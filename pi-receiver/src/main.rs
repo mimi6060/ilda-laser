@@ -1,40 +1,44 @@
-//! Runs on the Raspberry Pi. Advertises itself as an IDN (ILDA Digital
-//! Network) laser receiver on the network, and for every point it receives,
-//! writes the X/Y/R/G/B values out to three MCP4922 SPI DACs whose analog
-//! outputs feed the laser's ILDA DB25 input.
+//! Runs on the Raspberry Pi. Two ways in, one shared output:
+//!
+//! - An IDN (ILDA Digital Network) receiver on the network, for real
+//!   content streamed from `pc-client` or other laser show software.
+//! - A tiny local web control panel (see `web.rs`), for picking a
+//!   pattern/color/speed from a phone or PC browser on the same WiFi,
+//!   without needing `pc-client` at all.
+//!
+//! Both funnel through the same `DacSink`, which writes X/Y/R/G/B out to
+//! three MCP4922 SPI DACs feeding the laser's ILDA DB25 input.
 //!
 //! See ../../README.md for the wiring diagram and why this needs external
 //! DAC chips rather than driving the ILDA input straight from GPIO.
 
+mod dac_sink;
 mod mcp4922;
+mod patterns;
+mod web;
 
 use anyhow::{Context, Result};
+use dac_sink::DacSink;
 use laser_dac::receiver::{IdnServer, ReceivedPoint, ServerBehavior, ServerConfig, Service};
-use log::{info, warn};
-use mcp4922::{normalized_to_12bit, Channel, Mcp4922};
+use log::info;
+use mcp4922::Mcp4922;
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 /// Conservative SPI clock: the MCP4922 supports up to 20 MHz, but breadboard
 /// jumper wiring is prone to ringing/reflections at high speed. Raise this
 /// once the wiring is solid and you've checked the waveform on a scope.
 const SPI_CLOCK_HZ: u32 = 1_000_000;
 
-fn log_dac_write(result: Result<()>, label: &str) {
-    if let Err(e) = result {
-        warn!("DAC write failed ({label}): {e}");
-    }
-}
-
-struct LaserOutput {
-    xy: Mcp4922,
-    rg: Mcp4922,
-    b: Mcp4922,
+/// Bridges the IDN server's point callback to the shared `DacSink`.
+struct IdnBridge {
+    dac: Arc<Mutex<DacSink>>,
     points_written: u64,
 }
 
-impl ServerBehavior for LaserOutput {
+impl ServerBehavior for IdnBridge {
     fn should_respond(&self, _command: u8) -> bool {
         true
     }
@@ -48,36 +52,24 @@ impl ServerBehavior for LaserOutput {
     }
 
     fn on_points_received(&mut self, points: &[ReceivedPoint]) {
+        let mut dac = self.dac.lock().unwrap();
         for p in points {
-            let x = normalized_to_12bit(p.x, -1.0, 1.0);
-            let y = normalized_to_12bit(p.y, -1.0, 1.0);
-            let r = normalized_to_12bit(p.r, 0.0, 1.0);
-            let g = normalized_to_12bit(p.g, 0.0, 1.0);
-            let b = normalized_to_12bit(p.b, 0.0, 1.0);
-
-            // Each write is its own SPI transaction (see mcp4922.rs). If a
-            // write fails mid-point we still attempt the rest, rather than
-            // aborting the frame over one bad transaction.
-            log_dac_write(self.xy.write(Channel::A, x), "xy/x");
-            log_dac_write(self.xy.write(Channel::B, y), "xy/y");
-            log_dac_write(self.rg.write(Channel::A, r), "rg/r");
-            log_dac_write(self.rg.write(Channel::B, g), "rg/g");
-            log_dac_write(self.b.write(Channel::A, b), "b/b");
-
-            self.points_written += 1;
+            dac.write_point(p.x, p.y, p.r, p.g, p.b);
         }
+        drop(dac);
 
+        self.points_written += points.len() as u64;
         if self.points_written % 50_000 < points.len() as u64 {
-            info!("{} points written so far", self.points_written);
+            info!("{} points written so far (IDN)", self.points_written);
         }
     }
 
     fn on_client_connected(&mut self, addr: SocketAddr) {
-        info!("client connected: {addr}");
+        info!("IDN client connected: {addr}");
     }
 
     fn on_client_disconnected(&mut self) {
-        info!("client disconnected");
+        info!("IDN client disconnected");
     }
 }
 
@@ -91,7 +83,7 @@ fn main() -> Result<()> {
 
     let hostname = std::env::args().nth(1).unwrap_or_else(|| "pi-laser".to_string());
 
-    // Wiring (see README.md):
+    // Wiring (see README.md / hardware/DESIGN.md):
     //   SPI0 CE0 -> DAC1: channel A = X, channel B = Y
     //   SPI0 CE1 -> DAC2: channel A = R, channel B = G
     //   SPI1 CE0 -> DAC3: channel A = B, channel B = unused
@@ -114,30 +106,31 @@ fn main() -> Result<()> {
          /boot/firmware/config.txt and reboot",
     )?;
 
-    let behavior = LaserOutput {
-        xy,
-        rg,
-        b,
-        points_written: 0,
-    };
+    let dac = Arc::new(Mutex::new(DacSink::new(xy, rg, b)));
 
     let config = ServerConfig::new_on_standard_port(&hostname)
         .with_services(vec![Service::laser_projector(1, "Pi Laser").with_dsid()]);
 
-    let server = IdnServer::new(config, behavior).context("failed to bind IDN UDP server")?;
-    let running = server.running_handle();
+    let idn_behavior = IdnBridge { dac: Arc::clone(&dac), points_written: 0 };
+    let idn_server = IdnServer::new(config, idn_behavior).context("failed to bind IDN UDP server")?;
+    let running = idn_server.running_handle();
+    let idn_addr = idn_server.addr();
+    let idn_handle = idn_server.spawn();
 
-    println!(
-        "IDN receiver '{hostname}' listening on {} - Ctrl+C to stop",
-        server.addr()
-    );
-    println!("On the PC, run: ilda-laser discover   (should list idn:{hostname})");
-
-    ctrlc::set_handler(move || {
-        running.store(false, Ordering::SeqCst);
+    ctrlc::set_handler({
+        let running = Arc::clone(&running);
+        move || running.store(false, Ordering::SeqCst)
     })
     .context("failed to install Ctrl+C handler")?;
 
-    server.run();
+    println!("IDN receiver '{hostname}' listening on {idn_addr}");
+    println!("On the PC, run: ilda-laser discover   (should list idn:{hostname})");
+
+    let web_addr = "0.0.0.0:8080";
+    println!("Web control panel: http://<this Pi's IP>:8080/  - Ctrl+C to stop everything");
+
+    web::run(dac, web_addr, running)?;
+
+    drop(idn_handle); // stops and joins the IDN server thread
     Ok(())
 }

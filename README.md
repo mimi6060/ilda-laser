@@ -177,6 +177,18 @@ It prints the IDN service name and address it's listening on. From the PC:
 ./target/release/ilda-laser pattern cross --device idn:pi-laser
 ```
 
+## Web control panel
+
+`pi-receiver` also starts a small web server on port 8080 - no app or PC
+CLI needed. From any phone or computer on the same WiFi as the Pi, open
+`http://<pi's IP address>:8080/` to pick a shape, color, size and speed and
+hit Apply. It talks to the same DAC output as the IDN receiver above, so
+the two share a "last one to send something wins" relationship - don't
+expect them to usefully run at the same time.
+
+Find the Pi's IP address with `hostname -I` run on the Pi itself, or check
+your router's connected-devices list.
+
 ## Usage (`pc-client`)
 
 ```
