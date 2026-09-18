@@ -1,0 +1,13 @@
+[package]
+name = "pi-receiver"
+version = "0.1.0"
+edition = "2021"
+description = "Runs on a Raspberry Pi: receives an IDN laser point stream over Ethernet and drives MCP4922 SPI DACs to produce analog X/Y/R/G/B for an ILDA laser projector."
+
+[dependencies]
+laser-dac = { version = "0.13.1", default-features = false, features = ["receiver"] }
+rppal = "0.22.1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+ctrlc = "3"
