@@ -48,7 +48,18 @@ hand-roll a DAC-side network protocol from scratch. `pc-client` still has
 the `ether-dream` feature enabled too, in case you ever add a real
 commercial Ether Dream DAC to the mix.
 
-## Hardware you need for `pi-receiver`
+## Custom HAT board (order-ready-ish design)
+
+`pi-receiver/hardware/DESIGN.md` has a full schematic-level design for a
+Raspberry Pi HAT that does the 3x MCP4922 wiring below for you, on a board
+that plugs straight onto the 40-pin header, with an onboard RJ45 jack wired
+to the laser manual's exact pinout and adjustable-gain output stages (since
+the laser's actual ILDA voltage range isn't documented anywhere). It
+includes a full BOM with JLCPCB part numbers and a bring-up/trim procedure.
+It is **not yet laid out as a PCB** - see that file's last section before
+ordering anything.
+
+## Hardware you need for `pi-receiver` (hand-wired version)
 
 - A Raspberry Pi 3 (any variant with the 40-pin header), with Raspberry Pi
   OS and its Ethernet port on the same network as your PC.
