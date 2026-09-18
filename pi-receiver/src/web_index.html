@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Laser</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 16px; }
+  h1 { font-size: 1.2rem; margin: 0 0 12px; }
+  canvas { width: 100%; aspect-ratio: 1; background: #000; border-radius: 8px; display: block; }
+  .tabs { display: flex; gap: 4px; margin: 14px 0 12px; }
+  .tab { flex: 1; padding: 10px 4px; text-align: center; background: #222; border-radius: 6px; font-size: 0.85rem; color: #999; cursor: pointer; }
+  .tab.active { background: #2d6; color: #032; font-weight: bold; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  label { display: block; margin: 14px 0 4px; font-size: 0.85rem; color: #aaa; }
+  select, input[type=text], input[type=range], input[type=number] { width: 100%; box-sizing: border-box; padding: 8px; background: #222; color: #eee; border: 1px solid #333; border-radius: 6px; }
+  input[type=color] { width: 100%; height: 40px; border: none; background: none; }
+  .row { display: flex; gap: 8px; margin-top: 16px; }
+  .row3 { display: flex; gap: 6px; margin-top: 8px; }
+  .row3 > * { flex: 1; }
+  button { padding: 12px; font-size: 0.95rem; border: none; border-radius: 8px; background: #333; color: #eee; cursor: pointer; }
+  button.primary { background: #2d6; color: #032; font-weight: bold; flex: 2; }
+  button.danger { background: #d33; color: #fff; }
+  button.stop { background: #d33; color: #fff; font-weight: bold; flex: 1; }
+  .val { color: #6cf; font-variant-numeric: tabular-nums; }
+  .scene-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #222; }
+  .scene-row .name { flex: 1; font-size: 0.9rem; }
+  .scene-row .meta { font-size: 0.75rem; color: #888; }
+  .scene-row button { padding: 6px 10px; font-size: 0.8rem; }
+  .hint { font-size: 0.75rem; color: #777; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>Pi Laser control</h1>
+<canvas id="preview" width="600" height="600"></canvas>
+
+<div class="tabs">
+  <div class="tab active" data-tab="pattern">Pattern</div>
+  <div class="tab" data-tab="text">Text</div>
+  <div class="tab" data-tab="scenes">Scenes</div>
+  <div class="tab" data-tab="calibration">Calibration</div>
+</div>
+
+<!-- Pattern -->
+<div class="panel active" id="panel-pattern">
+  <label>Shape</label>
+  <select id="shape">{{SHAPES}}</select>
+
+  <label>Color</label>
+  <input type="color" id="p-color" value="#ffffff">
+
+  <label>Size: <span class="val" id="p-scaleVal">80</span>%</label>
+  <input type="range" id="p-scale" min="0" max="100" value="80">
+
+  <label>Speed: <span class="val" id="p-ppsVal">4000</span> pts/sec</label>
+  <input type="range" id="p-pps" min="500" max="20000" step="100" value="4000">
+
+  <div class="row">
+    <button class="primary" id="p-apply">Apply</button>
+    <button class="stop" id="p-stop">Stop</button>
+  </div>
+  <div class="row3">
+    <input type="text" id="p-saveName" placeholder="Scene name">
+    <input type="number" id="p-saveDuration" placeholder="sec" value="5" min="0.5" step="0.5">
+    <button id="p-save">Save as scene</button>
+  </div>
+</div>
+
+<!-- Text -->
+<div class="panel" id="panel-text">
+  <label>Text</label>
+  <input type="text" id="t-text" placeholder="HELLO" maxlength="40">
+  <div class="hint">Letters, digits, space, . , ! ' -</div>
+
+  <label>Color</label>
+  <input type="color" id="t-color" value="#ffffff">
+
+  <label>Size: <span class="val" id="t-scaleVal">60</span>%</label>
+  <input type="range" id="t-scale" min="0" max="100" value="60">
+
+  <label>Speed: <span class="val" id="t-ppsVal">6000</span> pts/sec</label>
+  <input type="range" id="t-pps" min="500" max="20000" step="100" value="6000">
+
+  <div class="row">
+    <button class="primary" id="t-apply">Apply</button>
+    <button class="stop" id="t-stop">Stop</button>
+  </div>
+  <div class="row3">
+    <input type="text" id="t-saveName" placeholder="Scene name">
+    <input type="number" id="t-saveDuration" placeholder="sec" value="5" min="0.5" step="0.5">
+    <button id="t-save">Save as scene</button>
+  </div>
+</div>
+
+<!-- Scenes -->
+<div class="panel" id="panel-scenes">
+  <div class="row">
+    <button class="primary" id="s-playlistStart">Start playlist</button>
+    <button class="stop" id="s-playlistStop">Stop playlist</button>
+  </div>
+  <div class="hint">Playlist plays each saved scene in order for its saved duration, then loops. Manual Apply/Play interrupts it.</div>
+  <div id="s-list" style="margin-top: 12px;"></div>
+</div>
+
+<!-- Calibration -->
+<div class="panel" id="panel-calibration">
+  <div class="hint">Corrects physical projector alignment. Applies to everything, including network content. Start at defaults and nudge gently.</div>
+
+  <label>Offset X: <span class="val" id="c-offXVal">0</span></label>
+  <input type="range" id="c-offX" min="-100" max="100" value="0">
+  <label>Offset Y: <span class="val" id="c-offYVal">0</span></label>
+  <input type="range" id="c-offY" min="-100" max="100" value="0">
+  <label>Scale X: <span class="val" id="c-scaleXVal">1.00</span></label>
+  <input type="range" id="c-scaleX" min="10" max="200" value="100">
+  <label>Scale Y: <span class="val" id="c-scaleYVal">1.00</span></label>
+  <input type="range" id="c-scaleY" min="10" max="200" value="100">
+  <label>Rotation: <span class="val" id="c-rotVal">0</span>&deg;</label>
+  <input type="range" id="c-rot" min="-180" max="180" value="0">
+
+  <div class="row">
+    <button class="primary" id="c-save">Save calibration</button>
+    <button id="c-reset">Reset</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ---- shape generation, mirrors pi-receiver/src/patterns.rs ----
+function genCircle(scale) {
+  const segs = 120, pts = [];
+  for (let i = 0; i <= segs; i++) {
+    const a = (i % segs) / segs * Math.PI * 2;
+    pts.push({ x: scale * Math.cos(a), y: scale * Math.sin(a) });
+  }
+  return [pts];
+}
+function genSquare(scale) {
+  const c = [[-scale,-scale],[scale,-scale],[scale,scale],[-scale,scale],[-scale,-scale]];
+  return [c.map(([x,y]) => ({x,y}))];
+}
+function genTriangle(scale) {
+  const c = [[0,scale],[scale*0.866,-scale*0.5],[-scale*0.866,-scale*0.5],[0,scale]];
+  return [c.map(([x,y]) => ({x,y}))];
+}
+function genLine(scale) {
+  return [[{x:-scale,y:0},{x:scale,y:0}]];
+}
+function genCross(scale) {
+  return [[{x:-scale,y:0},{x:scale,y:0}], [{x:0,y:-scale},{x:0,y:scale}]];
+}
+function genStar(scale) {
+  const outer = scale, inner = scale * 0.382, pts = [];
+  for (let i = 0; i <= 10; i++) {
+    const r = (i % 10) % 2 === 0 ? outer : inner;
+    const a = (i % 10) / 10 * Math.PI * 2 - Math.PI / 2;
+    pts.push({ x: r * Math.cos(a), y: r * Math.sin(a) });
+  }
+  return [pts];
+}
+function genSpiral(scale, turns) {
+  turns = turns || 3;
+  const segs = Math.floor(120 * turns), pts = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, a = t * turns * Math.PI * 2, r = t * scale;
+    pts.push({ x: r * Math.cos(a), y: r * Math.sin(a) });
+  }
+  return [pts];
+}
+function genDots(scale) {
+  const N = 4, subpaths = [];
+  for (let iy = 0; iy < N; iy++) {
+    for (let ix = 0; ix < N; ix++) {
+      const x = (ix / (N - 1) * 2 - 1) * scale, y = (iy / (N - 1) * 2 - 1) * scale;
+      subpaths.push([{x,y}]);
+    }
+  }
+  return subpaths;
+}
+function genShape(name, scale) {
+  switch (name) {
+    case 'circle': return genCircle(scale);
+    case 'square': return genSquare(scale);
+    case 'triangle': return genTriangle(scale);
+    case 'cross': return genCross(scale);
+    case 'line': return genLine(scale);
+    case 'star': return genStar(scale);
+    case 'spiral': return genSpiral(scale, 3);
+    case 'dots': return genDots(scale);
+    default: return [];
+  }
+}
+
+// ---- font, mirrors pi-receiver/src/font.rs ----
+const TL=[0,2], TR=[1,2], ML=[0,1], MR=[1,1], BL=[0,0], BR=[1,0];
+const segA=[TL,TR], segB=[TR,MR], segC=[MR,BR], segD=[BL,BR], segE=[BL,ML], segF=[ML,TL], segG=[ML,MR];
+const GLYPHS = {
+  '0':[segA,segB,segC,segD,segE,segF], '1':[segB,segC], '2':[segA,segB,segG,segE,segD],
+  '3':[segA,segB,segG,segC,segD], '4':[segF,segG,segB,segC], '5':[segA,segF,segG,segC,segD],
+  '6':[segA,segF,segG,segE,segC,segD], '7':[segA,segB,segC], '8':[segA,segB,segC,segD,segE,segF,segG],
+  '9':[segA,segB,segC,segD,segF,segG],
+  'A':[segA,segB,segC,segE,segF,segG], 'B':[segA,segB,segC,segD,segE,segG], 'C':[segA,segF,segE,segD],
+  'D':[segA,segB,segC,segD,segG], 'E':[segA,segF,segG,segE,segD], 'F':[segA,segF,segG,segE],
+  'G':[segA,segF,segE,segD,segC,segG], 'H':[segF,segE,segG,segB,segC], 'I':[[[0.5,2.0],[0.5,0.0]]],
+  'J':[segB,segC,segD,segE],
+  'K':[segF,segE,[ML,TR],[ML,BR]],
+  'L':[segF,segE,segD],
+  'M':[segF,segE,[TL,[0.5,1.2]],[[0.5,1.2],TR],segB,segC],
+  'N':[segF,segE,[TL,BR],segB,segC],
+  'O':[segA,segB,segC,segD,segE,segF], 'P':[segA,segB,segG,segF,segE],
+  'Q':[segA,segB,segC,segD,segE,segF,[MR,[1.15,-0.15]]],
+  'R':[segA,segB,segG,segF,segE,[ML,BR]],
+  'S':[segA,segF,segG,segC,segD], 'T':[segA,[[0.5,2.0],[0.5,0.0]]],
+  'U':[segF,segE,segD,segC,segB],
+  'V':[[TL,[0.5,0.0]],[[0.5,0.0],TR]],
+  'W':[segF,segE,[BL,[0.5,0.8]],[[0.5,0.8],BR],segC,segB],
+  'X':[[TL,BR],[TR,BL]],
+  'Y':[[TL,[0.5,1.0]],[TR,[0.5,1.0]],[[0.5,1.0],[0.5,0.0]]],
+  'Z':[segA,segG,segE,segD,[TR,BL]],
+  '-':[segG], '_':[segD],
+  '.':[[BR,[BR[0]+0.02,BR[1]+0.02]]],
+  ',':[[BR,[BR[0]-0.05,BR[1]-0.2]]],
+  '!':[[[0.5,2.0],[0.5,0.5]],[[0.5,0.15],[0.5,0.0]]],
+  "'":[[TL,[0.0,1.6]]],
+};
+function genText(text, scale) {
+  const cellW = scale * 0.7, cellH = scale, advance = cellW * 1.3;
+  const chars = [...text.toUpperCase()];
+  const totalWidth = advance * chars.length;
+  let cursorX = -totalWidth / 2;
+  const baseY = -cellH / 2;
+  const subpaths = [];
+  for (const c of chars) {
+    const strokes = GLYPHS[c] || [];
+    for (const stroke of strokes) {
+      subpaths.push(stroke.map(([gx, gy]) => ({ x: cursorX + gx * cellW, y: baseY + gy * cellH })));
+    }
+    cursorX += advance;
+  }
+  return subpaths;
+}
+
+// ---- canvas rendering ----
+function draw(subpaths, color) {
+  const canvas = $('preview');
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6;
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  const s = Math.min(cx, cy) * 0.9;
+  for (const path of subpaths) {
+    if (path.length === 1) {
+      ctx.beginPath();
+      ctx.arc(cx + path[0].x * s, cy - path[0].y * s, 3, 0, Math.PI * 2);
+      ctx.fill();
+      continue;
+    }
+    ctx.beginPath();
+    path.forEach((p, i) => {
+      const px = cx + p.x * s, py = cy - p.y * s;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+  }
+}
+
+function hexToCss(hex) { return hex; }
+
+function updatePatternPreview() {
+  const shape = $('shape').value;
+  const scale = $('p-scale').value / 100;
+  draw(genShape(shape, scale), hexToCss($('p-color').value));
+}
+function updateTextPreview() {
+  const scale = $('t-scale').value / 100;
+  draw(genText($('t-text').value, scale), hexToCss($('t-color').value));
+}
+
+// ---- tabs ----
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    $('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'pattern') updatePatternPreview();
+    if (tab.dataset.tab === 'text') updateTextPreview();
+    if (tab.dataset.tab === 'scenes') loadScenes();
+  };
+});
+
+// ---- pattern tab ----
+['shape','p-color'].forEach(id => $(id).addEventListener('input', updatePatternPreview));
+$('shape').addEventListener('change', updatePatternPreview);
+$('p-scale').oninput = () => { $('p-scaleVal').textContent = $('p-scale').value; updatePatternPreview(); };
+$('p-pps').oninput = () => $('p-ppsVal').textContent = $('p-pps').value;
+
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+$('p-apply').onclick = () => {
+  const [r, g, b] = hexToRgb($('p-color').value);
+  const params = new URLSearchParams({ shape: $('shape').value, r, g, b, scale: $('p-scale').value, pps: $('p-pps').value });
+  fetch('/api/pattern?' + params, { method: 'POST' });
+};
+$('p-stop').onclick = () => fetch('/api/stop', { method: 'POST' });
+$('p-save').onclick = () => {
+  const name = $('p-saveName').value.trim();
+  if (!name) return alert('Name the scene first');
+  const [r, g, b] = hexToRgb($('p-color').value);
+  const params = new URLSearchParams({
+    name, kind: 'shape', shape: $('shape').value, r, g, b,
+    scale: $('p-scale').value, pps: $('p-pps').value, duration: $('p-saveDuration').value,
+  });
+  fetch('/api/scenes/save?' + params, { method: 'POST' }).then(() => { $('p-saveName').value = ''; });
+};
+
+// ---- text tab ----
+$('t-text').addEventListener('input', updateTextPreview);
+$('t-color').addEventListener('input', updateTextPreview);
+$('t-scale').oninput = () => { $('t-scaleVal').textContent = $('t-scale').value; updateTextPreview(); };
+$('t-pps').oninput = () => $('t-ppsVal').textContent = $('t-pps').value;
+
+$('t-apply').onclick = () => {
+  const [r, g, b] = hexToRgb($('t-color').value);
+  const params = new URLSearchParams({ text: $('t-text').value, r, g, b, scale: $('t-scale').value, pps: $('t-pps').value });
+  fetch('/api/text?' + params, { method: 'POST' });
+};
+$('t-stop').onclick = () => fetch('/api/stop', { method: 'POST' });
+$('t-save').onclick = () => {
+  const name = $('t-saveName').value.trim();
+  if (!name) return alert('Name the scene first');
+  const [r, g, b] = hexToRgb($('t-color').value);
+  const params = new URLSearchParams({
+    name, kind: 'text', text: $('t-text').value, r, g, b,
+    scale: $('t-scale').value, pps: $('t-pps').value, duration: $('t-saveDuration').value,
+  });
+  fetch('/api/scenes/save?' + params, { method: 'POST' }).then(() => { $('t-saveName').value = ''; });
+};
+
+// ---- scenes tab ----
+function loadScenes() {
+  fetch('/api/scenes').then(r => r.json()).then(scenes => {
+    const list = $('s-list');
+    list.innerHTML = '';
+    if (scenes.length === 0) {
+      list.innerHTML = '<div class="hint">No scenes saved yet - save one from the Pattern or Text tab.</div>';
+      return;
+    }
+    for (const s of scenes) {
+      const row = document.createElement('div');
+      row.className = 'scene-row';
+      const kind = s.content.kind === 'text' ? `"${s.content.text}"` : s.content.shape;
+      row.innerHTML = `
+        <div class="name">${s.name}<div class="meta">${kind} &middot; ${s.duration_secs}s</div></div>
+        <button class="play">Play</button>
+        <button class="danger del">Del</button>`;
+      row.querySelector('.play').onclick = () => fetch('/api/scenes/play?' + new URLSearchParams({ name: s.name }), { method: 'POST' });
+      row.querySelector('.del').onclick = () => fetch('/api/scenes/delete?' + new URLSearchParams({ name: s.name }), { method: 'POST' }).then(loadScenes);
+      list.appendChild(row);
+    }
+  });
+}
+$('s-playlistStart').onclick = () => fetch('/api/playlist/start', { method: 'POST' });
+$('s-playlistStop').onclick = () => fetch('/api/playlist/stop', { method: 'POST' });
+
+// ---- calibration tab ----
+function loadCalibration() {
+  fetch('/api/calibration').then(r => r.json()).then(c => {
+    $('c-offX').value = Math.round(c.offset_x * 100);
+    $('c-offY').value = Math.round(c.offset_y * 100);
+    $('c-scaleX').value = Math.round(c.scale_x * 100);
+    $('c-scaleY').value = Math.round(c.scale_y * 100);
+    $('c-rot').value = Math.round(c.rotation_deg);
+    updateCalibrationLabels();
+  });
+}
+function updateCalibrationLabels() {
+  $('c-offXVal').textContent = ($('c-offX').value / 100).toFixed(2);
+  $('c-offYVal').textContent = ($('c-offY').value / 100).toFixed(2);
+  $('c-scaleXVal').textContent = ($('c-scaleX').value / 100).toFixed(2);
+  $('c-scaleYVal').textContent = ($('c-scaleY').value / 100).toFixed(2);
+  $('c-rotVal').textContent = $('c-rot').value;
+}
+['c-offX','c-offY','c-scaleX','c-scaleY','c-rot'].forEach(id => $(id).oninput = updateCalibrationLabels);
+$('c-save').onclick = () => {
+  const params = new URLSearchParams({
+    offset_x: $('c-offX').value / 100, offset_y: $('c-offY').value / 100,
+    scale_x: $('c-scaleX').value / 100, scale_y: $('c-scaleY').value / 100,
+    rotation_deg: $('c-rot').value,
+  });
+  fetch('/api/calibration?' + params, { method: 'POST' });
+};
+$('c-reset').onclick = () => {
+  $('c-offX').value = 0; $('c-offY').value = 0; $('c-scaleX').value = 100; $('c-scaleY').value = 100; $('c-rot').value = 0;
+  updateCalibrationLabels();
+  $('c-save').click();
+};
+
+// initial state
+updatePatternPreview();
+loadCalibration();
+</script>
+</body>
+</html>

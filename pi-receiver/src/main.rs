@@ -13,8 +13,10 @@
 //! DAC chips rather than driving the ILDA input straight from GPIO.
 
 mod dac_sink;
+mod font;
 mod mcp4922;
 mod patterns;
+mod scenes;
 mod web;
 
 use anyhow::{Context, Result};
@@ -24,6 +26,7 @@ use log::info;
 use mcp4922::Mcp4922;
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -81,7 +84,12 @@ fn open_dac(bus: Bus, select: SlaveSelect, context: &'static str) -> Result<Mcp4
 fn main() -> Result<()> {
     env_logger::init();
 
-    let hostname = std::env::args().nth(1).unwrap_or_else(|| "pi-laser".to_string());
+    let mut args = std::env::args().skip(1);
+    let hostname = args.next().unwrap_or_else(|| "pi-laser".to_string());
+    let data_dir = args.next().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&data_dir).with_context(|| format!("failed to create {}", data_dir.display()))?;
+    let scenes_path = data_dir.join("scenes.json");
+    let calibration_path = data_dir.join("calibration.json");
 
     // Wiring (see README.md / hardware/DESIGN.md):
     //   SPI0 CE0 -> DAC1: channel A = X, channel B = Y
@@ -106,7 +114,8 @@ fn main() -> Result<()> {
          /boot/firmware/config.txt and reboot",
     )?;
 
-    let dac = Arc::new(Mutex::new(DacSink::new(xy, rg, b)));
+    let calibration = web::load_calibration(&calibration_path);
+    let dac = Arc::new(Mutex::new(DacSink::new(xy, rg, b, calibration)));
 
     let config = ServerConfig::new_on_standard_port(&hostname)
         .with_services(vec![Service::laser_projector(1, "Pi Laser").with_dsid()]);
@@ -126,10 +135,14 @@ fn main() -> Result<()> {
     println!("IDN receiver '{hostname}' listening on {idn_addr}");
     println!("On the PC, run: ilda-laser discover   (should list idn:{hostname})");
 
-    let web_addr = "0.0.0.0:8080";
     println!("Web control panel: http://<this Pi's IP>:8080/  - Ctrl+C to stop everything");
 
-    web::run(dac, web_addr, running)?;
+    let web_config = web::Config {
+        bind_addr: "0.0.0.0:8080".to_string(),
+        scenes_path,
+        calibration_path,
+    };
+    web::run(dac, web_config, running)?;
 
     drop(idn_handle); // stops and joins the IDN server thread
     Ok(())
