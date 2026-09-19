@@ -106,6 +106,7 @@ def place(lib, name, ref, x, y, rot=0, value=None, back=False):
 # ------------------------------------------------------------ mounting holes
 for i, (x, y) in enumerate([(3.5, 3.5), (W - 3.5, 3.5), (3.5, H - 3.5), (W - 3.5, H - 3.5)], 1):
     h = place("MountingHole", "MountingHole_2.7mm_M2.5", f"H{i}", x, y)
+    h.Reference().SetVisible(False)
     for gi in h.GraphicalItems():
         if hasattr(gi, "SetVisible"):
             gi.SetVisible(False)

@@ -220,7 +220,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "board.kicad_pro",
+    "filename": "board_freerouted.kicad_pro",
     "version": 1
   },
   "net_settings": {

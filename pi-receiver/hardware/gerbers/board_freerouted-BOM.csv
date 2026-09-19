@@ -1,0 +1,11 @@
+Comment,Designator,Footprint,LCSC Part #
+MCP4922-E/SL,"U1,U2,U3",SOIC-14_3.9x8.7mm_P1.27mm,C39851
+MCP6004-I/ST,"U4,U5",TSSOP-14_4.4x5mm_P0.65mm,C185811
+RJ45 8P8C right-angle unshielded,J1,RJ45_Amphenol_54602-x08_Horizontal,C3097717
+10k trimmer potentiometer,"RV1,RV2,RV3,RV4,RV5,RV6",Potentiometer_Bourns_3296W_Vertical,
+20k 1%,"R1,R2,R3,R4,R5,R6,R7,R8,R9",R_0603_1608Metric,
+470R,"R10,R11,R12,R13,R14,R15,R16",R_0603_1608Metric,
+10k,R17,R_0603_1608Metric,
+100nF,"C1,C2,C3,C4,C5",C_0603_1608Metric,
+10uF,C6,C_0603_1608Metric,
+2x20 female header 2.54mm (stacking/tall THT - source separately, hand-solder),J2,PinSocket_2x20_P2.54mm_Vertical,

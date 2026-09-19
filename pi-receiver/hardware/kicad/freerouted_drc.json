@@ -1,0 +1,140 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-09-19T11:00:42+0000",
+    "kicad_version": "8.0.9",
+    "schematic_parity": [],
+    "source": "board_freerouted.kicad_pcb",
+    "unconnected_items": [],
+    "violations": [
+        {
+            "description": "Silkscreen clipped by board edge",
+            "items": [
+                {
+                    "description": "Segment on Edge.Cuts",
+                    "pos": {
+                        "x": 62.0,
+                        "y": 56.0
+                    },
+                    "uuid": "206042c4-07ea-4637-bc91-313fe05f3684"
+                },
+                {
+                    "description": "Segment on F.Silkscreen",
+                    "pos": {
+                        "x": 26.07,
+                        "y": 51.47
+                    },
+                    "uuid": "4611bc8a-7eb9-4350-afe2-c1c61fea2d69"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_edge_clearance"
+        },
+        {
+            "description": "Silkscreen clipped by board edge",
+            "items": [
+                {
+                    "description": "Segment on Edge.Cuts",
+                    "pos": {
+                        "x": 62.0,
+                        "y": 56.0
+                    },
+                    "uuid": "206042c4-07ea-4637-bc91-313fe05f3684"
+                },
+                {
+                    "description": "Segment on F.Silkscreen",
+                    "pos": {
+                        "x": 35.84,
+                        "y": 51.47
+                    },
+                    "uuid": "2283070a-88bf-43fb-86b6-eb0d19b29298"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_edge_clearance"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Reference 'RV1'",
+                    "pos": {
+                        "x": 30.955,
+                        "y": 4.34
+                    },
+                    "uuid": "f3dab2b7-f4fc-41c0-a8ce-67b1e7d29144"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Segment on F.Silkscreen",
+                    "pos": {
+                        "x": 26.07,
+                        "y": 5.47
+                    },
+                    "uuid": "f794af3a-2219-446d-a423-f827c2c0e30b"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Segment on F.Silkscreen",
+                    "pos": {
+                        "x": 26.07,
+                        "y": 5.47
+                    },
+                    "uuid": "12296e04-dc9f-4a44-9c76-e83542941770"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Segment on F.Silkscreen",
+                    "pos": {
+                        "x": 35.84,
+                        "y": 5.47
+                    },
+                    "uuid": "739d145c-fe2c-4d52-8e68-0fff59627bbb"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen overlap",
+            "items": [
+                {
+                    "description": "Reference 'U4'",
+                    "pos": {
+                        "x": 15.735,
+                        "y": 14.0
+                    },
+                    "uuid": "584abb44-1534-4a3c-99b6-f6899fb39849"
+                },
+                {
+                    "description": "Segment on F.Silkscreen",
+                    "pos": {
+                        "x": 15.04,
+                        "y": 14.0
+                    },
+                    "uuid": "326afefa-8543-442a-9c44-a5e31b612d8b"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        }
+    ]
+}

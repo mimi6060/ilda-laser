@@ -217,10 +217,13 @@ Do this **before** ever plugging the RJ45 cable into the laser.
 ## What isn't verified
 
 This is a from-scratch analog design against an undocumented ILDA input -
-none of it has been bench-tested, and there's no PCB layout yet (copper
-routing/DRC needs an actual EDA tool with visual review, which I don't
-have). Before ordering fabrication+assembly: build this schematic in
-KiCad (free), then lay out the board using an existing Raspberry Pi HAT
-KiCad template for the mechanical outline/mounting holes (getting that
-wrong means the board doesn't fit the Pi), and have it DRC-checked. Order
-JLCPCB's cheap low-quantity prototype tier first, not a big batch.
+none of it has been bench-tested. **A PCB layout now exists** (see
+`kicad/` and `gerbers/`): placed, routed (via Freerouting), and DRC-clean
+(0 errors). The board outline/mounting holes/GPIO header placement are
+cross-checked against the official Raspberry Pi HAT mechanical spec and
+KiCad's own official HAT template, and the MCP4922/MCP6004 pinouts are
+read from their real datasheets (this caught the SHDN/VREFA/VREFB fix
+below). The RJ45 footprint is a generic stand-in, not verified against
+the exact BOM part's datasheet - see `kicad/README.md`. Order JLCPCB's
+cheap low-quantity prototype tier first, not a big batch, given none of
+this has touched real hardware yet.
