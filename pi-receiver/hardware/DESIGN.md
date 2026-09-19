@@ -83,6 +83,17 @@ mechanically-specific parts.
   the Pi's "high" as a logic high. The 0-3.3V DAC output is then scaled up
   to 0-5V (adjustable) by the op-amp gain stage anyway, so nothing is lost.
 
+**Correction found against the real MCP4922 datasheet (DS22250A) during
+PCB layout:** each MCP4922 has *two* separate reference pins, VREFA and
+VREFB (not one shared VREF as implied above) - both need to be tied to
+3.3V, not just one. It also has a hardware `/SHDN` pin (pin 9) in addition
+to the per-channel SHDN bit in the SPI command word already used by
+`pi-receiver`'s firmware; that hardware pin needs to be tied to VDD_3V3
+(active/high) or the DAC output stays in its high-impedance shutdown state
+regardless of what the SPI command word says. Neither of these needed a
+new part, just two more wires per DAC - reflected in the KiCad files under
+`kicad/`, not in the earlier ASCII connection diagrams above.
+
 ## Signal connections
 
 ### SPI (Pi -> DACs)
