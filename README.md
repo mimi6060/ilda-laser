@@ -210,6 +210,37 @@ Four tabs:
 calibration get saved (defaults to the current directory):
 `pi-receiver pi-laser /home/pi/laser-data`.
 
+## Laser Studio (`studio`)
+
+A live show controller for the Mac, meant to replace MadMapper for laser
+work: shapes, laser text and a travelling wave, animated (rotation) and
+optionally driven by music from the microphone (size and rotation follow
+the bass, color steps and flashes on each beat). Looks can be saved as
+scenes and run as a timed playlist. Calibration (offset/scale/rotation)
+applies to everything and is saved.
+
+```sh
+cargo run --release -p laser-studio                      # preview only
+cargo run --release -p laser-studio -- --device auto     # first IDN/Ether Dream DAC found
+```
+
+Then open http://127.0.0.1:8080/ (bound to localhost only, since the UI
+can switch a laser on). The laser always starts **off**: the button at the
+top right, or Space, turns it on; Escape is an instant blackout. The
+preview shows the exact frame being sent, plus its point count and the
+resulting frames per second - keep that above ~15 or the image flickers.
+
+Music analysis runs in the browser (Web Audio), so "Activer le micro"
+asks for microphone permission. To react to the Mac's own audio instead of
+the room, route it through a loopback device such as BlackHole and pick it
+under "Entrée audio".
+
+Laserworld ShowNET output is not there yet: the ShowNET's streaming
+protocol is encrypted and needs Laserworld's API (requested under NDA).
+It will plug in as another `Output` in `studio/src/output.rs`.
+
+Scenes and calibration are saved in `studio-data/` (`--data-dir` to change).
+
 ## Usage (`pc-client`)
 
 ```

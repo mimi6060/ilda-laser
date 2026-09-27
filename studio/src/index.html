@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laser Studio</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14171c; --panel-2: #1b1f26; --line: #262b33;
+    --text: #e8eaed; --muted: #8b929c; --accent: #3ddc84; --accent-ink: #062b15;
+    --danger: #ff4d4f; --warn: #ffb020;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+  #output { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #armBtn { padding: 10px 18px; border-radius: 8px; border: 2px solid var(--danger); background: transparent; color: var(--danger); font-weight: 700; cursor: pointer; letter-spacing: .04em; }
+  #armBtn.on { background: var(--danger); color: #fff; box-shadow: 0 0 18px #ff4d4f88; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .stage { position: relative; }
+  canvas { width: 100%; aspect-ratio: 1; background: #000; border-radius: 10px; border: 1px solid var(--line); display: block; }
+  #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
+  #offBadge.hidden { display: none; }
+  .stats { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--text); font-weight: 600; }
+  .stats .bad { color: var(--warn); }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; }
+  label { display: flex; justify-content: space-between; margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
+  label .v { color: var(--text); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=text], input[type=number], select { width: 100%; padding: 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  input[type=color] { width: 100%; height: 34px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); padding: 2px; }
+  .seg { display: flex; gap: 4px; }
+  .seg button { flex: 1; }
+  button { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font: inherit; }
+  button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .shapes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .row > * { flex: 1; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+  .meter { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  .meter > div { height: 100%; width: 0; background: var(--accent); transition: width 50ms linear; }
+  #beatDot { width: 12px; height: 12px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--line); display: inline-block; }
+  #beatDot.hit { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
+  .scene { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-top: 1px solid var(--line); }
+  .scene .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scene .d { color: var(--muted); font-size: 12px; }
+  .scene.playing .n { color: var(--accent); font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  details summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Laser Studio</h1>
+  <div id="output">…</div>
+  <button id="armBtn" title="Espace : allumer/éteindre · Échap : blackout">LASER OFF</button>
+</header>
+
+<main>
+  <div class="stage">
+    <canvas id="preview" width="900" height="900"></canvas>
+    <div id="offBadge">Laser éteint : aperçu seulement</div>
+    <div class="stats">
+      <span>Points <b id="stPoints">0</b></span>
+      <span>Images/s <b id="stFps">–</b></span>
+      <span><kbd>Espace</kbd> laser on/off · <kbd>Échap</kbd> blackout</span>
+    </div>
+  </div>
+
+  <div class="col">
+    <section>
+      <h2>Contenu</h2>
+      <div class="seg">
+        <button data-kind="shape">Forme</button>
+        <button data-kind="text">Texte</button>
+        <button data-kind="wave">Onde</button>
+      </div>
+      <div id="shapePanel"><div class="shapes" id="shapes"></div></div>
+      <div id="textPanel"><label>Texte</label><input type="text" id="text" maxlength="24" value="HELLO"></div>
+      <div id="wavePanel" class="hint">Une onde qui défile ; avec la musique, son amplitude suit le volume.</div>
+    </section>
+
+    <section>
+      <h2>Apparence</h2>
+      <label>Couleur</label>
+      <input type="color" id="color" value="#00ff00">
+      <label>Taille <span class="v" id="scaleV"></span></label>
+      <input type="range" id="scale" min="5" max="100">
+      <label>Rotation <span class="v" id="rotV"></span></label>
+      <input type="range" id="rot" min="-360" max="360" step="5">
+      <label>Luminosité <span class="v" id="brightV"></span></label>
+      <input type="range" id="bright" min="0" max="100">
+    </section>
+
+    <section>
+      <h2>Musique <span id="beatDot" title="Beat détecté"></span></h2>
+      <div class="row">
+        <button id="micBtn" class="primary">Activer le micro</button>
+      </div>
+      <label>Entrée audio</label>
+      <select id="micSelect"><option value="">Par défaut</option></select>
+      <label>Sensibilité <span class="v" id="gainV"></span></label>
+      <input type="range" id="gain" min="0.5" max="8" step="0.1" value="2">
+      <label>Volume</label><div class="meter"><div id="mLevel"></div></div>
+      <label>Basses</label><div class="meter"><div id="mBass"></div></div>
+
+      <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
+      <label>Taille suit les basses <span class="v" id="aSizeV"></span></label>
+      <input type="range" id="aSize" min="0" max="100">
+      <label>Rotation suit les basses <span class="v" id="aRotV"></span></label>
+      <input type="range" id="aRot" min="0" max="100">
+      <label>Flash sur le beat <span class="v" id="aFlashV"></span></label>
+      <input type="range" id="aFlash" min="0" max="100">
+      <div class="check"><input type="checkbox" id="aColor"><span>Change de couleur à chaque beat</span></div>
+    </section>
+
+    <section>
+      <h2>Scènes</h2>
+      <div class="row">
+        <input type="text" id="sceneName" placeholder="Nom de la scène">
+        <input type="number" id="sceneDur" value="8" min="0.5" step="0.5" title="Durée (s) dans la playlist" style="max-width:80px">
+        <button id="sceneSave" style="flex:0">Sauver</button>
+      </div>
+      <div id="sceneList"></div>
+      <div class="row">
+        <button id="plStart">▶ Playlist</button>
+        <button id="plStop">■ Stop</button>
+      </div>
+    </section>
+
+    <section>
+      <details>
+        <summary>Calibration</summary>
+        <label>Décalage X <span class="v" id="cOxV"></span></label><input type="range" id="cOx" min="-100" max="100">
+        <label>Décalage Y <span class="v" id="cOyV"></span></label><input type="range" id="cOy" min="-100" max="100">
+        <label>Échelle X <span class="v" id="cSxV"></span></label><input type="range" id="cSx" min="10" max="200">
+        <label>Échelle Y <span class="v" id="cSyV"></span></label><input type="range" id="cSy" min="10" max="200">
+        <label>Rotation <span class="v" id="cRotV"></span></label><input type="range" id="cRot" min="-180" max="180">
+        <div class="hint">S'applique à tout ce qui sort, et reste enregistrée.</div>
+      </details>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let settings = null, calibration = null, armed = false, pps = 30000;
+
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  if (!r.ok) console.warn(path, await r.text());
+  return r.ok;
+}
+
+// ---------- settings <-> controls ----------
+const hex = c => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
+const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+
+function showSettings() {
+  const s = settings, kind = s.content.kind;
+  document.querySelectorAll('[data-kind]').forEach(b => b.classList.toggle('active', b.dataset.kind === kind));
+  $('shapePanel').hidden = kind !== 'shape';
+  $('textPanel').hidden = kind !== 'text';
+  $('wavePanel').hidden = kind !== 'wave';
+  document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
+  if (kind === 'text') $('text').value = s.content.text;
+  $('color').value = hex(s.color);
+  $('scale').value = Math.round(s.scale * 100);
+  $('rot').value = s.rotation_speed;
+  $('bright').value = Math.round(s.brightness * 100);
+  $('aOn').checked = s.audio.enabled;
+  $('aSize').value = Math.round(s.audio.size * 100);
+  $('aRot').value = Math.round(s.audio.rotate * 100);
+  $('aFlash').value = Math.round(s.audio.flash * 100);
+  $('aColor').checked = s.audio.color_on_beat;
+  showValues();
+}
+
+function showValues() {
+  $('scaleV').textContent = $('scale').value + ' %';
+  $('rotV').textContent = $('rot').value + ' °/s';
+  $('brightV').textContent = $('bright').value + ' %';
+  $('aSizeV').textContent = $('aSize').value + ' %';
+  $('aRotV').textContent = $('aRot').value + ' %';
+  $('aFlashV').textContent = $('aFlash').value + ' %';
+  $('gainV').textContent = '×' + (+$('gain').value).toFixed(1);
+}
+
+function readControls() {
+  settings.color = rgb($('color').value);
+  settings.scale = $('scale').value / 100;
+  settings.rotation_speed = +$('rot').value;
+  settings.brightness = $('bright').value / 100;
+  settings.audio.enabled = $('aOn').checked;
+  settings.audio.size = $('aSize').value / 100;
+  settings.audio.rotate = $('aRot').value / 100;
+  settings.audio.flash = $('aFlash').value / 100;
+  settings.audio.color_on_beat = $('aColor').checked;
+  if (settings.content.kind === 'text') settings.content.text = $('text').value;
+  showValues();
+  pushSettings();
+}
+
+let pushTimer = null;
+function pushSettings() {
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => post('/api/settings', settings), 40);
+}
+
+['color', 'scale', 'rot', 'bright', 'aOn', 'aSize', 'aRot', 'aFlash', 'aColor', 'text']
+  .forEach(id => $(id).addEventListener('input', readControls));
+
+document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
+  const kind = b.dataset.kind;
+  if (kind === 'shape') settings.content = { kind, shape: settings.content.shape || 'circle' };
+  if (kind === 'text') settings.content = { kind, text: $('text').value || 'HELLO' };
+  if (kind === 'wave') settings.content = { kind };
+  showSettings(); pushSettings();
+}));
+
+// ---------- laser on/off ----------
+async function setArmed(on) {
+  if (await post('/api/arm', { on })) { armed = on; showArmed(); }
+}
+function showArmed() {
+  $('armBtn').classList.toggle('on', armed);
+  $('armBtn').textContent = armed ? 'LASER ON' : 'LASER OFF';
+  $('offBadge').classList.toggle('hidden', armed);
+}
+$('armBtn').addEventListener('click', () => setArmed(!armed));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { setArmed(false); return; }
+  if (e.code === 'Space' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+    e.preventDefault(); setArmed(!armed);
+  }
+});
+
+// ---------- preview ----------
+const cv = $('preview'), g = cv.getContext('2d');
+function draw(points) {
+  const W = cv.width, H = cv.height;
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = '#ffffff10'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+  const px = p => [(p[0] + 1) / 2 * W, (1 - (p[1] + 1) / 2) * H];
+  // Boost dim colors so a low-brightness look is still visible on screen.
+  const col = (p, a) => `rgba(${[2, 3, 4].map(i => Math.round(255 * Math.sqrt(p[i]))).join(',')},${a})`;
+  for (const [width, alpha] of [[9, 0.18], [2.5, 1]]) {
+    g.lineWidth = width; g.lineCap = 'round';
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      if (a[2] + a[3] + a[4] === 0 || b[2] + b[3] + b[4] === 0) continue;
+      const [x1, y1] = px(a), [x2, y2] = px(b);
+      g.strokeStyle = col(b, alpha);
+      g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2 + 0.01, y2); g.stroke();
+    }
+  }
+}
+
+async function previewLoop() {
+  try {
+    const f = await (await fetch('/api/frame')).json();
+    draw(f.points);
+    armed = f.armed; pps = f.pps; showArmed();
+    $('output').textContent = f.output_error ? '⚠ ' + f.output_error
+      : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement (lancez avec --device pour piloter un laser)';
+    const n = f.points.length, fps = n ? pps / n : 0;
+    $('stPoints').textContent = n;
+    $('stFps').textContent = n ? fps.toFixed(1) : '–';
+    $('stFps').classList.toggle('bad', n && fps < 15);
+    highlightPlaylist(f.playlist);
+  } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
+  setTimeout(previewLoop, 33);
+}
+
+// ---------- music ----------
+let audio = null, beat = 0, bassAvg = 0, lastBeat = 0, sending = false;
+
+async function listInputs() {
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+  const sel = $('micSelect'), cur = sel.value;
+  sel.innerHTML = '<option value="">Par défaut</option>' + devs.map(d => `<option value="${d.deviceId}">${d.label || 'Entrée ' + d.deviceId.slice(0, 6)}</option>`).join('');
+  sel.value = cur;
+}
+
+async function startMic() {
+  stopMic();
+  const deviceId = $('micSelect').value;
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+    deviceId: deviceId ? { exact: deviceId } : undefined,
+    echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  const ctx = new AudioContext();
+  const an = ctx.createAnalyser();
+  an.fftSize = 2048; an.smoothingTimeConstant = 0.3;
+  ctx.createMediaStreamSource(stream).connect(an);
+  audio = { ctx, an, stream, time: new Float32Array(an.fftSize), freq: new Uint8Array(an.frequencyBinCount) };
+  $('micBtn').textContent = 'Couper le micro'; $('micBtn').classList.remove('primary');
+  await listInputs();
+  analyse();
+}
+
+function stopMic() {
+  if (!audio) return;
+  audio.stream.getTracks().forEach(t => t.stop());
+  audio.ctx.close();
+  audio = null;
+  $('micBtn').textContent = 'Activer le micro'; $('micBtn').classList.add('primary');
+  $('mLevel').style.width = $('mBass').style.width = '0';
+}
+
+function analyse() {
+  if (!audio) return;
+  const { an, time, freq, ctx } = audio, gain = +$('gain').value;
+  an.getFloatTimeDomainData(time);
+  let sum = 0; for (const v of time) sum += v * v;
+  const level = Math.min(1, Math.sqrt(sum / time.length) * gain * 3);
+  an.getByteFrequencyData(freq);
+  const binHz = ctx.sampleRate / an.fftSize, top = Math.max(2, Math.round(150 / binHz));
+  let b = 0; for (let i = 1; i < top; i++) b += freq[i];
+  const bass = Math.min(1, b / (top - 1) / 255 * gain * 0.6);
+
+  // Beat: bass clearly above its recent average, at most ~5 per second.
+  const now = performance.now();
+  bassAvg = bassAvg * 0.95 + bass * 0.05;
+  if (bass > bassAvg * 1.35 && bass > 0.12 && now - lastBeat > 200) {
+    beat++; lastBeat = now;
+    $('beatDot').classList.add('hit'); setTimeout(() => $('beatDot').classList.remove('hit'), 90);
+  }
+  $('mLevel').style.width = (level * 100) + '%';
+  $('mBass').style.width = (bass * 100) + '%';
+
+  if (!sending) {
+    sending = true;
+    post('/api/audio', { level, bass, beat }).finally(() => sending = false);
+  }
+  setTimeout(analyse, 25);
+}
+
+$('micBtn').addEventListener('click', () => audio ? stopMic() : startMic().catch(e => alertMic(e)));
+$('micSelect').addEventListener('change', () => { if (audio) startMic().catch(alertMic); });
+$('gain').addEventListener('input', showValues);
+function alertMic(e) { $('micBtn').textContent = 'Micro refusé : ' + e.name; }
+
+// ---------- scenes ----------
+let scenes = [];
+function renderScenes() {
+  $('sceneList').innerHTML = scenes.length ? '' : '<div class="hint">Réglez un look, donnez-lui un nom, puis « Sauver ».</div>';
+  scenes.forEach((sc, i) => {
+    const row = document.createElement('div');
+    row.className = 'scene'; row.dataset.index = i;
+    row.innerHTML = `<span class="n"></span><span class="d">${sc.duration_secs} s</span><button>▶</button><button title="Supprimer">✕</button>`;
+    row.querySelector('.n').textContent = sc.name;
+    const [play, del] = row.querySelectorAll('button');
+    play.onclick = async () => { await post('/api/scenes/play', { name: sc.name }); await loadState(); };
+    del.onclick = async () => { await post('/api/scenes/delete', { name: sc.name }); await loadState(); };
+    $('sceneList').appendChild(row);
+  });
+}
+function highlightPlaylist(index) {
+  document.querySelectorAll('.scene').forEach(r => r.classList.toggle('playing', index !== null && +r.dataset.index === index));
+}
+$('sceneSave').onclick = async () => {
+  const name = $('sceneName').value.trim();
+  if (!name) { $('sceneName').focus(); return; }
+  await post('/api/scenes/save', { name, duration_secs: +$('sceneDur').value || 8 });
+  $('sceneName').value = '';
+  await loadState();
+};
+$('plStart').onclick = () => post('/api/playlist/start');
+$('plStop').onclick = () => post('/api/playlist/stop');
+
+// ---------- calibration ----------
+const calMap = { cOx: ['offset_x', 100], cOy: ['offset_y', 100], cSx: ['scale_x', 100], cSy: ['scale_y', 100], cRot: ['rotation_deg', 1] };
+function showCalibration() {
+  for (const [id, [key, k]] of Object.entries(calMap)) {
+    $(id).value = Math.round(calibration[key] * k);
+    $(id + 'V').textContent = key === 'rotation_deg' ? $(id).value + '°' : (calibration[key]).toFixed(2);
+  }
+}
+let calTimer = null;
+Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
+  for (const [cid, [key, k]] of Object.entries(calMap)) calibration[key] = $(cid).value / k;
+  showCalibration();
+  clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
+}));
+
+// ---------- boot ----------
+async function loadState() {
+  const st = await (await fetch('/api/state')).json();
+  settings = st.settings; calibration = st.calibration; armed = st.armed; scenes = st.scenes;
+  if (!$('shapes').children.length) {
+    const names = { circle: 'Cercle', square: 'Carré', triangle: 'Triangle', cross: 'Croix', line: 'Ligne', star: 'Étoile', spiral: 'Spirale', dots: 'Points' };
+    st.shapes.forEach(name => {
+      const b = document.createElement('button');
+      b.textContent = names[name] || name; b.dataset.shape = name;
+      b.onclick = () => { settings.content = { kind: 'shape', shape: name }; showSettings(); pushSettings(); };
+      $('shapes').appendChild(b);
+    });
+  }
+  showSettings(); showCalibration(); showArmed(); renderScenes();
+}
+
+loadState().then(previewLoop);
+</script>
+</body>
+</html>
