@@ -1,12 +1,12 @@
 ---
 id: T-155
 title: Modes de déclenchement des cues, groupes exclusifs, limiteur
-status: todo
+status: done
 area: cues
 priority: P1
 depends_on: [T-145]
-owner: ""
-branch: ""
+owner: "dev-agent (cue-modes)"
+branch: feat/cue-modes
 source: docs/research/pro-live-operation.md §2.2–§2.3
 ---
 
@@ -37,12 +37,12 @@ Grille persistante : `studio-data/grid.json` (préremplie avec le catalogue de 2
 Barre de la grille : *Basculer / Flash / Solo / Relancer*, *Un cue / Multi*, champ *Groupe* dans le menu contextuel d'une case (clic droit : *Propriétés du cue*). Case active surlignée ; case en flash d'une autre couleur.
 
 ## Critères d'acceptation
-- [ ] *Basculer* : clic 1 démarre, clic 2 arrête
-- [ ] *Flash* : actif entre appui et relâchement seulement (souris et clavier)
-- [ ] *Solo* tenu : seul ce cue sort ; relâché : les autres reviennent
-- [ ] Deux cues du même groupe : le second remplace le premier
-- [ ] 5 cues en *Multi* avec `max_active` 4 : le plus ancien s'arrête
-- [ ] Les scènes et la playlist existantes fonctionnent toujours
+- [x] *Basculer* : clic 1 démarre, clic 2 arrête
+- [x] *Flash* : actif entre appui et relâchement seulement (souris et clavier)
+- [x] *Solo* tenu : seul ce cue sort ; relâché : les autres reviennent
+- [x] Deux cues du même groupe : le second remplace le premier
+- [x] 5 cues en *Multi* avec `max_active` 4 : le plus ancien s'arrête
+- [x] Les scènes et la playlist existantes fonctionnent toujours
 
 ## Tests
 Unitaires sur `CueDeck` (tous les modes, groupes, limiteur). e2e : flash au clavier, solo, groupes.
@@ -52,3 +52,5 @@ Règles de CLAUDE.md : laser désarmé au démarrage, Échap = blackout instanta
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — dev-agent (cue-modes), branche `feat/cue-modes` : `cues.rs` (CueDeck, modes Basculer/Flash/Solo/Relancer, Un cue/Multi, groupes 1..8, limiteur `max_active`), rendu multi-cues concaténé avec trajets éteints, contrôles `grid.*` momentanés + `cue.mode/multi/max_active/stop_all`, API `/api/cue`, `/api/cues`, `/api/cues/slot`, barre de grille, Maj+lettre = flash, menu « Propriétés du cue », `grid.json` (propriétés par cue). Adapté : la grille reste dérivée du catalogue (8 pages, T-145) ; `layer/transition/quantize/modifiers/vlj_skip` laissés à T-156 et suivantes ; pas d'e2e (`studio/e2e/` absent). 89 tests OK, clippy propre, vérifié dans Chrome sur une instance d'aperçu. Note PR : `docs/prs/cue-modes.md`.
+- 2026-09-27 — architecte (review) : APPROUVÉ et fusionné dans develop (conflit moteur résolu avec T-141). Suivi : relâcher les flashs si le navigateur disparaît (T-252).

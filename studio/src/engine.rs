@@ -234,6 +234,22 @@ pub fn densify(points: &[Point]) -> Vec<Point> {
     out
 }
 
+/// Chain several rendered looks into one frame, with blanked travel
+/// between them so the beam never draws a line from one look to the next.
+/// (The jump from the frame's end back to its start is blanked by the
+/// output, as for a single look.)
+pub fn join_looks(looks: Vec<Vec<Point>>) -> Vec<Point> {
+    let mut out: Vec<Point> = Vec::new();
+    for look in looks.into_iter().filter(|l| !l.is_empty()) {
+        if let (Some(&last), Some(&first)) = (out.last(), look.first()) {
+            let travel = densify(&[Point::blanked(last.x, last.y), Point::blanked(first.x, first.y)]);
+            out.extend(travel);
+        }
+        out.extend(look);
+    }
+    out
+}
+
 fn is_corner(points: &[Point], i: usize) -> bool {
     if i == 0 || i + 1 >= points.len() {
         return true; // endpoints always get a dwell
@@ -393,6 +409,20 @@ mod tests {
         assert_eq!(s.brightness, Settings::default().brightness);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn joined_looks_travel_blanked_between_them() {
+        let a = vec![Point::lit(-0.5, 0.0, 1.0, 0.0, 0.0), Point::lit(-0.4, 0.0, 1.0, 0.0, 0.0)];
+        let b = vec![Point::lit(0.5, 0.0, 0.0, 1.0, 0.0), Point::lit(0.6, 0.0, 0.0, 1.0, 0.0)];
+        let joined = join_looks(vec![a.clone(), Vec::new(), b.clone()]);
+        assert_eq!(&joined[..2], &a[..]);
+        assert_eq!(&joined[joined.len() - 2..], &b[..]);
+        let travel = &joined[2..joined.len() - 2];
+        assert!(travel.len() > 10 && travel.iter().all(|p| !p.is_lit()));
+        assert!(max_step(&joined[1..joined.len() - 1]) <= MAX_STEP + 1e-4);
+        assert_eq!(join_looks(vec![a.clone()]), a);
+        assert!(join_looks(Vec::new()).is_empty());
     }
 
     fn a_frame(s: &Settings, audio: AudioFeatures) -> Vec<Point> {
