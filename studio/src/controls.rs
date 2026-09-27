@@ -8,6 +8,7 @@
 
 use crate::cues::{self, ClickMode, CueDeck, CLICK_MODES, CLICK_MODE_LABELS};
 use crate::engine::Settings;
+use crate::interlock::{ArmSource, DisarmReason};
 use crate::presets::{Preset, CATEGORIES};
 use crate::live::{
     ChaseSpread, ColorOverride, ColorParams, LiveModifiers, PaletteMode, Rate, COLOR_MODE_LABELS, COLOR_STEPS_BEATS,
@@ -137,7 +138,10 @@ impl ControlRegistry {
         add("audio.flash".into(), "Flash sur le beat".into(), "audio", cont(0.0, 1.0, d.audio.flash, Unit::Percent), true);
         add("audio.color_on_beat".into(), "Couleur change au beat".into(), "audio", ControlKind::Toggle { default: true }, true);
 
+        // Both latch the emergency stop (T-251): a controller's blackout pad
+        // is the stop button. Only the UI resets it, and nothing external arms.
         add("transport.blackout".into(), "Blackout".into(), "transport", ControlKind::Trigger, true);
+        add("safety.estop".into(), "Arrêt d'urgence".into(), "safety", ControlKind::Trigger, true);
         add("transport.arm".into(), "Allumer le laser".into(), "transport", ControlKind::Toggle { default: false }, false);
 
         add("tempo.tap".into(), "Tap tempo".into(), "tempo", ControlKind::Trigger, true);
@@ -287,10 +291,16 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
         "audio.rotate" => s.settings.audio.rotate = value(input),
         "audio.flash" => s.settings.audio.flash = value(input),
         "audio.color_on_beat" => s.settings.audio.color_on_beat = truthy(input),
-        "transport.blackout" => s.armed = false,
+        "transport.blackout" | "safety.estop" => s.emergency_stop(if from_external { ArmSource::Midi } else { ArmSource::Ui }),
         // Only reachable from the UI (external is false): arming goes
-        // through the same path as the laser button.
-        "transport.arm" => s.armed = truthy(input),
+        // through the gate, like the laser button.
+        "transport.arm" => {
+            if truthy(input) {
+                s.request_arm(ArmSource::Ui).map_err(|_| ControlError::Refused("armement impossible : un verrou est actif"))?
+            } else {
+                s.gate.disarm(DisarmReason::User, ArmSource::Ui)
+            }
+        }
         "tempo.tap" => {
             let t = s.now_s();
             s.tempo.tap(t);
@@ -432,7 +442,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "audio.rotate" => json!(s.settings.audio.rotate),
         "audio.flash" => json!(s.settings.audio.flash),
         "audio.color_on_beat" => json!(s.settings.audio.color_on_beat),
-        "transport.arm" => json!(s.armed),
+        "transport.arm" => json!(s.gate.is_armed() && !s.estop.is_latched()),
         "tempo.bpm" => json!(s.tempo.bpm),
         "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
         "cue.multi" => json!(s.deck.multi),
@@ -665,10 +675,44 @@ mod tests {
     fn controllers_cannot_arm_but_can_always_blackout() {
         let mut s = shared();
         assert!(matches!(apply(&mut s, "transport.arm", ControlInput::Value(1.0), true), Err(ControlError::Refused(_))));
-        assert!(!s.armed);
-        s.armed = true;
+        assert!(!s.gate.is_armed());
+        apply(&mut s, "transport.arm", ControlInput::Value(1.0), false).unwrap();
+        assert!(s.gate.is_armed());
         apply(&mut s, "transport.blackout", ControlInput::Value(1.0), true).unwrap();
-        assert!(!s.armed);
+        assert!(!s.gate.is_armed());
+        assert!(s.estop.is_latched(), "a controller blackout latches the e-stop");
+    }
+
+    #[test]
+    fn midi_estop_latches_and_nothing_external_rearms() {
+        let mut s = shared();
+        apply(&mut s, "transport.arm", ControlInput::Value(1.0), false).unwrap();
+        apply(&mut s, "safety.estop", ControlInput::Norm(1.0), true).unwrap();
+        assert!(!s.gate.is_armed());
+        let status = s.gate.status(&s.estop);
+        assert_eq!(status.estop.unwrap().source, ArmSource::Midi);
+        // Not from a controller, not from the UI either while latched.
+        assert!(apply(&mut s, "transport.arm", ControlInput::Value(1.0), true).is_err());
+        assert!(matches!(apply(&mut s, "transport.arm", ControlInput::Value(1.0), false), Err(ControlError::Refused(_))));
+        // Every control reachable from a controller leaves the laser disarmed.
+        s.gate.reset_estop(&s.estop);
+        let ids: Vec<String> = s.controls.list().iter().filter(|d| d.external).map(|d| d.id.clone()).collect();
+        for id in ids {
+            for v in [0.0, 1.0] {
+                let _ = apply(&mut s, &id, ControlInput::Norm(v), true);
+                assert!(!s.gate.is_armed(), "{id} armed the laser");
+            }
+        }
+    }
+
+    #[test]
+    fn ui_arm_toggle_off_is_a_plain_disarm() {
+        let mut s = shared();
+        apply(&mut s, "transport.arm", ControlInput::Value(1.0), false).unwrap();
+        apply(&mut s, "transport.arm", ControlInput::Value(0.0), false).unwrap();
+        assert!(!s.gate.is_armed());
+        assert!(!s.estop.is_latched());
+        assert_eq!(s.gate.status(&s.estop).last_disarm.unwrap().reason, "user");
     }
 
     #[test]

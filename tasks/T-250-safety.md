@@ -1,12 +1,12 @@
 ---
 id: T-250
 title: Verrous d'armement (interlocks) et raisons de désarmement
-status: todo
+status: review
 area: safety
 priority: P0
 depends_on: []
-owner: ""
-branch: ""
+owner: "dev-agent (arming)"
+branch: feat/arming
 source: docs/research/safety-regulation.md#7-proposed-features
 ---
 
@@ -49,12 +49,12 @@ impl ArmGate {
 - Sous le bouton : « Désarmé — raison : Échap (clavier), 21:42:10 » ou « Armé depuis 3 min 12 s (Espace) ».
 
 ## Critères d'acceptation
-- [ ] Au démarrage `armed=false`, raison `Démarrage`
-- [ ] Un verrou non satisfait fait refuser l'armement (409) avec son libellé
-- [ ] Un verrou qui tombe pendant l'armement désarme dans le même tick moteur
-- [ ] Désarmé : `/api/frame` de sortie ne contient aucun point allumé ; l'aperçu reste visible
-- [ ] `{on:false}` est toujours accepté, même si le corps contient d'autres champs
-- [ ] Échap et Espace se comportent comme avant
+- [x] Au démarrage `armed=false`, raison `Démarrage`
+- [x] Un verrou non satisfait fait refuser l'armement (409) avec son libellé
+- [x] Un verrou qui tombe pendant l'armement désarme dans le même tick moteur
+- [x] Désarmé : `/api/frame` de sortie ne contient aucun point allumé ; l'aperçu reste visible
+- [x] `{on:false}` est toujours accepté, même si le corps contient d'autres champs
+- [x] Échap et Espace se comportent comme avant
 
 ## Tests
 - Unitaires : table de transitions (armé/désarmé × verrous), raisons, `gate()` éteint toutes les couleurs.
@@ -67,3 +67,4 @@ impl ArmGate {
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/safety-regulation.md`.
+- 2026-09-27 — dev-agent (arming), branche `feat/arming` : `interlock.rs` (`ArmGate`, seul endroit qui change l'état armé ; MIDI et système ne peuvent jamais armer), `OutputStage` en dernier étage (trame de sortie éteinte si désarmé, aperçu intact, `output_lit` dans `/api/frame`), `GET/POST /api/arm` (409 + `blocking`), option cachée `--test-interlock`, bulle de refus et ligne d'état dans l'UI. 133 tests unitaires verts, clippy propre. Pas d'e2e : `studio/e2e/` absent de la branche (couvert par des tests HTTP dans `web.rs`). UI non cliquée dans un navigateur. PR : `docs/prs/arming.md`. → review
