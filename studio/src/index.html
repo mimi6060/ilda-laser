@@ -12,7 +12,18 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
-  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  #top { position: sticky; top: 0; z-index: 20; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .arm { position: relative; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+  #armInfo { font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #armRefused { position: absolute; top: calc(100% + 6px); right: 0; width: 280px; padding: 8px 10px; border-radius: 8px; background: var(--danger); color: #fff; font-size: 12px; box-shadow: 0 8px 24px #0008; }
+  #armRefused[hidden] { display: none; }
+  #armRefused ul { margin: 4px 0 0; padding-left: 18px; }
+  #estopBtn { width: 58px; height: 58px; flex: none; border-radius: 50%; border: 3px solid #fff3; background: #d0021b; color: #fff; font-weight: 800; font-size: 11px; letter-spacing: .04em; padding: 0; box-shadow: 0 0 0 3px #d0021b55; }
+  #estopBtn:active { background: #a00016; }
+  #estopBanner { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 8px 16px; background: #d0021b; color: #fff; font-weight: 700; letter-spacing: .03em; }
+  #estopBanner[hidden] { display: none; }
+  #estopBanner button { background: #fff; color: #d0021b; border-color: #fff; font-weight: 700; }
   header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
   #output { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #armBtn { padding: 10px 18px; border-radius: 8px; border: 2px solid var(--danger); background: transparent; color: var(--danger); font-weight: 700; cursor: pointer; letter-spacing: .04em; }
@@ -105,6 +116,7 @@
 </style>
 </head>
 <body>
+<div id="top">
 <header>
   <h1>Laser Studio</h1>
   <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
@@ -120,8 +132,16 @@
   </div>
   <div id="midiStatus" title="Contrôleurs MIDI (section Contrôleur)">MIDI : …</div>
   <div id="output">…</div>
-  <button id="armBtn" title="Espace : allumer/éteindre · Échap : blackout">LASER OFF</button>
+  <div class="arm">
+    <button id="armBtn" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
+    <span id="armInfo">Désarmé</span>
+    <div id="armRefused" hidden></div>
+  </div>
+  <button id="estopBtn" title="Arrêt d'urgence (Échap) · safety.estop">ARRÊT</button>
 </header>
+<div id="estopBanner" hidden>ARRÊT D'URGENCE — réinitialiser pour réarmer
+  <button id="estopReset">Réinitialiser l'arrêt d'urgence</button></div>
+</div>
 
 <main>
   <div class="stage">
@@ -130,7 +150,7 @@
     <div class="stats">
       <span>Points <b id="stPoints">0</b></span>
       <span>Images/s <b id="stFps">–</b></span>
-      <span><kbd>Espace</kbd> laser on/off · <kbd>Échap</kbd> blackout</span>
+      <span><kbd>Espace</kbd> laser on/off · <kbd>Échap</kbd> arrêt d'urgence · <kbd>Maj</kbd>+<kbd>Échap</kbd> désarmer</span>
     </div>
     <section style="margin-top:12px">
       <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
@@ -429,20 +449,34 @@ document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click'
   showSettings(); pushSettings();
 }));
 
-// ---------- laser on/off ----------
+// ---------- laser on/off, emergency stop ----------
 // Frames fetched before the last arm request answered may carry an old
 // "armed" value; they must not overwrite what the server just told us.
-let armAnsweredAt = 0;
+let arm = null, refusedTimer = null, armAnsweredAt = 0;
 async function sendArm(body) {
   const r = await fetch('/api/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) return;
-  armed = (await r.json()).armed;
   armAnsweredAt = performance.now();
-  showArmed();
+  if (r.ok) { armed = (await r.json()).armed; $('armRefused').hidden = true; showArmed(); return; }
+  if (r.status === 409) {
+    const { blocking } = await r.json();
+    armed = false; showArmed();
+    const box = $('armRefused');
+    box.innerHTML = '<b>Armement impossible :</b><ul></ul>';
+    for (const why of blocking) { const li = document.createElement('li'); li.textContent = why; box.querySelector('ul').appendChild(li); }
+    box.hidden = false;
+    clearTimeout(refusedTimer);
+    refusedTimer = setTimeout(() => { box.hidden = true; }, 5000);
+  } else console.warn('/api/arm', await r.text());
 }
-// Escape and blackouts are always an explicit "off", never a toggle.
-const setArmed = on => sendArm({ on });
-const toggleArmed = () => sendArm({ toggle: true });
+// Plain "off" (Shift+Escape, blackouts) is always explicit, never a toggle.
+const setArmed = (on, source) => sendArm({ on, source });
+const toggleArmed = source => sendArm({ toggle: true, source });
+// Latched stop: no JSON, no await before the request leaves.
+function emergencyStop(source) {
+  armed = false; showArmed();
+  fetch('/api/estop?source=' + source, { method: 'POST', keepalive: true }).catch(() => {});
+  $('estopBanner').hidden = false;
+}
 // Only text entry counts as typing: after a slider, checkbox or button,
 // Space, Enter, Backspace and the cue keys must keep working.
 function isTyping() {
@@ -451,20 +485,33 @@ function isTyping() {
   if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable) return true;
   return el.tagName === 'INPUT' && ['text', 'number', 'search', 'password', 'email', 'url'].includes(el.type);
 }
+const clock = ms => new Date(ms).toLocaleTimeString('fr-FR');
+function since(ms) {
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000)), m = Math.floor(s / 60);
+  return m ? `${m} min ${s % 60} s` : `${s} s`;
+}
 function showArmed() {
   $('armBtn').classList.toggle('on', armed);
   $('armBtn').textContent = armed ? 'LASER ON' : 'LASER OFF';
   $('offBadge').classList.toggle('hidden', armed);
+  if (!arm) return;
+  $('estopBanner').hidden = !arm.estop;
+  const d = arm.last_disarm;
+  $('armInfo').textContent = arm.armed ? `Armé depuis ${since(arm.since)} (${arm.source_fr})`
+    : d ? `Désarmé — raison : ${d.reason_fr} (${d.source_fr}), ${clock(d.at)}` : 'Désarmé';
 }
-$('armBtn').addEventListener('click', toggleArmed);
+$('armBtn').addEventListener('click', () => toggleArmed('ui'));
+$('estopBtn').addEventListener('click', () => emergencyStop('ui'));
+$('estopReset').addEventListener('click', async () => { if (await post('/api/estop/reset')) { $('estopBanner').hidden = true; } });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { setArmed(false); return; }
+  // Before anything else, whatever has focus.
+  if (e.key === 'Escape') { e.preventDefault(); if (e.shiftKey) setArmed(false, 'keyboard'); else emergencyStop('keyboard'); return; }
   const typing = isTyping();
   if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
   if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
   if (!typing && e.key === '<') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
   if (e.code === 'Space' && !typing) {
-    e.preventDefault(); if (!e.repeat) toggleArmed(); return;
+    e.preventDefault(); if (!e.repeat) toggleArmed('keyboard'); return;
   }
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   const i = CUE_KEYS.indexOf(e.key.toLowerCase());
@@ -518,8 +565,8 @@ async function previewLoop() {
     const fetchedAt = performance.now();
     const f = await (await fetch('/api/frame')).json();
     draw(f.points);
-    if (fetchedAt > armAnsweredAt) { armed = f.armed; showArmed(); }
-    pps = f.pps;
+    if (fetchedAt > armAnsweredAt) armed = f.armed;
+    arm = f.arm; pps = f.pps; showArmed();
     $('output').textContent = f.output_error ? '⚠ ' + f.output_error
       : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement (lancez avec --device pour piloter un laser)';
     const n = f.points.length, fps = n ? pps / n : 0;
@@ -986,7 +1033,7 @@ function showLfos(pos) {
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
-  settings = st.settings; calibration = st.calibration; armed = st.armed; scenes = st.scenes;
+  settings = st.settings; calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');
   }

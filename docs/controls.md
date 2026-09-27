@@ -43,6 +43,7 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `audio.flash` | Flash sur le beat | audio | continu 0…1 | oui |
 | `audio.color_on_beat` | Couleur change au beat | audio | bascule | oui |
 | `transport.blackout` | Blackout | transport | déclencheur | oui |
+| `safety.estop` | Arrêt d'urgence | safety | déclencheur | oui |
 | `transport.arm` | Allumer le laser | transport | bascule | non |
 | `tempo.tap` | Tap tempo | tempo | déclencheur | oui |
 | `tempo.resync` | Recaler sur le 1 | tempo | déclencheur | oui |

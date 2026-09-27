@@ -508,7 +508,7 @@ pub mod tests {
         assert_eq!(s.midi.recent.len(), 2, "clock not recorded");
         assert_eq!(s.midi.last.as_ref().unwrap().msg, MidiMsg::Cc { channel: 0, number: 0x0E, value: 0x7F });
         assert_eq!(s.midi.last.as_ref().unwrap().port, "APC40 mkII");
-        assert!(!s.armed);
+        assert!(!s.gate.is_armed());
     }
 
     #[test]

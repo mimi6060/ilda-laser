@@ -2,15 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (124)
+## À faire (122)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] |  |
 | [T-208](T-208-safety.md) | Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur) | safety | P0 | [T-202] |  |
 | [T-245](T-245-safety.md) | Sécurité de la réactivité audio (limiteur, péremption, silence, pas d'armement) | safety | P0 | [T-237, T-101] |  |
-| [T-250](T-250-safety.md) | Verrous d'armement (interlocks) et raisons de désarmement | safety | P0 | [] |  |
-| [T-251](T-251-safety.md) | Arrêt d'urgence verrouillé (clavier, bouton, API, MIDI) | safety | P0 | [T-250] |  |
 | [T-252](T-252-safety.md) | Présence opérateur — battement de l'interface et mode maintien | safety | P0 | [T-250] |  |
 | [T-254](T-254-safety.md) | Plafonds de puissance par sortie et fiche projecteur | safety | P0 | [T-250] |  |
 | [T-271](T-271-safety.md) | Barre du haut fixe : noir, armement, maître, tempo, état de sortie | safety | P0 | [T-270] |  |
@@ -138,10 +136,12 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (12)
+## Fait (14)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
+| [T-250](T-250-safety.md) | Verrous d'armement (interlocks) et raisons de désarmement | safety | P0 | [] | feat/arming |
+| [T-251](T-251-safety.md) | Arrêt d'urgence verrouillé (clavier, bouton, API, MIDI) | safety | P0 | [T-250] | feat/arming |
 | [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] | feat/e2e |
 | [T-005](T-005-cues.md) | Bibliothèque de 202 cues procéduraux | cues | P1 | [] | feat/presets |
 | [T-140](T-140-live.md) | Étage de modificateurs en direct maître (géométrie, luminosité, vitesse) | live | P1 | [T-145] | feat/live |

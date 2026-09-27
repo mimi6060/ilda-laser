@@ -1,12 +1,12 @@
 ---
 id: T-251
 title: Arrêt d'urgence verrouillé (clavier, bouton, API, MIDI)
-status: todo
+status: done
 area: safety
 priority: P0
 depends_on: [T-250]
-owner: ""
-branch: ""
+owner: "dev-agent (arming)"
+branch: feat/arming
 source: docs/research/safety-regulation.md#34-outdoor-dgta-authorisation-confirmed-primary-sources
 ---
 
@@ -29,11 +29,11 @@ Verrou `estop` dans `ArmGate` ; `Shared.estop_at: Option<SystemTime>`.
 - Raccourcis : Échap = arrêt d'urgence ; Maj+Échap = désarmer sans verrou.
 
 ## Critères d'acceptation
-- [ ] Échap pendant l'armement → `armed=false`, `estop=true`, bandeau visible
-- [ ] Espace ou `/api/arm {on:true}` pendant l'arrêt → refusé (409, verrou `estop`)
-- [ ] Reset puis Espace → armé
-- [ ] `/api/estop` sans corps ou avec un corps invalide → 200 et arrêt effectif
-- [ ] Mesure en test : trame éteinte produite au plus tard au tick suivant
+- [x] Échap pendant l'armement → `armed=false`, `estop=true`, bandeau visible
+- [x] Espace ou `/api/arm {on:true}` pendant l'arrêt → refusé (409, verrou `estop`)
+- [x] Reset puis Espace → armé
+- [x] `/api/estop` sans corps ou avec un corps invalide → 200 et arrêt effectif
+- [x] Mesure en test : trame éteinte produite au plus tard au tick suivant
 
 ## Tests
 - Unitaires : verrou, reset qui ne réarme pas, ordre de traitement.
@@ -47,3 +47,5 @@ Verrou `estop` dans `ArmGate` ; `Shared.estop_at: Option<SystemTime>`.
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/safety-regulation.md`.
+- 2026-09-27 — dev-agent (arming), branche `feat/arming` : verrou `EStop` sans lock (atomiques + coupe-circuit laser-dac appelé depuis le thread HTTP), `POST /api/estop` traité par le thread de réception avant la file (corps ignoré), `POST /api/estop/reset` (ne réarme jamais), Échap = arrêt verrouillé, Maj+Échap = désarmement simple, bouton rond « ARRÊT » + bandeau, contrôles `safety.estop` et `transport.blackout` (MIDI) = arrêt verrouillé. Tests : trame suivante éteinte même avant la synchro de la porte ; arrêt servi pendant qu'un gestionnaire tient le verrou. `estop_at` vit dans `EStop`, pas dans `Shared`. PR : `docs/prs/arming.md`. → review
+- 2026-09-27 — architecte (review) : APPROUVÉ et fusionné dans develop ; tests e2e ajoutés (verrouillage Échap, Maj+Échap).

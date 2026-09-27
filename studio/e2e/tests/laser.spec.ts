@@ -1,4 +1,5 @@
-// Laser on/off: the LASER button, Space, and Escape (always a blackout).
+// Laser on/off: the LASER button, Space, and Escape (always a blackout,
+// latched as an emergency stop since T-251).
 // Preview only: "armed" is just a flag in a studio that has no output.
 import { test, expect, useStudio, openUi, focusPage } from '../studio';
 
@@ -6,6 +7,8 @@ const studio = useStudio();
 const armed = async () => (await studio.state()).armed as boolean;
 
 test.beforeEach(async ({ page }) => {
+  // Escape latches the emergency stop (T-251): clear it so each test starts armable.
+  await studio.post('/api/estop/reset', {});
   await studio.post('/api/arm', { on: false });
   await openUi(page, studio);
 });
@@ -152,4 +155,34 @@ test('a restarted studio always comes back disarmed', async ({ page }) => {
   expect(await armed()).toBe(false);
   await openUi(page, studio);
   await expect(page.locator('#armBtn')).toHaveText('LASER OFF');
+});
+
+test('T-251: Escape latches the emergency stop until it is reset', async ({ page }) => {
+  await focusPage(page);
+  await page.keyboard.press('Space');
+  await expect.poll(armed).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect.poll(armed).toBe(false);
+  await expect(page.locator('#estopBanner')).toBeVisible();
+  // Space can't re-arm while the stop is latched.
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(300);
+  expect(await armed()).toBe(false);
+  await page.locator('#estopReset').click();
+  await expect(page.locator('#estopBanner')).toBeHidden();
+  expect(await armed()).toBe(false); // reset never re-arms by itself
+  await focusPage(page);
+  await page.keyboard.press('Space');
+  await expect.poll(armed).toBe(true);
+});
+
+test('T-251: Shift+Escape is a plain disarm without latching', async ({ page }) => {
+  await focusPage(page);
+  await page.keyboard.press('Space');
+  await expect.poll(armed).toBe(true);
+  await page.keyboard.press('Shift+Escape');
+  await expect.poll(armed).toBe(false);
+  await expect(page.locator('#estopBanner')).toBeHidden();
+  await page.keyboard.press('Space');
+  await expect.poll(armed).toBe(true);
 });
