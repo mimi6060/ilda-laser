@@ -2,7 +2,7 @@
 
 use crate::engine::{AudioFeatures, Calibration, Settings};
 use crate::scenes::SceneStore;
-use crate::{controls, cues, live, presets, tempo, Shared};
+use crate::{controls, cues, live, midi, presets, tempo, Shared};
 use std::time::Instant;
 
 /// A fresh `Shared` like the one `main` builds, with scenes stored in a
@@ -32,5 +32,6 @@ pub fn shared() -> Shared {
         live: live::LiveModifiers::default(),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
+        midi: midi::MidiState::new(false, midi::profile::ProfileStore::in_memory()),
     }
 }
