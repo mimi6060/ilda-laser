@@ -8,7 +8,10 @@
 
 use crate::engine::Settings;
 use crate::presets::{Preset, CATEGORIES};
-use crate::live::{LiveModifiers, ROT_PRESETS_FREE, ROT_PRESETS_SYNC, ROT_PRESET_LABELS};
+use crate::live::{
+    ChaseSpread, ColorOverride, ColorParams, LiveModifiers, PaletteMode, Rate, COLOR_MODE_LABELS, COLOR_STEPS_BEATS,
+    COLOR_STEP_LABELS, PALETTE_LABELS, ROT_PRESETS_FREE, ROT_PRESETS_SYNC, ROT_PRESET_LABELS,
+};
 use crate::tempo;
 use crate::Shared;
 use serde::Serialize;
@@ -26,7 +29,11 @@ pub enum Unit {
     DegPerSec,
     Bpm,
     Deg,
+    Hz,
 }
+
+const PALETTE_MODE_LABELS: [&str; 2] = ["Plus proche", "Pas à pas"];
+const CHASE_SPREAD_LABELS: [&str; 3] = ["Tout", "Par trait", "Par point"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -105,6 +112,23 @@ impl ControlRegistry {
         add("master.perspective".into(), "Perspective".into(), "master", cont(0.0, 1.0, m.perspective, Unit::Percent), true);
         add("master.speed".into(), "Vitesse d'animation".into(), "master", cont(0.0, 4.0, m.speed, Unit::Percent), true);
         add("master.reset".into(), "Réinitialiser le direct".into(), "master", ControlKind::Trigger, true);
+
+        let c = ColorParams::default();
+        let choice = |options: &[&'static str], default: usize| ControlKind::Choice { options: options.to_vec(), default };
+        add("master.color.mode".into(), "Mode couleur".into(), "master", choice(&COLOR_MODE_LABELS, 0), true);
+        add("master.color.hue".into(), "Teinte".into(), "master", cont(0.0, 360.0, c.hue, Unit::Deg), true);
+        add("master.color.palette".into(), "Palette".into(), "master", choice(&PALETTE_LABELS, c.palette), true);
+        add("master.color.palette_mode".into(), "Mode de palette".into(), "master", choice(&PALETTE_MODE_LABELS, 0), true);
+        add("master.color.offset".into(), "Décalage de palette".into(), "master", cont(0.0, 15.0, 0.0, Unit::None), true);
+        add("master.color.rate".into(), "Pas couleur (temps)".into(), "master", choice(&COLOR_STEP_LABELS, 3), true);
+        add("master.color.rate_hz".into(), "Vitesse couleur libre".into(), "master", cont(0.0, 10.0, 0.0, Unit::Hz), true);
+        add("master.color.spread".into(), "Étalement arc-en-ciel".into(), "master", cont(0.0, 4.0, c.spread, Unit::None), true);
+        add("master.color.chase_spread".into(), "Répartition du chenillard".into(), "master", choice(&CHASE_SPREAD_LABELS, 1), true);
+        for (i, name) in ["Rouge", "Vert", "Bleu"].iter().enumerate() {
+            let id = ["red", "green", "blue"][i];
+            let default = c.rgb[i] as f32 / 255.0;
+            add(format!("master.color.{id}"), format!("Couleur fixe : {name}"), "master", cont(0.0, 1.0, default, Unit::Percent), true);
+        }
 
         add("audio.enabled".into(), "Réagit à la musique".into(), "audio", ControlKind::Toggle { default: false }, true);
         add("audio.size".into(), "Taille suit les basses".into(), "audio", cont(0.0, 1.0, d.audio.size, Unit::Percent), true);
@@ -214,6 +238,35 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
         "master.perspective" => set_live(s, |m| m.perspective = value(input)),
         "master.speed" => set_live(s, |m| m.speed = value(input)),
         "master.reset" => set_live(s, |m| *m = LiveModifiers::default()),
+        "master.color.mode" => {
+            let index = choice_index(&desc.kind, input);
+            set_live(s, |m| m.color = m.color_params.build(index))
+        }
+        "master.color.hue" => set_color(s, |c| c.hue = value(input)),
+        "master.color.palette" => {
+            let index = choice_index(&desc.kind, input);
+            set_color(s, |c| c.palette = index)
+        }
+        "master.color.palette_mode" => {
+            let mode = [PaletteMode::Nearest, PaletteMode::Step][choice_index(&desc.kind, input)];
+            set_color(s, |c| c.palette_mode = mode)
+        }
+        "master.color.offset" => set_color(s, |c| c.offset = value(input).round() as usize),
+        "master.color.rate" => {
+            let rate = Rate::Beats(COLOR_STEPS_BEATS[choice_index(&desc.kind, input)]);
+            set_color_rate(s, rate)
+        }
+        "master.color.rate_hz" => set_color_rate(s, Rate::Hz(value(input))),
+        "master.color.spread" => set_color(s, |c| c.spread = value(input)),
+        "master.color.chase_spread" => {
+            let spread = [ChaseSpread::Whole, ChaseSpread::Stroke, ChaseSpread::Point][choice_index(&desc.kind, input)];
+            set_color(s, |c| c.chase_spread = spread)
+        }
+        "master.color.red" | "master.color.green" | "master.color.blue" => {
+            let channel = ["master.color.red", "master.color.green", "master.color.blue"].iter().position(|&i| i == desc.id).unwrap_or(0);
+            let v = (value(input) * 255.0).round() as u8;
+            set_color(s, |c| c.rgb[channel] = v)
+        }
         "audio.enabled" => s.settings.audio.enabled = truthy(input),
         "audio.size" => s.settings.audio.size = value(input),
         "audio.rotate" => s.settings.audio.rotate = value(input),
@@ -277,6 +330,26 @@ fn set_live(s: &mut Shared, f: impl FnOnce(&mut LiveModifiers)) {
     s.live_dirty = true;
 }
 
+/// Change a colour setting; the active colour mode picks it up at once. It
+/// never switches mode by itself (that's `master.color.mode`).
+fn set_color(s: &mut Shared, f: impl FnOnce(&mut ColorParams)) {
+    set_live(s, |m| {
+        f(&mut m.color_params);
+        m.color = m.color_params.build(m.color.mode_index());
+    })
+}
+
+/// « Pas » drives the mode that uses a rate (rainbow or chase); in the
+/// other modes it presets both.
+fn set_color_rate(s: &mut Shared, rate: Rate) {
+    let mode = s.live.color.mode_index();
+    set_color(s, |c| match mode {
+        4 => c.rainbow_rate = rate,
+        5 => c.chase_step = rate,
+        _ => (c.rainbow_rate, c.chase_step) = (rate, rate),
+    })
+}
+
 fn choice_index(kind: &ControlKind, input: ControlInput) -> usize {
     let n = match kind {
         ControlKind::Choice { options, .. } => options.len(),
@@ -307,6 +380,25 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "master.rot.reverse" => json!(s.live.rot_reverse),
         "master.perspective" => json!(s.live.perspective),
         "master.speed" => json!(s.live.speed),
+        "master.color.mode" => json!(s.live.color.mode_index()),
+        "master.color.hue" => json!(s.live.color_params.hue),
+        "master.color.palette" => json!(s.live.color_params.palette),
+        "master.color.palette_mode" => json!(s.live.color_params.palette_mode as usize),
+        "master.color.offset" => json!(s.live.color_params.offset),
+        "master.color.spread" => json!(s.live.color_params.spread),
+        "master.color.chase_spread" => json!(s.live.color_params.chase_spread as usize),
+        "master.color.rate" | "master.color.rate_hz" => {
+            let c = &s.live.color_params;
+            let rate = if matches!(s.live.color, ColorOverride::Rainbow { .. }) { c.rainbow_rate } else { c.chase_step };
+            match (desc.id.as_str(), rate) {
+                ("master.color.rate", Rate::Beats(b)) => json!(COLOR_STEPS_BEATS.iter().position(|&x| x == b)),
+                ("master.color.rate_hz", Rate::Hz(hz)) => json!(hz),
+                _ => serde_json::Value::Null,
+            }
+        }
+        "master.color.red" => json!(s.live.color_params.rgb[0] as f32 / 255.0),
+        "master.color.green" => json!(s.live.color_params.rgb[1] as f32 / 255.0),
+        "master.color.blue" => json!(s.live.color_params.rgb[2] as f32 / 255.0),
         "audio.enabled" => json!(s.settings.audio.enabled),
         "audio.size" => json!(s.settings.audio.size),
         "audio.rotate" => json!(s.settings.audio.rotate),
@@ -420,6 +512,50 @@ mod tests {
         assert_eq!(s.live.rot_angle[0], 45.0);
         apply(&mut s, "master.reset", ControlInput::Value(1.0), true).unwrap();
         assert_eq!(s.live, LiveModifiers::default());
+    }
+
+    #[test]
+    fn colour_modes_remember_their_settings() {
+        let mut s = shared();
+        apply(&mut s, "master.color.hue", ControlInput::Value(200.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Normal, "a setting alone never switches mode");
+        apply(&mut s, "master.color.mode", ControlInput::Value(2.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Hue { hue: 200.0 });
+        apply(&mut s, "master.color.hue", ControlInput::Norm(0.5), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Hue { hue: 180.0 });
+        apply(&mut s, "master.color.mode", ControlInput::Value(0.0), true).unwrap();
+        apply(&mut s, "master.color.mode", ControlInput::Value(2.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Hue { hue: 180.0 });
+        assert!(s.live_dirty);
+
+        apply(&mut s, "master.color.green", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "master.color.mode", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Fixed { rgb: [255, 255, 0] });
+
+        apply(&mut s, "master.color.palette", ControlInput::Value(4.0), true).unwrap();
+        apply(&mut s, "master.color.palette_mode", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "master.color.offset", ControlInput::Value(2.4), true).unwrap();
+        apply(&mut s, "master.color.mode", ControlInput::Value(3.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Palette { palette: 4, mode: PaletteMode::Step, offset: 2 });
+        assert_eq!(current(&s, s.controls.get("master.color.mode").unwrap()), Some(serde_json::json!(3)));
+
+        apply(&mut s, "master.reset", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Normal);
+    }
+
+    #[test]
+    fn colour_step_drives_the_active_rate() {
+        let mut s = shared();
+        apply(&mut s, "master.color.mode", ControlInput::Value(5.0), true).unwrap();
+        apply(&mut s, "master.color.rate", ControlInput::Value(0.0), true).unwrap();
+        apply(&mut s, "master.color.chase_spread", ControlInput::Value(2.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Chase { palette: 0, step: Rate::Beats(0.125), spread: ChaseSpread::Point });
+        assert_eq!(s.live.color_params.rainbow_rate, Rate::Beats(4.0), "the rainbow keeps its own rate");
+        apply(&mut s, "master.color.mode", ControlInput::Value(4.0), true).unwrap();
+        apply(&mut s, "master.color.rate_hz", ControlInput::Value(2.0), true).unwrap();
+        apply(&mut s, "master.color.spread", ControlInput::Value(3.0), true).unwrap();
+        assert_eq!(s.live.color, ColorOverride::Rainbow { spread: 3.0, rate: Rate::Hz(2.0) });
+        assert_eq!(current(&s, s.controls.get("master.color.rate_hz").unwrap()), Some(serde_json::json!(2.0)));
     }
 
     #[test]
