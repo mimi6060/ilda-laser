@@ -60,6 +60,19 @@
   .cue .key { position: absolute; top: 4px; right: 6px; font-size: 10px; color: var(--muted); }
   .cue.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .cue.active .key { color: var(--accent-ink); }
+  .cue.flash { background: var(--warn); color: #2b1d00; border-color: var(--warn); }
+  .cue.flash .key { color: #2b1d00; }
+  .cue.hidden-out { opacity: .55; }
+  .cue { touch-action: none; user-select: none; -webkit-user-select: none; }
+  .cue .tag { position: absolute; bottom: 3px; right: 6px; font-size: 10px; color: var(--muted); }
+  .cue.active .tag, .cue.flash .tag { color: inherit; }
+  .cue-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .cue-bar .seg button { padding: 6px 10px; font-size: 12px; white-space: nowrap; }
+  .cue-bar input { width: 56px; padding: 5px; }
+  .cue-bar > button { padding: 6px 10px; font-size: 12px; }
+  #cueMenu { position: fixed; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 220px; box-shadow: 0 8px 24px #0008; }
+  #cueMenu[hidden] { display: none; }
+  #cueMenu h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
   .tempo { display: flex; align-items: center; gap: 6px; }
   .tempo input { width: 84px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; padding: 6px; }
   .tempo button { padding: 6px 9px; font-size: 12px; }
@@ -99,9 +112,40 @@
     </div>
     <section style="margin-top:12px">
       <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
+      <div class="cue-bar">
+        <div class="seg" id="cueModes" title="cue.mode">
+          <button data-mode="toggle" title="Clic 1 démarre, clic 2 arrête">Basculer</button>
+          <button data-mode="flash" title="Actif tant que le bouton ou la touche est tenu">Flash</button>
+          <button data-mode="solo" title="Tenu : seul ce cue sort">Solo</button>
+          <button data-mode="restart" title="Chaque clic relance le cue du début">Relancer</button>
+        </div>
+        <div class="seg" id="cueMulti" title="cue.multi">
+          <button data-multi="0" title="Un nouveau cue remplace le précédent">Un cue</button>
+          <button data-multi="1" title="Les cues s'additionnent">Multi</button>
+        </div>
+        <span class="hint" style="margin:0">Max</span>
+        <input type="number" id="cueMax" min="1" max="16" title="cue.max_active : au-delà, le plus ancien s'arrête">
+        <button data-ctl="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
+      </div>
       <div class="cue-tabs" id="cueTabs"></div>
       <div class="cues" id="cues"></div>
+      <div class="hint"><kbd>Maj</kbd> + lettre = flash · clic droit sur un cue = propriétés</div>
     </section>
+    <div id="cueMenu" hidden>
+      <h3>Propriétés du cue</h3>
+      <div class="hint" id="cueMenuName" style="margin:0"></div>
+      <label>Mode de clic</label>
+      <select id="cueMenuMode">
+        <option value="">Comme la grille</option><option value="toggle">Basculer</option>
+        <option value="flash">Flash</option><option value="solo">Solo</option><option value="restart">Relancer</option>
+      </select>
+      <label>Groupe (un seul cue actif par groupe)</label>
+      <select id="cueMenuGroup">
+        <option value="">Aucun</option><option>1</option><option>2</option><option>3</option>
+        <option>4</option><option>5</option><option>6</option><option>7</option><option>8</option>
+      </select>
+      <div class="row"><button id="cueMenuClose">Fermer</button></div>
+    </div>
   </div>
 
   <div class="col">
@@ -300,7 +344,6 @@ function readControls() {
       count: +$('gCount').value, a: +$('gA').value, b: +$('gB').value, speed: +$('gSpeed').value,
       color_mode: $('gMode').value, color2: rgb($('gColor2').value) });
   }
-  activeCue = null; renderCues();
   showValues();
   pushSettings();
 }
@@ -347,7 +390,26 @@ document.addEventListener('keydown', e => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
   const i = CUE_KEYS.indexOf(e.key.toLowerCase());
   const page = presets.filter(p => p.category === cuePage);
-  if (i >= 0 && i < page.length) { e.preventDefault(); playCue(page[i].id); }
+  if (i >= 0 && i < page.length) {
+    e.preventDefault();
+    // Auto-repeat would toggle the cue on and off while the key is held.
+    if (e.repeat || heldKeys.has(e.code)) return;
+    heldKeys.set(e.code, page[i].id);
+    cueDown(page[i].id, e.shiftKey ? 'flash' : null);
+  }
+});
+document.addEventListener('keyup', e => {
+  const id = heldKeys.get(e.code);
+  if (id === undefined) return;
+  heldKeys.delete(e.code);
+  cueUp(id);
+});
+// A key or button released while the window had no focus never sends its
+// keyup: end every flash still held.
+window.addEventListener('blur', () => {
+  for (const id of heldKeys.values()) cueUp(id);
+  heldKeys.clear();
+  if (pointerCue) { cueUp(pointerCue); pointerCue = null; }
 });
 
 // ---------- preview ----------
@@ -386,15 +448,14 @@ async function previewLoop() {
     highlightPlaylist(f.playlist);
     showTempo(f.tempo);
     showLive(f.live);
-    // Follow page and cue changes made elsewhere (MIDI controller, API) -
-    // only when the server's value changes, so a click that the server
+    // Follow page changes made elsewhere (MIDI controller, API) - only
+    // when the server's value changes, so a tab click that the server
     // hasn't processed yet isn't undone by an older frame.
-    if (f.cue_page !== serverPage || f.active_cue !== serverCue) {
-      serverPage = f.cue_page; serverCue = f.active_cue;
-      if (cueCategories[serverPage]) cuePage = cueCategories[serverPage];
-      activeCue = serverCue;
-      renderCues();
+    if (f.cue_page !== serverPage) {
+      serverPage = f.cue_page;
+      if (cueCategories[serverPage] && cueCategories[serverPage] !== cuePage) { cuePage = cueCategories[serverPage]; renderCues(); }
     }
+    showCueDeck(f.cues);
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -559,12 +620,21 @@ $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm'
 // ---------- cues ----------
 // AZERTY rows, so each key sits where it looks like it should.
 const CUE_KEYS = 'azertyuiopqsdfghjklmwxcvbn'.split('');
-let presets = [], cueCategories = [], cuePage = null, activeCue = null, serverPage = null, serverCue = null;
+let presets = [], cueCategories = [], cuePage = null, serverPage = null;
+// What the server says plays (from /api/frame), and the grid's cue properties.
+let deck = { active: [], shown: [], click_mode: 'toggle', multi: false, max_active: 4 }, deckKey = '', slots = {};
+const heldKeys = new Map(); // key code -> cue id, for keyup
+let pointerCue = null;      // cue id under a held mouse button / finger
+const MODE_TAGS = { toggle: 'B', flash: 'F', solo: 'S', restart: 'R' };
 
 async function loadPresets() {
   const r = await (await fetch('/api/presets')).json();
   presets = r.presets; cueCategories = r.categories;
   cuePage = cuePage || cueCategories[0];
+  await loadSlots();
+}
+async function loadSlots() {
+  slots = (await (await fetch('/api/cues')).json()).slots || {};
   renderCues();
 }
 function renderCues() {
@@ -579,21 +649,89 @@ function renderCues() {
   $('cues').innerHTML = '';
   presets.filter(p => p.category === cuePage).forEach((p, i) => {
     const b = document.createElement('button');
-    b.className = 'cue' + (p.id === activeCue ? ' active' : '');
+    b.className = 'cue';
     b.dataset.id = p.id;
     if (i < 40) b.title = `grid.${cueCategories.indexOf(cuePage) + 1}.${Math.floor(i / 8) + 1}.${i % 8 + 1}`;
-    b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><span class="n"></span>`;
+    const slot = slots[p.id] || {};
+    const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : ''].filter(Boolean).join(' ');
+    b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><span class="n"></span><span class="tag">${tag}</span>`;
     b.querySelector('.n').textContent = p.name;
-    b.onclick = () => playCue(p.id);
+    b.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      if (pointerCue) cueUp(pointerCue);
+      pointerCue = p.id;
+      cueDown(p.id, e.shiftKey ? 'flash' : null);
+    });
+    b.addEventListener('contextmenu', e => { e.preventDefault(); openCueMenu(p, e.clientX, e.clientY); });
     $('cues').appendChild(b);
   });
+  paintCues();
 }
-async function playCue(id) {
-  if (!await post('/api/presets/play', { id })) return;
-  activeCue = id;
+// Released anywhere: the button may have been re-rendered (page change)
+// while it was held.
+['pointerup', 'pointercancel'].forEach(ev => window.addEventListener(ev, () => {
+  if (pointerCue) { cueUp(pointerCue); pointerCue = null; }
+}));
+// Highlight in place: re-rendering would lose the button under a held pointer.
+function paintCues() {
+  const latched = new Set(deck.active.filter(a => !a.held).map(a => a.cue));
+  const held = new Set(deck.active.filter(a => a.held).map(a => a.cue));
+  const shown = new Set(deck.shown);
+  document.querySelectorAll('#cues .cue').forEach(b => {
+    const id = b.dataset.id;
+    b.classList.toggle('flash', held.has(id));
+    b.classList.toggle('active', latched.has(id) && !held.has(id));
+    b.classList.toggle('hidden-out', (latched.has(id) || held.has(id)) && !shown.has(id));
+  });
+}
+function showCueDeck(c) {
+  if (!c) return;
+  const key = JSON.stringify(c);
+  if (key === deckKey) return;
+  deckKey = key; deck = c;
+  document.querySelectorAll('#cueModes button').forEach(b => b.classList.toggle('active', b.dataset.mode === c.click_mode));
+  document.querySelectorAll('#cueMulti button').forEach(b => b.classList.toggle('active', (b.dataset.multi === '1') === c.multi));
+  if (document.activeElement !== $('cueMax')) $('cueMax').value = c.max_active;
+  paintCues();
+}
+async function cueDown(id, mode) {
+  if (await post('/api/cue', { id, down: true, mode })) refreshLook();
+}
+async function cueUp(id) {
+  if (await post('/api/cue', { id, down: false })) refreshLook();
+}
+// The look panel shows the newest cue's look.
+async function refreshLook() {
   const st = await (await fetch('/api/state')).json();
-  settings = st.settings; showSettings(); renderCues();
+  settings = st.settings; showSettings();
 }
+document.querySelectorAll('#cueModes button').forEach((b, i) => b.addEventListener('click', () => post('/api/control', { id: 'cue.mode', value: i })));
+document.querySelectorAll('#cueMulti button').forEach(b => b.addEventListener('click', () => post('/api/control', { id: 'cue.multi', value: b.dataset.multi === '1' })));
+$('cueMax').addEventListener('change', () => post('/api/control', { id: 'cue.max_active', value: +$('cueMax').value }));
+
+// « Propriétés du cue » (right click): its own click mode and group.
+let menuCue = null;
+function openCueMenu(p, x, y) {
+  menuCue = p.id;
+  const slot = slots[p.id] || {};
+  $('cueMenuName').textContent = p.name;
+  $('cueMenuMode').value = slot.mode || '';
+  $('cueMenuGroup').value = slot.group ? String(slot.group) : '';
+  const m = $('cueMenu');
+  m.hidden = false;
+  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 8)) + 'px';
+}
+async function saveCueMenu() {
+  if (!menuCue) return;
+  const mode = $('cueMenuMode').value || null, group = $('cueMenuGroup').value ? +$('cueMenuGroup').value : null;
+  await post('/api/cues/slot', { id: menuCue, mode, group });
+  await loadSlots();
+}
+['cueMenuMode', 'cueMenuGroup'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+$('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
+document.addEventListener('pointerdown', e => { if (!$('cueMenu').hidden && !$('cueMenu').contains(e.target)) $('cueMenu').hidden = true; });
 
 const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Rosace', tunnel: 'Tunnel',
   polygon_tunnel: 'Tunnel polygonal', spiral_arms: 'Spirale à bras', starburst: 'Soleil', beam_fan: 'Faisceaux en éventail',
@@ -613,7 +751,7 @@ async function loadState() {
     st.shapes.forEach(name => {
       const b = document.createElement('button');
       b.textContent = names[name] || name; b.dataset.shape = name;
-      b.onclick = () => { settings.content = { kind: 'shape', shape: name }; activeCue = null; renderCues(); showSettings(); pushSettings(); };
+      b.onclick = () => { settings.content = { kind: 'shape', shape: name }; showSettings(); pushSettings(); };
       $('shapes').appendChild(b);
     });
   }

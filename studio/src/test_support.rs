@@ -2,7 +2,7 @@
 
 use crate::engine::{AudioFeatures, Calibration, Settings};
 use crate::scenes::SceneStore;
-use crate::{controls, live, presets, tempo, Shared};
+use crate::{controls, cues, live, presets, tempo, Shared};
 use std::time::Instant;
 
 /// A fresh `Shared` like the one `main` builds, with scenes stored in a
@@ -25,6 +25,8 @@ pub fn shared() -> Shared {
         presets,
         cue_page: 0,
         active_cue: None,
+        deck: cues::CueDeck::default(),
+        look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch: Instant::now(),
         live: live::LiveModifiers::default(),

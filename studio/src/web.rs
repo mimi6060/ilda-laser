@@ -5,6 +5,7 @@
 //! exposed to the rest of the network.
 
 use crate::controls;
+use crate::cues::{ClickMode, CueSlot};
 use crate::engine::{AudioFeatures, Calibration, Settings};
 use crate::generators::GENERATOR_NAMES;
 use crate::patterns::SHAPE_NAMES;
@@ -54,7 +55,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         (Method::Post, "/api/settings") => match body::<Settings>(request) {
             Ok(settings) => {
                 let mut s = shared.lock().unwrap();
+                // With cues playing this edits the newest one; otherwise it
+                // is the manual look, shown again.
                 s.settings = settings;
+                s.look_on |= s.deck.active.is_empty();
                 s.playlist = None; // a manual change takes over from the playlist
                 ok()
             }
@@ -119,7 +123,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 let mut s = shared.lock().unwrap();
                 match s.scenes.get(&req.name).cloned() {
                     Some(scene) => {
-                        s.settings = scene.settings;
+                        controls::show_look(&mut s, scene.settings);
                         s.playlist = None;
                         ok()
                     }
@@ -132,7 +136,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             let mut s = shared.lock().unwrap();
             match s.scenes.list().first().cloned() {
                 Some(first) => {
-                    s.settings = first.settings;
+                    controls::show_look(&mut s, first.settings);
                     s.playlist = Some(Playlist { index: 0, started: Instant::now() });
                     ok()
                 }
@@ -151,6 +155,29 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 } else {
                     text(404, "no such preset")
                 }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/cue") => match body::<CueRequest>(request) {
+            Ok(req) => {
+                if controls::press_cue(&mut shared.lock().unwrap(), &req.id, req.mode, req.down) {
+                    ok()
+                } else {
+                    text(404, "no such preset")
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/cues") => json_response(json!(shared.lock().unwrap().deck)),
+        (Method::Post, "/api/cues/slot") => match body::<SlotRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                if !s.presets.iter().any(|p| p.id == req.id) {
+                    return text(404, "no such preset");
+                }
+                s.deck.set_slot(&req.id, req.slot);
+                s.deck.save();
+                ok()
             }
             Err(e) => e,
         },
@@ -203,6 +230,26 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
 #[derive(Deserialize)]
 struct ArmRequest {
     on: bool,
+}
+
+/// A cue button, key or pad: `down` true on press, false on release.
+#[derive(Deserialize)]
+struct CueRequest {
+    id: String,
+    #[serde(default = "yes")]
+    down: bool,
+    mode: Option<ClickMode>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+struct SlotRequest {
+    id: String,
+    #[serde(flatten)]
+    slot: CueSlot,
 }
 
 #[derive(Deserialize)]
@@ -276,6 +323,13 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "cue_page": s.cue_page,
         "active_cue": s.active_cue,
+        "cues": {
+            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held })).collect::<Vec<_>>(),
+            "shown": s.deck.visible().iter().map(|a| a.cue.as_str()).collect::<Vec<_>>(),
+            "click_mode": s.deck.click_mode,
+            "multi": s.deck.multi,
+            "max_active": s.deck.max_active,
+        },
         "tempo": s.tempo.state(s.now_s()),
         "live": s.live,
     }))
