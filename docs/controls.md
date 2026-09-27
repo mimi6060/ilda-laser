@@ -4,9 +4,27 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 
 | id | libellé | groupe | type | externe |
 |---|---|---|---|---|
-| `master.size` | Taille | master | continu 0.05…1 | oui |
-| `master.brightness` | Luminosité | master | continu 0…1 | oui |
-| `master.rotation_speed` | Vitesse de rotation | master | continu -360…360 | oui |
+| `look.size` | Taille du look | look | continu 0.05…1 | oui |
+| `look.brightness` | Luminosité du look | look | continu 0…1 | oui |
+| `look.rotation_speed` | Rotation du look | look | continu -360…360 | oui |
+| `master.brightness` | Luminosité maître | master | continu 0…1 | oui |
+| `master.size` | Taille maître | master | continu 0…2 | oui |
+| `master.size_x` | Taille X | master | continu -2…2 | oui |
+| `master.size_y` | Taille Y | master | continu -2…2 | oui |
+| `master.pos_x` | Position X | master | continu -1…1 | oui |
+| `master.pos_y` | Position Y | master | continu -1…1 | oui |
+| `master.rot_x.angle` | Angle X | master | continu -180…180 | oui |
+| `master.rot_x.speed` | Rotation X | master | continu -720…720 | oui |
+| `master.rot_y.angle` | Angle Y | master | continu -180…180 | oui |
+| `master.rot_y.speed` | Rotation Y | master | continu -720…720 | oui |
+| `master.rot_z.angle` | Angle Z | master | continu -180…180 | oui |
+| `master.rot_z.speed` | Rotation Z | master | continu -720…720 | oui |
+| `master.rot.preset` | Vitesse de rotation | master | choix : Stop / Lent / Moyen / Rapide | oui |
+| `master.rot.sync` | Rotation synchro tempo | master | bascule | oui |
+| `master.rot.reverse` | Inverser la rotation | master | momentané | oui |
+| `master.perspective` | Perspective | master | continu 0…1 | oui |
+| `master.speed` | Vitesse d'animation | master | continu 0…4 | oui |
+| `master.reset` | Réinitialiser le direct | master | déclencheur | oui |
 | `audio.enabled` | Réagit à la musique | audio | bascule | oui |
 | `audio.size` | Taille suit les basses | audio | continu 0…1 | oui |
 | `audio.rotate` | Rotation suit les basses | audio | continu 0…1 | oui |

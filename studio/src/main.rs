@@ -12,6 +12,7 @@ mod controls;
 mod engine;
 mod font;
 mod generators;
+mod live;
 mod output;
 mod patterns;
 mod presets;
@@ -83,6 +84,9 @@ pub struct Shared {
     /// The single tempo clock (see tempo.rs); times are seconds since `epoch`.
     pub tempo: tempo::TempoClock,
     pub epoch: Instant,
+    /// Master live modifiers (live.rs), saved to live.json when changed.
+    pub live: live::LiveModifiers,
+    pub live_dirty: bool,
 }
 
 impl Shared {
@@ -108,6 +112,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.data_dir)
         .with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
     let calibration_path = cli.data_dir.join("calibration.json");
+    let live_path = cli.data_dir.join("live.json");
 
     let output: Option<Box<dyn Output>> = match &cli.device {
         Some(device) => {
@@ -140,6 +145,8 @@ fn main() -> Result<()> {
         active_cue: None,
         tempo: tempo::TempoClock::default(),
         epoch: Instant::now(),
+        live: load_json(&live_path),
+        live_dirty: false,
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -152,7 +159,7 @@ fn main() -> Result<()> {
     let engine = std::thread::spawn({
         let shared = Arc::clone(&shared);
         let running = Arc::clone(&running);
-        move || run_engine(shared, output, running)
+        move || run_engine(shared, output, running, live_path)
     });
 
     let addr = format!("127.0.0.1:{}", cli.port);
@@ -164,8 +171,10 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, running: Arc<AtomicBool>) {
+fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, running: Arc<AtomicBool>, live_path: PathBuf) {
     let mut animator = Animator::default();
+    let mut live_state = live::LiveState::default();
+    let mut frames_since_save = 0u32;
     let mut last = Instant::now();
     let mut output_armed = false;
 
@@ -174,19 +183,27 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (settings, calibration, audio, armed) = {
+        let (settings, calibration, audio, armed, live, bpm, beats_per_bar) = {
             let mut s = shared.lock().unwrap();
+            frames_since_save += 1;
+            if s.live_dirty && frames_since_save >= 60 {
+                // At most once a second, so MIDI faders don't hammer the disk.
+                save_json(&live_path, &s.live);
+                s.live_dirty = false;
+                frames_since_save = 0;
+            }
             advance_playlist(&mut s);
             let audio = if s.audio_at.elapsed() < AUDIO_STALE {
                 s.audio
             } else {
                 AudioFeatures { beat: s.audio.beat, ..Default::default() }
             };
-            (s.settings.clone(), s.calibration, audio, s.armed)
+            (s.settings.clone(), s.calibration, audio, s.armed, s.live.clone(), s.tempo.bpm, s.tempo.beats_per_bar)
         };
 
-        let frame: Vec<Point> = animator
-            .render(&settings, audio, dt)
+        live_state.advance(&live, dt, bpm, beats_per_bar);
+        let look = animator.render(&settings, audio, dt * live.speed.clamp(0.0, 4.0));
+        let frame: Vec<Point> = live::apply(&look, &live, &live_state)
             .into_iter()
             .map(|p| {
                 let (x, y) = calibration.apply(p.x, p.y);
@@ -209,6 +226,21 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
 
     if let Some(out) = output.as_mut() {
         let _ = out.set_armed(false);
+    }
+}
+
+pub fn load_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
+    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+pub fn save_json<T: serde::Serialize>(path: &std::path::Path, value: &T) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, json) {
+                log::warn!("failed to save {}: {e}", path.display());
+            }
+        }
+        Err(e) => log::warn!("failed to serialize {}: {e}", path.display()),
     }
 }
 
