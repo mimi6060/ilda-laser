@@ -91,10 +91,14 @@ Roles:
    branch plus a PR note file `docs/prs/<short-name>.md` (what/why, how it
    was tested, risks). No GitHub remote: PRs are local branches.
 4. **Reviewer agents**: review one branch against `develop` (correctness,
-   safety rules, IP rules, style, tests). Either merge it
-   (`git merge --no-ff feat/<name>` into `develop`, after re-running the
-   full test suite on the merged result) or append a "Changes requested"
-   section to the PR note and send it back. Never merge red builds.
+   safety rules, IP rules, style, tests) in their own worktree, and append
+   a "Review" section to the PR note ending in `Verdict: APPROVED` or
+   `Verdict: CHANGES REQUESTED` (with a numbered list of required fixes).
+   Reviews can run in parallel. Merges are serialised: one integrator (the
+   architect, or a single merge agent) merges approved branches into
+   `develop` one at a time with `git merge --no-ff feat/<name>`, re-runs
+   the full suite on the merged result, and reverts the merge if it goes
+   red. Never merge red builds.
 5. **QA agents**: after merges, run the full suite plus e2e click tests on
    `develop`, write findings to `docs/qa/<date>.md`, file bugs as new
    roadmap items.
