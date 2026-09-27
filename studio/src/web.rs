@@ -154,6 +154,16 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/live") => json_response(json!(shared.lock().unwrap().live)),
+        (Method::Post, "/api/live") => match body::<crate::live::LiveModifiers>(request) {
+            Ok(live) => {
+                let mut s = shared.lock().unwrap();
+                s.live = live;
+                s.live_dirty = true;
+                ok()
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/controls") => json_response(json!(shared.lock().unwrap().controls.list())),
         (Method::Get, "/api/control-values") => {
             let s = shared.lock().unwrap();
@@ -267,6 +277,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "cue_page": s.cue_page,
         "active_cue": s.active_cue,
         "tempo": s.tempo.state(s.now_s()),
+        "live": s.live,
     }))
 }
 

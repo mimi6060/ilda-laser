@@ -106,6 +106,33 @@
 
   <div class="col">
     <section>
+      <h2>Direct <button id="liveReset" data-ctl="master.reset" title="master.reset" style="padding:4px 8px;font-size:11px">Réinitialiser</button></h2>
+      <label>Rotation</label>
+      <div class="seg" id="rotPresets">
+        <button data-preset="0">Stop</button><button data-preset="1">Lent</button>
+        <button data-preset="2">Moyen</button><button data-preset="3">Rapide</button>
+      </div>
+      <div class="row">
+        <label class="check" style="margin:0"><input type="checkbox" id="rotSync" title="master.rot.sync"> Synchro tempo</label>
+        <button id="rotReverse" title="master.rot.reverse (maintenir, ou touche &lt;)">⟲ Inverser (maintenir)</button>
+      </div>
+      <label>Taille maître <span class="v" id="mSizeV"></span></label>
+      <input type="range" id="mSize" min="0" max="200" data-live="size" data-k="100" title="master.size">
+      <label>Position X <span class="v" id="mPosXV"></span></label>
+      <input type="range" id="mPosX" min="-100" max="100" data-live="pos_x" data-k="100" title="master.pos_x">
+      <label>Position Y <span class="v" id="mPosYV"></span></label>
+      <input type="range" id="mPosY" min="-100" max="100" data-live="pos_y" data-k="100" title="master.pos_y">
+      <label>Inclinaison X (3D) <span class="v" id="mTiltXV"></span></label>
+      <input type="range" id="mTiltX" min="-180" max="180" data-live="rot_angle.0" data-k="1" title="master.rot_x.angle">
+      <label>Inclinaison Y (3D) <span class="v" id="mTiltYV"></span></label>
+      <input type="range" id="mTiltY" min="-180" max="180" data-live="rot_angle.1" data-k="1" title="master.rot_y.angle">
+      <label>Vitesse d'animation <span class="v" id="mSpeedV"></span></label>
+      <input type="range" id="mSpeed" min="0" max="400" data-live="speed" data-k="100" title="master.speed">
+      <label>Luminosité maître <span class="v" id="mBrightV"></span></label>
+      <input type="range" id="mBright" min="0" max="100" data-live="brightness" data-k="100" title="master.brightness">
+    </section>
+
+    <section>
       <h2>Contenu</h2>
       <div class="seg">
         <button data-kind="shape">Forme</button>
@@ -143,11 +170,11 @@
       <h2>Apparence</h2>
       <label>Couleur</label>
       <input type="color" id="color" value="#00ff00">
-      <label>Taille <span class="v" id="scaleV"></span></label>
+      <label>Taille du look <span class="v" id="scaleV"></span></label>
       <input type="range" id="scale" min="5" max="100">
-      <label>Rotation <span class="v" id="rotV"></span></label>
+      <label>Rotation du look <span class="v" id="rotV"></span></label>
       <input type="range" id="rot" min="-360" max="360" step="5">
-      <label>Luminosité <span class="v" id="brightV"></span></label>
+      <label>Luminosité du look <span class="v" id="brightV"></span></label>
       <input type="range" id="bright" min="0" max="100">
     </section>
 
@@ -313,6 +340,7 @@ document.addEventListener('keydown', e => {
   const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
   if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
   if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
+  if (!typing && e.key === '<') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
   if (e.code === 'Space' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
     e.preventDefault(); setArmed(!armed); return;
   }
@@ -357,9 +385,16 @@ async function previewLoop() {
     $('stFps').classList.toggle('bad', n && fps < 15);
     highlightPlaylist(f.playlist);
     showTempo(f.tempo);
-    // Follow page and cue changes made elsewhere (MIDI controller, API).
-    const page = cueCategories[f.cue_page];
-    if (page && (page !== cuePage || f.active_cue !== activeCue)) { cuePage = page; activeCue = f.active_cue; renderCues(); }
+    showLive(f.live);
+    // Follow page and cue changes made elsewhere (MIDI controller, API) -
+    // only when the server's value changes, so a click that the server
+    // hasn't processed yet isn't undone by an older frame.
+    if (f.cue_page !== serverPage || f.active_cue !== serverCue) {
+      serverPage = f.cue_page; serverCue = f.active_cue;
+      if (cueCategories[serverPage]) cuePage = cueCategories[serverPage];
+      activeCue = serverCue;
+      renderCues();
+    }
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -475,6 +510,42 @@ Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
   clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
 }));
 
+// ---------- live (master) ----------
+let live = null;
+const liveGet = (path) => path.split('.').reduce((o, k) => o[k], live);
+function liveSet(path, v) {
+  const keys = path.split('.'), last = keys.pop();
+  keys.reduce((o, k) => o[k], live)[last] = v;
+}
+function showLive(l) {
+  if (!l) return;
+  live = l;
+  document.querySelectorAll('[data-live]').forEach(el => {
+    const v = liveGet(el.dataset.live), k = +el.dataset.k;
+    if (document.activeElement !== el) el.value = Math.round(v * k);
+    const unit = k === 1 ? '°' : '%';
+    $(el.id + 'V').textContent = Math.round(v * k) + ' ' + unit;
+  });
+  $('rotSync').checked = l.rot_sync;
+  const table = l.rot_sync ? [0, 0.25, 1, 2] : [0, 30, 90, 270];
+  document.querySelectorAll('#rotPresets button').forEach(b => b.classList.toggle('active', table[+b.dataset.preset] === l.rot_speed[2]));
+}
+// Each slider drives its control id (in its title) directly, so a slider
+// move can't be overwritten by a slightly older state from the server.
+document.querySelectorAll('[data-live]').forEach(el => el.addEventListener('input', () => {
+  const v = el.value / +el.dataset.k;
+  if (live) { liveSet(el.dataset.live, v); showLive(live); }
+  post('/api/control', { id: el.title, value: v });
+}));
+document.querySelectorAll('#rotPresets button').forEach(b => b.addEventListener('click', () =>
+  post('/api/control', { id: 'master.rot.preset', value: +b.dataset.preset })));
+$('rotSync').addEventListener('change', () => post('/api/control', { id: 'master.rot.sync', value: $('rotSync').checked }));
+const reverse = on => post('/api/control', { id: 'master.rot.reverse', value: on });
+$('rotReverse').addEventListener('pointerdown', () => reverse(true));
+['pointerup', 'pointerleave'].forEach(ev => $('rotReverse').addEventListener(ev, () => reverse(false)));
+let reverseKey = false;
+document.addEventListener('keyup', e => { if (e.key === '<' && reverseKey) { reverseKey = false; reverse(false); } });
+
 // ---------- tempo ----------
 function showTempo(t) {
   if (!t) return;
@@ -488,7 +559,7 @@ $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm'
 // ---------- cues ----------
 // AZERTY rows, so each key sits where it looks like it should.
 const CUE_KEYS = 'azertyuiopqsdfghjklmwxcvbn'.split('');
-let presets = [], cueCategories = [], cuePage = null, activeCue = null;
+let presets = [], cueCategories = [], cuePage = null, activeCue = null, serverPage = null, serverCue = null;
 
 async function loadPresets() {
   const r = await (await fetch('/api/presets')).json();
@@ -550,7 +621,7 @@ async function loadState() {
 }
 
 // Tooltips show each control's stable id, to help with MIDI mapping.
-for (const [el, id] of [['scale', 'master.size'], ['bright', 'master.brightness'], ['rot', 'master.rotation_speed'],
+for (const [el, id] of [['scale', 'look.size'], ['bright', 'look.brightness'], ['rot', 'look.rotation_speed'],
   ['aOn', 'audio.enabled'], ['aSize', 'audio.size'], ['aRot', 'audio.rotate'], ['aFlash', 'audio.flash'],
   ['aColor', 'audio.color_on_beat']]) $(el).title = id;
 $('armBtn').title += ' · transport.arm';
