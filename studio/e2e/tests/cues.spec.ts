@@ -90,11 +90,9 @@ test('cue keys are ignored while typing in a text field', async ({ page }) => {
   await expect(page.locator('#cues .cue.active')).toHaveCount(0);
 });
 
-// T-292: the server keeps `active_cue` after the look is changed by hand
-// (or by a scene / the playlist). The page un-highlights the cue locally,
-// but a reload (or a MIDI grid's LED feedback) still shows the old cue as
-// playing.
-test.fixme('T-292: changing the look by hand clears the active cue', async ({ page }) => {
+// T-292: picking another drawing by hand stops the cue on the server too,
+// so a reload (or a MIDI grid's LED feedback) no longer shows it playing.
+test('T-292: changing the look by hand clears the active cue', async ({ page }) => {
   await page.locator('#cues .cue').first().click();
   await expect.poll(activeCue).toBe(pageCues(catalog.categories[0])[0].id);
   await page.locator('[data-kind="shape"]').click();
@@ -105,6 +103,45 @@ test.fixme('T-292: changing the look by hand clears the active cue', async ({ pa
   await page.reload();
   await openUi(page, studio);
   await expect(page.locator('#cues .cue.active')).toHaveCount(0);
+});
+
+test('T-292: a size edit or a master modifier keeps the cue playing', async ({ page }) => {
+  const cue = pageCues(catalog.categories[0])[2];
+  await page.locator(`#cues .cue[data-id="${cue.id}"]`).click();
+  await expect.poll(activeCue).toBe(cue.id);
+  await expect(page.locator('#gen')).toHaveValue((await studio.state()).settings.content.generator);
+  await page.locator('#scale').fill('40');
+  await expect.poll(async () => (await studio.state()).settings.scale).toBeCloseTo(0.4, 3);
+  expect(await studio.post('/api/control', { id: 'master.size', value: 1.2 })).toBe(200);
+  expect(await activeCue()).toBe(cue.id);
+  await expect(page.locator(`#cues .cue[data-id="${cue.id}"]`)).toHaveClass(/active/);
+});
+
+test('T-292: a scene stops the cue', async ({ page }) => {
+  await page.locator('#sceneName').fill('Fond');
+  await page.locator('#sceneSave').click();
+  await expect(page.locator('#sceneList .scene', { hasText: 'Fond' })).toBeVisible();
+  await page.locator('#cues .cue').first().click();
+  await expect.poll(activeCue).toBe(pageCues(catalog.categories[0])[0].id);
+  await page.locator('#sceneList .scene', { hasText: 'Fond' }).locator('button').first().click();
+  await expect.poll(activeCue).toBeNull();
+  await expect(page.locator('#cues .cue.active')).toHaveCount(0);
+  await studio.post('/api/scenes/delete', { name: 'Fond' });
+});
+
+test('T-293: a cue played through the API updates the Effet panel', async ({ page }) => {
+  const category = catalog.categories[0];
+  expect(await studio.post('/api/control', { id: 'grid.1.1.3' })).toBe(200);
+  await expect.poll(activeCue).toBe(pageCues(category)[2].id);
+  const st = await studio.state();
+  await expect(page.locator('[data-kind="generator"]')).toHaveClass(/active/);
+  await expect(page.locator('#gen')).toHaveValue(st.settings.content.generator);
+  await expect(page.locator('#gCount')).toHaveValue(String(st.settings.content.params.count));
+  // And the next slider move edits that cue, not the look from before.
+  await page.locator('#bright').fill('70');
+  await expect.poll(async () => (await studio.state()).settings.brightness).toBeCloseTo(0.7, 3);
+  expect((await studio.state()).settings.content).toEqual(st.settings.content);
+  expect(await activeCue()).toBe(pageCues(category)[2].id);
 });
 
 test('a page changed from outside (MIDI/API) shows up in the UI', async ({ page }) => {

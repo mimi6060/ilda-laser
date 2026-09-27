@@ -360,6 +360,9 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
             }
         }
     }
+    if desc.id.starts_with("look.") || desc.id.starts_with("audio.") {
+        s.settings_rev += 1;
+    }
     Ok(())
 }
 
@@ -514,6 +517,7 @@ pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) 
 /// play.
 fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
     let was_empty = s.deck.active.is_empty();
+    let before = s.settings.clone();
     if let Some(top) = s.deck.active.last_mut() {
         top.settings = s.settings.clone();
     }
@@ -535,15 +539,37 @@ fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
         }
     }
     s.active_cue = s.deck.primary().map(|a| a.cue.clone());
+    if s.settings != before {
+        s.settings_rev += 1;
+    }
 }
 
-/// Show a look by itself (a scene, the playlist): every cue stops.
+/// Show a look by itself (a scene, the playlist, new content picked by
+/// hand): every cue stops.
 pub fn show_look(s: &mut Shared, settings: Settings) {
     s.deck.stop_all();
     s.deck.parked = None;
     s.settings = settings;
+    s.settings_rev += 1;
     s.look_on = true;
     s.active_cue = None;
+}
+
+/// A whole look sent by the look panel (`POST /api/settings`). Picking
+/// something else to draw (another shape, content kind or generator) is
+/// the operator taking over by hand: the cues stop and the look shows by
+/// itself, like a scene. Other edits (size, colour, text, generator
+/// parameters…) edit the newest cue while cues play (T-155), or the
+/// manual look otherwise. Either way the playlist stops.
+pub fn set_look(s: &mut Shared, settings: Settings) {
+    if !s.deck.active.is_empty() && !settings.content.same_drawing(&s.settings.content) {
+        show_look(s, settings);
+    } else {
+        s.settings = settings;
+        s.settings_rev += 1;
+        s.look_on |= s.deck.active.is_empty();
+    }
+    s.playlist = None;
 }
 
 /// Markdown table of every control id, for docs/controls.md.
@@ -568,6 +594,7 @@ pub fn markdown(reg: &ControlRegistry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Content;
     use crate::presets::catalog;
     use crate::test_support::shared;
     use std::collections::HashSet;
@@ -806,6 +833,76 @@ mod tests {
         assert!(!s.look_on);
         apply(&mut s, "cue.stop_all", ControlInput::Value(1.0), true).unwrap();
         assert!(cues::looks(&s.deck, &s.settings, s.look_on).is_empty());
+    }
+
+    #[test]
+    fn a_new_drawing_by_hand_stops_the_cues() {
+        let mut s = shared();
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        assert!(s.active_cue.is_some());
+        let square = Settings { content: Content::Shape { shape: "square".into() }, ..s.settings.clone() };
+        set_look(&mut s, square.clone());
+        assert_eq!(s.active_cue, None);
+        assert!(s.deck.active.is_empty() && s.look_on);
+        assert_eq!(cues::looks(&s.deck, &s.settings, s.look_on), vec![(0, square)]);
+        let desc = s.controls.get("grid.1.1.1").cloned().unwrap();
+        assert_eq!(current(&s, &desc), Some(serde_json::json!(false)), "its LED goes off");
+    }
+
+    #[test]
+    fn editing_the_cue_by_hand_keeps_it_playing() {
+        let mut s = shared();
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        let cue = s.active_cue.clone();
+        let mut edited = s.settings.clone();
+        edited.scale = 0.3;
+        edited.color = [255, 0, 0];
+        if let Content::Generator { params, .. } = &mut edited.content {
+            params.count += 1;
+        }
+        set_look(&mut s, edited.clone());
+        assert_eq!(s.active_cue, cue);
+        assert_eq!(s.settings, edited);
+        assert_eq!(s.deck.active.len(), 1);
+    }
+
+    #[test]
+    fn scenes_clear_the_cue_but_master_controls_and_tempo_do_not() {
+        let mut s = shared();
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        let cue = s.active_cue.clone();
+        for id in ["master.size", "master.brightness", "tempo.double"] {
+            apply(&mut s, id, ControlInput::Norm(0.8), true).unwrap();
+            assert_eq!(s.active_cue, cue, "{id} keeps the cue");
+        }
+        show_look(&mut s, Settings::default());
+        assert_eq!(s.active_cue, None);
+    }
+
+    #[test]
+    fn the_look_revision_follows_every_change_of_the_look() {
+        let mut s = shared();
+        let mut last = s.settings_rev;
+        let mut changed = |s: &Shared| {
+            let bumped = s.settings_rev > last;
+            last = s.settings_rev;
+            bumped
+        };
+        apply(&mut s, "look.size", ControlInput::Value(0.6), true).unwrap();
+        assert!(changed(&s), "look control");
+        apply(&mut s, "audio.flash", ControlInput::Value(0.6), true).unwrap();
+        assert!(changed(&s), "music control");
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        assert!(changed(&s), "cue started");
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(0.0), true).unwrap();
+        assert!(!changed(&s), "an ignored release");
+        apply(&mut s, "master.size", ControlInput::Value(1.5), true).unwrap();
+        assert!(!changed(&s), "master modifiers are not the look");
+        let same = s.settings.clone();
+        set_look(&mut s, same);
+        assert!(changed(&s), "look panel");
+        show_look(&mut s, Settings::default());
+        assert!(changed(&s), "scene");
     }
 
     #[test]

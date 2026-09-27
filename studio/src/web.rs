@@ -105,12 +105,16 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         (Method::Post, "/api/settings") => match body::<Settings>(request) {
             Ok(settings) => {
                 let mut s = shared.lock().unwrap();
-                // With cues playing this edits the newest one; otherwise it
-                // is the manual look, shown again.
-                s.settings = settings;
-                s.look_on |= s.deck.active.is_empty();
-                s.playlist = None; // a manual change takes over from the playlist
-                ok()
+                // `?rev=N`: the look the page edited. If it has been replaced
+                // since (playlist, cue, MIDI), the page's copy is stale and
+                // must not be sent back over what plays now.
+                if let Some(rev) = query_u64(request.url(), "rev") {
+                    if rev != s.settings_rev {
+                        return with_type(Response::from_string(json!({ "rev": s.settings_rev }).to_string()).with_status_code(409), "application/json");
+                    }
+                }
+                controls::set_look(&mut s, settings);
+                json_response(json!({ "rev": s.settings_rev }))
             }
             Err(e) => e,
         },
@@ -420,6 +424,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     let arm = s.gate.status(&s.estop);
     json_response(json!({
         "settings": s.settings,
+        "settings_rev": s.settings_rev,
         "calibration": s.calibration,
         "armed": arm.armed,
         "estop": arm.estop.is_some(),
@@ -455,6 +460,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "cue_page": s.cue_page,
         "active_cue": s.active_cue,
+        "settings_rev": s.settings_rev,
         "cues": {
             "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held })).collect::<Vec<_>>(),
             "shown": s.deck.visible().iter().map(|a| a.cue.as_str()).collect::<Vec<_>>(),
@@ -495,6 +501,11 @@ fn save_calibration(path: &Path, cal: &Calibration) {
         }
         Err(e) => log::warn!("failed to serialize calibration: {e}"),
     }
+}
+
+/// `key`'s value in the URL's query string, as a number.
+fn query_u64(url: &str, key: &str) -> Option<u64> {
+    url.split_once('?')?.1.split('&').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
 }
 
 fn ok() -> HttpResponse {
@@ -682,5 +693,13 @@ mod tests {
         assert!(is_estop(&Method::Post, "/api/estop?source=keyboard"));
         assert!(!is_estop(&Method::Get, "/api/estop"));
         assert!(!is_estop(&Method::Post, "/api/estop/reset"));
+    }
+
+    #[test]
+    fn query_numbers() {
+        assert_eq!(query_u64("/api/settings?rev=12", "rev"), Some(12));
+        assert_eq!(query_u64("/api/settings?x=1&rev=3", "rev"), Some(3));
+        assert_eq!(query_u64("/api/settings?revision=3", "rev"), None);
+        assert_eq!(query_u64("/api/settings", "rev"), None);
     }
 }
