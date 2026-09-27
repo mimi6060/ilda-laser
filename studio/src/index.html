@@ -90,6 +90,12 @@
   .beats span { width: 12px; height: 12px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--line); }
   .beats span.on { background: var(--accent); border-color: var(--accent); }
   .beats span.one.on { background: var(--warn); border-color: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  #midiStatus { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #midiStatus.on { color: var(--accent); }
+  .mdev { border-top: 1px solid var(--line); padding: 8px 0; }
+  .mdev .n { font-weight: 600; }
+  .mdev.off .n { color: var(--muted); }
+  .merr { color: var(--warn); font-size: 12px; margin-top: 4px; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -107,6 +113,7 @@
     <button data-ctl="tempo.nudge_down" title="tempo.nudge_down">◀</button>
     <button data-ctl="tempo.nudge_up" title="tempo.nudge_up">▶</button>
   </div>
+  <div id="midiStatus" title="Contrôleurs MIDI (section Contrôleur)">MIDI : …</div>
   <div id="output">…</div>
   <button id="armBtn" title="Espace : allumer/éteindre · Échap : blackout">LASER OFF</button>
 </header>
@@ -302,6 +309,14 @@
         <label>Échelle Y <span class="v" id="cSyV"></span></label><input type="range" id="cSy" min="10" max="200">
         <label>Rotation <span class="v" id="cRotV"></span></label><input type="range" id="cRot" min="-180" max="180">
         <div class="hint">S'applique à tout ce qui sort, et reste enregistrée.</div>
+      </details>
+    </section>
+
+    <section>
+      <details id="midiPanel">
+        <summary>Contrôleur</summary>
+        <div id="midiDevices"></div>
+        <div class="hint" id="midiHint"></div>
       </details>
     </section>
   </div>
@@ -878,7 +893,47 @@ for (const [el, id] of [['scale', 'look.size'], ['bright', 'look.brightness'], [
   ['aColor', 'audio.color_on_beat']]) $(el).title = id;
 $('armBtn').title += ' · transport.arm';
 
+// ---------- MIDI controllers ----------
+const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+let midiProfiles = [], midiKey = '';
+async function midiLoop() {
+  try {
+    const m = await (await fetch('/api/midi')).json();
+    if (!midiProfiles.length) midiProfiles = await (await fetch('/api/midi/profiles')).json();
+    const live = m.devices.filter(d => d.connected);
+    const st = $('midiStatus');
+    st.textContent = !m.enabled ? 'MIDI : désactivé' : live.length
+      ? 'MIDI : ' + live.map(d => d.model === 'Unknown' ? d.name : d.model_label).join(', ') + ' connecté' + (live.length > 1 ? 's' : '')
+      : 'MIDI : aucun contrôleur';
+    st.classList.toggle('on', live.length > 0);
+    // Only rebuild the list when something changed, so an open menu isn't reset.
+    const key = JSON.stringify([m.enabled, m.devices.map(d => [d.name, d.connected, d.enabled, d.model, d.profile, d.profile_error]), m.errors]);
+    if (key !== midiKey) { midiKey = key; renderMidi(m); }
+  } catch (e) { /* studio restarting */ }
+  setTimeout(midiLoop, 2000);
+}
+function renderMidi(m) {
+  const opts = midiProfiles.map(p => `<option value="${esc(p.slug)}">${esc(p.name || p.slug)}${p.builtin ? '' : ' (perso)'}</option>`).join('');
+  $('midiDevices').innerHTML = m.devices.map((d, i) => `
+    <div class="mdev ${d.connected ? '' : 'off'}">
+      <div class="n">${esc(d.name)} <span class="hint">${d.connected ? 'connecté' : 'déconnecté'}</span></div>
+      <div class="hint">Modèle détecté : ${esc(d.model_label)}</div>
+      <label class="check"><input type="checkbox" data-mdev="${i}" ${d.enabled ? 'checked' : ''}> Activé</label>
+      <label>Profil</label>
+      <div class="row" style="margin-top:0"><select data-mprof="${i}">${opts}</select>
+        <button data-mreset="${i}" style="flex:0;white-space:nowrap">Réinitialiser le profil</button></div>
+      ${d.profile_error ? `<div class="merr">${esc(d.profile_error)}</div>` : ''}
+    </div>`).join('') || '<div class="hint">Aucun appareil MIDI.</div>';
+  m.devices.forEach((d, i) => { const sel = document.querySelector(`[data-mprof="${i}"]`); if (sel) sel.value = d.profile; });
+  $('midiHint').innerHTML = (m.enabled ? '' : 'Lancé avec --no-midi : aucun port ouvert. ') + m.errors.map(e => `<div class="merr">${esc(e)}</div>`).join('');
+  const portOf = el => m.devices[+Object.values(el.dataset)[0]].name;
+  document.querySelectorAll('[data-mdev]').forEach(el => el.onchange = () => post('/api/midi/device', { port: portOf(el), enabled: el.checked }));
+  document.querySelectorAll('[data-mprof]').forEach(el => el.onchange = () => post('/api/midi/profile', { port: portOf(el), profile: el.value }));
+  document.querySelectorAll('[data-mreset]').forEach(el => el.onclick = () => post('/api/midi/profile', { port: portOf(el), profile: null }));
+}
+
 loadState().then(loadPresets).then(loadPalettes).then(previewLoop);
+midiLoop();
 </script>
 </body>
 </html>

@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (126)
+## À faire (124)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -29,8 +29,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-151](T-151-tempo.md) | Modulateurs LFO synchronisés au tempo sur n'importe quel contrôle | tempo | P1 | [T-150, T-145] |  |
 | [T-156](T-156-cues.md) | Quatre calques avec gradateur, muet/solo et budget de points | cues | P1 | [T-155, T-140] |  |
 | [T-157](T-157-cues.md) | Cues évolutifs : un cue = une mini-timeline (calques internes, courbes sur modificateurs, LFO) | cues | P1 | [T-111, T-151, T-140] |  |
-| [T-200](T-200-midi.md) | Entrée/sortie MIDI native (midir, CoreMIDI) | midi | P1 | [] |  |
-| [T-201](T-201-midi.md) | Détection des contrôleurs et profils par appareil (APC40 / APC40 mkII) | midi | P1 | [T-200] |  |
 | [T-202](T-202-midi.md) | Moteur de correspondances MIDI → contrôles (boutons, faders, encodeurs, Shift) | midi | P1 | [T-200, T-201, T-145] |  |
 | [T-203](T-203-midi.md) | Apprentissage MIDI (clic droit → « Apprendre MIDI ») | midi | P1 | [T-202, T-145, T-209] |  |
 | [T-204](T-204-midi.md) | Profil APC40 par défaut (disposition Laser Studio) pour APC40 et APC40 mkII | midi | P1 | [T-201, T-202, T-140, T-145, T-150, T-155, T-160, T-208, T-209] |  |
@@ -140,7 +138,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (6)
+## Fait (8)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -150,3 +148,5 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-145](T-145-live.md) | Identifiants de contrôle stables (registre des contrôles) | live | P1 | [] | feat/controls |
 | [T-150](T-150-tempo.md) | Moteur de tempo : BPM, tap, resync, phase temps/mesure | tempo | P1 | [] | feat/tempo |
 | [T-155](T-155-cues.md) | Modes de déclenchement des cues, groupes exclusifs, limiteur | cues | P1 | [T-145] | feat/cue-modes |
+| [T-200](T-200-midi.md) | Entrée/sortie MIDI native (midir, CoreMIDI) | midi | P1 | [] | feat/midi-core |
+| [T-201](T-201-midi.md) | Détection des contrôleurs et profils par appareil (APC40 / APC40 mkII) | midi | P1 | [T-200] | feat/midi-core |

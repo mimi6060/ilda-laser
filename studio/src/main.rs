@@ -14,6 +14,7 @@ mod engine;
 mod font;
 mod generators;
 mod live;
+mod midi;
 mod output;
 mod patterns;
 mod presets;
@@ -56,6 +57,10 @@ struct Cli {
     /// Print every control id (for MIDI/OSC mapping) as Markdown and exit.
     #[arg(long)]
     list_controls: bool,
+    /// Don't open any MIDI port (tests, e2e, or a second instance that
+    /// must not grab the controller).
+    #[arg(long)]
+    no_midi: bool,
 }
 
 /// Audio features older than this are treated as silence (the browser tab
@@ -96,6 +101,8 @@ pub struct Shared {
     pub live_dirty: bool,
     /// User colour palettes (palettes.json).
     pub palettes: live::PaletteStore,
+    /// MIDI controllers (midi/mod.rs); not part of any saved look.
+    pub midi: midi::MidiState,
 }
 
 impl Shared {
@@ -159,6 +166,7 @@ fn main() -> Result<()> {
         live: load_json(&live_path),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
+        midi: midi::MidiState::new(!cli.no_midi, midi::profile::ProfileStore::load(cli.data_dir.join("midi"))),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -174,12 +182,22 @@ fn main() -> Result<()> {
         move || run_engine(shared, output, running, live_path)
     });
 
+    let midi_thread = if cli.no_midi {
+        println!("--no-midi: MIDI disabled.");
+        None
+    } else {
+        midi::worker::spawn(Arc::clone(&shared), Arc::clone(&running))
+    };
+
     let addr = format!("127.0.0.1:{}", cli.port);
     println!("Studio: open http://{addr}/ in your browser - Ctrl+C to quit");
     web::run(&addr, shared, calibration_path, Arc::clone(&running))?;
 
     running.store(false, Ordering::SeqCst);
     engine.join().ok();
+    if let Some(midi_thread) = midi_thread {
+        midi_thread.join().ok(); // lets it switch the APC LEDs off
+    }
     Ok(())
 }
 
