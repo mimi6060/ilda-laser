@@ -2,13 +2,18 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (95)
+## À faire (128)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] |  |
 | [T-208](T-208-safety.md) | Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur) | safety | P0 | [T-202] |  |
 | [T-245](T-245-safety.md) | Sécurité de la réactivité audio (limiteur, péremption, silence, pas d'armement) | safety | P0 | [T-237, T-101] |  |
+| [T-250](T-250-safety.md) | Verrous d'armement (interlocks) et raisons de désarmement | safety | P0 | [] |  |
+| [T-251](T-251-safety.md) | Arrêt d'urgence verrouillé (clavier, bouton, API, MIDI) | safety | P0 | [T-250] |  |
+| [T-252](T-252-safety.md) | Présence opérateur — battement de l'interface et mode maintien | safety | P0 | [T-250] |  |
+| [T-254](T-254-safety.md) | Plafonds de puissance par sortie et fiche projecteur | safety | P0 | [T-250] |  |
+| [T-271](T-271-safety.md) | Barre du haut fixe : noir, armement, maître, tempo, état de sortie | safety | P0 | [T-270] |  |
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
 | [T-002](T-002-output.md) | Optimiseur de points (tracé laser pro) | output | P1 | [] |  |
 | [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] |  |
@@ -20,7 +25,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-106](T-106-cues.md) | Nappes : liquid sky, lame, rideaux, cascade, scanner, lamelles, aurore, grille | cues | P1 | [T-100] |  |
 | [T-110](T-110-cues.md) | Page de cues « Festival » | cues | P1 | [T-102, T-103, T-104, T-105, T-106, T-107, T-130] |  |
 | [T-111](T-111-cues.md) | Moteur de cues évolutifs (images clés en temps) | cues | P1 | [T-100] |  |
-| [T-140](T-140-live.md) | Étage de modificateurs en direct maître (géométrie, luminosité, vitesse) | live | P1 | [T-145] |  |
 | [T-141](T-141-live.md) | Couleur en direct : fixe, teinte, palette, arc-en-ciel, chenillard | live | P1 | [T-140, T-150] |  |
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
 | [T-151](T-151-tempo.md) | Modulateurs LFO synchronisés au tempo sur n'importe quel contrôle | tempo | P1 | [T-150, T-145] |  |
@@ -43,6 +47,21 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-237](T-237-live.md) | AudioFeatures v2 : instantané complet côté moteur et dans /api/state | live | P1 | [T-231] |  |
 | [T-238](T-238-live.md) | Conditionnement des signaux audio : seuil, courbe, attaque/relâche, enveloppes en temps musicaux | live | P1 | [T-237, T-150] |  |
 | [T-244](T-244-qa.md) | Banc d'essai de l'analyse audio : signaux synthétiques, corpus annoté, métriques, latence | qa | P1 | [T-231] |  |
+| [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] |  |
+| [T-255](T-255-safety.md) | Mode balayage public verrouillé par défaut | safety | P1 | [T-003, T-250, T-252, T-254, T-256, T-258] |  |
+| [T-256](T-256-safety.md) | Garde anti-point fixe (taille minimum, vitesse, temps de pose) | safety | P1 | [T-250, T-003] |  |
+| [T-258](T-258-safety.md) | Liste de contrôle avant show | safety | P1 | [T-250, T-259] |  |
+| [T-259](T-259-safety.md) | Journal des événements de sécurité | safety | P1 | [] |  |
+| [T-264](T-264-qa.md) | Suite de tests des invariants de sécurité | qa | P1 | [T-250, T-251, T-252, T-253, T-254, T-256] |  |
+| [T-270](T-270-ui.md) | Nouvelle disposition de l'écran (régions, onglets de panneau) | ui | P1 | [] |  |
+| [T-272](T-272-ui.md) | Grille de cues à taille fixe (8×5 par défaut), pages sur touches F | ui | P1 | [T-270] |  |
+| [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] |  |
+| [T-276](T-276-ui.md) | Rendu des faisceaux : énergie conservée, nappes, brume, halo | ui | P1 | [T-275] |  |
+| [T-277](T-277-output.md) | Lieu et projecteurs multiples (modèle `Venue`, `/api/frames`) | output | P1 | [T-275] |  |
+| [T-279](T-279-safety.md) | Surcouches de sécurité dans le visualiseur (zone public, horizon) | safety | P1 | [T-277, T-003] |  |
+| [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
+| [T-286](T-286-infra.md) | Fichier projet `.lsproj` : ouvrir, enregistrer, récents | infra | P1 | [] |  |
+| [T-287](T-287-infra.md) | Sauvegarde automatique et récupération après plantage | infra | P1 | [T-286] |  |
 | [T-011](T-011-ilda.md) | Médiathèque ILDA : import et export depuis l'interface | ilda | P2 | [T-001] |  |
 | [T-012](T-012-output.md) | Zones de projection et correction géométrique | output | P2 | [T-003] |  |
 | [T-104](T-104-cues.md) | Croisements, faisceau chaud et convergences | cues | P2 | [T-102] |  |
@@ -70,7 +89,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-142](T-142-live.md) | Strobe, points visibles, pointillés, miroir/prisme, figer, noir momentané | live | P2 | [T-140, T-150] |  |
 | [T-144](T-144-live.md) | Modificateurs au niveau cue et calque, sauvegarde dans le cue, lissage | live | P2 | [T-140, T-156] |  |
 | [T-146](T-146-live.md) | Grille FX : effets par-dessus les cues | live | P2 | [T-140, T-151] |  |
-| [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 | [T-153](T-153-live.md) | Routage des bandes audio vers n'importe quel contrôle | live | P2 | [T-145, T-151] |  |
 | [T-158](T-158-cues.md) | Transitions entre cues : coupe, fondu, fondu au noir, morph | cues | P2 | [T-155, T-150] |  |
 | [T-159](T-159-cues.md) | Lancement quantifié et mode beat (changement automatique au temps) | cues | P2 | [T-150, T-155] |  |
@@ -90,6 +108,18 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-242](T-242-ui.md) | Permission micro macOS et diagnostic de l'entrée audio | ui | P2 | [T-230] |  |
 | [T-243](T-243-ui.md) | Panneau « Musique » v2 : bandes, spectre, onsets, tempo détecté, section | ui | P2 | [T-237, T-233, T-236] |  |
 | [T-246](T-246-tempo.md) | Compensation de latence : décalage de sortie réglable et temps prédits | tempo | P2 | [T-234] |  |
+| [T-257](T-257-safety.md) | Estimateur d'exposition (EMP) et distance de danger (DNRO) | safety | P2 | [T-254] |  |
+| [T-260](T-260-safety.md) | Profils de sécurité par lieu | safety | P2 | [T-003, T-254, T-101] |  |
+| [T-262](T-262-safety.md) | Mode extérieur — angles déclarés, « Ciel coupé », limite 45° | safety | P2 | [T-003, T-250, T-254, T-259] |  |
+| [T-273](T-273-ui.md) | Vignettes animées des cues | ui | P2 | [T-272] |  |
+| [T-274](T-274-cues.md) | Aperçu avant diffusion (préparer un cue sans l'envoyer) | cues | P2 | [T-270] |  |
+| [T-278](T-278-ui.md) | Points de vue caméra (public, premier rang, scène, dessus, côté) | ui | P2 | [T-277] |  |
+| [T-281](T-281-ui.md) | Fenêtres supplémentaires et multi-écran (`?vue=`) | ui | P2 | [T-270, T-275] |  |
+| [T-282](T-282-ui.md) | Mode nuit et mode tactile | ui | P2 | [T-270] |  |
+| [T-284](T-284-ui.md) | Table unique des raccourcis clavier et aide « ? » | ui | P2 | [T-270] |  |
+| [T-285](T-285-ui.md) | Annuler / rétablir et historique des modifications | ui | P2 | [T-286] |  |
+| [T-288](T-288-infra.md) | Versions du format (migrations) et versions nommées | infra | P2 | [T-286] |  |
+| [T-289](T-289-infra.md) | Import partiel, profil de site et paquet d'export `.lspack` | infra | P2 | [T-286, T-288] |  |
 | [T-013](T-013-midi.md) | Entrées OSC et Art-Net/DMX | midi | P3 | [] |  |
 | [T-109](T-109-output.md) | Cibles miroir : faisceaux dirigés vers des points calibrés | output | P3 | [T-003, T-100] |  |
 | [T-148](T-148-cues.md) | Pilote automatique (Virtual LJ) calé sur le tempo | cues | P3 | [T-159] |  |
@@ -101,17 +131,22 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-170](T-170-output.md) | Groupes de projecteurs et chenillard entre zones | output | P3 | [T-012, T-150] |  |
 | [T-207](T-207-midi.md) | Horloge MIDI (entrée pour caler le BPM, sortie vers l'APC40 mkII) | tempo | P3 | [T-200, T-150] |  |
 | [T-241](T-241-infra.md) | Capturer le son du Mac lui-même (BlackHole documenté, puis capture système optionnelle) | infra | P3 | [T-230] |  |
+| [T-261](T-261-safety.md) | Verrouillage des réglages de sécurité par code | safety | P3 | [T-260, T-259] |  |
+| [T-263](T-263-safety.md) | Fiche sécurité du show exportable | safety | P3 | [T-254, T-258, T-262] |  |
+| [T-280](T-280-ui.md) | Simulation de l'inertie des galvos et divergence | ui | P3 | [T-276, T-171] |  |
 
-## Bloqué (1)
+## Bloqué (2)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
+| [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (3)
+## Fait (4)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-005](T-005-cues.md) | Bibliothèque de 202 cues procéduraux | cues | P1 | [] | feat/presets |
+| [T-140](T-140-live.md) | Étage de modificateurs en direct maître (géométrie, luminosité, vitesse) | live | P1 | [T-145] | feat/live |
 | [T-145](T-145-live.md) | Identifiants de contrôle stables (registre des contrôles) | live | P1 | [] | feat/controls |
 | [T-150](T-150-tempo.md) | Moteur de tempo : BPM, tap, resync, phase temps/mesure | tempo | P1 | [] | feat/tempo |

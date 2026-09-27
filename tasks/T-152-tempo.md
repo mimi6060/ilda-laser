@@ -1,7 +1,7 @@
 ---
 id: T-152
 title: Détection automatique du BPM depuis l'audio (avec confiance)
-status: todo
+status: blocked
 area: tempo
 priority: P2
 depends_on: [T-150]
@@ -42,3 +42,4 @@ Ne pas embarquer de code sous licence incompatible ; s'inspirer des publications
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — architecte : bloquée — l'analyse audio part côté Rust (T-230 capture, T-233 BPM, T-234 intégration au tempo) au lieu du navigateur. À refermer ou re-cadrer quand T-234 est faite.
