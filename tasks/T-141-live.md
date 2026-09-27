@@ -1,12 +1,12 @@
 ---
 id: T-141
 title: Couleur en direct : fixe, teinte, palette, arc-en-ciel, chenillard
-status: todo
+status: done
 area: live
 priority: P1
 depends_on: [T-140, T-150]
-owner: ""
-branch: ""
+owner: "agent-dev"
+branch: "feat/live-color"
 source: docs/research/pro-live-operation.md §1.3, §1.4, §6 (A)
 ---
 
@@ -44,11 +44,11 @@ pub struct Palette { pub name: String, pub colors: Vec<[u8; 3]> } // 1..=16
 Dans « Direct » (T-143), bloc *Couleur* : boutons *Normal, Fixe, Teinte, Palette, Arc-en-ciel, Chenillard* ; sélecteur de couleur ; bande de teinte cliquable ; vignettes de palettes ; *Pas* (1/8, 1/4, 1/2, 1, 2, 4 temps) ; *Étalement*. Clic droit = *Normal*.
 
 ## Critères d'acceptation
-- [ ] *Normal* ne change aucun point
-- [ ] *Fixe* rouge : tous les points allumés sont rouges avec leur intensité d'origine ; les points éteints restent à 0
-- [ ] *Chenillard* au pas de 1 temps : la couleur change exactement aux frontières de temps de `TempoClock` (±1 frame)
-- [ ] *Palette* plus proche : un point vert pur devient la couleur de palette la plus proche (distance RGB)
-- [ ] Les palettes utilisateur survivent au redémarrage
+- [x] *Normal* ne change aucun point
+- [x] *Fixe* rouge : tous les points allumés sont rouges avec leur intensité d'origine ; les points éteints restent à 0
+- [x] *Chenillard* au pas de 1 temps : la couleur change exactement aux frontières de temps de `TempoClock` (±1 frame)
+- [x] *Palette* plus proche : un point vert pur devient la couleur de palette la plus proche (distance RGB)
+- [x] Les palettes utilisateur survivent au redémarrage
 
 ## Tests
 Unitaires : chaque mode sur un frame de test, frontières de temps du chenillard. e2e : bouton *Fixe* → couleurs de `/api/frame`.
@@ -58,3 +58,5 @@ Réutiliser les palettes nommées de T-130 (agent festival) si elles existent : 
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — agent de dev (feat/live-color) : `ColorOverride` + `ColorParams` (mémoire des réglages par mode) dans `LiveModifiers`, `Rate` Hz/temps lu sur `TempoClock` à chaque image, 8 palettes intégrées + `PaletteStore` (`palettes.json`, 8 palettes utilisateur max, 1..16 couleurs), `/api/palettes`, contrôles `master.color.*` (mode, hue, palette, palette_mode, offset, rate, rate_hz, spread, chase_spread, red/green/blue), bloc *Couleur* du panneau « Direct » (clic droit = Normal). 87 tests unitaires (+16), clippy propre, vérifié en aperçu (API + Chrome). Pas de suite e2e dans l'arbre : le test e2e *Fixe* a été vérifié à la main via l'API. Note : `docs/prs/live-color.md`.
+- 2026-09-27 — architecte (review) : APPROUVÉ et fusionné dans develop.
