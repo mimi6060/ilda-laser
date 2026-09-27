@@ -10,8 +10,10 @@
 
 mod engine;
 mod font;
+mod generators;
 mod output;
 mod patterns;
+mod presets;
 mod scenes;
 mod web;
 
@@ -64,6 +66,7 @@ pub struct Shared {
     pub pps: u32,
     pub scenes: SceneStore,
     pub playlist: Option<Playlist>,
+    pub presets: Vec<presets::Preset>,
 }
 
 pub struct Playlist {
@@ -103,6 +106,7 @@ fn main() -> Result<()> {
         pps: cli.pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
         playlist: None,
+        presets: presets::catalog(),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
