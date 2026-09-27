@@ -49,7 +49,9 @@ Puis les sections, toujours dans cet ordre :
 - Plages d'identifiants, pour éviter les doublons entre agents :
   T-001–T-099 feuille de route de base · T-100–T-139 looks festival et
   cues évolutifs · T-140–T-199 modificateurs en direct, calques, timeline,
-  tempo · T-200–T-229 MIDI / APC40 · T-230+ nouvelles tâches (QA, bugs).
+  tempo · T-200–T-229 MIDI / APC40 · T-230–T-249 analyse audio ·
+  T-250–T-269 sécurité et réglementation · T-270–T-289 visualiseur et
+  ergonomie · T-290+ nouvelles tâches (QA, bugs).
 - Les règles de `CLAUDE.md` (sécurité laser, propriété intellectuelle)
   s'appliquent à chaque tâche.
 
