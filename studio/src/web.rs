@@ -246,6 +246,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "shapes": SHAPE_NAMES,
         "generators": GENERATOR_NAMES,
         "scenes": s.scenes.list(),
+        "tempo": s.tempo.state(s.now_s()),
         "playlist": s.playlist.as_ref().map(|p| p.index),
     }))
 }
@@ -265,6 +266,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "cue_page": s.cue_page,
         "active_cue": s.active_cue,
+        "tempo": s.tempo.state(s.now_s()),
     }))
 }
 

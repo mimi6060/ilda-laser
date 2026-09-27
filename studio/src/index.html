@@ -60,12 +60,30 @@
   .cue .key { position: absolute; top: 4px; right: 6px; font-size: 10px; color: var(--muted); }
   .cue.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .cue.active .key { color: var(--accent-ink); }
+  .tempo { display: flex; align-items: center; gap: 6px; }
+  .tempo input { width: 84px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; padding: 6px; }
+  .tempo button { padding: 6px 9px; font-size: 12px; }
+  .beats { display: flex; gap: 4px; margin: 0 4px; }
+  .beats span { width: 12px; height: 12px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--line); }
+  .beats span.on { background: var(--accent); border-color: var(--accent); }
+  .beats span.one.on { background: var(--warn); border-color: var(--warn); box-shadow: 0 0 8px var(--warn); }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Laser Studio</h1>
+  <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
+    <input type="number" id="bpm" min="40" max="250" step="0.1" value="120" title="tempo.bpm">
+    <span class="hint" style="margin:0">BPM</span>
+    <div class="beats" id="beats"><span class="one"></span><span></span><span></span><span></span></div>
+    <button data-ctl="tempo.tap" title="tempo.tap (Entrée)">Tap</button>
+    <button data-ctl="tempo.resync" title="tempo.resync (⌫)">Sync 1</button>
+    <button data-ctl="tempo.half" title="tempo.half">÷2</button>
+    <button data-ctl="tempo.double" title="tempo.double">×2</button>
+    <button data-ctl="tempo.nudge_down" title="tempo.nudge_down">◀</button>
+    <button data-ctl="tempo.nudge_up" title="tempo.nudge_up">▶</button>
+  </div>
   <div id="output">…</div>
   <button id="armBtn" title="Espace : allumer/éteindre · Échap : blackout">LASER OFF</button>
 </header>
@@ -292,6 +310,9 @@ function showArmed() {
 $('armBtn').addEventListener('click', () => setArmed(!armed));
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { setArmed(false); return; }
+  const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+  if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
+  if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
   if (e.code === 'Space' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
     e.preventDefault(); setArmed(!armed); return;
   }
@@ -335,6 +356,7 @@ async function previewLoop() {
     $('stFps').textContent = n ? fps.toFixed(1) : '–';
     $('stFps').classList.toggle('bad', n && fps < 15);
     highlightPlaylist(f.playlist);
+    showTempo(f.tempo);
     // Follow page and cue changes made elsewhere (MIDI controller, API).
     const page = cueCategories[f.cue_page];
     if (page && (page !== cuePage || f.active_cue !== activeCue)) { cuePage = page; activeCue = f.active_cue; renderCues(); }
@@ -452,6 +474,16 @@ Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
   showCalibration();
   clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
 }));
+
+// ---------- tempo ----------
+function showTempo(t) {
+  if (!t) return;
+  if (document.activeElement !== $('bpm')) $('bpm').value = t.bpm.toFixed(1);
+  // Light the current beat for the first half of it, so the dots visibly pulse.
+  document.querySelectorAll('#beats span').forEach((d, i) => d.classList.toggle('on', i === t.beat_in_bar && t.phase < 0.5));
+}
+document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => post('/api/control', { id: b.dataset.ctl })));
+$('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm', value: +$('bpm').value }));
 
 // ---------- cues ----------
 // AZERTY rows, so each key sits where it looks like it should.

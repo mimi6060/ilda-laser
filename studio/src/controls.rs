@@ -8,6 +8,7 @@
 
 use crate::engine::Settings;
 use crate::presets::{Preset, CATEGORIES};
+use crate::tempo;
 use crate::Shared;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ pub enum Unit {
     None,
     Percent,
     DegPerSec,
+    Bpm,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -84,6 +86,14 @@ impl ControlRegistry {
 
         add("transport.blackout".into(), "Blackout".into(), "transport", ControlKind::Trigger, true);
         add("transport.arm".into(), "Allumer le laser".into(), "transport", ControlKind::Toggle { default: false }, false);
+
+        add("tempo.tap".into(), "Tap tempo".into(), "tempo", ControlKind::Trigger, true);
+        add("tempo.resync".into(), "Recaler sur le 1".into(), "tempo", ControlKind::Trigger, true);
+        add("tempo.bpm".into(), "BPM".into(), "tempo", cont(tempo::MIN_BPM as f32, tempo::MAX_BPM as f32, 120.0, Unit::Bpm), true);
+        add("tempo.nudge_up".into(), "Avancer la phase".into(), "tempo", ControlKind::Trigger, true);
+        add("tempo.nudge_down".into(), "Retarder la phase".into(), "tempo", ControlKind::Trigger, true);
+        add("tempo.double".into(), "Tempo ×2".into(), "tempo", ControlKind::Trigger, true);
+        add("tempo.half".into(), "Tempo ÷2".into(), "tempo", ControlKind::Trigger, true);
 
         add("page.next".into(), "Page de cues suivante".into(), "page", ControlKind::Trigger, true);
         add("page.prev".into(), "Page de cues précédente".into(), "page", ControlKind::Trigger, true);
@@ -156,6 +166,25 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
         // Only reachable from the UI (external is false): arming goes
         // through the same path as the laser button.
         "transport.arm" => s.armed = truthy(input),
+        "tempo.tap" => {
+            let t = s.now_s();
+            s.tempo.tap(t);
+        }
+        "tempo.resync" => {
+            let t = s.now_s();
+            s.tempo.resync(t);
+        }
+        "tempo.bpm" => {
+            let t = s.now_s();
+            s.tempo.set_bpm_manual(value(input) as f64, t);
+        }
+        "tempo.nudge_up" => s.tempo.nudge(1.0 / 32.0),
+        "tempo.nudge_down" => s.tempo.nudge(-1.0 / 32.0),
+        "tempo.double" | "tempo.half" => {
+            let (t, factor) = (s.now_s(), if desc.id == "tempo.double" { 2.0 } else { 0.5 });
+            let bpm = s.tempo.bpm * factor;
+            s.tempo.set_bpm_manual(bpm, t);
+        }
         "page.next" => s.cue_page = (s.cue_page + 1) % CATEGORIES.len(),
         "page.prev" => s.cue_page = (s.cue_page + CATEGORIES.len() - 1) % CATEGORIES.len(),
         other => {
@@ -186,6 +215,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "audio.flash" => json!(s.settings.audio.flash),
         "audio.color_on_beat" => json!(s.settings.audio.color_on_beat),
         "transport.arm" => json!(s.armed),
+        "tempo.bpm" => json!(s.tempo.bpm),
         _ => return None,
     })
 }
@@ -311,6 +341,19 @@ mod tests {
         assert_eq!(s.cue_page, 0);
         apply(&mut s, "page.3", ControlInput::Value(1.0), true).unwrap();
         assert_eq!(s.cue_page, 2);
+    }
+
+    #[test]
+    fn tempo_controls_drive_the_clock() {
+        let mut s = shared();
+        apply(&mut s, "tempo.bpm", ControlInput::Value(128.0), true).unwrap();
+        assert_eq!(s.tempo.bpm, 128.0);
+        apply(&mut s, "tempo.half", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.tempo.bpm, 64.0);
+        apply(&mut s, "tempo.double", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.tempo.bpm, 128.0);
+        apply(&mut s, "tempo.bpm", ControlInput::Norm(1.0), true).unwrap();
+        assert_eq!(s.tempo.bpm, tempo::MAX_BPM);
     }
 
     #[test]
