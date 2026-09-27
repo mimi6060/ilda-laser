@@ -8,6 +8,7 @@
 
 use crate::cues::{self, ClickMode, CueDeck, CLICK_MODES, CLICK_MODE_LABELS};
 use crate::engine::Settings;
+use crate::layers::{Layer, LAYER_COUNT};
 use crate::presets::{Preset, CATEGORIES};
 use crate::live::{
     ChaseSpread, ColorOverride, ColorParams, LiveModifiers, PaletteMode, Rate, COLOR_MODE_LABELS, COLOR_STEPS_BEATS,
@@ -165,6 +166,13 @@ impl ControlRegistry {
         let max = CueDeck::default().max_active as f32;
         add("cue.max_active".into(), "Cues simultanés max".into(), "cue", cont(1.0, cues::MAX_ACTIVE_LIMIT as f32, max, Unit::None), true);
         add("cue.stop_all".into(), "Arrêter tous les cues".into(), "cue", ControlKind::Trigger, true);
+
+        for n in 1..=LAYER_COUNT {
+            add(format!("layer.{n}.dimmer"), format!("Gradateur calque {n}"), "layer", cont(0.0, 1.0, 1.0, Unit::Percent), true);
+            add(format!("layer.{n}.mute"), format!("Muet calque {n}"), "layer", ControlKind::Toggle { default: false }, true);
+            add(format!("layer.{n}.solo"), format!("Solo calque {n}"), "layer", ControlKind::Toggle { default: false }, true);
+            add(format!("layer.{n}.clear"), format!("Vider le calque {n}"), "layer", ControlKind::Trigger, true);
+        }
 
         // Momentary: pad down (value 1) presses, pad up (value 0) releases -
         // what flash and solo need. Toggle/restart cues ignore the release.
@@ -340,6 +348,15 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
                 }
                 return Ok(());
             }
+            if let Some((n, param)) = layer_control(other) {
+                match param {
+                    "dimmer" => set_layer(s, n, |l| l.dimmer = value(input)),
+                    "mute" => set_layer(s, n, |l| l.mute = truthy(input)),
+                    "solo" => set_layer(s, n, |l| l.solo = truthy(input)),
+                    _ => with_deck(s, |d, _| d.clear_layer(n)),
+                }
+                return Ok(());
+            }
             if let Some(n) = other.strip_prefix("page.").and_then(|n| n.parse::<usize>().ok()) {
                 s.cue_page = n - 1;
             } else if let Some(cell) = other.strip_prefix("grid.") {
@@ -351,6 +368,17 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
         }
     }
     Ok(())
+}
+
+/// "layer.<n>.<param>" → (n, param), for registered ids only.
+fn layer_control(id: &str) -> Option<(u8, &str)> {
+    let (n, param) = id.strip_prefix("layer.")?.split_once('.')?;
+    Some((n.parse().ok()?, param))
+}
+
+fn set_layer(s: &mut Shared, n: u8, f: impl FnOnce(&mut Layer)) {
+    f(s.mixer.layer_mut(n));
+    s.mixer_dirty = true;
 }
 
 fn set_live(s: &mut Shared, f: impl FnOnce(&mut LiveModifiers)) {
@@ -437,6 +465,16 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
         "cue.multi" => json!(s.deck.multi),
         "cue.max_active" => json!(s.deck.max_active),
+        id if id.starts_with("layer.") => {
+            let (n, param) = layer_control(id)?;
+            let l = s.mixer.layer(n);
+            match param {
+                "dimmer" => json!(l.dimmer),
+                "mute" => json!(l.mute),
+                "solo" => json!(l.solo),
+                _ => return None,
+            }
+        }
         id => {
             // Grid cells light up while their cue plays (LED feedback).
             let cue = grid_cell_preset(&s.presets, id.strip_prefix("grid.")?)?;
@@ -737,7 +775,7 @@ mod tests {
         apply(&mut s, "cue.multi", ControlInput::Value(1.0), true).unwrap();
         apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
         apply(&mut s, "look.size", ControlInput::Value(0.77), true).unwrap();
-        s.deck.set_slot(&cue_at(&s, 0, 1), cues::CueSlot { mode: Some(ClickMode::Flash), group: None });
+        s.deck.set_slot(&cue_at(&s, 0, 1), cues::CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None });
         apply(&mut s, "grid.1.1.2", ControlInput::Norm(1.0), true).unwrap();
         assert_eq!(s.active_cue, Some(cue_at(&s, 0, 1)));
         assert_eq!(cues::looks(&s.deck, &s.settings, s.look_on).len(), 2);
@@ -781,6 +819,29 @@ mod tests {
         apply(&mut s, "cue.max_active", ControlInput::Value(2.0), true).unwrap();
         assert_eq!(s.deck.active.len(), 2);
         assert_eq!(s.active_cue, Some(cue_at(&s, 0, 4)));
+    }
+
+    #[test]
+    fn layer_controls_drive_the_mixer_and_clear_their_cues() {
+        let mut s = shared();
+        apply(&mut s, "layer.2.dimmer", ControlInput::Norm(0.25), true).unwrap();
+        apply(&mut s, "layer.3.mute", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "layer.4.solo", ControlInput::Norm(1.0), true).unwrap();
+        assert_eq!(s.mixer.layers[1].dimmer, 0.25);
+        assert!(s.mixer.layers[2].mute && s.mixer.layers[3].solo && s.mixer_dirty);
+        assert_eq!(current(&s, s.controls.get("layer.2.dimmer").unwrap()), Some(serde_json::json!(0.25)));
+        assert_eq!(current(&s, s.controls.get("layer.4.solo").unwrap()), Some(serde_json::json!(true)));
+        assert_eq!(current(&s, s.controls.get("layer.1.clear").unwrap()), None);
+        assert!(matches!(apply(&mut s, "layer.5.mute", ControlInput::Value(1.0), true), Err(ControlError::Unknown(_))));
+
+        apply(&mut s, "cue.multi", ControlInput::Value(1.0), true).unwrap();
+        let (a, b) = (cue_at(&s, 0, 0), cue_at(&s, 0, 1));
+        s.deck.set_slot(&b, cues::CueSlot { layer: Some(2), ..Default::default() });
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "grid.1.1.2", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "layer.2.clear", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.deck.active.iter().map(|c| c.cue.as_str()).collect::<Vec<_>>(), [a.as_str()]);
+        assert_eq!(s.active_cue, Some(a), "the cue left on layer 1 is the primary again");
     }
 
     /// Keeps docs/controls.md in sync with the registry.

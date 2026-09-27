@@ -188,6 +188,17 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/layers") => json_response(json!(shared.lock().unwrap().mixer)),
+        (Method::Post, "/api/layers") => match body::<crate::layers::Mixer>(request) {
+            Ok(mut mixer) => {
+                mixer.sanitize();
+                let mut s = shared.lock().unwrap();
+                s.mixer = mixer;
+                s.mixer_dirty = true;
+                ok()
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/live") => json_response(json!(shared.lock().unwrap().live)),
         (Method::Post, "/api/live") => match body::<crate::live::LiveModifiers>(request) {
             Ok(live) => {
@@ -382,12 +393,13 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "cue_page": s.cue_page,
         "active_cue": s.active_cue,
         "cues": {
-            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held })).collect::<Vec<_>>(),
+            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer })).collect::<Vec<_>>(),
             "shown": s.deck.visible().iter().map(|a| a.cue.as_str()).collect::<Vec<_>>(),
             "click_mode": s.deck.click_mode,
             "multi": s.deck.multi,
             "max_active": s.deck.max_active,
         },
+        "layers": { "mixer": s.mixer, "mix": s.mix },
         "tempo": s.tempo.state(s.now_s()),
         "live": s.live,
         "lfos": lfo_positions(&s),
