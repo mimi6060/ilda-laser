@@ -119,7 +119,7 @@ test('Space right after clicking the LASER button toggles exactly once', async (
 // by an older /api/frame). Two quick Space presses both send on:true, so
 // a quick "on, off" leaves the laser ON. The /api/arm round trip is slowed
 // to 150 ms (a busy machine) so the race reproduces every time.
-test.fixme('T-290: two quick Space presses end disarmed (on, then off)', async ({ page }) => {
+test('T-290: two quick Space presses end disarmed (on, then off)', async ({ page }) => {
   await page.route('**/api/arm', async route => {
     await new Promise(r => setTimeout(r, 150));
     await route.continue();
@@ -137,7 +137,7 @@ test.fixme('T-290: two quick Space presses end disarmed (on, then off)', async (
 // the operator touches a slider or a checkbox (which keeps focus), Space
 // no longer turns the laser off, and cue keys / Enter / Backspace are dead
 // until they click somewhere else. Escape still works.
-test.fixme('T-291: Space still turns the laser off after using a slider', async ({ page }) => {
+test('T-291: Space still turns the laser off after using a slider', async ({ page }) => {
   await page.locator('#armBtn').click();
   await expect.poll(armed).toBe(true);
   await page.locator('#mSize').click(); // a mouse move on « Taille maître »
