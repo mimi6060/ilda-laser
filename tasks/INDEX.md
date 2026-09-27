@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (79)
+## À faire (80)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -35,6 +35,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-204](T-204-midi.md) | Profil APC40 par défaut (disposition Laser Studio) pour APC40 et APC40 mkII | midi | P1 | [T-201, T-202, T-140, T-145, T-150, T-155, T-160, T-208, T-209] |  |
 | [T-205](T-205-midi.md) | Retour LED sur l'APC40 (cue active, page, calques, battement) | midi | P1 | [T-201, T-204, T-150] |  |
 | [T-209](T-209-qa.md) | Tests MIDI sans matériel (APC40 simulé, ports virtuels, injection e2e) | qa | P1 | [T-200] |  |
+| [T-211](T-211-midi.md) | Contrôleurs MIDI génériques (n'importe quel appareil) | midi | P1 | [T-200, T-201, T-202, T-203] |  |
 | [T-011](T-011-ilda.md) | Médiathèque ILDA : import et export depuis l'interface | ilda | P2 | [T-001] |  |
 | [T-012](T-012-output.md) | Zones de projection et correction géométrique | output | P2 | [T-003] |  |
 | [T-104](T-104-cues.md) | Croisements, faisceau chaud et convergences | cues | P2 | [T-102] |  |

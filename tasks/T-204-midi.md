@@ -88,3 +88,4 @@ Une aide « Disposition de l'APC40 » affiche ce tableau (voir aussi T-210).
 - Règles de CLAUDE.md (sécurité laser, propriété intellectuelle).
 
 ## Journal
+- 2026-09-27 — architecte : l'utilisateur possède un **APC40 mkII** → c'est la cible principale à tester en premier ; le profil APC40 d'origine reste utile. Le support générique de tout contrôleur est dans T-211.
