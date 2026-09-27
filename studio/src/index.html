@@ -53,6 +53,13 @@
   .scene.playing .n { color: var(--accent); font-weight: 600; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
   details summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .cue-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .cue-tabs button { padding: 6px 10px; font-size: 12px; }
+  .cues { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; }
+  .cue { position: relative; text-align: left; min-height: 48px; font-size: 12px; line-height: 1.25; padding: 8px 8px 8px 10px; }
+  .cue .key { position: absolute; top: 4px; right: 6px; font-size: 10px; color: var(--muted); }
+  .cue.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .cue.active .key { color: var(--accent-ink); }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -72,6 +79,11 @@
       <span>Images/s <b id="stFps">–</b></span>
       <span><kbd>Espace</kbd> laser on/off · <kbd>Échap</kbd> blackout</span>
     </div>
+    <section style="margin-top:12px">
+      <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
+      <div class="cue-tabs" id="cueTabs"></div>
+      <div class="cues" id="cues"></div>
+    </section>
   </div>
 
   <div class="col">
@@ -81,10 +93,32 @@
         <button data-kind="shape">Forme</button>
         <button data-kind="text">Texte</button>
         <button data-kind="wave">Onde</button>
+        <button data-kind="generator">Effet</button>
       </div>
       <div id="shapePanel"><div class="shapes" id="shapes"></div></div>
       <div id="textPanel"><label>Texte</label><input type="text" id="text" maxlength="24" value="HELLO"></div>
       <div id="wavePanel" class="hint">Une onde qui défile ; avec la musique, son amplitude suit le volume.</div>
+      <div id="genPanel">
+        <label>Effet</label>
+        <select id="gen"></select>
+        <label>Nombre <span class="v" id="gCountV"></span></label>
+        <input type="range" id="gCount" min="1" max="32">
+        <label>Forme A <span class="v" id="gAV"></span></label>
+        <input type="range" id="gA" min="0" max="10" step="0.1">
+        <label>Forme B <span class="v" id="gBV"></span></label>
+        <input type="range" id="gB" min="-1" max="3" step="0.05">
+        <label>Vitesse <span class="v" id="gSpeedV"></span></label>
+        <input type="range" id="gSpeed" min="0" max="4" step="0.05">
+        <label>Mode couleur</label>
+        <select id="gMode">
+          <option value="solid">Couleur unie</option>
+          <option value="rainbow">Arc-en-ciel</option>
+          <option value="gradient">Dégradé</option>
+          <option value="alternate">Alterné</option>
+        </select>
+        <label>Deuxième couleur</label>
+        <input type="color" id="gColor2" value="#0000ff">
+      </div>
     </section>
 
     <section>
@@ -169,6 +203,13 @@ function showSettings() {
   $('shapePanel').hidden = kind !== 'shape';
   $('textPanel').hidden = kind !== 'text';
   $('wavePanel').hidden = kind !== 'wave';
+  $('genPanel').hidden = kind !== 'generator';
+  if (kind === 'generator') {
+    const p = s.content.params;
+    $('gen').value = s.content.generator;
+    $('gCount').value = p.count; $('gA').value = p.a; $('gB').value = p.b; $('gSpeed').value = p.speed;
+    $('gMode').value = p.color_mode; $('gColor2').value = hex(p.color2);
+  }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
   if (kind === 'text') $('text').value = s.content.text;
   $('color').value = hex(s.color);
@@ -191,6 +232,10 @@ function showValues() {
   $('aRotV').textContent = $('aRot').value + ' %';
   $('aFlashV').textContent = $('aFlash').value + ' %';
   $('gainV').textContent = '×' + (+$('gain').value).toFixed(1);
+  $('gCountV').textContent = $('gCount').value;
+  $('gAV').textContent = (+$('gA').value).toFixed(1);
+  $('gBV').textContent = (+$('gB').value).toFixed(2);
+  $('gSpeedV').textContent = '×' + (+$('gSpeed').value).toFixed(2);
 }
 
 function readControls() {
@@ -204,6 +249,13 @@ function readControls() {
   settings.audio.flash = $('aFlash').value / 100;
   settings.audio.color_on_beat = $('aColor').checked;
   if (settings.content.kind === 'text') settings.content.text = $('text').value;
+  if (settings.content.kind === 'generator') {
+    settings.content.generator = $('gen').value;
+    Object.assign(settings.content.params, {
+      count: +$('gCount').value, a: +$('gA').value, b: +$('gB').value, speed: +$('gSpeed').value,
+      color_mode: $('gMode').value, color2: rgb($('gColor2').value) });
+  }
+  activeCue = null; renderCues();
   showValues();
   pushSettings();
 }
@@ -214,7 +266,8 @@ function pushSettings() {
   pushTimer = setTimeout(() => post('/api/settings', settings), 40);
 }
 
-['color', 'scale', 'rot', 'bright', 'aOn', 'aSize', 'aRot', 'aFlash', 'aColor', 'text']
+['color', 'scale', 'rot', 'bright', 'aOn', 'aSize', 'aRot', 'aFlash', 'aColor', 'text',
+ 'gen', 'gCount', 'gA', 'gB', 'gSpeed', 'gMode', 'gColor2']
   .forEach(id => $(id).addEventListener('input', readControls));
 
 document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
@@ -222,6 +275,8 @@ document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click'
   if (kind === 'shape') settings.content = { kind, shape: settings.content.shape || 'circle' };
   if (kind === 'text') settings.content = { kind, text: $('text').value || 'HELLO' };
   if (kind === 'wave') settings.content = { kind };
+  if (kind === 'generator') settings.content = { kind, generator: 'lissajous',
+    params: { count: 8, a: 3, b: 2, speed: 1, color_mode: 'rainbow', color2: [0, 0, 255] } };
   showSettings(); pushSettings();
 }));
 
@@ -238,8 +293,12 @@ $('armBtn').addEventListener('click', () => setArmed(!armed));
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { setArmed(false); return; }
   if (e.code === 'Space' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-    e.preventDefault(); setArmed(!armed);
+    e.preventDefault(); setArmed(!armed); return;
   }
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  const i = CUE_KEYS.indexOf(e.key.toLowerCase());
+  const page = presets.filter(p => p.category === cuePage);
+  if (i >= 0 && i < page.length) { e.preventDefault(); playCue(page[i].id); }
 });
 
 // ---------- preview ----------
@@ -391,23 +450,70 @@ Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
   clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
 }));
 
+// ---------- cues ----------
+// AZERTY rows, so each key sits where it looks like it should.
+const CUE_KEYS = 'azertyuiopqsdfghjklmwxcvbn'.split('');
+let presets = [], cueCategories = [], cuePage = null, activeCue = null;
+
+async function loadPresets() {
+  const r = await (await fetch('/api/presets')).json();
+  presets = r.presets; cueCategories = r.categories;
+  cuePage = cuePage || cueCategories[0];
+  renderCues();
+}
+function renderCues() {
+  $('cueTabs').innerHTML = '';
+  for (const c of cueCategories) {
+    const b = document.createElement('button');
+    const n = presets.filter(p => p.category === c).length;
+    b.textContent = `${c} (${n})`; b.classList.toggle('active', c === cuePage);
+    b.onclick = () => { cuePage = c; renderCues(); };
+    $('cueTabs').appendChild(b);
+  }
+  $('cues').innerHTML = '';
+  presets.filter(p => p.category === cuePage).forEach((p, i) => {
+    const b = document.createElement('button');
+    b.className = 'cue' + (p.id === activeCue ? ' active' : '');
+    b.dataset.id = p.id;
+    b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><span class="n"></span>`;
+    b.querySelector('.n').textContent = p.name;
+    b.onclick = () => playCue(p.id);
+    $('cues').appendChild(b);
+  });
+}
+async function playCue(id) {
+  if (!await post('/api/presets/play', { id })) return;
+  activeCue = id;
+  const st = await (await fetch('/api/state')).json();
+  settings = st.settings; showSettings(); renderCues();
+}
+
+const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Rosace', tunnel: 'Tunnel',
+  polygon_tunnel: 'Tunnel polygonal', spiral_arms: 'Spirale à bras', starburst: 'Soleil', beam_fan: 'Faisceaux en éventail',
+  beam_circle: 'Cône de faisceaux', beam_wave: 'Vague de faisceaux', sweep: 'Balayage', liquid_sky: 'Nappe',
+  grid_scan: 'Grille de balayage', sine_stack: 'Oscillateurs', helix: 'Hélice', pulse_rings: 'Anneaux pulsés',
+  spectrum: 'Spectre audio', clock: 'Horloge', vortex: 'Vortex', flower: 'Fleur' };
+
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
   settings = st.settings; calibration = st.calibration; armed = st.armed; scenes = st.scenes;
+  if (!$('gen').children.length) {
+    $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');
+  }
   if (!$('shapes').children.length) {
     const names = { circle: 'Cercle', square: 'Carré', triangle: 'Triangle', cross: 'Croix', line: 'Ligne', star: 'Étoile', spiral: 'Spirale', dots: 'Points' };
     st.shapes.forEach(name => {
       const b = document.createElement('button');
       b.textContent = names[name] || name; b.dataset.shape = name;
-      b.onclick = () => { settings.content = { kind: 'shape', shape: name }; showSettings(); pushSettings(); };
+      b.onclick = () => { settings.content = { kind: 'shape', shape: name }; activeCue = null; renderCues(); showSettings(); pushSettings(); };
       $('shapes').appendChild(b);
     });
   }
   showSettings(); showCalibration(); showArmed(); renderScenes();
 }
 
-loadState().then(previewLoop);
+loadState().then(loadPresets).then(previewLoop);
 </script>
 </body>
 </html>

@@ -5,6 +5,7 @@
 //! of a look - the same thing a scene stores.
 
 use crate::font;
+use crate::generators::{self, GenParams};
 use crate::patterns::{self, Point};
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,12 @@ pub enum Content {
     Shape { shape: String },
     Text { text: String },
     Wave,
+    /// A procedural effect from `generators.rs` (what most cues use).
+    Generator {
+        generator: String,
+        #[serde(default)]
+        params: GenParams,
+    },
 }
 
 /// How strongly the music drives the look. Every amount is 0.0..=1.0, and
@@ -127,6 +134,7 @@ pub struct Animator {
     angle_deg: f32,
     hue_shift: f32,
     wave_phase: f32,
+    gen_time: f32,
     flash: f32,
     last_beat: u64,
 }
@@ -153,6 +161,10 @@ impl Animator {
 
         self.angle_deg = (self.angle_deg + dt * (s.rotation_speed + react.rotate * 360.0 * bass)) % 360.0;
         self.wave_phase = (self.wave_phase + dt * (3.0 + 12.0 * level)) % std::f32::consts::TAU;
+        if let Content::Generator { params, .. } = &s.content {
+            // Bass speeds generators up, so their motion follows the music.
+            self.gen_time += dt * params.speed * (1.0 + 2.0 * bass);
+        }
 
         // size = 0 leaves the scale alone; size = 1 swings it 0.5x..1.5x.
         let scale = s.scale * (1.0 - 0.5 * react.size * (react.enabled as u8 as f32) + react.size * bass);
@@ -166,6 +178,21 @@ impl Animator {
             Content::Shape { shape } => patterns::by_name(shape, scale, r, g, b).unwrap_or_default(),
             Content::Text { text } => font::text_to_points(&text.to_uppercase(), scale, r, g, b),
             Content::Wave => patterns::wave(scale, 0.15 + 0.6 * level, self.wave_phase, r, g, b),
+            Content::Generator { generator, params } => {
+                match generators::generate(generator, params, self.gen_time, level, bass, scale) {
+                    Some(geo) => {
+                        let (r2, g2, b2) = shift_hue(params.color2, hue_shift);
+                        let c2 = (r2 * gain, g2 * gain, b2 * gain);
+                        let pts = generators::colorize(&geo, params.color_mode, (r, g, b), c2, self.gen_time);
+                        if params.color_mode == generators::ColorMode::Rainbow {
+                            pts.into_iter().map(|p| Point { r: p.r * gain, g: p.g * gain, b: p.b * gain, ..p }).collect()
+                        } else {
+                            pts
+                        }
+                    }
+                    None => Vec::new(),
+                }
+            }
         };
 
         let rotated: Vec<Point> = points
