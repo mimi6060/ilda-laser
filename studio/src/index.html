@@ -419,25 +419,43 @@ document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click'
 }));
 
 // ---------- laser on/off ----------
-async function setArmed(on) {
-  if (await post('/api/arm', { on })) { armed = on; showArmed(); }
+// Frames fetched before the last arm request answered may carry an old
+// "armed" value; they must not overwrite what the server just told us.
+let armAnsweredAt = 0;
+async function sendArm(body) {
+  const r = await fetch('/api/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) return;
+  armed = (await r.json()).armed;
+  armAnsweredAt = performance.now();
+  showArmed();
+}
+// Escape and blackouts are always an explicit "off", never a toggle.
+const setArmed = on => sendArm({ on });
+const toggleArmed = () => sendArm({ toggle: true });
+// Only text entry counts as typing: after a slider, checkbox or button,
+// Space, Enter, Backspace and the cue keys must keep working.
+function isTyping() {
+  const el = document.activeElement;
+  if (!el) return false;
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable) return true;
+  return el.tagName === 'INPUT' && ['text', 'number', 'search', 'password', 'email', 'url'].includes(el.type);
 }
 function showArmed() {
   $('armBtn').classList.toggle('on', armed);
   $('armBtn').textContent = armed ? 'LASER ON' : 'LASER OFF';
   $('offBadge').classList.toggle('hidden', armed);
 }
-$('armBtn').addEventListener('click', () => setArmed(!armed));
+$('armBtn').addEventListener('click', toggleArmed);
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { setArmed(false); return; }
-  const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+  const typing = isTyping();
   if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
   if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
   if (!typing && e.key === '<') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
-  if (e.code === 'Space' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-    e.preventDefault(); setArmed(!armed); return;
+  if (e.code === 'Space' && !typing) {
+    e.preventDefault(); if (!e.repeat) toggleArmed(); return;
   }
-  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   const i = CUE_KEYS.indexOf(e.key.toLowerCase());
   const page = presets.filter(p => p.category === cuePage);
   if (i >= 0 && i < page.length) {
@@ -486,9 +504,11 @@ function draw(points) {
 
 async function previewLoop() {
   try {
+    const fetchedAt = performance.now();
     const f = await (await fetch('/api/frame')).json();
     draw(f.points);
-    armed = f.armed; pps = f.pps; showArmed();
+    if (fetchedAt > armAnsweredAt) { armed = f.armed; showArmed(); }
+    pps = f.pps;
     $('output').textContent = f.output_error ? '⚠ ' + f.output_error
       : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement (lancez avec --device pour piloter un laser)';
     const n = f.points.length, fps = n ? pps / n : 0;

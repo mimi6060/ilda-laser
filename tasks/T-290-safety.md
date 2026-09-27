@@ -1,12 +1,12 @@
 ---
 id: T-290
 title: Bouton laser / Espace basculent depuis une copie locale périmée de « armed »
-status: todo
+status: done
 area: safety
 priority: P2
 depends_on: []
-owner: ""
-branch: ""
+owner: "architecte"
+branch: "fix/arm-keys"
 source: docs/prs/e2e.md#bugs-found
 ---
 
@@ -36,10 +36,10 @@ Corriger en l'une de ces façons (au choix du développeur) :
 Aucun changement visible : bouton LASER ON/OFF et Espace.
 
 ## Critères d'acceptation
-- [ ] Deux appuis rapides sur Espace, même avec un `/api/arm` lent (150 ms), finissent désarmés.
-- [ ] Un clic sur le bouton suivi tout de suite d'Espace finit désarmé.
-- [ ] Échap force toujours `armed=false`.
-- [ ] Le test e2e `T-290: two quick Space presses…` (`studio/e2e/tests/laser.spec.ts`) passe de `test.fixme` à `test` et est vert.
+- [x] Deux appuis rapides sur Espace, même avec un `/api/arm` lent (150 ms), finissent désarmés.
+- [x] Un clic sur le bouton suivi tout de suite d'Espace finit désarmé.
+- [x] Échap force toujours `armed=false`.
+- [x] Le test e2e `T-290: two quick Space presses…` (`studio/e2e/tests/laser.spec.ts`) passe de `test.fixme` à `test` et est vert.
 
 ## Tests
 e2e : `studio/e2e/tests/laser.spec.ts` (déjà écrit, en `test.fixme`).
@@ -50,3 +50,4 @@ explicite de l'utilisateur ; un doute doit toujours finir en désarmé.
 
 ## Journal
 - 2026-09-27 — QA e2e (T-004) : reproduit à chaque fois avec `/api/arm` ralenti à 150 ms ; sans ralenti, un clic puis Espace à ~3 ms d'écart envoie `on:true` deux fois.
+- 2026-09-27 — architecte : corrigé sur fix/arm-keys — bascule décidée côté serveur (`POST /api/arm {toggle:true}` renvoie l'état) ; la page ignore les frames plus anciennes que la dernière réponse. Échap reste `on:false`. Test e2e T-290 activé et vert.

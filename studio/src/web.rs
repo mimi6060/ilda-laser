@@ -75,8 +75,15 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         },
         (Method::Post, "/api/arm") => match body::<ArmRequest>(request) {
             Ok(req) => {
-                shared.lock().unwrap().armed = req.on;
-                ok()
+                let mut s = shared.lock().unwrap();
+                // A toggle is decided here, against the real state, so two quick
+                // presses always mean on-then-off (never on-on from a stale page).
+                s.armed = match (req.on, req.toggle) {
+                    (Some(on), _) => on,
+                    (None, true) => !s.armed,
+                    (None, false) => return text(400, "expected \"on\" or \"toggle\""),
+                };
+                json_response(json!({ "armed": s.armed }))
             }
             Err(e) => e,
         },
@@ -255,7 +262,9 @@ fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, pa
 
 #[derive(Deserialize)]
 struct ArmRequest {
-    on: bool,
+    on: Option<bool>,
+    #[serde(default)]
+    toggle: bool,
 }
 
 /// A cue button, key or pad: `down` true on press, false on release.
