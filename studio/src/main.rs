@@ -16,6 +16,7 @@ mod output;
 mod patterns;
 mod presets;
 mod scenes;
+mod tempo;
 mod web;
 
 #[cfg(test)]
@@ -79,6 +80,16 @@ pub struct Shared {
     pub cue_page: usize,
     /// Id of the last cue played, for highlighting and LED feedback.
     pub active_cue: Option<String>,
+    /// The single tempo clock (see tempo.rs); times are seconds since `epoch`.
+    pub tempo: tempo::TempoClock,
+    pub epoch: Instant,
+}
+
+impl Shared {
+    /// Seconds since startup: the time base of the tempo clock.
+    pub fn now_s(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64()
+    }
 }
 
 pub struct Playlist {
@@ -127,6 +138,8 @@ fn main() -> Result<()> {
         presets,
         cue_page: 0,
         active_cue: None,
+        tempo: tempo::TempoClock::default(),
+        epoch: Instant::now(),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
