@@ -14,6 +14,7 @@ mod engine;
 mod font;
 mod generators;
 mod lfo;
+mod interlock;
 mod live;
 mod midi;
 mod output;
@@ -29,7 +30,8 @@ mod test_support;
 use anyhow::{Context, Result};
 use clap::Parser;
 use engine::{Animator, AudioFeatures, Calibration, Settings};
-use output::{DacOutput, Output};
+use interlock::{ArmGate, EStop};
+use output::{DacOutput, Output, OutputStage};
 use patterns::Point;
 use scenes::SceneStore;
 use std::collections::HashMap;
@@ -62,6 +64,10 @@ struct Cli {
     /// must not grab the controller).
     #[arg(long)]
     no_midi: bool,
+    /// Testing only: add an interlock that is never satisfied, so arming
+    /// is always refused (e2e tests of the refusal message).
+    #[arg(long, hide = true)]
+    test_interlock: bool,
 }
 
 /// Audio features older than this are treated as silence (the browser tab
@@ -75,9 +81,16 @@ pub struct Shared {
     pub calibration: Calibration,
     pub audio: AudioFeatures,
     pub audio_at: Instant,
-    /// Laser emission requested by the UI. Always starts off.
-    pub armed: bool,
+    /// The only place the armed state changes (interlock.rs). Always
+    /// starts disarmed, reason « Démarrage ».
+    pub gate: ArmGate,
+    /// Latched emergency stop, shared lock-free with the HTTP fast path
+    /// and the engine's output stage.
+    pub estop: Arc<EStop>,
+    /// The computed frame, shown by the preview even while disarmed.
     pub frame: Vec<Point>,
+    /// Lit points in the frame actually sent to the output (0 when disarmed).
+    pub output_lit: usize,
     pub output_name: Option<String>,
     pub output_error: Option<String>,
     pub pps: u32,
@@ -110,6 +123,18 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// Arm request, after catching up with the e-stop latch.
+    pub fn request_arm(&mut self, src: interlock::ArmSource) -> Result<(), Vec<String>> {
+        self.gate.sync_estop(&self.estop);
+        self.gate.request_arm(src)
+    }
+
+    /// Trips the emergency stop and records it in the gate.
+    pub fn emergency_stop(&mut self, src: interlock::ArmSource) {
+        self.estop.trip(src);
+        self.gate.sync_estop(&self.estop);
+    }
+
     /// Seconds since startup: the time base of the tempo clock.
     pub fn now_s(&self) -> f64 {
         self.epoch.elapsed().as_secs_f64()
@@ -146,6 +171,15 @@ fn main() -> Result<()> {
         }
     };
 
+    let estop = Arc::new(EStop::default());
+    if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
+        estop.set_kill_switch(kill);
+    }
+    let mut gate = ArmGate::default();
+    if cli.test_interlock {
+        gate.register(interlock::TEST, "Verrou de test (--test-interlock)", false);
+    }
+
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
@@ -154,8 +188,10 @@ fn main() -> Result<()> {
         calibration: web::load_calibration(&calibration_path),
         audio: AudioFeatures::default(),
         audio_at: Instant::now(),
-        armed: false,
+        gate,
+        estop: Arc::clone(&estop),
         frame: Vec::new(),
+        output_lit: 0,
         output_name: output.as_ref().map(|o| o.name().to_string()),
         output_error: None,
         pps: cli.pps,
@@ -198,7 +234,7 @@ fn main() -> Result<()> {
 
     let addr = format!("127.0.0.1:{}", cli.port);
     println!("Studio: open http://{addr}/ in your browser - Ctrl+C to quit");
-    web::run(&addr, shared, calibration_path, Arc::clone(&running))?;
+    web::run(&addr, shared, estop, calibration_path, Arc::clone(&running))?;
 
     running.store(false, Ordering::SeqCst);
     engine.join().ok();
@@ -208,22 +244,24 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, running: Arc<AtomicBool>, live_path: PathBuf) {
+fn run_engine(shared: Arc<Mutex<Shared>>, output: Option<Box<dyn Output>>, running: Arc<AtomicBool>, live_path: PathBuf) {
     // One animator per playing cue instance (0 = the manual look), so
     // every cue keeps its own motion and a restart starts it over.
     let mut animators: HashMap<u64, Animator> = HashMap::new();
     let mut live_state = live::LiveState::default();
     let mut frames_since_save = 0u32;
     let mut last = Instant::now();
-    let mut output_armed = false;
+    let mut stage = OutputStage::new(output);
 
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (looks, calibration, audio, armed, live, bpm, beats_per_bar, user_palettes) = {
+        let (looks, calibration, audio, armed, live, bpm, beats_per_bar, user_palettes, estop) = {
             let mut s = shared.lock().unwrap();
+            let shared_state = &mut *s;
+            shared_state.gate.sync_estop(&shared_state.estop);
             frames_since_save += 1;
             if s.live_dirty && frames_since_save >= 60 {
                 // At most once a second, so MIDI faders don't hammer the disk.
@@ -244,7 +282,7 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
             let (mut settings, mut live) = (s.settings.clone(), s.live.clone());
             lfo::modulate(s.lfos.list(), &s.controls, &mut settings, &mut live, t, beat);
             let looks = cues::looks(&s.deck, &settings, s.look_on);
-            (looks, s.calibration, audio, s.armed, live, s.tempo.bpm, s.tempo.beats_per_bar, s.palettes.list().to_vec())
+            (looks, s.calibration, audio, s.gate.is_armed(), live, s.tempo.bpm, s.tempo.beats_per_bar, s.palettes.list().to_vec(), Arc::clone(&s.estop))
         };
 
         live_state.advance(&live, dt, bpm, beats_per_bar);
@@ -260,22 +298,21 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
             })
             .collect();
 
-        if let Some(out) = output.as_mut() {
-            if armed != output_armed {
-                let result = out.set_armed(armed);
-                output_armed = armed;
-                shared.lock().unwrap().output_error = result.err().map(|e| e.to_string());
-            }
-            out.send(&frame);
+        // Last stage: the gate. `armed` was read under the lock at the top
+        // of the frame; the e-stop latch is re-read here, lock-free.
+        let emitted = stage.emit(&frame, armed, &estop);
+        let mut s = shared.lock().unwrap();
+        if let Some(error) = emitted.arm_change {
+            s.output_error = error;
         }
-        shared.lock().unwrap().frame = frame;
+        s.output_lit = emitted.lit;
+        s.frame = frame;
+        drop(s);
 
         std::thread::sleep(FRAME_INTERVAL.saturating_sub(now.elapsed()));
     }
 
-    if let Some(out) = output.as_mut() {
-        let _ = out.set_armed(false);
-    }
+    stage.shutdown();
 }
 
 pub fn load_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {

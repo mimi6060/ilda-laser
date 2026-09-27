@@ -3,11 +3,16 @@
 //!
 //! Bound to 127.0.0.1 only: the UI can turn a laser on, so it isn't
 //! exposed to the rest of the network.
+//!
+//! One thread receives requests; `POST /api/estop` is handled right there,
+//! lock-free, ahead of everything queued. All other requests go, in order,
+//! to a single worker thread, so a slow handler never delays a stop.
 
 use crate::controls;
 use crate::cues::{ClickMode, CueSlot};
 use crate::engine::{AudioFeatures, Calibration, Settings};
 use crate::generators::GENERATOR_NAMES;
+use crate::interlock::{ArmSource, DisarmReason, EStop};
 use crate::patterns::SHAPE_NAMES;
 use crate::presets::CATEGORIES;
 use crate::scenes::Scene;
@@ -24,11 +29,28 @@ const INDEX_HTML: &str = include_str!("index.html");
 
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
-pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, calibration_path: PathBuf, running: Arc<AtomicBool>) -> anyhow::Result<()> {
+pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) -> anyhow::Result<()> {
     let server = Server::http(addr).map_err(|e| anyhow::anyhow!("failed to start web server on {addr}: {e}"))?;
+    serve(server, shared, estop, calibration_path, running);
+    Ok(())
+}
+
+fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) {
+    let (queue, pending) = std::sync::mpsc::channel::<Request>();
+    let worker = std::thread::spawn({
+        let shared = Arc::clone(&shared);
+        move || {
+            for mut request in pending {
+                let response = route(&mut request, &shared, &calibration_path);
+                if let Err(e) = request.respond(response) {
+                    log::debug!("failed to send HTTP response: {e}");
+                }
+            }
+        }
+    });
 
     while running.load(Ordering::SeqCst) {
-        let mut request = match server.recv_timeout(Duration::from_millis(200)) {
+        let request = match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(r)) => r,
             Ok(None) => continue,
             Err(e) => {
@@ -36,12 +58,40 @@ pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, calibration_path: PathBuf, ru
                 continue;
             }
         };
-        let response = route(&mut request, &shared, &calibration_path);
-        if let Err(e) = request.respond(response) {
-            log::debug!("failed to send HTTP response: {e}");
+        if is_estop(request.method(), request.url()) {
+            emergency_stop(request, &estop, &shared);
+        } else if let Err(e) = queue.send(request) {
+            log::warn!("HTTP worker gone: {e}");
         }
     }
-    Ok(())
+    drop(queue);
+    worker.join().ok();
+}
+
+fn is_estop(method: &Method, url: &str) -> bool {
+    *method == Method::Post && url.split('?').next() == Some("/api/estop")
+}
+
+/// `POST /api/estop[?source=keyboard|ui]`: the body is never read or
+/// validated. Trips the latch (which also disarms the DAC directly), then
+/// records it in the gate only if the lock is free right now; otherwise
+/// the engine does so at the top of its next frame.
+fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>) {
+    let source = request
+        .url()
+        .split_once('?')
+        .and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix("source=")))
+        .map(ArmSource::parse)
+        .unwrap_or(ArmSource::Api);
+    // The source is only a label: a stop is accepted from anyone.
+    estop.trip(source);
+    if let Ok(mut s) = shared.try_lock() {
+        let s = &mut *s;
+        s.gate.sync_estop(&s.estop);
+    }
+    if let Err(e) = request.respond(ok()) {
+        log::debug!("failed to send HTTP response: {e}");
+    }
 }
 
 fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &Path) -> HttpResponse {
@@ -73,20 +123,40 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
-        (Method::Post, "/api/arm") => match body::<ArmRequest>(request) {
+        (Method::Get, "/api/arm") => {
+            let s = shared.lock().unwrap();
+            json_response(json!(s.gate.status(&s.estop)))
+        }
+        (Method::Post, "/api/arm") => match body::<serde_json::Value>(request) {
             Ok(req) => {
+                let source = ArmSource::parse(req.get("source").and_then(|v| v.as_str()).unwrap_or(""));
                 let mut s = shared.lock().unwrap();
                 // A toggle is decided here, against the real state, so two quick
                 // presses always mean on-then-off (never on-on from a stale page).
-                s.armed = match (req.on, req.toggle) {
+                let want = match (req.get("on").and_then(|v| v.as_bool()), req.get("toggle").and_then(|v| v.as_bool())) {
                     (Some(on), _) => on,
-                    (None, true) => !s.armed,
-                    (None, false) => return text(400, "expected \"on\" or \"toggle\""),
+                    (None, Some(true)) => !s.gate.is_armed(),
+                    _ => return text(400, "expected \"on\" or \"toggle\""),
                 };
-                json_response(json!({ "armed": s.armed }))
+                if want {
+                    match s.request_arm(source) {
+                        Ok(()) => json_response(json!({ "armed": s.gate.is_armed() })),
+                        Err(blocking) => with_status(json_response(json!({ "armed": false, "blocking": blocking })), 409),
+                    }
+                } else {
+                    // Disarming is always accepted, whatever else the body says.
+                    s.gate.disarm(DisarmReason::User, source);
+                    json_response(json!({ "armed": false }))
+                }
             }
             Err(e) => e,
         },
+        (Method::Post, "/api/estop/reset") => {
+            let mut s = shared.lock().unwrap();
+            let s = &mut *s;
+            s.gate.reset_estop(&s.estop);
+            ok()
+        }
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
                 let cal = Calibration {
@@ -283,13 +353,6 @@ fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, pa
     }
 }
 
-#[derive(Deserialize)]
-struct ArmRequest {
-    on: Option<bool>,
-    #[serde(default)]
-    toggle: bool,
-}
-
 /// A cue button, key or pad: `down` true on press, false on release.
 #[derive(Deserialize)]
 struct CueRequest {
@@ -351,11 +414,16 @@ struct SaveScene {
 }
 
 fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
-    let s = shared.lock().unwrap();
+    let mut s = shared.lock().unwrap();
+    let s = &mut *s;
+    s.gate.sync_estop(&s.estop);
+    let arm = s.gate.status(&s.estop);
     json_response(json!({
         "settings": s.settings,
         "calibration": s.calibration,
-        "armed": s.armed,
+        "armed": arm.armed,
+        "estop": arm.estop.is_some(),
+        "arm": arm,
         "output": s.output_name,
         "pps": s.pps,
         "shapes": SHAPE_NAMES,
@@ -369,12 +437,18 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 /// The current frame for the preview, as `[x, y, r, g, b]` rows rounded
 /// to 3 decimals to keep the payload small at 30 requests a second.
 fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
-    let s = shared.lock().unwrap();
+    let mut s = shared.lock().unwrap();
+    let s = &mut *s;
+    s.gate.sync_estop(&s.estop);
+    let arm = s.gate.status(&s.estop);
     let round = |v: f32| (v * 1000.0).round() / 1000.0;
     let points: Vec<[f32; 5]> = s.frame.iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect();
     json_response(json!({
         "points": points,
-        "armed": s.armed,
+        "output_lit": s.output_lit,
+        "armed": arm.armed,
+        "estop": arm.estop.is_some(),
+        "arm": arm,
         "output": s.output_name,
         "output_error": s.output_error,
         "pps": s.pps,
@@ -390,7 +464,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         },
         "tempo": s.tempo.state(s.now_s()),
         "live": s.live,
-        "lfos": lfo_positions(&s),
+        "lfos": lfo_positions(s),
     }))
 }
 
@@ -431,6 +505,10 @@ fn text(status: u16, body: &str) -> HttpResponse {
     Response::from_string(body).with_status_code(status)
 }
 
+fn with_status(response: HttpResponse, status: u16) -> HttpResponse {
+    response.with_status_code(status)
+}
+
 fn json_response(value: serde_json::Value) -> HttpResponse {
     with_type(Response::from_string(value.to_string()), "application/json")
 }
@@ -438,4 +516,171 @@ fn json_response(value: serde_json::Value) -> HttpResponse {
 fn with_type(response: HttpResponse, content_type: &str) -> HttpResponse {
     let header = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).expect("content type is valid ASCII");
     response.with_header(header)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interlock::TEST;
+    use crate::test_support;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    /// A studio API on a free localhost port, without engine or output.
+    struct TestServer {
+        addr: SocketAddr,
+        shared: Arc<Mutex<Shared>>,
+        running: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        fn start(test_interlock: bool) -> Self {
+            let mut state = test_support::shared();
+            if test_interlock {
+                state.gate.register(TEST, "Verrou de test", false);
+            }
+            let estop = Arc::clone(&state.estop);
+            let shared = Arc::new(Mutex::new(state));
+            let server = Server::http("127.0.0.1:0").unwrap();
+            let addr = server.server_addr().to_ip().unwrap();
+            let running = Arc::new(AtomicBool::new(true));
+            let thread = std::thread::spawn({
+                let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
+                let calibration = std::env::temp_dir().join("laser-studio-test-unused/calibration.json");
+                move || serve(server, shared, estop, calibration, running)
+            });
+            Self { addr, shared, running, thread: Some(thread) }
+        }
+
+        fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {
+            http(self.addr, method, path, body)
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::SeqCst);
+            if let Some(t) = self.thread.take() {
+                t.join().ok();
+            }
+        }
+    }
+
+    fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let status = raw.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        (status, raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    fn arm_status(t: &TestServer) -> serde_json::Value {
+        serde_json::from_str(&t.request("GET", "/api/arm", "").1).unwrap()
+    }
+
+    #[test]
+    fn starts_disarmed_and_arms_on_request() {
+        let t = TestServer::start(false);
+        let st = arm_status(&t);
+        assert_eq!(st["armed"], false);
+        assert_eq!(st["last_disarm"]["reason_fr"], "Démarrage");
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
+        let st = arm_status(&t);
+        assert_eq!((st["armed"].clone(), st["source"].clone()), (json!(true), json!("keyboard")));
+    }
+
+    #[test]
+    fn a_blocking_interlock_refuses_with_409_and_its_label() {
+        let t = TestServer::start(true);
+        let (status, body) = t.request("POST", "/api/arm", r#"{"on":true}"#);
+        assert_eq!(status, 409);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["blocking"], json!(["Verrou de test"]));
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    #[test]
+    fn disarm_is_accepted_with_extra_fields_and_unknown_source() {
+        let t = TestServer::start(false);
+        t.request("POST", "/api/arm", r#"{"on":true}"#);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false,"source":"??","foo":[1,2]}"#).0, 200);
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    #[test]
+    fn midi_claimed_over_http_cannot_arm() {
+        let t = TestServer::start(false);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"midi"}"#).0, 409);
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    #[test]
+    fn estop_latches_until_reset_and_reset_never_arms() {
+        let t = TestServer::start(false);
+        t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#);
+        // No body at all, then a body that is not JSON: both stop.
+        assert_eq!(t.request("POST", "/api/estop?source=keyboard", "").0, 200);
+        assert_eq!(t.request("POST", "/api/estop", "{not json").0, 200);
+        let st = arm_status(&t);
+        assert_eq!(st["armed"], false);
+        assert_eq!(st["estop"]["source"], "keyboard");
+        assert_eq!(st["last_disarm"]["reason"], "estop");
+        let (status, body) = t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#);
+        assert_eq!(status, 409);
+        assert!(body.contains("Arrêt d'urgence"));
+
+        assert_eq!(t.request("POST", "/api/estop/reset", "").0, 200);
+        let st = arm_status(&t);
+        assert_eq!((st["armed"].clone(), st["estop"].clone()), (json!(false), json!(null)));
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
+        assert_eq!(arm_status(&t)["armed"], true);
+    }
+
+    /// The stop is served, and latched, while another handler is stuck
+    /// holding the shared lock (here: the test thread holds it).
+    #[test]
+    fn estop_jumps_ahead_of_a_busy_handler() {
+        let t = TestServer::start(false);
+        t.request("POST", "/api/arm", r#"{"on":true}"#);
+        let estop = Arc::clone(&t.shared.lock().unwrap().estop);
+        let guard = t.shared.lock().unwrap();
+        let addr = t.addr;
+        let slow = std::thread::spawn(move || http(addr, "POST", "/api/arm", r#"{"on":true}"#));
+        std::thread::sleep(Duration::from_millis(100)); // the worker is now blocked on the lock
+        let started = Instant::now();
+        assert_eq!(t.request("POST", "/api/estop?source=ui", "").0, 200);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(estop.is_latched(), "latched while the lock was still held");
+        drop(guard);
+        // The queued arm runs after the stop and is refused.
+        assert_eq!(slow.join().unwrap().0, 409);
+        let st = arm_status(&t);
+        assert_eq!(st["armed"], false);
+        assert_eq!(st["last_disarm"]["reason"], "estop");
+    }
+
+    #[test]
+    fn frame_reports_no_lit_output_while_disarmed_but_keeps_the_preview() {
+        let t = TestServer::start(false);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.frame = vec![crate::patterns::Point::lit(0.0, 0.0, 1.0, 0.0, 0.0)];
+            s.output_lit = 0;
+        }
+        let f: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
+        assert_eq!(f["points"].as_array().unwrap().len(), 1);
+        assert_eq!(f["output_lit"], 0);
+        assert_eq!(f["armed"], false);
+    }
+
+    #[test]
+    fn only_post_estop_takes_the_fast_path() {
+        assert!(is_estop(&Method::Post, "/api/estop"));
+        assert!(is_estop(&Method::Post, "/api/estop?source=keyboard"));
+        assert!(!is_estop(&Method::Get, "/api/estop"));
+        assert!(!is_estop(&Method::Post, "/api/estop/reset"));
+    }
 }
