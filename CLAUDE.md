@@ -30,8 +30,14 @@ work. `pc-client/` is the original CLI; new work goes into `studio/`.
   come from a source whose licence explicitly allows redistribution. Every
   third-party file added must be listed in `docs/CONTENT_SOURCES.md` with
   its URL, licence and date checked. No licence found = don't add it.
-- The user's own ILDA files (`.ild`, bought or exported from software they
-  own) are loaded at runtime through ILDA import. They are never committed.
+- ILDA import is generic: it loads `.ild` files the user has the rights to
+  (their own creations, content bought with a licence that allows it) at
+  runtime. They are never committed. Never add an importer or converter
+  aimed at Pangolin or Laserworld content: their licences forbid using it
+  outside their own software/hardware.
+- For their cues and effects, the rule is **copy the idea, never the
+  content**: study what a look does (from public docs, videos, photos) and
+  rebuild it our own way with our generators and parameters.
 
 ### Laser safety
 - The laser **always starts disarmed**. Only an explicit user action arms
