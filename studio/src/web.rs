@@ -5,7 +5,9 @@
 //! exposed to the rest of the network.
 
 use crate::engine::{AudioFeatures, Calibration, Settings};
+use crate::generators::GENERATOR_NAMES;
 use crate::patterns::SHAPE_NAMES;
+use crate::presets::CATEGORIES;
 use crate::scenes::Scene;
 use crate::{Playlist, Shared};
 use serde::Deserialize;
@@ -136,6 +138,32 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 None => text(400, "no saved scenes"),
             }
         }
+        (Method::Get, "/api/presets") => {
+            let s = shared.lock().unwrap();
+            let list: Vec<_> = s.presets.iter().map(|p| json!({ "id": p.id, "name": p.name, "category": p.category })).collect();
+            json_response(json!({ "categories": CATEGORIES, "presets": list }))
+        }
+        (Method::Post, "/api/presets/play") => match body::<IdRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match s.presets.iter().find(|p| p.id == req.id).map(|p| p.settings.clone()) {
+                    Some(mut settings) => {
+                        // A cue sets the look, not the operator's safety and music choices:
+                        // keep the current brightness, and the current music settings
+                        // unless the cue is built around the music.
+                        settings.brightness = s.settings.brightness;
+                        if !settings.audio.enabled {
+                            settings.audio = s.settings.audio.clone();
+                        }
+                        s.settings = settings;
+                        s.playlist = None;
+                        ok()
+                    }
+                    None => text(404, "no such preset"),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Post, "/api/playlist/stop") => {
             shared.lock().unwrap().playlist = None;
             ok()
@@ -147,6 +175,11 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
 #[derive(Deserialize)]
 struct ArmRequest {
     on: bool,
+}
+
+#[derive(Deserialize)]
+struct IdRequest {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +202,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "output": s.output_name,
         "pps": s.pps,
         "shapes": SHAPE_NAMES,
+        "generators": GENERATOR_NAMES,
         "scenes": s.scenes.list(),
         "playlist": s.playlist.as_ref().map(|p| p.index),
     }))
