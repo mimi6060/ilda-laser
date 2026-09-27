@@ -1,5 +1,5 @@
 //! Controller profiles: which driver a port uses (APC40, APC40 mkII or
-//! generic) and, from T-202 on, its mappings. Built-in profiles are
+//! generic), its Shift key and its mappings (T-202). Built-in profiles are
 //! compiled in and never written; user profiles live in
 //! `<data-dir>/midi/profiles/<slug>.json`, and `<data-dir>/midi/devices.json`
 //! remembers, per port name, the chosen profile and whether it is enabled.
@@ -7,6 +7,8 @@
 //! Nothing here panics on bad files: a broken profile is skipped with a
 //! readable error (shown by `/api/midi`) and the port falls back to `generic`.
 
+use super::mapping::{Mapping, MidiInput};
+use super::safety::MidiSafety;
 use super::detect::{Model, MODE_ABLETON, MODE_ALTERNATE, MODE_GENERIC, PID_APC40, PID_APC40_MK2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -83,9 +85,12 @@ pub struct Profile {
     /// Introduction mode sent to an APC (0x40 / 0x41 / 0x42).
     #[serde(default = "mode_41")]
     pub host_mode: u8,
-    /// Typed by T-202; kept as raw JSON until then so nothing is lost.
+    /// The Shift key (APC: note 0x62): while held, `shift: true` mappings
+    /// are looked up first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift_key: Option<MidiInput>,
     #[serde(default)]
-    pub mappings: Vec<Value>,
+    pub mappings: Vec<Mapping>,
     /// Fields added by later tasks (shift key, encoders…), kept on save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -128,7 +133,10 @@ impl Default for PortPrefs {
 pub struct DevicesFile {
     #[serde(default)]
     pub ports: BTreeMap<String, PortPrefs>,
-    /// Global MIDI options added later (T-208 safety flags), kept on save.
+    /// Global MIDI safety options (T-208).
+    #[serde(default)]
+    pub safety: MidiSafety,
+    /// Fields added later, kept on save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -269,6 +277,11 @@ impl ProfileStore {
         self.save_devices()
     }
 
+    pub fn set_safety(&mut self, safety: MidiSafety) -> Result<(), String> {
+        self.devices.safety = safety;
+        self.save_devices()
+    }
+
     /// Saves an edited profile. Editing a built-in one saves a
     /// `<slug>-perso` copy instead; with a port, that copy becomes the
     /// port's profile. Returns the slug actually written.
@@ -343,7 +356,8 @@ mod tests {
             "mappings": [{ "input": { "kind": "cc", "channel": null, "number": 14 }, "target": "master.brightness", "mode": "absolute" }] }"#;
         let p = Profile::parse(json).unwrap();
         assert_eq!(p.matches.product_id, Some(0x29));
-        assert!(p.extra.contains_key("shift_key"));
+        assert_eq!(p.shift_key.as_ref().map(|k| (k.channel, k.number)), Some((None, 0x62)));
+        assert_eq!(p.mappings[0].target, "master.brightness");
         let back = Profile::parse(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
     }
@@ -401,6 +415,7 @@ mod tests {
         assert_eq!(slug, "apc40-mk2-perso");
         assert_eq!(store.get("apc40-mk2").unwrap().name, "APC40 mkII — Laser Studio", "built-in untouched");
         store.set_port_enabled("Other", false).unwrap();
+        store.set_safety(MidiSafety { allow_arm: true, blackout_on_disconnect: false }).unwrap();
 
         let reloaded = ProfileStore::load(dir.clone());
         assert!(reloaded.errors.is_empty(), "{:?}", reloaded.errors);
@@ -408,6 +423,7 @@ mod tests {
         assert_eq!(reloaded.choose("APC40 mkII", Model::Apc40Mk2).slug, "apc40-mk2-perso");
         assert!(!reloaded.port_enabled("Other"));
         assert!(reloaded.port_enabled("APC40 mkII"));
+        assert!(reloaded.devices.safety.allow_arm);
         let _ = std::fs::remove_dir_all(dir);
     }
 

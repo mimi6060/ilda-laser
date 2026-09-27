@@ -96,6 +96,8 @@
   .mdev .n { font-weight: 600; }
   .mdev.off .n { color: var(--muted); }
   .merr { color: var(--warn); font-size: 12px; margin-top: 4px; }
+  #midiLost { display: none; background: #b3261e; color: #fff; font-weight: 600; font-size: 13px; padding: 6px 12px; text-align: center; }
+  #midiLost.on { display: block; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -117,6 +119,7 @@
   <div id="output">…</div>
   <button id="armBtn" title="Espace : allumer/éteindre · Échap : blackout">LASER OFF</button>
 </header>
+<div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
 
 <main>
   <div class="stage">
@@ -316,6 +319,11 @@
       <details id="midiPanel">
         <summary>Contrôleur</summary>
         <div id="midiDevices"></div>
+        <div class="mdev">
+          <div class="n">Sécurité</div>
+          <label class="check"><input type="checkbox" id="midiAllowArm"> Autoriser l'armement depuis le contrôleur (Shift + maintien 1 s)</label>
+          <label class="check"><input type="checkbox" id="midiBlackoutLost"> Blackout si le contrôleur se déconnecte</label>
+        </div>
         <div class="hint" id="midiHint"></div>
       </details>
     </section>
@@ -906,6 +914,10 @@ async function midiLoop() {
       ? 'MIDI : ' + live.map(d => d.model === 'Unknown' ? d.name : d.model_label).join(', ') + ' connecté' + (live.length > 1 ? 's' : '')
       : 'MIDI : aucun contrôleur';
     st.classList.toggle('on', live.length > 0);
+    const lost = m.devices.filter(d => d.lost);
+    $('midiLost').textContent = 'Contrôleur MIDI déconnecté' + (lost.length ? ' : ' + lost.map(d => d.name).join(', ') : '');
+    $('midiLost').classList.toggle('on', lost.length > 0);
+    if (m.safety) { $('midiAllowArm').checked = m.safety.allow_arm; $('midiBlackoutLost').checked = m.safety.blackout_on_disconnect; }
     // Only rebuild the list when something changed, so an open menu isn't reset.
     const key = JSON.stringify([m.enabled, m.devices.map(d => [d.name, d.connected, d.enabled, d.model, d.profile, d.profile_error]), m.errors]);
     if (key !== midiKey) { midiKey = key; renderMidi(m); }
@@ -932,6 +944,8 @@ function renderMidi(m) {
   document.querySelectorAll('[data-mreset]').forEach(el => el.onclick = () => post('/api/midi/profile', { port: portOf(el), profile: null }));
 }
 
+$('midiAllowArm').onchange = e => post('/api/midi/safety', { allow_arm: e.target.checked });
+$('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
 loadState().then(loadPresets).then(loadPalettes).then(previewLoop);
 midiLoop();
 </script>

@@ -1,6 +1,6 @@
 //! The "midi" thread: opens every enabled input port (and the output of
 //! the same name), identifies the device, applies its profile, and feeds
-//! incoming events to `midi::handle`.
+//! incoming events to the mapping engine (`engine::handle_batch`).
 //!
 //! midir has no hot-plug notification, so the port list is re-scanned
 //! every 2 s. Backend calls (CoreMIDI) never happen under the `Shared`
@@ -125,8 +125,8 @@ impl<B: Backend> Worker<B> {
             }
             for ev in &events {
                 s.midi.record(ev);
-                super::handle(&mut s, ev);
             }
+            super::engine::handle_batch(&mut s, &events);
         }
 
         if now >= self.next_scan {
@@ -176,19 +176,29 @@ impl<B: Backend> Worker<B> {
         for name in inputs.iter().chain(&outputs) {
             midi.device_mut(name);
         }
+        let mut unplugged = Vec::new();
         for i in 0..midi.devices.len() {
             let enabled = midi.store.port_enabled(&midi.devices[i].name);
             let d = &mut midi.devices[i];
             let connected = self.slots.contains_key(&d.name);
             if connected && !d.connected {
                 d.connected_at = Some(now);
+                d.lost = false;
             } else if !connected {
+                if d.connected {
+                    d.lost = true;
+                    unplugged.push(d.name.clone());
+                }
                 d.connected_at = None;
             }
             d.input = inputs.contains(&d.name);
             d.output = outputs.contains(&d.name);
             d.connected = connected;
             d.enabled = enabled;
+        }
+        for name in unplugged {
+            log::warn!("MIDI : contrôleur {name} déconnecté");
+            super::engine::port_closed(&mut s, &name, true);
         }
     }
 
@@ -230,6 +240,7 @@ impl<B: Backend> Worker<B> {
             let mut s = lock(&self.shared);
             let midi = &mut s.midi;
             let mut plans = Vec::new();
+            let mut closed = Vec::new();
             for (name, slot) in &self.slots {
                 if !midi.store.port_enabled(name) {
                     let d = midi.device_mut(name);
@@ -237,6 +248,7 @@ impl<B: Backend> Worker<B> {
                     d.connected = false;
                     d.connected_at = None;
                     plans.push((name.clone(), Plan::Close));
+                    closed.push(name.clone());
                     continue;
                 }
                 if slot.detecting.is_some() {
@@ -253,6 +265,9 @@ impl<B: Backend> Worker<B> {
                 if slot.profile.as_deref() != Some(choice.slug.as_str()) || slot.introduced != want {
                     plans.push((name.clone(), Plan::Apply { slug: choice.slug, want }));
                 }
+            }
+            for name in closed {
+                super::engine::port_closed(&mut s, &name, false);
             }
             plans
         };
@@ -495,6 +510,63 @@ pub mod tests {
         assert!(device(&shared, "APC40 mkII").connected, "back within one scan (2 s)");
         let intro = introduction(PID_APC40_MK2, MODE_ABLETON);
         assert_eq!(fake.sent("APC40 mkII").iter().filter(|b| **b == intro).count(), 2, "introduced again");
+    }
+
+    #[test]
+    fn unplugging_flags_the_device_and_optionally_blacks_out() {
+        let (mut w, fake, shared, t0) = setup();
+        fake.plug("APC40 mkII", Some(identity_reply(PID_APC40_MK2)));
+        w.step(t0, None);
+        shared.lock().unwrap().armed = true;
+        fake.unplug("APC40 mkII");
+        w.step(t0 + ms(2000), None);
+        assert!(device(&shared, "APC40 mkII").lost, "banner shown");
+        assert!(shared.lock().unwrap().armed, "state kept by default");
+
+        fake.plug("APC40 mkII", Some(identity_reply(PID_APC40_MK2)));
+        w.step(t0 + ms(4000), None);
+        assert!(!device(&shared, "APC40 mkII").lost, "banner gone once back");
+
+        shared.lock().unwrap().midi.store.devices.safety.blackout_on_disconnect = true;
+        fake.unplug("APC40 mkII");
+        w.step(t0 + ms(6000), None);
+        assert!(!shared.lock().unwrap().armed, "opt-in blackout on disconnect");
+
+        // Disabling a port by hand is not a loss.
+        fake.plug("Other", None);
+        w.step(t0 + ms(8000), None);
+        shared.lock().unwrap().midi.store.set_port_enabled("Other", false).unwrap();
+        shared.lock().unwrap().armed = true;
+        w.step(t0 + ms(8300), None);
+        w.step(t0 + ms(10000), None);
+        assert!(!device(&shared, "Other").lost);
+        assert!(shared.lock().unwrap().armed);
+    }
+
+    #[test]
+    fn mapped_events_drive_controls_through_the_worker() {
+        let (mut w, fake, shared, t0) = setup();
+        {
+            let mut s = shared.lock().unwrap();
+            let p = crate::midi::profile::Profile::parse(
+                r#"{ "name": "t", "match": { "port_contains": ["Pad"] },
+                    "mappings": [ { "input": { "kind": "note", "number": 81 }, "target": "transport.blackout", "mode": "trigger" },
+                                  { "input": { "kind": "cc", "number": 20 }, "target": "master.size", "mode": "absolute" } ] }"#,
+            )
+            .unwrap();
+            s.midi.store.save_profile(None, "pad", p).unwrap();
+        }
+        fake.plug("Pad", None);
+        w.step(t0, None);
+        w.step(t0 + ms(600), None); // no inquiry reply: name fallback, profile applied
+        assert_eq!(device(&shared, "Pad").profile, "pad");
+        shared.lock().unwrap().armed = true;
+        fake.push("Pad", &[0xB0, 20, 127, 0x90, 81, 127]);
+        w.step(t0 + ms(610), None);
+        let mut s = shared.lock().unwrap();
+        assert!(!s.armed, "blackout");
+        crate::midi::engine::frame(&mut s, t0 + ms(620));
+        assert_eq!(s.live.size, 2.0, "fader written at the engine frame");
     }
 
     #[test]

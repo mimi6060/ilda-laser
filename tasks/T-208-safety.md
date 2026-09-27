@@ -1,12 +1,12 @@
 ---
 id: T-208
 title: Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur)
-status: todo
+status: review
 area: safety
 priority: P0
 depends_on: [T-202]
-owner: ""
-branch: ""
+owner: "dev-agent midi-map"
+branch: feat/midi-map
 source: docs/research/midi-apc40.md#7-safety-notes-claudemd
 ---
 
@@ -52,11 +52,11 @@ contrôleur (Shift + maintien 1 s) », « Blackout si le contrôleur se
 déconnecte ». Bandeau rouge quand un contrôleur se déconnecte.
 
 ## Critères d'acceptation
-- [ ] Par défaut, aucune combinaison MIDI ne peut armer le laser (test exhaustif sur le profil APC40).
-- [ ] Option activée : Shift + Stop All tenu 1 s arme ; relâché avant 1 s ne fait rien.
-- [ ] Un lot [pad, fader, blackout] finit désarmé.
-- [ ] Fader maître à 127 au branchement : luminosité inchangée.
-- [ ] La luminosité issue du MIDI ne dépasse jamais le maximum de sécurité.
+- [x] Par défaut, aucune combinaison MIDI ne peut armer le laser (test exhaustif sur le profil APC40).
+- [x] Option activée : Shift + Stop All tenu 1 s arme ; relâché avant 1 s ne fait rien.
+- [x] Un lot [pad, fader, blackout] finit désarmé.
+- [x] Fader maître à 127 au branchement : luminosité inchangée.
+- [x] La luminosité issue du MIDI ne dépasse jamais le maximum de sécurité.
 
 ## Tests
 - Unitaires : ordre de traitement du blackout, armement refusé par défaut, délai 1 s, garde de 5 s après branchement, bornage de luminosité, pickup forcé sur le maître.
@@ -67,3 +67,4 @@ déconnecte ». Bandeau rouge quand un contrôleur se déconnecte.
 - Règles de CLAUDE.md (sécurité laser, propriété intellectuelle).
 
 ## Journal
+- 2026-09-27 — dev-agent midi-map (branche `feat/midi-map`, avec T-202) : `studio/src/midi/safety.rs` + moteur. Blackout traité en premier dans chaque lot ; armement MIDI seulement avec `allow_arm` (faux par défaut, `devices.json`), Shift + maintien 1 s, ≥ 5 s après branchement, re-vérifié à l'échéance (seul chemin qui met `armed = true` hors UI) ; luminosité MIDI plafonnée (`BRIGHTNESS_MAX` = 1,0 en attendant T-003) et toujours en pickup ; déconnexion → `lost` + bandeau rouge, option blackout. `POST /api/midi/safety`, encadré « Sécurité » dans l'onglet Contrôleur. Test exhaustif du refus par défaut (toutes notes/CC/programmes, 16 canaux, avec/sans Shift). Reste : refus d'apprendre « armer » → T-203 ; test e2e `--midi-test` → T-209. Statut → review.
