@@ -2,7 +2,14 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (124)
+## En review (2)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-293](T-293-ui.md) | Pendant la playlist, un curseur du look renvoie l'ancien look (la scène saute) | ui | P1 | [] | fix/ui-state |
+| [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] | fix/ui-state |
+
+## À faire (122)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -56,7 +63,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
 | [T-286](T-286-infra.md) | Fichier projet `.lsproj` : ouvrir, enregistrer, récents | infra | P1 | [] |  |
 | [T-287](T-287-infra.md) | Sauvegarde automatique et récupération après plantage | infra | P1 | [T-286] |  |
-| [T-293](T-293-ui.md) | Pendant la playlist, un curseur du look renvoie l'ancien look (la scène saute) | ui | P1 | [] |  |
 | [T-011](T-011-ilda.md) | Médiathèque ILDA : import et export depuis l'interface | ilda | P2 | [T-001] |  |
 | [T-012](T-012-output.md) | Zones de projection et correction géométrique | output | P2 | [T-003] |  |
 | [T-104](T-104-cues.md) | Croisements, faisceau chaud et convergences | cues | P2 | [T-102] |  |
@@ -115,7 +121,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-285](T-285-ui.md) | Annuler / rétablir et historique des modifications | ui | P2 | [T-286] |  |
 | [T-288](T-288-infra.md) | Versions du format (migrations) et versions nommées | infra | P2 | [T-286] |  |
 | [T-289](T-289-infra.md) | Import partiel, profil de site et paquet d'export `.lspack` | infra | P2 | [T-286, T-288] |  |
-| [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] |  |
 | [T-013](T-013-midi.md) | Entrées OSC et Art-Net/DMX | midi | P3 | [] |  |
 | [T-109](T-109-output.md) | Cibles miroir : faisceaux dirigés vers des points calibrés | output | P3 | [T-003, T-100] |  |
 | [T-148](T-148-cues.md) | Pilote automatique (Virtual LJ) calé sur le tempo | cues | P3 | [T-159] |  |

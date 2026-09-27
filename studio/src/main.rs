@@ -89,6 +89,9 @@ pub struct Shared {
     pub cue_page: usize,
     /// Id of the newest playing cue, for highlighting and LED feedback.
     pub active_cue: Option<String>,
+    /// Bumped each time `settings` changes (look panel, cue, scene,
+    /// playlist, look controls), so the page reloads a look it didn't make.
+    pub settings_rev: u64,
     /// Playing cues and the grid's trigger settings (cues.rs).
     pub deck: cues::CueDeck,
     /// Whether `settings` is shown when no cue plays: on for a scene, the
@@ -165,6 +168,7 @@ fn main() -> Result<()> {
         presets,
         cue_page: 0,
         active_cue: None,
+        settings_rev: 0,
         deck: cues::CueDeck::load(cli.data_dir.join("grid.json")),
         look_on: true,
         tempo: tempo::TempoClock::default(),
@@ -309,9 +313,40 @@ fn advance_playlist(s: &mut Shared) {
     let next = s.scenes.list()[playlist.index].settings.clone();
     if s.deck.active.is_empty() {
         s.settings = next;
+        s.settings_rev += 1;
     } else {
         // Only flashes can play over the playlist (a latched cue stops it):
         // the next scene waits for them to end.
         s.deck.parked = Some(next);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenes::Scene;
+    use crate::test_support;
+    use std::time::Duration;
+
+    #[test]
+    fn the_playlist_moves_on_with_a_new_look_and_no_cue() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-playlist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = test_support::shared();
+        s.scenes = SceneStore::load_or_create(dir.join("scenes.json"));
+        for (name, scale) in [("a", 0.2), ("b", 0.4)] {
+            let settings = Settings { scale, ..Default::default() };
+            s.scenes.upsert(Scene { name: name.into(), settings, duration_secs: 1.0 }).unwrap();
+        }
+        let first = s.scenes.list()[0].settings.clone();
+        controls::show_look(&mut s, first);
+        s.playlist = Some(Playlist { index: 0, started: Instant::now() - Duration::from_secs(2) });
+        let rev = s.settings_rev;
+        advance_playlist(&mut s);
+        assert_eq!(s.playlist.as_ref().map(|p| p.index), Some(1));
+        assert_eq!(s.settings.scale, s.scenes.list()[1].settings.scale);
+        assert!(s.settings_rev > rev, "the page must reload the look");
+        assert_eq!(s.active_cue, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
