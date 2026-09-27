@@ -9,6 +9,7 @@ check what the user sees plus the studio's API (`/api/state`,
 The harness (`studio.ts`) only ever starts a **preview-only** studio:
 
 - never with `--device` (no laser output; it also checks `output` is null),
+- always with `--no-midi` (never opens the user's MIDI controller),
 - on a free port, never 8080 (the user's instance),
 - with a fresh temporary `--data-dir` per spec file, deleted afterwards —
   never the user's `studio-data/`,
