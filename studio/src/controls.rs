@@ -8,6 +8,7 @@
 
 use crate::engine::Settings;
 use crate::presets::{Preset, CATEGORIES};
+use crate::live::{LiveModifiers, ROT_PRESETS_FREE, ROT_PRESETS_SYNC, ROT_PRESET_LABELS};
 use crate::tempo;
 use crate::Shared;
 use serde::Serialize;
@@ -24,6 +25,7 @@ pub enum Unit {
     Percent,
     DegPerSec,
     Bpm,
+    Deg,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -33,6 +35,8 @@ pub enum ControlKind {
     Toggle { default: bool },
     Momentary,
     Trigger,
+    /// One of `options`; set by index (value) or spread over 0..1 (norm).
+    Choice { options: Vec<&'static str>, default: usize },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -74,9 +78,33 @@ impl ControlRegistry {
         let cont = |min: f32, max: f32, default: f32, unit: Unit| ControlKind::Continuous { min, max, default, unit };
         let d = Settings::default();
 
-        add("master.size".into(), "Taille".into(), "master", cont(0.05, 1.0, d.scale, Unit::Percent), true);
-        add("master.brightness".into(), "Luminosité".into(), "master", cont(0.0, 1.0, d.brightness, Unit::Percent), true);
-        add("master.rotation_speed".into(), "Vitesse de rotation".into(), "master", cont(-360.0, 360.0, 0.0, Unit::DegPerSec), true);
+        add("look.size".into(), "Taille du look".into(), "look", cont(0.05, 1.0, d.scale, Unit::Percent), true);
+        add("look.brightness".into(), "Luminosité du look".into(), "look", cont(0.0, 1.0, d.brightness, Unit::Percent), true);
+        add("look.rotation_speed".into(), "Rotation du look".into(), "look", cont(-360.0, 360.0, 0.0, Unit::DegPerSec), true);
+
+        let m = LiveModifiers::default();
+        add("master.brightness".into(), "Luminosité maître".into(), "master", cont(0.0, 1.0, m.brightness, Unit::Percent), true);
+        add("master.size".into(), "Taille maître".into(), "master", cont(0.0, 2.0, m.size, Unit::Percent), true);
+        add("master.size_x".into(), "Taille X".into(), "master", cont(-2.0, 2.0, m.size_x, Unit::Percent), true);
+        add("master.size_y".into(), "Taille Y".into(), "master", cont(-2.0, 2.0, m.size_y, Unit::Percent), true);
+        add("master.pos_x".into(), "Position X".into(), "master", cont(-1.0, 1.0, 0.0, Unit::None), true);
+        add("master.pos_y".into(), "Position Y".into(), "master", cont(-1.0, 1.0, 0.0, Unit::None), true);
+        for (axis, name) in ["x", "y", "z"].iter().zip(["X", "Y", "Z"]) {
+            add(format!("master.rot_{axis}.angle"), format!("Angle {name}"), "master", cont(-180.0, 180.0, 0.0, Unit::Deg), true);
+            add(format!("master.rot_{axis}.speed"), format!("Rotation {name}"), "master", cont(-720.0, 720.0, 0.0, Unit::DegPerSec), true);
+        }
+        add(
+            "master.rot.preset".into(),
+            "Vitesse de rotation".into(),
+            "master",
+            ControlKind::Choice { options: ROT_PRESET_LABELS.to_vec(), default: 0 },
+            true,
+        );
+        add("master.rot.sync".into(), "Rotation synchro tempo".into(), "master", ControlKind::Toggle { default: false }, true);
+        add("master.rot.reverse".into(), "Inverser la rotation".into(), "master", ControlKind::Momentary, true);
+        add("master.perspective".into(), "Perspective".into(), "master", cont(0.0, 1.0, m.perspective, Unit::Percent), true);
+        add("master.speed".into(), "Vitesse d'animation".into(), "master", cont(0.0, 4.0, m.speed, Unit::Percent), true);
+        add("master.reset".into(), "Réinitialiser le direct".into(), "master", ControlKind::Trigger, true);
 
         add("audio.enabled".into(), "Réagit à la musique".into(), "audio", ControlKind::Toggle { default: false }, true);
         add("audio.size".into(), "Taille suit les basses".into(), "audio", cont(0.0, 1.0, d.audio.size, Unit::Percent), true);
@@ -154,9 +182,38 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
     };
 
     match desc.id.as_str() {
-        "master.size" => s.settings.scale = value(input),
-        "master.brightness" => s.settings.brightness = value(input),
-        "master.rotation_speed" => s.settings.rotation_speed = value(input),
+        "look.size" => s.settings.scale = value(input),
+        "look.brightness" => s.settings.brightness = value(input),
+        "look.rotation_speed" => s.settings.rotation_speed = value(input),
+        "master.brightness" => set_live(s, |m| m.brightness = value(input)),
+        "master.size" => set_live(s, |m| m.size = value(input)),
+        "master.size_x" => set_live(s, |m| m.size_x = value(input)),
+        "master.size_y" => set_live(s, |m| m.size_y = value(input)),
+        "master.pos_x" => set_live(s, |m| m.pos_x = value(input)),
+        "master.pos_y" => set_live(s, |m| m.pos_y = value(input)),
+        "master.rot.preset" => {
+            let index = choice_index(&desc.kind, input);
+            set_live(s, |m| {
+                let table = if m.rot_sync { ROT_PRESETS_SYNC } else { ROT_PRESETS_FREE };
+                m.rot_speed[2] = table[index];
+            })
+        }
+        "master.rot.sync" => set_live(s, |m| {
+            // Keep the same step when switching modes (Moyen stays Moyen).
+            let on = truthy(input);
+            if on == m.rot_sync {
+                return;
+            }
+            let (from, to) = if on { (ROT_PRESETS_FREE, ROT_PRESETS_SYNC) } else { (ROT_PRESETS_SYNC, ROT_PRESETS_FREE) };
+            if let Some(i) = from.iter().position(|&v| v == m.rot_speed[2]) {
+                m.rot_speed[2] = to[i];
+            }
+            m.rot_sync = on;
+        }),
+        "master.rot.reverse" => set_live(s, |m| m.rot_reverse = truthy(input)),
+        "master.perspective" => set_live(s, |m| m.perspective = value(input)),
+        "master.speed" => set_live(s, |m| m.speed = value(input)),
+        "master.reset" => set_live(s, |m| *m = LiveModifiers::default()),
         "audio.enabled" => s.settings.audio.enabled = truthy(input),
         "audio.size" => s.settings.audio.size = value(input),
         "audio.rotate" => s.settings.audio.rotate = value(input),
@@ -188,6 +245,20 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
         "page.next" => s.cue_page = (s.cue_page + 1) % CATEGORIES.len(),
         "page.prev" => s.cue_page = (s.cue_page + CATEGORIES.len() - 1) % CATEGORIES.len(),
         other => {
+            if let Some(rest) = other.strip_prefix("master.rot_") {
+                let axis = match &rest[..1] {
+                    "x" => 0,
+                    "y" => 1,
+                    _ => 2,
+                };
+                let v = value(input);
+                if rest.ends_with(".angle") {
+                    set_live(s, |m| m.rot_angle[axis] = v);
+                } else {
+                    set_live(s, |m| m.rot_speed[axis] = v);
+                }
+                return Ok(());
+            }
             if let Some(n) = other.strip_prefix("page.").and_then(|n| n.parse::<usize>().ok()) {
                 s.cue_page = n - 1;
             } else if let Some(cell) = other.strip_prefix("grid.") {
@@ -201,14 +272,41 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
     Ok(())
 }
 
+fn set_live(s: &mut Shared, f: impl FnOnce(&mut LiveModifiers)) {
+    f(&mut s.live);
+    s.live_dirty = true;
+}
+
+fn choice_index(kind: &ControlKind, input: ControlInput) -> usize {
+    let n = match kind {
+        ControlKind::Choice { options, .. } => options.len(),
+        _ => 1,
+    };
+    let i = match input {
+        ControlInput::Value(v) => v.round().max(0.0) as usize,
+        ControlInput::Norm(x) => (x.clamp(0.0, 1.0) * n as f32) as usize,
+    };
+    i.min(n - 1)
+}
+
 /// Current value of a control, for LED feedback and UI sync. Triggers have
 /// none.
 pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
     use serde_json::json;
     Some(match desc.id.as_str() {
-        "master.size" => json!(s.settings.scale),
-        "master.brightness" => json!(s.settings.brightness),
-        "master.rotation_speed" => json!(s.settings.rotation_speed),
+        "look.size" => json!(s.settings.scale),
+        "look.brightness" => json!(s.settings.brightness),
+        "look.rotation_speed" => json!(s.settings.rotation_speed),
+        "master.brightness" => json!(s.live.brightness),
+        "master.size" => json!(s.live.size),
+        "master.size_x" => json!(s.live.size_x),
+        "master.size_y" => json!(s.live.size_y),
+        "master.pos_x" => json!(s.live.pos_x),
+        "master.pos_y" => json!(s.live.pos_y),
+        "master.rot.sync" => json!(s.live.rot_sync),
+        "master.rot.reverse" => json!(s.live.rot_reverse),
+        "master.perspective" => json!(s.live.perspective),
+        "master.speed" => json!(s.live.speed),
         "audio.enabled" => json!(s.settings.audio.enabled),
         "audio.size" => json!(s.settings.audio.size),
         "audio.rotate" => json!(s.settings.audio.rotate),
@@ -263,6 +361,7 @@ pub fn markdown(reg: &ControlRegistry) -> String {
             ControlKind::Toggle { .. } => "bascule".into(),
             ControlKind::Momentary => "momentané".into(),
             ControlKind::Trigger => "déclencheur".into(),
+            ControlKind::Choice { options, .. } => format!("choix : {}", options.join(" / ")),
         };
         out.push_str(&format!("| `{}` | {} | {} | {kind} | {} |\n", d.id, d.label_fr, d.group, if d.external { "oui" } else { "non" }));
     }
@@ -295,12 +394,32 @@ mod tests {
     }
 
     #[test]
-    fn master_size_changes_the_look() {
+    fn look_and_master_size_are_separate() {
         let mut s = shared();
-        apply(&mut s, "master.size", ControlInput::Norm(1.0), true).unwrap();
+        apply(&mut s, "look.size", ControlInput::Norm(1.0), true).unwrap();
         assert_eq!(s.settings.scale, 1.0);
+        apply(&mut s, "master.size", ControlInput::Norm(1.0), true).unwrap();
+        assert_eq!(s.live.size, 2.0);
         apply(&mut s, "live.size", ControlInput::Value(0.2), true).unwrap();
-        assert_eq!(s.settings.scale, 0.2);
+        assert_eq!(s.live.size, 0.2);
+        assert!(s.live_dirty);
+    }
+
+    #[test]
+    fn rotation_presets_and_sync_keep_the_same_step() {
+        let mut s = shared();
+        apply(&mut s, "master.rot.preset", ControlInput::Value(2.0), true).unwrap();
+        assert_eq!(s.live.rot_speed[2], ROT_PRESETS_FREE[2]);
+        apply(&mut s, "master.rot.sync", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.live.rot_speed[2], ROT_PRESETS_SYNC[2]);
+        apply(&mut s, "master.rot.sync", ControlInput::Value(0.0), true).unwrap();
+        assert_eq!(s.live.rot_speed[2], ROT_PRESETS_FREE[2]);
+        apply(&mut s, "master.rot.preset", ControlInput::Norm(1.0), true).unwrap();
+        assert_eq!(s.live.rot_speed[2], ROT_PRESETS_FREE[3]);
+        apply(&mut s, "master.rot_x.angle", ControlInput::Value(45.0), true).unwrap();
+        assert_eq!(s.live.rot_angle[0], 45.0);
+        apply(&mut s, "master.reset", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.live, LiveModifiers::default());
     }
 
     #[test]
