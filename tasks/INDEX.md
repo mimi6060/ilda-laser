@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (124)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] | feat/e2e |
+
+## À faire (127)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -16,7 +22,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-271](T-271-safety.md) | Barre du haut fixe : noir, armement, maître, tempo, état de sortie | safety | P0 | [T-270] |  |
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
 | [T-002](T-002-output.md) | Optimiseur de points (tracé laser pro) | output | P1 | [] |  |
-| [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] |  |
 | [T-100](T-100-cues.md) | Générateurs cadencés au beat (beat_pos, bpm, groupes) | cues | P1 | [T-150] |  |
 | [T-101](T-101-safety.md) | Limiteur de stroboscope et horizon appliqués à tous les looks | safety | P1 | [T-100] |  |
 | [T-102](T-102-cues.md) | Générateurs éventails : fan, balayage, levée, ouverture, vague, positions | cues | P1 | [T-100] |  |
@@ -58,6 +63,8 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
 | [T-286](T-286-infra.md) | Fichier projet `.lsproj` : ouvrir, enregistrer, récents | infra | P1 | [] |  |
 | [T-287](T-287-infra.md) | Sauvegarde automatique et récupération après plantage | infra | P1 | [T-286] |  |
+| [T-291](T-291-ui.md) | Raccourcis clavier morts après un curseur ou une case à cocher (Espace n'éteint plus) | ui | P1 | [] |  |
+| [T-293](T-293-ui.md) | Pendant la playlist, un curseur du look renvoie l'ancien look (la scène saute) | ui | P1 | [] |  |
 | [T-011](T-011-ilda.md) | Médiathèque ILDA : import et export depuis l'interface | ilda | P2 | [T-001] |  |
 | [T-012](T-012-output.md) | Zones de projection et correction géométrique | output | P2 | [T-003] |  |
 | [T-104](T-104-cues.md) | Croisements, faisceau chaud et convergences | cues | P2 | [T-102] |  |
@@ -116,6 +123,8 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-285](T-285-ui.md) | Annuler / rétablir et historique des modifications | ui | P2 | [T-286] |  |
 | [T-288](T-288-infra.md) | Versions du format (migrations) et versions nommées | infra | P2 | [T-286] |  |
 | [T-289](T-289-infra.md) | Import partiel, profil de site et paquet d'export `.lspack` | infra | P2 | [T-286, T-288] |  |
+| [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] |  |
+| [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] |  |
 | [T-013](T-013-midi.md) | Entrées OSC et Art-Net/DMX | midi | P3 | [] |  |
 | [T-109](T-109-output.md) | Cibles miroir : faisceaux dirigés vers des points calibrés | output | P3 | [T-003, T-100] |  |
 | [T-148](T-148-cues.md) | Pilote automatique (Virtual LJ) calé sur le tempo | cues | P3 | [T-159] |  |
