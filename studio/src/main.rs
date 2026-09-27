@@ -13,6 +13,7 @@ mod cues;
 mod engine;
 mod font;
 mod generators;
+mod lfo;
 mod live;
 mod midi;
 mod output;
@@ -103,6 +104,9 @@ pub struct Shared {
     pub palettes: live::PaletteStore,
     /// MIDI controllers (midi/mod.rs); not part of any saved look.
     pub midi: midi::MidiState,
+    /// Master LFO modulators (lfo.rs, lfos.json), applied every frame on
+    /// top of the stored values.
+    pub lfos: lfo::LfoStore,
 }
 
 impl Shared {
@@ -143,6 +147,8 @@ fn main() -> Result<()> {
     };
 
     let presets = presets::catalog();
+    let controls = controls::ControlRegistry::build(&presets);
+    let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
     let shared = Arc::new(Mutex::new(Shared {
         settings: Settings::default(),
         calibration: web::load_calibration(&calibration_path),
@@ -155,7 +161,7 @@ fn main() -> Result<()> {
         pps: cli.pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
         playlist: None,
-        controls: controls::ControlRegistry::build(&presets),
+        controls,
         presets,
         cue_page: 0,
         active_cue: None,
@@ -167,6 +173,7 @@ fn main() -> Result<()> {
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
         midi: midi::MidiState::new(!cli.no_midi, midi::profile::ProfileStore::load(cli.data_dir.join("midi"))),
+        lfos,
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -231,9 +238,13 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
                 AudioFeatures { beat: s.audio.beat, ..Default::default() }
             };
             let t = s.now_s();
-            live_state.set_clock(t, s.tempo.beat_at(t));
-            let looks = cues::looks(&s.deck, &s.settings, s.look_on);
-            (looks, s.calibration, audio, s.armed, s.live.clone(), s.tempo.bpm, s.tempo.beats_per_bar, s.palettes.list().to_vec())
+            let beat = s.tempo.beat_at(t);
+            live_state.set_clock(t, beat);
+            // LFOs move copies: the stored values stay the operator's base.
+            let (mut settings, mut live) = (s.settings.clone(), s.live.clone());
+            lfo::modulate(s.lfos.list(), &s.controls, &mut settings, &mut live, t, beat);
+            let looks = cues::looks(&s.deck, &settings, s.look_on);
+            (looks, s.calibration, audio, s.armed, live, s.tempo.bpm, s.tempo.beats_per_bar, s.palettes.list().to_vec())
         };
 
         live_state.advance(&live, dt, bpm, beats_per_bar);
