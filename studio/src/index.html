@@ -46,6 +46,11 @@
   .palettes .sw { display: flex; height: 10px; border-radius: 2px; overflow: hidden; margin-bottom: 3px; }
   .palettes .sw i { flex: 1; }
   .palettes .del { position: absolute; top: 0; right: 2px; color: var(--muted); }
+  .lfo { border-top: 1px solid var(--line); padding: 8px 0 4px; }
+  .lfo .row { margin-top: 6px; }
+  .lfo canvas { width: 72px; height: 30px; aspect-ratio: auto; border-radius: 4px; flex: 0 0 72px; }
+  .lfo .del { flex: 0 0 auto; padding: 4px 8px; }
+  .lfo input[type=number] { max-width: 70px; }
   button { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font: inherit; }
   button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
@@ -209,6 +214,12 @@
         <label>Chenillard</label>
         <div class="seg" id="chaseSpreads"><button data-cs="0">Tout</button><button data-cs="1">Par trait</button><button data-cs="2">Par point</button></div>
       </div>
+    </section>
+
+    <section>
+      <h2>Modulateurs <button id="lfoAdd" title="Ajouter un modulateur (LFO calé sur le tempo)" style="padding:4px 8px;font-size:11px">+ Modulateur</button></h2>
+      <div id="lfoList"></div>
+      <div class="hint" id="lfoHint">Un modulateur fait osciller un réglage autour de sa valeur, calé sur le tempo.</div>
     </section>
 
     <section>
@@ -483,6 +494,7 @@ async function previewLoop() {
     highlightPlaylist(f.playlist);
     showTempo(f.tempo);
     showLive(f.live);
+    showLfos(f.lfos);
     // Follow page changes made elsewhere (MIDI controller, API) - only
     // when the server's value changes, so a tab click that the server
     // hasn't processed yet isn't undone by an older frame.
@@ -853,6 +865,89 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   grid_scan: 'Grille de balayage', sine_stack: 'Oscillateurs', helix: 'Hélice', pulse_rings: 'Anneaux pulsés',
   spectrum: 'Spectre audio', clock: 'Horloge', vortex: 'Vortex', flower: 'Fleur' };
 
+// ---------- LFO modulators ----------
+const LFO_WAVES = [['sine', 'Sinus'], ['triangle', 'Triangle'], ['square', 'Carré'], ['saw_up', 'Dent de scie ↗'],
+  ['saw_down', 'Dent de scie ↘'], ['random', 'Aléatoire']];
+const LFO_PERIODS = [[0.25, '1/4 temps'], [0.5, '1/2 temps'], [1, '1 temps'], [2, '2 temps'], [4, '4 temps'], [8, '8 temps'], [16, '16 temps']];
+let lfos = [], lfoTargets = [], lfoMax = 16;
+const lfoEsc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const lfoShape = (wave, p) => ({ sine: Math.sin(2 * Math.PI * p), triangle: p < 0.25 ? 4 * p : p < 0.75 ? 2 - 4 * p : 4 * p - 4,
+  square: p < 0.5 ? 1 : -1, saw_up: 2 * p - 1, saw_down: 1 - 2 * p, random: 0 })[wave];
+async function loadLfos() {
+  const r = await (await fetch('/api/lfos')).json();
+  lfos = r.lfos; lfoTargets = r.targets; lfoMax = r.max;
+  renderLfos();
+}
+async function saveLfos() {
+  if (!await post('/api/lfos', lfos)) await loadLfos();
+}
+function renderLfos() {
+  const opts = (list, sel) => list.map(([v, t]) => `<option value="${v}"${String(v) === String(sel) ? ' selected' : ''}>${lfoEsc(t)}</option>`).join('');
+  $('lfoList').innerHTML = lfos.map((m, i) => {
+    const period = m.rate.beats !== undefined ? m.rate.beats : 'hz';
+    return `<div class="lfo" data-i="${i}">
+      <div class="row"><canvas width="144" height="60" data-graph="${i}"></canvas>
+        <select data-f="target" title="Cible">${opts(lfoTargets.map(t => [t.id, t.label]), m.target)}</select>
+        <button class="del" data-del="${i}" title="Supprimer ce modulateur">×</button></div>
+      <div class="row"><select data-f="wave" title="Forme">${opts(LFO_WAVES, m.wave)}</select>
+        <select data-f="period" title="Période">${opts([...LFO_PERIODS, ['hz', 'Hz (libre)']], period)}</select>
+        ${period === 'hz' ? `<input type="number" data-f="hz" min="0" max="20" step="0.05" value="${m.rate.hz}" title="Fréquence (Hz)">` : ''}</div>
+      <label>Profondeur <span class="v">${Math.round(m.depth * 100)} %</span></label>
+      <input type="range" data-f="depth" min="0" max="100" value="${Math.round(m.depth * 100)}">
+      <label>Phase <span class="v">${Math.round(m.phase * 360)}°</span></label>
+      <input type="range" data-f="phase" min="0" max="99" value="${Math.round(m.phase * 100)}">
+      <label class="check" style="justify-content:flex-start"><input type="checkbox" data-f="enabled"${m.enabled ? ' checked' : ''}> Actif</label>
+    </div>`;
+  }).join('');
+  $('lfoAdd').disabled = lfos.length >= lfoMax;
+  $('lfoHint').style.display = lfos.length ? 'none' : '';
+}
+$('lfoAdd').addEventListener('click', () => {
+  if (lfos.length >= lfoMax) return;
+  lfos.push({ target: 'master.size', wave: 'sine', rate: { beats: 4 }, depth: 0.5, phase: 0, offset: 0, enabled: true });
+  renderLfos(); saveLfos();
+});
+$('lfoList').addEventListener('click', e => {
+  const del = e.target.dataset.del;
+  if (del === undefined) return;
+  lfos.splice(+del, 1); renderLfos(); saveLfos();
+});
+function lfoEdit(e, final) {
+  const f = e.target.dataset.f, box = e.target.closest('.lfo');
+  if (!f || !box) return;
+  const m = lfos[+box.dataset.i], v = e.target.value;
+  if (f === 'target' || f === 'wave') m[f] = v;
+  else if (f === 'period') m.rate = v === 'hz' ? { hz: 1 } : { beats: +v };
+  else if (f === 'hz') m.rate = { hz: Math.min(20, Math.max(0, +v || 0)) };
+  else if (f === 'depth' || f === 'phase') {
+    m[f] = +v / 100;
+    e.target.previousElementSibling.querySelector('.v').textContent = f === 'depth' ? Math.round(m.depth * 100) + ' %' : Math.round(m.phase * 360) + '°';
+  }
+  else if (f === 'enabled') m.enabled = e.target.checked;
+  if (final && (f === 'period' || f === 'target')) renderLfos();
+  saveLfos();
+}
+// Sliders and the Hz field send while moving; menus and the checkbox on change.
+$('lfoList').addEventListener('input', e => { if (e.target.type === 'range' || e.target.type === 'number') lfoEdit(e, false); });
+$('lfoList').addEventListener('change', e => { if (e.target.type !== 'range' && e.target.type !== 'number') lfoEdit(e, true); });
+// Mini graph: one cycle of the wave, and a dot where the modulator is now.
+function showLfos(pos) {
+  if (!pos) return;
+  document.querySelectorAll('#lfoList canvas').forEach(c => {
+    const i = +c.dataset.graph, m = lfos[i], at = pos[i];
+    if (!m || !at) return;
+    const g = c.getContext('2d'), w = c.width, h = c.height, y = v => h / 2 - v * (h / 2 - 5);
+    g.clearRect(0, 0, w, h);
+    g.strokeStyle = m.enabled ? '#3ddc84' : '#8b929c'; g.lineWidth = 2; g.beginPath();
+    for (let x = 0; x <= w; x++) {
+      const p = x / w, v = m.wave === 'random' ? (Math.floor(p * 4) % 2 ? 0.6 : -0.4) : lfoShape(m.wave, p);
+      x ? g.lineTo(x, y(v)) : g.moveTo(x, y(v));
+    }
+    g.stroke();
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(at.phase * w, y(at.value), 4, 0, 2 * Math.PI); g.fill();
+  });
+}
+
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
@@ -878,7 +973,7 @@ for (const [el, id] of [['scale', 'look.size'], ['bright', 'look.brightness'], [
   ['aColor', 'audio.color_on_beat']]) $(el).title = id;
 $('armBtn').title += ' · transport.arm';
 
-loadState().then(loadPresets).then(loadPalettes).then(previewLoop);
+loadState().then(loadPresets).then(loadPalettes).then(loadLfos).then(previewLoop);
 </script>
 </body>
 </html>

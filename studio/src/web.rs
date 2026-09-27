@@ -202,6 +202,29 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             },
             Err(e) => e,
         },
+        (Method::Get, "/api/lfos") => {
+            let s = shared.lock().unwrap();
+            let targets: Vec<_> = s
+                .controls
+                .list()
+                .iter()
+                .filter_map(|d| {
+                    let (min, max) = crate::lfo::modulatable(&s.controls, &d.id)?;
+                    Some(json!({ "id": d.id, "label": d.label_fr, "group": d.group, "min": min, "max": max }))
+                })
+                .collect();
+            json_response(json!({ "lfos": s.lfos.list(), "targets": targets, "max": crate::lfo::MAX_MODULATORS }))
+        }
+        (Method::Post, "/api/lfos") => match body::<Vec<crate::lfo::Modulator>>(request) {
+            Ok(list) => {
+                let s = &mut *shared.lock().unwrap();
+                match s.lfos.set(list, &s.controls) {
+                    Ok(()) => ok(),
+                    Err(e) => text(400, &e.to_string()),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/controls") => json_response(json!(shared.lock().unwrap().controls.list())),
         (Method::Get, "/api/control-values") => {
             let s = shared.lock().unwrap();
@@ -343,7 +366,16 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         },
         "tempo": s.tempo.state(s.now_s()),
         "live": s.live,
+        "lfos": lfo_positions(&s),
     }))
+}
+
+/// Where each modulator is in its cycle and its wave value, for the UI's
+/// animated mini graphs.
+fn lfo_positions(s: &Shared) -> Vec<serde_json::Value> {
+    let t = s.now_s();
+    let beat = s.tempo.beat_at(t);
+    s.lfos.list().iter().map(|m| json!({ "phase": m.position(t, beat).1, "value": m.wave_at(t, beat) })).collect()
 }
 
 fn body<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T, HttpResponse> {
