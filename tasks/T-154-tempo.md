@@ -39,3 +39,4 @@ Licences : voir docs/research/pro-live-operation.md §4. Règles de CLAUDE.md : 
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — architecte : l'utilisateur confirme un usage **non commercial**. Décision : Ableton Link (GPLv2+) est autorisé, mais **uniquement derrière une feature Cargo optionnelle `ableton-link`, désactivée par défaut**. Raison : le SDK ShowNET de Laserworld (T-015) sera propriétaire et sous NDA, et un binaire qui contient à la fois du code GPL et ce SDK ne peut pas être distribué. Les deux ne doivent jamais être activés dans le même build distribué ; le documenter dans le README.
