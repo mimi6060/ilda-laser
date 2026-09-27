@@ -87,6 +87,8 @@ pub struct Shared {
     /// Master live modifiers (live.rs), saved to live.json when changed.
     pub live: live::LiveModifiers,
     pub live_dirty: bool,
+    /// User colour palettes (palettes.json).
+    pub palettes: live::PaletteStore,
 }
 
 impl Shared {
@@ -147,6 +149,7 @@ fn main() -> Result<()> {
         epoch: Instant::now(),
         live: load_json(&live_path),
         live_dirty: false,
+        palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -183,7 +186,7 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (settings, calibration, audio, armed, live, bpm, beats_per_bar) = {
+        let (settings, calibration, audio, armed, live, bpm, beats_per_bar, user_palettes) = {
             let mut s = shared.lock().unwrap();
             frames_since_save += 1;
             if s.live_dirty && frames_since_save >= 60 {
@@ -198,12 +201,14 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
             } else {
                 AudioFeatures { beat: s.audio.beat, ..Default::default() }
             };
-            (s.settings.clone(), s.calibration, audio, s.armed, s.live.clone(), s.tempo.bpm, s.tempo.beats_per_bar)
+            let t = s.now_s();
+            live_state.set_clock(t, s.tempo.beat_at(t));
+            (s.settings.clone(), s.calibration, audio, s.armed, s.live.clone(), s.tempo.bpm, s.tempo.beats_per_bar, s.palettes.list().to_vec())
         };
 
         live_state.advance(&live, dt, bpm, beats_per_bar);
         let look = animator.render(&settings, audio, dt * live.speed.clamp(0.0, 4.0));
-        let frame: Vec<Point> = live::apply(&look, &live, &live_state)
+        let frame: Vec<Point> = live::apply(&look, &live, &live_state, &user_palettes)
             .into_iter()
             .map(|p| {
                 let (x, y) = calibration.apply(p.x, p.y);
