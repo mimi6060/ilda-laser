@@ -1,7 +1,8 @@
 // Test harness: starts a throw-away, preview-only Laser Studio.
 //
-// Safety (CLAUDE.md): the studio is never started with --device, never on
-// port 8080 (the user's instance) and never with the user's studio-data/.
+// Safety (CLAUDE.md): the studio is never started with --device, always
+// with --no-midi (never grab the user's controller), never on port 8080
+// (the user's instance) and never with the user's studio-data/.
 // Each spec file gets a fresh temporary --data-dir, deleted afterwards.
 
 import { test as base, expect, type Page } from '@playwright/test';
@@ -49,9 +50,10 @@ export class Studio {
   async start() {
     this.dataDir ||= mkdtempSync(path.join(tmpdir(), 'laser-studio-e2e-'));
     this.port = await freePort();
-    // Deliberately no --device: preview only, no laser output.
-    const args = ['--port', String(this.port), '--data-dir', this.dataDir];
-    if (args.includes('--device') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
+    // Deliberately no --device: preview only, no laser output. --no-midi so
+    // a test never opens the user's MIDI controller.
+    const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi'];
+    if (args.includes('--device') || !args.includes('--no-midi') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc.stdout!.on('data', d => { this.log += d; });
     this.proc.stderr!.on('data', d => { this.log += d; });

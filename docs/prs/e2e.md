@@ -10,7 +10,8 @@ against a real studio and asserts on what the user sees plus
 - `studio.ts` — the harness. `global-setup.ts` runs
   `cargo build -p laser-studio`; each spec file then starts
   `target/debug/laser-studio` on a free port (never 8080) with a fresh
-  temporary `--data-dir` (deleted afterwards), **never `--device`**, and
+  temporary `--data-dir` (deleted afterwards), **never `--device`**, always
+  `--no-midi` (the MIDI support from T-200 stays off), and
   checks the instance reports no output and starts disarmed. It is stopped
   with SIGINT (the studio's Ctrl+C path), SIGKILL after 5 s. `restart()`
   keeps the data dir to test persistence.
@@ -67,7 +68,7 @@ See `studio/e2e/README.md` for single files, `--headed`, traces.
 - Flakiness check: `--repeat-each 5` → 245 passed, 0 failed.
 - Each `test.fixme` was run as `test.fail` to confirm it reproduces the
   bug (T-290 5/5 with a slowed `/api/arm`).
-- `cargo test -p laser-studio`: 71 passed.
+- `cargo test -p laser-studio`: 150 passed (develop at cd0979b, with MIDI).
 - No temp data dir or studio process left behind after a run.
 
 ## Bugs found
