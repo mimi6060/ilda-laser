@@ -335,6 +335,9 @@ async function previewLoop() {
     $('stFps').textContent = n ? fps.toFixed(1) : '–';
     $('stFps').classList.toggle('bad', n && fps < 15);
     highlightPlaylist(f.playlist);
+    // Follow page and cue changes made elsewhere (MIDI controller, API).
+    const page = cueCategories[f.cue_page];
+    if (page && (page !== cuePage || f.active_cue !== activeCue)) { cuePage = page; activeCue = f.active_cue; renderCues(); }
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -467,7 +470,7 @@ function renderCues() {
     const b = document.createElement('button');
     const n = presets.filter(p => p.category === c).length;
     b.textContent = `${c} (${n})`; b.classList.toggle('active', c === cuePage);
-    b.onclick = () => { cuePage = c; renderCues(); };
+    b.onclick = () => { cuePage = c; renderCues(); post('/api/control', { id: 'page.' + (cueCategories.indexOf(c) + 1) }); };
     $('cueTabs').appendChild(b);
   }
   $('cues').innerHTML = '';
@@ -475,6 +478,7 @@ function renderCues() {
     const b = document.createElement('button');
     b.className = 'cue' + (p.id === activeCue ? ' active' : '');
     b.dataset.id = p.id;
+    if (i < 40) b.title = `grid.${cueCategories.indexOf(cuePage) + 1}.${Math.floor(i / 8) + 1}.${i % 8 + 1}`;
     b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><span class="n"></span>`;
     b.querySelector('.n').textContent = p.name;
     b.onclick = () => playCue(p.id);
@@ -512,6 +516,12 @@ async function loadState() {
   }
   showSettings(); showCalibration(); showArmed(); renderScenes();
 }
+
+// Tooltips show each control's stable id, to help with MIDI mapping.
+for (const [el, id] of [['scale', 'master.size'], ['bright', 'master.brightness'], ['rot', 'master.rotation_speed'],
+  ['aOn', 'audio.enabled'], ['aSize', 'audio.size'], ['aRot', 'audio.rotate'], ['aFlash', 'audio.flash'],
+  ['aColor', 'audio.color_on_beat']]) $(el).title = id;
+$('armBtn').title += ' · transport.arm';
 
 loadState().then(loadPresets).then(previewLoop);
 </script>
