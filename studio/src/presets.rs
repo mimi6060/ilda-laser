@@ -58,7 +58,7 @@ impl Builder {
     #[allow(clippy::too_many_arguments)]
     fn generator(&mut self, category: &'static str, label: &str, generator: &str, count: u32, a: f32, b: f32, look: Look, scale: f32) {
         let Look(color_name, color, color_mode, color2) = look;
-        let params = GenParams { count, a, b, speed: 1.0, color_mode, color2 };
+        let params = GenParams { count, a, b, speed: 1.0, color_mode, color2, ..GenParams::default() };
         let settings = Settings {
             content: Content::Generator { generator: generator.to_string(), params },
             color,
@@ -239,7 +239,7 @@ fn slug(category: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{Animator, AudioFeatures};
+    use crate::engine::{Animator, AudioFeatures, BeatClock};
     use std::collections::HashSet;
 
     #[test]
@@ -263,11 +263,48 @@ mod tests {
     fn every_cue_renders_something_within_budget() {
         for p in catalog() {
             let mut a = Animator::default();
-            let pts = a.render(&p.settings, AudioFeatures { level: 0.5, bass: 0.5, beat: 1 }, 1.0 / 60.0);
+            let pts = a.render(&p.settings, AudioFeatures { level: 0.5, bass: 0.5, beat: 1 }, 1.0 / 60.0, &BeatClock::default());
             assert!(pts.iter().any(|q| q.is_lit()), "cue '{}' ({}) is dark", p.name, p.id);
             assert!(pts.len() <= 4000, "cue '{}' makes {} points", p.name, pts.len());
         }
     }
+
+    /// FNV-1a over values rounded to 1e-3, so libm last-bit differences
+    /// between platforms don't matter but any real change does.
+    fn digest(values: impl Iterator<Item = f32>) -> u64 {
+        values.fold(0xcbf2_9ce4_8422_2325u64, |h, v| {
+            let q = (v * 1000.0).round() as i64 as u64;
+            (h ^ q).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    #[test]
+    fn cue_frames_are_unchanged() {
+        // Golden digest of every cue's 30th frame (clock cues excluded: they
+        // show the system time), taken before the beat-synced generator work.
+        let mut values = Vec::new();
+        for p in catalog() {
+            if matches!(&p.settings.content, Content::Generator { generator, .. } if generator == "clock") {
+                continue;
+            }
+            let mut a = Animator::default();
+            let mut pts = Vec::new();
+            for i in 0..30u64 {
+                pts = a.render(&p.settings, AudioFeatures { level: 0.4, bass: 0.3, beat: i / 10 }, 1.0 / 60.0, &BeatClock::default());
+            }
+            values.extend(pts.iter().flat_map(|q| [q.x, q.y, q.r, q.g, q.b]));
+        }
+        assert_eq!(digest(values.into_iter()), GOLDEN_FRAMES);
+    }
+
+    #[test]
+    fn cue_ids_are_unchanged() {
+        let ids: String = catalog().iter().map(|p| format!("{}|", p.id)).collect();
+        assert_eq!(digest(ids.bytes().map(|b| b as f32)), GOLDEN_IDS);
+    }
+
+    const GOLDEN_FRAMES: u64 = 5_542_766_730_402_865_477;
+    const GOLDEN_IDS: u64 = 1_416_572_363_121_705_351;
 
     #[test]
     fn ids_are_stable_slugs() {

@@ -508,14 +508,14 @@ fn recolor(points: &mut [Point], c: &ColorOverride, st: &LiveState, user: &[Pale
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{Animator, AudioFeatures};
+    use crate::engine::{Animator, AudioFeatures, BeatClock};
     use crate::presets::catalog;
 
     #[test]
     fn default_modifiers_change_nothing() {
         let cues = catalog();
         for p in cues.iter().step_by(40).take(5) {
-            let frame = Animator::default().render(&p.settings, AudioFeatures::default(), 1.0 / 60.0);
+            let frame = Animator::default().render(&p.settings, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default());
             assert_eq!(apply(&frame, &LiveModifiers::default(), &LiveState::default(), &[]), frame, "cue {}", p.id);
         }
     }
@@ -622,7 +622,7 @@ mod tests {
             ..Default::default()
         };
         for p in catalog().iter().step_by(40).take(5) {
-            let frame = Animator::default().render(&p.settings, AudioFeatures::default(), 1.0 / 60.0);
+            let frame = Animator::default().render(&p.settings, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default());
             let out = apply(&frame, &m, &LiveState::default(), &[]);
             let bits = |f: &[Point]| f.iter().flat_map(|p| [p.x, p.y, p.r, p.g, p.b].map(f32::to_bits)).collect::<Vec<_>>();
             assert_eq!(bits(&out), bits(&frame), "cue {}", p.id);
