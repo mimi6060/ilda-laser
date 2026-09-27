@@ -2,12 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (79)
+## À faire (95)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] |  |
 | [T-208](T-208-safety.md) | Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur) | safety | P0 | [T-202] |  |
+| [T-245](T-245-safety.md) | Sécurité de la réactivité audio (limiteur, péremption, silence, pas d'armement) | safety | P0 | [T-237, T-101] |  |
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
 | [T-002](T-002-output.md) | Optimiseur de points (tracé laser pro) | output | P1 | [] |  |
 | [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] |  |
@@ -22,7 +23,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-140](T-140-live.md) | Étage de modificateurs en direct maître (géométrie, luminosité, vitesse) | live | P1 | [T-145] |  |
 | [T-141](T-141-live.md) | Couleur en direct : fixe, teinte, palette, arc-en-ciel, chenillard | live | P1 | [T-140, T-150] |  |
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
-| [T-150](T-150-tempo.md) | Moteur de tempo : BPM, tap, resync, phase temps/mesure | tempo | P1 | [] |  |
 | [T-151](T-151-tempo.md) | Modulateurs LFO synchronisés au tempo sur n'importe quel contrôle | tempo | P1 | [T-150, T-145] |  |
 | [T-155](T-155-cues.md) | Modes de déclenchement des cues, groupes exclusifs, limiteur | cues | P1 | [T-145] |  |
 | [T-156](T-156-cues.md) | Quatre calques avec gradateur, muet/solo et budget de points | cues | P1 | [T-155, T-140] |  |
@@ -35,6 +35,14 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-205](T-205-midi.md) | Retour LED sur l'APC40 (cue active, page, calques, battement) | midi | P1 | [T-201, T-204, T-150] |  |
 | [T-209](T-209-qa.md) | Tests MIDI sans matériel (APC40 simulé, ports virtuels, injection e2e) | qa | P1 | [T-200] |  |
 | [T-211](T-211-midi.md) | Contrôleurs MIDI génériques (n'importe quel appareil) | midi | P1 | [T-200, T-201, T-202, T-203] |  |
+| [T-230](T-230-infra.md) | Capture audio native (cpal, CoreAudio) sur un fil dédié | infra | P1 | [] |  |
+| [T-231](T-231-tempo.md) | Analyse spectrale : 5 bandes, niveaux dBFS et gain automatique | tempo | P1 | [T-230] |  |
+| [T-232](T-232-tempo.md) | Fonction d'onsets (flux spectral) et détection kick / caisse claire / charleston | tempo | P1 | [T-231] |  |
+| [T-233](T-233-tempo.md) | Estimation du BPM et suivi des temps (autocorrélation, peigne, programmation dynamique) avec confiance | tempo | P1 | [T-232, T-150] |  |
+| [T-234](T-234-tempo.md) | Brancher la détection sur l'horloge de tempo : verrouillage, maintien, tap prioritaire, recalage de phase | tempo | P1 | [T-233, T-150] |  |
+| [T-237](T-237-live.md) | AudioFeatures v2 : instantané complet côté moteur et dans /api/state | live | P1 | [T-231] |  |
+| [T-238](T-238-live.md) | Conditionnement des signaux audio : seuil, courbe, attaque/relâche, enveloppes en temps musicaux | live | P1 | [T-237, T-150] |  |
+| [T-244](T-244-qa.md) | Banc d'essai de l'analyse audio : signaux synthétiques, corpus annoté, métriques, latence | qa | P1 | [T-231] |  |
 | [T-011](T-011-ilda.md) | Médiathèque ILDA : import et export depuis l'interface | ilda | P2 | [T-001] |  |
 | [T-012](T-012-output.md) | Zones de projection et correction géométrique | output | P2 | [T-003] |  |
 | [T-104](T-104-cues.md) | Croisements, faisceau chaud et convergences | cues | P2 | [T-102] |  |
@@ -75,6 +83,13 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-171](T-171-output.md) | Budget de points, vitesse de balayage et minimum de points par sortie | output | P2 | [T-002] |  |
 | [T-206](T-206-midi.md) | Couleurs RGB des pads sur l'APC40 mkII (couleur de la cue, pulsation) | midi | P2 | [T-205] |  |
 | [T-210](T-210-ui.md) | APC40 virtuel à l'écran (disposition, affectations, état des LED) | ui | P2 | [T-203, T-204, T-205] |  |
+| [T-235](T-235-tempo.md) | Détection du temps fort (début de mesure) et des phrases de 8/16 mesures | tempo | P2 | [T-234, T-236] |  |
+| [T-236](T-236-tempo.md) | Détection montée / drop / break et silence (sections musicales) | tempo | P2 | [T-231, T-232] |  |
+| [T-239](T-239-live.md) | Préréglages de réactivité audio (correspondances bandes → paramètres laser) | live | P2 | [T-153, T-238] |  |
+| [T-240](T-240-cues.md) | Déclencheurs sur événements audio (kick, drop, break → cues) | cues | P2 | [T-232, T-236, T-155] |  |
+| [T-242](T-242-ui.md) | Permission micro macOS et diagnostic de l'entrée audio | ui | P2 | [T-230] |  |
+| [T-243](T-243-ui.md) | Panneau « Musique » v2 : bandes, spectre, onsets, tempo détecté, section | ui | P2 | [T-237, T-233, T-236] |  |
+| [T-246](T-246-tempo.md) | Compensation de latence : décalage de sortie réglable et temps prédits | tempo | P2 | [T-234] |  |
 | [T-013](T-013-midi.md) | Entrées OSC et Art-Net/DMX | midi | P3 | [] |  |
 | [T-109](T-109-output.md) | Cibles miroir : faisceaux dirigés vers des points calibrés | output | P3 | [T-003, T-100] |  |
 | [T-148](T-148-cues.md) | Pilote automatique (Virtual LJ) calé sur le tempo | cues | P3 | [T-159] |  |
@@ -85,6 +100,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-169](T-169-timeline.md) | Enregistrer le jeu en direct dans la timeline | timeline | P3 | [T-160, T-145] |  |
 | [T-170](T-170-output.md) | Groupes de projecteurs et chenillard entre zones | output | P3 | [T-012, T-150] |  |
 | [T-207](T-207-midi.md) | Horloge MIDI (entrée pour caler le BPM, sortie vers l'APC40 mkII) | tempo | P3 | [T-200, T-150] |  |
+| [T-241](T-241-infra.md) | Capturer le son du Mac lui-même (BlackHole documenté, puis capture système optionnelle) | infra | P3 | [T-230] |  |
 
 ## Bloqué (1)
 
@@ -92,9 +108,10 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 |---|---|---|---|---|---|
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 
-## Fait (2)
+## Fait (3)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-005](T-005-cues.md) | Bibliothèque de 202 cues procéduraux | cues | P1 | [] | feat/presets |
 | [T-145](T-145-live.md) | Identifiants de contrôle stables (registre des contrôles) | live | P1 | [] | feat/controls |
+| [T-150](T-150-tempo.md) | Moteur de tempo : BPM, tap, resync, phase temps/mesure | tempo | P1 | [] | feat/tempo |

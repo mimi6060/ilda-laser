@@ -1,12 +1,12 @@
 ---
 id: T-150
 title: Moteur de tempo : BPM, tap, resync, phase temps/mesure
-status: todo
+status: done
 area: tempo
 priority: P1
 depends_on: []
-owner: ""
-branch: ""
+owner: "architecte"
+branch: "feat/tempo"
 source: docs/research/pro-live-operation.md §4 et §6 (D)
 ---
 
@@ -43,12 +43,12 @@ impl TempoClock { fn beat_at(&self, t: f64) -> f64; fn set_bpm(&mut self, bpm: f
 Barre « Tempo » en haut : BPM en grand (éditable), 4 voyants de temps (le 1 plus visible), boutons *Tap* (touche Entrée), *Resync* (touche ⌫), *÷2*, *×2*, *◀* / *▶* (nudge). Touches lues via `e.code` (indépendant AZERTY/QWERTY). Espace et Échap restent réservés à la sécurité ; les lettres restent des cues.
 
 ## Critères d'acceptation
-- [ ] 4 taps réguliers à 500 ms donnent 120,0 BPM (±0,1)
-- [ ] Un tap isolé après 3 s de silence ne change pas le BPM
-- [ ] Changer le BPM de 120 à 128 ne fait pas sauter `beat_at(now)` (écart < 1e-6)
-- [ ] Après Resync, `beat_in_bar` vaut 0 à l'instant du resync
-- [ ] Pas de dérive : après 1 h simulée à 128 BPM, `beat_at` = 7680,000 exactement (±1e-6)
-- [ ] Entrée et ⌫ n'agissent pas quand le focus est dans un champ texte
+- [x] 4 taps réguliers à 500 ms donnent 120,0 BPM (±0,1)
+- [x] Un tap isolé après 3 s de silence ne change pas le BPM
+- [x] Changer le BPM de 120 à 128 ne fait pas sauter `beat_at(now)` (écart < 1e-6)
+- [x] Après Resync, `beat_in_bar` vaut 0 à l'instant du resync
+- [x] Pas de dérive : après 1 h simulée à 128 BPM, `beat_at` = 7680,000 exactement (±1e-6)
+- [x] Entrée et ⌫ n'agissent pas quand le focus est dans un champ texte
 
 ## Tests
 Unitaires sur `TempoClock` avec temps simulé (tap, médiane, bornes, continuité, resync, nudge). e2e : 4 appuis sur Entrée → `/api/state.tempo.bpm` proche du rythme tapé.
@@ -58,3 +58,4 @@ Une seule horloge dans l'appli : T-100 prévoit une horloge provisoire pour `Gen
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — architecte : implémenté sur feat/tempo (62 tests, clippy propre), fusionné dans develop. e2e Playwright à ajouter avec T-004. Voir docs/prs/tempo.md.
