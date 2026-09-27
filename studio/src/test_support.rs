@@ -27,6 +27,7 @@ pub fn shared() -> Shared {
         presets,
         cue_page: 0,
         active_cue: None,
+        settings_rev: 0,
         deck: cues::CueDeck::default(),
         look_on: true,
         tempo: tempo::TempoClock::default(),
