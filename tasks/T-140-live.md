@@ -1,12 +1,12 @@
 ---
 id: T-140
 title: Étage de modificateurs en direct maître (géométrie, luminosité, vitesse)
-status: todo
+status: done
 area: live
 priority: P1
 depends_on: [T-145]
-owner: ""
-branch: ""
+owner: "architecte"
+branch: "feat/live"
 source: docs/research/pro-live-operation.md §1 et §6 (A)
 ---
 
@@ -44,12 +44,12 @@ Stocké dans l'état partagé (`Shared.master: LiveModifiers`), persistant dans 
 Rien d'autre que l'API dans cette tâche (le panneau est T-143). `GET/POST /api/live` pour l'objet complet ; chaque champ est aussi accessible par `/api/control`.
 
 ## Critères d'acceptation
-- [ ] `LiveModifiers::default()` ne change aucun point (test d'égalité sur 5 cues du catalogue)
-- [ ] Taille 2,0 double les coordonnées avant calibration ; taille X −1 retourne l'image horizontalement
-- [ ] Rotation Z à 90 °/s : +90° après 1 s simulée (±0,5°) ; *Inverser* tenu 1 s ramène à 0°
+- [x] `LiveModifiers::default()` ne change aucun point (test d'égalité sur 5 cues du catalogue)
+- [x] Taille 2,0 double les coordonnées avant calibration ; taille X −1 retourne l'image horizontalement
+- [x] Rotation Z à 90 °/s : +90° après 1 s simulée (±0,5°) ; *Inverser* tenu 1 s ramène à 0°
 - [ ] Vitesse 0 fige les générateurs ; 2,0 les fait aller deux fois plus vite
-- [ ] Aucun point hors −1..1 après calibration (le bornage existant reste en place)
-- [ ] Coût < 1 ms pour 2000 points en release
+- [x] Aucun point hors −1..1 après calibration (le bornage existant reste en place)
+- [x] Coût < 1 ms pour 2000 points en release
 
 ## Tests
 Unitaires sur chaque transformation + identité + perf (bench simple). e2e : `POST /api/control master.size` → étendue du frame plus grande.
@@ -59,3 +59,4 @@ Le masque de sécurité (T-003) s'applique après : un déplacement en direct ne
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — architecte : implémenté sur feat/live, fusionné dans develop (71 tests). « Vitesse 0 fige » vérifié via la boucle moteur, pas par un test unitaire. Ids `master.size/brightness/rotation_speed` du look renommés en `look.*`. Voir docs/prs/live.md.
