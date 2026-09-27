@@ -1,12 +1,12 @@
 ---
 id: T-145
 title: Identifiants de contrôle stables (registre des contrôles)
-status: todo
+status: done
 area: live
 priority: P1
 depends_on: []
-owner: ""
-branch: ""
+owner: "architecte"
+branch: "feat/controls"
 source: docs/research/pro-live-operation.md §6 (F)
 ---
 
@@ -52,11 +52,11 @@ pub struct ControlRegistry { descs: Vec<ControlDesc>, by_id: HashMap<String, usi
 - Dans l'interface : infobulle de chaque contrôle = son identifiant (aide au mapping MIDI).
 
 ## Critères d'acceptation
-- [ ] Chaque id est unique ; un test échoue si deux descripteurs ont le même id
-- [ ] `norm` 0 et 1 donnent exactement min et max ; les valeurs hors bornes sont bornées
-- [ ] Un id inconnu renvoie HTTP 404 avec un message clair, sans panique
-- [ ] `transport.arm` est refusé via `/api/control` tant que l'option de T-208 n'est pas activée
-- [ ] Un fichier `docs/controls.md` généré par un test (ou `--list-controls`) liste tous les ids
+- [x] Chaque id est unique ; un test échoue si deux descripteurs ont le même id
+- [x] `norm` 0 et 1 donnent exactement min et max ; les valeurs hors bornes sont bornées
+- [x] Un id inconnu renvoie HTTP 404 avec un message clair, sans panique
+- [x] `transport.arm` est refusé via `/api/control` tant que l'option de T-208 n'est pas activée
+- [x] Un fichier `docs/controls.md` généré par un test (ou `--list-controls`) liste tous les ids
 
 ## Tests
 Unitaires : unicité, conversion norm↔valeur, bornage, refus d'armer. e2e : `POST /api/control master.size` change `/api/frame`.
@@ -66,3 +66,4 @@ Les ids servent de contrat avec les agents MIDI (T-200+) : tout renommage casse 
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — architecte : implémenté sur feat/controls (205 contrôles, 52 tests, clippy propre), fusionné dans develop. Contrôles de T-140/T-141/T-150 à ajouter par ces tâches. Voir docs/prs/controls.md.

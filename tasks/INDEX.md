@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (80)
+## À faire (79)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -22,7 +22,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-140](T-140-live.md) | Étage de modificateurs en direct maître (géométrie, luminosité, vitesse) | live | P1 | [T-145] |  |
 | [T-141](T-141-live.md) | Couleur en direct : fixe, teinte, palette, arc-en-ciel, chenillard | live | P1 | [T-140, T-150] |  |
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
-| [T-145](T-145-live.md) | Identifiants de contrôle stables (registre des contrôles) | live | P1 | [] |  |
 | [T-150](T-150-tempo.md) | Moteur de tempo : BPM, tap, resync, phase temps/mesure | tempo | P1 | [] |  |
 | [T-151](T-151-tempo.md) | Modulateurs LFO synchronisés au tempo sur n'importe quel contrôle | tempo | P1 | [T-150, T-145] |  |
 | [T-155](T-155-cues.md) | Modes de déclenchement des cues, groupes exclusifs, limiteur | cues | P1 | [T-145] |  |
@@ -93,8 +92,9 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 |---|---|---|---|---|---|
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 
-## Fait (1)
+## Fait (2)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-005](T-005-cues.md) | Bibliothèque de 202 cues procéduraux | cues | P1 | [] | feat/presets |
+| [T-145](T-145-live.md) | Identifiants de contrôle stables (registre des contrôles) | live | P1 | [] | feat/controls |
