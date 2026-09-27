@@ -4,6 +4,7 @@
 //! Bound to 127.0.0.1 only: the UI can turn a laser on, so it isn't
 //! exposed to the rest of the network.
 
+use crate::controls;
 use crate::engine::{AudioFeatures, Calibration, Settings};
 use crate::generators::GENERATOR_NAMES;
 use crate::patterns::SHAPE_NAMES;
@@ -145,21 +146,38 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         }
         (Method::Post, "/api/presets/play") => match body::<IdRequest>(request) {
             Ok(req) => {
-                let mut s = shared.lock().unwrap();
-                match s.presets.iter().find(|p| p.id == req.id).map(|p| p.settings.clone()) {
-                    Some(mut settings) => {
-                        // A cue sets the look, not the operator's safety and music choices:
-                        // keep the current brightness, and the current music settings
-                        // unless the cue is built around the music.
-                        settings.brightness = s.settings.brightness;
-                        if !settings.audio.enabled {
-                            settings.audio = s.settings.audio.clone();
-                        }
-                        s.settings = settings;
-                        s.playlist = None;
-                        ok()
-                    }
-                    None => text(404, "no such preset"),
+                if controls::play_preset(&mut shared.lock().unwrap(), &req.id) {
+                    ok()
+                } else {
+                    text(404, "no such preset")
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/controls") => json_response(json!(shared.lock().unwrap().controls.list())),
+        (Method::Get, "/api/control-values") => {
+            let s = shared.lock().unwrap();
+            let values: serde_json::Map<String, serde_json::Value> = s
+                .controls
+                .list()
+                .iter()
+                .filter_map(|d| controls::current(&s, d).map(|v| (d.id.clone(), v)))
+                .collect();
+            json_response(json!({ "values": values, "cue_page": s.cue_page + 1, "active_cue": s.active_cue }))
+        }
+        (Method::Post, "/api/control") => match body::<ControlRequest>(request) {
+            Ok(req) => {
+                let input = match (req.value, req.norm) {
+                    (Some(v), _) => controls::ControlInput::Value(v.as_f32()),
+                    (None, Some(n)) => controls::ControlInput::Norm(n),
+                    (None, None) => controls::ControlInput::Value(1.0),
+                };
+                // Treated like a controller: arming stays on /api/arm (the laser
+                // button and Space), never on the generic control endpoint.
+                match controls::apply(&mut shared.lock().unwrap(), &req.id, input, true) {
+                    Ok(()) => ok(),
+                    Err(controls::ControlError::Unknown(id)) => text(404, &format!("contrôle inconnu : {id}")),
+                    Err(controls::ControlError::Refused(why)) => text(403, why),
                 }
             }
             Err(e) => e,
@@ -180,6 +198,30 @@ struct ArmRequest {
 #[derive(Deserialize)]
 struct IdRequest {
     id: String,
+}
+
+/// `value` is a number or a boolean (native units); `norm` is 0..1.
+#[derive(Deserialize)]
+struct ControlRequest {
+    id: String,
+    value: Option<NumOrBool>,
+    norm: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NumOrBool {
+    Num(f32),
+    Bool(bool),
+}
+
+impl NumOrBool {
+    fn as_f32(&self) -> f32 {
+        match *self {
+            NumOrBool::Num(v) => v,
+            NumOrBool::Bool(b) => b as u8 as f32,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -221,6 +263,8 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "output_error": s.output_error,
         "pps": s.pps,
         "playlist": s.playlist.as_ref().map(|p| p.index),
+        "cue_page": s.cue_page,
+        "active_cue": s.active_cue,
     }))
 }
 
