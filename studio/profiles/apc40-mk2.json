@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "APC40 mkII — Laser Studio",
+  "driver": "apc40mk2",
+  "match": { "port_contains": ["APC40 mkII", "APC40 MK2"], "product_id": 41 },
+  "host_mode": 65,
+  "mappings": []
+}

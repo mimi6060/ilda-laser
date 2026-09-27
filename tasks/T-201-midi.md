@@ -1,12 +1,12 @@
 ---
 id: T-201
 title: Détection des contrôleurs et profils par appareil (APC40 / APC40 mkII)
-status: todo
+status: review
 area: midi
 priority: P1
 depends_on: [T-200]
-owner: ""
-branch: ""
+owner: "dev-agent midi-core"
+branch: feat/midi-core
 source: docs/research/midi-apc40.md#25-model-detection
 ---
 
@@ -66,8 +66,8 @@ appareils MIDI avec modèle détecté, case « Activé », menu déroulant « Pr
 ## Critères d'acceptation
 - [ ] Un APC40 mkII branché est reconnu `Apc40Mk2`, reçoit l'Introduction 0x41 et ses pads cessent de s'allumer tout seuls quand on appuie.
 - [ ] Un APC40 d'origine est reconnu `Apc40` (même comportement).
-- [ ] Le choix de profil pour un port est retrouvé après redémarrage.
-- [ ] Un JSON de profil corrompu donne un message d'erreur lisible et le profil `generic`, sans panique.
+- [x] Le choix de profil pour un port est retrouvé après redémarrage.
+- [x] Un JSON de profil corrompu donne un message d'erreur lisible et le profil `generic`, sans panique.
 - [ ] À l'arrêt du studio, les LED de l'APC s'éteignent.
 
 ## Tests
@@ -80,3 +80,4 @@ appareils MIDI avec modèle détecté, case « Activé », menu déroulant « Pr
 - Règles de CLAUDE.md (sécurité laser, propriété intellectuelle).
 
 ## Journal
+- 2026-09-27 — dev-agent midi-core (feat/midi-core) : Device Inquiry (réponse ≤ 500 ms, sinon nom du port), Introduction 0x41 (mode = `host_mode` du profil), réponse 0x61 du mkII gardée dans `MidiDevice.faders`, à l'arrêt ou à la désactivation : LED éteintes puis mode 0x40. Profils intégrés `studio/profiles/*.json` (mappings vides, remplis par T-204), profils perso `<data-dir>/midi/profiles/`, `devices.json`, copie `-perso`, `GET /api/midi/profiles`, `POST /api/midi/profile`, `POST /api/midi/device`, section « Contrôleur » (modèle détecté, Activé, Profil, Réinitialiser le profil). Faux APC40 mkII sur port virtuel CoreMIDI détecté et introduit (test ignoré, vert). Non cochés : les critères qui demandent le vrai matériel (pads, LED).

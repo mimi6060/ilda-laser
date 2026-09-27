@@ -196,7 +196,22 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             shared.lock().unwrap().playlist = None;
             ok()
         }
+        (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
         _ => text(404, "not found"),
+    }
+}
+
+fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, path: &str) -> HttpResponse {
+    let mut raw = String::new();
+    if post {
+        if let Err(e) = request.as_reader().read_to_string(&mut raw) {
+            return text(400, &format!("unreadable body: {e}"));
+        }
+    }
+    match crate::midi::api::route(&mut shared.lock().unwrap(), post, path, &raw) {
+        Some(crate::midi::api::Reply::Json(v)) => json_response(v),
+        Some(crate::midi::api::Reply::Text(code, t)) => text(code, &t),
+        None => text(404, "not found"),
     }
 }
 

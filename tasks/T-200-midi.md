@@ -1,12 +1,12 @@
 ---
 id: T-200
 title: Entrée/sortie MIDI native (midir, CoreMIDI)
-status: todo
+status: review
 area: midi
 priority: P1
 depends_on: []
-owner: ""
-branch: ""
+owner: "dev-agent midi-core"
+branch: feat/midi-core
 source: docs/research/midi-apc40.md#4-architecture-native-rust-midi-vs-web-midi
 ---
 
@@ -66,9 +66,9 @@ Aucune interface pour l'instant, sauf une ligne d'état dans la barre du haut :
 ## Critères d'acceptation
 - [ ] `cargo run -p laser-studio -- --port 8090 --data-dir /tmp/studio-test` liste l'APC40 branché dans `/api/midi`.
 - [ ] Débrancher/rebrancher l'APC40 : le studio le voit repartir en ≤ 3 s, sans redémarrage ni saccade du rendu.
-- [ ] `--no-midi` : aucun port ouvert, `/api/midi` renvoie `enabled: false`.
-- [ ] Le callback midir ne prend aucun verrou (revue de code).
-- [ ] Build, tests, clippy `-D warnings` verts.
+- [x] `--no-midi` : aucun port ouvert, `/api/midi` renvoie `enabled: false`.
+- [x] Le callback midir ne prend aucun verrou (revue de code).
+- [x] Build, tests, clippy `-D warnings` verts.
 
 ## Tests
 - Unitaires sur le décodeur : Note On/Off, Note On vel 0 = Off, CC, pitch bend 14 bits, SysEx complet, octets tronqués ignorés, messages temps réel.
@@ -81,3 +81,4 @@ Aucune interface pour l'instant, sauf une ligne d'état dans la barre du haut :
 - Règles de CLAUDE.md (sécurité laser, propriété intellectuelle).
 
 ## Journal
+- 2026-09-27 — dev-agent midi-core (feat/midi-core) : module `studio/src/midi/` (décodeur pur, thread « midi », re-scan 2 s, `--no-midi`, `GET /api/midi`, ligne d'état « MIDI : … » dans la barre du haut). midir 0.11 (MIT). Frontière `Backend` : tests avec un faux CoreMIDI (branchement/débranchement, envoi, pannes) et deux tests `#[ignore]` sur ports virtuels CoreMIDI (`-- --ignored midi_virtual`, verts). 116 tests verts + 2 ignorés, clippy propre. Non cochés : les deux critères qui demandent le vrai APC40 (à valider par l'utilisateur). Voir docs/prs/midi-core.md.
