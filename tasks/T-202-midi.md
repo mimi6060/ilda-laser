@@ -1,12 +1,12 @@
 ---
 id: T-202
 title: Moteur de correspondances MIDI → contrôles (boutons, faders, encodeurs, Shift)
-status: todo
+status: done
 area: midi
 priority: P1
 depends_on: [T-200, T-201, T-145]
-owner: ""
-branch: ""
+owner: "dev-agent midi-map"
+branch: feat/midi-map
 source: docs/research/midi-apc40.md#6-midi-learn-and-mapping-storage
 ---
 
@@ -67,12 +67,12 @@ Pas d'UI propre (voir T-203). Les valeurs pilotées au MIDI bougent les
 curseurs de l'interface.
 
 ## Critères d'acceptation
-- [ ] Un CC mappé en `absolute` sur un modificateur change sa valeur dans `/api/state` dans la trame suivante.
-- [ ] Un encodeur relatif (CC `0x2F` « Cue Level ») augmente/diminue la valeur, bornée à `min..max`.
-- [ ] Avec pickup, un fader physique à 100 % alors que la valeur est à 20 % ne change rien tant qu'il ne repasse pas par 20 %.
-- [ ] Shift + bouton déclenche l'action Shift, le bouton seul l'action normale.
-- [ ] `momentary` : la cue flash s'arrête au relâchement.
-- [ ] Toutes les actions MIDI passent par la fonction commune de T-145 (revue).
+- [x] Un CC mappé en `absolute` sur un modificateur change sa valeur dans `/api/state` dans la trame suivante.
+- [x] Un encodeur relatif (CC `0x2F` « Cue Level ») augmente/diminue la valeur, bornée à `min..max`.
+- [x] Avec pickup, un fader physique à 100 % alors que la valeur est à 20 % ne change rien tant qu'il ne repasse pas par 20 %.
+- [x] Shift + bouton déclenche l'action Shift, le bouton seul l'action normale.
+- [x] `momentary` : la cue flash s'arrête au relâchement.
+- [x] Toutes les actions MIDI passent par la fonction commune de T-145 (revue).
 
 ## Tests
 - Unitaires : conversion absolute (bornes, courbe log), relative (1, 63, 64, 127), pickup (croisement vers le haut et vers le bas, seuil 3 %), Shift + repli, canal `null` vs canal fixe, coalescence de 100 CC en une écriture.
@@ -84,3 +84,5 @@ curseurs de l'interface.
 - Règles de CLAUDE.md (sécurité laser, propriété intellectuelle).
 
 ## Journal
+- 2026-09-27 — dev-agent midi-map (branche `feat/midi-map`, PR `docs/prs/midi-map.md`) : moteur dans `studio/src/midi/{mapping,engine}.rs`. Tous les modes, Shift + repli, canal `null`, pickup 3 % (positions 0x61 du mkII), encodeurs relatifs dans les 3 encodages (complément à 2 par défaut, signe binaire, offset 64 ; champ `encoding`), coalescence : écritures des faders/encodeurs appliquées une fois par trame moteur (`engine::frame`). Tout passe par `controls::apply(…, true)`. Identifiant inconnu → ignoré + avertissement dans `/api/midi.errors`. 187 tests OK (2 ignorés CoreMIDI), clippy propre. Statut → review.
+- 2026-09-27 — architecte (review) : APPROUVÉ et fusionné ; l'armement MIDI passe désormais par la porte d'interlocks (T-250) et reste bloqué par l'arrêt d'urgence.

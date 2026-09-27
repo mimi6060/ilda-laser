@@ -6,20 +6,24 @@
 //! Threads: the CoreMIDI callback only decodes bytes and pushes a
 //! `MidiEvent` into a channel (no lock). The worker thread (`worker.rs`)
 //! drains the channel, takes the `Shared` lock briefly per batch and hands
-//! every event to `handle` - the hook the mapping engine (T-202) fills. It
-//! never touches arming or the laser output.
+//! the batch to the mapping engine (`engine.rs`, T-202), which drives
+//! controls through `controls::apply(…, true)`; the engine thread flushes
+//! coalesced fader writes once per frame (`engine::frame`). Safety rules
+//! (blackout first, opt-in arming, capped brightness) are in `safety.rs`.
 
 pub mod api;
 pub mod backend;
 pub mod decode;
 pub mod detect;
+pub mod engine;
+pub mod mapping;
 pub mod profile;
+pub mod safety;
 pub mod worker;
 
 pub use decode::MidiMsg;
 pub use detect::Model;
 
-use crate::Shared;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
@@ -64,6 +68,9 @@ pub struct MidiDevice {
     /// When its input was opened (T-208: no arming in the first seconds).
     #[serde(skip)]
     pub connected_at: Option<Instant>,
+    /// Unplugged while in use: the UI shows « Contrôleur MIDI déconnecté »
+    /// until it comes back (not set when disabled by hand).
+    pub lost: bool,
 }
 
 impl MidiDevice {
@@ -80,6 +87,7 @@ impl MidiDevice {
             profile_error: None,
             faders: None,
             connected_at: None,
+            lost: false,
         }
     }
 }
@@ -113,11 +121,13 @@ pub struct MidiState {
     /// CoreMIDI-level problem (e.g. unavailable), for the UI.
     pub error: Option<String>,
     pub sender: Option<MidiSender>,
+    /// Mapping engine runtime state (Shift, held buttons, pickup…).
+    pub map: engine::MapState,
 }
 
 impl MidiState {
     pub fn new(enabled: bool, store: profile::ProfileStore) -> Self {
-        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None }
+        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default() }
     }
 
     pub fn device_mut(&mut self, name: &str) -> &mut MidiDevice {
@@ -145,11 +155,6 @@ impl MidiState {
         self.recent.push_back(event.clone());
     }
 }
-
-/// Called by the worker for every incoming event, under the `Shared` lock.
-/// T-202 (mapping engine) plugs in here, through `controls::apply(…, true)`
-/// so a controller can never arm the laser.
-pub fn handle(_s: &mut Shared, _event: &MidiEvent) {}
 
 #[cfg(test)]
 mod tests {

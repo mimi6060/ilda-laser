@@ -2,12 +2,11 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (121)
+## À faire (119)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] |  |
-| [T-208](T-208-safety.md) | Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur) | safety | P0 | [T-202] |  |
 | [T-245](T-245-safety.md) | Sécurité de la réactivité audio (limiteur, péremption, silence, pas d'armement) | safety | P0 | [T-237, T-101] |  |
 | [T-252](T-252-safety.md) | Présence opérateur — battement de l'interface et mode maintien | safety | P0 | [T-250] |  |
 | [T-254](T-254-safety.md) | Plafonds de puissance par sortie et fiche projecteur | safety | P0 | [T-250] |  |
@@ -24,7 +23,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
 | [T-156](T-156-cues.md) | Quatre calques avec gradateur, muet/solo et budget de points | cues | P1 | [T-155, T-140] |  |
 | [T-157](T-157-cues.md) | Cues évolutifs : un cue = une mini-timeline (calques internes, courbes sur modificateurs, LFO) | cues | P1 | [T-111, T-151, T-140] |  |
-| [T-202](T-202-midi.md) | Moteur de correspondances MIDI → contrôles (boutons, faders, encodeurs, Shift) | midi | P1 | [T-200, T-201, T-145] |  |
 | [T-203](T-203-midi.md) | Apprentissage MIDI (clic droit → « Apprendre MIDI ») | midi | P1 | [T-202, T-145, T-209] |  |
 | [T-204](T-204-midi.md) | Profil APC40 par défaut (disposition Laser Studio) pour APC40 et APC40 mkII | midi | P1 | [T-201, T-202, T-140, T-145, T-150, T-155, T-160, T-208, T-209] |  |
 | [T-205](T-205-midi.md) | Retour LED sur l'APC40 (cue active, page, calques, battement) | midi | P1 | [T-201, T-204, T-150] |  |
@@ -135,10 +133,11 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (15)
+## Fait (17)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
+| [T-208](T-208-safety.md) | Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur) | safety | P0 | [T-202] | feat/midi-map |
 | [T-250](T-250-safety.md) | Verrous d'armement (interlocks) et raisons de désarmement | safety | P0 | [] | feat/arming |
 | [T-251](T-251-safety.md) | Arrêt d'urgence verrouillé (clavier, bouton, API, MIDI) | safety | P0 | [T-250] | feat/arming |
 | [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] | feat/e2e |
@@ -152,5 +151,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-155](T-155-cues.md) | Modes de déclenchement des cues, groupes exclusifs, limiteur | cues | P1 | [T-145] | feat/cue-modes |
 | [T-200](T-200-midi.md) | Entrée/sortie MIDI native (midir, CoreMIDI) | midi | P1 | [] | feat/midi-core |
 | [T-201](T-201-midi.md) | Détection des contrôleurs et profils par appareil (APC40 / APC40 mkII) | midi | P1 | [T-200] | feat/midi-core |
+| [T-202](T-202-midi.md) | Moteur de correspondances MIDI → contrôles (boutons, faders, encodeurs, Shift) | midi | P1 | [T-200, T-201, T-145] | feat/midi-map |
 | [T-291](T-291-ui.md) | Raccourcis clavier morts après un curseur ou une case à cocher (Espace n'éteint plus) | ui | P1 | [] | fix/arm-keys |
 | [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] | fix/arm-keys |
