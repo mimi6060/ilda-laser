@@ -1,0 +1,8 @@
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+# Browsers, when installed next to the project (PLAYWRIGHT_BROWSERS_PATH=0
+# puts them under node_modules; a custom local path is .browsers/).
+.browsers/
+.cache/
