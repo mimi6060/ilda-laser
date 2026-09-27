@@ -8,6 +8,7 @@
 //! laser output. The HTTP handlers in `web.rs` only ever edit that shared
 //! state.
 
+mod controls;
 mod engine;
 mod font;
 mod generators;
@@ -16,6 +17,9 @@ mod patterns;
 mod presets;
 mod scenes;
 mod web;
+
+#[cfg(test)]
+mod test_support;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -45,6 +49,9 @@ struct Cli {
     /// Where scenes and calibration are saved.
     #[arg(long, default_value = "studio-data")]
     data_dir: PathBuf,
+    /// Print every control id (for MIDI/OSC mapping) as Markdown and exit.
+    #[arg(long)]
+    list_controls: bool,
 }
 
 /// Audio features older than this are treated as silence (the browser tab
@@ -67,6 +74,11 @@ pub struct Shared {
     pub scenes: SceneStore,
     pub playlist: Option<Playlist>,
     pub presets: Vec<presets::Preset>,
+    pub controls: controls::ControlRegistry,
+    /// Cue-grid page shown in the UI and on MIDI grids (0-based category index).
+    pub cue_page: usize,
+    /// Id of the last cue played, for highlighting and LED feedback.
+    pub active_cue: Option<String>,
 }
 
 pub struct Playlist {
@@ -77,6 +89,10 @@ pub struct Playlist {
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
+    if cli.list_controls {
+        print!("{}", controls::markdown(&controls::ControlRegistry::build(&presets::catalog())));
+        return Ok(());
+    }
 
     std::fs::create_dir_all(&cli.data_dir)
         .with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
@@ -94,6 +110,7 @@ fn main() -> Result<()> {
         }
     };
 
+    let presets = presets::catalog();
     let shared = Arc::new(Mutex::new(Shared {
         settings: Settings::default(),
         calibration: web::load_calibration(&calibration_path),
@@ -106,7 +123,10 @@ fn main() -> Result<()> {
         pps: cli.pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
         playlist: None,
-        presets: presets::catalog(),
+        controls: controls::ControlRegistry::build(&presets),
+        presets,
+        cue_page: 0,
+        active_cue: None,
     }));
 
     let running = Arc::new(AtomicBool::new(true));
