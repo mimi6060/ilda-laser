@@ -1,0 +1,12 @@
+{
+  "name": "laser-studio-e2e",
+  "private": true,
+  "description": "End-to-end click tests for Laser Studio (Playwright, headless Chromium, preview only)",
+  "scripts": {
+    "test": "playwright test",
+    "install-browser": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
