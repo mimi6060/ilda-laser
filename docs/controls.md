@@ -14,6 +14,13 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `audio.color_on_beat` | Couleur change au beat | audio | bascule | oui |
 | `transport.blackout` | Blackout | transport | déclencheur | oui |
 | `transport.arm` | Allumer le laser | transport | bascule | non |
+| `tempo.tap` | Tap tempo | tempo | déclencheur | oui |
+| `tempo.resync` | Recaler sur le 1 | tempo | déclencheur | oui |
+| `tempo.bpm` | BPM | tempo | continu 40…250 | oui |
+| `tempo.nudge_up` | Avancer la phase | tempo | déclencheur | oui |
+| `tempo.nudge_down` | Retarder la phase | tempo | déclencheur | oui |
+| `tempo.double` | Tempo ×2 | tempo | déclencheur | oui |
+| `tempo.half` | Tempo ÷2 | tempo | déclencheur | oui |
 | `page.next` | Page de cues suivante | page | déclencheur | oui |
 | `page.prev` | Page de cues précédente | page | déclencheur | oui |
 | `page.1` | Page Abstraits | page | déclencheur | oui |
