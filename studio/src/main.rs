@@ -225,6 +225,8 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
                 frames_since_save = 0;
             }
             advance_playlist(&mut s);
+            // MIDI faders/encoders: at most one write per control per frame.
+            midi::engine::frame(&mut s, now);
             let audio = if s.audio_at.elapsed() < AUDIO_STALE {
                 s.audio
             } else {
