@@ -164,6 +164,17 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/palettes") => {
+            let s = shared.lock().unwrap();
+            json_response(json!({ "builtin": crate::live::builtin_palettes(), "user": s.palettes.list() }))
+        }
+        (Method::Post, "/api/palettes") => match body::<Vec<crate::live::Palette>>(request) {
+            Ok(list) => match shared.lock().unwrap().palettes.set(list) {
+                Ok(()) => ok(),
+                Err(e) => text(400, &e.to_string()),
+            },
+            Err(e) => e,
+        },
         (Method::Get, "/api/controls") => json_response(json!(shared.lock().unwrap().controls.list())),
         (Method::Get, "/api/control-values") => {
             let s = shared.lock().unwrap();

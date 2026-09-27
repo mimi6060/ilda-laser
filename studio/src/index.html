@@ -36,6 +36,16 @@
   input[type=color] { width: 100%; height: 34px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); padding: 2px; }
   .seg { display: flex; gap: 4px; }
   .seg button { flex: 1; }
+  .seg.wrap { flex-wrap: wrap; }
+  .seg.wrap button { flex: 1 0 30%; padding: 6px 4px; font-size: 12px; }
+  .hue-strip { position: relative; height: 18px; margin-top: 8px; border-radius: 4px; cursor: pointer; border: 1px solid var(--line);
+    background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+  .hue-strip span { position: absolute; top: -3px; bottom: -3px; width: 4px; margin-left: -2px; background: #fff; border-radius: 2px; box-shadow: 0 0 3px #000; }
+  .palettes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 8px; }
+  .palettes button { position: relative; padding: 4px; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .palettes .sw { display: flex; height: 10px; border-radius: 2px; overflow: hidden; margin-bottom: 3px; }
+  .palettes .sw i { flex: 1; }
+  .palettes .del { position: absolute; top: 0; right: 2px; color: var(--muted); }
   button { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font: inherit; }
   button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
@@ -130,6 +140,31 @@
       <input type="range" id="mSpeed" min="0" max="400" data-live="speed" data-k="100" title="master.speed">
       <label>Luminosité maître <span class="v" id="mBrightV"></span></label>
       <input type="range" id="mBright" min="0" max="100" data-live="brightness" data-k="100" title="master.brightness">
+      <div id="colorBlock" title="Clic droit = couleurs du cue (Normal)">
+        <label>Couleur</label>
+        <div class="seg wrap" id="colorModes">
+          <button data-mode="0">Normal</button><button data-mode="1">Fixe</button><button data-mode="2">Teinte</button>
+          <button data-mode="3">Palette</button><button data-mode="4">Arc-en-ciel</button><button data-mode="5">Chenillard</button>
+        </div>
+        <div class="row"><input type="color" id="colorFixed" value="#ff0000" title="Couleur fixe (master.color.red/green/blue)"></div>
+        <div class="hue-strip" id="hueStrip" title="Teinte (master.color.hue)"><span id="hueMark"></span></div>
+        <div class="palettes" id="palettes"></div>
+        <div class="row">
+          <div class="seg" id="paletteModes"><button data-pm="0">Plus proche</button><button data-pm="1">Pas à pas</button></div>
+          <button id="paletteNew" title="Nouvelle palette utilisateur" style="flex:0 0 auto">+ Palette</button>
+        </div>
+        <label>Décalage <span class="v" id="colorOffsetV"></span></label>
+        <input type="range" id="colorOffset" min="0" max="15" step="1" value="0" title="master.color.offset">
+        <label>Pas (temps)</label>
+        <div class="seg" id="colorSteps">
+          <button data-step="0">1/8</button><button data-step="1">1/4</button><button data-step="2">1/2</button>
+          <button data-step="3">1</button><button data-step="4">2</button><button data-step="5">4</button>
+        </div>
+        <label>Étalement <span class="v" id="colorSpreadV"></span></label>
+        <input type="range" id="colorSpread" min="0" max="400" value="100" title="master.color.spread">
+        <label>Chenillard</label>
+        <div class="seg" id="chaseSpreads"><button data-cs="0">Tout</button><button data-cs="1">Par trait</button><button data-cs="2">Par point</button></div>
+      </div>
     </section>
 
     <section>
@@ -529,6 +564,7 @@ function showLive(l) {
   $('rotSync').checked = l.rot_sync;
   const table = l.rot_sync ? [0, 0.25, 1, 2] : [0, 30, 90, 270];
   document.querySelectorAll('#rotPresets button').forEach(b => b.classList.toggle('active', table[+b.dataset.preset] === l.rot_speed[2]));
+  showColor(l);
 }
 // Each slider drives its control id (in its title) directly, so a slider
 // move can't be overwritten by a slightly older state from the server.
@@ -545,6 +581,84 @@ $('rotReverse').addEventListener('pointerdown', () => reverse(true));
 ['pointerup', 'pointerleave'].forEach(ev => $('rotReverse').addEventListener(ev, () => reverse(false)));
 let reverseKey = false;
 document.addEventListener('keyup', e => { if (e.key === '<' && reverseKey) { reverseKey = false; reverse(false); } });
+
+// ---------- live colour ----------
+const COLOR_MODES = ['normal', 'fixed', 'hue', 'palette', 'rainbow', 'chase'];
+const COLOR_STEPS = [0.125, 0.25, 0.5, 1, 2, 4];
+let palettes = { builtin: [], user: [] };
+const colorMode = () => live ? COLOR_MODES.indexOf(live.color.kind) : 0;
+const control = (id, value) => post('/api/control', { id, value });
+const setColorMode = m => control('master.color.mode', m);
+function showColor(l) {
+  const p = l.color_params, mode = COLOR_MODES.indexOf(l.color.kind);
+  document.querySelectorAll('#colorModes button').forEach(b => b.classList.toggle('active', +b.dataset.mode === mode));
+  if (document.activeElement !== $('colorFixed')) $('colorFixed').value = hex(p.rgb);
+  $('hueMark').style.left = (p.hue / 360 * 100) + '%';
+  document.querySelectorAll('#palettes button').forEach(b => b.classList.toggle('active', +b.dataset.index === p.palette));
+  document.querySelectorAll('#paletteModes button').forEach(b => b.classList.toggle('active', +b.dataset.pm === (p.palette_mode === 'step' ? 1 : 0)));
+  if (document.activeElement !== $('colorOffset')) $('colorOffset').value = p.offset;
+  $('colorOffsetV').textContent = p.offset;
+  const rate = mode === 4 ? p.rainbow_rate : p.chase_step;
+  document.querySelectorAll('#colorSteps button').forEach(b => b.classList.toggle('active', rate.beats === COLOR_STEPS[+b.dataset.step]));
+  if (document.activeElement !== $('colorSpread')) $('colorSpread').value = Math.round(p.spread * 100);
+  $('colorSpreadV').textContent = p.spread.toFixed(2) + ' cycle' + (p.spread > 1 ? 's' : '');
+  const cs = ['whole', 'stroke', 'point'].indexOf(p.chase_spread);
+  document.querySelectorAll('#chaseSpreads button').forEach(b => b.classList.toggle('active', +b.dataset.cs === cs));
+}
+async function loadPalettes() {
+  palettes = await (await fetch('/api/palettes')).json();
+  const all = [...palettes.builtin, ...palettes.user];
+  const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  $('palettes').innerHTML = all.map((p, i) => `<button data-index="${i}" title="${esc(p.name)}">`
+    + `<div class="sw">${p.colors.map(c => `<i style="background:${hex(c)}"></i>`).join('')}</div>${esc(p.name)}`
+    + (i >= palettes.builtin.length ? `<span class="del" data-del="${i - palettes.builtin.length}" title="Supprimer">×</span>` : '')
+    + '</button>').join('');
+  $('palettes').querySelectorAll('button').forEach(b => b.addEventListener('click', async e => {
+    if (e.target.dataset.del !== undefined) {
+      const i = +e.target.dataset.del;
+      if (!confirm(`Supprimer la palette « ${palettes.user[i].name} » ?`)) return;
+      await post('/api/palettes', palettes.user.filter((_, j) => j !== i));
+      return loadPalettes();
+    }
+    await control('master.color.palette', +b.dataset.index);
+    // A palette click shows it at once, unless a chase is already using palettes.
+    if (colorMode() !== 3 && colorMode() !== 5) setColorMode(3);
+  }));
+  if (live) showColor(live);
+}
+$('colorModes').querySelectorAll('button').forEach(b => b.addEventListener('click', () => setColorMode(+b.dataset.mode)));
+$('colorBlock').addEventListener('contextmenu', e => { e.preventDefault(); setColorMode(0); });
+let fixedTimer = null;
+$('colorFixed').addEventListener('input', () => {
+  clearTimeout(fixedTimer);
+  fixedTimer = setTimeout(async () => {
+    const [r, g, b] = rgb($('colorFixed').value);
+    await Promise.all([control('master.color.red', r / 255), control('master.color.green', g / 255), control('master.color.blue', b / 255)]);
+    if (colorMode() !== 1) setColorMode(1);
+  }, 40);
+});
+function pickHue(e) {
+  const box = $('hueStrip').getBoundingClientRect();
+  const hue = Math.min(360, Math.max(0, (e.clientX - box.left) / box.width * 360));
+  $('hueMark').style.left = (hue / 360 * 100) + '%';
+  control('master.color.hue', hue).then(() => { if (colorMode() !== 2) setColorMode(2); });
+}
+$('hueStrip').addEventListener('pointerdown', e => { $('hueStrip').setPointerCapture(e.pointerId); pickHue(e); });
+$('hueStrip').addEventListener('pointermove', e => { if (e.buttons & 1) pickHue(e); });
+$('paletteModes').querySelectorAll('button').forEach(b => b.addEventListener('click', () => control('master.color.palette_mode', +b.dataset.pm)));
+$('colorOffset').addEventListener('input', () => { $('colorOffsetV').textContent = $('colorOffset').value; control('master.color.offset', +$('colorOffset').value); });
+$('colorSteps').querySelectorAll('button').forEach(b => b.addEventListener('click', () => control('master.color.rate', +b.dataset.step)));
+$('colorSpread').addEventListener('input', () => control('master.color.spread', $('colorSpread').value / 100));
+$('chaseSpreads').querySelectorAll('button').forEach(b => b.addEventListener('click', () => control('master.color.chase_spread', +b.dataset.cs)));
+$('paletteNew').addEventListener('click', async () => {
+  const name = prompt('Nom de la nouvelle palette :');
+  if (!name) return;
+  const list = prompt('Couleurs (1 à 16, en hexadécimal, séparées par des espaces) :', '#ff0000 #ffffff #0000ff');
+  const colors = (list || '').split(/[\s,;]+/).filter(s => /^#?[0-9a-f]{6}$/i.test(s)).map(s => rgb(s.startsWith('#') ? s : '#' + s));
+  if (!colors.length) return alert('Aucune couleur valide.');
+  if (!await post('/api/palettes', [...palettes.user, { name, colors: colors.slice(0, 16) }])) return alert('Palette refusée (8 palettes utilisateur au maximum).');
+  loadPalettes();
+});
 
 // ---------- tempo ----------
 function showTempo(t) {
@@ -626,7 +740,7 @@ for (const [el, id] of [['scale', 'look.size'], ['bright', 'look.brightness'], [
   ['aColor', 'audio.color_on_beat']]) $(el).title = id;
 $('armBtn').title += ' · transport.arm';
 
-loadState().then(loadPresets).then(previewLoop);
+loadState().then(loadPresets).then(loadPalettes).then(previewLoop);
 </script>
 </body>
 </html>

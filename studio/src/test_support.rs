@@ -29,5 +29,6 @@ pub fn shared() -> Shared {
         epoch: Instant::now(),
         live: live::LiveModifiers::default(),
         live_dirty: false,
+        palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
     }
 }

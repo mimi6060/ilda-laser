@@ -25,6 +25,18 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `master.perspective` | Perspective | master | continu 0…1 | oui |
 | `master.speed` | Vitesse d'animation | master | continu 0…4 | oui |
 | `master.reset` | Réinitialiser le direct | master | déclencheur | oui |
+| `master.color.mode` | Mode couleur | master | choix : Normal / Fixe / Teinte / Palette / Arc-en-ciel / Chenillard | oui |
+| `master.color.hue` | Teinte | master | continu 0…360 | oui |
+| `master.color.palette` | Palette | master | choix : Froid / Chaud / Feu / Océan / Néon / Forêt / Tricolore / Blanc pur / Perso 1 / Perso 2 / Perso 3 / Perso 4 / Perso 5 / Perso 6 / Perso 7 / Perso 8 | oui |
+| `master.color.palette_mode` | Mode de palette | master | choix : Plus proche / Pas à pas | oui |
+| `master.color.offset` | Décalage de palette | master | continu 0…15 | oui |
+| `master.color.rate` | Pas couleur (temps) | master | choix : 1/8 / 1/4 / 1/2 / 1 / 2 / 4 | oui |
+| `master.color.rate_hz` | Vitesse couleur libre | master | continu 0…10 | oui |
+| `master.color.spread` | Étalement arc-en-ciel | master | continu 0…4 | oui |
+| `master.color.chase_spread` | Répartition du chenillard | master | choix : Tout / Par trait / Par point | oui |
+| `master.color.red` | Couleur fixe : Rouge | master | continu 0…1 | oui |
+| `master.color.green` | Couleur fixe : Vert | master | continu 0…1 | oui |
+| `master.color.blue` | Couleur fixe : Bleu | master | continu 0…1 | oui |
 | `audio.enabled` | Réagit à la musique | audio | bascule | oui |
 | `audio.size` | Taille suit les basses | audio | continu 0…1 | oui |
 | `audio.rotate` | Rotation suit les basses | audio | continu 0…1 | oui |
