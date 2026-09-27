@@ -242,6 +242,33 @@
         </select>
         <label>Deuxième couleur</label>
         <input type="color" id="gColor2" value="#0000ff">
+        <div class="check"><input type="checkbox" id="gSync"><span>Tempo du look (calé sur le BPM)</span></div>
+        <div id="gSyncPanel" hidden>
+          <div class="row" style="justify-content:space-between">
+            <span id="gBpm" class="v">120 BPM</span>
+            <div class="beats" id="gBeats"><span class="one"></span><span></span><span></span><span></span></div>
+          </div>
+          <label>Période (temps)</label>
+          <select id="gPeriod">
+            <option value="1">1</option><option value="2">2</option><option value="4">4</option>
+            <option value="8">8</option><option value="16">16</option><option value="32">32</option>
+          </select>
+          <label>Pas par temps</label>
+          <select id="gSteps">
+            <option value="0.5">1/2</option><option value="1">1</option><option value="2">2</option>
+            <option value="4">4</option><option value="8">8</option>
+          </select>
+          <label>Gate (temps) <span class="v" id="gGateV"></span></label>
+          <input type="range" id="gGate" min="0" max="1" step="0.05" value="0" title="0 = pas de gate">
+          <label>Sens</label>
+          <select id="gDir"><option value="1">→</option><option value="-1">←</option></select>
+          <label>Groupes</label>
+          <select id="gGroups"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+          <label>Mode de groupe</label>
+          <select id="gGroupMode">
+            <option value="unison">Ensemble</option><option value="mirror">Miroir</option><option value="offset">Décalé</option>
+          </select>
+        </div>
       </div>
     </section>
 
@@ -333,6 +360,10 @@ function showSettings() {
     $('gen').value = s.content.generator;
     $('gCount').value = p.count; $('gA').value = p.a; $('gB').value = p.b; $('gSpeed').value = p.speed;
     $('gMode').value = p.color_mode; $('gColor2').value = hex(p.color2);
+    $('gSync').checked = !!p.beat_sync; $('gSyncPanel').hidden = !p.beat_sync;
+    $('gPeriod').value = String(p.period_beats ?? 4); $('gSteps').value = String(p.steps_per_beat ?? 1);
+    $('gGate').value = p.gate_beats ?? 0; $('gDir').value = String((p.direction ?? 1) < 0 ? -1 : 1);
+    $('gGroups').value = String(p.groups ?? 1); $('gGroupMode').value = p.group_mode ?? 'unison';
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
   if (kind === 'text') $('text').value = s.content.text;
@@ -360,6 +391,7 @@ function showValues() {
   $('gAV').textContent = (+$('gA').value).toFixed(1);
   $('gBV').textContent = (+$('gB').value).toFixed(2);
   $('gSpeedV').textContent = '×' + (+$('gSpeed').value).toFixed(2);
+  $('gGateV').textContent = +$('gGate').value ? (+$('gGate').value).toFixed(2) : 'off';
 }
 
 function readControls() {
@@ -377,7 +409,11 @@ function readControls() {
     settings.content.generator = $('gen').value;
     Object.assign(settings.content.params, {
       count: +$('gCount').value, a: +$('gA').value, b: +$('gB').value, speed: +$('gSpeed').value,
-      color_mode: $('gMode').value, color2: rgb($('gColor2').value) });
+      color_mode: $('gMode').value, color2: rgb($('gColor2').value),
+      beat_sync: $('gSync').checked, period_beats: +$('gPeriod').value, steps_per_beat: +$('gSteps').value,
+      gate_beats: +$('gGate').value, direction: +$('gDir').value, groups: +$('gGroups').value,
+      group_mode: $('gGroupMode').value });
+    $('gSyncPanel').hidden = !$('gSync').checked;
   }
   showValues();
   pushSettings();
@@ -390,7 +426,8 @@ function pushSettings() {
 }
 
 ['color', 'scale', 'rot', 'bright', 'aOn', 'aSize', 'aRot', 'aFlash', 'aColor', 'text',
- 'gen', 'gCount', 'gA', 'gB', 'gSpeed', 'gMode', 'gColor2']
+ 'gen', 'gCount', 'gA', 'gB', 'gSpeed', 'gMode', 'gColor2',
+ 'gSync', 'gPeriod', 'gSteps', 'gGate', 'gDir', 'gGroups', 'gGroupMode']
   .forEach(id => $(id).addEventListener('input', readControls));
 
 document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
@@ -726,7 +763,11 @@ function showTempo(t) {
   if (!t) return;
   if (document.activeElement !== $('bpm')) $('bpm').value = t.bpm.toFixed(1);
   // Light the current beat for the first half of it, so the dots visibly pulse.
-  document.querySelectorAll('#beats span').forEach((d, i) => d.classList.toggle('on', i === t.beat_in_bar && t.phase < 0.5));
+  document.querySelectorAll('#beats span, #gBeats span').forEach(d => {
+    const i = [...d.parentNode.children].indexOf(d);
+    d.classList.toggle('on', i === t.beat_in_bar && t.phase < 0.5);
+  });
+  $('gBpm').textContent = t.bpm.toFixed(1) + ' BPM';
 }
 document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => post('/api/control', { id: b.dataset.ctl })));
 $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm', value: +$('bpm').value }));

@@ -4,8 +4,9 @@
 //! `Animator`, so a `Settings` value stays a plain, saveable description
 //! of a look - the same thing a scene stores.
 
+use crate::beat;
 use crate::font;
-use crate::generators::{self, GenParams};
+use crate::generators::{self, GenCtx, GenParams};
 use crate::patterns::{self, Point};
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +130,22 @@ const CORNER_DWELL: usize = 3;
 /// Direction changes sharper than this (degrees) count as corners.
 const CORNER_ANGLE_DEG: f32 = 30.0;
 
+/// The tempo clock as one frame sees it (read from `tempo::TempoClock`,
+/// the app's only tempo clock).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BeatClock {
+    /// `TempoClock::beat_at(now)`.
+    pub beat: f64,
+    pub bpm: f64,
+    pub beats_per_bar: u8,
+}
+
+impl Default for BeatClock {
+    fn default() -> Self {
+        Self { beat: 0.0, bpm: 120.0, beats_per_bar: 4 }
+    }
+}
+
 #[derive(Default)]
 pub struct Animator {
     angle_deg: f32,
@@ -137,10 +154,25 @@ pub struct Animator {
     gen_time: f32,
     flash: f32,
     last_beat: u64,
+    /// Tempo-clock beat the look started at (the cue's launch); `None`
+    /// until then = the first rendered frame.
+    start_beat: Option<f64>,
 }
 
 impl Animator {
-    pub fn render(&mut self, s: &Settings, audio: AudioFeatures, dt: f32) -> Vec<Point> {
+    /// An animator for a cue launched at tempo-clock beat `beat`.
+    pub fn starting_at(beat: f64) -> Self {
+        Self { start_beat: Some(beat), ..Default::default() }
+    }
+
+    /// Beats since the look started, counted from the first beat of the
+    /// bar it started in, so beat-synced motion lands on the "one".
+    fn beat_pos(&mut self, clock: &BeatClock) -> f64 {
+        let start = *self.start_beat.get_or_insert(clock.beat);
+        (clock.beat - beat::bar_start(start, clock.beats_per_bar)).max(0.0)
+    }
+
+    pub fn render(&mut self, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock) -> Vec<Point> {
         let react = &s.audio;
         let (bass, level) = if react.enabled {
             (audio.bass.clamp(0.0, 1.0), audio.level.clamp(0.0, 1.0))
@@ -171,7 +203,15 @@ impl Animator {
         let hue_shift = if react.enabled { self.hue_shift } else { 0.0 };
         let (r, g, b) = shift_hue(s.color, hue_shift);
         let flash_gain = 1.0 - react.flash * (react.enabled as u8 as f32) * (1.0 - self.flash);
-        let gain = s.brightness.clamp(0.0, 1.0) * flash_gain;
+        let mut gain = s.brightness.clamp(0.0, 1.0) * flash_gain;
+        let beat_pos = self.beat_pos(clock);
+        let synced = match &s.content {
+            Content::Generator { params, .. } if params.beat_sync => Some(params),
+            _ => None,
+        };
+        if let Some(p) = synced.filter(|p| p.gate_beats > 0.0) {
+            gain *= beat::env_stab(beat_pos.rem_euclid(1.0) as f32, p.gate_beats, 0.0);
+        }
         let (r, g, b) = (r * gain, g * gain, b * gain);
 
         let points = match &s.content {
@@ -179,16 +219,13 @@ impl Animator {
             Content::Text { text } => font::text_to_points(&text.to_uppercase(), scale, r, g, b),
             Content::Wave => patterns::wave(scale, 0.15 + 0.6 * level, self.wave_phase, r, g, b),
             Content::Generator { generator, params } => {
-                match generators::generate(generator, params, self.gen_time, level, bass, scale) {
+                let t = if params.beat_sync { beat_time(params, beat_pos) } else { self.gen_time };
+                let ctx = GenCtx { t, beat_pos, bpm: clock.bpm as f32, level, bass, scale };
+                match generators::generate(generator, params, &ctx) {
                     Some(geo) => {
                         let (r2, g2, b2) = shift_hue(params.color2, hue_shift);
                         let c2 = (r2 * gain, g2 * gain, b2 * gain);
-                        let pts = generators::colorize(&geo, params.color_mode, (r, g, b), c2, self.gen_time);
-                        if params.color_mode == generators::ColorMode::Rainbow {
-                            pts.into_iter().map(|p| Point { r: p.r * gain, g: p.g * gain, b: p.b * gain, ..p }).collect()
-                        } else {
-                            pts
-                        }
+                        generators::colorize(&geo, params.color_mode, (r, g, b), c2, t, gain)
                     }
                     None => Vec::new(),
                 }
@@ -204,6 +241,16 @@ impl Animator {
             .collect();
         densify(&rotated)
     }
+}
+
+/// Generator time for a beat-synced look: one 2π cycle per
+/// `period_beats`, backwards when `direction` < 0, so every motion that
+/// repeats every 2π of `t` repeats exactly every period at any BPM.
+/// `speed` and the bass boost don't apply: the tempo sets the pace.
+fn beat_time(p: &GenParams, beat_pos: f64) -> f32 {
+    let period = if p.period_beats > 0.0 { p.period_beats as f64 } else { 4.0 };
+    let dir = if p.direction < 0 { -1.0 } else { 1.0 };
+    (dir * std::f64::consts::TAU * beat_pos / period) as f32
 }
 
 /// Split long segments into `MAX_STEP`-sized steps and hold sharp
@@ -360,7 +407,7 @@ mod tests {
     fn brightness_scales_colors() {
         let mut a = Animator::default();
         let s = Settings { brightness: 0.5, color: [255, 255, 255], ..Default::default() };
-        let pts = a.render(&s, AudioFeatures::default(), 1.0 / 60.0);
+        let pts = a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default());
         assert!(pts.iter().all(|p| (p.r - 0.5).abs() < 1e-6));
     }
 
@@ -389,8 +436,8 @@ mod tests {
         s.audio.enabled = true;
         s.color = [255, 0, 0];
         let mut a = Animator::default();
-        let before = a.render(&s, AudioFeatures::default(), 0.016)[0];
-        let after = a.render(&s, AudioFeatures { beat: 1, ..Default::default() }, 0.016)[0];
+        let before = a.render(&s, AudioFeatures::default(), 0.016, &BeatClock::default())[0];
+        let after = a.render(&s, AudioFeatures { beat: 1, ..Default::default() }, 0.016, &BeatClock::default())[0];
         assert!(after.g > before.g, "hue did not move: {before:?} -> {after:?}");
     }
 
@@ -425,7 +472,80 @@ mod tests {
         assert!(join_looks(Vec::new()).is_empty());
     }
 
+    fn synced(generator: &str, params: GenParams) -> Settings {
+        let params = GenParams { beat_sync: true, ..params };
+        Settings { content: Content::Generator { generator: generator.into(), params }, brightness: 1.0, ..Default::default() }
+    }
+
+    /// The frame a cue launched at `start` shows at tempo-clock `beat`.
+    fn frame_at(s: &Settings, start: f64, beat: f64, bpm: f64) -> Vec<Point> {
+        let clock = BeatClock { beat, bpm, beats_per_bar: 4 };
+        Animator::starting_at(start).render(s, AudioFeatures::default(), 1.0 / 60.0, &clock)
+    }
+
+    fn same(a: &[Point], b: &[Point]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (p.x - q.x).abs() < 1e-4 && (p.y - q.y).abs() < 1e-4 && p.r == q.r)
+    }
+
+    #[test]
+    fn beat_synced_motion_repeats_every_period_at_any_bpm() {
+        // Generators whose motion repeats every 2π of t.
+        for generator in ["beam_circle", "beam_fan", "lissajous", "spiral_arms"] {
+            let s = synced(generator, GenParams { period_beats: 4.0, ..Default::default() });
+            for bpm in [128.0, 150.0] {
+                let a = frame_at(&s, 0.0, 1.3, bpm);
+                assert!(same(&a, &frame_at(&s, 0.0, 5.3, bpm)), "{generator} at {bpm} BPM: not back after 4 beats");
+                assert!(same(&a, &frame_at(&s, 0.0, 41.3, bpm)), "{generator}: not back after 40 beats");
+                assert!(!same(&a, &frame_at(&s, 0.0, 3.3, bpm)), "{generator}: should have moved after 2 beats");
+            }
+            // Beats, not seconds: the same beat looks the same at any tempo.
+            assert!(same(&frame_at(&s, 0.0, 2.7, 90.0), &frame_at(&s, 0.0, 2.7, 174.0)));
+        }
+    }
+
+    #[test]
+    fn beat_position_counts_from_the_bar_the_cue_started_in() {
+        let s = synced("beam_circle", GenParams { period_beats: 4.0, ..Default::default() });
+        // Launched mid-bar (beat 5.6 or 6.9): the motion is where a cue
+        // launched on that bar's "one" (beat 4) would be.
+        let on_the_one = frame_at(&s, 4.0, 7.2, 120.0);
+        assert!(same(&frame_at(&s, 5.6, 7.2, 120.0), &on_the_one));
+        assert!(same(&frame_at(&s, 6.9, 7.2, 120.0), &on_the_one));
+        // At its first frame a cue launched on a "one" starts its cycle.
+        assert!(same(&frame_at(&s, 12.0, 12.0, 120.0), &frame_at(&s, 0.0, 0.0, 120.0)));
+        // Without a launch beat, the first rendered frame is the launch.
+        let mut a = Animator::default();
+        let clock = |beat| BeatClock { beat, ..Default::default() };
+        a.render(&s, AudioFeatures::default(), 0.016, &clock(9.0));
+        let later = a.render(&s, AudioFeatures::default(), 0.016, &clock(10.0));
+        assert!(same(&later, &frame_at(&s, 8.0, 10.0, 120.0)));
+    }
+
+    #[test]
+    fn reversed_direction_runs_the_cycle_backwards() {
+        let fwd = synced("beam_circle", GenParams::default());
+        let rev = synced("beam_circle", GenParams { direction: -1, ..Default::default() });
+        assert!(same(&frame_at(&rev, 0.0, 1.0, 128.0), &frame_at(&fwd, 0.0, 3.0, 128.0)));
+    }
+
+    #[test]
+    fn gate_lights_the_look_only_just_after_each_beat() {
+        let s = synced("beam_fan", GenParams { gate_beats: 0.25, ..Default::default() });
+        let lit = |beat| frame_at(&s, 0.0, beat, 128.0).iter().any(|p| p.is_lit());
+        assert!(lit(3.0) && lit(3.2));
+        assert!(!lit(3.3) && !lit(3.9));
+        // Without beat_sync the gate does nothing.
+        let free = Settings { content: Content::Generator { generator: "beam_fan".into(), params: GenParams { gate_beats: 0.25, ..Default::default() } }, ..Default::default() };
+        assert!(frame_at(&free, 0.0, 3.9, 128.0).iter().any(|p| p.is_lit()));
+    }
+
+    #[test]
+    fn free_running_looks_ignore_the_tempo_clock() {
+        let s = Settings { content: Content::Generator { generator: "beam_circle".into(), params: GenParams::default() }, ..Default::default() };
+        assert_eq!(frame_at(&s, 0.0, 0.0, 120.0), frame_at(&s, 3.0, 17.4, 150.0));
+    }
+
     fn a_frame(s: &Settings, audio: AudioFeatures) -> Vec<Point> {
-        Animator::default().render(s, audio, 1.0 / 60.0)
+        Animator::default().render(s, audio, 1.0 / 60.0, &BeatClock::default())
     }
 }

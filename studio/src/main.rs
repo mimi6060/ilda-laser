@@ -8,6 +8,7 @@
 //! laser output. The HTTP handlers in `web.rs` only ever edit that shared
 //! state.
 
+mod beat;
 mod controls;
 mod cues;
 mod engine;
@@ -197,7 +198,7 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (looks, calibration, audio, armed, live, bpm, beats_per_bar, user_palettes) = {
+        let (looks, starts, clock, calibration, audio, armed, live, user_palettes) = {
             let mut s = shared.lock().unwrap();
             frames_since_save += 1;
             if s.live_dirty && frames_since_save >= 60 {
@@ -213,15 +214,27 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
                 AudioFeatures { beat: s.audio.beat, ..Default::default() }
             };
             let t = s.now_s();
-            live_state.set_clock(t, s.tempo.beat_at(t));
+            let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
+            live_state.set_clock(t, clock.beat);
             let looks = cues::looks(&s.deck, &s.settings, s.look_on);
-            (looks, s.calibration, audio, s.armed, s.live.clone(), s.tempo.bpm, s.tempo.beats_per_bar, s.palettes.list().to_vec())
+            // Launch beats, so a cue's beat-synced motion counts from its start.
+            let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
+            (looks, starts, clock, s.calibration, audio, s.armed, s.live.clone(), s.palettes.list().to_vec())
         };
 
-        live_state.advance(&live, dt, bpm, beats_per_bar);
+        live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
         let anim_dt = dt * live.speed.clamp(0.0, 4.0);
         animators.retain(|id, _| looks.iter().any(|(i, _)| i == id));
-        let rendered = looks.iter().map(|(id, settings)| animators.entry(*id).or_default().render(settings, audio, anim_dt)).collect();
+        let rendered = looks
+            .iter()
+            .map(|(id, settings)| {
+                let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
+                    Some(&beat) => Animator::starting_at(beat),
+                    None => Animator::default(),
+                });
+                animator.render(settings, audio, anim_dt, &clock)
+            })
+            .collect();
         let look = engine::join_looks(rendered);
         let frame: Vec<Point> = live::apply(&look, &live, &live_state, &user_palettes)
             .into_iter()
