@@ -12,6 +12,7 @@
 //! cue on top. `controls::press_cue` keeps the two in sync.
 
 use crate::engine::Settings;
+use crate::layers::LAYER_COUNT;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,8 @@ pub struct CueSlot {
     pub mode: Option<ClickMode>,
     /// Exclusive group 1..=8: starting a cue stops the other cues of its group.
     pub group: Option<u8>,
+    /// Layer 1..=4 (layers.rs); `None` = layer 1.
+    pub layer: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +59,8 @@ pub struct ActiveCue {
     /// Preset id.
     pub cue: String,
     pub group: Option<u8>,
+    /// Layer 1..=4, taken from the grid when the cue started.
+    pub layer: u8,
     pub started_s: f64,
     pub started_beat: f64,
     /// Flash/solo: removed on release.
@@ -84,7 +89,8 @@ pub struct CueDeck {
     pub parked: Option<Settings>,
     /// Default mode for cues without their own.
     pub click_mode: ClickMode,
-    /// « Multi »: cues add up. Off (« Un cue »): a new cue replaces the others.
+    /// « Multi »: cues add up. Off (« Un cue »): a new cue replaces the
+    /// others of its layer (with one layer in use: all the others).
     pub multi: bool,
     /// Latched cues allowed at once; the oldest is stopped beyond it.
     pub max_active: u8,
@@ -134,6 +140,7 @@ impl CueDeck {
         self.next_id = self.next_id.max(1);
         for slot in self.slots.values_mut() {
             slot.group = slot.group.filter(|g| (1..=MAX_GROUP).contains(g));
+            slot.layer = slot.layer.filter(|n| (2..=LAYER_COUNT as u8).contains(n));
         }
         self.slots.retain(|_, slot| *slot != CueSlot::default());
     }
@@ -199,11 +206,18 @@ impl CueDeck {
         self.active.clear();
     }
 
+    /// « Vider » a layer: every cue on it stops, held ones included.
+    pub fn clear_layer(&mut self, layer: u8) {
+        self.active.retain(|a| a.layer != layer);
+    }
+
     fn start(&mut self, cue: &str, at: At, settings: Settings, held: bool, solo: bool) {
-        let group = self.slot(cue).group;
+        let slot = self.slot(cue);
+        let (group, layer) = (slot.group, slot.layer.unwrap_or(1));
         if !held {
             if !self.multi {
-                self.active.retain(|a| a.held);
+                // One cue per layer: a beam on layer 2 stays over the tunnel on layer 1.
+                self.active.retain(|a| a.held || a.layer != layer);
             } else if group.is_some() {
                 self.active.retain(|a| a.held || a.group != group);
             }
@@ -214,6 +228,7 @@ impl CueDeck {
             id,
             cue: cue.to_string(),
             group,
+            layer,
             started_s: at.s,
             started_beat: at.beat,
             held,
@@ -273,6 +288,14 @@ pub fn looks(deck: &CueDeck, primary: &Settings, look_on: bool) -> Vec<(u64, Set
                 (a.id, Settings { brightness: primary.brightness, ..a.settings.clone() })
             }
         })
+        .collect()
+}
+
+/// `looks` with the layer of each look (the manual look is on layer 1).
+pub fn layered_looks(deck: &CueDeck, primary: &Settings, look_on: bool) -> Vec<(u8, u64, Settings)> {
+    looks(deck, primary, look_on)
+        .into_iter()
+        .map(|(id, settings)| (deck.active.iter().find(|a| a.id == id).map_or(1, |a| a.layer), id, settings))
         .collect()
 }
 
@@ -348,7 +371,7 @@ mod tests {
         d.release("a");
         assert!(playing(&d).is_empty());
         d.click_mode = ClickMode::Toggle;
-        d.set_slot("b", CueSlot { mode: Some(ClickMode::Flash), group: None });
+        d.set_slot("b", CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None });
         press(&mut d, "b");
         d.release("b");
         assert!(playing(&d).is_empty());
@@ -400,9 +423,9 @@ mod tests {
     #[test]
     fn same_group_replaces_other_groups_stay() {
         let mut d = deck(true);
-        d.set_slot("a", CueSlot { mode: None, group: Some(1) });
-        d.set_slot("b", CueSlot { mode: None, group: Some(1) });
-        d.set_slot("c", CueSlot { mode: None, group: Some(2) });
+        d.set_slot("a", CueSlot { mode: None, group: Some(1), layer: None });
+        d.set_slot("b", CueSlot { mode: None, group: Some(1), layer: None });
+        d.set_slot("c", CueSlot { mode: None, group: Some(2), layer: None });
         press(&mut d, "a");
         press(&mut d, "c");
         press(&mut d, "free");
@@ -413,8 +436,8 @@ mod tests {
     #[test]
     fn a_flash_in_a_group_hides_its_group_mates_only_while_held() {
         let mut d = deck(true);
-        d.set_slot("a", CueSlot { mode: None, group: Some(3) });
-        d.set_slot("f", CueSlot { mode: Some(ClickMode::Flash), group: Some(3) });
+        d.set_slot("a", CueSlot { mode: None, group: Some(3), layer: None });
+        d.set_slot("f", CueSlot { mode: Some(ClickMode::Flash), group: Some(3), layer: None });
         press(&mut d, "a");
         press(&mut d, "other");
         press(&mut d, "f");
@@ -454,15 +477,66 @@ mod tests {
         assert_eq!(looks(&d, &live, true), vec![(0, live.clone())]);
     }
 
+    fn on_layer(d: &mut CueDeck, cue: &str, layer: u8) {
+        d.set_slot(cue, CueSlot { layer: Some(layer), ..d.slot(cue) });
+    }
+
+    #[test]
+    fn single_mode_replaces_only_within_a_layer() {
+        let mut d = deck(false);
+        on_layer(&mut d, "beam", 2);
+        press(&mut d, "a");
+        press(&mut d, "beam");
+        assert_eq!(playing(&d), ["a", "beam"]);
+        press(&mut d, "b");
+        assert_eq!(playing(&d), ["beam", "b"], "b replaces a on layer 1, the beam stays");
+        let l = layered_looks(&d, &Settings::default(), false);
+        assert_eq!(l.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(layered_looks(&deck(false), &Settings::default(), true)[0].0, 1, "the manual look is on layer 1");
+    }
+
+    #[test]
+    fn clearing_a_layer_stops_its_cues_only() {
+        let mut d = deck(true);
+        on_layer(&mut d, "x", 3);
+        on_layer(&mut d, "f", 3);
+        press(&mut d, "a");
+        press(&mut d, "x");
+        press_as(&mut d, "f", ClickMode::Flash);
+        d.clear_layer(3);
+        assert_eq!(playing(&d), ["a"]);
+        d.release("f");
+        assert_eq!(playing(&d), ["a"]);
+    }
+
+    #[test]
+    fn a_flash_on_another_layer_still_returns_to_what_played() {
+        for multi in [false, true] {
+            let mut d = deck(multi);
+            on_layer(&mut d, "f", 4);
+            press(&mut d, "a");
+            press_as(&mut d, "f", ClickMode::Flash);
+            assert_eq!(shown(&d).contains(&"a"), multi, "« Un cue »: the flash still takes over the output");
+            d.release("f");
+            assert_eq!(shown(&d), ["a"]);
+        }
+    }
+
     #[test]
     fn grid_json_round_trips_without_the_playing_list() {
         let mut d = deck(true);
-        d.set_slot("a", CueSlot { mode: Some(ClickMode::Solo), group: Some(9) });
+        d.set_slot("a", CueSlot { mode: Some(ClickMode::Solo), group: Some(9), layer: None });
         press(&mut d, "a");
         let back: CueDeck = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         assert!(back.active.is_empty());
         assert!(back.multi);
-        assert_eq!(back.slot("a"), CueSlot { mode: Some(ClickMode::Solo), group: None }, "group 9 is out of range");
+        assert_eq!(back.slot("a"), CueSlot { mode: Some(ClickMode::Solo), group: None, layer: None }, "group 9 is out of range");
+        on_layer(&mut d, "b", 9);
+        on_layer(&mut d, "c", 1);
+        assert!(!d.slots.contains_key("b") && !d.slots.contains_key("c"), "layer 9 is out of range, layer 1 is the default");
+        on_layer(&mut d, "c", 4);
+        let back: CueDeck = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.slot("c").layer, Some(4));
         let old: CueDeck = serde_json::from_str("{}").unwrap();
         assert_eq!((old.click_mode, old.multi, old.max_active), (ClickMode::Toggle, false, 4));
     }
