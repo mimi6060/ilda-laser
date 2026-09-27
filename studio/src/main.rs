@@ -9,6 +9,7 @@
 //! state.
 
 mod controls;
+mod cues;
 mod engine;
 mod font;
 mod generators;
@@ -29,6 +30,7 @@ use engine::{Animator, AudioFeatures, Calibration, Settings};
 use output::{DacOutput, Output};
 use patterns::Point;
 use scenes::SceneStore;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -79,8 +81,13 @@ pub struct Shared {
     pub controls: controls::ControlRegistry,
     /// Cue-grid page shown in the UI and on MIDI grids (0-based category index).
     pub cue_page: usize,
-    /// Id of the last cue played, for highlighting and LED feedback.
+    /// Id of the newest playing cue, for highlighting and LED feedback.
     pub active_cue: Option<String>,
+    /// Playing cues and the grid's trigger settings (cues.rs).
+    pub deck: cues::CueDeck,
+    /// Whether `settings` is shown when no cue plays: on for a scene, the
+    /// playlist or a look edited by hand; off once the last cue is stopped.
+    pub look_on: bool,
     /// The single tempo clock (see tempo.rs); times are seconds since `epoch`.
     pub tempo: tempo::TempoClock,
     pub epoch: Instant,
@@ -143,6 +150,8 @@ fn main() -> Result<()> {
         presets,
         cue_page: 0,
         active_cue: None,
+        deck: cues::CueDeck::load(cli.data_dir.join("grid.json")),
+        look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch: Instant::now(),
         live: load_json(&live_path),
@@ -172,7 +181,9 @@ fn main() -> Result<()> {
 }
 
 fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, running: Arc<AtomicBool>, live_path: PathBuf) {
-    let mut animator = Animator::default();
+    // One animator per playing cue instance (0 = the manual look), so
+    // every cue keeps its own motion and a restart starts it over.
+    let mut animators: HashMap<u64, Animator> = HashMap::new();
     let mut live_state = live::LiveState::default();
     let mut frames_since_save = 0u32;
     let mut last = Instant::now();
@@ -183,7 +194,7 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (settings, calibration, audio, armed, live, bpm, beats_per_bar) = {
+        let (looks, calibration, audio, armed, live, bpm, beats_per_bar) = {
             let mut s = shared.lock().unwrap();
             frames_since_save += 1;
             if s.live_dirty && frames_since_save >= 60 {
@@ -198,11 +209,15 @@ fn run_engine(shared: Arc<Mutex<Shared>>, mut output: Option<Box<dyn Output>>, r
             } else {
                 AudioFeatures { beat: s.audio.beat, ..Default::default() }
             };
-            (s.settings.clone(), s.calibration, audio, s.armed, s.live.clone(), s.tempo.bpm, s.tempo.beats_per_bar)
+            let looks = cues::looks(&s.deck, &s.settings, s.look_on);
+            (looks, s.calibration, audio, s.armed, s.live.clone(), s.tempo.bpm, s.tempo.beats_per_bar)
         };
 
         live_state.advance(&live, dt, bpm, beats_per_bar);
-        let look = animator.render(&settings, audio, dt * live.speed.clamp(0.0, 4.0));
+        let anim_dt = dt * live.speed.clamp(0.0, 4.0);
+        animators.retain(|id, _| looks.iter().any(|(i, _)| i == id));
+        let rendered = looks.iter().map(|(id, settings)| animators.entry(*id).or_default().render(settings, audio, anim_dt)).collect();
+        let look = engine::join_looks(rendered);
         let frame: Vec<Point> = live::apply(&look, &live, &live_state)
             .into_iter()
             .map(|p| {
@@ -257,5 +272,12 @@ fn advance_playlist(s: &mut Shared) {
     }
     playlist.index = (playlist.index + 1) % count;
     playlist.started = Instant::now();
-    s.settings = s.scenes.list()[playlist.index].settings.clone();
+    let next = s.scenes.list()[playlist.index].settings.clone();
+    if s.deck.active.is_empty() {
+        s.settings = next;
+    } else {
+        // Only flashes can play over the playlist (a latched cue stops it):
+        // the next scene waits for them to end.
+        s.deck.parked = Some(next);
+    }
 }

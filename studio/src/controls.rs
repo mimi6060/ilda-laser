@@ -6,6 +6,7 @@
 //! Ids are lowercase, dot-separated and **never renamed** once shipped -
 //! saved MIDI mappings refer to them. Add an alias instead of renaming.
 
+use crate::cues::{self, ClickMode, CueDeck, CLICK_MODES, CLICK_MODE_LABELS};
 use crate::engine::Settings;
 use crate::presets::{Preset, CATEGORIES};
 use crate::live::{LiveModifiers, ROT_PRESETS_FREE, ROT_PRESETS_SYNC, ROT_PRESET_LABELS};
@@ -129,11 +130,25 @@ impl ControlRegistry {
             add(format!("page.{}", i + 1), format!("Page {name}"), "page", ControlKind::Trigger, true);
         }
 
+        add(
+            "cue.mode".into(),
+            "Mode de clic des cues".into(),
+            "cue",
+            ControlKind::Choice { options: CLICK_MODE_LABELS.to_vec(), default: 0 },
+            true,
+        );
+        add("cue.multi".into(), "Plusieurs cues à la fois".into(), "cue", ControlKind::Toggle { default: false }, true);
+        let max = CueDeck::default().max_active as f32;
+        add("cue.max_active".into(), "Cues simultanés max".into(), "cue", cont(1.0, cues::MAX_ACTIVE_LIMIT as f32, max, Unit::None), true);
+        add("cue.stop_all".into(), "Arrêter tous les cues".into(), "cue", ControlKind::Trigger, true);
+
+        // Momentary: pad down (value 1) presses, pad up (value 0) releases -
+        // what flash and solo need. Toggle/restart cues ignore the release.
         for (page, category) in CATEGORIES.iter().enumerate() {
             let cues: Vec<&Preset> = presets.iter().filter(|p| p.category == *category).collect();
             for (i, cue) in cues.iter().take(GRID_ROWS * GRID_COLS).enumerate() {
                 let (row, col) = (i / GRID_COLS + 1, i % GRID_COLS + 1);
-                add(format!("grid.{}.{row}.{col}", page + 1), cue.name.clone(), "grid", ControlKind::Trigger, true);
+                add(format!("grid.{}.{row}.{col}", page + 1), cue.name.clone(), "grid", ControlKind::Momentary, true);
             }
         }
 
@@ -242,6 +257,19 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
             let bpm = s.tempo.bpm * factor;
             s.tempo.set_bpm_manual(bpm, t);
         }
+        "cue.mode" => {
+            s.deck.click_mode = CLICK_MODES[choice_index(&desc.kind, input)];
+            s.deck.save();
+        }
+        "cue.multi" => {
+            s.deck.multi = truthy(input);
+            s.deck.save();
+        }
+        "cue.max_active" => {
+            with_deck(s, |d, _| d.set_max_active(value(input).round() as u8));
+            s.deck.save();
+        }
+        "cue.stop_all" => with_deck(s, |d, _| d.stop_all()),
         "page.next" => s.cue_page = (s.cue_page + 1) % CATEGORIES.len(),
         "page.prev" => s.cue_page = (s.cue_page + CATEGORIES.len() - 1) % CATEGORIES.len(),
         other => {
@@ -263,7 +291,7 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
                 s.cue_page = n - 1;
             } else if let Some(cell) = other.strip_prefix("grid.") {
                 let preset_id = grid_cell_preset(&s.presets, cell).ok_or_else(|| ControlError::Unknown(id.to_string()))?;
-                play_preset(s, &preset_id);
+                press_cue(s, &preset_id, None, truthy(input));
             } else {
                 return Err(ControlError::Unknown(id.to_string()));
             }
@@ -314,7 +342,14 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "audio.color_on_beat" => json!(s.settings.audio.color_on_beat),
         "transport.arm" => json!(s.armed),
         "tempo.bpm" => json!(s.tempo.bpm),
-        _ => return None,
+        "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
+        "cue.multi" => json!(s.deck.multi),
+        "cue.max_active" => json!(s.deck.max_active),
+        id => {
+            // Grid cells light up while their cue plays (LED feedback).
+            let cue = grid_cell_preset(&s.presets, id.strip_prefix("grid.")?)?;
+            json!(s.deck.active.iter().any(|a| a.cue == cue))
+        }
     })
 }
 
@@ -333,20 +368,80 @@ fn grid_cell_preset(presets: &[Preset], cell: &str) -> Option<String> {
         .map(|p| p.id.clone())
 }
 
-/// Play a cue: it sets the look, but keeps the operator's brightness, and
-/// the operator's music settings unless the cue is built around the music.
-pub fn play_preset(s: &mut Shared, id: &str) -> bool {
-    let Some(mut settings) = s.presets.iter().find(|p| p.id == id).map(|p| p.settings.clone()) else {
-        return false;
-    };
+/// A cue's look as it starts: the preset, but with the operator's
+/// brightness, and the operator's music settings unless the cue is built
+/// around the music.
+fn cue_settings(s: &Shared, id: &str) -> Option<Settings> {
+    let mut settings = s.presets.iter().find(|p| p.id == id)?.settings.clone();
     settings.brightness = s.settings.brightness;
     if !settings.audio.enabled {
         settings.audio = s.settings.audio.clone();
     }
-    s.settings = settings;
-    s.playlist = None;
-    s.active_cue = Some(id.to_string());
+    Some(settings)
+}
+
+/// Play a cue from the start, whatever its click mode (the old « play »
+/// action, kept for `/api/presets/play`).
+pub fn play_preset(s: &mut Shared, id: &str) -> bool {
+    press_cue(s, id, Some(ClickMode::Restart), true)
+}
+
+/// A cue's key, pad or button went down (`down`) or up. `mode` overrides
+/// the cue's click mode (Shift + letter flashes). False if no such cue.
+pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) -> bool {
+    let Some(settings) = cue_settings(s, id) else { return false };
+    let first_new = s.deck.next_id();
+    with_deck(s, |deck, at| {
+        if down {
+            deck.press(id, mode, at, || settings);
+        } else {
+            deck.release(id);
+        }
+    });
+    if s.deck.active.iter().any(|a| !a.held && a.id >= first_new) {
+        // A latched cue takes over from the scene/playlist, as a cue click
+        // always did. A flash doesn't: the look comes back on release.
+        s.playlist = None;
+        s.look_on = false;
+    }
     true
+}
+
+/// Run a change on the deck, keeping `Shared::settings` the live look of
+/// the newest cue (see cues.rs), and parking the manual look while cues
+/// play.
+fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
+    let was_empty = s.deck.active.is_empty();
+    if let Some(top) = s.deck.active.last_mut() {
+        top.settings = s.settings.clone();
+    }
+    let now = s.now_s();
+    f(&mut s.deck, cues::At { s: now, beat: s.tempo.beat_at(now) });
+    match s.deck.active.last() {
+        Some(top) => {
+            if was_empty {
+                s.deck.parked = Some(std::mem::replace(&mut s.settings, top.settings.clone()));
+            } else {
+                s.settings = top.settings.clone();
+            }
+        }
+        None => {
+            let parked = s.deck.parked.take();
+            if let (Some(look), true, false) = (parked, s.look_on, was_empty) {
+                s.settings = look;
+            }
+        }
+    }
+    s.active_cue = s.deck.primary().map(|a| a.cue.clone());
+}
+
+/// Show a look by itself (a scene, the playlist): every cue stops.
+pub fn show_look(s: &mut Shared, settings: Settings) {
+    s.deck.stop_all();
+    s.deck.parked = None;
+    s.settings = settings;
+    s.look_on = true;
+    s.active_cue = None;
 }
 
 /// Markdown table of every control id, for docs/controls.md.
@@ -481,6 +576,75 @@ mod tests {
         s.settings.brightness = 0.2;
         assert!(play_preset(&mut s, "tunnels-001"));
         assert_eq!(s.settings.brightness, 0.2);
+    }
+
+    fn cue_at(s: &Shared, page: usize, n: usize) -> String {
+        s.presets.iter().filter(|p| p.category == CATEGORIES[page]).nth(n).unwrap().id.clone()
+    }
+
+    #[test]
+    fn grid_cells_toggle_and_ignore_the_release() {
+        let mut s = shared();
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(0.0), true).unwrap();
+        assert_eq!(s.active_cue, Some(cue_at(&s, 0, 0)));
+        let desc = s.controls.get("grid.1.1.1").cloned().unwrap();
+        assert_eq!(current(&s, &desc), Some(serde_json::json!(true)));
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.active_cue, None);
+        assert!(s.deck.active.is_empty() && !s.look_on, "the last cue stopped: nothing plays");
+    }
+
+    #[test]
+    fn a_flash_pad_returns_to_the_cue_and_its_edits() {
+        let mut s = shared();
+        apply(&mut s, "cue.multi", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "look.size", ControlInput::Value(0.77), true).unwrap();
+        s.deck.set_slot(&cue_at(&s, 0, 1), cues::CueSlot { mode: Some(ClickMode::Flash), group: None });
+        apply(&mut s, "grid.1.1.2", ControlInput::Norm(1.0), true).unwrap();
+        assert_eq!(s.active_cue, Some(cue_at(&s, 0, 1)));
+        assert_eq!(cues::looks(&s.deck, &s.settings, s.look_on).len(), 2);
+        apply(&mut s, "grid.1.1.2", ControlInput::Norm(0.0), true).unwrap();
+        assert_eq!(s.active_cue, Some(cue_at(&s, 0, 0)));
+        assert_eq!(s.settings.scale, 0.77, "the edited look of the cue below comes back");
+    }
+
+    #[test]
+    fn a_flash_over_a_scene_gives_the_scene_back() {
+        let mut s = shared();
+        let scene = Settings { scale: 0.42, ..Default::default() };
+        show_look(&mut s, scene.clone());
+        assert!(press_cue(&mut s, "tunnels-001", Some(ClickMode::Flash), true));
+        assert_ne!(s.settings, scene);
+        assert!(s.look_on);
+        press_cue(&mut s, "tunnels-001", None, false);
+        assert_eq!(s.settings, scene);
+        assert_eq!(cues::looks(&s.deck, &s.settings, s.look_on), vec![(0, scene)]);
+        // A latched cue takes over; stopping it leaves the output dark.
+        press_cue(&mut s, "tunnels-001", Some(ClickMode::Toggle), true);
+        assert!(!s.look_on);
+        apply(&mut s, "cue.stop_all", ControlInput::Value(1.0), true).unwrap();
+        assert!(cues::looks(&s.deck, &s.settings, s.look_on).is_empty());
+    }
+
+    #[test]
+    fn cue_mode_and_limit_controls() {
+        let mut s = shared();
+        apply(&mut s, "cue.mode", ControlInput::Value(2.0), true).unwrap();
+        assert_eq!(s.deck.click_mode, ClickMode::Solo);
+        apply(&mut s, "cue.mode", ControlInput::Norm(1.0), true).unwrap();
+        assert_eq!(s.deck.click_mode, ClickMode::Restart);
+        apply(&mut s, "cue.multi", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "cue.mode", ControlInput::Value(0.0), true).unwrap();
+        for n in 0..5 {
+            apply(&mut s, &format!("grid.1.1.{}", n + 1), ControlInput::Value(1.0), true).unwrap();
+        }
+        assert_eq!(s.deck.active.len(), 4);
+        assert!(!s.deck.active.iter().any(|a| a.cue == cue_at(&s, 0, 0)), "the oldest stopped");
+        apply(&mut s, "cue.max_active", ControlInput::Value(2.0), true).unwrap();
+        assert_eq!(s.deck.active.len(), 2);
+        assert_eq!(s.active_cue, Some(cue_at(&s, 0, 4)));
     }
 
     /// Keeps docs/controls.md in sync with the registry.
