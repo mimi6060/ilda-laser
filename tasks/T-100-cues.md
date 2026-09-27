@@ -1,12 +1,12 @@
 ---
 id: T-100
 title: Générateurs cadencés au beat (beat_pos, bpm, groupes)
-status: todo
+status: review
 area: cues
 priority: P1
 depends_on: [T-150]
-owner: ""
-branch: ""
+owner: "dev-agent (beat-gen)"
+branch: feat/beat-gen
 source: docs/research/festival-looks.md#47-engine-features-these-parameters-imply
 ---
 
@@ -45,11 +45,11 @@ Les scènes et presets existants doivent se recharger à l'identique (`#[serde(d
 Onglet Effet : section « Tempo du look » visible si `beat_sync` : Période (temps) 1/2/4/8/16/32, Pas par temps 1/2, 1, 2, 4, 8, Gate (temps), Sens (→ / ←), Groupes 1–4, Mode de groupe (Ensemble / Miroir / Décalé). Affichage du BPM courant et d'un indicateur de temps (1-2-3-4).
 
 ## Critères d'acceptation
-- [ ] `generate` reçoit `GenCtx` ; les 20 générateurs existants produisent les mêmes points qu'avant (test de non-régression)
-- [ ] Avec `beat_sync` et `period_beats = 4`, un mouvement revient à la même position tous les 4 temps, quel que soit le BPM
-- [ ] Intensité et couleur par faisceau prises en compte par `colorize` et dans l'aperçu
-- [ ] Groupes : en mode Miroir, deux groupes ont des décalages x opposés
-- [ ] Anciennes scènes JSON rechargées sans erreur
+- [x] `generate` reçoit `GenCtx` ; les 20 générateurs existants produisent les mêmes points qu'avant (test de non-régression)
+- [x] Avec `beat_sync` et `period_beats = 4`, un mouvement revient à la même position tous les 4 temps, quel que soit le BPM
+- [x] Intensité et couleur par faisceau prises en compte par `colorize` et dans l'aperçu
+- [x] Groupes : en mode Miroir, deux groupes ont des décalages x opposés
+- [x] Anciennes scènes JSON rechargées sans erreur
 
 ## Tests
 Unitaires : `phase`, `env_stab`, `step_index` à 128 et 150 BPM ; non-régression des 20 générateurs (même sortie pour même `t`) ; groupes miroir/décalé ; désérialisation d'un `GenParams` ancien.
@@ -62,3 +62,4 @@ Règles de CLAUDE.md (sécurité laser, propriété intellectuelle) : looks écr
 
 ## Journal
 - 2026-09-27 — architecte : dépend désormais de T-150 (une seule horloge de tempo dans l'appli) ; l'horloge temporaire est retirée du périmètre.
+- 2026-09-27 — dev-agent (feat/beat-gen) : fait, passé en `review`. `beat.rs` (phase, env_stab, easings, step_index, seeded_rand, bar_start, GroupMode/group_of) ; `GenCtx` + 7 champs `GenParams` (serde default) ; `Geometry::styles` (intensité + teinte par faisceau/trait) respectés par `colorize` ; `Animator` reçoit un `BeatClock` lu sur l'horloge T-150 (aucune autre horloge) et compte `beat_pos` depuis le 1er temps de la mesure où le cue a été lancé (`ActiveCue::started_beat`). `beat_sync` : t = 2π·beat_pos/period_beats (sens inclus) et gate appliqué. UI « Tempo du look » dans l'onglet Effet. 126 tests (+19), clippy propre ; digests de référence (202 cues, 20 générateurs) pris avant le changement et inchangés ; ids des cues figés par digest. Pas d'e2e : `studio/e2e/` n'existe pas encore sur `develop` (vérifié à la main via l'API en aperçu, port 8098). Voir docs/prs/beat-gen.md.

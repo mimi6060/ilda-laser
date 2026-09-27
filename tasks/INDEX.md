@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (126)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-100](T-100-cues.md) | Générateurs cadencés au beat (beat_pos, bpm, groupes) | cues | P1 | [T-150] | feat/beat-gen |
+
+## À faire (125)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -17,7 +23,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
 | [T-002](T-002-output.md) | Optimiseur de points (tracé laser pro) | output | P1 | [] |  |
 | [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] |  |
-| [T-100](T-100-cues.md) | Générateurs cadencés au beat (beat_pos, bpm, groupes) | cues | P1 | [T-150] |  |
 | [T-101](T-101-safety.md) | Limiteur de stroboscope et horizon appliqués à tous les looks | safety | P1 | [T-100] |  |
 | [T-102](T-102-cues.md) | Générateurs éventails : fan, balayage, levée, ouverture, vague, positions | cues | P1 | [T-100] |  |
 | [T-103](T-103-cues.md) | Chasers, coups sur le kick et strobes de faisceaux | cues | P1 | [T-100, T-101] |  |
