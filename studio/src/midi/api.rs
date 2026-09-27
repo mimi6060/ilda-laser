@@ -23,6 +23,15 @@ struct ProfileRequest {
     profile: Option<String>,
 }
 
+/// Partial update of the safety options; missing fields are unchanged.
+#[derive(Deserialize)]
+struct SafetyRequest {
+    #[serde(default)]
+    allow_arm: Option<bool>,
+    #[serde(default)]
+    blackout_on_disconnect: Option<bool>,
+}
+
 #[derive(Deserialize)]
 struct DeviceRequest {
     port: String,
@@ -62,6 +71,18 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             },
             Err(e) => e,
         },
+        (true, "/api/midi/safety") => match parse::<SafetyRequest>(body) {
+            Ok(req) => {
+                let mut safety = s.midi.store.devices.safety;
+                safety.allow_arm = req.allow_arm.unwrap_or(safety.allow_arm);
+                safety.blackout_on_disconnect = req.blackout_on_disconnect.unwrap_or(safety.blackout_on_disconnect);
+                match s.midi.store.set_safety(safety) {
+                    Ok(()) => ok(),
+                    Err(e) => Reply::Text(500, e),
+                }
+            }
+            Err(e) => e,
+        },
         _ => return None,
     })
 }
@@ -70,6 +91,7 @@ fn state(s: &Shared) -> Value {
     let m = &s.midi;
     let mut errors = m.store.errors.clone();
     errors.extend(m.error.clone());
+    errors.extend(m.map.warnings.iter().cloned());
     json!({
         "enabled": m.enabled,
         "devices": m.devices,
@@ -77,6 +99,7 @@ fn state(s: &Shared) -> Value {
         "recent": m.recent.iter().map(|e| e.to_json()).collect::<Vec<_>>(),
         "errors": errors,
         "default_profile": GENERIC,
+        "safety": m.store.devices.safety,
     })
 }
 
@@ -145,5 +168,18 @@ mod tests {
         assert_eq!(status(route(&mut s, true, "/api/midi/profile", "{")), 400);
         assert_eq!(status(route(&mut s, true, "/api/midi/device", r#"{"port":"X","enabled":false}"#)), 200);
         assert!(!s.midi.store.port_enabled("X"));
+    }
+
+    #[test]
+    fn safety_options_default_off_and_partial_updates() {
+        let mut s = test_support::shared();
+        let v = json(route(&mut s, false, "/api/midi", ""));
+        assert_eq!(v["safety"], json!({ "allow_arm": false, "blackout_on_disconnect": false }));
+        assert_eq!(status(route(&mut s, true, "/api/midi/safety", r#"{"blackout_on_disconnect":true}"#)), 200);
+        assert_eq!(status(route(&mut s, true, "/api/midi/safety", r#"{"allow_arm":true}"#)), 200);
+        let v = json(route(&mut s, false, "/api/midi", ""));
+        assert_eq!(v["safety"], json!({ "allow_arm": true, "blackout_on_disconnect": true }));
+        assert_eq!(status(route(&mut s, true, "/api/midi/safety", "[")), 400);
+        assert!(!s.gate.is_armed(), "changing the option never arms");
     }
 }

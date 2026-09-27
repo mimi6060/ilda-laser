@@ -157,6 +157,17 @@ impl ArmGate {
         if matches!(src, ArmSource::Midi | ArmSource::System) {
             return Err(vec![format!("L'armement depuis « {} » n'est pas autorisé", src.label_fr())]);
         }
+        self.arm_if_clear(src)
+    }
+
+    /// MIDI arming, reachable only after the MIDI engine's explicit opt-in
+    /// checks (T-208: option on, Shift + 1 s hold, device connected). Every
+    /// interlock and the latched e-stop still apply; the system never arms.
+    pub fn request_arm_midi_opt_in(&mut self) -> Result<(), Vec<String>> {
+        self.arm_if_clear(ArmSource::Midi)
+    }
+
+    fn arm_if_clear(&mut self, src: ArmSource) -> Result<(), Vec<String>> {
         let blocking = self.blocking();
         if !blocking.is_empty() {
             return Err(blocking);
@@ -363,6 +374,22 @@ mod tests {
     }
 
     /// Transition table: (interlock ok?, armed before?) × arm request.
+    #[test]
+    fn midi_opt_in_still_obeys_the_estop_and_interlocks() {
+        let mut gate = ArmGate::default();
+        assert!(gate.request_arm(ArmSource::Midi).is_err(), "plain MIDI arming is always refused");
+        let estop = EStop::default();
+        estop.trip(ArmSource::Midi);
+        gate.sync_estop(&estop);
+        assert!(gate.request_arm_midi_opt_in().is_err(), "latched e-stop blocks the opt-in");
+        gate.reset_estop(&estop);
+        gate.register("door", "Porte ouverte", false);
+        assert!(gate.request_arm_midi_opt_in().is_err(), "an open interlock blocks the opt-in");
+        gate.set_interlock("door", true);
+        gate.request_arm_midi_opt_in().unwrap();
+        assert!(gate.is_armed());
+    }
+
     #[test]
     fn arming_needs_every_interlock() {
         for (lock_ok, armed_before) in [(true, false), (true, true), (false, false)] {

@@ -130,6 +130,17 @@ impl Shared {
         self.gate.request_arm(src)
     }
 
+    /// The only way MIDI can arm (see `midi::engine::frame`): the MIDI
+    /// engine has checked its opt-in, the option is re-checked here, and
+    /// the gate still applies every interlock and the e-stop.
+    pub fn request_arm_midi_opt_in(&mut self) -> Result<(), Vec<String>> {
+        if !self.midi.store.devices.safety.allow_arm {
+            return Err(vec!["L'armement depuis le MIDI est désactivé".into()]);
+        }
+        self.gate.sync_estop(&self.estop);
+        self.gate.request_arm_midi_opt_in()
+    }
+
     /// Trips the emergency stop and records it in the gate.
     pub fn emergency_stop(&mut self, src: interlock::ArmSource) {
         self.estop.trip(src);
@@ -271,6 +282,8 @@ fn run_engine(shared: Arc<Mutex<Shared>>, output: Option<Box<dyn Output>>, runni
                 frames_since_save = 0;
             }
             advance_playlist(&mut s);
+            // MIDI faders/encoders: at most one write per control per frame.
+            midi::engine::frame(&mut s, now);
             let audio = if s.audio_at.elapsed() < AUDIO_STALE {
                 s.audio
             } else {
