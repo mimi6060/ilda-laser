@@ -24,6 +24,20 @@ pub enum Content {
     },
 }
 
+impl Content {
+    /// Whether both draw the same thing: same kind, same shape, same
+    /// generator. The text itself and generator parameters are edits of
+    /// that drawing, not a new one.
+    pub fn same_drawing(&self, other: &Content) -> bool {
+        match (self, other) {
+            (Content::Shape { shape: a }, Content::Shape { shape: b }) => a == b,
+            (Content::Generator { generator: a, .. }, Content::Generator { generator: b, .. }) => a == b,
+            (Content::Text { .. }, Content::Text { .. }) | (Content::Wave, Content::Wave) => true,
+            _ => false,
+        }
+    }
+}
+
 /// How strongly the music drives the look. Every amount is 0.0..=1.0, and
 /// 0.0 means "ignore the music for this parameter".
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

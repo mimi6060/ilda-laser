@@ -402,6 +402,18 @@ async function post(path, body) {
 const hex = c => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
 const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 
+// The look panel follows the server's look (playlist, cues, MIDI) and
+// never sends an old one back. `settingsRev` is the server revision our
+// copy matches. An edit is a function setting one field; it is applied at
+// once and kept until the server accepts it, so when the look changed
+// elsewhere meanwhile, the page reloads it and replays its edits on top
+// (the server refuses a post made on an older revision).
+let settingsRev = -1, pendingEdits = [], pushTimer = null, lookQueue = Promise.resolve(), lookBusy = 0;
+
+// A control being dragged or typed in keeps its value on screen.
+const setVal = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v; };
+const setCheck = (id, v) => { if (document.activeElement !== $(id)) $(id).checked = v; };
+
 function showSettings() {
   const s = settings, kind = s.content.kind;
   document.querySelectorAll('[data-kind]').forEach(b => b.classList.toggle('active', b.dataset.kind === kind));
@@ -411,25 +423,26 @@ function showSettings() {
   $('genPanel').hidden = kind !== 'generator';
   if (kind === 'generator') {
     const p = s.content.params;
-    $('gen').value = s.content.generator;
-    $('gCount').value = p.count; $('gA').value = p.a; $('gB').value = p.b; $('gSpeed').value = p.speed;
-    $('gMode').value = p.color_mode; $('gColor2').value = hex(p.color2);
-    $('gSync').checked = !!p.beat_sync; $('gSyncPanel').hidden = !p.beat_sync;
-    $('gPeriod').value = String(p.period_beats ?? 4); $('gSteps').value = String(p.steps_per_beat ?? 1);
-    $('gGate').value = p.gate_beats ?? 0; $('gDir').value = String((p.direction ?? 1) < 0 ? -1 : 1);
-    $('gGroups').value = String(p.groups ?? 1); $('gGroupMode').value = p.group_mode ?? 'unison';
+    setVal('gen', s.content.generator);
+    setVal('gCount', p.count); setVal('gA', p.a); setVal('gB', p.b); setVal('gSpeed', p.speed);
+    setVal('gMode', p.color_mode); setVal('gColor2', hex(p.color2));
+    if (document.activeElement !== $('gSync')) $('gSync').checked = !!p.beat_sync;
+    $('gSyncPanel').hidden = !p.beat_sync;
+    setVal('gPeriod', String(p.period_beats ?? 4)); setVal('gSteps', String(p.steps_per_beat ?? 1));
+    setVal('gGate', p.gate_beats ?? 0); setVal('gDir', String((p.direction ?? 1) < 0 ? -1 : 1));
+    setVal('gGroups', String(p.groups ?? 1)); setVal('gGroupMode', p.group_mode ?? 'unison');
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
-  if (kind === 'text') $('text').value = s.content.text;
-  $('color').value = hex(s.color);
-  $('scale').value = Math.round(s.scale * 100);
-  $('rot').value = s.rotation_speed;
-  $('bright').value = Math.round(s.brightness * 100);
-  $('aOn').checked = s.audio.enabled;
-  $('aSize').value = Math.round(s.audio.size * 100);
-  $('aRot').value = Math.round(s.audio.rotate * 100);
-  $('aFlash').value = Math.round(s.audio.flash * 100);
-  $('aColor').checked = s.audio.color_on_beat;
+  if (kind === 'text') setVal('text', s.content.text);
+  setVal('color', hex(s.color));
+  setVal('scale', Math.round(s.scale * 100));
+  setVal('rot', s.rotation_speed);
+  setVal('bright', Math.round(s.brightness * 100));
+  setCheck('aOn', s.audio.enabled);
+  setVal('aSize', Math.round(s.audio.size * 100));
+  setVal('aRot', Math.round(s.audio.rotate * 100));
+  setVal('aFlash', Math.round(s.audio.flash * 100));
+  setCheck('aColor', s.audio.color_on_beat);
   showValues();
 }
 
@@ -448,50 +461,90 @@ function showValues() {
   $('gGateV').textContent = +$('gGate').value ? (+$('gGate').value).toFixed(2) : 'off';
 }
 
-function readControls() {
-  settings.color = rgb($('color').value);
-  settings.scale = $('scale').value / 100;
-  settings.rotation_speed = +$('rot').value;
-  settings.brightness = $('bright').value / 100;
-  settings.audio.enabled = $('aOn').checked;
-  settings.audio.size = $('aSize').value / 100;
-  settings.audio.rotate = $('aRot').value / 100;
-  settings.audio.flash = $('aFlash').value / 100;
-  settings.audio.color_on_beat = $('aColor').checked;
-  if (settings.content.kind === 'text') settings.content.text = $('text').value;
-  if (settings.content.kind === 'generator') {
-    settings.content.generator = $('gen').value;
-    Object.assign(settings.content.params, {
-      count: +$('gCount').value, a: +$('gA').value, b: +$('gB').value, speed: +$('gSpeed').value,
-      color_mode: $('gMode').value, color2: rgb($('gColor2').value),
-      beat_sync: $('gSync').checked, period_beats: +$('gPeriod').value, steps_per_beat: +$('gSteps').value,
-      gate_beats: +$('gGate').value, direction: +$('gDir').value, groups: +$('gGroups').value,
-      group_mode: $('gGroupMode').value });
-    $('gSyncPanel').hidden = !$('gSync').checked;
-  }
-  showValues();
-  pushSettings();
+// One edit per control: the value it had when moved, written to one field.
+const genEdit = f => s => { if (s.content.kind === 'generator') f(s.content); };
+const LOOK_EDITS = {
+  color: v => s => { s.color = rgb(v); },
+  scale: v => s => { s.scale = v / 100; },
+  rot: v => s => { s.rotation_speed = +v; },
+  bright: v => s => { s.brightness = v / 100; },
+  aOn: v => s => { s.audio.enabled = v; },
+  aSize: v => s => { s.audio.size = v / 100; },
+  aRot: v => s => { s.audio.rotate = v / 100; },
+  aFlash: v => s => { s.audio.flash = v / 100; },
+  aColor: v => s => { s.audio.color_on_beat = v; },
+  text: v => s => { if (s.content.kind === 'text') s.content.text = v; },
+  gen: v => genEdit(c => { c.generator = v; }),
+  gCount: v => genEdit(c => { c.params.count = +v; }),
+  gA: v => genEdit(c => { c.params.a = +v; }),
+  gB: v => genEdit(c => { c.params.b = +v; }),
+  gSpeed: v => genEdit(c => { c.params.speed = +v; }),
+  gMode: v => genEdit(c => { c.params.color_mode = v; }),
+  gColor2: v => genEdit(c => { c.params.color2 = rgb(v); }),
+  gSync: v => genEdit(c => { c.params.beat_sync = v; }),
+  gPeriod: v => genEdit(c => { c.params.period_beats = +v; }),
+  gSteps: v => genEdit(c => { c.params.steps_per_beat = +v; }),
+  gGate: v => genEdit(c => { c.params.gate_beats = +v; }),
+  gDir: v => genEdit(c => { c.params.direction = +v; }),
+  gGroups: v => genEdit(c => { c.params.groups = +v; }),
+  gGroupMode: v => genEdit(c => { c.params.group_mode = v; }),
+};
+for (const [id, edit] of Object.entries(LOOK_EDITS)) {
+  $(id).addEventListener('input', () => {
+    editLook(edit($(id).type === 'checkbox' ? $(id).checked : $(id).value));
+    showValues();
+  });
+  // Shown again once let go, in case the look changed while it was held.
+  if (id === 'gSync') $(id).addEventListener('input', () => { $('gSyncPanel').hidden = !$('gSync').checked; });
+  $(id).addEventListener('blur', () => setTimeout(showSettings));
 }
 
-let pushTimer = null;
-function pushSettings() {
+function editLook(fn) {
+  fn(settings);
+  pendingEdits.push(fn);
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => post('/api/settings', settings), 40);
+  pushTimer = setTimeout(() => lookTask(sendLook), 40);
 }
 
-['color', 'scale', 'rot', 'bright', 'aOn', 'aSize', 'aRot', 'aFlash', 'aColor', 'text',
- 'gen', 'gCount', 'gA', 'gB', 'gSpeed', 'gMode', 'gColor2',
- 'gSync', 'gPeriod', 'gSteps', 'gGate', 'gDir', 'gGroups', 'gGroupMode']
-  .forEach(id => $(id).addEventListener('input', readControls));
+// Look requests run one at a time, in order.
+function lookTask(task) {
+  lookBusy++;
+  lookQueue = lookQueue.then(task).catch(e => console.warn(e)).finally(() => lookBusy--);
+  return lookQueue;
+}
+
+async function sendLook() {
+  for (let tries = 0; tries < 3 && pendingEdits.length; tries++) {
+    const sent = pendingEdits.length;
+    const r = await fetch('/api/settings?rev=' + settingsRev,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+    if (r.status === 409) { await loadLook(); continue; } // replaced meanwhile: replay on the new look
+    pendingEdits.splice(0, sent);
+    if (r.ok) settingsRev = (await r.json()).rev; else console.warn('/api/settings', await r.text());
+    return;
+  }
+}
+
+// Take the server's look (from /api/state), with our unsent edits on top.
+function takeLook(st) {
+  settings = st.settings; settingsRev = st.settings_rev;
+  pendingEdits.forEach(f => f(settings));
+  showSettings();
+}
+async function loadLook() {
+  takeLook(await (await fetch('/api/state')).json());
+}
 
 document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
   const kind = b.dataset.kind;
-  if (kind === 'shape') settings.content = { kind, shape: settings.content.shape || 'circle' };
-  if (kind === 'text') settings.content = { kind, text: $('text').value || 'HELLO' };
-  if (kind === 'wave') settings.content = { kind };
-  if (kind === 'generator') settings.content = { kind, generator: 'lissajous',
+  let content;
+  if (kind === 'shape') content = { kind, shape: settings.content.shape || 'circle' };
+  if (kind === 'text') content = { kind, text: $('text').value || 'HELLO' };
+  if (kind === 'wave') content = { kind };
+  if (kind === 'generator') content = { kind, generator: 'lissajous',
     params: { count: 8, a: 3, b: 2, speed: 1, color_mode: 'rainbow', color2: [0, 0, 255] } };
-  showSettings(); pushSettings();
+  editLook(s => { s.content = structuredClone(content); });
+  showSettings();
 }));
 
 // ---------- laser on/off, emergency stop ----------
@@ -630,6 +683,9 @@ async function previewLoop() {
       if (cueCategories[serverPage] && cueCategories[serverPage] !== cuePage) { cuePage = cueCategories[serverPage]; renderCues(); }
     }
     showCueDeck(f.cues);
+    // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
+    // control); our own requests update settingsRev themselves.
+    if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -959,9 +1015,8 @@ async function cueUp(id) {
   if (await post('/api/cue', { id, down: false })) refreshLook();
 }
 // The look panel shows the newest cue's look.
-async function refreshLook() {
-  const st = await (await fetch('/api/state')).json();
-  settings = st.settings; showSettings();
+function refreshLook() {
+  return lookTask(loadLook);
 }
 document.querySelectorAll('#cueModes button').forEach((b, i) => b.addEventListener('click', () => post('/api/control', { id: 'cue.mode', value: i })));
 document.querySelectorAll('#cueMulti button').forEach(b => b.addEventListener('click', () => post('/api/control', { id: 'cue.multi', value: b.dataset.multi === '1' })));
@@ -1082,7 +1137,7 @@ function showLfos(pos) {
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
-  settings = st.settings; calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
+  calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');
   }
@@ -1091,11 +1146,11 @@ async function loadState() {
     st.shapes.forEach(name => {
       const b = document.createElement('button');
       b.textContent = names[name] || name; b.dataset.shape = name;
-      b.onclick = () => { settings.content = { kind: 'shape', shape: name }; showSettings(); pushSettings(); };
+      b.onclick = () => { editLook(s => { s.content = { kind: 'shape', shape: name }; }); showSettings(); };
       $('shapes').appendChild(b);
     });
   }
-  showSettings(); showCalibration(); showArmed(); renderScenes();
+  takeLook(st); showCalibration(); showArmed(); renderScenes();
 }
 
 // Tooltips show each control's stable id, to help with MIDI mapping.

@@ -73,11 +73,10 @@ test('the playlist steps through the scenes, and Stop ends it', async ({ page })
   await expect(page.locator('#sceneList .scene.playing')).toHaveCount(0);
 });
 
-// T-293: the page only reloads the look (settings) on its own actions, so
-// when the playlist (or MIDI / the API) changes it, the Contenu/Apparence
-// controls keep showing the old look, and the next slider move sends that
-// old look back: the scene on stage jumps to a different content.
-test.fixme('T-293: a slider move during the playlist keeps the scene on stage', async ({ page }) => {
+// T-293: the page follows the look when the playlist (or MIDI / the API)
+// changes it, so the next slider move edits the scene on stage instead of
+// sending the pre-playlist look back.
+test('T-293: a slider move during the playlist keeps the scene on stage', async ({ page }) => {
   await pickShape(page, 'Cercle', 'circle');
   await saveScene(page, 'Un', 60);
   await pickShape(page, 'Triangle', 'triangle');
