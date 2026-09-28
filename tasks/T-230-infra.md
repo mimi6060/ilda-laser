@@ -1,12 +1,12 @@
 ---
 id: T-230
 title: Capture audio native (cpal, CoreAudio) sur un fil dédié
-status: todo
+status: in-progress
 area: infra
 priority: P1
 depends_on: []
-owner: ""
-branch: ""
+owner: "dev-agent (audio-capture)"
+branch: feat/audio-capture
 source: docs/research/audio-analysis.md §3
 ---
 
