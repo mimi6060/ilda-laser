@@ -1,12 +1,12 @@
 ---
 id: T-298
 title: Isoler le décodage audio (MP3) pour qu'un fichier piégé ne puisse pas arrêter le studio
-status: todo
+status: in-progress
 area: infra
 priority: P1
 depends_on: []
-owner: ""
-branch: ""
+owner: "dev-agent (decode-isolation)"
+branch: fix/decode-isolation
 source: docs/prs/timeline-audio.md (review T-161)
 ---
 
