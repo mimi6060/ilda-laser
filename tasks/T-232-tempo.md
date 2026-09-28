@@ -1,12 +1,12 @@
 ---
 id: T-232
 title: Fonction d'onsets (flux spectral) et détection kick / caisse claire / charleston
-status: todo
+status: in-progress
 area: tempo
 priority: P1
 depends_on: [T-231]
-owner: ""
-branch: ""
+owner: "dev-agent (audio-onsets)"
+branch: feat/audio-onsets
 source: docs/research/audio-analysis.md §2.2 et §2.3
 ---
 
