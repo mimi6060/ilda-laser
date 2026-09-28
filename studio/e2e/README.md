@@ -12,6 +12,8 @@ The harness (`studio.ts`) only ever starts a **preview-only** studio:
 - always with `--no-midi` (never opens the user's MIDI controller); MIDI
   specs add `--midi-test`, which plugs in a *simulated* APC40 mkII
   (« Test APC40 mkII ») fed by `POST /api/midi/inject` — still no real port,
+- always with `--no-audio` (never opens the Mac's microphone or an audio
+  interface; audio specs use the browser source, `POST /api/audio`),
 - on a free port, never 8080 (the user's instance),
 - with a fresh temporary `--data-dir` per spec file, deleted afterwards —
   never the user's `studio-data/`,

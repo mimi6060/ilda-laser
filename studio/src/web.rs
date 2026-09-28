@@ -142,6 +142,26 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/audio/devices") => {
+            let hub = Arc::clone(&shared.lock().unwrap().audio_in);
+            // The capture thread's last scan: this handler never calls CoreAudio.
+            json_response(json!({ "capture": hub.capture_enabled(), "devices": hub.devices() }))
+        }
+        (Method::Get, "/api/audio/config") => {
+            let hub = Arc::clone(&shared.lock().unwrap().audio_in);
+            json_response(json!(hub.config().0))
+        }
+        (Method::Post, "/api/audio/config") => match body::<serde_json::Value>(request) {
+            Ok(patch) => {
+                let hub = Arc::clone(&shared.lock().unwrap().audio_in);
+                // Only the fields sent change; the reply is what was kept.
+                match hub.config().0.patched(&patch).and_then(|c| hub.set_config(c)) {
+                    Ok(config) => json_response(json!(config)),
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Post, "/api/heartbeat") => match body::<Heartbeat>(request) {
             Ok(hb) => {
                 let mut s = shared.lock().unwrap();
@@ -629,6 +649,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "evolving": evolving_status(s),
         "timeline": s.timeline.state(&s.timeline_clock()),
+        "audio": s.audio_in.view(s.audio, s.audio_at, Instant::now()),
     }))
 }
 
