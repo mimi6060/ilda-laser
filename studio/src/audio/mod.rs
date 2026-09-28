@@ -8,8 +8,8 @@
 //! - the **capture** thread (worker.rs): opens/closes the input, lists
 //!   devices, retries every 2 s after an unplug or a refusal;
 //! - the **analysis** thread (worker.rs): reads the ring by hops of 256
-//!   samples (analysis.rs, spectrum.rs, onsets.rs: meter, bands,
-//!   auto-gain, silence, onsets, kick / snare / hat)
+//!   samples (analysis.rs, spectrum.rs, onsets.rs, bpm.rs: meter, bands,
+//!   auto-gain, silence, onsets, kick / snare / hat, BPM and beats)
 //!   and publishes a snapshot in `AudioHub`, which the 60 fps engine reads
 //!   at the top of each frame (a mutex held for a copy).
 //!
@@ -22,6 +22,7 @@
 //! its own thread, its clock driving the timeline (playback.rs).
 
 pub mod analysis;
+pub mod bpm;
 pub mod capture;
 pub mod decode;
 pub mod isolate;
@@ -33,12 +34,14 @@ pub mod worker;
 
 use crate::engine::AudioFeatures;
 use anyhow::{Context, Result};
+use bpm::TempoEstimate;
 use capture::{InputDevice, MAX_BUFFER_FRAMES, MIN_BUFFER_FRAMES};
 use onsets::Onsets;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spectrum::{AnalysisConfig, SpectralFrame};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -215,6 +218,9 @@ pub struct NativeSnapshot {
     pub spectral: SpectralFrame,
     /// Onset / kick / snare / hat counters, strengths and times (T-232).
     pub onsets: Onsets,
+    /// BPM, confidence, last / next beat, detector state (T-233). A
+    /// proposal only: the tempo clock is not touched here.
+    pub tempo: TempoEstimate,
     /// Audio time of the end of the last hop, seconds since the studio
     /// epoch (the tempo clock's time base).
     pub t: f64,
@@ -247,6 +253,8 @@ pub struct AudioHub {
     config: Mutex<(AudioConfig, u64)>,
     info: Mutex<Info>,
     snapshot: Mutex<Option<NativeSnapshot>>,
+    /// *Nouveau morceau* requests, counted (the analysis thread compares).
+    new_tracks: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -263,7 +271,7 @@ impl AudioHub {
         } else {
             CaptureStatus { state: CaptureState::Disabled, message: "Capture audio désactivée (--no-audio)".into(), ..Default::default() }
         };
-        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None) }
+        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0) }
     }
 
     /// From `<data_dir>/audio.json`, then `--audio-device` (for this run).
@@ -338,6 +346,16 @@ impl AudioHub {
         lock(&self.info).devices = devices;
     }
 
+    /// *Nouveau morceau*: the tempo estimator forgets its history at its
+    /// next hop. Never blocks.
+    pub fn new_track(&self) {
+        self.new_tracks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn new_track_requests(&self) -> u64 {
+        self.new_tracks.load(Ordering::Relaxed)
+    }
+
     pub fn publish(&self, snapshot: NativeSnapshot) {
         *lock(&self.snapshot) = Some(snapshot);
     }
@@ -400,6 +418,9 @@ impl AudioHub {
             // Onset / kick / snare / hat counters, 0..1 strengths, audio
             // times (T-232); null when nothing fresh is captured.
             "onsets": native.map(|n| n.onsets),
+            // BPM, confidence, beat_time / next_beat (audio times), state
+            // (T-233); null when nothing fresh is captured.
+            "tempo": native.map(|n| n.tempo),
             "stats": stats,
             "level": features.level,
             "bass": features.bass,
@@ -418,7 +439,8 @@ mod tests {
 
     fn snap(level: f32, beat: u64, at: Instant) -> NativeSnapshot {
         let onsets = Onsets { kick: beat, onset: beat + 2, ..Default::default() };
-        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, t: 1.0, at }
+        let tempo = TempoEstimate { bpm: 128.0, confidence: 0.8, beat_time: 0.9, next_beat: 1.37, state: bpm::DetectState::Locked };
+        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, t: 1.0, at }
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {
@@ -551,6 +573,7 @@ mod tests {
         assert_eq!(v["level_db"], Value::Null);
         assert_eq!(v["spectral"], Value::Null);
         assert_eq!(v["onsets"], Value::Null);
+        assert_eq!(v["tempo"], Value::Null);
         assert_eq!(v["source"], "native");
         assert_eq!(v["active"], "none");
         assert_eq!(v["stats"]["rms_db"], analysis::FLOOR_DB as f64);
@@ -563,6 +586,8 @@ mod tests {
         assert_eq!(v["spectral"]["silent"], true);
         assert_eq!((v["onsets"]["kick"].as_u64(), v["onsets"]["onset"].as_u64()), (Some(9), Some(11)));
         assert_eq!(v["beat"], 9, "the legacy beat is the kick counter");
+        assert_eq!((v["tempo"]["bpm"].as_f64(), v["tempo"]["state"].as_str()), (Some(128.0), Some("locked")));
+        assert_eq!(v["tempo"]["next_beat"], 1.37);
         set_source(&hub, AudioInputSource::Browser);
         assert_eq!(hub.view(AudioFeatures::default(), now, now)["spectral"], Value::Null, "native only");
         let off = AudioHub::in_memory(false);

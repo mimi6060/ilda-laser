@@ -219,6 +219,13 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Post, "/api/audio/tempo/new_track") => {
+            // *Nouveau morceau*: the native tempo estimator forgets its
+            // history (applied by the analysis thread; never blocks).
+            let hub = Arc::clone(&shared.lock().unwrap().audio_in);
+            hub.new_track();
+            ok()
+        }
         (Method::Post, "/api/heartbeat") => match body::<Heartbeat>(request) {
             Ok(hb) => {
                 let mut s = shared.lock().unwrap();
