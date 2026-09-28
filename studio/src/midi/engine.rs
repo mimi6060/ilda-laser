@@ -12,7 +12,7 @@
 use super::mapping::{pickup_catches, Incoming, InputKind, MapMode, Mapping};
 use super::profile::{Profile, GENERIC};
 use super::safety::{self, ARM, ARM_HOLD, BLACKOUT, PLUG_GUARD};
-use super::MidiEvent;
+use super::{learn, MidiEvent};
 use crate::controls::{self, ControlInput, ControlKind, GRID_COLS, GRID_ROWS};
 use crate::Shared;
 use std::collections::{HashMap, HashSet};
@@ -94,13 +94,19 @@ pub fn handle_batch(s: &mut Shared, events: &[MidiEvent]) {
         do_blackout(s);
     }
     for ev in events {
-        handle_event(s, ev);
+        // MIDI learn (T-203) takes the message it binds: it doesn't act.
+        let learned = learn::capture(s, ev);
+        learn::observe(s, ev);
+        if !learned {
+            handle_event(s, ev);
+        }
     }
 }
 
 /// Once per engine frame: flush coalesced fader/encoder writes and finish
 /// a Shift + arm hold that lasted long enough.
 pub fn frame(s: &mut Shared, now: Instant) {
+    learn::expire(s, now);
     if s.midi.map.pending.is_empty() && s.midi.map.arm_hold.is_none() {
         return;
     }
@@ -142,12 +148,12 @@ pub fn port_closed(s: &mut Shared, port: &str, unplugged: bool) {
     }
 }
 
-fn profile_of<'a>(s: &'a Shared, port: &str) -> Option<&'a Profile> {
+pub(super) fn profile_of<'a>(s: &'a Shared, port: &str) -> Option<&'a Profile> {
     let slug = s.midi.devices.iter().find(|d| d.name == port).map_or(GENERIC, |d| d.profile.as_str());
     s.midi.store.get(slug)
 }
 
-fn is_shift_key(p: &Profile, m: &Incoming) -> bool {
+pub(super) fn is_shift_key(p: &Profile, m: &Incoming) -> bool {
     p.shift_key.as_ref().is_some_and(|k| k.matches(m))
 }
 
@@ -275,6 +281,12 @@ fn release(s: &mut Shared, key: &Key, m: &Incoming) -> bool {
         }
         Some(Held::Nothing) => true,
     }
+}
+
+/// A mapping just learned from a fader at `pos`: pickup starts from there,
+/// so moving it on across the value takes over.
+pub(super) fn seed_pickup(s: &mut Shared, port: &str, id: &str, pos: f32) {
+    s.midi.map.pickup.insert((port.to_string(), id.to_string()), Pickup { prev: Some(pos), engaged: false, written: None });
 }
 
 /// "grid" slot n (row-major from the top left) on the current page.
@@ -1000,7 +1012,7 @@ mod tests {
                     assert!(lo >= *min && hi <= *max && lo < hi, "{slug}: {} range {lo}..{hi}", mp.target);
                 }
                 if mp.mode == MapMode::Relative {
-                    let declared = p.extra["encoders"].as_array().unwrap().iter().any(|e| e["number"] == mp.input.number);
+                    let declared = p.encoders.iter().any(|e| e.input.number == mp.input.number);
                     assert!(declared && mp.input.kind == InputKind::Cc, "{slug}: {} on an undeclared encoder", mp.target);
                 }
             }

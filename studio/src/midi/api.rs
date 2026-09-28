@@ -1,11 +1,13 @@
 //! `/api/midi*` routes, as a pure function of `Shared` so they are tested
 //! without an HTTP server. `web.rs` only reads the body and forwards.
 
+use super::learn;
 use super::profile::GENERIC;
 use super::testing::InjectError;
 use crate::Shared;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Instant;
 
 pub enum Reply {
     Json(Value),
@@ -46,6 +48,39 @@ struct InjectRequest {
     #[serde(default)]
     port: Option<String>,
     bytes: Vec<u8>,
+}
+
+/// MIDI learn (T-203).
+#[derive(Deserialize)]
+struct LearnRequest {
+    target: String,
+    #[serde(default)]
+    args: Value,
+    #[serde(default)]
+    shift: bool,
+}
+
+#[derive(Deserialize)]
+struct ConfirmRequest {
+    replace: bool,
+}
+
+#[derive(Deserialize)]
+struct DeleteRequest {
+    port: String,
+    index: usize,
+}
+
+#[derive(Deserialize)]
+struct ForgetRequest {
+    target: String,
+}
+
+fn learn_reply(r: Result<(), learn::LearnError>) -> Reply {
+    match r {
+        Ok(()) => ok(),
+        Err((code, msg)) => Reply::Text(code, msg),
+    }
 }
 
 /// Longest injection accepted at once.
@@ -96,6 +131,29 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             }
             Err(e) => e,
         },
+        (true, "/api/midi/learn") => match parse::<LearnRequest>(body) {
+            Ok(req) => learn_reply(learn::start(s, &req.target, req.args, req.shift, Instant::now())),
+            Err(e) => e,
+        },
+        (true, "/api/midi/learn/cancel") => {
+            learn::cancel(s);
+            ok()
+        }
+        (true, "/api/midi/learn/confirm") => match parse::<ConfirmRequest>(body) {
+            Ok(req) => learn_reply(learn::confirm(s, req.replace)),
+            Err(e) => e,
+        },
+        (true, "/api/midi/mapping/delete") => match parse::<DeleteRequest>(body) {
+            Ok(req) => learn_reply(learn::delete(s, &req.port, req.index)),
+            Err(e) => e,
+        },
+        (true, "/api/midi/mapping/forget") => match parse::<ForgetRequest>(body) {
+            Ok(req) => match learn::forget(s, &req.target) {
+                Ok(n) => Reply::Json(json!({ "removed": n })),
+                Err((code, msg)) => Reply::Text(code, msg),
+            },
+            Err(e) => e,
+        },
         // Test mode only (`--midi-test`): without it these routes don't exist.
         (true, "/api/midi/inject") if s.midi.sim.is_some() => match parse::<InjectRequest>(body) {
             Ok(req) => inject(s, req),
@@ -144,7 +202,7 @@ fn state(s: &Shared) -> Value {
     let mut errors = m.store.errors.clone();
     errors.extend(m.error.clone());
     errors.extend(m.map.warnings.iter().cloned());
-    json!({
+    let mut v = json!({
         "enabled": m.enabled,
         "devices": m.devices,
         "last": m.last.as_ref().map(|e| e.to_json()),
@@ -153,7 +211,11 @@ fn state(s: &Shared) -> Value {
         "default_profile": GENERIC,
         "safety": m.store.devices.safety,
         "test": m.sim.is_some(),
-    })
+    });
+    for (key, value) in learn::state(s, Instant::now()) {
+        v[key] = value;
+    }
+    v
 }
 
 #[cfg(test)]
@@ -161,7 +223,6 @@ mod tests {
     use super::*;
     use crate::midi::{MidiEvent, MidiMsg};
     use crate::test_support;
-    use std::time::Instant;
 
     fn json(reply: Option<Reply>) -> Value {
         match reply {
@@ -283,5 +344,28 @@ mod tests {
         call(true, "/api/midi/device", r#"{"port":"Test APC40 mkII","enabled":false}"#);
         w.step(Instant::now() + std::time::Duration::from_millis(300), None);
         assert_eq!(status(call(true, "/api/midi/inject", r#"{"bytes":[144,32,127]}"#)), 409);
+    }
+
+    #[test]
+    fn learn_routes() {
+        let mut s = test_support::shared();
+        assert_eq!(status(route(&mut s, true, "/api/midi/learn", r#"{"target":"master.size"}"#)), 409, "--no-midi");
+        s.midi.enabled = true;
+        s.midi.device_mut("Pad").connected = true;
+        assert_eq!(status(route(&mut s, true, "/api/midi/learn", r#"{"target":"nope"}"#)), 404);
+        assert_eq!(status(route(&mut s, true, "/api/midi/learn", r#"{"target":"transport.arm"}"#)), 403);
+        assert_eq!(status(route(&mut s, true, "/api/midi/learn", "{")), 400);
+        assert_eq!(status(route(&mut s, true, "/api/midi/learn", r#"{"target":"master.size"}"#)), 200);
+        let v = json(route(&mut s, false, "/api/midi", ""));
+        assert_eq!(v["learn"]["target"], "master.size");
+        assert_eq!(v["mappings"], json!([]));
+        assert_eq!(status(route(&mut s, true, "/api/midi/learn/cancel", "")), 200);
+        let v = json(route(&mut s, false, "/api/midi", ""));
+        assert_eq!(v["learn"], Value::Null);
+        assert_eq!(v["learn_notice"]["text"], "Apprentissage MIDI annulé");
+        assert_eq!(status(route(&mut s, true, "/api/midi/learn/confirm", r#"{"replace":true}"#)), 409);
+        assert_eq!(status(route(&mut s, true, "/api/midi/mapping/delete", r#"{"port":"Pad","index":0}"#)), 404);
+        assert_eq!(json(route(&mut s, true, "/api/midi/mapping/forget", r#"{"target":"master.size"}"#))["removed"], 0);
+        assert!(!s.gate.is_armed());
     }
 }

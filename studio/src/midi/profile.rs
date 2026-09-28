@@ -7,7 +7,7 @@
 //! Nothing here panics on bad files: a broken profile is skipped with a
 //! readable error (shown by `/api/midi`) and the port falls back to `generic`.
 
-use super::mapping::{Mapping, MidiInput};
+use super::mapping::{Mapping, MidiInput, RelEncoding};
 use super::safety::MidiSafety;
 use super::detect::{Model, MODE_ABLETON, MODE_ALTERNATE, MODE_GENERIC, PID_APC40, PID_APC40_MK2};
 use serde::{Deserialize, Serialize};
@@ -89,11 +89,24 @@ pub struct Profile {
     /// are looked up first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shift_key: Option<MidiInput>,
+    /// Endless encoders of the device (APC: Cue Level, Tempo): MIDI learn
+    /// (T-203) maps them in `relative` mode with this encoding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub encoders: Vec<Encoder>,
     #[serde(default)]
     pub mappings: Vec<Mapping>,
     /// Fields added by later tasks (shift key, encoders…), kept on save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// A CC known to come from an endless encoder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Encoder {
+    #[serde(flatten)]
+    pub input: MidiInput,
+    #[serde(default)]
+    pub encoding: RelEncoding,
 }
 
 impl Profile {
@@ -300,6 +313,18 @@ impl ProfileStore {
             self.set_port_profile(port, Some(&slug))?;
         }
         Ok(slug)
+    }
+
+    /// Where edits of profile `slug` go (MIDI learn, deleting a mapping):
+    /// the profile itself if it is a user one; for a built-in one, a new
+    /// `<slug>-perso` copy (`-perso-2`… if taken: an older copy is never
+    /// overwritten).
+    pub fn edit_slug(&self, slug: &str) -> String {
+        if !self.is_builtin(slug) {
+            return slug.to_string();
+        }
+        let base = format!("{slug}-perso");
+        (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|s| self.get(s).is_none()).unwrap_or(base)
     }
 
     fn save_devices(&self) -> Result<(), String> {
