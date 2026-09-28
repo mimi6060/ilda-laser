@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## En cours (1)
+## En review (1)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|

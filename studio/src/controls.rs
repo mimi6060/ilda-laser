@@ -985,6 +985,45 @@ mod tests {
         assert_eq!(s.active_cue, Some(a), "the cue left on layer 1 is the primary again");
     }
 
+    #[test]
+    fn an_evolving_cue_plays_through_the_deck_on_its_layer_within_budget() {
+        use crate::engine::{Animator, AudioFeatures, BeatClock};
+        use crate::evolving::{test_cue, EvolvingKey};
+        let mut s = shared();
+        // A heavy evolving cue (32 beams, then a 32-beam wave) on layer 2,
+        // over a catalogue cue on layer 1.
+        let mut cue = test_cue(true);
+        cue.keys.iter_mut().for_each(|k: &mut EvolvingKey| k.params.count = 32);
+        let settings = Settings { content: Content::Evolving(cue), ..Settings::default() };
+        s.presets.push(Preset { id: "test-evolving".into(), name: "Test".into(), category: "Faisceaux", settings });
+        s.deck.set_slot("test-evolving", cues::CueSlot { layer: Some(2), ..Default::default() });
+        let base = cue_at(&s, 0, 0);
+        assert!(press_cue(&mut s, &base, None, true));
+        assert!(press_cue(&mut s, "test-evolving", None, true));
+        assert_eq!(s.active_cue.as_deref(), Some("test-evolving"));
+        assert!(matches!(s.settings.content, Content::Evolving(_)), "the primary look is the evolving cue");
+        let looks = cues::layered_looks(&s.deck, &s.settings, s.look_on);
+        assert_eq!(looks.iter().map(|(layer, _, _)| *layer).collect::<Vec<_>>(), [1, 2]);
+        let started = s.deck.active[1].started_beat;
+        for beat in [0.0, 3.5, 7.9, 8.0, 12.25, 15.9] {
+            let clock = BeatClock { beat: started + 1.0 + beat, ..Default::default() };
+            let rendered = looks
+                .iter()
+                .map(|(layer, id, look)| {
+                    let start = s.deck.active.iter().find(|a| a.id == *id).unwrap().started_beat;
+                    (*layer, Animator::starting_at(start).render(look, AudioFeatures::default(), 1.0 / 60.0, &clock))
+                })
+                .collect::<Vec<_>>();
+            assert!(rendered[1].1.iter().any(|p| p.is_lit()), "evolving cue dark at beat {beat}");
+            let (frame, report) = crate::layers::mix(rendered, &s.mixer);
+            assert!(frame.len() <= s.mixer.point_budget, "beat {beat}: {} points", frame.len());
+            assert!(report.dropped.is_empty() || report.dropped == [2], "{report:?}");
+        }
+        // Stopping it gives the layer-1 cue back as the primary.
+        assert!(press_cue(&mut s, "test-evolving", None, true));
+        assert_eq!(s.active_cue, Some(base));
+    }
+
     /// Keeps docs/controls.md in sync with the registry.
     #[test]
     fn write_controls_doc() {
