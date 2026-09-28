@@ -258,6 +258,16 @@ impl PaletteStore {
         &self.palettes
     }
 
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Replaces every user palette in memory only (already validated); the
+    /// caller saves the file (project open, T-286).
+    pub fn replace_in_memory(&mut self, palettes: Vec<Palette>) {
+        self.palettes = palettes;
+    }
+
     /// Replaces every user palette and saves.
     pub fn set(&mut self, palettes: Vec<Palette>) -> Result<()> {
         validate_palettes(&palettes)?;

@@ -6,7 +6,7 @@ use crate::engine::Settings;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Scene {
@@ -33,6 +33,16 @@ impl SceneStore {
 
     pub fn list(&self) -> &[Scene] {
         &self.scenes
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Replaces every scene in memory only; the caller saves the file
+    /// (project open, T-286: outside the engine lock).
+    pub fn replace_in_memory(&mut self, scenes: Vec<Scene>) {
+        self.scenes = scenes;
     }
 
     pub fn get(&self, name: &str) -> Option<&Scene> {
