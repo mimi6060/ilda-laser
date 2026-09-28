@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (116)
+## À faire (114)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -43,8 +43,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-264](T-264-qa.md) | Suite de tests des invariants de sécurité | qa | P1 | [T-250, T-251, T-252, T-253, T-254, T-256] |  |
 | [T-270](T-270-ui.md) | Nouvelle disposition de l'écran (régions, onglets de panneau) | ui | P1 | [] |  |
 | [T-272](T-272-ui.md) | Grille de cues à taille fixe (8×5 par défaut), pages sur touches F | ui | P1 | [T-270] |  |
-| [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] |  |
-| [T-276](T-276-ui.md) | Rendu des faisceaux : énergie conservée, nappes, brume, halo | ui | P1 | [T-275] |  |
 | [T-277](T-277-output.md) | Lieu et projecteurs multiples (modèle `Venue`, `/api/frames`) | output | P1 | [T-275] |  |
 | [T-279](T-279-safety.md) | Surcouches de sécurité dans le visualiseur (zone public, horizon) | safety | P1 | [T-277, T-003] |  |
 | [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
@@ -130,7 +128,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (20)
+## Fait (22)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -150,6 +148,8 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-200](T-200-midi.md) | Entrée/sortie MIDI native (midir, CoreMIDI) | midi | P1 | [] | feat/midi-core |
 | [T-201](T-201-midi.md) | Détection des contrôleurs et profils par appareil (APC40 / APC40 mkII) | midi | P1 | [T-200] | feat/midi-core |
 | [T-202](T-202-midi.md) | Moteur de correspondances MIDI → contrôles (boutons, faders, encodeurs, Shift) | midi | P1 | [T-200, T-201, T-145] | feat/midi-map |
+| [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] | feat/beam-view |
+| [T-276](T-276-ui.md) | Rendu des faisceaux : énergie conservée, nappes, brume, halo | ui | P1 | [T-275] | feat/beam-view |
 | [T-291](T-291-ui.md) | Raccourcis clavier morts après un curseur ou une case à cocher (Espace n'éteint plus) | ui | P1 | [] | fix/arm-keys |
 | [T-293](T-293-ui.md) | Pendant la playlist, un curseur du look renvoie l'ancien look (la scène saute) | ui | P1 | [] | fix/ui-state |
 | [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] | fix/arm-keys |
