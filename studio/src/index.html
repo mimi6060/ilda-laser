@@ -1733,7 +1733,7 @@ async function midiLoop() {
   setTimeout(midiLoop, 2000);
 }
 function renderMidi(m) {
-  const opts = midiProfiles.map(p => `<option value="${esc(p.slug)}">${esc(p.name || p.slug)}${p.builtin ? '' : ' (perso)'}</option>`).join('');
+  const opts = midiProfiles.map(p => `<option value="${esc(p.slug)}">${esc(p.name || p.slug)}${p.builtin ? ' (intégré)' : ' (perso)'}</option>`).join('');
   $('midiDevices').innerHTML = m.devices.map((d, i) => `
     <div class="mdev ${d.connected ? '' : 'off'}">
       <div class="n">${esc(d.name)} <span class="hint">${d.connected ? 'connecté' : 'déconnecté'}</span></div>

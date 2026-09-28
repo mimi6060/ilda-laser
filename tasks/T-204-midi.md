@@ -1,12 +1,12 @@
 ---
 id: T-204
 title: Profil APC40 par défaut (disposition Laser Studio) pour APC40 et APC40 mkII
-status: todo
+status: done
 area: midi
 priority: P1
 depends_on: [T-201, T-202, T-140, T-145, T-150, T-155, T-160, T-208, T-209]
-owner: ""
-branch: ""
+owner: "dev-agent (apc40-profile)"
+branch: "feat/apc40-profile"
 source: docs/research/midi-apc40.md#5-our-default-apc40-layout-proposal-same-for-both-models
 ---
 
@@ -70,13 +70,13 @@ Dans l'onglet Contrôleur : « Profil : APC40 mkII — Laser Studio (intégré) 
 Une aide « Disposition de l'APC40 » affiche ce tableau (voir aussi T-210).
 
 ## Critères d'acceptation
-- [ ] APC40 mkII branché : le pad en haut à gauche joue la 1re cue de la page, celui en bas à droite la 40e.
-- [ ] Même chose avec un APC40 d'origine (même disposition physique).
-- [ ] Scene Launch 3 affiche la page 3 dans l'UI ; l'onglet de page cliqué dans l'UI change la page de la grille MIDI.
-- [ ] Stop All = blackout immédiat (laser désarmé).
-- [ ] Tap tapé 4 fois à 120 BPM → tempo 120 ± 1.
-- [ ] Master fader : pas de saut de luminosité au branchement (pickup).
-- [ ] Les deux profils se chargent sans avertissement (tous les identifiants existent).
+- [x] APC40 mkII branché : le pad en haut à gauche joue la 1re cue de la page, celui en bas à droite la 40e.
+- [x] Même chose avec un APC40 d'origine (même disposition physique).
+- [x] Scene Launch 3 affiche la page 3 dans l'UI ; l'onglet de page cliqué dans l'UI change la page de la grille MIDI.
+- [x] Stop All = blackout immédiat (laser désarmé).
+- [x] Tap tapé 4 fois à 120 BPM → tempo 120 ± 1.
+- [x] Master fader : pas de saut de luminosité au branchement (pickup).
+- [x] Les deux profils se chargent sans avertissement (tous les identifiants existent).
 
 ## Tests
 - Unitaires : table note → slot pour les deux modèles (4 coins + centre), tous les identifiants des profils intégrés existent dans le registre T-145, pas deux mappings sur le même message+Shift.
@@ -89,3 +89,5 @@ Une aide « Disposition de l'APC40 » affiche ce tableau (voir aussi T-210).
 
 ## Journal
 - 2026-09-27 — architecte : l'utilisateur possède un **APC40 mkII** → c'est la cible principale à tester en premier ; le profil APC40 d'origine reste utile. Le support générique de tout contrôleur est dans T-211.
+- 2026-09-28 — dev-agent (feat/apc40-profile) : profils `apc40-mk2.json` et `apc40.json` écrits (grille, pages, Stop All = blackout, calques 1–4, faders/potards en reprise, master, Tap/Nudge/Tempo, Play/Stop, pédale), uniquement avec des identifiants existants + un nouveau `timeline.toggle` (Play = lecture/pause). Sécurité : tant que « Armer depuis le MIDI » est décoché, Shift + Stop All reste un blackout (avant : rien). Profils intégrés affichés « (intégré) ». Non faits faute d'identifiant (libres pour T-203) : Shift + pad = flash, tranches Left/Right, Track Select/potards Device, banques Pan/Sends/User, fader strobe, Metronome, Record, Nudge en BPM (il décale la phase). Critères vérifiés en simulation (mkII e2e, les deux modèles en unitaires) ; reste à confirmer sur le vrai APC40 mkII. `cargo test` 410 ok, clippy propre, e2e 104/104 (sur develop d680a15). Note : docs/prs/apc40-profile.md.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop. À essayer sur l'APC40 mkII de l'utilisateur.
