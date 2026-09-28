@@ -5,12 +5,14 @@
 //! already uses (`level`, `bass`, `beat`; `level` and `bass` computed the
 //! way the browser does it, T-230), the spectral frame (five bands with
 //! auto-gain, centroid, flatness, silence: `spectrum.rs`, T-231) and the
-//! onsets (kick / snare / hat: `onsets.rs`, T-232). The legacy `beat` is
+//! onsets (kick / snare / hat: `onsets.rs`, T-232) and the tempo estimate
+//! with its beat tracking (`bpm.rs`, T-233). The legacy `beat` is
 //! the kick counter: it no longer fires on a bass line. T-237 moves `bass`
 //! onto the bands.
 
+use super::bpm::{BpmTracker, TempoEstimate};
 use super::onsets::{OnsetDetector, Onsets};
-use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame};
+use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame, FFT_SIZE};
 use crate::engine::AudioFeatures;
 
 /// Samples per analysis step (5.3 ms at 48 kHz).
@@ -40,6 +42,8 @@ pub struct Meter {
     pub features: AudioFeatures,
     pub spectral: SpectralFrame,
     pub onsets: Onsets,
+    /// BPM, confidence, beats, detector state (T-233).
+    pub tempo: TempoEstimate,
 }
 
 /// A second-order low-pass (RBJ cookbook, Q = 1/√2), transposed direct
@@ -89,6 +93,7 @@ pub struct Analyzer {
     peak_db: f32,
     spectral: SpectralAnalyzer,
     onsets: OnsetDetector,
+    bpm: BpmTracker,
 }
 
 impl Analyzer {
@@ -101,6 +106,8 @@ impl Analyzer {
     /// not look like a new beat to the engine).
     pub fn with_config(sample_rate: u32, carried: Onsets, config: AnalysisConfig) -> Self {
         let rate = sample_rate.max(1) as f32;
+        let onsets = OnsetDetector::new(sample_rate, carried, config.onsets);
+        let bpm = BpmTracker::new(onsets.odf_rate(), FFT_SIZE);
         Self {
             hop_s: HOP as f32 / rate,
             lp: LowPass::new(BASS_HZ, rate),
@@ -108,7 +115,8 @@ impl Analyzer {
             bass_mean_sq: 0.0,
             peak_db: FLOOR_DB,
             spectral: SpectralAnalyzer::new(sample_rate, config),
-            onsets: OnsetDetector::new(sample_rate, carried, config.onsets),
+            onsets,
+            bpm,
         }
     }
 
@@ -140,12 +148,33 @@ impl Analyzer {
         let rms_db = to_db(self.mean_sq);
         let spectral = self.spectral.process(hop, t, rms_db);
         let onsets = self.onsets.process(self.spectral.power(), t, spectral.silent);
+        let tempo = self.bpm.process(self.onsets.band_flux(), t, spectral.silent);
         let features = AudioFeatures { level, bass, beat: onsets.kick };
-        Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets }
+        Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets, tempo }
     }
 
     pub fn onsets(&self) -> Onsets {
         self.onsets.onsets()
+    }
+
+    pub fn tempo(&self) -> TempoEstimate {
+        self.bpm.estimate()
+    }
+
+    /// A reopened input shows the last BPM until its first estimate.
+    pub fn carry_bpm(&mut self, bpm: f32) {
+        self.bpm.carry_bpm(bpm);
+    }
+
+    /// *Nouveau morceau*: the tempo history is forgotten.
+    pub fn new_track(&mut self) {
+        self.bpm.new_track();
+    }
+
+    /// A guide tempo for the estimator (T-234's *Guider*), or none.
+    #[allow(dead_code)] // wired to the tap by T-234
+    pub fn set_guide(&mut self, bpm: Option<f32>) {
+        self.bpm.set_guide(bpm);
     }
 }
 

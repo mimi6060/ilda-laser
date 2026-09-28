@@ -14,6 +14,7 @@
 //! engine or the UI.
 
 use super::analysis::{Analyzer, HOP};
+use super::bpm::TempoEstimate;
 use super::onsets::Onsets;
 use super::capture::{self, CaptureCounters, CpalSource, OpenError, OpenRequest, SampleSource};
 use super::{AudioHub, AudioInputSource, CaptureState, CaptureStatus, NativeSnapshot};
@@ -213,22 +214,34 @@ pub struct Analysis {
     /// stream to the next (a reopened stream must not look like a new beat
     /// to the engine).
     onsets: Onsets,
+    /// The last tempo estimate: a reopened stream shows its BPM until it
+    /// has its own.
+    tempo: TempoEstimate,
+    /// *Nouveau morceau* requests already applied (`AudioHub::new_track`).
+    new_tracks: u64,
     buf: [f32; HOP],
 }
 
 impl Analysis {
     pub fn new(hub: Arc<AudioHub>, feeds: Receiver<Feed>) -> Self {
-        Self { hub, feeds, current: None, onsets: Onsets::default(), buf: [0.0; HOP] }
+        let new_tracks = hub.new_track_requests();
+        Self { hub, feeds, current: None, onsets: Onsets::default(), tempo: TempoEstimate::default(), new_tracks, buf: [0.0; HOP] }
     }
 
     /// Reads every complete hop waiting in the ring and publishes the
     /// latest result. Returns the number of hops analysed.
     pub fn poll(&mut self) -> usize {
         while let Ok(feed) = self.feeds.try_recv() {
-            let analyzer = Analyzer::with_config(feed.sample_rate, self.onsets, self.hub.analysis_config());
+            let mut analyzer = Analyzer::with_config(feed.sample_rate, self.onsets, self.hub.analysis_config());
+            analyzer.carry_bpm(self.tempo.bpm);
             self.current = Some(Current { analyzer, feed, consumed: 0 });
         }
         let Some(cur) = self.current.as_mut() else { return 0 };
+        let new_tracks = self.hub.new_track_requests();
+        if new_tracks != self.new_tracks {
+            self.new_tracks = new_tracks;
+            cur.analyzer.new_track();
+        }
         if cur.feed.consumer.slots() >= HOP {
             // A copy under a leaf lock, at most once per poll.
             cur.analyzer.set_config(self.hub.analysis_config());
@@ -245,8 +258,9 @@ impl Analysis {
             hops += 1;
         }
         self.onsets = cur.analyzer.onsets();
+        self.tempo = cur.analyzer.tempo();
         if let Some((m, t)) = last {
-            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, t, at: Instant::now() });
+            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, tempo: m.tempo, t, at: Instant::now() });
         }
         if cur.feed.consumer.is_abandoned() && cur.feed.consumer.slots() < HOP {
             // The stream was closed and its ring is drained.
@@ -289,6 +303,7 @@ pub fn spawn_with<S: SampleSource + 'static>(make: impl FnOnce() -> S + Send + '
 #[cfg(test)]
 mod tests {
     use super::super::analysis::testsig::sine;
+    use super::super::bpm::DetectState;
     use super::super::{Active, AudioConfig};
     use super::capture::testing::FakeSource;
     use super::*;
@@ -458,6 +473,26 @@ mod tests {
         let snap = r.hub.snapshot().unwrap();
         assert_eq!(snap.features.beat, 41);
         assert_eq!((snap.onsets.onset, snap.onsets.kick, snap.onsets.snare, snap.onsets.hat), (50, 41, 20, 90));
+    }
+
+    #[test]
+    fn the_tempo_estimate_is_published_carried_and_reset_on_request() {
+        let mut r = rig(&["Mic"], AudioConfig::native());
+        r.run(50, 0.5);
+        let snap = r.hub.snapshot().unwrap();
+        assert_eq!((snap.tempo.bpm, snap.tempo.state), (0.0, DetectState::Checking), "a steady tone: listening, nothing yet");
+        // A reopened stream shows the last BPM until it has its own.
+        r.analysis.tempo = TempoEstimate { bpm: 126.0, ..Default::default() };
+        r.hub.set_config(AudioConfig { buffer_frames: 512, ..AudioConfig::native() }).unwrap();
+        r.run(100, 0.5);
+        assert_eq!(r.fake.opens(), 2);
+        assert_eq!(r.hub.snapshot().unwrap().tempo.bpm, 126.0);
+        // *Nouveau morceau* reaches the analyser without a reopen.
+        assert_eq!(r.analysis.new_tracks, 0);
+        r.hub.new_track();
+        r.run(20, 0.5);
+        assert_eq!((r.analysis.new_tracks, r.fake.opens()), (1, 2));
+        assert_eq!(r.hub.snapshot().unwrap().tempo.state, DetectState::Checking);
     }
 
     #[test]
