@@ -13,7 +13,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-271](T-271-safety.md) | Barre du haut fixe : noir, armement, maître, tempo, état de sortie | safety | P0 | [T-270] |  |
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
 | [T-002](T-002-output.md) | Optimiseur de points (tracé laser pro) | output | P1 | [] |  |
-| [T-101](T-101-safety.md) | Limiteur de stroboscope et horizon appliqués à tous les looks | safety | P1 | [T-100] |  |
 | [T-103](T-103-cues.md) | Chasers, coups sur le kick et strobes de faisceaux | cues | P1 | [T-100, T-101] |  |
 | [T-105](T-105-cues.md) | Tunnels, cônes, soleil et rayons tournants | cues | P1 | [T-100] |  |
 | [T-106](T-106-cues.md) | Nappes : liquid sky, lame, rideaux, cascade, scanner, lamelles, aurore, grille | cues | P1 | [T-100] |  |
@@ -119,6 +118,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-261](T-261-safety.md) | Verrouillage des réglages de sécurité par code | safety | P3 | [T-260, T-259] |  |
 | [T-263](T-263-safety.md) | Fiche sécurité du show exportable | safety | P3 | [T-254, T-258, T-262] |  |
 | [T-280](T-280-ui.md) | Simulation de l'inertie des galvos et divergence | ui | P3 | [T-276, T-171] |  |
+| [T-294](T-294-qa.md) | Test e2e intermittent : « Synchro tempo keeps the preset step » (live.spec.ts:43) | qa | P3 | [] |  |
 
 ## Bloqué (2)
 
@@ -127,7 +127,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (23)
+## Fait (24)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -137,6 +137,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] | feat/e2e |
 | [T-005](T-005-cues.md) | Bibliothèque de 202 cues procéduraux | cues | P1 | [] | feat/presets |
 | [T-100](T-100-cues.md) | Générateurs cadencés au beat (beat_pos, bpm, groupes) | cues | P1 | [T-150] | feat/beat-gen |
+| [T-101](T-101-safety.md) | Limiteur de stroboscope et horizon appliqués à tous les looks | safety | P1 | [T-100] | feat/strobe-limit |
 | [T-102](T-102-cues.md) | Générateurs éventails : fan, balayage, levée, ouverture, vague, positions | cues | P1 | [T-100] | feat/fan-gens |
 | [T-140](T-140-live.md) | Étage de modificateurs en direct maître (géométrie, luminosité, vitesse) | live | P1 | [T-145] | feat/live |
 | [T-141](T-141-live.md) | Couleur en direct : fixe, teinte, palette, arc-en-ciel, chenillard | live | P1 | [T-140, T-150] | feat/live-color |
