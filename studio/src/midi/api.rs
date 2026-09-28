@@ -38,7 +38,11 @@ struct SafetyRequest {
 #[derive(Deserialize)]
 struct DeviceRequest {
     port: String,
-    enabled: bool,
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// « Retour LED » (T-205).
+    #[serde(default)]
+    leds: Option<bool>,
 }
 
 /// `--midi-test` only: bytes "played" on a simulated controller.
@@ -107,16 +111,26 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             Err(e) => e,
         },
         (true, "/api/midi/device") => match parse::<DeviceRequest>(body) {
-            Ok(req) => match s.midi.store.set_port_enabled(&req.port, req.enabled) {
-                Ok(()) => {
-                    // Shown at once; the worker opens/closes the port within 250 ms.
-                    if let Some(d) = s.midi.devices.iter_mut().find(|d| d.name == req.port) {
-                        d.enabled = req.enabled;
-                    }
-                    ok()
+            Ok(DeviceRequest { enabled: None, leds: None, .. }) => Reply::Text(400, "« enabled » ou « leds » attendu".into()),
+            Ok(req) => {
+                let store = &mut s.midi.store;
+                let mut saved = req.enabled.map_or(Ok(()), |on| store.set_port_enabled(&req.port, on));
+                if let (Ok(()), Some(on)) = (&saved, req.leds) {
+                    saved = store.set_port_leds(&req.port, on);
                 }
-                Err(e) => Reply::Text(500, e),
-            },
+                match saved {
+                    Ok(()) => {
+                        // Shown at once; the worker opens/closes the port within
+                        // 250 ms and follows « Retour LED » at its next LED update.
+                        if let Some(d) = s.midi.devices.iter_mut().find(|d| d.name == req.port) {
+                            d.enabled = req.enabled.unwrap_or(d.enabled);
+                            d.leds = req.leds.unwrap_or(d.leds);
+                        }
+                        ok()
+                    }
+                    Err(e) => Reply::Text(500, e),
+                }
+            }
             Err(e) => e,
         },
         (true, "/api/midi/safety") => match parse::<SafetyRequest>(body) {
@@ -282,6 +296,10 @@ mod tests {
         assert_eq!(status(route(&mut s, true, "/api/midi/profile", "{")), 400);
         assert_eq!(status(route(&mut s, true, "/api/midi/device", r#"{"port":"X","enabled":false}"#)), 200);
         assert!(!s.midi.store.port_enabled("X"));
+        assert!(s.midi.store.port_leds("X"), "« Retour LED » on by default");
+        assert_eq!(status(route(&mut s, true, "/api/midi/device", r#"{"port":"X","leds":false}"#)), 200);
+        assert!(!s.midi.store.port_leds("X") && !s.midi.store.port_enabled("X"), "partial update");
+        assert_eq!(status(route(&mut s, true, "/api/midi/device", r#"{"port":"X"}"#)), 400);
     }
 
     #[test]

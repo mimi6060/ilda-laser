@@ -324,7 +324,7 @@ fn do_blackout(s: &mut Shared) {
 
 /// Native range a mapping drives: its own `min`/`max`, else the control's.
 /// Choices count their options. `None` for buttons.
-fn range(kind: &ControlKind, mp: &Mapping) -> Option<(f32, f32)> {
+pub(super) fn range(kind: &ControlKind, mp: &Mapping) -> Option<(f32, f32)> {
     let (lo, hi) = match kind {
         ControlKind::Continuous { min, max, .. } => (*min, *max),
         ControlKind::Choice { options, .. } => (0.0, options.len().saturating_sub(1) as f32),

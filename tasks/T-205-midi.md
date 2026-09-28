@@ -1,7 +1,7 @@
 ---
 id: T-205
 title: Retour LED sur l'APC40 (cue active, page, calques, battement)
-status: in-progress
+status: review
 area: midi
 priority: P1
 depends_on: [T-201, T-204, T-150]
@@ -42,11 +42,11 @@ Case « Retour LED » par appareil (onglet Contrôleur), cochée par défaut pou
 les APC.
 
 ## Critères d'acceptation
-- [ ] Jouer une cue depuis l'UI ou le clavier allume son pad en vert sur l'APC ; l'ancienne repasse en jaune.
-- [ ] Changer de page (UI ou Scene Launch) redessine la grille en < 50 ms.
-- [ ] Onglet fermé : Tap puis pads → les LED suivent toujours.
-- [ ] La LED de battement clignote au tempo courant.
-- [ ] Au repos, aucun message LED n'est envoyé (diff vide).
+- [x] Jouer une cue depuis l'UI ou le clavier allume son pad en vert sur l'APC ; l'ancienne repasse en jaune.
+- [x] Changer de page (UI ou Scene Launch) redessine la grille en < 50 ms.
+- [x] Onglet fermé : Tap puis pads → les LED suivent toujours.
+- [x] La LED de battement clignote au tempo courant.
+- [x] Au repos, aucun message LED n'est envoyé (diff vide).
 
 ## Tests
 - Unitaires : rendu `Apc40` d'un état donné (pad vide/présent/actif/flash, page 7 → Scene Launch 2 clignotant), diff (seules les LED changées sont envoyées), rendu complet au rebranchement, débit ≤ 30 envois/s.
@@ -57,3 +57,9 @@ les APC.
 - Règles de CLAUDE.md (sécurité laser, propriété intellectuelle).
 
 ## Journal
+
+- 2026-09-28 — dev-agent (apc-leds), branche `feat/apc-leds`, note `docs/prs/apc-leds.md`.
+  `studio/src/midi/led.rs` : `LedFrame` / `LedState` (dernier envoi, diff, ≤ 30 mises à jour/s, tout renvoyer après Introduction ou rebranchement) et `render(driver, &Shared, port, t)` lu **depuis le profil** (grille, `page.N`, calques, bascules, anneaux) + Metronome au temps (horloge T-150) + rangée Clip Stop clignotante tant que l'arrêt d'urgence est verrouillé.
+  Le thread MIDI rend sous un seul verrou, envoie hors verrou ; `goodbye` éteint aussi les anneaux. Case « Retour LED » par appareil (`devices.json`, `POST /api/midi/device {leds}`, 2 lignes dans index.html).
+  Écarts : fonction `render` par pilote plutôt qu'un trait ; mkII : clignotement « flash » et arrêt d'urgence faits à la main (pas d'horloge MIDI envoyée), Shift + Scene Launch (pages 6–8) en orange ; pas de rouge « sélectionnée dans l'UI » (la sélection n'existe que dans l'UI), pas de banques Pan/Send ni Track Select (pas d'ids de contrôle). Au repos, seul le Metronome envoie (2 messages par temps).
+  Tests : cargo test 465 OK (2 ignorés CoreMIDI), clippy -D warnings propre, e2e 118/118 (`--workers=2` ; à 4 workers, machine chargée, le premier test de 1–2 fichiers expire au chargement de l'UI, aussi avec l'index.html de develop), specs MIDI `--repeat-each 3` 54/54. L'assertion e2e `ledAt(0,1) === null` de T-209 est devenue un vrai contrôle de couleur (vert 21 / blanc 3).

@@ -1870,6 +1870,7 @@ function renderMidi(m) {
       <div class="n">${esc(d.name)} <span class="hint">${d.connected ? 'connecté' : 'déconnecté'}</span></div>
       <div class="hint">Modèle détecté : ${esc(d.model_label)}</div>
       <label class="check"><input type="checkbox" data-mdev="${i}" ${d.enabled ? 'checked' : ''}> Activé</label>
+      <label class="check"><input type="checkbox" data-mled="${i}" ${d.leds ? 'checked' : ''}> Retour LED</label>
       <label>Profil</label>
       <div class="row" style="margin-top:0"><select data-mprof="${i}">${opts}</select>
         <button data-mreset="${i}" style="flex:0;white-space:nowrap">Réinitialiser le profil</button></div>
@@ -1879,6 +1880,7 @@ function renderMidi(m) {
   $('midiHint').innerHTML = (m.enabled ? '' : 'Lancé avec --no-midi : aucun port ouvert. ') + m.errors.map(e => `<div class="merr">${esc(e)}</div>`).join('');
   const portOf = el => m.devices[+Object.values(el.dataset)[0]].name;
   document.querySelectorAll('[data-mdev]').forEach(el => el.onchange = () => post('/api/midi/device', { port: portOf(el), enabled: el.checked }));
+  document.querySelectorAll('[data-mled]').forEach(el => el.onchange = () => post('/api/midi/device', { port: portOf(el), leds: el.checked }));
   document.querySelectorAll('[data-mprof]').forEach(el => el.onchange = () => post('/api/midi/profile', { port: portOf(el), profile: el.value }));
   document.querySelectorAll('[data-mreset]').forEach(el => el.onclick = () => post('/api/midi/profile', { port: portOf(el), profile: null }));
 }
