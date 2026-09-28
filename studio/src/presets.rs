@@ -16,9 +16,10 @@ pub struct Preset {
     pub settings: Settings,
 }
 
-/// Cue pages, in display order.
+/// Cue pages, in display order. The last one holds the operator's
+/// figures (`figures.rs`), not built-in cues.
 pub const CATEGORIES: &[&str] =
-    &["Abstraits", "Tunnels", "Faisceaux", "Balayages", "Vagues", "Géométrie", "Audio", "Texte & horloge"];
+    &["Abstraits", "Tunnels", "Faisceaux", "Balayages", "Vagues", "Géométrie", "Audio", "Texte & horloge", crate::figures::CATEGORY];
 
 const GREEN: [u8; 3] = [0, 255, 0];
 const RED: [u8; 3] = [255, 0, 0];
@@ -253,7 +254,7 @@ mod tests {
     #[test]
     fn every_category_has_cues_and_every_cue_has_a_known_category() {
         let all = catalog();
-        for c in CATEGORIES {
+        for c in CATEGORIES.iter().filter(|c| **c != crate::figures::CATEGORY) {
             assert!(all.iter().any(|p| p.category == *c), "empty page '{c}'");
         }
         assert!(all.iter().all(|p| CATEGORIES.contains(&p.category)));

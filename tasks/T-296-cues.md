@@ -1,12 +1,12 @@
 ---
 id: T-296
 title: Espace CRÉATION : éditeur de figures laser (dessin point par point, animation)
-status: todo
+status: done
 area: cues
 priority: P1
 depends_on: [T-295]
-owner: ""
-branch: ""
+owner: "dev agent (figure-editor)"
+branch: feat/figure-editor
 source: demande utilisateur 2026-09-28 (« créer du contenu », idée PicEdit/Showeditor)
 ---
 
@@ -40,11 +40,11 @@ Onglet CRÉATION → « Figures » : barre d'outils à gauche, canvas au centre,
 images en bas, propriétés à droite. Libellés en français.
 
 ## Critères d'acceptation
-- [ ] Dessiner une figure, l'enregistrer, la rouvrir à l'identique
-- [ ] Une figure enregistrée apparaît comme cue jouable (grille ou bibliothèque)
-- [ ] Une animation de plusieurs images joue en boucle calée sur le tempo
-- [ ] Le rendu passe par calques, direct, calibration, sécurité et verrou de sortie
-- [ ] Annuler/rétablir sur au moins 50 actions
+- [x] Dessiner une figure, l'enregistrer, la rouvrir à l'identique
+- [x] Une figure enregistrée apparaît comme cue jouable (grille ou bibliothèque)
+- [x] Une animation de plusieurs images joue en boucle calée sur le tempo
+- [x] Le rendu passe par calques, direct, calibration, sécurité et verrou de sortie
+- [x] Annuler/rétablir sur au moins 50 actions
 
 ## Tests
 Unitaires sur le modèle et la conversion en points ; e2e : dessin simple
@@ -56,3 +56,18 @@ tiers intégré.
 
 ## Journal
 - 2026-09-28 — architecte : créée à la demande de l'utilisateur.
+- 2026-09-28 — dev (feat/figure-editor) : fait. `figures.rs` (modèle
+  `Figure`/`FigureFrame`/`Stroke`, `rate` + `per` temps|seconde, boucle /
+  aller-retour / une fois, bibliothèque `studio-data/figures/`, noms
+  confinés comme les shows), `Content::Figure` rendu par `engine.rs`
+  (tracés éteints explicites, trajet éteint entre tracés, images calées
+  sur le temps depuis le 1 de la mesure), page de cues « Figures » (9e page,
+  cellules MIDI `grid.9.*`), API `/api/figures*`, section `figures` du
+  fichier projet (anciens projets : s'ouvrent sans figures), UI CRÉATION ›
+  Figures (outils, couleur par tracé, ordre, symétries, images, pelure
+  d'oignon, compteur/budget, annuler/rétablir 200 niveaux). Tests :
+  `cargo test` 519 + 2 OK, clippy OK, e2e 141/141 (dont
+  `figures.spec.ts`, 4 tests) après rebase sur develop 9a86362. Note PR :
+  `docs/prs/figure-editor.md`. À trancher en review : ouvrir un projet
+  remplace la bibliothèque de figures (modèle document de T-286).
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.

@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (100)
+## À faire (99)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -33,7 +33,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-279](T-279-safety.md) | Surcouches de sécurité dans le visualiseur (zone public, horizon) | safety | P1 | [T-277, T-003] |  |
 | [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
 | [T-287](T-287-infra.md) | Sauvegarde automatique et récupération après plantage | infra | P1 | [T-286] |  |
-| [T-296](T-296-cues.md) | Espace CRÉATION : éditeur de figures laser (dessin point par point, animation) | cues | P1 | [T-295] |  |
 | [T-011](T-011-ilda.md) | Médiathèque ILDA : import et export depuis l'interface | ilda | P2 | [T-001] |  |
 | [T-012](T-012-output.md) | Zones de projection et correction géométrique | output | P2 | [T-003] |  |
 | [T-104](T-104-cues.md) | Croisements, faisceau chaud et convergences | cues | P2 | [T-102] |  |
@@ -114,7 +113,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (40)
+## Fait (41)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -154,6 +153,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-291](T-291-ui.md) | Raccourcis clavier morts après un curseur ou une case à cocher (Espace n'éteint plus) | ui | P1 | [] | fix/arm-keys |
 | [T-293](T-293-ui.md) | Pendant la playlist, un curseur du look renvoie l'ancien look (la scène saute) | ui | P1 | [] | fix/ui-state |
 | [T-295](T-295-ui.md) | Trois espaces de travail en onglets : LIVE, TIMELINE, CRÉATION (+ Réglages) | ui | P1 | [T-270] | feat/workspaces |
+| [T-296](T-296-cues.md) | Espace CRÉATION : éditeur de figures laser (dessin point par point, animation) | cues | P1 | [T-295] | feat/figure-editor |
 | [T-160](T-160-timeline.md) | Timeline : modèle de show et lecteur (pistes, événements, carte de tempo) | timeline | P2 | [T-150, T-156] | feat/timeline |
 | [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] | fix/arm-keys |
 | [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] | fix/ui-state |
