@@ -1,12 +1,12 @@
 ---
 id: T-105
 title: Tunnels, cônes, soleil et rayons tournants
-status: todo
+status: done
 area: cues
 priority: P1
 depends_on: [T-100]
-owner: ""
-branch: ""
+owner: "dev-agent (tunnel-gens)"
+branch: feat/tunnel-gens
 source: docs/research/festival-looks.md#b-tunnels-and-cones
 ---
 
@@ -28,11 +28,11 @@ Ajout `GenParams.snap: bool` (défaut false). `a` = tours par temps pour les gé
 Libellés : « Tunnel de faisceaux », « Tunnel qui pompe », « Double tunnel », « Soleil ». Liste déroulante « Vitesse » (Glaciale, Lente, Moyenne, Rapide, Très rapide) qui remplit `a`.
 
 ## Critères d'acceptation
-- [ ] `finger_tunnel` : tous les faisceaux à distance r du centre (± 1 %)
-- [ ] Rotation 1/4 tour/temps : après 4 temps, retour à l'angle initial
-- [ ] `tunnel_pump` : rayon max juste après le temps, retour à r_base en 1/2 temps
-- [ ] `sunburst` : aucun rayon allumé sous l'horizon
-- [ ] `polygon_tunnel` avec snap : angle constant entre deux temps
+- [x] `finger_tunnel` : tous les faisceaux à distance r du centre (± 1 %)
+- [x] Rotation 1/4 tour/temps : après 4 temps, retour à l'angle initial
+- [x] `tunnel_pump` : rayon max juste après le temps, retour à r_base en 1/2 temps
+- [x] `sunburst` : aucun rayon allumé sous l'horizon
+- [x] `polygon_tunnel` avec snap : angle constant entre deux temps
 
 ## Tests
 Unitaires géométriques (rayon, angle aux temps entiers) ; non-régression de `polygon_tunnel` sans snap.
@@ -43,3 +43,15 @@ Garder le cercle au-dessus de ~40 Hz de rafraîchissement pour que le cône para
 Règles de CLAUDE.md (sécurité laser, propriété intellectuelle) : looks écrits par nous en maths, rien de copié depuis Pangolin/Laserworld. Tests uniquement en aperçu, jamais `--device`.
 
 ## Journal
+
+- 2026-09-28 — dev-agent (tunnel-gens), branche `feat/tunnel-gens` : module
+  `tunnels.rs` (`finger_tunnel`, `tunnel_pump`, `twin_tunnel`, `sunburst`,
+  ajoutés à la fin de `GENERATOR_NAMES`), `GenParams.snap` pour
+  `polygon_tunnel`, libellés/aides/« Vitesse (tours par temps) » et case
+  « Rotation par à-coups » dans l'onglet Effet. `sunburst` s'appelle
+  « Soleil levant » (« Soleil » = `starburst` existant). Tunnels centrés à
+  y = 0,5, rayon ≤ 0,5 (au-dessus du public). 404 tests unitaires + 98 e2e
+  verts, clippy propre ; empreintes existantes inchangées ; ≤ 432 points
+  (budget 750) ; aucun clignotement (vérifié avec le limiteur T-101 à
+  250 BPM). Note PR : docs/prs/tunnel-gens.md. Statut → review.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.

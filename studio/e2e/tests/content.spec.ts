@@ -85,6 +85,51 @@ test('« Éventail balayé » sweeps a beam fan with the tempo, above the audien
   await expect.poll(async () => Math.abs(centre(await lit()) - first), { timeout: 5000 }).toBeGreaterThan(0.02);
 });
 
+test('« Tunnel de faisceaux » draws a turning cone of beams on a true circle', async ({ page }) => {
+  await page.locator('[data-kind="generator"]').click();
+  await page.locator('#gen').selectOption({ label: 'Tunnel de faisceaux' });
+  await expect.poll(async () => (await settings()).content.generator).toBe('finger_tunnel');
+  // Picking it starts it in tempo, at the medium speed (1/16 turn per beat).
+  const p = (await settings()).content.params;
+  expect(p.beat_sync).toBe(true);
+  expect(p.a).toBeCloseTo(1 / 16, 6);
+  expect(p.count).toBe(12);
+  await expect(page.locator('#gTurnsRow')).toBeVisible();
+  await expect(page.locator('#gTurns')).toHaveValue('0.0625');
+  await expect(page.locator('#gSnapRow')).toBeHidden();
+  await expect(page.locator('#gAH')).toContainText('Tours par temps');
+  await page.locator('#gTurns').selectOption({ label: 'Rapide (1/4)' });
+  await expect.poll(async () => (await settings()).content.params.a).toBe(0.25);
+  await expect(page.locator('#gAV')).toHaveText('0.250 tour/temps');
+
+  // 12 beams, all at the look size (0.5) from the tunnel's centre (0, 0.5).
+  const lit = async () => (await points()).filter(isLit);
+  const beams = (pts: Point[]) => new Set(pts.map(q => `${q[0].toFixed(3)},${q[1].toFixed(3)}`)).size;
+  await expect.poll(async () => beams(await lit())).toBe(12);
+  const pts = await lit();
+  for (const q of pts) expect(Math.abs(Math.hypot(q[0], q[1] - 0.5) - 0.5)).toBeLessThan(0.01);
+  // A quarter turn per beat: the first beam moves between two reads.
+  const first = pts[0];
+  await expect.poll(async () => {
+    const q = (await lit())[0];
+    return Math.hypot(q[0] - first[0], q[1] - first[1]);
+  }, { timeout: 5000 }).toBeGreaterThan(0.02);
+});
+
+test('« Soleil levant » only lights rays above the horizon; polygon tunnel can snap', async ({ page }) => {
+  await page.locator('[data-kind="generator"]').click();
+  await page.locator('#gen').selectOption({ label: 'Soleil levant' });
+  await expect.poll(async () => (await settings()).content.generator).toBe('sunburst');
+  await expect.poll(async () => (await points()).filter(isLit).length).toBeGreaterThan(12 * 10);
+  expect((await points()).filter(isLit).every(q => q[1] > 0)).toBe(true);
+
+  await page.locator('#gen').selectOption('polygon_tunnel');
+  await expect(page.locator('#gSnapRow')).toBeVisible();
+  await expect(page.locator('#gTurnsRow')).toBeHidden();
+  await page.locator('#gSnap').check();
+  await expect.poll(async () => (await settings()).content.params.snap).toBe(true);
+});
+
 test('look size slider scales the drawing', async ({ page }) => {
   expect(extent(await points())).toBeCloseTo(0.5, 1);
   await page.locator('#scale').fill('100');

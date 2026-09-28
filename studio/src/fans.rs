@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn fans_are_listed_after_the_original_generators() {
-        assert_eq!(&GENERATOR_NAMES[20..], &NAMES);
+        assert_eq!(&GENERATOR_NAMES[20..25], &NAMES);
         assert!(generate("beam_fan", &GenParams::default(), &at(0.0, 0.5)).is_none());
     }
 
