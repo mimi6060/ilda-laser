@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (111)
+## À faire (110)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -17,7 +17,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-105](T-105-cues.md) | Tunnels, cônes, soleil et rayons tournants | cues | P1 | [T-100] |  |
 | [T-106](T-106-cues.md) | Nappes : liquid sky, lame, rideaux, cascade, scanner, lamelles, aurore, grille | cues | P1 | [T-100] |  |
 | [T-110](T-110-cues.md) | Page de cues « Festival » | cues | P1 | [T-102, T-103, T-104, T-105, T-106, T-107, T-130] |  |
-| [T-111](T-111-cues.md) | Moteur de cues évolutifs (images clés en temps) | cues | P1 | [T-100] |  |
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
 | [T-157](T-157-cues.md) | Cues évolutifs : un cue = une mini-timeline (calques internes, courbes sur modificateurs, LFO) | cues | P1 | [T-111, T-151, T-140] |  |
 | [T-203](T-203-midi.md) | Apprentissage MIDI (clic droit → « Apprendre MIDI ») | midi | P1 | [T-202, T-145, T-209] |  |
@@ -125,7 +124,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (26)
+## Fait (27)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -137,6 +136,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-100](T-100-cues.md) | Générateurs cadencés au beat (beat_pos, bpm, groupes) | cues | P1 | [T-150] | feat/beat-gen |
 | [T-101](T-101-safety.md) | Limiteur de stroboscope et horizon appliqués à tous les looks | safety | P1 | [T-100] | feat/strobe-limit |
 | [T-102](T-102-cues.md) | Générateurs éventails : fan, balayage, levée, ouverture, vague, positions | cues | P1 | [T-100] | feat/fan-gens |
+| [T-111](T-111-cues.md) | Moteur de cues évolutifs (images clés en temps) | cues | P1 | [T-100] | feat/evolving |
 | [T-140](T-140-live.md) | Étage de modificateurs en direct maître (géométrie, luminosité, vitesse) | live | P1 | [T-145] | feat/live |
 | [T-141](T-141-live.md) | Couleur en direct : fixe, teinte, palette, arc-en-ciel, chenillard | live | P1 | [T-140, T-150] | feat/live-color |
 | [T-145](T-145-live.md) | Identifiants de contrôle stables (registre des contrôles) | live | P1 | [] | feat/controls |

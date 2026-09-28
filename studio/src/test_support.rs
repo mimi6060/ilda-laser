@@ -44,5 +44,6 @@ pub fn shared() -> Shared {
         mix: layers::MixReport::default(),
         safety: crate::safety::SafetyStore::in_memory(),
         strobe: Default::default(),
+        evolving: Vec::new(),
     }
 }
