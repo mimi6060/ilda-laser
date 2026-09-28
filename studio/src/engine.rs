@@ -5,6 +5,7 @@
 //! of a look - the same thing a scene stores.
 
 use crate::beat;
+use crate::evolving::{self, EvolvingCue};
 use crate::font;
 use crate::generators::{self, GenCtx, GenParams};
 use crate::patterns::{self, Point};
@@ -22,6 +23,8 @@ pub enum Content {
         #[serde(default)]
         params: GenParams,
     },
+    /// An evolving cue (T-111): keyframes over N beats (`evolving.rs`).
+    Evolving(EvolvingCue),
 }
 
 impl Content {
@@ -32,7 +35,9 @@ impl Content {
         match (self, other) {
             (Content::Shape { shape: a }, Content::Shape { shape: b }) => a == b,
             (Content::Generator { generator: a, .. }, Content::Generator { generator: b, .. }) => a == b,
-            (Content::Text { .. }, Content::Text { .. }) | (Content::Wave, Content::Wave) => true,
+            (Content::Text { .. }, Content::Text { .. })
+            | (Content::Wave, Content::Wave)
+            | (Content::Evolving(_), Content::Evolving(_)) => true,
             _ => false,
         }
     }
@@ -171,6 +176,12 @@ pub struct Animator {
     /// Tempo-clock beat the look started at (the cue's launch); `None`
     /// until then = the first rendered frame.
     start_beat: Option<f64>,
+    /// Whether a frame has been rendered yet.
+    rendered: bool,
+    /// The evolving cue being played and the beat it counts from (its
+    /// quantized launch). A different evolving cue starts over.
+    evolving: Option<(EvolvingCue, f64)>,
+    progress: Option<evolving::Progress>,
 }
 
 impl Animator {
@@ -186,7 +197,64 @@ impl Animator {
         (clock.beat - beat::bar_start(start, clock.beats_per_bar)).max(0.0)
     }
 
+    /// Where the evolving cue on show is (`None` for any other look), as of
+    /// the last rendered frame.
+    pub fn progress(&self) -> Option<&evolving::Progress> {
+        self.progress.as_ref()
+    }
+
     pub fn render(&mut self, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock) -> Vec<Point> {
+        let points = match &s.content {
+            Content::Evolving(cue) => self.render_evolving(cue, s, audio, dt, clock),
+            _ => {
+                self.evolving = None;
+                self.progress = None;
+                let beat_pos = self.beat_pos(clock);
+                self.render_look(s, audio, dt, clock, beat_pos)
+            }
+        };
+        self.rendered = true;
+        points
+    }
+
+    /// An evolving cue: sample its keys at its local beat and draw that
+    /// look like any generator look, with the local beat as `beat_pos`.
+    fn render_evolving(&mut self, cue: &EvolvingCue, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock) -> Vec<Point> {
+        let start = *self.start_beat.get_or_insert(clock.beat);
+        if self.evolving.as_ref().is_none_or(|(playing, _)| playing != cue) {
+            // A cue counts from its launch; a look switched to (or edited
+            // into) another evolving cue counts from now.
+            let pressed = if self.rendered { clock.beat } else { start };
+            self.evolving = Some((cue.clone(), cue.launch.quantize(pressed, clock.beats_per_bar)));
+        }
+        let launch = self.evolving.as_ref().map_or(start, |(_, at)| *at);
+        let raw = clock.beat - launch;
+        let b = cue.local(raw);
+        let sample = cue.sample(b);
+        self.progress = Some(evolving::Progress {
+            pos: b,
+            length: cue.length(),
+            key: sample.as_ref().map_or(0, |k| k.key),
+            keys: cue.keys.len(),
+            looped: cue.looped,
+            waiting: raw < 0.0,
+            ended: cue.ended(raw),
+            pass: if cue.looped && raw > 0.0 { (raw / cue.length()).floor() as u64 } else { 0 },
+            beats_per_bar: clock.beats_per_bar,
+        });
+        let Some(k) = sample else { return Vec::new() };
+        let look = Settings {
+            content: Content::Generator { generator: k.generator, params: k.params },
+            color: k.color,
+            scale: k.scale,
+            rotation_speed: s.rotation_speed,
+            brightness: s.brightness.clamp(0.0, 1.0) * k.brightness * evolving::strobe(b, k.strobe_div),
+            audio: s.audio.clone(),
+        };
+        self.render_look(&look, audio, dt, clock, b)
+    }
+
+    fn render_look(&mut self, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock, beat_pos: f64) -> Vec<Point> {
         let react = &s.audio;
         let (bass, level) = if react.enabled {
             (audio.bass.clamp(0.0, 1.0), audio.level.clamp(0.0, 1.0))
@@ -218,7 +286,6 @@ impl Animator {
         let (r, g, b) = shift_hue(s.color, hue_shift);
         let flash_gain = 1.0 - react.flash * (react.enabled as u8 as f32) * (1.0 - self.flash);
         let mut gain = s.brightness.clamp(0.0, 1.0) * flash_gain;
-        let beat_pos = self.beat_pos(clock);
         let synced = match &s.content {
             Content::Generator { params, .. } if params.beat_sync => Some(params),
             _ => None,
@@ -232,6 +299,8 @@ impl Animator {
             Content::Shape { shape } => patterns::by_name(shape, scale, r, g, b).unwrap_or_default(),
             Content::Text { text } => font::text_to_points(&text.to_uppercase(), scale, r, g, b),
             Content::Wave => patterns::wave(scale, 0.15 + 0.6 * level, self.wave_phase, r, g, b),
+            // Drawn through `render_evolving`, never directly.
+            Content::Evolving(_) => Vec::new(),
             Content::Generator { generator, params } => {
                 let t = if params.beat_sync { beat_time(params, beat_pos) } else { self.gen_time };
                 let ctx = GenCtx { t, beat_pos, bpm: clock.bpm as f32, level, bass, scale };
@@ -557,6 +626,115 @@ mod tests {
     fn free_running_looks_ignore_the_tempo_clock() {
         let s = Settings { content: Content::Generator { generator: "beam_circle".into(), params: GenParams::default() }, ..Default::default() };
         assert_eq!(frame_at(&s, 0.0, 0.0, 120.0), frame_at(&s, 3.0, 17.4, 150.0));
+    }
+
+    fn evolving(cue: crate::evolving::EvolvingCue) -> Settings {
+        Settings { content: Content::Evolving(cue), brightness: 1.0, ..Default::default() }
+    }
+
+    /// A plain beat-synced look, `beat_pos` beats after its bar's one.
+    fn plain_at(generator: &str, scale: f32, color: [u8; 3], beat_pos: f64) -> Vec<Point> {
+        let s = Settings { scale, color, ..synced(generator, GenParams::default()) };
+        frame_at(&s, 0.0, beat_pos, 120.0)
+    }
+
+    #[test]
+    fn an_evolving_cue_draws_the_look_of_its_keys() {
+        use crate::evolving::{EvolvingCue, EvolvingKey};
+        // Two fan keys: size 0.2 → 1.0 over 16 beats.
+        let fan = |at_beats, scale| EvolvingKey { at_beats, scale, ..Default::default() };
+        let s = evolving(EvolvingCue { keys: vec![fan(0.0, 0.2), fan(16.0, 1.0)], ..Default::default() });
+        // Launched on beat 4: at beat 12 it is half-way, size 0.6.
+        assert!(same(&frame_at(&s, 4.0, 12.0, 120.0), &plain_at("fan", 0.6, [0, 255, 0], 8.0)));
+        assert!(same(&frame_at(&s, 4.0, 4.0, 120.0), &plain_at("fan", 0.2, [0, 255, 0], 0.0)));
+        // Beats, not seconds.
+        assert!(same(&frame_at(&s, 4.0, 9.5, 120.0), &frame_at(&s, 4.0, 9.5, 150.0)));
+        // A key's brightness is on top of the look's; the key's gate applies.
+        let dim = Settings { brightness: 0.5, ..s.clone() };
+        let lit = frame_at(&dim, 0.0, 2.0, 120.0);
+        assert!(lit.iter().any(|p| p.is_lit()) && lit.iter().all(|p| p.g <= 0.5 + 1e-6));
+        let gated = evolving(EvolvingCue { keys: vec![EvolvingKey { gate_beats: 0.25, ..Default::default() }], ..Default::default() });
+        let lit = |beat| frame_at(&gated, 0.0, beat, 128.0).iter().any(|p| p.is_lit());
+        assert!(lit(3.1) && !lit(3.5));
+    }
+
+    #[test]
+    fn an_evolving_cue_switches_generator_on_the_key_beat() {
+        let s = evolving(crate::evolving::test_cue(false));
+        let frame = 1.0 / 60.0;
+        let before = 8.0 - frame;
+        assert!(same(&frame_at(&s, 0.0, before, 120.0), &plain_at("fan", 0.2 + 0.4 * before as f32 / 8.0, [0, 255, 0], before)));
+        assert!(same(&frame_at(&s, 0.0, 8.0, 120.0), &plain_at("fan_wave", 0.6, [0, 255, 0], 8.0)));
+    }
+
+    #[test]
+    fn an_evolving_cue_starts_on_the_next_beat_and_loops() {
+        let s = evolving(crate::evolving::test_cue(true));
+        let at = |start: f64, beat: f64| {
+            let mut a = Animator::starting_at(start);
+            let pts = a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock { beat, ..Default::default() });
+            (pts, a.progress().cloned().unwrap())
+        };
+        // Pressed at 5.3: holds its first frame until beat 6.
+        let (waiting, p) = at(5.3, 5.8);
+        assert!(p.waiting && p.pos == 0.0);
+        assert!(same(&waiting, &at(6.0, 6.0).0));
+        let (_, p) = at(5.3, 7.5);
+        assert!(!p.waiting && (p.pos - 1.5).abs() < 1e-9 && p.key == 0);
+        // Loop: after 16 beats it is back on key 0, exactly as it started.
+        let (looped, p) = at(6.0, 22.0);
+        assert!(same(&looped, &at(6.0, 6.0).0));
+        assert_eq!((p.pos, p.key, p.pass, p.ended), (0.0, 0, 1, false));
+        // A one-shot cue stays on its last key.
+        let once = evolving(crate::evolving::test_cue(false));
+        let mut a = Animator::starting_at(0.0);
+        a.render(&once, AudioFeatures::default(), 0.016, &BeatClock { beat: 30.0, ..Default::default() });
+        let p = a.progress().unwrap();
+        assert!(p.ended && p.key == 1);
+    }
+
+    #[test]
+    fn a_look_switched_to_an_evolving_cue_starts_it_then() {
+        let mut a = Animator::default();
+        let clock = |beat| BeatClock { beat, ..Default::default() };
+        a.render(&Settings::default(), AudioFeatures::default(), 0.016, &clock(1.0));
+        assert!(a.progress().is_none());
+        let s = evolving(crate::evolving::test_cue(false));
+        a.render(&s, AudioFeatures::default(), 0.016, &clock(10.2));
+        assert!(a.progress().unwrap().waiting);
+        a.render(&s, AudioFeatures::default(), 0.016, &clock(13.0));
+        assert!((a.progress().unwrap().pos - 2.0).abs() < 1e-9);
+        // Editing the look around it (brightness) doesn't restart it...
+        let brighter = Settings { brightness: 0.8, ..s.clone() };
+        a.render(&brighter, AudioFeatures::default(), 0.016, &clock(14.0));
+        assert!((a.progress().unwrap().pos - 3.0).abs() < 1e-9);
+        // ...editing its keys does.
+        let mut edited = crate::evolving::test_cue(false);
+        edited.keys[0].scale = 0.3;
+        a.render(&evolving(edited), AudioFeatures::default(), 0.016, &clock(14.0));
+        assert_eq!(a.progress().unwrap().pos, 0.0);
+    }
+
+    #[test]
+    fn evolving_strobe_flashes_on_the_beat_grid() {
+        let mut cue = crate::evolving::test_cue(false);
+        cue.keys.iter_mut().for_each(|k| k.strobe_div = 2.0);
+        let s = evolving(cue);
+        let lit = |beat| frame_at(&s, 0.0, beat, 128.0).iter().any(|p| p.is_lit());
+        assert!(lit(2.1) && !lit(2.3) && lit(2.6) && !lit(2.8));
+    }
+
+    #[test]
+    fn evolving_json_loads_as_content() {
+        let s: Settings = serde_json::from_str(
+            r#"{"content":{"kind":"evolving","length_beats":8,"loop":true,"keys":[{"at_beats":0,"generator":"fan","scale":0.4}]}}"#,
+        )
+        .unwrap();
+        let Content::Evolving(cue) = &s.content else { panic!("{:?}", s.content) };
+        assert!(cue.looped && cue.keys[0].scale == 0.4);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        assert!(s.content.same_drawing(&Content::Evolving(Default::default())));
     }
 
     fn a_frame(s: &Settings, audio: AudioFeatures) -> Vec<Point> {

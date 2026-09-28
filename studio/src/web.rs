@@ -476,6 +476,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "scenes": s.scenes.list(),
         "tempo": s.tempo.state(s.now_s()),
         "playlist": s.playlist.as_ref().map(|p| p.index),
+        "evolving": evolving_status(s),
     }))
 }
 
@@ -513,7 +514,23 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "live": s.live,
         "lfos": lfo_positions(s),
         "strobe": s.strobe,
+        "evolving": evolving_status(s),
     }))
+}
+
+/// Evolving cues on show (last frame), oldest first: the cue (`null` for
+/// the manual look), its layer and where it is in its keys.
+fn evolving_status(s: &Shared) -> Vec<serde_json::Value> {
+    s.evolving
+        .iter()
+        .map(|(id, progress)| {
+            let cue = s.deck.active.iter().find(|a| a.id == *id);
+            let mut v = json!(progress);
+            v["cue"] = json!(cue.map(|a| a.cue.as_str()));
+            v["layer"] = json!(cue.map_or(1, |a| a.layer));
+            v
+        })
+        .collect()
 }
 
 /// Where each modulator is in its cycle and its wave value, for the UI's

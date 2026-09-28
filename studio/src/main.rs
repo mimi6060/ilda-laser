@@ -12,6 +12,7 @@ mod beat;
 mod controls;
 mod cues;
 mod engine;
+mod evolving;
 mod fans;
 mod font;
 mod generators;
@@ -143,6 +144,9 @@ pub struct Shared {
     pub safety: safety::SafetyStore,
     /// What the strobe limiter and horizon did on the last frame.
     pub strobe: safety::StrobeStatus,
+    /// Evolving cues on show in the last frame: (animator id, where it is).
+    /// Id 0 is the manual look.
+    pub evolving: Vec<(u64, evolving::Progress)>,
 }
 
 impl Shared {
@@ -265,6 +269,7 @@ fn main() -> Result<()> {
         mix: layers::MixReport::default(),
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
+        evolving: Vec::new(),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -365,7 +370,7 @@ fn run_engine(
         let anim_dt = dt * live.speed.clamp(0.0, 4.0);
         animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id));
         // Muted layers keep animating, so they come back in motion.
-        let rendered = looks
+        let rendered: Vec<(u8, Vec<Point>)> = looks
             .iter()
             .map(|(layer, id, settings)| {
                 let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
@@ -375,6 +380,8 @@ fn run_engine(
                 (*layer, animator.render(settings, audio, anim_dt, &clock))
             })
             .collect();
+        let evolving: Vec<(u64, evolving::Progress)> =
+            looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();
         // Layers 1 → 4 with their dimmers, within the point budget.
         let (look, mix) = layers::mix(rendered, &mixer);
         let frame: Vec<Point> = live::apply(&look, &live, &live_state, &user_palettes)
@@ -400,6 +407,7 @@ fn run_engine(
         s.frame = frame;
         s.mix = mix;
         s.strobe = limiter.status();
+        s.evolving = evolving;
         drop(s);
 
         std::thread::sleep(FRAME_INTERVAL.saturating_sub(now.elapsed()));
