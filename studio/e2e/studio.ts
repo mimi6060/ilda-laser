@@ -46,8 +46,10 @@ export interface StudioOptions {
   midiTest?: boolean;
   /** Files written into the fresh data dir before the first start (path → content). */
   files?: Record<string, string>;
-  /** Pass the hidden --test-hooks flag (simulated engine stall, T-253). */
+  /** Pass the hidden --test-hooks flag (simulated engine stall, T-253; crashing decoder files, T-298). */
   testHooks?: boolean;
+  /** With testHooks: the audio decoding time limit in ms (T-298; default 120 s). */
+  decodeTimeoutMs?: number;
 }
 
 export class Studio {
@@ -78,6 +80,7 @@ export class Studio {
     const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio'];
     if (this.opts.midiTest) args.push('--midi-test');
     if (this.opts.testHooks) args.push('--test-hooks');
+    if (this.opts.testHooks && this.opts.decodeTimeoutMs) args.push('--test-decode-timeout-ms', String(this.opts.decodeTimeoutMs));
     if (args.includes('--device') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc.stdout!.on('data', d => { this.log += d; });

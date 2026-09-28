@@ -17,13 +17,14 @@
 //! source, and the fallback when the native one has nothing fresh.
 //!
 //! Audio *output* lives here too: the timeline's song (T-161) is decoded
-//! (decode.rs), kept in `studio-data/media/audio/` (media.rs) and played on
-//! the Mac's output by its own thread, its clock driving the timeline
-//! (playback.rs).
+//! (decode.rs, in a child process: isolate.rs), kept in
+//! `studio-data/media/audio/` (media.rs) and played on the Mac's output by
+//! its own thread, its clock driving the timeline (playback.rs).
 
 pub mod analysis;
 pub mod capture;
 pub mod decode;
+pub mod isolate;
 pub mod media;
 pub mod onsets;
 pub mod playback;
