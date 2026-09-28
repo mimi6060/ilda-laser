@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn tunnels_are_listed_after_the_fans() {
-        assert_eq!(&GENERATOR_NAMES[25..], &NAMES);
+        assert_eq!(&GENERATOR_NAMES[25..29], &NAMES);
         assert!(generate("tunnel", &GenParams::default(), &at(0.0, 0.5)).is_none());
         assert!(generate("fan", &GenParams::default(), &at(0.0, 0.5)).is_none());
     }
