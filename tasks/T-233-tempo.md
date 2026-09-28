@@ -1,12 +1,12 @@
 ---
 id: T-233
 title: Estimation du BPM et suivi des temps (autocorrélation, peigne, programmation dynamique) avec confiance
-status: todo
+status: in-progress
 area: tempo
 priority: P1
 depends_on: [T-232, T-150]
-owner: ""
-branch: ""
+owner: "dev-agent (audio-bpm)"
+branch: feat/audio-bpm
 source: docs/research/audio-analysis.md §2.4
 ---
 
