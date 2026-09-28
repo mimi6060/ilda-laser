@@ -285,6 +285,8 @@ pub struct OnsetDetector {
     /// The whole-spectrum ODF of the last 8 s, by hop number modulo the
     /// length (for the tempo estimation, T-233).
     odf: Vec<f32>,
+    /// This hop's flux: whole spectrum, low, mid, high.
+    flux: [f32; ODF_COUNT],
     /// Hops processed.
     n: u64,
     out: Onsets,
@@ -310,6 +312,7 @@ impl OnsetDetector {
             pickers: std::array::from_fn(|_| Picker::new(hop_s)),
             history: [HopInfo::default(); HISTORY],
             odf: vec![0.0; odf_len.max(1)],
+            flux: [0.0; ODF_COUNT],
             n: 0,
             out: Onsets { onset_strength: 0.0, kick_strength: 0.0, snare_strength: 0.0, hat_strength: 0.0, ..carried },
         }
@@ -323,15 +326,21 @@ impl OnsetDetector {
         self.out
     }
 
+    /// The last hop's flux in the low (40–150 Hz), mid (150 Hz–5 kHz) and
+    /// high (5–15 kHz) bands, each a mean over its bins (T-233's tempo ODF).
+    pub fn band_flux(&self) -> [f32; 3] {
+        [self.flux[ODF_LOW], self.flux[ODF_MID], self.flux[ODF_HIGH]]
+    }
+
     /// Hops per second of the ODF.
-    #[allow(dead_code)] // read by T-233's tempo estimation
     pub fn odf_rate(&self) -> f32 {
         1.0 / self.hop_s
     }
 
     /// The whole-spectrum ODF of the last 8 s (or less since the start),
-    /// oldest first, as two slices.
-    #[allow(dead_code)] // read by T-233's tempo estimation
+    /// oldest first, as two slices. (The tempo, T-233, reads the band
+    /// fluxes instead; kept for an ODF display.)
+    #[allow(dead_code)]
     pub fn odf_history(&self) -> (&[f32], &[f32]) {
         let len = self.odf.len();
         if (self.n as usize) < len {
@@ -399,6 +408,7 @@ impl OnsetDetector {
         }
         info.spread = if self.spread_bins.len() > 0 { spread as f32 / self.spread_bins.len() as f32 } else { 0.0 };
         self.history[(n % HISTORY as u64) as usize] = info;
+        self.flux = flux;
         let odf_len = self.odf.len() as u64;
         self.odf[(n % odf_len) as usize] = flux[ODF_FULL];
 
@@ -490,7 +500,7 @@ impl OnsetDetector {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::analysis::{Analyzer, HOP};
     use super::super::spectrum::AnalysisConfig;
     use super::*;
@@ -500,7 +510,7 @@ mod tests {
 
     /// Deterministic white noise in -1..1, a pure function of the sample
     /// index (so every generator is stateless).
-    fn noise(i: usize, seed: u64) -> f32 {
+    pub(crate) fn noise(i: usize, seed: u64) -> f32 {
         let mut z = (i as u64).wrapping_add(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -509,7 +519,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
-    enum Hit {
+    pub(crate) enum Hit {
         /// A sine gliding 150 → 50 Hz.
         Kick,
         /// Noise + 200 Hz.
@@ -544,7 +554,7 @@ mod tests {
         render_at(RATE, seconds, hits, bed)
     }
 
-    fn render_at(rate: u32, seconds: f32, hits: &[(f64, Hit)], bed: impl Fn(usize) -> f32) -> Vec<f32> {
+    pub(crate) fn render_at(rate: u32, seconds: f32, hits: &[(f64, Hit)], bed: impl Fn(usize) -> f32) -> Vec<f32> {
         let n = (seconds * rate as f32) as usize;
         let mut out: Vec<f32> = (0..n).map(&bed).collect();
         for &(t0, hit) in hits {
