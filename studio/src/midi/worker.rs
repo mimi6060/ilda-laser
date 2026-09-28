@@ -5,11 +5,13 @@
 //! midir has no hot-plug notification, so the port list is re-scanned
 //! every 2 s. Backend calls (CoreMIDI) never happen under the `Shared`
 //! lock, and the lock is taken once per batch of events: the 60 fps
-//! engine thread never waits on MIDI.
+//! engine thread never waits on MIDI. LED feedback (T-205, `led.rs`) is
+//! rendered under the lock at most 30 times a second and sent after it.
 
 use super::backend::{Backend, InputCallback, InputHandle, MidirBackend, OutputPort};
 use super::decode::Decoder;
 use super::detect::{self, Model, DEVICE_INQUIRY, MODE_GENERIC};
+use super::led::{self, LedFrame, LedState};
 use super::profile::Driver;
 use super::{Command, MidiEvent, MidiMsg, MidiSender};
 use crate::Shared;
@@ -51,6 +53,8 @@ struct Slot {
     profile: Option<String>,
     /// APC driver and Introduction mode we took the device over with.
     introduced: Option<(Driver, u8)>,
+    /// What its LEDs show (T-205).
+    leds: LedState,
 }
 
 enum Plan {
@@ -84,12 +88,18 @@ impl<B: Backend> Worker<B> {
         let mut first = None;
         while running.load(Ordering::SeqCst) {
             self.step(Instant::now(), first.take());
-            first = self.events.recv_timeout(IDLE_WAIT).ok();
+            first = self.events.recv_timeout(self.wait(Instant::now())).ok();
         }
         self.shutdown();
     }
 
-    /// One pass: events, commands, detection timeouts, rescan, profiles.
+    /// How long to wait for an event: until the next LED update at most.
+    fn wait(&self, now: Instant) -> Duration {
+        let next_led = self.slots.values().filter(|s| s.introduced.is_some()).filter_map(|s| s.leds.next_at()).min();
+        next_led.map_or(IDLE_WAIT, |t| t.saturating_duration_since(now).clamp(Duration::from_millis(1), IDLE_WAIT))
+    }
+
+    /// One pass: events, commands, detection timeouts, rescan, profiles, LEDs.
     pub fn step(&mut self, now: Instant, first: Option<MidiEvent>) {
         let events: Vec<MidiEvent> = first.into_iter().chain(self.events.try_iter()).collect();
         while let Ok(Command::Send { port, bytes }) = self.commands.try_recv() {
@@ -143,6 +153,43 @@ impl<B: Backend> Worker<B> {
             self.reconcile();
             self.next_reconcile = now + RECONCILE_EVERY;
         }
+        self.update_leds(now);
+    }
+
+    /// LED feedback: one lock for every device that is due, frames rendered
+    /// from `Shared`, then only the differences sent, outside the lock.
+    fn update_leds(&mut self, now: Instant) {
+        let due: Vec<(String, Driver)> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.output.is_some() && slot.leds.due(now))
+            .filter_map(|(name, slot)| slot.introduced.map(|(driver, _)| (name.clone(), driver)))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let frames: Vec<(String, LedFrame)> = {
+            let s = lock(&self.shared);
+            let t = s.now_s();
+            due.into_iter()
+                .map(|(name, driver)| {
+                    // « Retour LED » unticked: an empty frame switches off what we lit.
+                    let frame = if s.midi.store.port_leds(&name) { led::render(driver, &s, &name, t) } else { LedFrame::default() };
+                    (name, frame)
+                })
+                .collect()
+        };
+        for (name, frame) in frames {
+            let Some(slot) = self.slots.get_mut(&name) else { continue };
+            let msgs = slot.leds.update(frame, now);
+            let Some(out) = slot.output.as_mut() else { continue };
+            for msg in msgs {
+                if let Err(e) = out.send(&msg) {
+                    log::debug!("MIDI : LED vers {name} impossible : {e}");
+                    break;
+                }
+            }
+        }
     }
 
     fn scan(&mut self, now: Instant) {
@@ -184,6 +231,7 @@ impl<B: Backend> Worker<B> {
         let mut unplugged = Vec::new();
         for i in 0..midi.devices.len() {
             let enabled = midi.store.port_enabled(&midi.devices[i].name);
+            let leds = midi.store.port_leds(&midi.devices[i].name);
             let d = &mut midi.devices[i];
             let connected = self.slots.contains_key(&d.name);
             if connected && !d.connected {
@@ -200,6 +248,7 @@ impl<B: Backend> Worker<B> {
             d.output = outputs.contains(&d.name);
             d.connected = connected;
             d.enabled = enabled;
+            d.leds = leds;
         }
         for name in unplugged {
             log::warn!("MIDI : contrôleur {name} déconnecté");
@@ -235,7 +284,7 @@ impl<B: Backend> Worker<B> {
         let detecting = output.as_mut().and_then(|out| out.send(&DEVICE_INQUIRY).ok()).map(|_| now + INQUIRY_TIMEOUT);
         let model = if detecting.is_some() { Model::Unknown } else { Model::from_port_name(name) };
         log::info!("MIDI : {name} connecté");
-        self.slots.insert(name.to_string(), Slot { _input: input, output, detecting, model, profile: None, introduced: None });
+        self.slots.insert(name.to_string(), Slot { _input: input, output, detecting, model, profile: None, introduced: None, leds: LedState::default() });
     }
 
     /// Applies UI changes (enabled, chosen profile) and the profile of
@@ -295,6 +344,7 @@ impl<B: Backend> Worker<B> {
                             }
                         }
                         slot.introduced = want;
+                        slot.leds.forget();
                     }
                     log::info!("MIDI : {name} utilise le profil « {slug} »");
                     slot.profile = Some(slug);
@@ -320,11 +370,14 @@ impl<B: Backend> Worker<B> {
     }
 }
 
-/// LEDs off, then Introduction `0x40`: the device is as we found it.
+/// LEDs and knob rings off, then Introduction `0x40`: the device is as we
+/// found it.
 fn goodbye(slot: &mut Slot) {
+    let last = std::mem::take(&mut slot.leds.last_sent);
+    slot.leds.forget();
     let Some((driver, _)) = slot.introduced.take() else { return };
     let (Some(out), Some(pid)) = (slot.output.as_mut(), driver.apc_pid()) else { return };
-    for msg in detect::leds_off(driver.model()) {
+    for msg in LedFrame::default().diff(&last).into_iter().chain(detect::leds_off(driver.model())) {
         let _ = out.send(&msg);
     }
     let _ = out.send(&detect::introduction(pid, MODE_GENERIC));
@@ -356,6 +409,9 @@ pub mod tests {
         pub replies: HashMap<String, Vec<u8>>,
         pub fail_ports: bool,
         pub fail_open: bool,
+        /// Every send checks this lock is free: CoreMIDI is never called
+        /// while `Shared` is held (T-205).
+        pub unlocked: Option<Arc<Mutex<Shared>>>,
     }
 
     #[derive(Clone, Default)]
@@ -404,6 +460,9 @@ pub mod tests {
     impl OutputPort for FakeOutput {
         fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
             let mut f = self.0.lock().unwrap();
+            if let Some(shared) = &f.unlocked {
+                assert!(shared.try_lock().is_ok(), "sent while holding the Shared lock");
+            }
             f.sent.push((self.1.clone(), bytes.to_vec()));
             if bytes == DEVICE_INQUIRY {
                 if let Some(reply) = f.replies.get(&self.1).cloned() {
@@ -439,6 +498,11 @@ pub mod tests {
         }
     }
 
+    /// Only the SysEx messages (inquiry, Introductions), without LEDs.
+    fn sysex(sent: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        sent.into_iter().filter(|m| m.first() == Some(&0xF0)).collect()
+    }
+
     pub fn identity_reply(pid: u8) -> Vec<u8> {
         vec![0xF0, 0x7E, 0x00, 0x06, 0x02, 0x47, pid, 0x00, 0x19, 0x00, 0x01, 0x00, 0x00, 0x7F, 0x00, 0x00, 0x00, 0x00, 0xF7]
     }
@@ -465,7 +529,10 @@ pub mod tests {
         fake.plug("USB MIDI Device", Some(identity_reply(PID_APC40_MK2)));
         w.step(t0, None);
         w.step(t0 + ms(10), None);
-        assert_eq!(fake.sent("USB MIDI Device"), vec![DEVICE_INQUIRY.to_vec(), introduction(PID_APC40_MK2, MODE_ABLETON)]);
+        assert_eq!(sysex(fake.sent("USB MIDI Device")), vec![DEVICE_INQUIRY.to_vec(), introduction(PID_APC40_MK2, MODE_ABLETON)]);
+        let sent = fake.sent("USB MIDI Device");
+        assert_eq!(sent[1], introduction(PID_APC40_MK2, MODE_ABLETON), "Introduction before any LED");
+        assert!(sent[2..].iter().all(|m| m.len() == 3), "then LEDs (T-205)");
         let d = device(&shared, "USB MIDI Device");
         assert_eq!((d.model, d.profile.as_str(), d.connected, d.input, d.output), (Model::Apc40Mk2, "apc40-mk2", true, true, true));
         assert!(d.connected_at.is_some());
@@ -639,7 +706,7 @@ pub mod tests {
         assert_eq!(fake.sent("APC40 mkII").last().unwrap(), &introduction(PID_APC40_MK2, MODE_GENERIC));
         shared.lock().unwrap().midi.store.set_port_profile("APC40 mkII", None).unwrap();
         w.step(t0 + ms(600), None);
-        assert_eq!(fake.sent("APC40 mkII").last().unwrap(), &introduction(PID_APC40_MK2, MODE_ABLETON));
+        assert_eq!(sysex(fake.sent("APC40 mkII")).last().unwrap(), &introduction(PID_APC40_MK2, MODE_ABLETON));
     }
 
     #[test]
@@ -667,6 +734,111 @@ pub mod tests {
         sender.send("Nobody", &[0x90, 0x20, 0x05]);
         w.step(t0 + ms(5), None);
         assert_eq!(fake.sent("APC40 mkII").last().unwrap(), &vec![0x90, 0x20, 0x05]);
+    }
+
+    /// An introduced mkII with LED feedback, plugged at `t0`.
+    fn led_setup() -> (Worker<FakeBackend>, FakeBackend, Arc<Mutex<Shared>>, Instant) {
+        let (mut w, fake, shared, t0) = setup();
+        fake.0.lock().unwrap().unlocked = Some(Arc::clone(&shared));
+        fake.plug("APC40 mkII", Some(identity_reply(PID_APC40_MK2)));
+        w.step(t0, None);
+        w.step(t0 + ms(10), None);
+        (w, fake, shared, t0)
+    }
+
+    fn leds(sent: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        sent.iter().filter(|m| m.len() == 3).cloned().collect()
+    }
+
+    #[test]
+    fn leds_follow_the_studio_as_diffs_at_most_30_times_a_second() {
+        let (mut w, fake, shared, t0) = led_setup();
+        let first = leds(&fake.sent("APC40 mkII"));
+        assert!(first.contains(&vec![0x90, 32, led::MK2_WHITE]), "full frame after the Introduction");
+        assert!(first.contains(&vec![0x90, 0x52, led::MK2_GREEN]), "page 1 on Scene Launch 1");
+
+        // A cue started from the UI: at the next update (≤ 33 ms later)
+        // only what changed is sent.
+        let cue = {
+            let mut s = shared.lock().unwrap();
+            let cat = crate::presets::CATEGORIES[0];
+            let id = s.presets.iter().find(|p| p.category == cat).unwrap().id.clone();
+            crate::controls::press_cue(&mut s, &id, None, true);
+            id
+        };
+        assert!(!cue.is_empty());
+        let before = fake.sent("APC40 mkII").len();
+        w.step(t0 + ms(20), None);
+        assert_eq!(fake.sent("APC40 mkII").len(), before, "not yet: 30 per second at most");
+        w.step(t0 + ms(45), None);
+        let new = leds(&fake.sent("APC40 mkII")[before..]);
+        assert!(new.contains(&vec![0x90, 32, led::MK2_GREEN]), "{new:?}");
+        assert!(new.len() < 10, "a diff, not a full frame: {new:?}");
+
+        // Page change: the grid is redrawn at the next update.
+        shared.lock().unwrap().cue_page = 1;
+        let before = fake.sent("APC40 mkII").len();
+        w.step(t0 + ms(80), None);
+        let new = leds(&fake.sent("APC40 mkII")[before..]);
+        assert!(new.contains(&vec![0x90, 0x53, led::MK2_GREEN]) && new.contains(&vec![0x90, 0x52, 0]), "{new:?}");
+
+        // Idle: over two seconds, only the metronome LED (2 per beat at 120 BPM).
+        let before = fake.sent("APC40 mkII").len();
+        for i in 0..200 {
+            w.step(t0 + ms(100 + i * 10), None);
+        }
+        let idle = leds(&fake.sent("APC40 mkII")[before..]);
+        assert!(idle.iter().all(|m| m[1] == led::NOTE_METRONOME_MK2), "{idle:?}");
+        assert!(idle.len() <= 10, "{idle:?}");
+        assert!(w.wait(t0 + ms(2100)) <= IDLE_WAIT);
+    }
+
+    #[test]
+    fn leds_can_be_turned_off_per_device() {
+        let (mut w, fake, shared, t0) = led_setup();
+        shared.lock().unwrap().midi.store.set_port_leds("APC40 mkII", false).unwrap();
+        let before = fake.sent("APC40 mkII").len();
+        w.step(t0 + ms(50), None);
+        let off = leds(&fake.sent("APC40 mkII")[before..]);
+        assert!(!off.is_empty() && off.iter().all(|m| m[2] == 0), "what was lit goes dark: {off:?}");
+        let before = fake.sent("APC40 mkII").len();
+        for i in 0..100 {
+            w.step(t0 + ms(100 + i * 10), None);
+        }
+        assert_eq!(fake.sent("APC40 mkII").len(), before, "then nothing, not even the beat");
+        w.step(t0 + ms(2100), None);
+        assert!(!device(&shared, "APC40 mkII").leds, "shown in /api/midi after the next scan");
+    }
+
+    #[test]
+    fn replug_resends_everything_and_leaving_clears_the_rings() {
+        let (mut w, fake, shared, t0) = led_setup();
+        shared.lock().unwrap().live.perspective = 1.0;
+        w.step(t0 + ms(50), None);
+        assert!(fake.sent("APC40 mkII").contains(&vec![0xB0, 0x36, 127]), "ring value");
+        fake.unplug("APC40 mkII");
+        w.step(t0 + ms(2000), None);
+        fake.plug("APC40 mkII", Some(identity_reply(PID_APC40_MK2)));
+        let before = fake.sent("APC40 mkII").len();
+        w.step(t0 + ms(4000), None);
+        w.step(t0 + ms(4010), None);
+        let again = leds(&fake.sent("APC40 mkII")[before..]);
+        assert!(again.len() > 60 && again.contains(&vec![0x90, 32, led::MK2_WHITE]), "full frame after a replug");
+
+        w.shutdown();
+        let sent = fake.sent("APC40 mkII");
+        assert!(sent.contains(&vec![0xB0, 0x36, 0]), "ring cleared on the way out");
+        assert_eq!(sent.last().unwrap(), &introduction(PID_APC40_MK2, MODE_GENERIC));
+    }
+
+    #[test]
+    fn generic_devices_get_no_leds() {
+        let (mut w, fake, _shared, t0) = setup();
+        fake.plug("nano", None);
+        for i in 0..100 {
+            w.step(t0 + ms(i * 10), None);
+        }
+        assert_eq!(fake.sent("nano"), vec![DEVICE_INQUIRY.to_vec()]);
     }
 
     /// Real CoreMIDI, but only on virtual ports this test creates: the

@@ -492,11 +492,38 @@ mod tests {
         assert_eq!(Some(active), second, "pad (0,1) = second cue of page 1");
         assert_eq!(rig.shared.lock().unwrap().midi.last.as_ref().unwrap().msg, MidiMsg::NoteOn { channel: 0, note: 33, velocity: 127 });
 
-        // LED feedback (T-205) will go through the sender: it reaches the pad.
-        let sender = rig.shared.lock().unwrap().midi.sender.clone().unwrap();
-        sender.send(TEST_MK2_PORT, &[0x90, 33, 21]);
+        // LED feedback (T-205): the pad turns green, the others show white
+        // (cue present); a second press stops it and it goes back to white.
+        std::thread::sleep(crate::midi::led::LED_EVERY);
         rig.worker.step(Instant::now(), None);
-        assert_eq!(rig.apc(|a| a.led_at(0, 1)), Some(21));
+        assert_eq!(rig.apc(|a| a.led_at(0, 1)), Some(crate::midi::led::MK2_GREEN));
+        assert_eq!(rig.apc(|a| a.led_at(0, 0)), Some(crate::midi::led::MK2_WHITE));
+        let (down, up) = rig.apc(|a| (a.pad(0, 1, true), a.pad(0, 1, false)));
+        rig.play(&up);
+        rig.play(&down);
+        std::thread::sleep(crate::midi::led::LED_EVERY);
+        rig.worker.step(Instant::now(), None);
+        assert_eq!(rig.apc(|a| a.led_at(0, 1)), Some(crate::midi::led::MK2_WHITE));
+    }
+
+    #[test]
+    fn simulated_apc40_pads_turn_green_and_the_old_one_yellow() {
+        let sim = SimMidi::default();
+        sim.plug("Akai APC40", FakeApc::new(Model::Apc40));
+        let shared = Arc::new(Mutex::new(test_support::shared()));
+        let mut w = Worker::new(sim.clone(), Arc::clone(&shared));
+        w.step(Instant::now(), None);
+        w.step(Instant::now(), None);
+        let led = |r, c| sim.with_device("Akai APC40", |a| a.led_at(r, c)).unwrap();
+        assert_eq!(led(0, 0), Some(5), "yellow = cue present");
+        for (r, c) in [(0, 0), (2, 3)] {
+            let (down, up) = sim.with_device("Akai APC40", |a| (a.pad(r, c, true), a.pad(r, c, false))).unwrap();
+            sim.inject("Akai APC40", &down).unwrap();
+            sim.inject("Akai APC40", &up).unwrap();
+            std::thread::sleep(crate::midi::led::LED_EVERY);
+            w.step(Instant::now(), None);
+        }
+        assert_eq!((led(0, 0), led(2, 3)), (Some(5), Some(1)), "the new cue green, the old one yellow again");
     }
 
     #[test]

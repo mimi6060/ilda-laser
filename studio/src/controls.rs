@@ -575,7 +575,7 @@ pub fn timeline_play(s: &mut Shared) -> Result<(), &'static str> {
 }
 
 /// Whether the grid cell of `cue` holds a show that is playing now.
-fn show_cue_playing(s: &Shared, cue: &str) -> bool {
+pub(crate) fn show_cue_playing(s: &Shared, cue: &str) -> bool {
     let slot = s.deck.slot(cue);
     let loaded = s.timeline.show.as_ref().map(|sh| sh.name.as_str());
     slot.show.is_some() && slot.show.as_deref() == loaded && s.timeline.is_playing()
