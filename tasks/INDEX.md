@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (105)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-230](T-230-infra.md) | Capture audio native (cpal, CoreAudio) sur un fil dédié | infra | P1 | [] | feat/audio-capture |
+
+## À faire (104)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -18,7 +24,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-157](T-157-cues.md) | Cues évolutifs : un cue = une mini-timeline (calques internes, courbes sur modificateurs, LFO) | cues | P1 | [T-111, T-151, T-140] |  |
 | [T-205](T-205-midi.md) | Retour LED sur l'APC40 (cue active, page, calques, battement) | midi | P1 | [T-201, T-204, T-150] |  |
 | [T-211](T-211-midi.md) | Contrôleurs MIDI génériques (n'importe quel appareil) | midi | P1 | [T-200, T-201, T-202, T-203] |  |
-| [T-230](T-230-infra.md) | Capture audio native (cpal, CoreAudio) sur un fil dédié | infra | P1 | [] |  |
 | [T-231](T-231-tempo.md) | Analyse spectrale : 5 bandes, niveaux dBFS et gain automatique | tempo | P1 | [T-230] |  |
 | [T-232](T-232-tempo.md) | Fonction d'onsets (flux spectral) et détection kick / caisse claire / charleston | tempo | P1 | [T-231] |  |
 | [T-233](T-233-tempo.md) | Estimation du BPM et suivi des temps (autocorrélation, peigne, programmation dynamique) avec confiance | tempo | P1 | [T-232, T-150] |  |

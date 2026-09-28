@@ -3,7 +3,7 @@
 //!
 //! Runs the real binary in a subprocess, preview-only apart from the
 //! hidden `--test-output` fake output (a text file, never a laser), with
-//! `--no-midi`, a free localhost port and a temporary data directory.
+//! `--no-midi`, `--no-audio`, a free localhost port and a temporary data directory.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -25,7 +25,7 @@ impl Studio {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("output.log");
         let child = Command::new(env!("CARGO_BIN_EXE_laser-studio"))
-            .args(["--no-midi", "--port", &port.to_string(), "--data-dir"])
+            .args(["--no-midi", "--no-audio", "--port", &port.to_string(), "--data-dir"])
             .arg(&dir)
             .arg("--test-output")
             .arg(&log)
