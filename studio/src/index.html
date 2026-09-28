@@ -294,10 +294,13 @@
         <select id="gen"></select>
         <label>Nombre <span class="v" id="gCountV"></span></label>
         <input type="range" id="gCount" min="1" max="32">
+        <div class="hint" id="gCountH" hidden></div>
         <label>Forme A <span class="v" id="gAV"></span></label>
-        <input type="range" id="gA" min="0" max="10" step="0.1">
+        <input type="range" id="gA" min="0" max="10" step="0.05">
+        <div class="hint" id="gAH" hidden></div>
         <label>Forme B <span class="v" id="gBV"></span></label>
         <input type="range" id="gB" min="-1" max="3" step="0.05">
+        <div class="hint" id="gBH" hidden></div>
         <label>Vitesse <span class="v" id="gSpeedV"></span></label>
         <input type="range" id="gSpeed" min="0" max="4" step="0.05">
         <label>Mode couleur</label>
@@ -328,13 +331,18 @@
           <label>Gate (temps) <span class="v" id="gGateV"></span></label>
           <input type="range" id="gGate" min="0" max="1" step="0.05" value="0" title="0 = pas de gate">
           <label>Sens</label>
-          <select id="gDir"><option value="1">→</option><option value="-1">←</option></select>
+          <select id="gDir"><option value="1">→</option><option value="-1">←</option><option value="0">↔ aller-retour</option></select>
           <label>Groupes</label>
           <select id="gGroups"><option>1</option><option>2</option><option>3</option><option>4</option></select>
           <label>Mode de groupe</label>
           <select id="gGroupMode">
             <option value="unison">Ensemble</option><option value="mirror">Miroir</option><option value="offset">Décalé</option>
           </select>
+          <label>Courbe du balayage</label>
+          <select id="gEasing">
+            <option value="sine">Sinus (ralentit aux bords)</option><option value="triangle">Triangle</option><option value="trapezoid">Trapèze (tenue aux bords)</option>
+          </select>
+          <div class="hint" id="gSyncH" hidden></div>
         </div>
       </div>
     </section>
@@ -455,8 +463,10 @@ function showSettings() {
     if (document.activeElement !== $('gSync')) $('gSync').checked = !!p.beat_sync;
     $('gSyncPanel').hidden = !p.beat_sync;
     setVal('gPeriod', String(p.period_beats ?? 4)); setVal('gSteps', String(p.steps_per_beat ?? 1));
-    setVal('gGate', p.gate_beats ?? 0); setVal('gDir', String((p.direction ?? 1) < 0 ? -1 : 1));
+    setVal('gGate', p.gate_beats ?? 0); setVal('gDir', String(Math.sign(p.direction ?? 1)));
     setVal('gGroups', String(p.groups ?? 1)); setVal('gGroupMode', p.group_mode ?? 'unison');
+    setVal('gEasing', p.easing ?? 'sine');
+    showGenHelp(s.content.generator);
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
   if (kind === 'text') setVal('text', s.content.text);
@@ -500,7 +510,12 @@ const LOOK_EDITS = {
   aFlash: v => s => { s.audio.flash = v / 100; },
   aColor: v => s => { s.audio.color_on_beat = v; },
   text: v => s => { if (s.content.kind === 'text') s.content.text = v; },
-  gen: v => genEdit(c => { c.generator = v; }),
+  // Picking a festival fan starts it from its own starting values, in tempo.
+  gen: v => genEdit(c => {
+    c.generator = v;
+    const d = GEN_DEFAULTS[v];
+    if (d) Object.assign(c.params, { count: d.count, a: d.a, b: d.b, beat_sync: true, period_beats: d.period, steps_per_beat: d.steps });
+  }),
   gCount: v => genEdit(c => { c.params.count = +v; }),
   gA: v => genEdit(c => { c.params.a = +v; }),
   gB: v => genEdit(c => { c.params.b = +v; }),
@@ -514,6 +529,7 @@ const LOOK_EDITS = {
   gDir: v => genEdit(c => { c.params.direction = +v; }),
   gGroups: v => genEdit(c => { c.params.groups = +v; }),
   gGroupMode: v => genEdit(c => { c.params.group_mode = v; }),
+  gEasing: v => genEdit(c => { c.params.easing = v; }),
 };
 for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   $(id).addEventListener('input', () => {
@@ -523,6 +539,8 @@ for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   // Shown again once let go, in case the look changed while it was held.
   if (id === 'gSync') $(id).addEventListener('input', () => { $('gSyncPanel').hidden = !$('gSync').checked; });
   $(id).addEventListener('blur', () => setTimeout(showSettings));
+  // A new generator may bring its own values and help: show them now.
+  if (id === 'gen') $(id).addEventListener('input', () => showSettings());
 }
 
 function editLook(fn) {
@@ -1141,7 +1159,35 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   polygon_tunnel: 'Tunnel polygonal', spiral_arms: 'Spirale à bras', starburst: 'Soleil', beam_fan: 'Faisceaux en éventail',
   beam_circle: 'Cône de faisceaux', beam_wave: 'Vague de faisceaux', sweep: 'Balayage', liquid_sky: 'Nappe',
   grid_scan: 'Grille de balayage', sine_stack: 'Oscillateurs', helix: 'Hélice', pulse_rings: 'Anneaux pulsés',
-  spectrum: 'Spectre audio', clock: 'Horloge', vortex: 'Vortex', flower: 'Fleur' };
+  spectrum: 'Spectre audio', clock: 'Horloge', vortex: 'Vortex', flower: 'Fleur',
+  fan: 'Éventail', fan_sweep: 'Éventail balayé', fan_tilt: 'Éventail qui se lève', fan_wave: 'Éventail vague',
+  positions: 'Positions au temps' };
+
+// Festival fans (T-102): what Nombre / A / B mean for each, plus how the
+// tempo settings drive it. Old generators keep the generic labels.
+const GEN_HELP = {
+  fan: ['Faisceaux (6 à 16).', 'Pompage : 0 = fixe, 1 = s’ouvre sur chaque temps puis se referme.', 'Hauteur au-dessus du public.',
+    'Taille = demi-largeur de l’éventail.'],
+  fan_sweep: ['Faisceaux (6 à 16).', 'Amplitude du balayage (0,25 à 0,45).', 'Hauteur au-dessus du public.',
+    'Un aller-retour par période ; Miroir : les groupes se croisent, Décalé : une vague d’un groupe à l’autre.'],
+  fan_tilt: ['Faisceaux (6 à 16).', 'Non utilisé.', 'Non utilisé.',
+    'Monte sur une période puis redescend d’un coup ; ← : descend ; ↔ : monte et redescend. Miroir : un groupe monte, l’autre descend.'],
+  fan_wave: ['Faisceaux (10 à 16).', 'Amplitude de la vague (0,15 à 0,4).', 'Hauteur moyenne au-dessus du public.',
+    'Une longueur d’onde tous les 2 temps ; ← : la vague part dans l’autre sens.'],
+  positions: ['Faisceaux (6 à 16).', 'Non utilisé.', 'Hauteur des positions.',
+    '4 positions (large haut, incliné gauche, incliné droite, V), une par pas : Pas par temps règle la cadence.'],
+};
+const GEN_DEFAULTS = {
+  fan: { count: 8, a: 0, b: 0.3, period: 4, steps: 1 },
+  fan_sweep: { count: 8, a: 0.35, b: 0.3, period: 4, steps: 1 },
+  fan_tilt: { count: 8, a: 0, b: 0, period: 8, steps: 1 },
+  fan_wave: { count: 12, a: 0.25, b: 0.4, period: 4, steps: 1 },
+  positions: { count: 8, a: 0, b: 0.3, period: 4, steps: 1 },
+};
+function showGenHelp(name) {
+  const h = GEN_HELP[name] || [];
+  ['gCountH', 'gAH', 'gBH', 'gSyncH'].forEach((id, i) => { $(id).textContent = h[i] || ''; $(id).hidden = !h[i]; });
+}
 
 // ---------- LFO modulators ----------
 const LFO_WAVES = [['sine', 'Sinus'], ['triangle', 'Triangle'], ['square', 'Carré'], ['saw_up', 'Dent de scie ↗'],

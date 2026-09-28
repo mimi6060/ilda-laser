@@ -81,6 +81,43 @@ pub fn bar_start(beat: f64, beats_per_bar: u8) -> f64 {
     ((beat + 1e-6) / bpb).floor() * bpb
 }
 
+/// Shape of a back-and-forth motion (a fan sweep): how the move eases
+/// into its extremes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Easing {
+    /// Slows down at the ends, like a moving head.
+    #[default]
+    Sine,
+    /// Constant speed, sharp turn at the ends.
+    Triangle,
+    /// Constant speed, then held still at each end for a quarter of the
+    /// cycle.
+    Trapezoid,
+}
+
+impl Easing {
+    /// One back-and-forth swing per cycle, in -1..1: 0 at phase 0, +1 at a
+    /// quarter, 0 at half, -1 at three quarters (all three shapes agree on
+    /// those points, so switching easing keeps the timing).
+    pub fn swing(self, phase: f32) -> f32 {
+        let x = phase.rem_euclid(1.0);
+        let tri = if x < 0.25 {
+            4.0 * x
+        } else if x < 0.75 {
+            2.0 - 4.0 * x
+        } else {
+            4.0 * x - 4.0
+        };
+        match self {
+            Easing::Sine => (std::f32::consts::TAU * x).sin(),
+            Easing::Triangle => tri,
+            // |tri| >= 0.5 for half the cycle: a quarter held at each end.
+            Easing::Trapezoid => (2.0 * tri).clamp(-1.0, 1.0),
+        }
+    }
+}
+
 /// How the virtual groups of a generator's beams move relative to each
 /// other ("virtual heads").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +265,24 @@ mod tests {
         let (ph, _) = GroupMode::Offset.motion(1, 4, 0.9);
         assert!((ph - 0.15).abs() < 1e-6);
         assert_eq!(GroupMode::Offset.motion(0, 4, 0.9).0, 0.9);
+    }
+
+    #[test]
+    fn easings_swing_through_the_same_key_points() {
+        for e in [Easing::Sine, Easing::Triangle, Easing::Trapezoid] {
+            assert!(e.swing(0.0).abs() < 1e-6, "{e:?}");
+            assert!((e.swing(0.25) - 1.0).abs() < 1e-6, "{e:?}");
+            assert!(e.swing(0.5).abs() < 1e-5, "{e:?}");
+            assert!((e.swing(0.75) + 1.0).abs() < 1e-6, "{e:?}");
+            assert!((e.swing(1.3) - e.swing(0.3)).abs() < 1e-5, "{e:?} wraps");
+            assert!((0..100).all(|i| e.swing(i as f32 / 100.0).abs() <= 1.0 + 1e-6));
+        }
+        // Trapezoid: held at the top from 1/8 to 3/8 of the cycle.
+        assert_eq!(Easing::Trapezoid.swing(0.13), 1.0);
+        assert_eq!(Easing::Trapezoid.swing(0.37), 1.0);
+        assert!(Easing::Trapezoid.swing(0.1) < 1.0);
+        assert!((Easing::Triangle.swing(0.125) - 0.5).abs() < 1e-6);
+        assert_eq!(serde_json::to_string(&Easing::Trapezoid).unwrap(), "\"trapezoid\"");
     }
 
     #[test]
