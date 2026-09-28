@@ -1,6 +1,7 @@
 //! Project files (T-286): one `.lsproj` file holds a whole show - scenes
 //! and playlist, cue-grid properties, timelines, default tempo, master
-//! live modifiers, layers, LFOs, user palettes and MIDI mappings - as
+//! live modifiers, layers, LFOs, user palettes, MIDI mappings and the
+//! figure library (T-296) - as
 //! pretty-printed, versioned JSON in `<data-dir>/projects/`.
 //!
 //! The data directory's own files (`scenes.json`, `grid.json`, `shows/`…)
@@ -23,6 +24,7 @@
 //! the state out, or to swap the checked state in.
 
 use crate::cues::CueDeck;
+use crate::figures::Figure;
 use crate::layers::Mixer;
 use crate::lfo::Modulator;
 use crate::live::{LiveModifiers, Palette};
@@ -95,6 +97,9 @@ pub struct Project {
     pub lfos: Vec<Modulator>,
     pub palettes: Vec<Palette>,
     pub midi: MidiSection,
+    /// The figure library (`figures/`). Missing in projects saved before
+    /// T-296: they open with no figures.
+    pub figures: Vec<Figure>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -116,6 +121,7 @@ impl Default for Project {
             lfos: Vec::new(),
             palettes: Vec::new(),
             midi: MidiSection::default(),
+            figures: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -188,7 +194,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 7] = ["scenes.json", "grid.json", "live.json", "layers.json", "lfos.json", "palettes.json", "shows"];
+const WORKING_FILES: [&str; 8] = ["scenes.json", "grid.json", "live.json", "layers.json", "lfos.json", "palettes.json", "shows", "figures"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -343,6 +349,15 @@ fn check(p: &mut Project) -> Result<()> {
     }
     p.timelines.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let mut figures = HashSet::new();
+    for fig in &mut p.figures {
+        fig.validate()?;
+        if !figures.insert(fig.name.clone()) {
+            bail!("figure en double : « {} »", fig.name);
+        }
+    }
+    p.figures.sort_by(|a, b| a.name.cmp(&b.name));
+
     let bpm = if p.tempo.bpm.is_finite() { p.tempo.bpm } else { 120.0 };
     p.tempo = TempoDefaults { bpm: bpm.clamp(MIN_BPM, MAX_BPM), beats_per_bar: p.tempo.beats_per_bar.clamp(1, 16) };
     p.layers.sanitize();
@@ -377,6 +392,7 @@ pub fn snapshot(s: &Shared) -> Project {
         lfos: s.lfos.list().to_vec(),
         palettes: s.palettes.list().to_vec(),
         midi: MidiSection { profiles: s.midi.store.user_profiles().clone() },
+        figures: s.figures.list().to_vec(),
         ..Project::default()
     }
 }
@@ -398,6 +414,8 @@ fn apply(s: &mut Shared, p: &Project) {
     s.lfos.replace_in_memory(p.lfos.clone());
     s.palettes.replace_in_memory(p.palettes.clone());
     s.midi.store.replace_user_in_memory(p.midi.profiles.clone());
+    s.figures.replace_in_memory(p.figures.clone());
+    crate::figures::refresh(s);
     // Saved below, not by the engine thread.
     s.live_dirty = false;
     s.mixer_dirty = false;
@@ -412,6 +430,7 @@ struct WorkingPaths {
     lfos: PathBuf,
     palettes: PathBuf,
     midi: Option<PathBuf>,
+    figures: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
 }
@@ -424,6 +443,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         lfos: s.lfos.path().to_path_buf(),
         palettes: s.palettes.path().to_path_buf(),
         midi: s.midi.store.dir().map(|d| d.join("profiles")),
+        figures: s.figures.dir().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
     }
@@ -455,10 +475,16 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
             put(&dir.join(format!("{slug}.json")), serde_json::to_vec_pretty(profile));
         }
     }
-    // The previous project's timelines and MIDI profiles go: only plain
+    if let Some(dir) = &w.figures {
+        for fig in &p.figures {
+            put(&dir.join(format!("{}.json", fig.name)), serde_json::to_vec_pretty(fig));
+        }
+    }
+    // The previous project's timelines, MIDI profiles and figures go: only plain
     // `<name>.json` files directly in those folders, never anything else.
     let keep_shows: HashSet<&str> = p.timelines.iter().map(|s| s.name.as_str()).collect();
     let keep_midi: HashSet<&str> = p.midi.profiles.keys().map(String::as_str).collect();
+    let keep_figures: HashSet<&str> = p.figures.iter().map(|f| f.name.as_str()).collect();
     let mut prune = |dir: &Path, keep: &HashSet<&str>, valid: &dyn Fn(&str) -> bool| {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for path in entries.flatten().map(|e| e.path()) {
@@ -474,6 +500,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     prune(&w.shows, &keep_shows, &valid_show_name);
     if let Some(dir) = &w.midi {
         prune(dir, &keep_midi, &valid_slug);
+    }
+    if let Some(dir) = &w.figures {
+        prune(dir, &keep_figures, &valid_show_name);
     }
     errors
 }
@@ -715,6 +744,7 @@ mod tests {
         s.lfos = crate::lfo::LfoStore::load_or_create(dir.join("lfos.json"), &s.controls);
         s.palettes = crate::live::PaletteStore::load_or_create(dir.join("palettes.json"));
         s.midi.store = ProfileStore::load(dir.join("midi"));
+        s.figures = crate::figures::FigureStore::load(dir.join("figures"));
         s.project = ProjectState::load(dir);
         startup(&mut s);
         Mutex::new(s)
@@ -788,6 +818,40 @@ mod tests {
     }
 
     #[test]
+    fn figures_are_saved_in_the_project_and_old_projects_still_open() {
+        let dir = temp_dir("figures");
+        let shared = studio(&dir);
+        let logo = crate::figures::test_figure("Logo", 3);
+        {
+            let mut s = shared.lock().unwrap();
+            s.figures.save(logo.clone()).unwrap();
+            crate::figures::refresh(&mut s);
+        }
+        assert!(modified(&shared), "a new figure is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Avec figures" })).unwrap();
+        {
+            let mut s = shared.lock().unwrap();
+            s.figures.save(crate::figures::test_figure("Autre", 1)).unwrap();
+            s.figures.remove("Logo").unwrap();
+            crate::figures::refresh(&mut s);
+        }
+        post(&shared, &dir, "open", json!({ "path": "Avec figures" })).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.figures.list(), &[logo.clone()][..], "reopened identical");
+            assert!(s.presets.iter().any(|p| p.id == "figure:Logo"), "its cue is back");
+            assert!(!s.presets.iter().any(|p| p.id == "figure:Autre"));
+        }
+        assert!(dir.join("figures/Logo.json").is_file());
+        assert!(!dir.join("figures/Autre.json").exists(), "the working copy is the project's");
+        // A project from before figures (no « figures » section) opens, with none.
+        std::fs::write(dir.join("projects/ancien.lsproj"), json!({ "format_version": 1, "name": "ancien" }).to_string()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "ancien" })).unwrap();
+        assert!(shared.lock().unwrap().figures.list().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn unknown_fields_survive_a_save() {
         let dir = temp_dir("unknown");
         let shared = studio(&dir);
@@ -853,6 +917,8 @@ mod tests {
             ("lfo", json!({ "format_version": 1, "scenes": scenes, "lfos": [{ "target": "safety.estop" }] }).to_string()),
             ("midi", json!({ "format_version": 1, "scenes": scenes, "midi": { "profiles": { "../x": {} } } }).to_string()),
             ("palette", json!({ "format_version": 1, "scenes": scenes, "palettes": [{ "name": "", "colors": [] }] }).to_string()),
+            ("figure", json!({ "format_version": 1, "scenes": scenes, "figures": [{ "name": "../../evil" }] }).to_string()),
+            ("figdup", json!({ "format_version": 1, "scenes": scenes, "figures": [{ "name": "a" }, { "name": "a" }] }).to_string()),
         ];
         for (name, text) in bad {
             std::fs::write(dir.join(format!("projects/{name}.lsproj")), text).unwrap();
