@@ -499,13 +499,151 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         },
         (Method::Get, "/api/timeline") => {
             let s = shared.lock().unwrap();
-            json_response(json!({ "state": s.timeline.state(&s.timeline_clock()), "show": s.timeline.show }))
+            json_response(json!({ "state": s.timeline.state(&s.timeline_clock()), "show": s.timeline.show, "audio": song_view(&s) }))
         }
+        (Method::Get, "/api/media/audio") => {
+            let media = Arc::clone(&shared.lock().unwrap().media);
+            json_response(json!({ "files": media.list(), "extensions": crate::audio::media::EXTENSIONS }))
+        }
+        (Method::Post, "/api/media/audio") => import_song(request, shared),
+        (Method::Get, "/api/timeline/waveform") => waveform(request.url(), shared),
+        (Method::Post, "/api/timeline/audio") => match body::<SongPatch>(request) {
+            Ok(patch) => attach_song(patch, shared),
+            Err(e) => e,
+        },
         (Method::Post, p) if p.starts_with("/api/timeline/") => timeline_route(request, shared, &p["/api/timeline/".len()..]),
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         _ => text(404, "not found"),
     }
+}
+
+/// `POST /api/media/audio?name=<file name>`, the file's bytes as the body:
+/// decoded first (a damaged file is refused with a clear message and
+/// nothing is written), then stored in `media/audio/` under a safe name.
+/// The lock is not held while reading, decoding or writing.
+fn import_song(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    use crate::audio::media::MAX_IMPORT_BYTES;
+    use std::io::Read;
+    let too_big = || text(413, &format!("fichier trop gros ({} Mo au plus)", MAX_IMPORT_BYTES >> 20));
+    let Some(name) = query_str(request.url(), "name") else { return text(400, "expected ?name=<nom du fichier>") };
+    if request.body_length().is_some_and(|n| n as u64 > MAX_IMPORT_BYTES) {
+        return too_big();
+    }
+    let mut bytes = Vec::new();
+    if let Err(e) = request.as_reader().take(MAX_IMPORT_BYTES + 1).read_to_end(&mut bytes) {
+        return text(400, &format!("unreadable body: {e}"));
+    }
+    if bytes.len() as u64 > MAX_IMPORT_BYTES {
+        return too_big();
+    }
+    let media = Arc::clone(&shared.lock().unwrap().media);
+    match media.import(&name, &bytes) {
+        Ok(imported) => json_response(json!(imported)),
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
+/// `GET /api/timeline/waveform?from=&to=&px=[&file=]`: the song's
+/// waveform over show seconds `[from, to[` in `px` columns (min and max per
+/// column, 3 decimals). Default: the loaded show's song over the whole show.
+fn waveform(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let (media, song, length) = {
+        let s = shared.lock().unwrap();
+        let show = s.timeline.show.as_ref();
+        (Arc::clone(&s.media), show.and_then(|sh| sh.song()).cloned(), show.map_or(0.0, |sh| sh.end()))
+    };
+    let (file, offset_s) = match (query_str(url, "file"), song) {
+        (Some(file), _) => (file, 0.0),
+        (None, Some(a)) => (a.file, a.offset_s),
+        (None, None) => return text(404, "aucun morceau dans le show chargé"),
+    };
+    let peaks = match media.peaks(&file) {
+        Ok(p) => p,
+        Err(e) => return text(404, &format!("{e:#}")),
+    };
+    let num = |k: &str| query_str(url, k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+    let from = num("from").unwrap_or(0.0);
+    let to = num("to").unwrap_or_else(|| length.max(offset_s + peaks.duration_s()));
+    let px = num("px").map_or(1000, |v| v.max(1.0) as usize).clamp(1, 8192);
+    let (min, max) = peaks.view(offset_s, from, to, px);
+    let round = |v: Vec<f32>| v.into_iter().map(|x| (x * 1000.0).round() / 1000.0).collect::<Vec<_>>();
+    json_response(json!({
+        "file": file,
+        "duration_s": peaks.duration_s(),
+        "offset_s": offset_s,
+        "sample_rate": peaks.sample_rate,
+        "block": peaks.block,
+        "from": from,
+        "to": to,
+        "px": px,
+        "min": round(min),
+        "max": round(max),
+    }))
+}
+
+/// `POST /api/timeline/audio`: the loaded show's song. `file` (a song of
+/// the library, `null` = none), `offset_s` (±0.5 s), `gain` (0..1); fields
+/// left out don't change. The show is saved at once when it has a name.
+#[derive(Deserialize)]
+struct SongPatch {
+    #[serde(default, deserialize_with = "some_string")]
+    file: Option<Option<String>>,
+    offset_s: Option<f64>,
+    gain: Option<f32>,
+}
+
+/// Tells an explicit `null` (Some(None)) from a missing field (None).
+fn some_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+fn attach_song(patch: SongPatch, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let media = Arc::clone(&shared.lock().unwrap().media);
+    // The song's length, read (maybe decoded) without the lock.
+    let duration = match &patch.file {
+        Some(Some(file)) => match media.peaks(file) {
+            Ok(p) => Some(p.duration_s()),
+            Err(e) => return text(400, &format!("{e:#}")),
+        },
+        _ => None,
+    };
+    let mut s = shared.lock().unwrap();
+    let s = &mut *s;
+    let Some(show) = s.timeline.show.as_mut() else { return text(409, "aucun show chargé") };
+    if show.time_base != crate::timeline::TimeBase::Seconds {
+        return text(400, "un morceau ne va qu'avec un show en secondes");
+    }
+    if patch.file.is_none() && show.song().is_none() && (patch.offset_s.is_some() || patch.gain.is_some()) {
+        return text(400, "pas de morceau dans ce show");
+    }
+    match (&patch.file, duration) {
+        (Some(None), _) => show.audio = None,
+        (Some(Some(file)), Some(duration_s)) => {
+            let keep = show.audio.take().unwrap_or_default();
+            show.audio = Some(crate::timeline::AudioRef { file: file.clone(), duration_s, ..keep });
+        }
+        _ => {}
+    }
+    if let Some(audio) = show.audio.as_mut() {
+        if let Some(v) = patch.offset_s {
+            audio.offset_s = v;
+        }
+        if let Some(v) = patch.gain {
+            audio.gain = v;
+        }
+    }
+    show.sanitize();
+    let saved = crate::timeline::valid_show_name(&show.name) && s.shows.save(show).is_ok();
+    let c = s.timeline_clock();
+    json_response(json!({ "state": s.timeline.state(&c), "audio": song_view(s), "saved": saved }))
+}
+
+/// The song player's status, and which clock the timeline follows.
+fn song_view(s: &Shared) -> serde_json::Value {
+    let mut v = json!(s.song.status());
+    v["clock"] = json!(s.song_sync.clock);
+    v
 }
 
 /// `POST /api/timeline/{load,play,pause,stop,seek,loop}`. Transport only:
@@ -712,6 +850,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "evolving": evolving_status(s),
         "timeline": s.timeline.state(&s.timeline_clock()),
+        "timeline_audio": song_view(s),
         "audio": s.audio_in.view(s.audio, s.audio_at, Instant::now()),
     }))
 }
@@ -750,6 +889,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "layers": { "mixer": s.mixer, "mix": s.mix },
         "tempo": s.tempo.state(s.now_s()),
         "timeline": s.timeline.state(&s.timeline_clock()),
+        "timeline_audio": song_view(s),
         "live": s.live,
         "lfos": lfo_positions(s),
         "strobe": s.strobe,
@@ -804,6 +944,32 @@ fn save_calibration(path: &Path, cal: &Calibration) {
 /// `key`'s value in the URL's query string, as a number.
 fn query_u64(url: &str, key: &str) -> Option<u64> {
     url.split_once('?')?.1.split('&').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+}
+
+/// `key`'s value in the URL's query string, percent-decoded (UTF-8).
+fn query_str(url: &str, key: &str) -> Option<String> {
+    let raw = url.split_once('?')?.1.split('&').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))?;
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 fn ok() -> HttpResponse {
@@ -1106,6 +1272,93 @@ mod tests {
         assert_eq!(t.request("POST", "/api/timeline/play", "").0, 409);
         assert_eq!(t.request("POST", "/api/timeline/stop", "").0, 200);
         assert!(!t.shared.lock().unwrap().timeline.is_playing());
+    }
+
+    /// Like `http`, with a binary body.
+    fn http_bytes(addr: SocketAddr, path: &str, body: &[u8]) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+        stream.write_all(body).unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let status = raw.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        (status, raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    #[test]
+    fn songs_are_imported_in_their_folder_and_attached_to_the_loaded_show() {
+        use crate::audio::decode::testing::{sine, wav16};
+        let t = TestServer::start(false);
+        let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        let media_dir = t.shared.lock().unwrap().media.dir().to_path_buf();
+
+        // A damaged file: a clear 400, nothing written.
+        let (status, body) = http_bytes(t.addr, "/api/media/audio?name=cass%C3%A9%20web.wav", b"RIFF\x10\0\0\0WAVEjunk");
+        assert_eq!(status, 400);
+        assert!(body.contains("WAV illisible"), "{body}");
+        assert!(!media_dir.join("cassé web.wav").exists());
+        assert_eq!(http_bytes(t.addr, "/api/media/audio", b"x").0, 400, "no name");
+        assert_eq!(http_bytes(t.addr, "/api/media/audio?name=notes.txt", b"x").0, 400);
+
+        // A path in the name: only the file name is kept, inside media/audio/.
+        let wav = wav16(8_000, 1, &sine(8_000, 2.0, 100.0, 0.5));
+        let (status, body) = http_bytes(t.addr, "/api/media/audio?name=..%2F..%2FChanson%20web.wav", &wav);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(json(&body)["file"], "Chanson web.wav");
+        assert_eq!(json(&body)["duration_s"], 2.0);
+        assert!(media_dir.join("Chanson web.wav").is_file());
+        assert!(!media_dir.join("../../Chanson web.wav").exists());
+        let list = json(&t.request("GET", "/api/media/audio", "").1);
+        assert!(list["files"].as_array().unwrap().iter().any(|f| f["file"] == "Chanson web.wav"));
+
+        let song = r#"{"file":"Chanson web.wav","offset_s":0.9,"gain":2}"#;
+        assert_eq!(t.request("POST", "/api/timeline/audio", song).0, 409, "no show loaded");
+        let show = r#"{"name":"web song","time_base":"seconds","tracks":[{"events":[{"id":1,"start":0,"len":1,"source":{"kind":"cue","id":"x"}}]}]}"#;
+        assert_eq!(t.request("POST", "/api/shows", show).0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/load", r#"{"name":"web song"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/audio", r#"{"gain":0.5}"#).0, 400, "no song yet");
+        assert_eq!(t.request("POST", "/api/timeline/audio", r#"{"file":"nope.wav"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/timeline/audio", r#"{"file":"../Chanson web.wav"}"#).0, 400);
+        let (status, body) = t.request("POST", "/api/timeline/audio", song);
+        assert_eq!(status, 200, "{body}");
+        let got = json(&body);
+        assert_eq!(got["saved"], true);
+        let audio = &got["state"]["audio"];
+        assert_eq!((audio["offset_s"].as_f64(), audio["gain"].as_f64(), audio["duration_s"].as_f64()), (Some(0.5), Some(1.0), Some(2.0)), "clamped");
+        assert_eq!(got["state"]["length"], 2.5, "the show lasts until the song ends");
+        assert_eq!(got["audio"]["state"], "disabled", "no playback thread in tests");
+        // Saved with the show.
+        let saved = t.shared.lock().unwrap().shows.load("web song").unwrap();
+        assert_eq!(saved.audio.unwrap().file, "Chanson web.wav");
+
+        // Waveform in show time: the song starts 0.5 s in.
+        let wave = json(&t.request("GET", "/api/timeline/waveform?px=5", "").1);
+        assert_eq!((wave["from"].as_f64(), wave["to"].as_f64(), wave["px"].as_u64()), (Some(0.0), Some(2.5), Some(5)));
+        let max: Vec<f64> = wave["max"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(max[0], 0.0, "before the song");
+        assert!(max[1..].iter().all(|m| (m - 0.5).abs() < 0.01), "{max:?}");
+        let zoom = json(&t.request("GET", "/api/timeline/waveform?from=1&to=1.5&px=3", "").1);
+        assert_eq!(zoom["min"].as_array().unwrap().len(), 3);
+        let by_file = json(&t.request("GET", "/api/timeline/waveform?file=Chanson%20web.wav&px=2", "").1);
+        assert_eq!((by_file["offset_s"].as_f64(), by_file["to"].as_f64()), (Some(0.0), Some(2.5)));
+        assert_eq!(t.request("GET", "/api/timeline/waveform?file=..%2Fsecret.wav", "").0, 404);
+
+        let state = json(&t.request("GET", "/api/state", "").1);
+        assert_eq!(state["timeline_audio"]["clock"], "system");
+        assert_eq!(state["armed"], false);
+        let (_, body) = t.request("POST", "/api/timeline/audio", r#"{"file":null}"#);
+        assert!(json(&body)["state"]["audio"].is_null());
+        assert_eq!(t.request("GET", "/api/timeline/waveform", "").0, 404, "no song any more");
+    }
+
+    #[test]
+    fn query_strings_are_percent_decoded() {
+        assert_eq!(query_str("/x?name=Mon%20Titre%C3%A9+2.wav&a=1", "name").as_deref(), Some("Mon Titreé 2.wav"));
+        assert_eq!(query_str("/x?a=1", "name"), None);
+        assert_eq!(query_str("/x?name=%zz", "name"), None);
+        assert_eq!(query_str("/x?name=%4", "name"), None);
+        assert_eq!(query_str("/x?name=%FF", "name"), None, "not UTF-8");
     }
 
     #[test]

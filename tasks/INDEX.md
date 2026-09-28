@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (99)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-161](T-161-timeline.md) | Fichier audio et forme d'onde dans la timeline | timeline | P2 | [T-160] | feat/timeline-audio |
+
+## À faire (98)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -63,7 +69,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-153](T-153-live.md) | Routage des bandes audio vers n'importe quel contrôle | live | P2 | [T-145, T-151] |  |
 | [T-158](T-158-cues.md) | Transitions entre cues : coupe, fondu, fondu au noir, morph | cues | P2 | [T-155, T-150] |  |
 | [T-159](T-159-cues.md) | Lancement quantifié et mode beat (changement automatique au temps) | cues | P2 | [T-150, T-155] |  |
-| [T-161](T-161-timeline.md) | Fichier audio et forme d'onde dans la timeline | timeline | P2 | [T-160] |  |
 | [T-162](T-162-timeline.md) | Éditeur de timeline (pistes, glisser, magnétisme, zoom, marqueurs, copier-coller) | ui | P2 | [T-160, T-161] |  |
 | [T-163](T-163-timeline.md) | Enveloppes de paramètres sur n'importe quel contrôle | timeline | P2 | [T-160, T-145] |  |
 | [T-164](T-164-cues.md) | Éditeur de cue évolutif | ui | P2 | [T-157, T-162] |  |
