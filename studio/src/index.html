@@ -24,6 +24,14 @@
   #estopBanner { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 8px 16px; background: #d0021b; color: #fff; font-weight: 700; letter-spacing: .03em; }
   #estopBanner[hidden] { display: none; }
   #estopBanner button { background: #fff; color: #d0021b; border-color: #fff; font-weight: 700; }
+  .leds { display: flex; gap: 10px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .led { display: inline-flex; align-items: center; gap: 5px; }
+  .led::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+  .led.ok::before { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .led.bad { color: var(--danger); font-weight: 700; }
+  #holdBanner { padding: 10px 16px; text-align: center; font-size: 20px; font-weight: 800; letter-spacing: .06em; background: #3a2a00; color: var(--warn); border-bottom: 2px solid var(--warn); }
+  #holdBanner.emitting { background: var(--accent-ink); color: var(--accent); border-color: var(--accent); }
+  #holdBanner[hidden] { display: none; }
   header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
   #output { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #armBtn { padding: 10px 18px; border-radius: 8px; border: 2px solid var(--danger); background: transparent; color: var(--danger); font-weight: 700; cursor: pointer; letter-spacing: .04em; }
@@ -176,12 +184,17 @@
   <div class="arm">
     <button id="armBtn" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
     <span id="armInfo">Désarmé</span>
+    <div class="leds">
+      <span id="presenceLed" class="led" title="Battement de l'interface : sans aucune page ouverte, le laser se désarme">Opérateur absent</span>
+      <span id="engineLed" class="led ok" title="Chien de garde du moteur">Moteur</span>
+    </div>
     <div id="armRefused" hidden></div>
   </div>
   <button id="estopBtn" title="Arrêt d'urgence (Échap) · safety.estop">ARRÊT</button>
 </header>
 <div id="estopBanner" hidden>ARRÊT D'URGENCE — réinitialiser pour réarmer
   <button id="estopReset">Réinitialiser l'arrêt d'urgence</button></div>
+<div id="holdBanner" hidden></div>
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
 </div>
 
@@ -473,6 +486,12 @@
         <label>Horizon des faisceaux <span class="v" id="sfFloorV"></span></label><input type="range" id="sfFloor" min="-1" max="1" step="0.05">
         <div class="hint">Au-delà de 4 Hz, un strobe est limité à 5 s puis la sortie reste allumée en continu (au moins 2 s). Les faisceaux sous l'horizon sont éteints. Ces limites ne peuvent qu'être resserrées ici.</div>
         <div class="hint" id="strobeInfo"></div>
+        <label for="uiTimeout">Couper si l'interface ne répond plus (ms)</label>
+        <input type="number" id="uiTimeout" min="1000" max="10000" step="100">
+        <label class="check"><input type="checkbox" id="holdToRun"> Mode maintien (homme mort)</label>
+        <div class="row"><span>Touche de maintien : <b id="holdKeyLabel"></b></span>
+          <button id="holdKeyPick" style="flex:0;white-space:nowrap">Changer…</button></div>
+        <div class="hint">Mode maintien : le laser n'émet que tant que la touche est maintenue (une pédale USB qui envoie une touche fonctionne aussi ; pad MIDI : contrôle safety.hold). Relâcher = sortie noire ; relâché plus de 10 s = désarmé.</div>
       </details>
     </section>
 
@@ -684,7 +703,8 @@ document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click'
 // "armed" value; they must not overwrite what the server just told us.
 let arm = null, refusedTimer = null, armAnsweredAt = 0;
 async function sendArm(body) {
-  const r = await fetch('/api/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  // client_id: this page is alive, even if its first heartbeat is late.
+  const r = await fetch('/api/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, client_id: clientId }) });
   armAnsweredAt = performance.now();
   if (r.ok) { armed = (await r.json()).armed; $('armRefused').hidden = true; showArmed(); return; }
   if (r.status === 409) {
@@ -735,7 +755,11 @@ $('estopBtn').addEventListener('click', () => emergencyStop('ui'));
 $('estopReset').addEventListener('click', async () => { if (await post('/api/estop/reset')) { $('estopBanner').hidden = true; } });
 document.addEventListener('keydown', e => {
   // Before anything else, whatever has focus.
-  if (e.key === 'Escape') { e.preventDefault(); if (e.shiftKey) setArmed(false, 'keyboard'); else emergencyStop('keyboard'); return; }
+  if (e.key === 'Escape') { e.preventDefault(); pickingHoldKey = false; if (shiftMod(e)) setArmed(false, 'keyboard'); else emergencyStop('keyboard'); return; }
+  downCodes.add(e.code);
+  if (pickingHoldKey) { e.preventDefault(); pickHoldKey(e.code); return; }
+  // Hold-to-run key (dead man): works whatever has focus.
+  if (presence.hold_to_run && e.code === presence.hold_key) { setHold(true); if (!isTyping()) e.preventDefault(); return; }
   const typing = isTyping();
   if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
   if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
@@ -751,10 +775,12 @@ document.addEventListener('keydown', e => {
     // Auto-repeat would toggle the cue on and off while the key is held.
     if (e.repeat || heldKeys.has(e.code)) return;
     heldKeys.set(e.code, page[i].id);
-    cueDown(page[i].id, e.shiftKey ? 'flash' : null);
+    cueDown(page[i].id, shiftMod(e) ? 'flash' : null);
   }
 });
 document.addEventListener('keyup', e => {
+  downCodes.delete(e.code);
+  if (e.code === presence.hold_key) setHold(false);
   const id = heldKeys.get(e.code);
   if (id === undefined) return;
   heldKeys.delete(e.code);
@@ -766,6 +792,100 @@ window.addEventListener('blur', () => {
   for (const id of heldKeys.values()) cueUp(id);
   heldKeys.clear();
   if (pointerCue) { cueUp(pointerCue); pointerCue = null; }
+  downCodes.clear();
+  setHold(false);
+});
+
+// ---------- operator presence (T-252) ----------
+// Every page beats POST /api/heartbeat every 500 ms. With no beat from any
+// page for ui_timeout_ms (2 s), the server disarms (« Interface perdue »)
+// and ends held flashes. The beat comes from a Worker, whose timers are
+// not throttled like a background tab's, but only while this page answers
+// it: a frozen page stops vouching for itself.
+const clientId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let presence = { hold_to_run: false, hold_key: 'ShiftRight' }, holdDown = false, pickingHoldKey = false;
+const downCodes = new Set(); // KeyboardEvent.code of the keys down now
+const KEY_NAMES = { ShiftRight: 'Maj droite', ShiftLeft: 'Maj gauche', ControlRight: 'Ctrl droite', ControlLeft: 'Ctrl gauche',
+  AltRight: 'Alt droite', AltLeft: 'Alt gauche', MetaRight: 'Cmd droite', MetaLeft: 'Cmd gauche' };
+const keyName = code => KEY_NAMES[code] ?? code.replace(/^(Key|Digit)/, '');
+// Shift as a modifier (Shift+Escape = plain disarm, Shift+cue = flash),
+// not counting a Shift key that is the hold key.
+function shiftMod(e) {
+  if (!e.shiftKey) return false;
+  if (!presence.hold_to_run || !presence.hold_key.startsWith('Shift')) return true;
+  return [...downCodes].some(c => c.startsWith('Shift') && c !== presence.hold_key);
+}
+const beatBody = gone => JSON.stringify(gone ? { client_id: clientId, gone: true }
+  : { client_id: clientId, visible: document.visibilityState === 'visible', hold: holdDown });
+function beatNow() { fetch('/api/heartbeat', { method: 'POST', body: beatBody(), keepalive: true }).catch(() => {}); }
+const HB_WORKER = `let s = null, at = 0;
+onmessage = e => { s = e.data; at = Date.now(); };
+setInterval(() => {
+  postMessage(0);
+  if (s && Date.now() - at < 1500) fetch(s.url, { method: 'POST', body: s.body }).catch(() => {});
+}, 500);`;
+try {
+  const hb = new Worker(URL.createObjectURL(new Blob([HB_WORKER], { type: 'text/javascript' })));
+  hb.onmessage = () => hb.postMessage({ url: location.origin + '/api/heartbeat', body: beatBody() });
+} catch (e) {
+  console.warn('heartbeat worker unavailable, beating from the page:', e);
+  setInterval(beatNow, 500);
+}
+beatNow();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible') setHold(false); beatNow(); });
+// Closing the page: gone at once, without waiting for the timeout.
+window.addEventListener('pagehide', () => navigator.sendBeacon('/api/heartbeat', beatBody(true)));
+window.addEventListener('pageshow', e => { if (e.persisted) beatNow(); });
+
+function setHold(down) {
+  if (holdDown === down) return;
+  holdDown = down;
+  beatNow(); // don't wait for the next beat: release = black now
+}
+function showPresence(f) {
+  const p = f.presence;
+  if (!p) return;
+  presence.hold_to_run = p.hold_to_run; presence.hold_key = p.hold_key;
+  if (!p.hold_to_run) holdDown = false;
+  const led = $('presenceLed');
+  led.classList.toggle('ok', p.ui_alive);
+  led.textContent = p.ui_alive ? 'Opérateur présent' : 'Opérateur absent';
+  const stalled = !f.engine_ok || (!f.armed && f.arm?.last_disarm?.reason === 'engine_stall');
+  $('engineLed').classList.toggle('ok', !stalled);
+  $('engineLed').classList.toggle('bad', stalled);
+  $('engineLed').textContent = stalled ? 'Moteur bloqué — laser coupé' : 'Moteur';
+  const banner = $('holdBanner');
+  banner.hidden = !p.hold_to_run;
+  banner.classList.toggle('emitting', p.hold_ok);
+  banner.textContent = p.hold_ok ? 'ÉMISSION — maintien actif' : `MAINTENIR « ${keyName(p.hold_key)} » POUR ÉMETTRE`;
+  if (!pickingHoldKey) $('holdKeyLabel').textContent = keyName(p.hold_key);
+}
+async function loadPresence() {
+  const { settings } = await (await fetch('/api/presence')).json();
+  showPresenceSettings(settings);
+}
+function showPresenceSettings(st) {
+  presence = { ...presence, ...st };
+  if (document.activeElement !== $('uiTimeout')) $('uiTimeout').value = st.ui_timeout_ms;
+  $('holdToRun').checked = st.hold_to_run;
+  $('holdKeyLabel').textContent = keyName(st.hold_key);
+}
+async function savePresence(patch) {
+  const { settings } = await (await fetch('/api/presence')).json();
+  const r = await fetch('/api/presence', { method: 'POST', body: JSON.stringify({ ...settings, ...patch }) });
+  if (r.ok) showPresenceSettings(await r.json());
+}
+function pickHoldKey(code) {
+  pickingHoldKey = false;
+  $('holdKeyPick').textContent = 'Changer…';
+  savePresence({ hold_key: code }); // Space and Escape are refused (back to Maj droite)
+}
+$('uiTimeout').addEventListener('change', e => savePresence({ ui_timeout_ms: Math.round(+e.target.value) || 2000 }));
+$('holdToRun').addEventListener('change', e => savePresence({ hold_to_run: e.target.checked }));
+$('holdKeyPick').addEventListener('click', e => {
+  pickingHoldKey = true;
+  e.target.textContent = 'Appuyez sur une touche…';
+  $('holdKeyLabel').textContent = '…';
 });
 
 // ---------- preview ----------
@@ -798,7 +918,7 @@ async function previewLoop() {
     // One fetch feeds whichever view is shown; the 3D view only reads it.
     if (view3d && show3d) view3d.setFrame(f.points); else draw(f.points);
     if (fetchedAt > armAnsweredAt) armed = f.armed;
-    arm = f.arm; pps = f.pps; showArmed();
+    arm = f.arm; pps = f.pps; showArmed(); showPresence(f);
     $('output').textContent = f.output_error ? '⚠ ' + f.output_error
       : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement (lancez avec --device pour piloter un laser)';
     const n = f.points.length, fps = n ? pps / n : 0;
@@ -1217,7 +1337,7 @@ function renderCues() {
       e.preventDefault();
       if (pointerCue) cueUp(pointerCue);
       pointerCue = p.id;
-      cueDown(p.id, e.shiftKey ? 'flash' : null);
+      cueDown(p.id, shiftMod(e) ? 'flash' : null);
     });
     b.addEventListener('contextmenu', e => { e.preventDefault(); openCueMenu(p, e.clientX, e.clientY); });
     $('cues').appendChild(b);
@@ -1595,6 +1715,7 @@ $('midiAllowArm').onchange = e => post('/api/midi/safety', { allow_arm: e.target
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
 loadState().then(loadPresets).then(loadPalettes).then(loadLfos).then(previewLoop);
 midiLoop();
+loadPresence().catch(() => {});
 </script>
 </body>
 </html>

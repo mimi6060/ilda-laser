@@ -11,7 +11,8 @@ function watch(page: Page) {
   const errors: string[] = [], external: string[] = [];
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', e => errors.push(String(e)));
-  page.on('request', r => { if (!r.url().startsWith(studio.url)) external.push(r.url()); });
+  // blob:<studio>/… is the page's own heartbeat worker (T-252), not a request out.
+  page.on('request', r => { if (!r.url().startsWith(studio.url) && !r.url().startsWith('blob:' + studio.url + '/')) external.push(r.url()); });
   return { errors, external };
 }
 

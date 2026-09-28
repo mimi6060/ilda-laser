@@ -205,6 +205,11 @@ impl CueDeck {
         self.active.retain(|a| !(a.held && a.cue == cue));
     }
 
+    /// Every held flash/solo ends (the page that held them is gone).
+    pub fn release_all_held(&mut self) {
+        self.active.retain(|a| !a.held);
+    }
+
     pub fn stop_all(&mut self) {
         self.active.clear();
     }

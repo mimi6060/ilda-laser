@@ -143,6 +143,8 @@ impl ControlRegistry {
         // is the stop button. Only the UI resets it, and nothing external arms.
         add("transport.blackout".into(), "Blackout".into(), "transport", ControlKind::Trigger, true);
         add("safety.estop".into(), "Arrêt d'urgence".into(), "safety", ControlKind::Trigger, true);
+        // Hold-to-run pad (T-252): only lets an armed laser emit, never arms.
+        add("safety.hold".into(), "Maintien pour émettre (homme mort)".into(), "safety", ControlKind::Momentary, true);
         add("transport.arm".into(), "Allumer le laser".into(), "transport", ControlKind::Toggle { default: false }, false);
 
         add("tempo.tap".into(), "Tap tempo".into(), "tempo", ControlKind::Trigger, true);
@@ -305,6 +307,7 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
         "audio.flash" => s.settings.audio.flash = value(input),
         "audio.color_on_beat" => s.settings.audio.color_on_beat = truthy(input),
         "transport.blackout" | "safety.estop" => s.emergency_stop(if from_external { ArmSource::Midi } else { ArmSource::Ui }),
+        "safety.hold" => s.presence.set_midi_hold(truthy(input)),
         // Only reachable from the UI (external is false): arming goes
         // through the gate, like the laser button.
         "transport.arm" => {
@@ -486,6 +489,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "audio.flash" => json!(s.settings.audio.flash),
         "audio.color_on_beat" => json!(s.settings.audio.color_on_beat),
         "transport.arm" => json!(s.gate.is_armed() && !s.estop.is_latched()),
+        "safety.hold" => json!(s.presence.status().midi_hold),
         "tempo.bpm" => json!(s.tempo.bpm),
         "timeline.play" => json!(s.timeline.is_playing()),
         "timeline.pause" => json!(s.timeline.transport == crate::timeline::Transport::Paused),
@@ -644,6 +648,14 @@ fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
     s.active_cue = s.deck.primary().map(|a| a.cue.clone());
     if s.settings != before {
         s.settings_rev += 1;
+    }
+}
+
+/// Ends every held flash/solo, as if each key or pad came up (the UI
+/// holding them is gone). Latched cues keep playing.
+pub fn release_held(s: &mut Shared) {
+    if s.deck.active.iter().any(|a| a.held) {
+        with_deck(s, |deck, _| deck.release_all_held());
     }
 }
 

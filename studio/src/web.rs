@@ -142,6 +142,41 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Post, "/api/heartbeat") => match body::<Heartbeat>(request) {
+            Ok(hb) => {
+                let mut s = shared.lock().unwrap();
+                if hb.gone {
+                    s.presence.leave(&hb.client_id);
+                } else {
+                    s.presence.beat(&hb.client_id, Instant::now(), hb.visible, hb.hold);
+                }
+                ok()
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/presence") => {
+            let s = shared.lock().unwrap();
+            json_response(json!({ "settings": s.presence.settings, "status": s.presence.status() }))
+        }
+        (Method::Post, "/api/presence") => match body::<crate::presence::PresenceSettings>(request) {
+            Ok(settings) => {
+                let mut s = shared.lock().unwrap();
+                // Out-of-range values are clamped (ui_timeout_ms ≤ 10 000);
+                // the reply is what was kept.
+                s.presence.set_settings(settings);
+                json_response(json!(s.presence.settings))
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/test/stall") => {
+            let ms = query_u64(request.url(), "ms").unwrap_or(200).min(2_000);
+            let mut s = shared.lock().unwrap();
+            if !s.test_hooks {
+                return text(404, "not found");
+            }
+            s.test_stall_ms = ms;
+            ok()
+        }
         (Method::Get, "/api/arm") => {
             let s = shared.lock().unwrap();
             json_response(json!(s.gate.status(&s.estop)))
@@ -150,6 +185,11 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             Ok(req) => {
                 let source = ArmSource::parse(req.get("source").and_then(|v| v.as_str()).unwrap_or(""));
                 let mut s = shared.lock().unwrap();
+                // The page asking is alive, even if its first heartbeat is
+                // still on its way.
+                if let Some(id) = req.get("client_id").and_then(|v| v.as_str()) {
+                    s.presence.touch(id, Instant::now());
+                }
                 // A toggle is decided here, against the real state, so two quick
                 // presses always mean on-then-off (never on-on from a stale page).
                 let want = match (req.get("on").and_then(|v| v.as_bool()), req.get("toggle").and_then(|v| v.as_bool())) {
@@ -474,6 +514,19 @@ fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, pa
     }
 }
 
+/// `POST /api/heartbeat` from a UI page, every 500 ms and on every change
+/// of visibility or of the hold key; `gone` when the page closes.
+#[derive(Deserialize)]
+struct Heartbeat {
+    client_id: String,
+    #[serde(default = "yes")]
+    visible: bool,
+    #[serde(default)]
+    hold: bool,
+    #[serde(default)]
+    gone: bool,
+}
+
 /// A cue button, key or pad: `down` true on press, false on release.
 #[derive(Deserialize)]
 struct CueRequest {
@@ -547,6 +600,8 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "armed": arm.armed,
         "estop": arm.estop.is_some(),
         "arm": arm,
+        "engine_ok": s.health.engine_ok(),
+        "presence": s.presence.status(),
         "output": s.output_name,
         "pps": s.pps,
         "shapes": SHAPE_NAMES,
@@ -574,6 +629,8 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "armed": arm.armed,
         "estop": arm.estop.is_some(),
         "arm": arm,
+        "engine_ok": s.health.engine_ok(),
+        "presence": s.presence.status(),
         "output": s.output_name,
         "output_error": s.output_error,
         "pps": s.pps,
@@ -824,6 +881,65 @@ mod tests {
         assert_eq!(f["points"].as_array().unwrap().len(), 1);
         assert_eq!(f["output_lit"], 0);
         assert_eq!(f["armed"], false);
+    }
+
+    /// Presence enforced as in the real studio (no page yet).
+    fn enforce_presence(t: &TestServer) {
+        let mut s = t.shared.lock().unwrap();
+        s.presence = crate::presence::Presence::new(Default::default(), true);
+        s.gate.register(crate::interlock::UI_ALIVE, "Aucune interface ouverte", false);
+    }
+
+    #[test]
+    fn heartbeats_let_a_page_arm_and_gone_disarms_on_the_next_sync() {
+        let t = TestServer::start(false);
+        enforce_presence(&t);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 409, "no page");
+        assert_eq!(t.request("POST", "/api/heartbeat", r#"{"client_id":"p1","visible":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
+        // sendBeacon posts text/plain: only the body matters.
+        assert_eq!(t.request("POST", "/api/heartbeat", r#"{"client_id":"p1","gone":true}"#).0, 200);
+        t.shared.lock().unwrap().sync_safety(Instant::now());
+        let st = arm_status(&t);
+        assert_eq!(st["armed"], false);
+        assert_eq!(st["last_disarm"]["reason"], "ui_lost");
+        assert_eq!(t.request("POST", "/api/heartbeat", r#"{"visible":true}"#).0, 400, "client_id is required");
+    }
+
+    #[test]
+    fn an_arm_request_with_a_client_id_counts_as_a_beat() {
+        let t = TestServer::start(false);
+        enforce_presence(&t);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard","client_id":"p1"}"#).0, 200);
+        assert_eq!(arm_status(&t)["armed"], true);
+    }
+
+    #[test]
+    fn presence_settings_are_clamped_and_reported() {
+        let t = TestServer::start(false);
+        let (status, body) = t.request("POST", "/api/presence", r#"{"ui_timeout_ms":60000,"hold_to_run":true,"hold_key":"Space"}"#);
+        assert_eq!(status, 200);
+        let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(kept["ui_timeout_ms"], 10_000);
+        assert_eq!(kept["hold_key"], "ShiftRight");
+        let got: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/presence", "").1).unwrap();
+        assert_eq!(got["settings"]["hold_to_run"], true);
+        assert_eq!(got["status"]["hold_to_run"], true);
+        let state: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/state", "").1).unwrap();
+        assert!(state["engine_ok"].is_boolean());
+        assert_eq!(state["presence"]["hold_key"], "ShiftRight");
+        // Changing presence settings never arms.
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    #[test]
+    fn the_stall_hook_exists_only_with_test_hooks() {
+        let t = TestServer::start(false);
+        assert_eq!(t.request("POST", "/api/test/stall?ms=200", "").0, 404);
+        assert_eq!(t.shared.lock().unwrap().test_stall_ms, 0);
+        t.shared.lock().unwrap().test_hooks = true;
+        assert_eq!(t.request("POST", "/api/test/stall?ms=99999", "").0, 200);
+        assert_eq!(t.shared.lock().unwrap().test_stall_ms, 2_000, "bounded");
     }
 
     #[test]
