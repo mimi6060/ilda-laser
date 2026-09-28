@@ -1,12 +1,12 @@
 ---
 id: T-205
 title: Retour LED sur l'APC40 (cue active, page, calques, battement)
-status: todo
+status: in-progress
 area: midi
 priority: P1
 depends_on: [T-201, T-204, T-150]
-owner: ""
-branch: ""
+owner: "dev-agent (apc-leds)"
+branch: feat/apc-leds
 source: docs/research/midi-apc40.md#13-outbound-host--device-leds-and-rings
 ---
 
