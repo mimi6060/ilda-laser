@@ -13,6 +13,13 @@ pub trait Output: Send {
     /// re-arming shows the current look immediately.
     fn set_armed(&mut self, armed: bool) -> Result<()>;
     fn send(&mut self, points: &[Point]);
+    /// Sends a dark frame right away, for shutdown and failures (T-253).
+    /// The default is one blanked point at the centre; a new output (the
+    /// ShowNET later) should override it if it has a faster way.
+    fn blank_now(&mut self) -> Result<()> {
+        self.send(&[Point::blanked(0.0, 0.0)]);
+        Ok(())
+    }
     /// A thread-safe way to disarm the output without going through the
     /// engine thread, for the emergency stop. `None` if it has none.
     fn kill_switch(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
@@ -42,10 +49,12 @@ impl OutputStage {
         Self { output, output_armed: false }
     }
 
-    pub fn emit(&mut self, frame: &[Point], gate_armed: bool, estop: &EStop) -> Emitted {
+    /// `hold_ok` false (hold-to-run released) sends a dark frame but keeps
+    /// the output armed, so pressing again resumes at once.
+    pub fn emit(&mut self, frame: &[Point], gate_armed: bool, hold_ok: bool, estop: &EStop) -> Emitted {
         let armed = gate_armed && !estop.is_latched();
         let mut sent = frame.to_vec();
-        blank_unless(armed, &mut sent);
+        blank_unless(armed && hold_ok, &mut sent);
         let mut arm_change = None;
         if let Some(out) = self.output.as_mut() {
             if armed != self.output_armed {
@@ -57,10 +66,82 @@ impl OutputStage {
         Emitted { lit: sent.iter().filter(|p| p.is_lit()).count(), arm_change }
     }
 
+    /// Clean shutdown (Ctrl+C, SIGTERM): disarm, three dark frames, then
+    /// close the output (drop it).
     pub fn shutdown(&mut self) {
+        if let Some(mut out) = self.output.take() {
+            if let Err(e) = out.set_armed(false) {
+                log::warn!("disarm at shutdown failed: {e}");
+            }
+            for _ in 0..3 {
+                if let Err(e) = out.blank_now() {
+                    log::warn!("blank frame at shutdown failed: {e}");
+                }
+            }
+        }
+        self.output_armed = false;
+    }
+}
+
+impl Drop for OutputStage {
+    /// Reached without `shutdown` only when the engine thread unwinds from a
+    /// panic: send a dark frame, then disarm, before the output closes.
+    fn drop(&mut self) {
         if let Some(out) = self.output.as_mut() {
+            let _ = out.blank_now();
             let _ = out.set_armed(false);
         }
+    }
+}
+
+/// Testing only (`--test-output <file>`): no laser at all. Appends what the
+/// studio asks of an output to a text file, one call per line (`arm`,
+/// `disarm`, `blank`, `close`, and `lit`/`dark` when frames change between
+/// lit and dark), so a subprocess test can check the shutdown sequence.
+pub struct FileLogOutput {
+    name: String,
+    file: std::fs::File,
+    lit: Option<bool>,
+}
+
+impl FileLogOutput {
+    pub fn create(path: &std::path::Path) -> Result<Self> {
+        let file = std::fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+        Ok(Self { name: format!("fichier de test ({})", path.display()), file, lit: None })
+    }
+
+    fn log(&mut self, line: &str) {
+        use std::io::Write;
+        let _ = writeln!(self.file, "{line}");
+        let _ = self.file.flush();
+    }
+}
+
+impl Output for FileLogOutput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn set_armed(&mut self, armed: bool) -> Result<()> {
+        self.log(if armed { "arm" } else { "disarm" });
+        Ok(())
+    }
+    fn send(&mut self, points: &[Point]) {
+        let lit = points.iter().any(|p| p.is_lit());
+        if self.lit != Some(lit) {
+            self.lit = Some(lit);
+            self.log(if lit { "lit" } else { "dark" });
+        }
+    }
+    fn blank_now(&mut self) -> Result<()> {
+        self.lit = Some(false);
+        self.log("blank");
+        Ok(())
+    }
+}
+
+impl Drop for FileLogOutput {
+    fn drop(&mut self) {
+        self.log("close");
     }
 }
 
@@ -103,6 +184,12 @@ impl Output for DacOutput {
         self.session.send_frame(Frame::new(points.iter().map(to_laser_point).collect()));
     }
 
+    fn blank_now(&mut self) -> Result<()> {
+        // A single blanked point replaces whatever the DAC would repeat.
+        self.session.send_frame(Frame::new(vec![LaserPoint::blanked(0.0, 0.0)]));
+        Ok(())
+    }
+
     fn kill_switch(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
         let control = self.session.control();
         Some(Box::new(move || {
@@ -133,6 +220,8 @@ mod tests {
     struct Probe {
         armed: Arc<Mutex<Vec<bool>>>,
         frames: Arc<Mutex<Vec<Vec<Point>>>>,
+        /// Every call in order: "arm", "disarm", "send", "blank".
+        calls: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl Output for Probe {
@@ -141,10 +230,31 @@ mod tests {
         }
         fn set_armed(&mut self, armed: bool) -> Result<()> {
             self.armed.lock().unwrap().push(armed);
+            self.calls.lock().unwrap().push(if armed { "arm" } else { "disarm" });
             Ok(())
         }
         fn send(&mut self, points: &[Point]) {
             self.frames.lock().unwrap().push(points.to_vec());
+            self.calls.lock().unwrap().push("send");
+        }
+        fn blank_now(&mut self) -> Result<()> {
+            self.calls.lock().unwrap().push("blank");
+            Ok(())
+        }
+    }
+
+    /// Only the trait's default `blank_now`, as a new output would have.
+    struct Plain(Arc<Mutex<Vec<Vec<Point>>>>);
+
+    impl Output for Plain {
+        fn name(&self) -> &str {
+            "plain"
+        }
+        fn set_armed(&mut self, _: bool) -> Result<()> {
+            Ok(())
+        }
+        fn send(&mut self, points: &[Point]) {
+            self.0.lock().unwrap().push(points.to_vec());
         }
     }
 
@@ -156,7 +266,7 @@ mod tests {
     fn disarmed_stage_sends_only_blank_points() {
         let probe = Probe::default();
         let mut stage = OutputStage::new(Some(Box::new(probe.clone())));
-        let e = stage.emit(&lit(), false, &EStop::default());
+        let e = stage.emit(&lit(), false, true, &EStop::default());
         assert_eq!(e.lit, 0);
         assert!(e.arm_change.is_none(), "starts disarmed: nothing to change");
         assert!(probe.frames.lock().unwrap()[0].iter().all(|p| !p.is_lit()));
@@ -167,8 +277,8 @@ mod tests {
         let probe = Probe::default();
         let mut stage = OutputStage::new(Some(Box::new(probe.clone())));
         let estop = EStop::default();
-        assert_eq!(stage.emit(&lit(), true, &estop).lit, 2);
-        assert_eq!(stage.emit(&lit(), true, &estop).lit, 2);
+        assert_eq!(stage.emit(&lit(), true, true, &estop).lit, 2);
+        assert_eq!(stage.emit(&lit(), true, true, &estop).lit, 2);
         assert_eq!(*probe.armed.lock().unwrap(), vec![true]);
     }
 
@@ -179,19 +289,85 @@ mod tests {
         let probe = Probe::default();
         let mut stage = OutputStage::new(Some(Box::new(probe.clone())));
         let estop = EStop::default();
-        stage.emit(&lit(), true, &estop);
+        stage.emit(&lit(), true, true, &estop);
         estop.trip(ArmSource::Keyboard);
-        let e = stage.emit(&lit(), true, &estop);
+        let e = stage.emit(&lit(), true, true, &estop);
         assert_eq!(e.lit, 0);
         assert!(probe.frames.lock().unwrap().last().unwrap().iter().all(|p| !p.is_lit()));
         assert_eq!(*probe.armed.lock().unwrap(), vec![true, false]);
     }
 
     #[test]
+    fn hold_released_sends_dark_frames_but_keeps_the_output_armed() {
+        let probe = Probe::default();
+        let mut stage = OutputStage::new(Some(Box::new(probe.clone())));
+        let estop = EStop::default();
+        assert_eq!(stage.emit(&lit(), true, true, &estop).lit, 2);
+        let e = stage.emit(&lit(), true, false, &estop);
+        assert_eq!(e.lit, 0);
+        assert!(e.arm_change.is_none(), "not disarmed");
+        assert!(probe.frames.lock().unwrap().last().unwrap().iter().all(|p| !p.is_lit()));
+        assert_eq!(stage.emit(&lit(), true, true, &estop).lit, 2, "pressed again");
+        assert_eq!(*probe.armed.lock().unwrap(), vec![true]);
+    }
+
+    #[test]
+    fn shutdown_disarms_sends_three_dark_frames_then_closes() {
+        let probe = Probe::default();
+        let mut stage = OutputStage::new(Some(Box::new(probe.clone())));
+        stage.emit(&lit(), true, true, &EStop::default());
+        stage.shutdown();
+        assert_eq!(*probe.calls.lock().unwrap(), vec!["arm", "send", "disarm", "blank", "blank", "blank"]);
+        drop(stage);
+        assert_eq!(probe.calls.lock().unwrap().len(), 6, "closed: nothing more after shutdown");
+    }
+
+    /// The engine thread panics mid-show: unwinding drops the stage, which
+    /// blanks then disarms the output.
+    #[test]
+    fn a_panicking_engine_thread_blanks_and_disarms_the_output() {
+        let probe = Probe::default();
+        let p = probe.clone();
+        let engine = std::thread::spawn(move || {
+            let mut stage = OutputStage::new(Some(Box::new(p)));
+            stage.emit(&lit(), true, true, &EStop::default());
+            panic!("simulated engine panic");
+        });
+        assert!(engine.join().is_err());
+        assert_eq!(*probe.calls.lock().unwrap(), vec!["arm", "send", "blank", "disarm"]);
+    }
+
+    #[test]
+    fn default_blank_now_sends_one_dark_point() {
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let mut out = Plain(Arc::clone(&frames));
+        out.blank_now().unwrap();
+        let frames = frames.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].len(), 1);
+        assert!(!frames[0][0].is_lit());
+    }
+
+    #[test]
+    fn file_log_output_records_the_calls() {
+        let path = std::env::temp_dir().join(format!("laser-studio-filelog-{}.txt", std::process::id()));
+        {
+            let mut stage = OutputStage::new(Some(Box::new(FileLogOutput::create(&path).unwrap())));
+            stage.emit(&lit(), false, true, &EStop::default());
+            stage.emit(&lit(), true, true, &EStop::default());
+            stage.emit(&lit(), true, true, &EStop::default());
+            stage.shutdown();
+        }
+        let log = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(log.lines().collect::<Vec<_>>(), ["dark", "arm", "lit", "disarm", "blank", "blank", "blank", "close"]);
+    }
+
+    #[test]
     fn preview_only_stage_still_reports_gated_points() {
         let mut stage = OutputStage::new(None);
-        assert_eq!(stage.emit(&lit(), false, &EStop::default()).lit, 0);
-        assert_eq!(stage.emit(&lit(), true, &EStop::default()).lit, 2);
+        assert_eq!(stage.emit(&lit(), false, true, &EStop::default()).lit, 0);
+        assert_eq!(stage.emit(&lit(), true, true, &EStop::default()).lit, 2);
     }
 
     #[test]

@@ -1,12 +1,12 @@
 ---
 id: T-252
 title: Présence opérateur — battement de l'interface et mode maintien
-status: todo
+status: done
 area: safety
 priority: P0
 depends_on: [T-250]
-owner: ""
-branch: ""
+owner: "dev-agent (heartbeat)"
+branch: feat/heartbeat
 source: docs/research/safety-regulation.md#6-gaps-in-laser-studio-today
 ---
 
@@ -32,10 +32,10 @@ pub struct PresenceSettings { pub ui_timeout_ms: u32 /*2000*/, pub hold_to_run: 
 - Indicateur « Opérateur présent » (vert/rouge) près du bouton Armer ; en mode maintien, gros indicateur « MAINTENIR POUR ÉMETTRE ».
 
 ## Critères d'acceptation
-- [ ] Armé puis plus aucun battement pendant 2 s → désarmé, raison « Interface perdue »
-- [ ] Deux onglets ouverts, un fermé → reste armé
-- [ ] Mode maintien : relâché → aucun point allumé en sortie ; réappuyé → sortie reprend ; relâché 10 s → désarmé
-- [ ] `ui_timeout_ms` ne peut pas dépasser 10 000
+- [x] Armé puis plus aucun battement pendant 2 s → désarmé, raison « Interface perdue »
+- [x] Deux onglets ouverts, un fermé → reste armé
+- [x] Mode maintien : relâché → aucun point allumé en sortie ; réappuyé → sortie reprend ; relâché 10 s → désarmé
+- [x] `ui_timeout_ms` ne peut pas dépasser 10 000
 
 ## Tests
 - Unitaires : horloge simulée pour le délai, plusieurs clients, maintien.
@@ -47,3 +47,5 @@ pub struct PresenceSettings { pub ui_timeout_ms: u32 /*2000*/, pub hold_to_run: 
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/safety-regulation.md`.
+- 2026-09-28 — dev-agent (heartbeat), branche `feat/heartbeat` : battement (Worker + ping de la page, balise `gone` à la fermeture), verrou `ui_alive` (désarme « Interface perdue », bloque l'armement sans page, relâche les flashs maintenus), mode maintien (touche configurable, `safety.hold` pour un pad MIDI ; relâché = noir sans désarmer, 10 s = désarmé ; pages toutes masquées 5 s = noir), section Sécurité et voyants. Tests : unitaires à horloge simulée (presence.rs, main.rs, web.rs), e2e `presence.spec.ts` (8). 392 unitaires + 2 sous-processus + 96 e2e verts, clippy propre. PR : `docs/prs/heartbeat.md`. Non testé sur Safari.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.

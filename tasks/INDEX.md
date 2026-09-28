@@ -2,13 +2,12 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (109)
+## À faire (107)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] |  |
 | [T-245](T-245-safety.md) | Sécurité de la réactivité audio (limiteur, péremption, silence, pas d'armement) | safety | P0 | [T-237, T-101] |  |
-| [T-252](T-252-safety.md) | Présence opérateur — battement de l'interface et mode maintien | safety | P0 | [T-250] |  |
 | [T-254](T-254-safety.md) | Plafonds de puissance par sortie et fiche projecteur | safety | P0 | [T-250] |  |
 | [T-271](T-271-safety.md) | Barre du haut fixe : noir, armement, maître, tempo, état de sortie | safety | P0 | [T-270] |  |
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
@@ -31,7 +30,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-237](T-237-live.md) | AudioFeatures v2 : instantané complet côté moteur et dans /api/state | live | P1 | [T-231] |  |
 | [T-238](T-238-live.md) | Conditionnement des signaux audio : seuil, courbe, attaque/relâche, enveloppes en temps musicaux | live | P1 | [T-237, T-150] |  |
 | [T-244](T-244-qa.md) | Banc d'essai de l'analyse audio : signaux synthétiques, corpus annoté, métriques, latence | qa | P1 | [T-231] |  |
-| [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] |  |
 | [T-255](T-255-safety.md) | Mode balayage public verrouillé par défaut | safety | P1 | [T-003, T-250, T-252, T-254, T-256, T-258] |  |
 | [T-256](T-256-safety.md) | Garde anti-point fixe (taille minimum, vitesse, temps de pose) | safety | P1 | [T-250, T-003] |  |
 | [T-258](T-258-safety.md) | Liste de contrôle avant show | safety | P1 | [T-250, T-259] |  |
@@ -123,13 +121,14 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (28)
+## Fait (30)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-208](T-208-safety.md) | Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur) | safety | P0 | [T-202] | feat/midi-map |
 | [T-250](T-250-safety.md) | Verrous d'armement (interlocks) et raisons de désarmement | safety | P0 | [] | feat/arming |
 | [T-251](T-251-safety.md) | Arrêt d'urgence verrouillé (clavier, bouton, API, MIDI) | safety | P0 | [T-250] | feat/arming |
+| [T-252](T-252-safety.md) | Présence opérateur — battement de l'interface et mode maintien | safety | P0 | [T-250] | feat/heartbeat |
 | [T-004](T-004-qa.md) | Tests e2e qui cliquent (Playwright) | qa | P1 | [] | feat/e2e |
 | [T-005](T-005-cues.md) | Bibliothèque de 202 cues procéduraux | cues | P1 | [] | feat/presets |
 | [T-100](T-100-cues.md) | Générateurs cadencés au beat (beat_pos, bpm, groupes) | cues | P1 | [T-150] | feat/beat-gen |
@@ -147,6 +146,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-201](T-201-midi.md) | Détection des contrôleurs et profils par appareil (APC40 / APC40 mkII) | midi | P1 | [T-200] | feat/midi-core |
 | [T-202](T-202-midi.md) | Moteur de correspondances MIDI → contrôles (boutons, faders, encodeurs, Shift) | midi | P1 | [T-200, T-201, T-145] | feat/midi-map |
 | [T-209](T-209-qa.md) | Tests MIDI sans matériel (APC40 simulé, ports virtuels, injection e2e) | qa | P1 | [T-200] | feat/midi-tests |
+| [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] | feat/heartbeat |
 | [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] | feat/beam-view |
 | [T-276](T-276-ui.md) | Rendu des faisceaux : énergie conservée, nappes, brume, halo | ui | P1 | [T-275] | feat/beam-view |
 | [T-291](T-291-ui.md) | Raccourcis clavier morts après un curseur ou une case à cocher (Espace n'éteint plus) | ui | P1 | [] | fix/arm-keys |
