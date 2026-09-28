@@ -1,2 +1,10 @@
 /target
 /studio-data
+# The studio's data (shows, songs, projects) wherever it was run from.
+studio-data/
+# The user's songs are never committed (T-161): tests generate their audio.
+*.wav
+*.mp3
+*.aif
+*.aiff
+*.flac

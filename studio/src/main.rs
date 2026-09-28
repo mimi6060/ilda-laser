@@ -181,6 +181,13 @@ pub struct Shared {
     /// The operator's figures (figures.rs, `studio-data/figures/`), also
     /// the cues of the « Figures » page.
     pub figures: figures::FigureStore,
+    /// The user's songs, `studio-data/media/audio/` (T-161).
+    pub media: Arc<audio::media::MediaStore>,
+    /// The show's song: shared with the song-playback thread and the
+    /// output callback (their own short locks, never this one).
+    pub song: Arc<audio::playback::SongHub>,
+    /// Engine side of the song clock (audio/playback.rs).
+    pub song_sync: audio::playback::SongSync,
     /// UI heartbeats and hold-to-run (presence.rs, presence.json).
     pub presence: presence::Presence,
     /// Engine ticks, read lock-free by the watchdog (watchdog.rs).
@@ -306,6 +313,7 @@ fn main() -> Result<()> {
     let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
     let sim = state.midi.sim.clone();
     let audio_hub = Arc::clone(&state.audio_in);
+    let (song_hub, media) = (Arc::clone(&state.song), Arc::clone(&state.media));
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
         estop.set_kill_switch(kill);
     }
@@ -354,10 +362,12 @@ fn main() -> Result<()> {
     };
 
     let audio_threads = if cli.no_audio {
-        println!("--no-audio: no audio input opened (the browser source still works).");
+        println!("--no-audio: no audio input opened (the browser source still works), no song played (the timeline runs on the system clock).");
         Vec::new()
     } else {
-        audio::worker::spawn(audio_hub, Arc::clone(&running))
+        let mut threads = audio::worker::spawn(audio_hub, Arc::clone(&running));
+        threads.push(audio::playback::spawn(song_hub, media, Arc::clone(&running)));
+        threads
     };
 
     let addr = format!("127.0.0.1:{}", cli.port);
@@ -460,6 +470,9 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
         figures: figures::FigureStore::load(cli.data_dir.join("figures")),
+        media: Arc::new(audio::media::MediaStore::new(&cli.data_dir)),
+        song: Arc::new(audio::playback::SongHub::new(epoch, !cli.no_audio)),
+        song_sync: Default::default(),
         presence: presence::Presence::load(cli.data_dir.join("presence.json")),
         health: Arc::new(watchdog::EngineHealth::default()),
         project: project::ProjectState::load(&cli.data_dir),
@@ -625,13 +638,16 @@ pub fn save_json<T: serde::Serialize>(path: &std::path::Path, value: &T) {
 }
 
 /// The timeline's events for this frame, with their looks. An emergency
-/// stop halts the timeline (it never resumes by itself); otherwise its
+/// stop halts the timeline (it never resumes by itself), and so its song;
+/// otherwise the song tells the timeline where it is (T-161) and its
 /// events join the cues, through the same mix, live stage and gate.
 fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(timeline::TimelineCue, Settings)> {
     let c = timeline::Clock { t, beat: clock.beat, bpm: clock.bpm, beats_per_bar: clock.beats_per_bar };
     if s.estop.is_latched() {
         s.timeline.halt(&c);
     }
+    let song = Arc::clone(&s.song);
+    s.song_sync.sync(&song, &mut s.timeline, &c);
     s.timeline.frame(&c).into_iter().filter_map(|cue| timeline::look_of(&cue, &s.presets).map(|look| (cue, look))).collect()
 }
 
