@@ -49,6 +49,8 @@ pub struct CueSlot {
     pub group: Option<u8>,
     /// Layer 1..=4 (layers.rs); `None` = layer 1.
     pub layer: Option<u8>,
+    /// A show (timeline.rs) the cell plays instead of its cue.
+    pub show: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -141,6 +143,7 @@ impl CueDeck {
         for slot in self.slots.values_mut() {
             slot.group = slot.group.filter(|g| (1..=MAX_GROUP).contains(g));
             slot.layer = slot.layer.filter(|n| (2..=LAYER_COUNT as u8).contains(n));
+            slot.show = slot.show.take().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
         }
         self.slots.retain(|_, slot| *slot != CueSlot::default());
     }
@@ -371,7 +374,7 @@ mod tests {
         d.release("a");
         assert!(playing(&d).is_empty());
         d.click_mode = ClickMode::Toggle;
-        d.set_slot("b", CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None });
+        d.set_slot("b", CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None, show: None });
         press(&mut d, "b");
         d.release("b");
         assert!(playing(&d).is_empty());
@@ -423,9 +426,9 @@ mod tests {
     #[test]
     fn same_group_replaces_other_groups_stay() {
         let mut d = deck(true);
-        d.set_slot("a", CueSlot { mode: None, group: Some(1), layer: None });
-        d.set_slot("b", CueSlot { mode: None, group: Some(1), layer: None });
-        d.set_slot("c", CueSlot { mode: None, group: Some(2), layer: None });
+        d.set_slot("a", CueSlot { mode: None, group: Some(1), layer: None, show: None });
+        d.set_slot("b", CueSlot { mode: None, group: Some(1), layer: None, show: None });
+        d.set_slot("c", CueSlot { mode: None, group: Some(2), layer: None, show: None });
         press(&mut d, "a");
         press(&mut d, "c");
         press(&mut d, "free");
@@ -436,8 +439,8 @@ mod tests {
     #[test]
     fn a_flash_in_a_group_hides_its_group_mates_only_while_held() {
         let mut d = deck(true);
-        d.set_slot("a", CueSlot { mode: None, group: Some(3), layer: None });
-        d.set_slot("f", CueSlot { mode: Some(ClickMode::Flash), group: Some(3), layer: None });
+        d.set_slot("a", CueSlot { mode: None, group: Some(3), layer: None, show: None });
+        d.set_slot("f", CueSlot { mode: Some(ClickMode::Flash), group: Some(3), layer: None, show: None });
         press(&mut d, "a");
         press(&mut d, "other");
         press(&mut d, "f");
@@ -525,12 +528,12 @@ mod tests {
     #[test]
     fn grid_json_round_trips_without_the_playing_list() {
         let mut d = deck(true);
-        d.set_slot("a", CueSlot { mode: Some(ClickMode::Solo), group: Some(9), layer: None });
+        d.set_slot("a", CueSlot { mode: Some(ClickMode::Solo), group: Some(9), layer: None, show: None });
         press(&mut d, "a");
         let back: CueDeck = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         assert!(back.active.is_empty());
         assert!(back.multi);
-        assert_eq!(back.slot("a"), CueSlot { mode: Some(ClickMode::Solo), group: None, layer: None }, "group 9 is out of range");
+        assert_eq!(back.slot("a"), CueSlot { mode: Some(ClickMode::Solo), group: None, layer: None, show: None }, "group 9 is out of range");
         on_layer(&mut d, "b", 9);
         on_layer(&mut d, "c", 1);
         assert!(!d.slots.contains_key("b") && !d.slots.contains_key("c"), "layer 9 is out of range, layer 1 is the default");

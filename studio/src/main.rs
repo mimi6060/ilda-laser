@@ -27,6 +27,7 @@ mod presets;
 mod safety;
 mod scenes;
 mod tempo;
+mod timeline;
 mod web;
 
 #[cfg(test)]
@@ -147,6 +148,11 @@ pub struct Shared {
     /// Evolving cues on show in the last frame: (animator id, where it is).
     /// Id 0 is the manual look.
     pub evolving: Vec<(u64, evolving::Progress)>,
+    /// The timeline player (timeline.rs): its events play through the
+    /// same layers and live stage as the cues. Never arms anything.
+    pub timeline: timeline::Player,
+    /// Saved shows, `studio-data/shows/`.
+    pub shows: timeline::ShowStore,
 }
 
 impl Shared {
@@ -176,6 +182,12 @@ impl Shared {
     /// Seconds since startup: the time base of the tempo clock.
     pub fn now_s(&self) -> f64 {
         self.epoch.elapsed().as_secs_f64()
+    }
+
+    /// The tempo clock now, for the timeline player.
+    pub fn timeline_clock(&self) -> timeline::Clock {
+        let t = self.now_s();
+        timeline::Clock { t, beat: self.tempo.beat_at(t), bpm: self.tempo.bpm, beats_per_bar: self.tempo.beats_per_bar }
     }
 }
 
@@ -270,6 +282,8 @@ fn main() -> Result<()> {
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
         evolving: Vec::new(),
+        timeline: timeline::Player::default(),
+        shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -318,6 +332,8 @@ fn run_engine(
     // every cue keeps its own motion and a restart starts it over.
     let mut animators: HashMap<u64, Animator> = HashMap::new();
     let mut live_state = live::LiveState::default();
+    // Rotation state of timeline events with their own modifiers.
+    let mut event_live: HashMap<u64, live::LiveState> = HashMap::new();
     let mut frames_since_save = 0u32;
     let mut last = Instant::now();
     let mut stage = OutputStage::new(output);
@@ -328,7 +344,7 @@ fn run_engine(
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (looks, starts, clock, mixer, calibration, audio, armed, live, user_palettes, estop, t, safety_cfg) = {
+        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, live, user_palettes, estop, t, safety_cfg) = {
             let mut s = shared.lock().unwrap();
             let shared_state = &mut *s;
             shared_state.gate.sync_estop(&shared_state.estop);
@@ -360,26 +376,43 @@ fn run_engine(
             let (mut settings, mut live) = (s.settings.clone(), s.live.clone());
             lfo::modulate(s.lfos.list(), &s.controls, &mut settings, &mut live, t, clock.beat);
             let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
+            let show_cues = timeline_cues(&mut s, t, &clock);
             let mixer = s.mixer.clone();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
-            (looks, starts, clock, mixer, s.calibration, audio, s.gate.is_armed(), live, s.palettes.list().to_vec(), Arc::clone(&s.estop), t, s.safety.get())
+            (looks, show_cues, starts, clock, mixer, s.calibration, audio, s.gate.is_armed(), live, s.palettes.list().to_vec(), Arc::clone(&s.estop), t, s.safety.get())
         };
 
         live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
         let anim_dt = dt * live.speed.clamp(0.0, 4.0);
-        animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id));
-        // Muted layers keep animating, so they come back in motion.
-        let rendered: Vec<(u8, Vec<Point>)> = looks
+        animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id));
+        event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
+        // Timeline events first (under the cues played by hand on the same
+        // layer), each on its own content clock; paused or held ones freeze.
+        let mut rendered: Vec<(u8, Vec<Point>)> = show_cues
             .iter()
-            .map(|(layer, id, settings)| {
-                let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
-                    Some(&beat) => Animator::starting_at(beat),
-                    None => Animator::default(),
-                });
-                (*layer, animator.render(settings, audio, anim_dt, &clock))
+            .map(|(cue, settings)| {
+                let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
+                let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
+                let event_dt = if cue.frozen { 0.0 } else { anim_dt };
+                let mut points = animator.render(settings, audio, event_dt, &content_clock);
+                if cue.modifiers != live::LiveModifiers::default() {
+                    let st = event_live.entry(cue.instance).or_default();
+                    st.set_clock(t, clock.beat);
+                    st.advance(&cue.modifiers, if cue.frozen { 0.0 } else { dt }, clock.bpm, clock.beats_per_bar);
+                    points = live::apply(&points, &cue.modifiers, st, &user_palettes);
+                }
+                (cue.layer, points)
             })
             .collect();
+        // Muted layers keep animating, so they come back in motion.
+        rendered.extend(looks.iter().map(|(layer, id, settings)| {
+            let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
+                Some(&beat) => Animator::starting_at(beat),
+                None => Animator::default(),
+            });
+            (*layer, animator.render(settings, audio, anim_dt, &clock))
+        }));
         let evolving: Vec<(u64, evolving::Progress)> =
             looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();
         // Layers 1 → 4 with their dimmers, within the point budget.
@@ -429,6 +462,17 @@ pub fn save_json<T: serde::Serialize>(path: &std::path::Path, value: &T) {
         }
         Err(e) => log::warn!("failed to serialize {}: {e}", path.display()),
     }
+}
+
+/// The timeline's events for this frame, with their looks. An emergency
+/// stop halts the timeline (it never resumes by itself); otherwise its
+/// events join the cues, through the same mix, live stage and gate.
+fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(timeline::TimelineCue, Settings)> {
+    let c = timeline::Clock { t, beat: clock.beat, bpm: clock.bpm, beats_per_bar: clock.beats_per_bar };
+    if s.estop.is_latched() {
+        s.timeline.halt(&c);
+    }
+    s.timeline.frame(&c).into_iter().filter_map(|cue| timeline::look_of(&cue, &s.presets).map(|look| (cue, look))).collect()
 }
 
 fn advance_playlist(s: &mut Shared) {
@@ -492,5 +536,33 @@ mod tests {
         assert!(s.settings_rev > rev, "the page must reload the look");
         assert_eq!(s.active_cue, None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn one_event_show(cue: &str) -> timeline::Show {
+        let event = timeline::Event { id: 1, start: 0.0, len: 60.0, source: timeline::EventSource::Cue { id: cue.into() }, ..Default::default() };
+        timeline::Show { name: "t".into(), tracks: vec![timeline::Track { layer: 2, events: vec![event], ..Default::default() }], ..Default::default() }
+    }
+
+    #[test]
+    fn the_timeline_feeds_the_frame_and_an_estop_halts_it_without_arming() {
+        let mut s = test_support::shared();
+        let cue = s.presets[0].id.clone();
+        s.timeline.load(one_event_show(&cue));
+        controls::timeline_play(&mut s).unwrap();
+        let clock = |t: f64| engine::BeatClock { beat: t * 2.0, bpm: 120.0, beats_per_bar: 4 };
+        let t = s.now_s();
+        let cues = timeline_cues(&mut s, t, &clock(t));
+        assert_eq!(cues.len(), 1);
+        assert_eq!((cues[0].0.layer, cues[0].1.content.clone()), (2, s.presets[0].settings.content.clone()));
+        assert!(!s.gate.is_armed(), "playing a show never arms");
+
+        s.emergency_stop(interlock::ArmSource::Keyboard);
+        assert!(timeline_cues(&mut s, t + 1.0, &clock(t + 1.0)).is_empty(), "Échap: nothing more from the timeline");
+        assert!(!s.timeline.is_playing());
+        assert!(timeline_cues(&mut s, t + 2.0, &clock(t + 2.0)).is_empty(), "and it doesn't come back by itself");
+        assert!(controls::timeline_play(&mut s).is_err(), "refused while the e-stop is latched");
+        s.gate.reset_estop(&s.estop.clone());
+        controls::timeline_play(&mut s).unwrap();
+        assert!(!s.gate.is_armed(), "resetting the e-stop and playing again doesn't arm");
     }
 }
