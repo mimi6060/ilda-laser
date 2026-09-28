@@ -1,7 +1,8 @@
 // Test harness: starts a throw-away, preview-only Laser Studio.
 //
 // Safety (CLAUDE.md): the studio is never started with --device, always
-// with --no-midi (never grab the user's controller), never on port 8080
+// with --no-midi (never grab the user's controller) and --no-audio (never
+// open the Mac's microphone, T-230), never on port 8080
 // (the user's instance) and never with the user's studio-data/.
 // Each spec file gets a fresh temporary --data-dir, deleted afterwards.
 // MIDI specs add --midi-test (T-209): a simulated APC40 mkII fed by
@@ -73,11 +74,11 @@ export class Studio {
     this.port = await freePort();
     // Deliberately no --device: preview only, no laser output. --no-midi so
     // a test never opens the user's MIDI controller (--midi-test only adds
-    // a simulated one).
-    const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi'];
+    // a simulated one); --no-audio so it never opens an audio input.
+    const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio'];
     if (this.opts.midiTest) args.push('--midi-test');
     if (this.opts.testHooks) args.push('--test-hooks');
-    if (args.includes('--device') || !args.includes('--no-midi') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
+    if (args.includes('--device') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc.stdout!.on('data', d => { this.log += d; });
     this.proc.stderr!.on('data', d => { this.log += d; });

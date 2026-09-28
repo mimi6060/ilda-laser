@@ -8,6 +8,7 @@
 //! laser output. The HTTP handlers in `web.rs` only ever edit that shared
 //! state.
 
+mod audio;
 mod beat;
 mod controls;
 mod cues;
@@ -75,6 +76,15 @@ struct Cli {
     /// must not grab the controller).
     #[arg(long)]
     no_midi: bool,
+    /// Audio input the studio listens to: a name from
+    /// `GET /api/audio/devices`, "default" (the Mac's input) or "none" (no
+    /// capture). Overrides audio.json for this run.
+    #[arg(long)]
+    audio_device: Option<String>,
+    /// Don't open any audio input (tests, e2e, a second instance). The
+    /// browser source (`POST /api/audio`) still works.
+    #[arg(long)]
+    no_audio: bool,
     /// Testing only: add an interlock that is never satisfied, so arming
     /// is always refused (e2e tests of the refusal message).
     #[arg(long, hide = true)]
@@ -95,17 +105,18 @@ struct Cli {
     test_hooks: bool,
 }
 
-/// Audio features older than this are treated as silence (the browser tab
-/// was closed or the mic stopped).
-const AUDIO_STALE: Duration = Duration::from_millis(500);
-
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 pub struct Shared {
     pub settings: Settings,
     pub calibration: Calibration,
+    /// The last `POST /api/audio` (the browser source) and when it came.
     pub audio: AudioFeatures,
     pub audio_at: Instant,
+    /// Native capture (audio/mod.rs): config, status and the analysis
+    /// snapshot, shared with the audio threads (their own short locks, never
+    /// this one).
+    pub audio_in: Arc<audio::AudioHub>,
     /// The only place the armed state changes (interlock.rs). Always
     /// starts disarmed, reason « Démarrage ».
     pub gate: ArmGate,
@@ -290,6 +301,7 @@ fn main() -> Result<()> {
     let state = startup_state(&cli, output.as_deref());
     let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
     let sim = state.midi.sim.clone();
+    let audio_hub = Arc::clone(&state.audio_in);
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
         estop.set_kill_switch(kill);
     }
@@ -337,6 +349,13 @@ fn main() -> Result<()> {
         midi::worker::spawn(Arc::clone(&shared), Arc::clone(&running))
     };
 
+    let audio_threads = if cli.no_audio {
+        println!("--no-audio: no audio input opened (the browser source still works).");
+        Vec::new()
+    } else {
+        audio::worker::spawn(audio_hub, Arc::clone(&running))
+    };
+
     let addr = format!("127.0.0.1:{}", cli.port);
     println!("Studio: open http://{addr}/ in your browser - Ctrl+C to quit");
     let served = web::run(&addr, shared, estop, cli.data_dir.join("calibration.json"), Arc::clone(&running));
@@ -357,11 +376,18 @@ fn main() -> Result<()> {
     if let Some(midi_thread) = midi_thread {
         midi_thread.join().ok(); // lets it switch the APC LEDs off
     }
+    // The audio threads close the input within ~50 ms; a device stuck in
+    // CoreAudio must not hold the exit.
+    let deadline = Instant::now() + AUDIO_SHUTDOWN_WAIT;
+    while audio_threads.iter().any(|t| !t.is_finished()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     served
 }
 
 /// How long `main` waits for the engine to close the output at shutdown.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+const AUDIO_SHUTDOWN_WAIT: Duration = Duration::from_millis(500);
 
 /// The state the studio starts with. Whatever the command line and the
 /// files in the data directory say, it is disarmed (reason « Démarrage »):
@@ -383,11 +409,13 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
+    let epoch = Instant::now();
     let mut state = Shared {
         settings: Settings::default(),
         calibration: web::load_calibration(&cli.data_dir.join("calibration.json")),
         audio: AudioFeatures::default(),
         audio_at: Instant::now(),
+        audio_in: Arc::new(audio::AudioHub::load(&cli.data_dir, epoch, !cli.no_audio, cli.audio_device.as_deref())),
         gate,
         estop: Arc::new(EStop::default()),
         frame: Vec::new(),
@@ -405,7 +433,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         deck: cues::CueDeck::load(cli.data_dir.join("grid.json")),
         look_on: true,
         tempo: tempo::TempoClock::default(),
-        epoch: Instant::now(),
+        epoch,
         live: load_json(&cli.data_dir.join("live.json")),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
@@ -488,11 +516,8 @@ fn run_engine(
             advance_playlist(&mut s);
             // MIDI faders/encoders: at most one write per control per frame.
             midi::engine::frame(&mut s, now);
-            let audio = if s.audio_at.elapsed() < AUDIO_STALE {
-                s.audio
-            } else {
-                AudioFeatures { beat: s.audio.beat, ..Default::default() }
-            };
+            // Native capture, else the browser's features, else silence.
+            let (audio, _) = s.audio_in.effective(s.audio, s.audio_at, now);
             let t = s.now_s();
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             live_state.set_clock(t, clock.beat);
