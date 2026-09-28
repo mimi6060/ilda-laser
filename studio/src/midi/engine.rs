@@ -134,6 +134,8 @@ pub fn port_closed(s: &mut Shared, port: &str, unplugged: bool) {
     if map.arm_hold.as_ref().is_some_and(|h| h.key.0 == port) {
         map.arm_hold = None;
     }
+    // A hold-to-run pad on a closed port can never send its release.
+    s.presence.set_midi_hold(false);
     if unplugged && s.midi.store.devices.safety.blackout_on_disconnect {
         log::warn!("MIDI : {port} déconnecté, blackout");
         do_blackout(s);

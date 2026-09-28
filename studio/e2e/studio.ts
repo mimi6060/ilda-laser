@@ -45,6 +45,8 @@ export interface StudioOptions {
   midiTest?: boolean;
   /** Files written into the fresh data dir before the first start (path → content). */
   files?: Record<string, string>;
+  /** Pass the hidden --test-hooks flag (simulated engine stall, T-253). */
+  testHooks?: boolean;
 }
 
 export class Studio {
@@ -74,6 +76,7 @@ export class Studio {
     // a simulated one).
     const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi'];
     if (this.opts.midiTest) args.push('--midi-test');
+    if (this.opts.testHooks) args.push('--test-hooks');
     if (args.includes('--device') || !args.includes('--no-midi') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc.stdout!.on('data', d => { this.log += d; });
