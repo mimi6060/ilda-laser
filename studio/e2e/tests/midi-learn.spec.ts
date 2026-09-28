@@ -4,7 +4,7 @@
 // which must never change: learning writes « apc40-mk2-perso ».
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { test, expect, useStudio, openUi, focusPage } from '../studio';
+import { test, expect, useStudio, openUi, openWorkspace, reveal, focusPage } from '../studio';
 import { Apc, CC_CUE_LEVEL, TEST_PORT } from '../midi';
 
 const studio = useStudio({ midiTest: true });
@@ -25,6 +25,7 @@ async function clearMappings() {
 }
 
 async function learnFromMenu(page: import('@playwright/test').Page, selector: string, item = '#midiMenuLearn') {
+  await reveal(page, selector);
   await page.locator(selector).click({ button: 'right' });
   await expect(page.locator('#midiMenu')).toBeVisible();
   await page.locator(item).click();
@@ -73,6 +74,7 @@ test('right click « Taille » → Apprendre MIDI → the knob drives the size, 
   await expect.poll(async () => +await page.locator('#mSize').inputValue()).toBeCloseTo(200 * 40 / 127, 0); // the slider moves
 
   // Listed in the Contrôleur section.
+  await reveal(page, '#midiPanel summary');
   await page.locator('#midiPanel summary').click();
   await expect(page.locator('#midiMappings')).toContainText('CC 16 · can. 1');
   await expect(page.locator('#midiMappings')).toContainText('Taille maître');
@@ -123,11 +125,13 @@ test('« Oublier MIDI » and « Supprimer » remove mappings; Échap cancels lea
   await expect.poll(async () => (await mappings()).length).toBe(2);
 
   await expect(page.locator('#mSize')).toHaveAttribute('data-midi', /CC 7/); // the page has seen it
+  await reveal(page, '#mSize');
   await page.locator('#mSize').click({ button: 'right' });
   await expect(page.locator('#midiMenuMaps')).toContainText('CC 7');
   await page.locator('#midiMenuForget').click();
   await expect.poll(async () => (await mappings()).map(m => m.target)).toEqual(['master.brightness']);
 
+  await reveal(page, '#midiPanel summary');
   await page.locator('#midiPanel summary').click();
   await page.locator('#midiMappings [data-mdel="0"]').click();
   await expect.poll(async () => (await mappings()).length).toBe(0);
@@ -147,9 +151,11 @@ test('« Oublier MIDI » and « Supprimer » remove mappings; Échap cancels lea
 test('learn mode: click a cue, press a pad, the pad plays that cue', async ({ page }) => {
   const catalog = await studio.presets();
   const cue = catalog.presets.filter(p => p.category === catalog.categories[0])[2];
+  await reveal(page, '#midiPanel summary');
   await page.locator('#midiPanel summary').click();
   await page.locator('#midiLearnMode').click();
   await expect(page.locator('body')).toHaveClass(/learning/);
+  await openWorkspace(page, 'live'); // learn mode keeps going across workspaces
   await page.locator(`#cues .cue[data-id="${cue.id}"]`).click();
   await expect.poll(async () => (await midi()).learn?.target).toBe('grid.1.1.3');
   expect((await studio.controlValues()).active_cue).toBeNull(); // picked, not played
@@ -158,6 +164,7 @@ test('learn mode: click a cue, press a pad, the pad plays that cue', async ({ pa
   await expect.poll(async () => (await mappings()).map(m => [m.message, m.target, m.mode])).toEqual([['Note 11', 'grid.1.1.3', 'momentary']]);
   expect((await studio.controlValues()).active_cue).toBeNull(); // the learned press didn't play it
   await expect(page.locator(`#cues .cue[data-id="${cue.id}"]`)).toHaveAttribute('data-midi-pill', 'Note 11 · can. 1');
+  await reveal(page, '#midiLearnMode');
   await page.locator('#midiLearnMode').click(); // « Terminer »
   await expect(page.locator('body')).not.toHaveClass(/learning/);
 

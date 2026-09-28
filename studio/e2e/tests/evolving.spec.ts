@@ -1,7 +1,7 @@
 // Evolving cues (T-111): a look sent as keyframes over N beats plays by
 // itself on the tempo clock, starts on a beat, loops, shows its progress
 // under the preview, and survives a scene save + restart.
-import { test, expect, useStudio, openUi, isLit } from '../studio';
+import { test, expect, useStudio, openUi, openWorkspace, isLit } from '../studio';
 
 const studio = useStudio();
 
@@ -78,6 +78,8 @@ test('the preview shows the evolving cue\'s progress', async ({ page }) => {
   await expect(page.locator('#evoBar')).toBeVisible();
   await expect(page.locator('#evoPos')).toContainText('/ 4 temps');
   await expect(page.locator('#evoState')).toContainText(/clé [12]\/2 · boucle/);
+  await openWorkspace(page, 'creation'); // the Contenu panel, with the preview still on screen
+  await expect(page.locator('#evoBar')).toBeVisible();
   await expect(page.locator('#evoPanel')).toBeVisible();
   await expect(page.locator('#evoPanel')).toContainText('2 clés sur 4 temps, en boucle');
   // The bar fills as the cue plays.

@@ -36,10 +36,56 @@
   #output { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #armBtn { padding: 10px 18px; border-radius: 8px; border: 2px solid var(--danger); background: transparent; color: var(--danger); font-weight: 700; cursor: pointer; letter-spacing: .04em; }
   #armBtn.on { background: var(--danger); color: #fff; box-shadow: 0 0 18px #ff4d4f88; }
-  main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  .stage { position: relative; }
   canvas { width: 100%; aspect-ratio: 1; background: #000; border-radius: 10px; border: 1px solid var(--line); display: block; }
+  /* Workspaces (T-295) and screen regions (T-270). The top bar stays put;
+     below it, one grid whose areas depend on the active workspace: the
+     stage (preview) on the left, the workspace's panel on the right and,
+     in LIVE, the cue grid full width at the bottom. Panels scroll inside
+     themselves so the preview and the grid stay on screen. */
+  #wsTabs { display: flex; align-items: stretch; gap: 2px; padding: 0 16px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  #wsTabs button { padding: 7px 18px 6px; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-weight: 700; letter-spacing: .08em; font-size: 13px; }
+  #wsTabs button:hover { color: var(--text); }
+  #wsTabs button.active { color: var(--text); border-bottom-color: var(--accent); background: var(--panel); }
+  #wsTabs button kbd { margin-left: 4px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
+  #wsHint { margin: 0 0 0 auto; align-self: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  main { display: grid; gap: 12px; padding: 12px 16px; height: max(560px, calc(100vh - var(--top-h, 150px)));
+    grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); grid-template-areas: "stage panel"; }
+  main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 350px 400px; grid-template-rows: minmax(0, 1fr) minmax(250px, 36vh);
+    grid-template-areas: "stage layers panel" "cues cues cues"; }
+  main[data-ws-active="timeline"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  main[data-ws-active="creation"] { grid-template-columns: minmax(0, 1fr) 440px; }
+  main[data-ws-active="settings"] { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+  [data-ws][hidden], [data-panel][hidden] { display: none !important; }
+  .stage { grid-area: stage; position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .ws-panel { grid-area: panel; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; padding-right: 2px; }
+  .ws-panel > section { flex: none; }
+  .ws-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); align-content: start; }
+  .ws-cues { grid-area: cues; display: flex; flex-direction: column; min-height: 0; }
+  .ws-cues > * { flex: none; }
+  .ws-cues > .cue-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .ws-cues h2 { margin-bottom: 6px; }
+  .ws-layers { grid-area: layers; align-self: start; max-height: 100%; overflow: auto; }
+  .ws-layers .layers-head { margin-top: 0; }
+  .ws-layers .layer { min-width: 0; padding: 6px 4px; }
+  .ptabs { display: flex; gap: 4px; flex: none; position: sticky; top: 0; z-index: 2; background: var(--bg); padding-bottom: 2px; }
+  .ptabs button { flex: 1; padding: 6px 8px; font-size: 12px; }
+  .soon { padding: 0 4px; }
+  /* The preview fits the stage: square in 2D, the whole stage in 3D. */
+  .view { flex: 1 1 auto; min-height: 0; container-type: size; display: flex; gap: 12px; align-items: flex-start; }
+  .view > canvas#preview, #beamsMsg { width: min(100cqw, 100cqh); height: auto; flex: none; }
+  .view > canvas#beams { width: 100cqw; height: 100cqh; aspect-ratio: auto; flex: none; }
+  .view.both > canvas#preview { width: min(calc(50cqw - 6px), 100cqh); }
+  .view.both > canvas#beams { width: calc(50cqw - 6px); }
+  @media (max-width: 900px) {
+    main, main[data-ws-active] { display: flex; flex-direction: column; height: auto; }
+    .stage { order: 1; } .ws-cues { order: 2; } .ws-cues > .cue-scroll { overflow: visible; } .ws-panel { order: 3; overflow: visible; }
+    .view { container-type: normal; flex-direction: column; }
+    .view > canvas#preview, .view.both > canvas#preview, #beamsMsg { width: 100%; }
+    .view > canvas#beams, .view.both > canvas#beams { width: 100%; height: auto; aspect-ratio: 1; }
+    .ws-layers { order: 2; }
+    #wsHint { display: none; }
+    header { flex-wrap: wrap; }
+  }
   #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
   #offBadge.hidden { display: none; }
   .stats { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -218,7 +264,7 @@
     <button data-ctl="tempo.nudge_down" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
     <button data-ctl="tempo.nudge_up" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
   </div>
-  <div id="midiStatus" title="Contrôleurs MIDI (section Contrôleur)">MIDI : …</div>
+  <div id="midiStatus" title="Contrôleurs MIDI : clic = RÉGLAGES › Contrôleur">MIDI : …</div>
   <div id="output">…</div>
   <div class="arm">
     <button id="armBtn" data-control="transport.arm" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
@@ -237,6 +283,14 @@
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
   <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
+<!-- Espaces de travail (T-295) : changer d'onglet ne change que l'affichage. -->
+<nav id="wsTabs" role="tablist" aria-label="Espaces de travail">
+  <button role="tab" data-ws-tab="live" title="Jouer en direct (F1)">LIVE <kbd>F1</kbd></button>
+  <button role="tab" data-ws-tab="timeline" title="Shows et timeline (F2)">TIMELINE <kbd>F2</kbd></button>
+  <button role="tab" data-ws-tab="creation" title="Créer du contenu (F3)">CRÉATION <kbd>F3</kbd></button>
+  <button role="tab" data-ws-tab="settings" title="Calibration, sécurité, MIDI (F4)">RÉGLAGES <kbd>F4</kbd></button>
+  <span class="hint" id="wsHint"><kbd>Espace</kbd> laser · <kbd>Échap</kbd> arrêt, dans tous les onglets · lettres = cues (LIVE)</span>
+</nav>
 </div>
 <div id="midiMenu" hidden>
   <h3>MIDI</h3>
@@ -264,12 +318,13 @@
   </div>
 </div>
 
-<main>
-  <div class="stage">
+<main id="workspace" data-ws-active="live">
+  <div class="stage" id="stage">
     <div class="viewbar">
       <div class="seg" id="viewSeg" title="Aperçu 2D (image du laser) ou vue 3D (faisceaux dans la brume)">
         <button data-view="2d" class="active">2D</button>
         <button data-view="3d">3D</button>
+        <button data-view="both" title="Aperçu 2D et vue 3D côte à côte">2D+3D</button>
       </div>
       <button id="recenter3d" hidden title="Double-clic sur la vue : même effet">Recentrer</button>
       <span class="hint" id="hint3d" hidden>Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer</span>
@@ -304,76 +359,17 @@
       <div id="evoTrack"><div id="evoTicks"></div><div id="evoFill"></div></div>
       <span id="evoState"></span>
     </div>
-    <section style="margin-top:12px">
-      <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
-      <div class="cue-bar">
-        <div class="seg" id="cueModes" data-control="cue.mode" title="cue.mode">
-          <button data-mode="toggle" title="Clic 1 démarre, clic 2 arrête">Basculer</button>
-          <button data-mode="flash" title="Actif tant que le bouton ou la touche est tenu">Flash</button>
-          <button data-mode="solo" title="Tenu : seul ce cue sort">Solo</button>
-          <button data-mode="restart" title="Chaque clic relance le cue du début">Relancer</button>
-        </div>
-        <div class="seg" id="cueMulti" data-control="cue.multi" title="cue.multi">
-          <button data-multi="0" title="Un nouveau cue remplace le précédent">Un cue</button>
-          <button data-multi="1" title="Les cues s'additionnent">Multi</button>
-        </div>
-        <span class="hint" style="margin:0">Max</span>
-        <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
-        <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
-      </div>
-      <div class="cue-tabs" id="cueTabs"></div>
-      <div class="cues" id="cues"></div>
-      <div class="hint"><kbd>Maj</kbd> + lettre = flash · clic droit sur un cue = propriétés (mode, groupe, calque)</div>
-      <div class="layers-head">
-        <span>Calques <span id="layerWarn"></span></span>
-        <span id="layerPoints" title="Points demandés par les calques / budget (au-delà : points espacés, puis calques du haut coupés)">Points : <b>0 / 750</b></span>
-      </div>
-      <div class="layers" id="layers"></div>
-    </section>
-    <section style="margin-top:12px" id="timeline">
-      <h2>Timeline <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">shows enregistrés dans studio-data/shows</span></h2>
-      <div class="cue-bar">
-        <select id="tlShow" title="Show à charger"><option value="">Aucun show</option></select>
-        <button id="tlPlay" title="timeline.play (une phrase en temps démarre à la mesure suivante)">▶ Lecture</button>
-        <button data-ctl="timeline.pause" id="tlPause" title="timeline.pause">❚❚ Pause</button>
-        <button data-ctl="timeline.stop" id="tlStop" title="timeline.stop">■ Arrêt</button>
-        <button id="tlLoop" title="timeline.loop : rejoue la région de boucle (ou tout le show)">⟲ Boucle</button>
-        <span id="tlPos">–</span>
-      </div>
-      <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
-      <div class="hint" id="tlMsg"></div>
-    </section>
-    <div id="cueMenu" hidden>
-      <h3>Propriétés du cue</h3>
-      <div class="hint" id="cueMenuName" style="margin:0"></div>
-      <label>Mode de clic</label>
-      <select id="cueMenuMode">
-        <option value="">Comme la grille</option><option value="toggle">Basculer</option>
-        <option value="flash">Flash</option><option value="solo">Solo</option><option value="restart">Relancer</option>
-      </select>
-      <label>Groupe (un seul cue actif par groupe)</label>
-      <select id="cueMenuGroup">
-        <option value="">Aucun</option><option>1</option><option>2</option><option>3</option>
-        <option>4</option><option>5</option><option>6</option><option>7</option><option>8</option>
-      </select>
-      <label>Calque</label>
-      <select id="cueMenuLayer">
-        <option value="1">Calque 1</option><option value="2">Calque 2</option>
-        <option value="3">Calque 3</option><option value="4">Calque 4</option>
-      </select>
-      <label>Show (joué à la place du cue)</label>
-      <select id="cueMenuShow"><option value="">Aucun</option></select>
-      <div class="midi" id="cueMenuMidi">
-        <button id="cueMenuLearn">Apprendre MIDI</button>
-        <button id="cueMenuShift">Apprendre avec Shift</button>
-        <button id="cueMenuForget">Oublier MIDI</button>
-      </div>
-      <div class="row"><button id="cueMenuClose">Fermer</button></div>
-    </div>
   </div>
 
-  <div class="col">
-    <section>
+  <!-- LIVE : panneau à onglets (Direct, Modulateurs, Musique, Scènes) + grille de cues -->
+  <div class="ws-panel" data-ws="live" id="livePanel">
+    <div class="ptabs" id="liveTabs" role="tablist" aria-label="Panneau LIVE">
+      <button role="tab" data-panel-tab="direct">Direct</button>
+      <button role="tab" data-panel-tab="lfo">Modulateurs</button>
+      <button role="tab" data-panel-tab="music">Musique</button>
+      <button role="tab" data-panel-tab="scenes">Scènes</button>
+    </div>
+    <section data-panel="direct">
       <h2>Direct <button id="liveReset" data-ctl="master.reset" data-control="master.reset" title="master.reset" style="padding:4px 8px;font-size:11px">Réinitialiser</button></h2>
       <label>Rotation</label>
       <div class="seg" id="rotPresets" data-control="master.rot.preset">
@@ -425,12 +421,102 @@
       </div>
     </section>
 
-    <section>
+    <section data-panel="lfo">
       <h2>Modulateurs <button id="lfoAdd" title="Ajouter un modulateur (LFO calé sur le tempo)" style="padding:4px 8px;font-size:11px">+ Modulateur</button></h2>
       <div id="lfoList"></div>
       <div class="hint" id="lfoHint">Un modulateur fait osciller un réglage autour de sa valeur, calé sur le tempo.</div>
     </section>
 
+    <section data-panel="music">
+      <h2>Musique <span id="beatDot" title="Beat détecté"></span></h2>
+      <div class="row">
+        <button id="micBtn" class="primary">Activer le micro</button>
+      </div>
+      <label>Entrée audio</label>
+      <select id="micSelect"><option value="">Par défaut</option></select>
+      <label>Sensibilité <span class="v" id="gainV"></span></label>
+      <input type="range" id="gain" min="0.5" max="8" step="0.1" value="2">
+      <label>Volume</label><div class="meter"><div id="mLevel"></div></div>
+      <label>Basses</label><div class="meter"><div id="mBass"></div></div>
+
+      <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
+      <label>Taille suit les basses <span class="v" id="aSizeV"></span></label>
+      <input type="range" id="aSize" min="0" max="100">
+      <label>Rotation suit les basses <span class="v" id="aRotV"></span></label>
+      <input type="range" id="aRot" min="0" max="100">
+      <label>Flash sur le beat <span class="v" id="aFlashV"></span></label>
+      <input type="range" id="aFlash" min="0" max="100">
+      <div class="check"><input type="checkbox" id="aColor"><span>Change de couleur à chaque beat</span></div>
+    </section>
+
+    <section data-panel="scenes">
+      <h2>Scènes</h2>
+      <div class="row">
+        <input type="text" id="sceneName" placeholder="Nom de la scène">
+        <input type="number" id="sceneDur" value="8" min="0.5" step="0.5" title="Durée (s) dans la playlist" style="max-width:80px">
+        <button id="sceneSave" style="flex:0">Sauver</button>
+      </div>
+      <div id="sceneList"></div>
+      <div class="row">
+        <button id="plStart">▶ Playlist</button>
+        <button id="plStop">■ Stop</button>
+      </div>
+    </section>
+  </div>
+
+  <section class="ws-cues" data-ws="live" id="cueRegion" aria-label="Grille de cues">
+    <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
+    <div class="cue-bar">
+      <div class="seg" id="cueModes" data-control="cue.mode" title="cue.mode">
+        <button data-mode="toggle" title="Clic 1 démarre, clic 2 arrête">Basculer</button>
+        <button data-mode="flash" title="Actif tant que le bouton ou la touche est tenu">Flash</button>
+        <button data-mode="solo" title="Tenu : seul ce cue sort">Solo</button>
+        <button data-mode="restart" title="Chaque clic relance le cue du début">Relancer</button>
+      </div>
+      <div class="seg" id="cueMulti" data-control="cue.multi" title="cue.multi">
+        <button data-multi="0" title="Un nouveau cue remplace le précédent">Un cue</button>
+        <button data-multi="1" title="Les cues s'additionnent">Multi</button>
+      </div>
+      <span class="hint" style="margin:0">Max</span>
+      <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
+      <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
+    </div>
+    <div class="cue-tabs" id="cueTabs"></div>
+    <div class="cue-scroll">
+      <div class="cues" id="cues"></div>
+      <div class="hint"><kbd>Maj</kbd> + lettre = flash · clic droit sur un cue = propriétés (mode, groupe, calque)</div>
+    </div>
+  </section>
+
+  <!-- LIVE : calques, à côté de l'aperçu -->
+  <section class="ws-layers" data-ws="live" id="layerRegion" aria-label="Calques">
+    <div class="layers-head">
+      <span>Calques <span id="layerWarn"></span></span>
+      <span id="layerPoints" title="Points demandés par les calques / budget (au-delà : points espacés, puis calques du haut coupés)">Points : <b>0 / 750</b></span>
+    </div>
+    <div class="layers" id="layers"></div>
+  </section>
+
+  <!-- TIMELINE : lecteur de shows (éditeur, forme d'onde, timecode à venir) -->
+  <div class="ws-panel" data-ws="timeline" id="timelinePanel" hidden>
+    <section id="timeline">
+      <h2>Timeline <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">shows enregistrés dans studio-data/shows</span></h2>
+      <div class="cue-bar">
+        <select id="tlShow" title="Show à charger"><option value="">Aucun show</option></select>
+        <button id="tlPlay" title="timeline.play (une phrase en temps démarre à la mesure suivante)">▶ Lecture</button>
+        <button data-ctl="timeline.pause" id="tlPause" title="timeline.pause">❚❚ Pause</button>
+        <button data-ctl="timeline.stop" id="tlStop" title="timeline.stop">■ Arrêt</button>
+        <button id="tlLoop" title="timeline.loop : rejoue la région de boucle (ou tout le show)">⟲ Boucle</button>
+        <span id="tlPos">–</span>
+      </div>
+      <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
+      <div class="hint" id="tlMsg"></div>
+    </section>
+    <div class="hint soon">À venir ici : éditeur de timeline glisser-déposer, forme d'onde audio, modèles, timecode.</div>
+  </div>
+
+  <!-- CRÉATION : contenu (générateurs, texte, cues évolutifs) et réglages du look -->
+  <div class="ws-panel" data-ws="creation" id="creationPanel" hidden>
     <section>
       <h2>Contenu</h2>
       <div class="seg">
@@ -528,43 +614,11 @@
       <label>Luminosité du look <span class="v" id="brightV"></span></label>
       <input type="range" id="bright" min="0" max="100">
     </section>
+    <div class="hint soon">À venir ici : éditeur de figures, import SVG/image, éditeur de cues évolutifs, médiathèque ILDA.</div>
+  </div>
 
-    <section>
-      <h2>Musique <span id="beatDot" title="Beat détecté"></span></h2>
-      <div class="row">
-        <button id="micBtn" class="primary">Activer le micro</button>
-      </div>
-      <label>Entrée audio</label>
-      <select id="micSelect"><option value="">Par défaut</option></select>
-      <label>Sensibilité <span class="v" id="gainV"></span></label>
-      <input type="range" id="gain" min="0.5" max="8" step="0.1" value="2">
-      <label>Volume</label><div class="meter"><div id="mLevel"></div></div>
-      <label>Basses</label><div class="meter"><div id="mBass"></div></div>
-
-      <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
-      <label>Taille suit les basses <span class="v" id="aSizeV"></span></label>
-      <input type="range" id="aSize" min="0" max="100">
-      <label>Rotation suit les basses <span class="v" id="aRotV"></span></label>
-      <input type="range" id="aRot" min="0" max="100">
-      <label>Flash sur le beat <span class="v" id="aFlashV"></span></label>
-      <input type="range" id="aFlash" min="0" max="100">
-      <div class="check"><input type="checkbox" id="aColor"><span>Change de couleur à chaque beat</span></div>
-    </section>
-
-    <section>
-      <h2>Scènes</h2>
-      <div class="row">
-        <input type="text" id="sceneName" placeholder="Nom de la scène">
-        <input type="number" id="sceneDur" value="8" min="0.5" step="0.5" title="Durée (s) dans la playlist" style="max-width:80px">
-        <button id="sceneSave" style="flex:0">Sauver</button>
-      </div>
-      <div id="sceneList"></div>
-      <div class="row">
-        <button id="plStart">▶ Playlist</button>
-        <button id="plStop">■ Stop</button>
-      </div>
-    </section>
-
+  <!-- RÉGLAGES : sécurité, calibration, contrôleurs MIDI (le projet est dans la barre du haut) -->
+  <div class="ws-panel ws-grid" data-ws="settings" id="settingsPanel" hidden>
     <section>
       <details id="safetyPanel">
         <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span></summary>
@@ -611,8 +665,41 @@
         <div class="hint" id="midiHint"></div>
       </details>
     </section>
+
+    <section>
+      <h2>Sorties et projecteurs</h2>
+      <div class="hint">La sortie en cours est indiquée dans la barre du haut. Projecteurs, zones et lieu : à venir.</div>
+    </section>
   </div>
 </main>
+
+<div id="cueMenu" hidden>
+  <h3>Propriétés du cue</h3>
+  <div class="hint" id="cueMenuName" style="margin:0"></div>
+  <label>Mode de clic</label>
+  <select id="cueMenuMode">
+    <option value="">Comme la grille</option><option value="toggle">Basculer</option>
+    <option value="flash">Flash</option><option value="solo">Solo</option><option value="restart">Relancer</option>
+  </select>
+  <label>Groupe (un seul cue actif par groupe)</label>
+  <select id="cueMenuGroup">
+    <option value="">Aucun</option><option>1</option><option>2</option><option>3</option>
+    <option>4</option><option>5</option><option>6</option><option>7</option><option>8</option>
+  </select>
+  <label>Calque</label>
+  <select id="cueMenuLayer">
+    <option value="1">Calque 1</option><option value="2">Calque 2</option>
+    <option value="3">Calque 3</option><option value="4">Calque 4</option>
+  </select>
+  <label>Show (joué à la place du cue)</label>
+  <select id="cueMenuShow"><option value="">Aucun</option></select>
+  <div class="midi" id="cueMenuMidi">
+    <button id="cueMenuLearn">Apprendre MIDI</button>
+    <button id="cueMenuShift">Apprendre avec Shift</button>
+    <button id="cueMenuForget">Oublier MIDI</button>
+  </div>
+  <div class="row"><button id="cueMenuClose">Fermer</button></div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -871,10 +958,13 @@ document.addEventListener('keydown', e => {
   if (pickingHoldKey) { e.preventDefault(); pickHoldKey(e.code); return; }
   // Hold-to-run key (dead man): works whatever has focus.
   if (presence.hold_to_run && e.code === presence.hold_key) { setHold(true); if (!isTyping()) e.preventDefault(); return; }
+  // F1–F4: workspaces (T-295). Display only, whatever has focus.
+  const ws = ['F1', 'F2', 'F3', 'F4'].indexOf(e.code);
+  if (ws >= 0 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) { e.preventDefault(); setWorkspace(WORKSPACES[ws]); return; }
   const typing = isTyping();
   if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
   if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
-  if (!typing && e.key === '<') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
+  if (!typing && e.key === '<' && activeWs === 'live') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
   if (e.code === 'Space' && !typing) {
     e.preventDefault(); if (!e.repeat) toggleArmed('keyboard'); return;
   }
@@ -883,6 +973,8 @@ document.addEventListener('keydown', e => {
     e.preventDefault(); if (!e.repeat) projAction(e.key.toLowerCase() === 's' ? 'save' : 'open'); return;
   }
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  // Cue letters only in LIVE; Space, Escape, Enter and Backspace above work everywhere.
+  if (activeWs !== 'live') return;
   const i = CUE_KEYS.indexOf(e.key.toLowerCase());
   const page = presets.filter(p => p.category === cuePage);
   if (i >= 0 && i < page.length) {
@@ -1031,7 +1123,8 @@ async function previewLoop() {
     const f = await (await fetch('/api/frame')).json();
     lastPoints = f.points;
     // One fetch feeds whichever view is shown; the 3D view only reads it.
-    if (view3d && show3d) view3d.setFrame(f.points); else draw(f.points);
+    if (view3d && show3d) view3d.setFrame(f.points);
+    if (show2d) draw(f.points);
     if (fetchedAt > armAnsweredAt) armed = f.armed;
     arm = f.arm; pps = f.pps; showArmed(); showPresence(f);
     $('output').textContent = f.output_error ? '⚠ ' + f.output_error
@@ -1098,8 +1191,13 @@ function bindRender3d() {
     $('r3info').textContent = `${view3d.render.quality === 'auto' ? 'Auto : ' + q : q} · ${view3d.stats.drawMs.toFixed(1)} ms`;
   }, 500);
 }
+// Stage tabs (T-270): 2D, 3D, or both side by side. The choice is
+// remembered in this browser.
+const STAGE_KEY = 'laserStudio.stageTab';
+let show2d = true;
 async function setView(mode) {
-  const want3d = mode === '3d';
+  if (!['2d', '3d', 'both'].includes(mode)) mode = '2d';
+  const want3d = mode !== '2d';
   if (want3d && !view3d && $('beamsMsg').hidden) {
     try {
       beam3d ??= await import('/beam3d.js');
@@ -1112,15 +1210,64 @@ async function setView(mode) {
     }
   }
   show3d = want3d && !!view3d;
+  show2d = mode !== '3d';
   document.querySelectorAll('#viewSeg button').forEach(b => b.classList.toggle('active', b.dataset.view === mode));
-  $('preview').hidden = want3d;
+  $('preview').parentElement.classList.toggle('both', mode === 'both');
+  $('preview').hidden = !show2d;
   $('beams').hidden = !show3d;
   $('beamsMsg').hidden = !want3d || !!view3d;
   for (const id of ['recenter3d', 'hint3d', 'render3d']) $(id).hidden = !show3d;
   if (show3d) { view3d.setFrame(lastPoints); view3d.start(); }
-  else { view3d?.stop(); draw(lastPoints); }
+  else view3d?.stop();
+  if (show2d) draw(lastPoints);
+  try { localStorage.setItem(STAGE_KEY, mode); } catch { /* private window: not remembered */ }
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
+
+// ---------- workspaces (T-295) and LIVE panel tabs (T-270) ----------
+// Pure display: switching never posts anything, so the laser, tempo and
+// running cues are untouched. The top bar (laser, ARRÊT, tempo, banners)
+// is outside the workspaces and always on screen. Remembered in this
+// browser; a page without localStorage just starts on LIVE / Direct.
+const WS_KEY = 'laserStudio.workspace', PANEL_KEY = 'laserStudio.livePanel';
+const WORKSPACES = ['live', 'timeline', 'creation', 'settings'];
+let activeWs = 'live';
+function remembered(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function remember(key, v) { try { localStorage.setItem(key, v); } catch { /* private window: not remembered */ } }
+function setWorkspace(ws) {
+  if (!WORKSPACES.includes(ws)) ws = 'live';
+  activeWs = ws;
+  $('workspace').dataset.wsActive = ws;
+  document.querySelectorAll('[data-ws]').forEach(el => { el.hidden = el.dataset.ws !== ws; });
+  document.querySelectorAll('#wsTabs [data-ws-tab]').forEach(b => {
+    b.classList.toggle('active', b.dataset.wsTab === ws);
+    b.setAttribute('aria-selected', String(b.dataset.wsTab === ws));
+  });
+  remember(WS_KEY, ws);
+}
+function setLivePanel(name) {
+  const tabs = [...document.querySelectorAll('#liveTabs [data-panel-tab]')];
+  if (!tabs.some(b => b.dataset.panelTab === name)) name = 'direct';
+  tabs.forEach(b => {
+    b.classList.toggle('active', b.dataset.panelTab === name);
+    b.setAttribute('aria-selected', String(b.dataset.panelTab === name));
+  });
+  document.querySelectorAll('#livePanel [data-panel]').forEach(el => { el.hidden = el.dataset.panel !== name; });
+  remember(PANEL_KEY, name);
+}
+document.querySelectorAll('#wsTabs [data-ws-tab]').forEach(b => b.onclick = () => setWorkspace(b.dataset.wsTab));
+document.querySelectorAll('#liveTabs [data-panel-tab]').forEach(b => b.onclick = () => setLivePanel(b.dataset.panelTab));
+// The MIDI status in the top bar leads to the controller settings.
+$('midiStatus').style.cursor = 'pointer';
+$('midiStatus').onclick = () => { setWorkspace('settings'); $('midiPanel').open = true; };
+setWorkspace(remembered(WS_KEY));
+setLivePanel(remembered(PANEL_KEY));
+{ const v = remembered(STAGE_KEY); if (v === '3d' || v === 'both') setView(v); }
+// The workspace grid fills the window below the top bar, whose height
+// changes with the banners.
+if (globalThis.ResizeObserver) new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--top-h', $('top').offsetHeight + 'px');
+}).observe($('top'));
 
 // ---------- music ----------
 let audio = null, beat = 0, bassAvg = 0, lastBeat = 0, sending = false;

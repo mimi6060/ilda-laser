@@ -1,5 +1,5 @@
 // « Direct » panel: master live modifiers on top of any look or cue.
-import { test, expect, useStudio, openUi, focusPage, extent, centroid, isLit } from '../studio';
+import { test, expect, useStudio, openUi, reveal, focusPage, extent, centroid, isLit } from '../studio';
 
 const studio = useStudio();
 const live = () => studio.live();
@@ -29,8 +29,10 @@ test('rotation presets set the Z rotation speed and highlight the button', async
 });
 
 test('a rotation preset spins the drawing', async ({ page }) => {
+  await reveal(page, '#shapes');
   await page.getByRole('button', { name: 'Carré', exact: true }).click();
   await expect.poll(async () => (await studio.state()).settings.content.shape).toBe('square');
+  await reveal(page, '#rotPresets');
   await page.locator('#rotPresets button', { hasText: 'Rapide' }).click();
   await expect.poll(async () => (await live()).rot_speed[2]).toBe(270);
   const a = (await points()).find(isLit)!;
