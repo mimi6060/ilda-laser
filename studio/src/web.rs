@@ -377,9 +377,87 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             shared.lock().unwrap().playlist = None;
             ok()
         }
+        (Method::Get, "/api/shows") => json_response(json!(shared.lock().unwrap().shows.list())),
+        (Method::Post, "/api/shows") => match body::<crate::timeline::Show>(request) {
+            Ok(show) => match shared.lock().unwrap().shows.save(&show) {
+                Ok(()) => ok(),
+                Err(e) => text(400, &format!("{e:#}")),
+            },
+            Err(e) => e,
+        },
+        (Method::Get, "/api/timeline") => {
+            let s = shared.lock().unwrap();
+            json_response(json!({ "state": s.timeline.state(&s.timeline_clock()), "show": s.timeline.show }))
+        }
+        (Method::Post, p) if p.starts_with("/api/timeline/") => timeline_route(request, shared, &p["/api/timeline/".len()..]),
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
         _ => text(404, "not found"),
     }
+}
+
+/// `POST /api/timeline/{load,play,pause,stop,seek,loop}`. Transport only:
+/// nothing here can arm the laser.
+fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &str) -> HttpResponse {
+    let req = match action {
+        "load" | "seek" | "loop" => match body::<TimelineRequest>(request) {
+            Ok(req) => req,
+            Err(e) => return e,
+        },
+        _ => TimelineRequest::default(),
+    };
+    let mut s = shared.lock().unwrap();
+    let c = s.timeline_clock();
+    match action {
+        "load" => {
+            let show = match (req.show, req.name) {
+                (Some(show), _) => show,
+                (None, Some(name)) => match s.shows.load(&name) {
+                    Ok(show) => show,
+                    Err(e) => return text(404, &format!("{e:#}")),
+                },
+                (None, None) => return text(400, "expected \"name\" or \"show\""),
+            };
+            s.timeline.load(show);
+        }
+        "play" => {
+            if let Err(why) = controls::timeline_play(&mut s) {
+                return text(409, why);
+            }
+        }
+        "pause" => s.timeline.pause(&c),
+        "stop" => s.timeline.stop(),
+        "seek" => match req.position {
+            Some(p) => s.timeline.seek(p, &c),
+            None => return text(400, "expected \"position\""),
+        },
+        "loop" => {
+            if let Some(on) = req.on {
+                s.timeline.loop_on = on;
+            }
+            if let (Some(region), Some(show)) = (req.region, s.timeline.show.as_mut()) {
+                show.loop_region = region;
+                show.sanitize();
+            }
+        }
+        _ => return text(404, "not found"),
+    }
+    json_response(json!(s.timeline.state(&c)))
+}
+
+#[derive(Deserialize, Default)]
+struct TimelineRequest {
+    name: Option<String>,
+    show: Option<crate::timeline::Show>,
+    position: Option<f64>,
+    on: Option<bool>,
+    /// `null` clears the region; absent leaves it.
+    #[serde(default, deserialize_with = "some_value")]
+    region: Option<Option<(f64, f64)>>,
+}
+
+/// Tells an explicit `null` (Some(None)) from a missing field (None).
+fn some_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<(f64, f64)>>, D::Error> {
+    Option::<(f64, f64)>::deserialize(d).map(Some)
 }
 
 fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, path: &str) -> HttpResponse {
@@ -477,6 +555,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "tempo": s.tempo.state(s.now_s()),
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "evolving": evolving_status(s),
+        "timeline": s.timeline.state(&s.timeline_clock()),
     }))
 }
 
@@ -511,6 +590,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         },
         "layers": { "mixer": s.mixer, "mix": s.mix },
         "tempo": s.tempo.state(s.now_s()),
+        "timeline": s.timeline.state(&s.timeline_clock()),
         "live": s.live,
         "lfos": lfo_positions(s),
         "strobe": s.strobe,
@@ -773,6 +853,41 @@ mod tests {
         assert!(module_type.starts_with("text/javascript"));
         assert!(module.contains("export class BeamView"));
         assert!(static_asset("/vendor/nothing.js").is_none());
+    }
+
+    #[test]
+    fn timeline_api_saves_loads_and_drives_a_show_without_arming() {
+        let t = TestServer::start(false);
+        let show = r#"{"name":"api show","time_base":"beats","tracks":[{"layer":2,"events":[{"start":0,"len":8,"source":{"kind":"cue","id":"x"}}]}]}"#;
+        assert_eq!(t.request("POST", "/api/shows", show).0, 200);
+        assert_eq!(t.request("POST", "/api/shows", r#"{"name":"../evil"}"#).0, 400);
+        let list: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/shows", "").1).unwrap();
+        assert_eq!(list[0]["name"], "api show");
+        assert_eq!(list[0]["length"], 8.0);
+
+        assert_eq!(t.request("POST", "/api/timeline/play", "").0, 409, "nothing loaded yet");
+        assert_eq!(t.request("POST", "/api/timeline/load", r#"{"name":"nope"}"#).0, 404);
+        assert_eq!(t.request("POST", "/api/timeline/load", r#"{"name":"api show"}"#).0, 200);
+        let (status, body) = t.request("POST", "/api/timeline/play", "");
+        assert_eq!(status, 200);
+        let st: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((st["name"].as_str(), st["playing"].as_bool(), st["time_base"].as_str()), (Some("api show"), Some(true), Some("beats")));
+        let (_, body) = t.request("POST", "/api/timeline/loop", r#"{"on":true,"region":[2,4]}"#);
+        let st: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((st["loop"].as_bool(), st["loop_region"].clone()), (Some(true), json!([2.0, 4.0])));
+        let (_, body) = t.request("POST", "/api/timeline/loop", r#"{"region":null}"#);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["loop_region"], serde_json::Value::Null);
+        assert_eq!(t.request("POST", "/api/timeline/seek", r#"{"position":3}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/seek", "{}").0, 400);
+        let state: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/state", "").1).unwrap();
+        assert_eq!(state["timeline"]["name"], "api show");
+        assert_eq!(state["armed"], false, "the timeline never arms");
+
+        // Échap: the e-stop halts the show's output, and play is refused until reset.
+        assert_eq!(t.request("POST", "/api/estop?source=keyboard", "").0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/play", "").0, 409);
+        assert_eq!(t.request("POST", "/api/timeline/stop", "").0, 200);
+        assert!(!t.shared.lock().unwrap().timeline.is_playing());
     }
 
     #[test]
