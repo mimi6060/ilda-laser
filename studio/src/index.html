@@ -381,9 +381,21 @@
         <label>Forme A <span class="v" id="gAV"></span></label>
         <input type="range" id="gA" min="0" max="10" step="0.05">
         <div class="hint" id="gAH" hidden></div>
+        <div id="gTurnsRow" hidden>
+          <label>Vitesse (tours par temps)</label>
+          <select id="gTurns">
+            <option value="0.015625">Glaciale (1/64)</option><option value="0.03125">Lente (1/32)</option>
+            <option value="0.0625">Moyenne (1/16)</option><option value="0.25">Rapide (1/4)</option>
+            <option value="0.5">Très rapide (1/2)</option><option value="" disabled>Autre (Forme A)</option>
+          </select>
+        </div>
         <label>Forme B <span class="v" id="gBV"></span></label>
         <input type="range" id="gB" min="-1" max="3" step="0.05">
         <div class="hint" id="gBH" hidden></div>
+        <div id="gSnapRow" hidden>
+          <div class="check"><input type="checkbox" id="gSnap"><span>Rotation par à-coups</span></div>
+          <div class="hint">Tourne d’un côté (360°/côtés) à chaque pas, immobile entre deux ; Pas par temps règle la cadence. Se voit mieux en Dégradé ou Arc-en-ciel.</div>
+        </div>
         <label>Vitesse <span class="v" id="gSpeedV"></span></label>
         <input type="range" id="gSpeed" min="0" max="4" step="0.05">
         <label>Mode couleur</label>
@@ -525,6 +537,10 @@
 <script>
 const $ = id => document.getElementById(id);
 let settings = null, calibration = null, armed = false, pps = 30000;
+// Generators whose Forme A is a rotation speed in turns per beat, and the
+// « Vitesse » presets (research §4.1: glacial … very fast).
+const ROTATING = new Set(['finger_tunnel', 'twin_tunnel', 'sunburst']);
+const TURNS = [0.015625, 0.03125, 0.0625, 0.25, 0.5];
 
 async function post(path, body) {
   const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
@@ -573,6 +589,8 @@ function showSettings() {
     setVal('gGate', p.gate_beats ?? 0); setVal('gDir', String(Math.sign(p.direction ?? 1)));
     setVal('gGroups', String(p.groups ?? 1)); setVal('gGroupMode', p.group_mode ?? 'unison');
     setVal('gEasing', p.easing ?? 'sine');
+    setCheck('gSnap', !!p.snap);
+    setVal('gTurns', TURNS.includes(+p.a) ? String(+p.a) : '');
     showGenHelp(s.content.generator);
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
@@ -598,7 +616,8 @@ function showValues() {
   $('aFlashV').textContent = $('aFlash').value + ' %';
   $('gainV').textContent = '×' + (+$('gain').value).toFixed(1);
   $('gCountV').textContent = $('gCount').value;
-  $('gAV').textContent = (+$('gA').value).toFixed(1);
+  const a = +$('gA').value;
+  $('gAV').textContent = ROTATING.has(settings?.content?.generator) ? a.toFixed(3) + ' tour/temps' : a.toFixed(1);
   $('gBV').textContent = (+$('gB').value).toFixed(2);
   $('gSpeedV').textContent = '×' + (+$('gSpeed').value).toFixed(2);
   $('gGateV').textContent = +$('gGate').value ? (+$('gGate').value).toFixed(2) : 'off';
@@ -637,6 +656,8 @@ const LOOK_EDITS = {
   gGroups: v => genEdit(c => { c.params.groups = +v; }),
   gGroupMode: v => genEdit(c => { c.params.group_mode = v; }),
   gEasing: v => genEdit(c => { c.params.easing = v; }),
+  gSnap: v => genEdit(c => { c.params.snap = v; }),
+  gTurns: v => genEdit(c => { if (v !== '') c.params.a = +v; }),
 };
 for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   $(id).addEventListener('input', () => {
@@ -646,8 +667,9 @@ for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   // Shown again once let go, in case the look changed while it was held.
   if (id === 'gSync') $(id).addEventListener('input', () => { $('gSyncPanel').hidden = !$('gSync').checked; });
   $(id).addEventListener('blur', () => setTimeout(showSettings));
-  // A new generator may bring its own values and help: show them now.
-  if (id === 'gen') $(id).addEventListener('input', () => showSettings());
+  // A new generator may bring its own values and help, and a « Vitesse »
+  // preset moves Forme A: show them now.
+  if (id === 'gen' || id === 'gTurns') $(id).addEventListener('input', () => showSettings());
 }
 
 function editLook(fn) {
@@ -1531,7 +1553,8 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   grid_scan: 'Grille de balayage', sine_stack: 'Oscillateurs', helix: 'Hélice', pulse_rings: 'Anneaux pulsés',
   spectrum: 'Spectre audio', clock: 'Horloge', vortex: 'Vortex', flower: 'Fleur',
   fan: 'Éventail', fan_sweep: 'Éventail balayé', fan_tilt: 'Éventail qui se lève', fan_wave: 'Éventail vague',
-  positions: 'Positions au temps' };
+  positions: 'Positions au temps', finger_tunnel: 'Tunnel de faisceaux', tunnel_pump: 'Tunnel qui pompe',
+  twin_tunnel: 'Double tunnel', sunburst: 'Soleil levant' };
 
 // Festival fans (T-102): what Nombre / A / B mean for each, plus how the
 // tempo settings drive it. Old generators keep the generic labels.
@@ -1546,6 +1569,16 @@ const GEN_HELP = {
     'Une longueur d’onde tous les 2 temps ; ← : la vague part dans l’autre sens.'],
   positions: ['Faisceaux (6 à 16).', 'Non utilisé.', 'Hauteur des positions.',
     '4 positions (large haut, incliné gauche, incliné droite, V), une par pas : Pas par temps règle la cadence.'],
+  // Tunnels, cones and sun (T-105): Forme A = turns per beat when it turns.
+  finger_tunnel: ['Faisceaux sur le cercle (8 à 16).', 'Tours par temps (voir Vitesse).', 'Non utilisé.',
+    'Taille = rayon du cône (0,25 à 0,4). ← : tourne dans l’autre sens.'],
+  tunnel_pump: ['Non utilisé.', 'Pompage : le rayon grandit de A (0,3 = 30 %) sur chaque temps et revient en 1/2 temps.',
+    '0 = pompe sur le temps, 1 = rampe : se resserre sur la période puis s’ouvre.',
+    'Taille = rayon au repos. Rampe : de la taille à un seul faisceau sur la période ; ← : s’ouvre au lieu de se resserrer.'],
+  twin_tunnel: ['Non utilisé.', 'Tours par temps (1/8 = un tour en 2 mesures).', 'Non utilisé.',
+    'Deux anneaux qui tournent en sens contraires, avec un trou pour voir la rotation. Taille = rayon extérieur.'],
+  sunburst: ['Rayons (12 à 24).', 'Tours par temps (voir Vitesse).', '0 = tous pareils, 1 = pair/impair : 100 % / 40 % qui s’échangent à chaque temps.',
+    'Rayons au-dessus de l’horizon seulement ; ceux qui passent dessous sont éteints. Taille = longueur des rayons.'],
 };
 const GEN_DEFAULTS = {
   fan: { count: 8, a: 0, b: 0.3, period: 4, steps: 1 },
@@ -1553,10 +1586,18 @@ const GEN_DEFAULTS = {
   fan_tilt: { count: 8, a: 0, b: 0, period: 8, steps: 1 },
   fan_wave: { count: 12, a: 0.25, b: 0.4, period: 4, steps: 1 },
   positions: { count: 8, a: 0, b: 0.3, period: 4, steps: 1 },
+  finger_tunnel: { count: 12, a: 0.0625, b: 0, period: 4, steps: 1 },
+  tunnel_pump: { count: 8, a: 0.3, b: 0, period: 16, steps: 1 },
+  twin_tunnel: { count: 8, a: 0.125, b: 0, period: 8, steps: 1 },
+  sunburst: { count: 16, a: 0.03125, b: 0, period: 4, steps: 1 },
 };
 function showGenHelp(name) {
   const h = GEN_HELP[name] || [];
   ['gCountH', 'gAH', 'gBH', 'gSyncH'].forEach((id, i) => { $(id).textContent = h[i] || ''; $(id).hidden = !h[i]; });
+  $('gTurnsRow').hidden = !ROTATING.has(name);
+  $('gSnapRow').hidden = name !== 'polygon_tunnel';
+  // Slow rotations (1/64 turn per beat) need a finer slider than 0.05.
+  $('gA').step = ROTATING.has(name) ? 'any' : '0.05';
 }
 
 // ---------- LFO modulators ----------
