@@ -767,7 +767,7 @@ async function previewLoop() {
     $('stFps').classList.toggle('bad', n && fps < 15);
     highlightPlaylist(f.playlist);
     showTempo(f.tempo);
-    showLive(f.live);
+    if (fetchedAt > liveAnsweredAt && liveAnsweredAt >= liveSentAt) showLive(f.live);
     showLfos(f.lfos);
     showStrobe(f.strobe);
     // Follow page changes made elsewhere (MIDI controller, API) - only
@@ -980,6 +980,15 @@ function showStrobe(st) {
 }
 
 // ---------- live (master) ----------
+// Like the laser button: a frame fetched before our last live change was
+// answered carries the old values and must not be drawn over the controls
+// (it would e.g. untick « Synchro tempo » right after it was ticked).
+let liveSentAt = 0, liveAnsweredAt = 0;
+async function postLive(body) {
+  liveSentAt = performance.now();
+  await post('/api/control', body);
+  liveAnsweredAt = performance.now();
+}
 let live = null;
 const liveGet = (path) => path.split('.').reduce((o, k) => o[k], live);
 function liveSet(path, v) {
@@ -1005,12 +1014,12 @@ function showLive(l) {
 document.querySelectorAll('[data-live]').forEach(el => el.addEventListener('input', () => {
   const v = el.value / +el.dataset.k;
   if (live) { liveSet(el.dataset.live, v); showLive(live); }
-  post('/api/control', { id: el.title, value: v });
+  postLive({ id: el.title, value: v });
 }));
 document.querySelectorAll('#rotPresets button').forEach(b => b.addEventListener('click', () =>
-  post('/api/control', { id: 'master.rot.preset', value: +b.dataset.preset })));
-$('rotSync').addEventListener('change', () => post('/api/control', { id: 'master.rot.sync', value: $('rotSync').checked }));
-const reverse = on => post('/api/control', { id: 'master.rot.reverse', value: on });
+  postLive({ id: 'master.rot.preset', value: +b.dataset.preset })));
+$('rotSync').addEventListener('change', () => postLive({ id: 'master.rot.sync', value: $('rotSync').checked }));
+const reverse = on => postLive({ id: 'master.rot.reverse', value: on });
 $('rotReverse').addEventListener('pointerdown', () => reverse(true));
 ['pointerup', 'pointerleave'].forEach(ev => $('rotReverse').addEventListener(ev, () => reverse(false)));
 let reverseKey = false;
