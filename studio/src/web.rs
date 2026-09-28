@@ -89,10 +89,20 @@ fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibrat
     worker.join().ok();
 }
 
-/// Requests whose handler may run an audio decoder.
+/// Requests whose handler may run for seconds (audio decoding, figure
+/// import): handled beside the single HTTP worker.
 fn may_decode(method: &Method, url: &str) -> bool {
     let path = url.split('?').next().unwrap_or("");
-    matches!((method, path), (Method::Post, "/api/media/audio") | (Method::Get, "/api/timeline/waveform") | (Method::Post, "/api/timeline/audio"))
+    // Figure import (SVG/image vectorisation) can take seconds too: kept off
+    // the single worker so heartbeats queued behind it aren't delayed into a
+    // « Interface perdue » disarm.
+    matches!(
+        (method, path),
+        (Method::Post, "/api/media/audio")
+            | (Method::Get, "/api/timeline/waveform")
+            | (Method::Post, "/api/timeline/audio")
+            | (Method::Post, "/api/figures/import")
+    )
 }
 
 /// At most this many decoding requests at once (each may run a decoder).
@@ -111,7 +121,7 @@ fn decode_aside(mut request: Request, shared: &Arc<Mutex<Shared>>, calibration_p
     let slot = Slot(Arc::clone(decoding));
     if decoding.fetch_add(1, Ordering::SeqCst) >= MAX_DECODING {
         drop(slot);
-        let _ = request.respond(text(503, "trop de décodages audio en cours, réessayez"));
+        let _ = request.respond(text(503, "trop de traitements longs en cours (décodage audio, import), réessayez"));
         return;
     }
     let (shared, calibration_path) = (Arc::clone(shared), calibration_path.to_path_buf());
@@ -535,6 +545,9 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        // Import (T-297): the raw file in the body, settings in the query.
+        // Returns a preview; nothing is saved (« Créer la figure » does).
+        (Method::Post, "/api/figures/import") => import_figure(request, shared),
         // The editor's text tool: the laser font as strokes. No state.
         (Method::Post, "/api/figures/text") => match body::<TextRequest>(request) {
             Ok(req) => {
@@ -988,6 +1001,67 @@ fn save_calibration(path: &Path, cal: &Calibration) {
     }
 }
 
+/// Stack of the import thread.
+const IMPORT_STACK: usize = 64 * 1024 * 1024;
+
+/// `POST /api/figures/import?name=…&simplify=…`: an SVG, PNG or JPEG
+/// (body, at most `MAX_FILE_BYTES`) → `{figure, warnings, stats}`. Runs
+/// without the lock held; a panic in the importer is caught and reported.
+fn import_figure(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    use crate::figure_import::{self as fi, Mode, Options};
+    use std::io::Read;
+    let limit = fi::MAX_FILE_BYTES;
+    let mut bytes = Vec::new();
+    if let Err(e) = request.as_reader().take(limit as u64 + 1).read_to_end(&mut bytes) {
+        return text(400, &format!("fichier illisible : {e}"));
+    }
+    if bytes.len() > limit {
+        return text(413, &format!("fichier trop gros : {} Mo au plus", limit / (1024 * 1024)));
+    }
+    let url = request.url().to_string();
+    let q = |k: &str| query_str(&url, k);
+    let num = |k: &str| q(k).and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite());
+    let d = Options::default();
+    let budget = shared.lock().unwrap().mixer.point_budget;
+    let opts = Options {
+        simplify: num("simplify").unwrap_or(d.simplify),
+        size: num("size").map_or(d.size, |v| v / 100.0),
+        budget: num("budget").map_or(budget, |v| v.max(0.0) as usize),
+        color: q("color").and_then(|c| parse_hex(&c)).unwrap_or(d.color),
+        fills: q("fills").map_or(d.fills, |v| v != "0"),
+        mode: q("mode").and_then(|m| Mode::parse(&m)).unwrap_or(d.mode),
+        threshold: num("threshold").map(|v| v.clamp(0.0, 255.0) as u8),
+        invert: q("invert").is_some_and(|v| v == "1"),
+        smooth: num("smooth").map_or(d.smooth, |v| v.clamp(0.0, 5.0) as u8),
+        colors: num("colors").map_or(d.colors, |v| v.clamp(1.0, 6.0) as u8),
+        resolution: num("resolution").map_or(d.resolution, |v| v.clamp(0.0, 10_000.0) as u32),
+        min_size: num("min_size").map_or(d.min_size, |v| v.clamp(0.0, 1_000.0) as u32),
+    };
+    let name = q("name").unwrap_or_default();
+    // Its own thread with a roomy stack (the XML parser recurses), so a
+    // file can't take the HTTP worker down; a panic is caught as well.
+    let job = std::thread::Builder::new().name("figure-import".into()).stack_size(IMPORT_STACK).spawn({
+        let name = name.clone();
+        move || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fi::import(&bytes, &name, &opts)))
+    });
+    match job.map(|h| h.join()) {
+        Ok(Ok(Ok(Ok(result)))) => json_response(json!(result)),
+        Ok(Ok(Ok(Err(e)))) => text(400, &format!("{e:#}")),
+        _ => {
+            log::warn!("figure import failed internally on {name:?}");
+            text(400, "fichier impossible à importer (erreur interne)")
+        }
+    }
+}
+
+fn parse_hex(s: &str) -> Option<[u8; 3]> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.is_ascii() {
+        return None;
+    }
+    Some([u8::from_str_radix(&h[0..2], 16).ok()?, u8::from_str_radix(&h[2..4], 16).ok()?, u8::from_str_radix(&h[4..6], 16).ok()?])
+}
+
 /// `key`'s value in the URL's query string, as a number.
 fn query_u64(url: &str, key: &str) -> Option<u64> {
     url.split_once('?')?.1.split('&').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
@@ -1112,6 +1186,36 @@ mod tests {
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
         let st = arm_status(&t);
         assert_eq!((st["armed"].clone(), st["source"].clone()), (json!(true), json!("keyboard")));
+    }
+
+    #[test]
+    fn figure_import_previews_without_saving_and_refuses_bad_files() {
+        let t = TestServer::start(false);
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="10" height="10" stroke="red"/></svg>"#;
+        let (status, body) = t.request("POST", "/api/figures/import?name=Mon%20logo%2B1.svg&budget=300&size=50", svg);
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["figure"]["name"], "Mon logo 1");
+        assert_eq!(v["stats"]["kind"], "svg");
+        assert_eq!(v["stats"]["budget"], 300);
+        assert_eq!(v["figure"]["frames"][0]["strokes"][0]["color"], json!([255, 0, 0]));
+        let xs: Vec<f64> = v["figure"]["frames"][0]["strokes"][0]["points"].as_array().unwrap().iter().map(|p| p[0].as_f64().unwrap()).collect();
+        assert!(xs.iter().all(|x| x.abs() <= 0.5 + 1e-4) && xs.iter().any(|x| (x.abs() - 0.5).abs() < 1e-3));
+        // A preview only: nothing in the library.
+        assert!(t.shared.lock().unwrap().figures.list().is_empty());
+        let (status, body) = t.request("POST", "/api/figures/import", "not an image");
+        assert_eq!(status, 400);
+        assert!(body.contains("format non reconnu"), "{body}");
+        let (status, body) = t.request("POST", "/api/figures/import", "");
+        assert_eq!((status, body.as_str()), (400, "fichier vide"));
+        let deep = format!("<svg>{}</svg>", "<g>".repeat(50_000));
+        let (status, body) = t.request("POST", "/api/figures/import", &deep);
+        assert_eq!(status, 400);
+        assert!(body.contains("imbriqués"), "{body}");
+        // Still serving.
+        assert_eq!(t.request("GET", "/api/arm", "").0, 200);
+        assert_eq!(parse_hex("#00ff80"), Some([0, 255, 128]));
+        assert_eq!(parse_hex("#00ff8"), None);
     }
 
     #[test]
