@@ -23,11 +23,13 @@ mod live;
 mod midi;
 mod output;
 mod patterns;
+mod presence;
 mod presets;
 mod safety;
 mod scenes;
 mod tempo;
 mod timeline;
+mod watchdog;
 mod web;
 
 #[cfg(test)]
@@ -37,7 +39,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use engine::{Animator, AudioFeatures, Calibration, Settings};
 use interlock::{ArmGate, EStop};
-use output::{DacOutput, Output, OutputStage};
+use output::{DacOutput, FileLogOutput, Output, OutputStage};
 use patterns::Point;
 use scenes::SceneStore;
 use std::collections::HashMap;
@@ -80,6 +82,14 @@ struct Cli {
     /// opened) and refuses --device (preview only).
     #[arg(long, hide = true, requires = "no_midi", conflicts_with = "device")]
     midi_test: bool,
+    /// Testing only: a fake output that logs its calls to this file (no
+    /// laser), for the shutdown subprocess test.
+    #[arg(long, hide = true, conflicts_with = "device")]
+    test_output: Option<PathBuf>,
+    /// Testing only: enable `POST /api/test/stall` (simulated engine stall
+    /// for the watchdog e2e test).
+    #[arg(long, hide = true)]
+    test_hooks: bool,
 }
 
 /// Audio features older than this are treated as silence (the browser tab
@@ -153,13 +163,25 @@ pub struct Shared {
     pub timeline: timeline::Player,
     /// Saved shows, `studio-data/shows/`.
     pub shows: timeline::ShowStore,
+    /// UI heartbeats and hold-to-run (presence.rs, presence.json).
+    pub presence: presence::Presence,
+    /// Engine ticks, read lock-free by the watchdog (watchdog.rs).
+    pub health: Arc<watchdog::EngineHealth>,
+    /// `--test-hooks`: allows `POST /api/test/stall`.
+    pub test_hooks: bool,
+    /// A pending simulated stall (ms): the engine sleeps this long while
+    /// holding the lock, the worst case for the watchdog.
+    pub test_stall_ms: u64,
 }
 
 impl Shared {
-    /// Arm request, after catching up with the e-stop latch.
+    /// Arm request, after catching up with the e-stop latch, the watchdog
+    /// and the heartbeats.
     pub fn request_arm(&mut self, src: interlock::ArmSource) -> Result<(), Vec<String>> {
-        self.gate.sync_estop(&self.estop);
-        self.gate.request_arm(src)
+        self.sync_safety(Instant::now());
+        self.gate.request_arm(src)?;
+        self.health.note_armed();
+        Ok(())
     }
 
     /// The only way MIDI can arm (see `midi::engine::frame`): the MIDI
@@ -169,8 +191,44 @@ impl Shared {
         if !self.midi.store.devices.safety.allow_arm {
             return Err(vec!["L'armement depuis le MIDI est désactivé".into()]);
         }
+        self.sync_safety(Instant::now());
+        self.gate.request_arm_midi_opt_in()?;
+        self.health.note_armed();
+        Ok(())
+    }
+
+    /// Brings the gate in line with everything that can disarm from
+    /// outside it: the e-stop latch, a watchdog trip, operator presence.
+    /// Returns whether hold-to-run lets the output emit.
+    pub fn sync_safety(&mut self, now: Instant) -> bool {
         self.gate.sync_estop(&self.estop);
-        self.gate.request_arm_midi_opt_in()
+        if self.health.take_trip() {
+            self.gate.disarm(interlock::DisarmReason::EngineStall, interlock::ArmSource::System);
+        }
+        self.sync_presence(now)
+    }
+
+    /// Operator presence (T-252). The last page gone: held flashes end and
+    /// the laser disarms with reason « Interface perdue »; no page at all
+    /// blocks arming. Hold-to-run released too long disarms too. Nothing
+    /// here can arm.
+    pub fn sync_presence(&mut self, now: Instant) -> bool {
+        if !self.presence.enforced {
+            return true;
+        }
+        let v = self.presence.update(now, self.gate.is_armed());
+        if v.ui_lost {
+            // The known cue-modes issue: a flash held in a page that died.
+            controls::release_held(self);
+        }
+        if !v.ui_alive && self.gate.is_armed() {
+            self.gate.disarm(interlock::DisarmReason::UiLost, interlock::ArmSource::System);
+        }
+        self.gate.set_interlock(interlock::UI_ALIVE, v.ui_alive);
+        if v.hold_expired && self.gate.is_armed() {
+            self.gate.disarm(interlock::DisarmReason::HoldReleased, interlock::ArmSource::System);
+        }
+        v.hold_ok
     }
 
     /// Trips the emergency stop and records it in the gate.
@@ -206,98 +264,62 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(&cli.data_dir)
         .with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
-    let calibration_path = cli.data_dir.join("calibration.json");
-    let live_path = cli.data_dir.join("live.json");
-    let layers_path = cli.data_dir.join("layers.json");
 
-    let output: Option<Box<dyn Output>> = match &cli.device {
-        Some(device) => {
+    let output: Option<Box<dyn Output>> = match (&cli.device, &cli.test_output) {
+        (Some(device), _) => {
             let out = DacOutput::open(device, cli.pps)?;
             println!("Laser output: {}", out.name());
             Some(Box::new(out))
         }
-        None => {
+        (None, Some(path)) => {
+            println!("--test-output: fake output logged to {} (no laser).", path.display());
+            Some(Box::new(FileLogOutput::create(path)?))
+        }
+        (None, None) => {
             println!("No --device given: preview only (no laser output).");
             None
         }
     };
 
-    let estop = Arc::new(EStop::default());
+    let state = startup_state(&cli, output.as_deref());
+    let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
+    let sim = state.midi.sim.clone();
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
         estop.set_kill_switch(kill);
     }
-    let mut gate = ArmGate::default();
-    if cli.test_interlock {
-        gate.register(interlock::TEST, "Verrou de test (--test-interlock)", false);
-    }
+    let shared = Arc::new(Mutex::new(state));
+    let running = Arc::new(AtomicBool::new(true));
 
-    let sim = cli.midi_test.then(|| {
-        let sim = midi::testing::SimMidi::default();
-        sim.plug(midi::testing::TEST_MK2_PORT, midi::testing::FakeApc::new(midi::Model::Apc40Mk2));
-        sim
-    });
-
-    let presets = presets::catalog();
-    let controls = controls::ControlRegistry::build(&presets);
-    let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
-    let shared = Arc::new(Mutex::new(Shared {
-        settings: Settings::default(),
-        calibration: web::load_calibration(&calibration_path),
-        audio: AudioFeatures::default(),
-        audio_at: Instant::now(),
-        gate,
-        estop: Arc::clone(&estop),
-        frame: Vec::new(),
-        output_lit: 0,
-        output_name: output.as_ref().map(|o| o.name().to_string()),
-        output_error: None,
-        pps: cli.pps,
-        scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
-        playlist: None,
-        controls,
-        presets,
-        cue_page: 0,
-        active_cue: None,
-        settings_rev: 0,
-        deck: cues::CueDeck::load(cli.data_dir.join("grid.json")),
-        look_on: true,
-        tempo: tempo::TempoClock::default(),
-        epoch: Instant::now(),
-        live: load_json(&live_path),
-        live_dirty: false,
-        palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
-        midi: {
-            let mut m = midi::MidiState::new(!cli.no_midi || cli.midi_test, midi::profile::ProfileStore::load(cli.data_dir.join("midi")));
-            m.sim = sim.clone();
-            m
-        },
-        lfos,
-        mixer: {
-            let mut m: layers::Mixer = load_json(&layers_path);
-            m.sanitize();
-            m
-        },
-        mixer_dirty: false,
-        mix: layers::MixReport::default(),
-        safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
-        strobe: safety::StrobeStatus::default(),
-        evolving: Vec::new(),
-        timeline: timeline::Player::default(),
-        shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
+    // A panic anywhere: cut the output first (the DAC kill switch, no lock),
+    // then let the default report run and every loop wind down. The engine's
+    // output stage also blanks and disarms as its thread unwinds.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new({
+        let (estop, health, running) = (Arc::clone(&estop), Arc::clone(&health), Arc::clone(&running));
+        move |info| {
+            watchdog::on_panic(&estop, &health, &running);
+            default_hook(info);
+        }
     }));
 
-    let running = Arc::new(AtomicBool::new(true));
+    // Ctrl+C and SIGTERM: cut the output at once, then shut down cleanly
+    // (the engine disarms and sends dark frames before closing the output).
     ctrlc::set_handler({
-        let running = Arc::clone(&running);
-        move || running.store(false, Ordering::SeqCst)
+        let (estop, running) = (Arc::clone(&estop), Arc::clone(&running));
+        move || {
+            estop.kill_output();
+            running.store(false, Ordering::SeqCst);
+        }
     })
     .context("failed to install Ctrl+C handler")?;
 
     let engine = std::thread::spawn({
         let shared = Arc::clone(&shared);
         let running = Arc::clone(&running);
+        let (live_path, layers_path) = (cli.data_dir.join("live.json"), cli.data_dir.join("layers.json"));
         move || run_engine(shared, output, running, live_path, layers_path)
     });
+    let watchdog = watchdog::spawn(Arc::clone(&health), Arc::clone(&estop), Arc::clone(&running));
 
     let midi_thread = if let Some(sim) = sim {
         println!("--midi-test: simulated APC40 mkII only, MIDI injection enabled (tests only).");
@@ -311,14 +333,99 @@ fn main() -> Result<()> {
 
     let addr = format!("127.0.0.1:{}", cli.port);
     println!("Studio: open http://{addr}/ in your browser - Ctrl+C to quit");
-    web::run(&addr, shared, estop, calibration_path, Arc::clone(&running))?;
+    let served = web::run(&addr, shared, estop, cli.data_dir.join("calibration.json"), Arc::clone(&running));
 
     running.store(false, Ordering::SeqCst);
-    engine.join().ok();
+    // The engine closes the output; don't wait forever if it is stuck (the
+    // kill switch has already cut a real DAC).
+    let deadline = Instant::now() + SHUTDOWN_WAIT;
+    while !engine.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if engine.is_finished() {
+        engine.join().ok();
+    } else {
+        log::error!("engine thread did not stop in {SHUTDOWN_WAIT:?}: exiting anyway");
+    }
+    watchdog.join().ok();
     if let Some(midi_thread) = midi_thread {
         midi_thread.join().ok(); // lets it switch the APC LEDs off
     }
-    Ok(())
+    served
+}
+
+/// How long `main` waits for the engine to close the output at shutdown.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
+/// The state the studio starts with. Whatever the command line and the
+/// files in the data directory say, it is disarmed (reason « Démarrage »):
+/// arming is not part of any saved state, and there is no option for it.
+fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
+    let mut gate = ArmGate::default();
+    if cli.test_interlock {
+        gate.register(interlock::TEST, "Verrou de test (--test-interlock)", false);
+    }
+    // No page has beaten yet: arming waits for the UI (T-252).
+    gate.register(interlock::UI_ALIVE, "Aucune interface ouverte (battement perdu)", false);
+
+    let sim = cli.midi_test.then(|| {
+        let sim = midi::testing::SimMidi::default();
+        sim.plug(midi::testing::TEST_MK2_PORT, midi::testing::FakeApc::new(midi::Model::Apc40Mk2));
+        sim
+    });
+
+    let presets = presets::catalog();
+    let controls = controls::ControlRegistry::build(&presets);
+    let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
+    Shared {
+        settings: Settings::default(),
+        calibration: web::load_calibration(&cli.data_dir.join("calibration.json")),
+        audio: AudioFeatures::default(),
+        audio_at: Instant::now(),
+        gate,
+        estop: Arc::new(EStop::default()),
+        frame: Vec::new(),
+        output_lit: 0,
+        output_name: output.map(|o| o.name().to_string()),
+        output_error: None,
+        pps: cli.pps,
+        scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
+        playlist: None,
+        controls,
+        presets,
+        cue_page: 0,
+        active_cue: None,
+        settings_rev: 0,
+        deck: cues::CueDeck::load(cli.data_dir.join("grid.json")),
+        look_on: true,
+        tempo: tempo::TempoClock::default(),
+        epoch: Instant::now(),
+        live: load_json(&cli.data_dir.join("live.json")),
+        live_dirty: false,
+        palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
+        midi: {
+            let mut m = midi::MidiState::new(!cli.no_midi || cli.midi_test, midi::profile::ProfileStore::load(cli.data_dir.join("midi")));
+            m.sim = sim.clone();
+            m
+        },
+        lfos,
+        mixer: {
+            let mut m: layers::Mixer = load_json(&cli.data_dir.join("layers.json"));
+            m.sanitize();
+            m
+        },
+        mixer_dirty: false,
+        mix: layers::MixReport::default(),
+        safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
+        strobe: safety::StrobeStatus::default(),
+        evolving: Vec::new(),
+        timeline: timeline::Player::default(),
+        shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
+        presence: presence::Presence::load(cli.data_dir.join("presence.json")),
+        health: Arc::new(watchdog::EngineHealth::default()),
+        test_hooks: cli.test_hooks,
+        test_stall_ms: 0,
+    }
 }
 
 fn run_engine(
@@ -336,6 +443,7 @@ fn run_engine(
     let mut event_live: HashMap<u64, live::LiveState> = HashMap::new();
     let mut frames_since_save = 0u32;
     let mut last = Instant::now();
+    // If this thread panics, unwinding drops the stage: dark frame + disarm.
     let mut stage = OutputStage::new(output);
     let mut limiter = safety::StrobeLimiter::default();
 
@@ -344,10 +452,16 @@ fn run_engine(
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, live, user_palettes, estop, t, safety_cfg) = {
+        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg) = {
             let mut s = shared.lock().unwrap();
-            let shared_state = &mut *s;
-            shared_state.gate.sync_estop(&shared_state.estop);
+            // E-stop latch, watchdog trip, heartbeats and hold-to-run.
+            let hold_ok = s.sync_safety(now);
+            s.health.tick(s.gate.is_armed());
+            if s.test_stall_ms > 0 {
+                // `--test-hooks` only: a stall while holding the lock.
+                let stall = Duration::from_millis(std::mem::take(&mut s.test_stall_ms));
+                std::thread::sleep(stall);
+            }
             frames_since_save += 1;
             if (s.live_dirty || s.mixer_dirty) && frames_since_save >= 60 {
                 // At most once a second, so MIDI faders don't hammer the disk.
@@ -380,7 +494,8 @@ fn run_engine(
             let mixer = s.mixer.clone();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
-            (looks, show_cues, starts, clock, mixer, s.calibration, audio, s.gate.is_armed(), live, s.palettes.list().to_vec(), Arc::clone(&s.estop), t, s.safety.get())
+            let armed = s.gate.is_armed();
+            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get())
         };
 
         live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -430,8 +545,9 @@ fn run_engine(
         let frame = safety::apply(frame, t, &safety_cfg, &mut limiter);
 
         // Last stage: the gate. `armed` was read under the lock at the top
-        // of the frame; the e-stop latch is re-read here, lock-free.
-        let emitted = stage.emit(&frame, armed, &estop);
+        // of the frame; the e-stop latch and a watchdog trip (this frame
+        // stalled) are re-read here, lock-free.
+        let emitted = stage.emit(&frame, armed && !health.is_tripped(), hold_ok, &estop);
         let mut s = shared.lock().unwrap();
         if let Some(error) = emitted.arm_change {
             s.output_error = error;
@@ -446,6 +562,9 @@ fn run_engine(
         std::thread::sleep(FRAME_INTERVAL.saturating_sub(now.elapsed()));
     }
 
+    // Clean shutdown: disarm the gate (recorded), then the output goes dark
+    // and closes. A poisoned lock still holds the gate.
+    shared.lock().unwrap_or_else(|e| e.into_inner()).gate.disarm(interlock::DisarmReason::Shutdown, interlock::ArmSource::System);
     stage.shutdown();
 }
 
@@ -564,5 +683,172 @@ mod tests {
         s.gate.reset_estop(&s.estop.clone());
         controls::timeline_play(&mut s).unwrap();
         assert!(!s.gate.is_armed(), "resetting the e-stop and playing again doesn't arm");
+    }
+
+    use crate::cues::ClickMode;
+    use crate::interlock::{ArmSource, UI_ALIVE};
+    use crate::presence::{Presence, PresenceSettings};
+
+    /// A `Shared` that enforces presence like the real studio.
+    fn with_presence(settings: PresenceSettings) -> Shared {
+        let mut s = test_support::shared();
+        s.presence = Presence::new(settings, true);
+        s.gate.register(UI_ALIVE, "Aucune interface ouverte", false);
+        s
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    fn reason(s: &Shared) -> String {
+        s.gate.status(&s.estop).last_disarm.unwrap().reason
+    }
+
+    #[test]
+    fn no_page_no_arming() {
+        let mut s = with_presence(PresenceSettings::default());
+        assert!(s.request_arm(ArmSource::Ui).is_err(), "no heartbeat yet");
+        s.presence.beat("page", Instant::now(), true, false);
+        s.request_arm(ArmSource::Ui).unwrap();
+        assert!(s.gate.is_armed());
+    }
+
+    #[test]
+    fn a_lost_heartbeat_disarms_with_its_reason_and_releases_held_flashes() {
+        let t0 = Instant::now();
+        let mut s = with_presence(PresenceSettings::default());
+        s.presence.beat("page", t0, true, false);
+        s.sync_safety(t0);
+        s.request_arm(ArmSource::Keyboard).unwrap();
+        assert!(controls::press_cue(&mut s, "tunnels-001", Some(ClickMode::Flash), true));
+        assert!(s.deck.active.iter().any(|a| a.held));
+        s.sync_safety(t0 + ms(1_900));
+        assert!(s.gate.is_armed(), "still within the timeout");
+        s.sync_safety(t0 + ms(2_000));
+        assert!(!s.gate.is_armed());
+        assert_eq!(reason(&s), "ui_lost");
+        assert_eq!(s.gate.status(&s.estop).last_disarm.unwrap().reason_fr, "Interface perdue");
+        assert!(s.deck.active.is_empty(), "the held flash is released");
+        assert_eq!(s.active_cue, None);
+        // Nothing comes back by itself when a page returns.
+        s.presence.beat("page", t0 + ms(3_000), true, false);
+        s.sync_safety(t0 + ms(3_000));
+        assert!(!s.gate.is_armed());
+    }
+
+    #[test]
+    fn a_latched_cue_survives_the_lost_page() {
+        let t0 = Instant::now();
+        let mut s = with_presence(PresenceSettings::default());
+        s.presence.beat("page", t0, true, false);
+        s.sync_safety(t0);
+        assert!(controls::press_cue(&mut s, "tunnels-001", Some(ClickMode::Toggle), true));
+        s.sync_safety(t0 + ms(5_000));
+        assert_eq!(s.deck.active.len(), 1, "only held flashes are released");
+    }
+
+    #[test]
+    fn two_pages_one_closed_stays_armed() {
+        let t0 = Instant::now();
+        let mut s = with_presence(PresenceSettings::default());
+        s.presence.beat("a", t0, true, false);
+        s.presence.beat("b", t0, true, false);
+        s.request_arm(ArmSource::Ui).unwrap();
+        s.presence.leave("a");
+        for step in 1..=10 {
+            let now = t0 + ms(step * 500);
+            s.presence.beat("b", now, true, false);
+            s.sync_safety(now);
+        }
+        assert!(s.gate.is_armed());
+    }
+
+    #[test]
+    fn hold_to_run_blanks_then_disarms_after_the_release_limit() {
+        let t0 = Instant::now();
+        let mut s = with_presence(PresenceSettings { hold_to_run: true, ..Default::default() });
+        s.presence.beat("page", t0, true, false);
+        s.request_arm(ArmSource::Ui).unwrap();
+        assert!(!s.sync_safety(t0), "armed but not held: black");
+        s.presence.beat("page", t0 + ms(500), true, true);
+        assert!(s.sync_safety(t0 + ms(500)), "held: emits");
+        // Released at 1 s: disarmed 10 s later.
+        for step in 2..=22 {
+            let now = t0 + ms(step * 500);
+            s.presence.beat("page", now, true, false);
+            assert!(!s.sync_safety(now));
+            assert_eq!(s.gate.is_armed(), step < 22, "at {} ms", step * 500);
+        }
+        assert_eq!(reason(&s), "hold_released");
+    }
+
+    #[test]
+    fn a_watchdog_trip_disarms_with_engine_stall() {
+        let mut s = test_support::shared();
+        s.request_arm(ArmSource::Ui).unwrap();
+        s.health.trip();
+        s.sync_safety(Instant::now());
+        assert!(!s.gate.is_armed());
+        assert_eq!(reason(&s), "engine_stall");
+        assert_eq!(s.gate.status(&s.estop).last_disarm.unwrap().reason_fr, "Moteur bloqué");
+        assert!(!s.health.is_tripped(), "recorded once");
+        s.request_arm(ArmSource::Ui).unwrap();
+        assert!(s.gate.is_armed(), "the operator can re-arm");
+    }
+
+    #[test]
+    fn presence_sync_never_arms() {
+        let t0 = Instant::now();
+        for hold_to_run in [false, true] {
+            let mut s = with_presence(PresenceSettings { hold_to_run, ..Default::default() });
+            for step in 0..40u64 {
+                let now = t0 + ms(step * 250);
+                if step % 3 != 0 {
+                    s.presence.beat("page", now, step % 2 == 0, step % 5 == 0);
+                }
+                s.presence.set_midi_hold(step % 7 == 0);
+                s.sync_safety(now);
+                assert!(!s.gate.is_armed());
+            }
+        }
+    }
+
+    /// T-253: no command-line option and no file in the data directory can
+    /// make the studio start armed.
+    #[test]
+    fn no_startup_path_is_armed() {
+        use clap::CommandFactory;
+        for arg in Cli::command().get_arguments() {
+            let id = arg.get_id().as_str().to_lowercase();
+            assert!(!id.contains("arm") && !id.contains("emit"), "unexpected option --{id}");
+        }
+        let dir = std::env::temp_dir().join(format!("laser-studio-startup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Files that try their luck with arming fields.
+        for name in ["presence.json", "live.json", "layers.json", "grid.json", "calibration.json", "scenes.json", "lfos.json", "palettes.json"] {
+            std::fs::write(dir.join(name), r#"{"armed": true, "arm": true, "on": true, "hold_to_run": false}"#).unwrap();
+        }
+        let data_dir = dir.to_str().unwrap();
+        let variants: [&[&str]; 4] = [
+            &[],
+            &["--test-interlock"],
+            &["--test-hooks", "--pps", "12000"],
+            &["--test-hooks", "--test-interlock", "--port", "0"],
+        ];
+        for extra in variants {
+            let args = [&["laser-studio", "--no-midi", "--data-dir", data_dir][..], extra].concat();
+            let cli = Cli::try_parse_from(&args).unwrap();
+            let mut s = startup_state(&cli, None);
+            assert!(!s.gate.is_armed(), "{args:?}");
+            let status = s.gate.status(&s.estop);
+            assert!(!status.armed);
+            assert_eq!(status.last_disarm.unwrap().reason, "startup");
+            assert!(s.presence.enforced);
+            // Without a page, even a direct request is refused.
+            assert!(s.request_arm(ArmSource::Keyboard).is_err(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["laser-studio", "--device", "x", "--test-output", "/tmp/x"]).is_err(), "the fake output never goes with a real device");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

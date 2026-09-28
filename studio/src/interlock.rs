@@ -66,6 +66,8 @@ pub enum DisarmReason {
     EStop,
     UiLost,
     EngineStall,
+    /// Hold-to-run: the hold key/pad was released for too long (T-252).
+    HoldReleased,
     Interlock(String),
     ProfileChange,
     Shutdown,
@@ -79,6 +81,7 @@ impl DisarmReason {
             DisarmReason::EStop => "estop".into(),
             DisarmReason::UiLost => "ui_lost".into(),
             DisarmReason::EngineStall => "engine_stall".into(),
+            DisarmReason::HoldReleased => "hold_released".into(),
             DisarmReason::Interlock(id) => format!("interlock:{id}"),
             DisarmReason::ProfileChange => "profile_change".into(),
             DisarmReason::Shutdown => "shutdown".into(),
@@ -92,6 +95,7 @@ impl DisarmReason {
             DisarmReason::EStop => "Arrêt d'urgence".into(),
             DisarmReason::UiLost => "Interface perdue".into(),
             DisarmReason::EngineStall => "Moteur bloqué".into(),
+            DisarmReason::HoldReleased => "Maintien relâché trop longtemps".into(),
             DisarmReason::Interlock(label) => format!("Verrou : {label}"),
             DisarmReason::ProfileChange => "Changement de profil".into(),
             DisarmReason::Shutdown => "Arrêt du studio".into(),
@@ -110,6 +114,8 @@ pub struct Interlock {
 pub const ESTOP: &str = "estop";
 /// Id of the always-blocking interlock enabled by `--test-interlock`.
 pub const TEST: &str = "test";
+/// Id of the operator-presence interlock: at least one UI page beats (T-252).
+pub const UI_ALIVE: &str = "ui_alive";
 
 pub struct ArmGate {
     armed: bool,
@@ -319,6 +325,13 @@ impl EStop {
             self.at_ms.store(now, Ordering::SeqCst);
         }
         self.latched.store(true, Ordering::SeqCst);
+        self.kill_output();
+    }
+
+    /// Disarms the output directly (DAC-level) without latching: for the
+    /// engine watchdog, the panic hook and Ctrl+C, which cannot wait for
+    /// the engine thread. A no-op in preview.
+    pub fn kill_output(&self) {
         // A poisoned lock still holds the switch: use it anyway.
         let kill = self.kill.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(kill) = kill.as_ref() {
@@ -519,6 +532,20 @@ mod tests {
         estop.trip(ArmSource::Api);
         estop.trip(ArmSource::Api);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn kill_output_fires_the_switch_without_latching() {
+        let estop = EStop::default();
+        estop.kill_output(); // no switch in preview: nothing happens
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        estop.set_kill_switch(Box::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        }));
+        estop.kill_output();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!estop.is_latched());
     }
 
     #[test]

@@ -47,5 +47,11 @@ pub fn shared() -> Shared {
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id()))),
+        // Not enforced: tests that arm without a page keep working. Tests
+        // of presence build an enforced one themselves.
+        presence: Default::default(),
+        health: Default::default(),
+        test_hooks: false,
+        test_stall_ms: 0,
     }
 }

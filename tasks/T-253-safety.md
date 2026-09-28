@@ -1,7 +1,7 @@
 ---
 id: T-253
 title: Chien de garde du moteur et extinction propre
-status: in-progress
+status: review
 area: safety
 priority: P1
 depends_on: [T-250]
@@ -27,10 +27,10 @@ Si le fil moteur se bloque (verrou tenu trop longtemps, calcul trop lourd) ou pa
 Voyant « Moteur » (vert/rouge) et message « Moteur bloqué — laser coupé » si le chien de garde a déclenché.
 
 ## Critères d'acceptation
-- [ ] Blocage simulé de 200 ms du moteur (option de test) → désarmé, raison « Moteur bloqué »
-- [ ] Panique simulée → `blank_now` appelé (sortie factice de test)
-- [ ] SIGTERM → trames noires puis fermeture (sortie factice)
-- [ ] Aucun chemin de démarrage ne produit `armed=true`
+- [x] Blocage simulé de 200 ms du moteur (option de test) → désarmé, raison « Moteur bloqué »
+- [x] Panique simulée → `blank_now` appelé (sortie factice de test)
+- [x] SIGTERM → trames noires puis fermeture (sortie factice)
+- [x] Aucun chemin de démarrage ne produit `armed=true`
 
 ## Tests
 Unitaires avec une sortie factice (`MockOutput`) qui enregistre les appels ; test d'intégration du signal sur un sous-processus en aperçu.
@@ -41,3 +41,4 @@ Unitaires avec une sortie factice (`MockOutput`) qui enregistre les appels ; tes
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/safety-regulation.md`.
+- 2026-09-28 — dev-agent (heartbeat), branche `feat/heartbeat` : `EngineHealth` (atomiques) + fil `watchdog` (coupe la sortie par le kill switch sans prendre le verrou, désarme « Moteur bloqué » au tick suivant), crochet de panique + `Drop` de l'étage de sortie (noir puis désarmement), Ctrl+C/SIGTERM (désarmer, 3 trames noires, fermer), `Output::blank_now`, `startup_state` testé (aucun chemin de démarrage armé). Options cachées `--test-output` (sortie factice fichier) et `--test-hooks` (blocage simulé). Tests : unitaires (watchdog.rs, output.rs, main.rs), sous-processus `studio/tests/shutdown.rs` (SIGTERM, SIGINT), e2e `watchdog.spec.ts` (2). PR : `docs/prs/heartbeat.md`.
