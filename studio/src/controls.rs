@@ -158,6 +158,8 @@ impl ControlRegistry {
         add("timeline.play".into(), "Lecture de la timeline".into(), "timeline", ControlKind::Trigger, true);
         add("timeline.pause".into(), "Pause de la timeline".into(), "timeline", ControlKind::Trigger, true);
         add("timeline.stop".into(), "Arrêt de la timeline".into(), "timeline", ControlKind::Trigger, true);
+        // One button for both (the APC40's Play): pause if playing, else play.
+        add("timeline.toggle".into(), "Lecture / pause de la timeline".into(), "timeline", ControlKind::Trigger, true);
         add("timeline.loop".into(), "Boucle de la timeline".into(), "timeline", ControlKind::Toggle { default: false }, true);
 
         add("page.next".into(), "Page de cues suivante".into(), "page", ControlKind::Trigger, true);
@@ -342,6 +344,14 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
             s.timeline.pause(&c)
         }
         "timeline.stop" => s.timeline.stop(),
+        "timeline.toggle" => {
+            if s.timeline.is_playing() {
+                let c = s.timeline_clock();
+                s.timeline.pause(&c)
+            } else {
+                timeline_play(s).map_err(ControlError::Refused)?
+            }
+        }
         "timeline.loop" => s.timeline.loop_on = truthy(input),
         "cue.mode" => {
             s.deck.click_mode = CLICK_MODES[choice_index(&desc.kind, input)];
@@ -1127,6 +1137,23 @@ mod tests {
         apply(&mut s, "master.size", ControlInput::Value(0.5), true).unwrap();
         play(&mut s).unwrap();
         assert_eq!(s.live.size, 0.5);
+    }
+
+    #[test]
+    fn timeline_toggle_plays_and_pauses() {
+        let mut s = shared();
+        let toggle = |s: &mut Shared| apply(s, "timeline.toggle", ControlInput::Value(1.0), true);
+        assert_eq!(toggle(&mut s), Err(ControlError::Refused("aucun show chargé")));
+        s.timeline.load(tiny_show("a", &cue_at(&s, 0, 0)));
+        toggle(&mut s).unwrap();
+        assert!(s.timeline.is_playing());
+        toggle(&mut s).unwrap();
+        assert_eq!(s.timeline.transport, crate::timeline::Transport::Paused);
+        toggle(&mut s).unwrap();
+        assert!(s.timeline.is_playing(), "resumes");
+        toggle(&mut s).unwrap();
+        s.emergency_stop(ArmSource::Midi);
+        assert!(toggle(&mut s).is_err() && !s.timeline.is_playing(), "no playback under a latched e-stop");
     }
 
     #[test]
