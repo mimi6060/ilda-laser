@@ -161,6 +161,19 @@
   .render3d .check { margin-top: 6px; }
   #strobeLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
   #strobeLed.on { opacity: 1; background: var(--warn); border-color: var(--warn); color: #2b1d00; box-shadow: 0 0 8px var(--warn); }
+  .proj { position: relative; display: flex; align-items: center; gap: 8px; }
+  #projName { font-size: 12px; color: var(--muted); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #projName.modified { color: var(--text); }
+  #projMenu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 220px; display: flex; flex-direction: column; gap: 2px; padding: 6px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+  #projMenu[hidden] { display: none; }
+  #projMenu button { text-align: left; }
+  #projMenu .sub { font-size: 11px; color: var(--muted); margin: 6px 4px 2px; text-transform: uppercase; letter-spacing: .06em; }
+  #projRecent { display: flex; flex-direction: column; gap: 2px; padding-left: 8px; }
+  .modal { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: #000a; }
+  .modal[hidden] { display: none; }
+  .modal .box { width: min(440px, 92vw); padding: 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
+  .modal h3 { margin: 0 0 8px; font-size: 15px; }
+  #projFiles { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 200px; overflow: auto; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -168,6 +181,18 @@
 <div id="top">
 <header>
   <h1>Laser Studio</h1>
+  <div class="proj">
+    <button id="projBtn" title="Projet : Cmd+S enregistrer, Cmd+O ouvrir">Projet ▾</button>
+    <span id="projName" title="Projet ouvert (• = modifications non enregistrées)">Sans titre</span>
+    <div id="projMenu" hidden>
+      <button data-proj="new">Nouveau</button>
+      <button data-proj="open">Ouvrir…</button>
+      <div class="sub">Récents</div>
+      <div id="projRecent"></div>
+      <button data-proj="save">Enregistrer</button>
+      <button data-proj="save-as">Enregistrer sous…</button>
+    </div>
+  </div>
   <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
     <input type="number" id="bpm" min="40" max="250" step="0.1" value="120" title="tempo.bpm">
     <span class="hint" style="margin:0">BPM</span>
@@ -196,6 +221,23 @@
   <button id="estopReset">Réinitialiser l'arrêt d'urgence</button></div>
 <div id="holdBanner" hidden></div>
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
+</div>
+<div id="projDialog" class="modal" hidden>
+  <div class="box">
+    <h3 id="projDlgTitle">Ouvrir…</h3>
+    <div class="hint" id="projDir"></div>
+    <label for="projPath">Nom ou chemin du projet</label>
+    <input type="text" id="projPath" autocomplete="off" placeholder="Mon show">
+    <div id="projFiles"></div>
+    <div id="projError" class="merr" role="alert"></div>
+    <div class="row"><button id="projOk">Ouvrir</button><button id="projCancel">Annuler</button></div>
+  </div>
+</div>
+<div id="projAsk" class="modal" hidden>
+  <div class="box">
+    <h3>Modifications non enregistrées : enregistrer avant ?</h3>
+    <div class="row"><button id="askSave">Enregistrer</button><button id="askDiscard">Ne pas enregistrer</button><button id="askCancel">Annuler</button></div>
+  </div>
 </div>
 
 <main>
@@ -795,6 +837,10 @@ document.addEventListener('keydown', e => {
   if (!typing && e.key === '<') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
   if (e.code === 'Space' && !typing) {
     e.preventDefault(); if (!e.repeat) toggleArmed('keyboard'); return;
+  }
+  // Projet (T-286): Cmd+S enregistrer, Cmd+O ouvrir (Ctrl on other systems).
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && ['s', 'o'].includes(e.key.toLowerCase())) {
+    e.preventDefault(); if (!e.repeat) projAction(e.key.toLowerCase() === 's' ? 'save' : 'open'); return;
   }
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   const i = CUE_KEYS.indexOf(e.key.toLowerCase());
@@ -1789,6 +1835,100 @@ function renderMidi(m) {
 
 $('midiAllowArm').onchange = e => post('/api/midi/safety', { allow_arm: e.target.checked });
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
+// ---------- project (T-286) ----------
+// One .lsproj file per show, in the studio's projects folder only (no
+// access to the rest of the disk from the browser). Opening a project
+// never arms the laser and never changes calibration or safety settings.
+let project = { name: 'Sans titre', file: null, modified: false, projects: [], recent: [], dir: '' };
+let projDialogMode = 'open';
+function showProject() {
+  $('projName').textContent = project.name + (project.modified ? ' •' : '');
+  $('projName').classList.toggle('modified', project.modified);
+  $('projRecent').innerHTML = project.recent.length
+    ? project.recent.map(n => `<button data-recent="${esc(n)}">${esc(n)}</button>`).join('') : '<div class="hint">Aucun</div>';
+  $('projRecent').querySelectorAll('[data-recent]').forEach(b => b.onclick = () => { $('projMenu').hidden = true; projOpen(b.dataset.recent); });
+}
+async function loadProject() {
+  try { project = await (await fetch('/api/project')).json(); showProject(); } catch { /* studio restarting */ }
+}
+async function projPost(action, body) {
+  const r = await fetch('/api/project/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  if (!r.ok) throw new Error(await r.text());
+  project = await r.json(); showProject();
+  if (project.warnings?.length) alert(project.warnings.join('\n'));
+}
+// Everything a project brings back, reloaded into the page.
+async function afterOpen() {
+  await loadState(); await loadSlots(); await loadPalettes(); await loadLfos(); await loadShows();
+}
+// Unsaved changes: resolves true to go on, false to stay.
+function askUnsaved() {
+  if (!project.modified) return Promise.resolve(true);
+  $('projAsk').hidden = false;
+  return new Promise(resolve => {
+    const done = go => { $('projAsk').hidden = true; resolve(go); };
+    $('askDiscard').onclick = () => done(true);
+    $('askCancel').onclick = () => done(false);
+    $('askSave').onclick = async () => {
+      if (!project.file) { done(false); projDialog('save-as'); return; }
+      try { await projPost('save'); done(true); } catch (e) { alert(e.message); done(false); }
+    };
+  });
+}
+function projDialog(mode) {
+  projDialogMode = mode;
+  $('projDlgTitle').textContent = mode === 'open' ? 'Ouvrir…' : 'Enregistrer sous…';
+  $('projOk').textContent = mode === 'open' ? 'Ouvrir' : 'Enregistrer';
+  $('projDir').textContent = 'Dossier : ' + project.dir;
+  $('projPath').value = mode === 'open' ? '' : (project.file ? project.name : '');
+  $('projError').textContent = '';
+  $('projFiles').innerHTML = project.projects.length
+    ? project.projects.map(n => `<button data-pfile="${esc(n)}">${esc(n)}</button>`).join('') : '<div class="hint">Aucun projet enregistré.</div>';
+  $('projFiles').querySelectorAll('[data-pfile]').forEach(b => b.onclick = () => { $('projPath').value = b.dataset.pfile; if (mode === 'open') projDialogOk(); });
+  $('projDialog').hidden = false;
+  $('projPath').focus();
+}
+async function projDialogOk() {
+  const path = $('projPath').value.trim();
+  if (!path) { $('projError').textContent = 'Donnez un nom au projet.'; return; }
+  try {
+    if (projDialogMode === 'open') {
+      await projPost('open', { path }); $('projDialog').hidden = true; await afterOpen();
+    } else {
+      const exists = project.projects.includes(path.replace(/\.lsproj$/, '')) && path !== project.name;
+      if (exists && !confirm(`Remplacer le projet « ${path} » ?`)) return;
+      await projPost('save-as', { path }); $('projDialog').hidden = true;
+    }
+  } catch (e) { $('projError').textContent = e.message; }
+}
+async function projOpen(name) {
+  if (!await askUnsaved()) return;
+  try { await projPost('open', { path: name }); await afterOpen(); } catch (e) { alert(e.message); }
+}
+async function projAction(kind) {
+  $('projMenu').hidden = true;
+  await loadProject();
+  if (kind === 'save') {
+    if (!project.file) { projDialog('save-as'); return; }
+    try { await projPost('save'); } catch (e) { alert(e.message); }
+  } else if (kind === 'save-as') {
+    projDialog('save-as');
+  } else if (kind === 'open') {
+    if (await askUnsaved()) projDialog('open');
+  } else if (kind === 'new') {
+    if (!await askUnsaved()) return;
+    try { await projPost('new'); await afterOpen(); } catch (e) { alert(e.message); }
+  }
+}
+$('projBtn').onclick = e => { e.stopPropagation(); $('projMenu').hidden = !$('projMenu').hidden; if (!$('projMenu').hidden) loadProject(); };
+$('projMenu').querySelectorAll('[data-proj]').forEach(b => b.onclick = () => projAction(b.dataset.proj));
+document.addEventListener('click', e => { if (!e.target.closest('.proj')) $('projMenu').hidden = true; });
+$('projOk').onclick = projDialogOk;
+$('projCancel').onclick = () => { $('projDialog').hidden = true; };
+$('projPath').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); projDialogOk(); } });
+loadProject();
+setInterval(loadProject, 2000);
+
 loadState().then(loadPresets).then(loadPalettes).then(loadLfos).then(previewLoop);
 midiLoop();
 loadPresence().catch(() => {});

@@ -790,6 +790,12 @@ pub struct ShowInfo {
     pub tracks: usize,
 }
 
+/// A show name that is also a safe file name (already trimmed): letters,
+/// digits, spaces, `-` and `_`, 1 to 64 characters.
+pub fn valid_show_name(name: &str) -> bool {
+    !name.is_empty() && name == name.trim() && name.chars().count() <= 64 && name.chars().all(|c| c.is_alphanumeric() || " -_".contains(c))
+}
+
 /// `studio-data/shows/`, one JSON file per show.
 pub struct ShowStore {
     dir: PathBuf,
@@ -804,10 +810,19 @@ impl ShowStore {
     /// `-` and `_` only, so a name can never leave the shows folder.
     fn path(&self, name: &str) -> Result<PathBuf> {
         let name = name.trim();
-        if name.is_empty() || name.chars().count() > 64 || !name.chars().all(|c| c.is_alphanumeric() || " -_".contains(c)) {
+        if !valid_show_name(name) {
             bail!("nom de show invalide (lettres, chiffres, espaces, - et _ seulement)");
         }
         Ok(self.dir.join(format!("{name}.json")))
+    }
+
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Every readable show, sorted by name.
+    pub fn load_all(&self) -> Vec<Show> {
+        self.list().into_iter().filter_map(|info| self.load(&info.name).ok()).collect()
     }
 
     pub fn load(&self, name: &str) -> Result<Show> {
