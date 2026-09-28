@@ -153,6 +153,11 @@ impl ControlRegistry {
         add("tempo.double".into(), "Tempo ×2".into(), "tempo", ControlKind::Trigger, true);
         add("tempo.half".into(), "Tempo ÷2".into(), "tempo", ControlKind::Trigger, true);
 
+        add("timeline.play".into(), "Lecture de la timeline".into(), "timeline", ControlKind::Trigger, true);
+        add("timeline.pause".into(), "Pause de la timeline".into(), "timeline", ControlKind::Trigger, true);
+        add("timeline.stop".into(), "Arrêt de la timeline".into(), "timeline", ControlKind::Trigger, true);
+        add("timeline.loop".into(), "Boucle de la timeline".into(), "timeline", ControlKind::Toggle { default: false }, true);
+
         add("page.next".into(), "Page de cues suivante".into(), "page", ControlKind::Trigger, true);
         add("page.prev".into(), "Page de cues précédente".into(), "page", ControlKind::Trigger, true);
         for (i, name) in CATEGORIES.iter().enumerate() {
@@ -328,6 +333,13 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
             let bpm = s.tempo.bpm * factor;
             s.tempo.set_bpm_manual(bpm, t);
         }
+        "timeline.play" => timeline_play(s).map_err(ControlError::Refused)?,
+        "timeline.pause" => {
+            let c = s.timeline_clock();
+            s.timeline.pause(&c)
+        }
+        "timeline.stop" => s.timeline.stop(),
+        "timeline.loop" => s.timeline.loop_on = truthy(input),
         "cue.mode" => {
             s.deck.click_mode = CLICK_MODES[choice_index(&desc.kind, input)];
             s.deck.save();
@@ -475,6 +487,9 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "audio.color_on_beat" => json!(s.settings.audio.color_on_beat),
         "transport.arm" => json!(s.gate.is_armed() && !s.estop.is_latched()),
         "tempo.bpm" => json!(s.tempo.bpm),
+        "timeline.play" => json!(s.timeline.is_playing()),
+        "timeline.pause" => json!(s.timeline.transport == crate::timeline::Transport::Paused),
+        "timeline.loop" => json!(s.timeline.loop_on),
         "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
         "cue.multi" => json!(s.deck.multi),
         "cue.max_active" => json!(s.deck.max_active),
@@ -489,9 +504,9 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
             }
         }
         id => {
-            // Grid cells light up while their cue plays (LED feedback).
+            // Grid cells light up while their cue (or show) plays (LED feedback).
             let cue = grid_cell_preset(&s.presets, id.strip_prefix("grid.")?)?;
-            json!(s.deck.active.iter().any(|a| a.cue == cue))
+            json!(s.deck.active.iter().any(|a| a.cue == cue) || show_cue_playing(s, &cue))
         }
     })
 }
@@ -529,9 +544,59 @@ pub fn play_preset(s: &mut Shared, id: &str) -> bool {
     press_cue(s, id, Some(ClickMode::Restart), true)
 }
 
+/// Start the loaded show. Like a latched cue, it takes over from the
+/// scene/playlist; cues played by hand keep playing on top. Refused while
+/// the emergency stop is latched. Never touches the arm state.
+pub fn timeline_play(s: &mut Shared) -> Result<(), &'static str> {
+    if s.estop.is_latched() {
+        return Err("arrêt d'urgence actif : réinitialiser avant de lancer la timeline");
+    }
+    let c = s.timeline_clock();
+    if !s.timeline.play(&c) {
+        return Err("aucun show chargé");
+    }
+    s.playlist = None;
+    s.look_on = false;
+    Ok(())
+}
+
+/// Whether the grid cell of `cue` holds a show that is playing now.
+fn show_cue_playing(s: &Shared, cue: &str) -> bool {
+    let slot = s.deck.slot(cue);
+    let loaded = s.timeline.show.as_ref().map(|sh| sh.name.as_str());
+    slot.show.is_some() && slot.show.as_deref() == loaded && s.timeline.is_playing()
+}
+
+/// A grid cell holding a show (« cue de type show »): a press loads and
+/// plays it, a press while it plays stops it; releases are ignored.
+fn press_show_cue(s: &mut Shared, cue: &str, show: &str) {
+    if show_cue_playing(s, cue) {
+        s.timeline.stop();
+        return;
+    }
+    match s.shows.load(show) {
+        Ok(loaded) => {
+            s.timeline.load(loaded);
+            if let Err(why) = timeline_play(s) {
+                log::warn!("show {show}: {why}");
+            }
+        }
+        Err(e) => log::warn!("show {show}: {e:#}"),
+    }
+}
+
 /// A cue's key, pad or button went down (`down`) or up. `mode` overrides
 /// the cue's click mode (Shift + letter flashes). False if no such cue.
 pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) -> bool {
+    if !s.presets.iter().any(|p| p.id == id) {
+        return false;
+    }
+    if let Some(show) = s.deck.slot(id).show {
+        if down {
+            press_show_cue(s, id, &show);
+        }
+        return true;
+    }
     let Some(settings) = cue_settings(s, id) else { return false };
     let first_new = s.deck.next_id();
     with_deck(s, |deck, at| {
@@ -846,7 +911,7 @@ mod tests {
         apply(&mut s, "cue.multi", ControlInput::Value(1.0), true).unwrap();
         apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
         apply(&mut s, "look.size", ControlInput::Value(0.77), true).unwrap();
-        s.deck.set_slot(&cue_at(&s, 0, 1), cues::CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None });
+        s.deck.set_slot(&cue_at(&s, 0, 1), cues::CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None, show: None });
         apply(&mut s, "grid.1.1.2", ControlInput::Norm(1.0), true).unwrap();
         assert_eq!(s.active_cue, Some(cue_at(&s, 0, 1)));
         assert_eq!(cues::looks(&s.deck, &s.settings, s.look_on).len(), 2);
@@ -1022,6 +1087,50 @@ mod tests {
         // Stopping it gives the layer-1 cue back as the primary.
         assert!(press_cue(&mut s, "test-evolving", None, true));
         assert_eq!(s.active_cue, Some(base));
+    }
+
+    fn tiny_show(name: &str, cue: &str) -> crate::timeline::Show {
+        use crate::timeline::{Event, EventSource, Show, Track};
+        let event = Event { id: 1, start: 0.0, len: 30.0, source: EventSource::Cue { id: cue.into() }, ..Default::default() };
+        Show { name: name.into(), tracks: vec![Track { events: vec![event], ..Default::default() }], ..Default::default() }
+    }
+
+    #[test]
+    fn timeline_transport_controls() {
+        let mut s = shared();
+        let play = |s: &mut Shared| apply(s, "timeline.play", ControlInput::Value(1.0), true);
+        assert_eq!(play(&mut s), Err(ControlError::Refused("aucun show chargé")));
+        let cue = cue_at(&s, 0, 0);
+        s.timeline.load(tiny_show("a", &cue));
+        play(&mut s).unwrap();
+        assert!(s.timeline.is_playing() && !s.look_on && !s.gate.is_armed());
+        assert_eq!(current(&s, s.controls.get("timeline.play").unwrap()), Some(serde_json::json!(true)));
+        apply(&mut s, "timeline.loop", ControlInput::Norm(1.0), true).unwrap();
+        assert!(s.timeline.loop_on);
+        apply(&mut s, "timeline.pause", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(current(&s, s.controls.get("timeline.pause").unwrap()), Some(serde_json::json!(true)));
+        apply(&mut s, "timeline.stop", ControlInput::Value(1.0), true).unwrap();
+        assert!(!s.timeline.is_playing());
+        // The master modifiers stay the operator's: the show doesn't touch them.
+        apply(&mut s, "master.size", ControlInput::Value(0.5), true).unwrap();
+        play(&mut s).unwrap();
+        assert_eq!(s.live.size, 0.5);
+    }
+
+    #[test]
+    fn a_grid_cell_can_hold_a_show() {
+        let mut s = shared();
+        let (cell, cue) = (cue_at(&s, 0, 2), cue_at(&s, 0, 0));
+        s.shows.save(&tiny_show("grid show", &cue)).unwrap();
+        s.deck.set_slot(&cell, cues::CueSlot { show: Some(" grid show ".into()), ..Default::default() });
+        assert_eq!(s.deck.slot(&cell).show.as_deref(), Some("grid show"));
+        apply(&mut s, "grid.1.1.3", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "grid.1.1.3", ControlInput::Value(0.0), true).unwrap();
+        assert!(s.timeline.is_playing(), "a press plays the show, the release is ignored");
+        assert!(s.deck.active.is_empty(), "the cell's own cue doesn't start");
+        assert_eq!(current(&s, s.controls.get("grid.1.1.3").unwrap()), Some(serde_json::json!(true)));
+        apply(&mut s, "grid.1.1.3", ControlInput::Value(1.0), true).unwrap();
+        assert!(!s.timeline.is_playing(), "second press stops it");
     }
 
     /// Keeps docs/controls.md in sync with the registry.

@@ -52,6 +52,10 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `tempo.nudge_down` | Retarder la phase | tempo | déclencheur | oui |
 | `tempo.double` | Tempo ×2 | tempo | déclencheur | oui |
 | `tempo.half` | Tempo ÷2 | tempo | déclencheur | oui |
+| `timeline.play` | Lecture de la timeline | timeline | déclencheur | oui |
+| `timeline.pause` | Pause de la timeline | timeline | déclencheur | oui |
+| `timeline.stop` | Arrêt de la timeline | timeline | déclencheur | oui |
+| `timeline.loop` | Boucle de la timeline | timeline | bascule | oui |
 | `page.next` | Page de cues suivante | page | déclencheur | oui |
 | `page.prev` | Page de cues précédente | page | déclencheur | oui |
 | `page.1` | Page Abstraits | page | déclencheur | oui |
