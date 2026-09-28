@@ -1,12 +1,12 @@
 ---
 id: T-101
 title: Limiteur de stroboscope et horizon appliqués à tous les looks
-status: todo
+status: review
 area: safety
 priority: P1
 depends_on: [T-100]
-owner: ""
-branch: ""
+owner: "dev-agent (strobe-limit)"
+branch: feat/strobe-limit
 source: docs/research/festival-looks.md#44-strobe-and-gating
 ---
 
@@ -28,10 +28,10 @@ Réglages dans `Settings` globaux (pas par look) : `strobe_max_hz`, `strobe_burs
 Section « Sécurité » : « Strobe max (Hz) » (lecture seule au-dessus de 4 sauf mode expert, hors périmètre ici), « Rafale max (s) », « Horizon des faisceaux ». Un voyant « Limiteur actif » s'allume quand il intervient.
 
 ## Critères d'acceptation
-- [ ] Un strobe à 8 Hz est coupé (sortie continue) après 5 s ± 0,1 s
-- [ ] Un strobe à 4 Hz n'est jamais limité
-- [ ] Aucun faisceau (`dots`) sous l'horizon dans `/api/frame`
-- [ ] L'arrêt d'urgence (Échap) et l'armement restent inchangés
+- [x] Un strobe à 8 Hz est coupé (sortie continue) après 5 s ± 0,1 s
+- [x] Un strobe à 4 Hz n'est jamais limité
+- [x] Aucun faisceau (`dots`) sous l'horizon dans `/api/frame`
+- [x] L'arrêt d'urgence (Échap) et l'armement restent inchangés
 
 ## Tests
 Unitaires : limiteur avec une suite d'images synthétiques (2, 4, 8, 17 Hz). Plancher : générateur de faisceaux à y négatif → aucun point allumé. e2e : cue strobe rapide, attendre 6 s, vérifier que `/api/frame` est stable.
@@ -42,3 +42,5 @@ Voir T-003 (zones et horizon définitifs). Seuil 4 Hz et rafales ≤ 5 s : prati
 Règles de CLAUDE.md (sécurité laser, propriété intellectuelle) : looks écrits par nous en maths, rien de copié depuis Pangolin/Laserworld. Tests uniquement en aperçu, jamais `--device`.
 
 ## Journal
+- 2026-09-28 — dev-agent (feat/strobe-limit) : `studio/src/safety.rs` (limiteur + horizon provisoire), branché dans `run_engine` après mix des calques / direct / calibration et juste avant la porte de sortie (demande de l'architecte ; la tâche disait « avant la calibration » — l'horizon est donc en coordonnées de sortie). Réglages globaux dans `safety.json` (`/api/safety`, resserrement seulement), section UI « Sécurité » avec voyant « Limiteur actif », `/api/frame.strobe`. 299 tests unitaires (+19 limiteur/horizon, +1 HTTP), clippy propre, e2e 71/71 (nouveau `safety.spec.ts`, 4 tests) ; `live.spec.ts:43` (Synchro tempo) a échoué 2 fois sur ~13 passes complètes sous charge, sans lien apparent. Note PR : docs/prs/strobe-limit.md. Statut → review.
+

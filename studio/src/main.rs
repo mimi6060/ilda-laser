@@ -23,6 +23,7 @@ mod midi;
 mod output;
 mod patterns;
 mod presets;
+mod safety;
 mod scenes;
 mod tempo;
 mod web;
@@ -132,6 +133,10 @@ pub struct Shared {
     pub mixer_dirty: bool,
     /// What the point budget did to the last frame.
     pub mix: layers::MixReport,
+    /// Strobe limiter and beam horizon settings (safety.rs, safety.json).
+    pub safety: safety::SafetyStore,
+    /// What the strobe limiter and horizon did on the last frame.
+    pub strobe: safety::StrobeStatus,
 }
 
 impl Shared {
@@ -242,6 +247,8 @@ fn main() -> Result<()> {
         },
         mixer_dirty: false,
         mix: layers::MixReport::default(),
+        safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
+        strobe: safety::StrobeStatus::default(),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -290,13 +297,14 @@ fn run_engine(
     let mut frames_since_save = 0u32;
     let mut last = Instant::now();
     let mut stage = OutputStage::new(output);
+    let mut limiter = safety::StrobeLimiter::default();
 
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (looks, starts, clock, mixer, calibration, audio, armed, live, user_palettes, estop) = {
+        let (looks, starts, clock, mixer, calibration, audio, armed, live, user_palettes, estop, t, safety_cfg) = {
             let mut s = shared.lock().unwrap();
             let shared_state = &mut *s;
             shared_state.gate.sync_estop(&shared_state.estop);
@@ -331,7 +339,7 @@ fn run_engine(
             let mixer = s.mixer.clone();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
-            (looks, starts, clock, mixer, s.calibration, audio, s.gate.is_armed(), live, s.palettes.list().to_vec(), Arc::clone(&s.estop))
+            (looks, starts, clock, mixer, s.calibration, audio, s.gate.is_armed(), live, s.palettes.list().to_vec(), Arc::clone(&s.estop), t, s.safety.get())
         };
 
         live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -357,6 +365,10 @@ fn run_engine(
                 Point { x, y, ..p }
             })
             .collect();
+        // Strobe limiter and beam horizon (T-101): on the finished,
+        // calibrated frame, so no layer, live move, LFO, gate or flash can
+        // get past it; the preview shows the limited frame too.
+        let frame = safety::apply(frame, t, &safety_cfg, &mut limiter);
 
         // Last stage: the gate. `armed` was read under the lock at the top
         // of the frame; the e-stop latch is re-read here, lock-free.
@@ -368,6 +380,7 @@ fn run_engine(
         s.output_lit = emitted.lit;
         s.frame = frame;
         s.mix = mix;
+        s.strobe = limiter.status();
         drop(s);
 
         std::thread::sleep(FRAME_INTERVAL.saturating_sub(now.elapsed()));
