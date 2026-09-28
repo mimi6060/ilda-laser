@@ -1,4 +1,4 @@
-// Audio input source (T-230), analysis settings (T-231) and onset settings (T-232), through the API only. The test studio runs
+// Audio input source (T-230), analysis settings (T-231), onset settings (T-232) and the tempo estimate (T-233), through the API only. The test studio runs
 // with --no-audio: no microphone or interface is ever opened, the native
 // capture reports « disabled », and the browser source (POST /api/audio)
 // keeps driving the looks as before.
@@ -30,6 +30,7 @@ test('--no-audio: no capture, no device, nothing fails', async () => {
   expect(a.level_db).toBeNull();
   expect(a.spectral).toBeNull();
   expect(a.onsets).toBeNull();
+  expect(a.tempo).toBeNull();
   // Default source is the browser: the studio never opens the Mac's mic by itself.
   expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: null, buffer_frames: 256, analysis: ANALYSIS });
 });
@@ -101,4 +102,14 @@ test('the onset settings are patched field by field, validated and kept across a
   expect((await audio()).onsets).toBeNull();
   expect(await studio.post('/api/audio/config', { analysis: ANALYSIS })).toBe(200);
   expect((await studio.get('/api/audio/config')).analysis).toEqual(ANALYSIS);
+});
+
+test('« Nouveau morceau » is accepted without a capture and changes nothing else', async () => {
+  const before = await studio.state();
+  expect(await studio.post('/api/audio/tempo/new_track', {})).toBe(200);
+  const after = await studio.state();
+  expect(after.audio.tempo).toBeNull();
+  // The detector only proposes: the tempo clock is untouched.
+  expect(after.tempo.bpm).toBe(before.tempo.bpm);
+  expect(after.tempo.source).toBe(before.tempo.source);
 });
