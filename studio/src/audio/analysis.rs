@@ -2,12 +2,14 @@
 //! on the analysis thread (never in the audio callback).
 //!
 //! It gives the dBFS meter (RMS and peak), the three features the engine
-//! already uses (`level`, `bass`, `beat`, T-230), computed the way the
-//! browser does it so a look reacts the same with either source, and the
-//! spectral frame (five bands with auto-gain, centroid, flatness, silence:
-//! `spectrum.rs`, T-231). T-232/T-237 move `bass` and `beat` onto the
-//! bands and real onsets.
+//! already uses (`level`, `bass`, `beat`; `level` and `bass` computed the
+//! way the browser does it, T-230), the spectral frame (five bands with
+//! auto-gain, centroid, flatness, silence: `spectrum.rs`, T-231) and the
+//! onsets (kick / snare / hat: `onsets.rs`, T-232). The legacy `beat` is
+//! the kick counter: it no longer fires on a bass line. T-237 moves `bass`
+//! onto the bands.
 
+use super::onsets::{OnsetDetector, Onsets};
 use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame};
 use crate::engine::AudioFeatures;
 
@@ -27,16 +29,6 @@ const BASS_HZ: f32 = 150.0;
 /// Bass level (dBFS) mapped to 0 and to 1.
 const BASS_FLOOR_DB: f32 = -60.0;
 const BASS_TOP_DB: f32 = -10.0;
-/// Browser beat rule: bass > 1.35 × its average (EMA 0.05 per 25 ms
-/// step), > 0.12, at most one beat per 200 ms.
-const BEAT_RATIO: f32 = 1.35;
-const BEAT_MIN: f32 = 0.12;
-const BEAT_REFRACTORY_S: f64 = 0.2;
-const BEAT_AVG_KEEP_PER_25MS: f32 = 0.95;
-/// Unlike the browser, a beat re-arms only once the bass has fallen back
-/// under this × its average: the slow decay of one kick is not a second
-/// beat.
-const BEAT_REARM_RATIO: f32 = 1.1;
 
 /// One hop's result.
 #[derive(Clone, Copy, Debug, Default)]
@@ -47,6 +39,7 @@ pub struct Meter {
     pub peak_db: f32,
     pub features: AudioFeatures,
     pub spectral: SpectralFrame,
+    pub onsets: Onsets,
 }
 
 /// A second-order low-pass (RBJ cookbook, Q = 1/√2), transposed direct
@@ -94,22 +87,19 @@ pub struct Analyzer {
     mean_sq: f32,
     bass_mean_sq: f32,
     peak_db: f32,
-    bass_avg: f32,
-    last_beat_t: f64,
-    beat_armed: bool,
-    beat: u64,
     spectral: SpectralAnalyzer,
+    onsets: OnsetDetector,
 }
 
 impl Analyzer {
-    /// `beat` continues an earlier counter (a reopened stream must not
-    /// look like a new beat to the engine).
     #[cfg(test)]
-    pub fn new(sample_rate: u32, beat: u64) -> Self {
-        Self::with_config(sample_rate, beat, AnalysisConfig::default())
+    pub fn new(sample_rate: u32) -> Self {
+        Self::with_config(sample_rate, Onsets::default(), AnalysisConfig::default())
     }
 
-    pub fn with_config(sample_rate: u32, beat: u64, config: AnalysisConfig) -> Self {
+    /// `carried` continues earlier onset counters (a reopened stream must
+    /// not look like a new beat to the engine).
+    pub fn with_config(sample_rate: u32, carried: Onsets, config: AnalysisConfig) -> Self {
         let rate = sample_rate.max(1) as f32;
         Self {
             hop_s: HOP as f32 / rate,
@@ -117,16 +107,14 @@ impl Analyzer {
             mean_sq: 0.0,
             bass_mean_sq: 0.0,
             peak_db: FLOOR_DB,
-            bass_avg: 0.0,
-            last_beat_t: f64::NEG_INFINITY,
-            beat_armed: true,
-            beat,
             spectral: SpectralAnalyzer::new(sample_rate, config),
+            onsets: OnsetDetector::new(sample_rate, carried, config.onsets),
         }
     }
 
     pub fn set_config(&mut self, config: AnalysisConfig) {
         self.spectral.set_config(config);
+        self.onsets.set_config(config.onsets);
     }
 
     /// One hop of mono samples ending at `t` (seconds, studio clock).
@@ -149,23 +137,15 @@ impl Analyzer {
 
         let level = (self.mean_sq.sqrt() * LEVEL_GAIN).min(1.0);
         let bass = ((to_db(self.bass_mean_sq) - BASS_FLOOR_DB) / (BASS_TOP_DB - BASS_FLOOR_DB)).clamp(0.0, 1.0);
-        let keep = BEAT_AVG_KEEP_PER_25MS.powf(dt / 0.025);
-        self.bass_avg = self.bass_avg * keep + bass * (1.0 - keep);
-        if bass < self.bass_avg * BEAT_REARM_RATIO {
-            self.beat_armed = true;
-        }
-        if self.beat_armed && bass > self.bass_avg * BEAT_RATIO && bass > BEAT_MIN && t - self.last_beat_t > BEAT_REFRACTORY_S {
-            self.beat += 1;
-            self.last_beat_t = t;
-            self.beat_armed = false;
-        }
         let rms_db = to_db(self.mean_sq);
         let spectral = self.spectral.process(hop, t, rms_db);
-        Meter { rms_db, peak_db: self.peak_db, features: AudioFeatures { level, bass, beat: self.beat }, spectral }
+        let onsets = self.onsets.process(self.spectral.power(), t, spectral.silent);
+        let features = AudioFeatures { level, bass, beat: onsets.kick };
+        Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets }
     }
 
-    pub fn beat(&self) -> u64 {
-        self.beat
+    pub fn onsets(&self) -> Onsets {
+        self.onsets.onsets()
     }
 }
 
@@ -198,19 +178,19 @@ mod tests {
 
     #[test]
     fn a_half_scale_sine_reads_minus_9_rms_and_minus_6_peak() {
-        let mut a = Analyzer::new(RATE, 0);
+        let mut a = Analyzer::new(RATE);
         let s = sine(1_000.0, 0.5, RATE, RATE as usize, 0);
         let m = *run(&mut a, 0.5, |i| s[i]).last().unwrap();
         assert!((m.rms_db - (-9.03)).abs() < 0.3, "{m:?}");
         assert!((m.peak_db - (-6.02)).abs() < 0.1, "{m:?}");
         assert!(m.features.level > 0.99, "0.35 RMS × 6 clips to 1");
-        let m = *run(&mut Analyzer::new(RATE, 0), 0.5, |i| s[i] * 0.1).last().unwrap();
+        let m = *run(&mut Analyzer::new(RATE), 0.5, |i| s[i] * 0.1).last().unwrap();
         assert!((m.features.level - 0.2121).abs() < 0.01, "0.035 RMS × 6: {m:?}");
     }
 
     #[test]
     fn silence_reads_the_floor() {
-        let mut a = Analyzer::new(RATE, 0);
+        let mut a = Analyzer::new(RATE);
         let m = *run(&mut a, 0.2, |_| 0.0).last().unwrap();
         assert_eq!(m.rms_db, FLOOR_DB);
         assert_eq!(m.peak_db, FLOOR_DB);
@@ -221,7 +201,7 @@ mod tests {
 
     #[test]
     fn the_peak_falls_back_at_20_db_per_second() {
-        let mut a = Analyzer::new(RATE, 0);
+        let mut a = Analyzer::new(RATE);
         run(&mut a, 0.05, |_| 1.0);
         let m = *run(&mut a, 0.5, |_| 0.0).last().unwrap();
         assert!((m.peak_db - (-10.0)).abs() < 0.3, "{m:?}");
@@ -229,10 +209,10 @@ mod tests {
 
     #[test]
     fn bass_follows_low_notes_not_high_ones() {
-        let mut low = Analyzer::new(RATE, 0);
+        let mut low = Analyzer::new(RATE);
         let s = sine(50.0, 0.3, RATE, RATE as usize, 0);
         let bass_low = run(&mut low, 0.5, |i| s[i]).last().unwrap().features.bass;
-        let mut high = Analyzer::new(RATE, 0);
+        let mut high = Analyzer::new(RATE);
         let s = sine(5_000.0, 0.3, RATE, RATE as usize, 0);
         let bass_high = run(&mut high, 0.5, |i| s[i]).last().unwrap().features.bass;
         assert!(bass_low > 0.8, "{bass_low}");
@@ -241,8 +221,10 @@ mod tests {
 
     #[test]
     fn kicks_at_120_bpm_count_beats_a_steady_tone_does_not() {
-        // 60 Hz bursts of 80 ms every 0.5 s, for 4 s: about 8 beats.
-        let mut a = Analyzer::new(RATE, 5);
+        // 60 Hz bursts of 80 ms every 0.5 s, for 4 s: 8 kicks, and the
+        // legacy beat is the kick counter (carried over from 5).
+        let carried = Onsets { kick: 5, ..Default::default() };
+        let mut a = Analyzer::with_config(RATE, carried, AnalysisConfig::default());
         let kick = |i: usize| {
             let t = i as f32 / RATE as f32;
             if t % 0.5 < 0.08 {
@@ -251,9 +233,9 @@ mod tests {
                 0.0
             }
         };
-        let beats = run(&mut a, 4.0, kick).last().unwrap().features.beat - 5;
-        assert!((7..=9).contains(&beats), "{beats} beats");
-        let mut steady = Analyzer::new(RATE, 0);
+        let m = *run(&mut a, 4.0, kick).last().unwrap();
+        assert_eq!((m.features.beat, m.onsets.kick), (13, 13), "{m:?}");
+        let mut steady = Analyzer::new(RATE);
         let s = sine(60.0, 0.5, RATE, 4 * RATE as usize, 0);
         let beats = run(&mut steady, 4.0, |i| s[i]).last().unwrap().features.beat;
         assert!(beats <= 1, "a held bass note is not a stream of beats: {beats}");
@@ -261,7 +243,7 @@ mod tests {
 
     #[test]
     fn non_finite_samples_are_ignored() {
-        let mut a = Analyzer::new(RATE, 0);
+        let mut a = Analyzer::new(RATE);
         let m = a.process(&[f32::NAN, f32::INFINITY, 0.0, 0.0], 0.1);
         assert!(m.rms_db.is_finite() && m.peak_db.is_finite() && m.features.level.is_finite());
         assert!(m.spectral.bands_db.iter().all(|d| d.is_finite()));
@@ -269,7 +251,7 @@ mod tests {
 
     #[test]
     fn each_hop_also_gives_the_spectral_frame() {
-        let mut a = Analyzer::new(RATE, 0);
+        let mut a = Analyzer::new(RATE);
         let s = sine(5_000.0, 0.3, RATE, RATE as usize, 0);
         let m = *run(&mut a, 0.5, |i| s[i]).last().unwrap();
         assert!(m.spectral.bands.high > 0.9, "{m:?}");

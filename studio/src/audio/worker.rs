@@ -14,6 +14,7 @@
 //! engine or the UI.
 
 use super::analysis::{Analyzer, HOP};
+use super::onsets::Onsets;
 use super::capture::{self, CaptureCounters, CpalSource, OpenError, OpenRequest, SampleSource};
 use super::{AudioHub, AudioInputSource, CaptureState, CaptureStatus, NativeSnapshot};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -208,22 +209,23 @@ pub struct Analysis {
     hub: Arc<AudioHub>,
     feeds: Receiver<Feed>,
     current: Option<Current>,
-    /// Beat counter, carried from one stream to the next (a reopened
-    /// stream must not look like a new beat to the engine).
-    beat: u64,
+    /// Onset counters (the legacy beat is the kick one), carried from one
+    /// stream to the next (a reopened stream must not look like a new beat
+    /// to the engine).
+    onsets: Onsets,
     buf: [f32; HOP],
 }
 
 impl Analysis {
     pub fn new(hub: Arc<AudioHub>, feeds: Receiver<Feed>) -> Self {
-        Self { hub, feeds, current: None, beat: 0, buf: [0.0; HOP] }
+        Self { hub, feeds, current: None, onsets: Onsets::default(), buf: [0.0; HOP] }
     }
 
     /// Reads every complete hop waiting in the ring and publishes the
     /// latest result. Returns the number of hops analysed.
     pub fn poll(&mut self) -> usize {
         while let Ok(feed) = self.feeds.try_recv() {
-            let analyzer = Analyzer::with_config(feed.sample_rate, self.beat, self.hub.analysis_config());
+            let analyzer = Analyzer::with_config(feed.sample_rate, self.onsets, self.hub.analysis_config());
             self.current = Some(Current { analyzer, feed, consumed: 0 });
         }
         let Some(cur) = self.current.as_mut() else { return 0 };
@@ -242,9 +244,9 @@ impl Analysis {
             last = Some((cur.analyzer.process(&self.buf, t), t));
             hops += 1;
         }
-        self.beat = cur.analyzer.beat();
+        self.onsets = cur.analyzer.onsets();
         if let Some((m, t)) = last {
-            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, t, at: Instant::now() });
+            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, t, at: Instant::now() });
         }
         if cur.feed.consumer.is_abandoned() && cur.feed.consumer.slots() < HOP {
             // The stream was closed and its ring is drained.
@@ -449,11 +451,13 @@ mod tests {
     fn the_beat_counter_survives_a_reopen() {
         let mut r = rig(&["Mic"], AudioConfig::native());
         r.run(50, 0.0);
-        r.analysis.beat = 41;
+        r.analysis.onsets = Onsets { onset: 50, kick: 41, snare: 20, hat: 90, ..Default::default() };
         r.hub.set_config(AudioConfig { buffer_frames: 512, ..AudioConfig::native() }).unwrap();
         r.run(100, 0.0);
         assert_eq!(r.fake.opens(), 2, "a config change reopens");
-        assert_eq!(r.hub.snapshot().unwrap().features.beat, 41);
+        let snap = r.hub.snapshot().unwrap();
+        assert_eq!(snap.features.beat, 41);
+        assert_eq!((snap.onsets.onset, snap.onsets.kick, snap.onsets.snare, snap.onsets.hat), (50, 41, 20, 90));
     }
 
     #[test]
