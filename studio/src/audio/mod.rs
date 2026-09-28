@@ -8,7 +8,8 @@
 //! - the **capture** thread (worker.rs): opens/closes the input, lists
 //!   devices, retries every 2 s after an unplug or a refusal;
 //! - the **analysis** thread (worker.rs): reads the ring by hops of 256
-//!   samples (analysis.rs, spectrum.rs: meter, bands, auto-gain, silence)
+//!   samples (analysis.rs, spectrum.rs, onsets.rs: meter, bands,
+//!   auto-gain, silence, onsets, kick / snare / hat)
 //!   and publishes a snapshot in `AudioHub`, which the 60 fps engine reads
 //!   at the top of each frame (a mutex held for a copy).
 //!
@@ -24,6 +25,7 @@ pub mod analysis;
 pub mod capture;
 pub mod decode;
 pub mod media;
+pub mod onsets;
 pub mod playback;
 pub mod spectrum;
 pub mod worker;
@@ -31,6 +33,7 @@ pub mod worker;
 use crate::engine::AudioFeatures;
 use anyhow::{Context, Result};
 use capture::{InputDevice, MAX_BUFFER_FRAMES, MIN_BUFFER_FRAMES};
+use onsets::Onsets;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spectrum::{AnalysisConfig, SpectralFrame};
@@ -136,19 +139,30 @@ impl AudioConfig {
             c.buffer_frames = v.as_u64().context("buffer_frames : entier")?.min(u32::MAX as u64) as u32;
         }
         if let Some(v) = obj.get("analysis") {
-            // Field by field too: `{"analysis": {"auto_gain": false}}`.
-            let fields = v.as_object().context("analysis : objet attendu")?;
+            // Field by field too: `{"analysis": {"auto_gain": false}}`,
+            // `{"analysis": {"onsets": {"delta": 0.2}}}`.
             let mut merged = serde_json::to_value(c.analysis)?;
-            for (k, v) in fields {
-                if merged.get(k).is_none() {
-                    anyhow::bail!("analysis : champ inconnu « {k} »");
-                }
-                merged[k] = v.clone();
-            }
-            c.analysis = serde_json::from_value(merged).context("analysis : auto_gain (booléen), manual_gain_db, silence_db (nombres)")?;
+            merge_fields(&mut merged, v, "analysis")?;
+            c.analysis = serde_json::from_value(merged)
+                .context("analysis : auto_gain (booléen), manual_gain_db, silence_db (nombres), onsets { delta, lookahead_hops (0..2), kick_refractory_ms }")?;
         }
         Ok(c.sanitized())
     }
+}
+
+/// Copies the fields of `patch` into `into`, recursing into objects; an
+/// unknown field is an error (a typo must not be silently ignored).
+fn merge_fields(into: &mut Value, patch: &Value, path: &str) -> Result<()> {
+    let fields = patch.as_object().with_context(|| format!("{path} : objet attendu"))?;
+    for (k, v) in fields {
+        let Some(slot) = into.get_mut(k) else { anyhow::bail!("{path} : champ inconnu « {k} »") };
+        if slot.is_object() {
+            merge_fields(slot, v, &format!("{path}.{k}"))?;
+        } else {
+            *slot = v.clone();
+        }
+    }
+    Ok(())
 }
 
 /// Stream figures for the meter and the status line.
@@ -198,6 +212,8 @@ pub struct NativeSnapshot {
     pub peak_db: f32,
     /// Bands, centroid, flatness, silence of the last hop.
     pub spectral: SpectralFrame,
+    /// Onset / kick / snare / hat counters, strengths and times (T-232).
+    pub onsets: Onsets,
     /// Audio time of the end of the last hop, seconds since the studio
     /// epoch (the tempo clock's time base).
     pub t: f64,
@@ -380,6 +396,9 @@ impl AudioHub {
             // Bands (0..1 and dBFS), centroid, flatness, silence (T-231);
             // null when nothing fresh is captured.
             "spectral": native.map(|n| n.spectral),
+            // Onset / kick / snare / hat counters, 0..1 strengths, audio
+            // times (T-232); null when nothing fresh is captured.
+            "onsets": native.map(|n| n.onsets),
             "stats": stats,
             "level": features.level,
             "bass": features.bass,
@@ -397,7 +416,8 @@ mod tests {
     }
 
     fn snap(level: f32, beat: u64, at: Instant) -> NativeSnapshot {
-        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), t: 1.0, at }
+        let onsets = Onsets { kick: beat, onset: beat + 2, ..Default::default() };
+        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, t: 1.0, at }
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {
@@ -442,10 +462,18 @@ mod tests {
         let c = base.patched(&json!({ "analysis": { "auto_gain": false } })).unwrap();
         assert_eq!(c.analysis, AnalysisConfig { auto_gain: false, ..Default::default() });
         let c = c.patched(&json!({ "analysis": { "manual_gain_db": 99, "silence_db": -50 } })).unwrap();
-        assert_eq!(c.analysis, AnalysisConfig { auto_gain: false, manual_gain_db: 40.0, silence_db: -50.0 });
+        assert_eq!(c.analysis, AnalysisConfig { auto_gain: false, manual_gain_db: 40.0, silence_db: -50.0, ..Default::default() });
         assert!(base.patched(&json!({ "analysis": { "auto_gain": "oui" } })).is_err());
         assert!(base.patched(&json!({ "analysis": { "gain": 3 } })).is_err());
         assert!(base.patched(&json!({ "analysis": 3 })).is_err());
+        // The onset settings, field by field one level down.
+        let c = base.patched(&json!({ "analysis": { "onsets": { "delta": 0.3 } } })).unwrap();
+        assert_eq!(c.analysis.onsets, onsets::OnsetConfig { delta: 0.3, ..Default::default() });
+        let c = c.patched(&json!({ "analysis": { "onsets": { "lookahead_hops": 7, "kick_refractory_ms": 150 } } })).unwrap();
+        assert_eq!(c.analysis.onsets, onsets::OnsetConfig { delta: 0.3, lookahead_hops: 2, kick_refractory_ms: 150.0 });
+        assert!(base.patched(&json!({ "analysis": { "onsets": { "sensitivity": 1 } } })).is_err());
+        assert!(base.patched(&json!({ "analysis": { "onsets": 3 } })).is_err());
+        assert!(base.patched(&json!({ "analysis": { "onsets": { "delta": "x" } } })).is_err());
         // Old audio.json files without it load with the defaults.
         let c: AudioConfig = serde_json::from_str(r#"{"source":"native","analysis":{"silence_db":-70}}"#).unwrap();
         assert_eq!(c.analysis, AnalysisConfig { silence_db: -70.0, ..Default::default() });
@@ -521,6 +549,7 @@ mod tests {
         let v = hub.view(AudioFeatures::default(), now - Duration::from_secs(5), now);
         assert_eq!(v["level_db"], Value::Null);
         assert_eq!(v["spectral"], Value::Null);
+        assert_eq!(v["onsets"], Value::Null);
         assert_eq!(v["source"], "native");
         assert_eq!(v["active"], "none");
         assert_eq!(v["stats"]["rms_db"], analysis::FLOOR_DB as f64);
@@ -531,6 +560,8 @@ mod tests {
         assert_eq!(v["spectral"]["bands"]["low_mid"], 0.0);
         assert_eq!(v["spectral"]["bands_db"].as_array().unwrap().len(), 5);
         assert_eq!(v["spectral"]["silent"], true);
+        assert_eq!((v["onsets"]["kick"].as_u64(), v["onsets"]["onset"].as_u64()), (Some(9), Some(11)));
+        assert_eq!(v["beat"], 9, "the legacy beat is the kick counter");
         set_source(&hub, AudioInputSource::Browser);
         assert_eq!(hub.view(AudioFeatures::default(), now, now)["spectral"], Value::Null, "native only");
         let off = AudioHub::in_memory(false);

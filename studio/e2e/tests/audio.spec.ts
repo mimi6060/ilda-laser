@@ -1,4 +1,4 @@
-// Audio input source (T-230) and analysis settings (T-231), through the API only. The test studio runs
+// Audio input source (T-230), analysis settings (T-231) and onset settings (T-232), through the API only. The test studio runs
 // with --no-audio: no microphone or interface is ever opened, the native
 // capture reports « disabled », and the browser source (POST /api/audio)
 // keeps driving the looks as before.
@@ -7,7 +7,8 @@ import { test, expect, useStudio, extent } from '../studio';
 const studio = useStudio();
 const audio = async () => (await studio.state()).audio;
 const setSource = (source: string) => studio.post('/api/audio/config', { source });
-const ANALYSIS = { auto_gain: true, manual_gain_db: 0, silence_db: -60 };
+const ONSETS = { delta: 0.1, lookahead_hops: 1, kick_refractory_ms: 100 };
+const ANALYSIS = { auto_gain: true, manual_gain_db: 0, silence_db: -60, onsets: ONSETS };
 
 /** Posts browser features until the frame has picked them up (they go stale after 500 ms). */
 async function extentWith(bass: number) {
@@ -28,6 +29,7 @@ test('--no-audio: no capture, no device, nothing fails', async () => {
   expect(a.state).toBe('disabled');
   expect(a.level_db).toBeNull();
   expect(a.spectral).toBeNull();
+  expect(a.onsets).toBeNull();
   // Default source is the browser: the studio never opens the Mac's mic by itself.
   expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: null, buffer_frames: 256, analysis: ANALYSIS });
 });
@@ -75,7 +77,7 @@ test('the band analysis settings are patched field by field and kept across a re
   expect(await studio.post('/api/audio/config', { analysis: { auto_gain: 'oui' } })).toBe(400);
   expect(await studio.post('/api/audio/config', { analysis: { gain: 3 } })).toBe(400);
   expect(await studio.post('/api/audio/config', { analysis: { auto_gain: false, manual_gain_db: 99 } })).toBe(200);
-  const kept = { auto_gain: false, manual_gain_db: 40, silence_db: -60 };
+  const kept = { auto_gain: false, manual_gain_db: 40, silence_db: -60, onsets: ONSETS };
   expect((await studio.get('/api/audio/config')).analysis).toEqual(kept);
   expect(await studio.post('/api/audio/config', { analysis: { silence_db: -45 } })).toBe(200);
   await studio.restart();
@@ -83,4 +85,20 @@ test('the band analysis settings are patched field by field and kept across a re
   expect(c.analysis).toEqual({ ...kept, silence_db: -45 });
   expect(c.source).toBe('browser');
   expect(await studio.post('/api/audio/config', { analysis: ANALYSIS })).toBe(200);
+});
+
+test('the onset settings are patched field by field, validated and kept across a restart', async () => {
+  expect(await studio.post('/api/audio/config', { analysis: { onsets: { sensitivity: 1 } } })).toBe(400);
+  expect(await studio.post('/api/audio/config', { analysis: { onsets: 3 } })).toBe(400);
+  expect(await studio.post('/api/audio/config', { analysis: { onsets: { delta: 'x' } } })).toBe(400);
+  expect(await studio.post('/api/audio/config', { analysis: { onsets: { delta: 0.25 } } })).toBe(200);
+  expect(await studio.post('/api/audio/config', { analysis: { onsets: { lookahead_hops: 9, kick_refractory_ms: 5 } } })).toBe(200);
+  const kept = { delta: 0.25, lookahead_hops: 2, kick_refractory_ms: 30 };
+  expect((await studio.get('/api/audio/config')).analysis.onsets).toEqual(kept);
+  await studio.restart();
+  const c = await studio.get('/api/audio/config');
+  expect(c.analysis).toEqual({ ...ANALYSIS, onsets: kept });
+  expect((await audio()).onsets).toBeNull();
+  expect(await studio.post('/api/audio/config', { analysis: ANALYSIS })).toBe(200);
+  expect((await studio.get('/api/audio/config')).analysis).toEqual(ANALYSIS);
 });

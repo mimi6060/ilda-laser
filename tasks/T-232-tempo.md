@@ -1,7 +1,7 @@
 ---
 id: T-232
 title: Fonction d'onsets (flux spectral) et détection kick / caisse claire / charleston
-status: in-progress
+status: review
 area: tempo
 priority: P1
 depends_on: [T-231]
@@ -31,10 +31,10 @@ pub struct Onsets { pub onset: u64, pub kick: u64, pub snare: u64, pub hat: u64,
 Trois voyants *Kick*, *Caisse*, *Charleston* à côté des vumètres ; réglage *Sensibilité* (δ).
 
 ## Critères d'acceptation
-- [ ] Motif synthétique 4 temps kick + caisse sur 2 et 4 + charleston en croches à 128 BPM : F-mesure kick ≥ 0,95, caisse ≥ 0,85, charleston ≥ 0,8 (fenêtre ±50 ms)
-- [ ] Une ligne de basse tenue sans kick ne produit pas de `kick`
-- [ ] Latence entre la transitoire et l'événement ≤ 25 ms (mesurée en échantillons)
-- [ ] `beat` hérité reste alimenté (= `kick` quand la source est native) pour la compatibilité
+- [x] Motif synthétique 4 temps kick + caisse sur 2 et 4 + charleston en croches à 128 BPM : F-mesure kick ≥ 0,95, caisse ≥ 0,85, charleston ≥ 0,8 (fenêtre ±50 ms)
+- [x] Une ligne de basse tenue sans kick ne produit pas de `kick`
+- [x] Latence entre la transitoire et l'événement ≤ 25 ms (mesurée en échantillons)
+- [x] `beat` hérité reste alimenté (= `kick` quand la source est native) pour la compatibilité
 
 ## Tests
 Unitaires avec générateurs de kick (sinus glissant 150→50 Hz), caisse (bruit + 200 Hz), charleston (bruit passe-haut), ligne de basse. Métriques du banc T-244 quand il existe.
@@ -44,3 +44,4 @@ Pas de modèle appris pré-entraîné de licence douteuse ; un petit classifieur
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/audio-analysis.md`.
+- 2026-09-28 — dev-agent (audio-onsets), branche `feat/audio-onsets` : `studio/src/audio/onsets.rs` (SuperFlux global + 3 bandes, ODF 8 s gardée pour T-233, sélection de pics causale avec anticipation 0–2 sauts, règles kick / caisse / charleston), compteurs `onset/kick/snare/hat` + forces + horodatages publiés dans `NativeSnapshot.onsets` et `/api/state.audio.onsets` ; `beat` hérité = compteur `kick` en source native ; réglages `analysis.onsets { delta, lookahead_hops, kick_refractory_ms }` (patch champ par champ). Motif 128 BPM : F kick 0,97–1,0, caisse 0,97–1,0, charleston 0,86 ; latence ≤ 25 ms (moyenne ≈ 14 ms) ; aucune allocation par saut ; 0,13 % d'un cœur. `cargo test` 557 OK, clippy propre, e2e 145/145. Interface (voyants, *Sensibilité*) laissée à T-243. Note : `docs/prs/audio-onsets.md`. Statut → review.
