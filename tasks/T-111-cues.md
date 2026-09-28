@@ -1,12 +1,12 @@
 ---
 id: T-111
 title: Moteur de cues évolutifs (images clés en temps)
-status: todo
+status: in-progress
 area: cues
 priority: P1
 depends_on: [T-100]
-owner: ""
-branch: ""
+owner: "dev-agent (evolving)"
+branch: feat/evolving
 source: docs/research/festival-looks.md#5-twelve-pre-made-evolving-cues
 ---
 
