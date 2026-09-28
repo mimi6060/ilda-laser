@@ -1,12 +1,12 @@
 ---
 id: T-105
 title: Tunnels, cônes, soleil et rayons tournants
-status: todo
+status: in-progress
 area: cues
 priority: P1
 depends_on: [T-100]
-owner: ""
-branch: ""
+owner: "dev-agent (tunnel-gens)"
+branch: feat/tunnel-gens
 source: docs/research/festival-looks.md#b-tunnels-and-cones
 ---
 

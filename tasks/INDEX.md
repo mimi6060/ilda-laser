@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (107)
+## En cours (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-105](T-105-cues.md) | Tunnels, cônes, soleil et rayons tournants | cues | P1 | [T-100] | feat/tunnel-gens |
+
+## À faire (106)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -13,7 +19,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
 | [T-002](T-002-output.md) | Optimiseur de points (tracé laser pro) | output | P1 | [] |  |
 | [T-103](T-103-cues.md) | Chasers, coups sur le kick et strobes de faisceaux | cues | P1 | [T-100, T-101] |  |
-| [T-105](T-105-cues.md) | Tunnels, cônes, soleil et rayons tournants | cues | P1 | [T-100] |  |
 | [T-106](T-106-cues.md) | Nappes : liquid sky, lame, rideaux, cascade, scanner, lamelles, aurore, grille | cues | P1 | [T-100] |  |
 | [T-110](T-110-cues.md) | Page de cues « Festival » | cues | P1 | [T-102, T-103, T-104, T-105, T-106, T-107, T-130] |  |
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
