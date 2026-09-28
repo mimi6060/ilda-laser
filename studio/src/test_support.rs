@@ -16,6 +16,7 @@ pub fn shared() -> Shared {
         calibration: Calibration::default(),
         audio: AudioFeatures::default(),
         audio_at: Instant::now(),
+        audio_in: std::sync::Arc::new(crate::audio::AudioHub::in_memory(false)),
         gate: Default::default(),
         estop: Default::default(),
         frame: Vec::new(),
