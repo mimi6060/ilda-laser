@@ -56,6 +56,7 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `timeline.play` | Lecture de la timeline | timeline | déclencheur | oui |
 | `timeline.pause` | Pause de la timeline | timeline | déclencheur | oui |
 | `timeline.stop` | Arrêt de la timeline | timeline | déclencheur | oui |
+| `timeline.toggle` | Lecture / pause de la timeline | timeline | déclencheur | oui |
 | `timeline.loop` | Boucle de la timeline | timeline | bascule | oui |
 | `page.next` | Page de cues suivante | page | déclencheur | oui |
 | `page.prev` | Page de cues précédente | page | déclencheur | oui |

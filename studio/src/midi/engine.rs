@@ -86,7 +86,7 @@ pub fn handle_batch(s: &mut Shared, events: &[MidiEvent]) {
                 shift.remove(&ev.port);
             }
         } else if m.pressed == Some(true) {
-            let target = find(profile, &m, shift.contains(&ev.port)).map(|mp| mp.target.as_str());
+            let target = find(s, profile, &m, shift.contains(&ev.port)).map(|mp| mp.target.as_str());
             blackout |= target.and_then(|t| s.controls.get(t)).is_some_and(|d| d.id == BLACKOUT);
         }
     }
@@ -151,9 +151,13 @@ fn is_shift_key(p: &Profile, m: &Incoming) -> bool {
     p.shift_key.as_ref().is_some_and(|k| k.matches(m))
 }
 
-/// Shift held: Shift mappings first, then the normal ones.
-fn find<'a>(p: &'a Profile, m: &Incoming, shift: bool) -> Option<&'a Mapping> {
-    let layer = |sh: bool| p.mappings.iter().find(|mp| mp.shift == sh && mp.input.matches(m));
+/// Shift held: Shift mappings first, then the normal ones. While arming
+/// from MIDI is off, mappings to the arm control are skipped, so Shift +
+/// Stop All (the default profiles' arm gesture) stays a blackout.
+fn find<'a>(s: &Shared, p: &'a Profile, m: &Incoming, shift: bool) -> Option<&'a Mapping> {
+    let arm_off = !s.midi.store.devices.safety.allow_arm;
+    let usable = |mp: &Mapping| !(arm_off && s.controls.get(&mp.target).is_some_and(|d| d.id == ARM));
+    let layer = |sh: bool| p.mappings.iter().find(|mp| mp.shift == sh && mp.input.matches(m) && usable(mp));
     if shift {
         layer(true).or_else(|| layer(false))
     } else {
@@ -173,7 +177,7 @@ fn handle_event(s: &mut Shared, ev: &MidiEvent) {
         return;
     }
     let shift = s.midi.map.shift.contains(&ev.port);
-    let Some(mp) = find(profile, &m, shift).cloned() else {
+    let Some(mp) = find(s, profile, &m, shift).cloned() else {
         release(s, &(ev.port.clone(), m.kind, m.channel, m.number), &m);
         return;
     };
@@ -787,12 +791,20 @@ mod tests {
         send_msgs(&mut s, &[on(0x20), MidiMsg::Cc { channel: 0, number: 0x0E, value: 90 }, on(STOP_ALL)]);
         assert_eq!(s.midi.map.applied.first().map(String::as_str), Some(BLACKOUT), "{:?}", s.midi.map.applied);
         assert!(!s.gate.is_armed());
-        // A Shift press earlier in the same batch turns Stop All into the
-        // arm button: no blackout then (and no arming either).
+        // Arming from MIDI off (the default): Shift + Stop All has nothing
+        // to arm, so it stays the blackout.
         let mut s = setup(apc_like(), Instant::now());
         s.request_arm(crate::interlock::ArmSource::Ui).unwrap();
         send_msgs(&mut s, &[on(SHIFT), on(STOP_ALL)]);
-        assert!(s.gate.is_armed(), "Shift + Stop All is not a blackout");
+        assert!(!s.gate.is_armed(), "Shift + Stop All is a blackout while arming is off");
+        assert_eq!(s.midi.map.applied.first().map(String::as_str), Some(BLACKOUT));
+        // Opted in: a Shift press earlier in the same batch turns Stop All
+        // into the arm button: no blackout then (and no arming yet).
+        let mut s = setup(apc_like(), Instant::now());
+        s.midi.store.devices.safety.allow_arm = true;
+        s.request_arm(crate::interlock::ArmSource::Ui).unwrap();
+        send_msgs(&mut s, &[on(SHIFT), on(STOP_ALL)]);
+        assert!(s.gate.is_armed(), "Shift + Stop All is the arm gesture once opted in");
         assert!(!s.midi.map.applied.iter().any(|id| id == BLACKOUT || id == ARM));
     }
 
@@ -945,6 +957,196 @@ mod tests {
             for mp in &store.get(&info.slug).unwrap().mappings {
                 assert!(mp.mode != MapMode::Absolute || mp.pickup, "{}: {} without pickup", info.slug, mp.target);
             }
+        }
+    }
+
+    // --- T-204: the built-in APC40 / APC40 mkII layouts ---
+
+    const APC_PROFILES: [&str; 2] = ["apc40-mk2", "apc40"];
+
+    /// A connected device on `PORT` using a built-in profile, plugged in
+    /// long ago (past the plug guard).
+    fn builtin(slug: &str) -> Shared {
+        let mut s = shared();
+        let d = s.midi.device_mut(PORT);
+        d.profile = slug.into();
+        d.connected = true;
+        d.connected_at = Some(Instant::now() - Duration::from_secs(10));
+        s
+    }
+
+    fn channels_overlap(a: Option<u8>, b: Option<u8>) -> bool {
+        a.is_none() || b.is_none() || a == b
+    }
+
+    #[test]
+    fn builtin_apc_profiles_only_use_registered_controls() {
+        let s = shared();
+        for slug in APC_PROFILES {
+            let p = s.midi.store.get(slug).unwrap();
+            assert_eq!(p.host_mode, 0x41, "{slug}");
+            assert_eq!(p.shift_key, Some(MidiInput { kind: InputKind::Note, channel: None, number: 0x62 }), "{slug}");
+            let mut slots = Vec::new();
+            for mp in &p.mappings {
+                if mp.mode == MapMode::Grid {
+                    slots.push(grid_cell(0, &mp.args).unwrap_or_else(|| panic!("{slug}: bad grid args {}", mp.args)));
+                    continue;
+                }
+                let d = s.controls.get(&mp.target).unwrap_or_else(|| panic!("{slug}: unknown control « {} »", mp.target));
+                assert_eq!(d.id, mp.target, "{slug}: use the canonical id, not an alias");
+                // The one non-external target is the opt-in arm gesture: Shift only.
+                assert!(d.external || (d.id == ARM && mp.shift), "{slug}: « {} » can't be driven from a controller", mp.target);
+                if let (Some(lo), Some(hi), ControlKind::Continuous { min, max, .. }) = (mp.min, mp.max, &d.kind) {
+                    assert!(lo >= *min && hi <= *max && lo < hi, "{slug}: {} range {lo}..{hi}", mp.target);
+                }
+                if mp.mode == MapMode::Relative {
+                    let declared = p.extra["encoders"].as_array().unwrap().iter().any(|e| e["number"] == mp.input.number);
+                    assert!(declared && mp.input.kind == InputKind::Cc, "{slug}: {} on an undeclared encoder", mp.target);
+                }
+            }
+            slots.sort();
+            slots.dedup();
+            assert_eq!(slots.len(), GRID_ROWS * GRID_COLS, "{slug}: every pad has its own slot");
+            // No two mappings can answer the same message in the same layer.
+            for (i, a) in p.mappings.iter().enumerate() {
+                for b in &p.mappings[i + 1..] {
+                    let same = a.shift == b.shift && a.input.kind == b.input.kind && a.input.number == b.input.number && channels_overlap(a.input.channel, b.input.channel);
+                    assert!(!same, "{slug}: {:?} (shift {}) mapped twice: {} / {}", a.input, a.shift, a.target, b.target);
+                }
+            }
+            // Nothing but Shift + Stop All targets arming.
+            let arm: Vec<_> = p.mappings.iter().filter(|mp| mp.target == ARM).collect();
+            assert!(arm.len() == 1 && arm[0].shift && arm[0].input.number == STOP_ALL, "{slug}");
+        }
+    }
+
+    /// Slot of the grid pad that answers `msg` in `slug`.
+    fn slot_of(s: &Shared, slug: &str, msg: MidiMsg) -> Option<u64> {
+        let m = Incoming::from_msg(&msg)?;
+        let p = s.midi.store.get(slug)?;
+        let mut hits = p.mappings.iter().filter(|mp| mp.mode == MapMode::Grid && !mp.shift && mp.input.matches(&m));
+        let slot = hits.next()?.args["slot"].as_u64();
+        assert!(hits.next().is_none());
+        slot
+    }
+
+    #[test]
+    fn grid_notes_map_to_slots_from_the_top_left_on_both_models() {
+        let s = shared();
+        // (row from the top, column) → slot: the 4 corners and the centre.
+        for (r, c) in [(0u8, 0u8), (0, 7), (4, 0), (4, 7), (2, 3), (2, 4)] {
+            let slot = Some((r * 8 + c) as u64);
+            // mkII: bottom row = notes 0–7, any channel.
+            for ch in [0, 5] {
+                assert_eq!(slot_of(&s, "apc40-mk2", MidiMsg::NoteOn { channel: ch, note: 0x20 + c - 8 * r, velocity: 127 }), slot, "mkII ({r},{c})");
+            }
+            // APC40: note 0x35 + row, channel = column.
+            assert_eq!(slot_of(&s, "apc40", MidiMsg::NoteOn { channel: c, note: 0x35 + r, velocity: 127 }), slot, "APC40 ({r},{c})");
+        }
+        assert_eq!(slot_of(&s, "apc40-mk2", on(0x27)), Some(7), "top right");
+        assert_eq!(slot_of(&s, "apc40-mk2", on(0x07)), Some(39), "bottom right");
+        assert_eq!(slot_of(&s, "apc40", MidiMsg::NoteOn { channel: 7, note: 0x39, velocity: 127 }), Some(39));
+        assert_eq!(slot_of(&s, "apc40", on(0x28)), None, "mkII notes above the grid aren't pads on the APC40");
+    }
+
+    fn pad_msg(slug: &str, r: u8, c: u8) -> MidiMsg {
+        if slug == "apc40" {
+            MidiMsg::NoteOn { channel: c, note: 0x35 + r, velocity: 127 }
+        } else {
+            on(0x20 + c - 8 * r)
+        }
+    }
+
+    /// Press and release a pad.
+    fn tap_pad(s: &mut Shared, slug: &str, r: u8, c: u8) {
+        let MidiMsg::NoteOn { channel, note, .. } = pad_msg(slug, r, c) else { unreachable!() };
+        send_msgs(s, &[pad_msg(slug, r, c), MidiMsg::NoteOff { channel, note }]);
+    }
+
+    #[test]
+    fn default_layout_plays_pads_changes_pages_and_blacks_out() {
+        for slug in APC_PROFILES {
+            let mut s = builtin(slug);
+            tap_pad(&mut s, slug, 0, 0);
+            assert!(s.midi.map.applied.contains(&"grid.1.1.1".to_string()), "{slug}: top-left = 1st cue");
+            assert_eq!(s.midi.map.applied.first().map(String::as_str), Some("grid.1.1.1"), "{slug}: top-left = 1st cue");
+            tap_pad(&mut s, slug, 4, 7);
+            assert_eq!(s.midi.map.applied.last().map(String::as_str), Some("grid.1.5.8"), "{slug}: bottom-right = 40th cue");
+
+            send_msgs(&mut s, &[on(0x54), off(0x54)]);
+            assert_eq!(s.cue_page, 2, "{slug}: scene launch 3 = page 3");
+            send_msgs(&mut s, &[on(SHIFT), on(0x53), off(0x53), off(SHIFT)]);
+            assert_eq!(s.cue_page, 6, "{slug}: Shift + scene launch 2 = page 7");
+            send_msgs(&mut s, &[on(0x5F), off(0x5F)]);
+            assert_eq!(s.cue_page, 7, "{slug}: Down = next page");
+            tap_pad(&mut s, slug, 0, 0);
+            assert_eq!(s.midi.map.applied.last().map(String::as_str), Some("grid.8.1.1"), "{slug}: the grid follows the page");
+
+            s.request_arm(crate::interlock::ArmSource::Ui).unwrap();
+            send_msgs(&mut s, &[on(STOP_ALL)]);
+            assert!(!s.gate.is_armed() && s.estop.is_latched(), "{slug}: Stop All = blackout, e-stop latched");
+
+            // Shift + Stop All held long enough: still nothing while the
+            // option is off, and it's a blackout too.
+            let mut s = builtin(slug);
+            s.request_arm(crate::interlock::ArmSource::Ui).unwrap();
+            let t = Instant::now();
+            batch_at(&mut s, &[on(SHIFT), on(STOP_ALL)], t);
+            frame(&mut s, t + Duration::from_secs(3));
+            assert!(!s.gate.is_armed() && s.estop.is_latched(), "{slug}: Shift + Stop All is a blackout by default");
+        }
+    }
+
+    #[test]
+    fn default_layout_arms_only_with_the_opt_in_gesture() {
+        for slug in APC_PROFILES {
+            let mut s = builtin(slug);
+            s.midi.store.devices.safety.allow_arm = true;
+            let t = Instant::now();
+            batch_at(&mut s, &[on(SHIFT), on(STOP_ALL)], t);
+            frame(&mut s, t + Duration::from_millis(1100));
+            assert!(s.gate.is_armed(), "{slug}: opted in, Shift + Stop All held 1 s arms (preview)");
+            batch_at(&mut s, &[off(STOP_ALL), off(SHIFT), on(STOP_ALL)], t + Duration::from_secs(2));
+            assert!(!s.gate.is_armed(), "{slug}: Stop All alone is still the blackout");
+        }
+    }
+
+    #[test]
+    fn default_layout_faders_knobs_and_tempo() {
+        for slug in APC_PROFILES {
+            let mut s = builtin(slug);
+            // Master fader: pickup (brightness 100 %, fader reported/assumed low).
+            send_msgs(&mut s, &[cc_msg(0x0E, 20)]);
+            tick(&mut s);
+            assert_eq!(s.live.brightness, 1.0, "{slug}: no jump");
+            send_msgs(&mut s, &[cc_msg(0x0E, 127), cc_msg(0x0E, 64)]);
+            tick(&mut s);
+            assert!((s.live.brightness - 64.0 / 127.0).abs() < 1e-5, "{slug}: caught at the top, then follows");
+            // Track fader 1 = master size (default 1.0 = middle).
+            send_msgs(&mut s, &[cc_msg(0x07, 64), cc_msg(0x07, 127)]);
+            tick(&mut s);
+            assert_eq!(s.live.size, 2.0, "{slug}");
+            // Shift + track fader 2 = layer 2 dimmer (default 100 %).
+            send_msgs(&mut s, &[on(SHIFT), MidiMsg::Cc { channel: 1, number: 0x07, value: 127 }, MidiMsg::Cc { channel: 1, number: 0x07, value: 0 }, off(SHIFT)]);
+            tick(&mut s);
+            assert_eq!(s.mixer.layer(2).dimmer, 0.0, "{slug}");
+            assert_eq!(s.live.size_x, 1.0, "{slug}: fader 2 without Shift not touched");
+            // Activator 3 mutes layer 3, Solo 1 solos layer 1.
+            send_msgs(&mut s, &[MidiMsg::NoteOn { channel: 2, note: 0x32, velocity: 127 }, MidiMsg::NoteOn { channel: 0, note: 0x31, velocity: 127 }]);
+            assert!(s.mixer.layer(3).mute && s.mixer.layer(1).solo, "{slug}");
+            // Nudge: + advances the phase on both (the notes are swapped).
+            let plus = if slug == "apc40" { 0x64 } else { 0x65 };
+            send_msgs(&mut s, &[on(plus), off(plus)]);
+            assert_eq!(s.midi.map.applied.last().map(String::as_str), Some("tempo.nudge_up"), "{slug}");
+            // BPM encoder: mkII tempo knob, APC40 Shift + Cue Level.
+            let bpm = s.tempo.bpm;
+            let knob = if slug == "apc40" { vec![on(SHIFT), cc_msg(0x2F, 2), off(SHIFT)] } else { vec![cc_msg(0x0D, 2)] };
+            send_msgs(&mut s, &knob);
+            tick(&mut s);
+            assert!((s.tempo.bpm - (bpm + 1.0)).abs() < 1e-6, "{slug}: 2 steps of 0.5 BPM ({} → {})", bpm, s.tempo.bpm);
+            // Tap and the footswitch both tap.
+            send_msgs(&mut s, &[on(0x63), off(0x63), cc_msg(0x40, 127), cc_msg(0x40, 0)]);
+            assert_eq!(s.midi.map.applied.iter().filter(|id| *id == "tempo.tap").count(), 2, "{slug}");
         }
     }
 }
