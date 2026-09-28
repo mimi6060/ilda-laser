@@ -1,12 +1,12 @@
 ---
 id: T-102
 title: Générateurs éventails : fan, balayage, levée, ouverture, vague, positions
-status: todo
+status: review
 area: cues
 priority: P1
 depends_on: [T-100]
-owner: ""
-branch: ""
+owner: "dev-agent (fan-gens)"
+branch: feat/fan-gens
 source: docs/research/festival-looks.md#a-beam-fans-the-backbone
 ---
 
@@ -29,11 +29,11 @@ Paramètres de départ (rapport section 4) : N 6–16, w 0.5–0.8, période 2/4
 Les 5 générateurs apparaissent dans la liste des générateurs de l'onglet Effet, avec des libellés français : « Éventail », « Éventail balayé », « Éventail qui se lève », « Éventail vague », « Positions au temps ». Aide courte sous chaque paramètre.
 
 ## Critères d'acceptation
-- [ ] Les 5 générateurs produisent des points dans -1..1, tous au-dessus de l'horizon
-- [ ] `fan_sweep` à période 4 : même position aux temps 0, 4, 8
-- [ ] `positions` : la position change exactement au passage du temps entier
-- [ ] Groupes miroir : balayage gauche/droite en opposition
-- [ ] Budget de points respecté (test existant `every_generator_stays_within_a_sane_point_budget`)
+- [x] Les 5 générateurs produisent des points dans -1..1, tous au-dessus de l'horizon
+- [x] `fan_sweep` à période 4 : même position aux temps 0, 4, 8
+- [x] `positions` : la position change exactement au passage du temps entier
+- [x] Groupes miroir : balayage gauche/droite en opposition
+- [x] Budget de points respecté (test existant `every_generator_stays_within_a_sane_point_budget`)
 
 ## Tests
 Unitaires par générateur (positions aux temps clés, bornes, nombre de faisceaux). e2e : sélectionner « Éventail balayé », vérifier `/api/frame` non vide et que des points bougent entre deux lectures.
@@ -42,3 +42,4 @@ Unitaires par générateur (positions aux temps clés, bornes, nombre de faiscea
 Règles de CLAUDE.md (sécurité laser, propriété intellectuelle) : looks écrits par nous en maths, rien de copié depuis Pangolin/Laserworld. Tests uniquement en aperçu, jamais `--device`.
 
 ## Journal
+- 2026-09-28 — dev-agent (fan-gens), branche `feat/fan-gens` (rebasée sur develop 6e83091) : 5 générateurs dans `studio/src/fans.rs` (`fan`, `fan_sweep`, `fan_tilt`, `fan_wave`, `positions`), `Easing` dans `beat.rs`, `GenParams.easing`, libellés/aides/courbe dans l'onglet Effet. Ajout en fin de liste : les 20 générateurs et les 202 cues existants inchangés (empreintes identiques). `cargo test` 278 OK, clippy propre, e2e 63 OK (nouveau test « Éventail balayé »). Pire cas 533 points/trame (32 faisceaux) < budget 750. Note PR : docs/prs/fan-gens.md. Statut : review.
