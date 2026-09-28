@@ -161,6 +161,20 @@
   .render3d .check { margin-top: 6px; }
   #strobeLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
   #strobeLed.on { opacity: 1; background: var(--warn); border-color: var(--warn); color: #2b1d00; box-shadow: 0 0 8px var(--warn); }
+  /* MIDI learn (T-203) */
+  #learnBanner { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; padding: 6px 12px; background: #0f3d24; color: #fff; font-size: 13px; }
+  #learnBanner[hidden] { display: none; }
+  #learnBanner button { padding: 3px 10px; font-size: 12px; }
+  body.learning [data-control] { outline: 2px dashed var(--accent); outline-offset: 2px; cursor: crosshair; }
+  body.learning [data-control][data-midi] { outline-style: solid; }
+  body.learning [data-midi-pill]::after { content: attr(data-midi-pill); margin-left: 6px; padding: 0 5px; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-size: 10px; font-weight: 600; white-space: nowrap; }
+  #midiMenu { position: fixed; z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 240px; box-shadow: 0 8px 24px #0008; }
+  #midiMenu[hidden] { display: none; }
+  #midiMenu h3 { margin: 0 0 2px; font-size: 12px; font-weight: 600; }
+  #midiMenu button, #cueMenu .midi button { display: block; width: 100%; text-align: left; margin-top: 4px; }
+  .mmap { display: grid; grid-template-columns: auto 1fr auto auto; gap: 4px 8px; align-items: center; font-size: 12px; margin-top: 6px; }
+  .mmap button { padding: 2px 8px; font-size: 11px; }
+  .mmap .h { color: var(--muted); }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -169,20 +183,20 @@
 <header>
   <h1>Laser Studio</h1>
   <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
-    <input type="number" id="bpm" min="40" max="250" step="0.1" value="120" title="tempo.bpm">
+    <input type="number" id="bpm" min="40" max="250" step="0.1" value="120" data-control="tempo.bpm" title="tempo.bpm">
     <span class="hint" style="margin:0">BPM</span>
     <div class="beats" id="beats"><span class="one"></span><span></span><span></span><span></span></div>
-    <button data-ctl="tempo.tap" title="tempo.tap (Entrée)">Tap</button>
-    <button data-ctl="tempo.resync" title="tempo.resync (⌫)">Sync 1</button>
-    <button data-ctl="tempo.half" title="tempo.half">÷2</button>
-    <button data-ctl="tempo.double" title="tempo.double">×2</button>
-    <button data-ctl="tempo.nudge_down" title="tempo.nudge_down">◀</button>
-    <button data-ctl="tempo.nudge_up" title="tempo.nudge_up">▶</button>
+    <button data-ctl="tempo.tap" data-control="tempo.tap" title="tempo.tap (Entrée)">Tap</button>
+    <button data-ctl="tempo.resync" data-control="tempo.resync" title="tempo.resync (⌫)">Sync 1</button>
+    <button data-ctl="tempo.half" data-control="tempo.half" title="tempo.half">÷2</button>
+    <button data-ctl="tempo.double" data-control="tempo.double" title="tempo.double">×2</button>
+    <button data-ctl="tempo.nudge_down" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
+    <button data-ctl="tempo.nudge_up" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
   </div>
   <div id="midiStatus" title="Contrôleurs MIDI (section Contrôleur)">MIDI : …</div>
   <div id="output">…</div>
   <div class="arm">
-    <button id="armBtn" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
+    <button id="armBtn" data-control="transport.arm" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
     <span id="armInfo">Désarmé</span>
     <div class="leds">
       <span id="presenceLed" class="led" title="Battement de l'interface : sans aucune page ouverte, le laser se désarme">Opérateur absent</span>
@@ -190,12 +204,22 @@
     </div>
     <div id="armRefused" hidden></div>
   </div>
-  <button id="estopBtn" title="Arrêt d'urgence (Échap) · safety.estop">ARRÊT</button>
+  <button id="estopBtn" data-control="safety.estop" title="Arrêt d'urgence (Échap) · safety.estop">ARRÊT</button>
 </header>
 <div id="estopBanner" hidden>ARRÊT D'URGENCE — réinitialiser pour réarmer
   <button id="estopReset">Réinitialiser l'arrêt d'urgence</button></div>
 <div id="holdBanner" hidden></div>
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
+<div id="learnBanner" role="status" hidden><span id="learnText"></span>
+  <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
+</div>
+<div id="midiMenu" hidden>
+  <h3>MIDI</h3>
+  <div class="hint" id="midiMenuName" style="margin:0"></div>
+  <div class="hint" id="midiMenuMaps" style="margin:2px 0 0"></div>
+  <button id="midiMenuLearn">Apprendre MIDI</button>
+  <button id="midiMenuShift">Apprendre avec Shift</button>
+  <button id="midiMenuForget">Oublier MIDI</button>
 </div>
 
 <main>
@@ -241,19 +265,19 @@
     <section style="margin-top:12px">
       <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
       <div class="cue-bar">
-        <div class="seg" id="cueModes" title="cue.mode">
+        <div class="seg" id="cueModes" data-control="cue.mode" title="cue.mode">
           <button data-mode="toggle" title="Clic 1 démarre, clic 2 arrête">Basculer</button>
           <button data-mode="flash" title="Actif tant que le bouton ou la touche est tenu">Flash</button>
           <button data-mode="solo" title="Tenu : seul ce cue sort">Solo</button>
           <button data-mode="restart" title="Chaque clic relance le cue du début">Relancer</button>
         </div>
-        <div class="seg" id="cueMulti" title="cue.multi">
+        <div class="seg" id="cueMulti" data-control="cue.multi" title="cue.multi">
           <button data-multi="0" title="Un nouveau cue remplace le précédent">Un cue</button>
           <button data-multi="1" title="Les cues s'additionnent">Multi</button>
         </div>
         <span class="hint" style="margin:0">Max</span>
-        <input type="number" id="cueMax" min="1" max="16" title="cue.max_active : au-delà, le plus ancien s'arrête">
-        <button data-ctl="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
+        <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
+        <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
       </div>
       <div class="cue-tabs" id="cueTabs"></div>
       <div class="cues" id="cues"></div>
@@ -297,60 +321,65 @@
       </select>
       <label>Show (joué à la place du cue)</label>
       <select id="cueMenuShow"><option value="">Aucun</option></select>
+      <div class="midi" id="cueMenuMidi">
+        <button id="cueMenuLearn">Apprendre MIDI</button>
+        <button id="cueMenuShift">Apprendre avec Shift</button>
+        <button id="cueMenuForget">Oublier MIDI</button>
+      </div>
       <div class="row"><button id="cueMenuClose">Fermer</button></div>
     </div>
   </div>
 
   <div class="col">
     <section>
-      <h2>Direct <button id="liveReset" data-ctl="master.reset" title="master.reset" style="padding:4px 8px;font-size:11px">Réinitialiser</button></h2>
+      <h2>Direct <button id="liveReset" data-ctl="master.reset" data-control="master.reset" title="master.reset" style="padding:4px 8px;font-size:11px">Réinitialiser</button></h2>
       <label>Rotation</label>
-      <div class="seg" id="rotPresets">
+      <div class="seg" id="rotPresets" data-control="master.rot.preset">
         <button data-preset="0">Stop</button><button data-preset="1">Lent</button>
         <button data-preset="2">Moyen</button><button data-preset="3">Rapide</button>
       </div>
       <div class="row">
-        <label class="check" style="margin:0"><input type="checkbox" id="rotSync" title="master.rot.sync"> Synchro tempo</label>
-        <button id="rotReverse" title="master.rot.reverse (maintenir, ou touche &lt;)">⟲ Inverser (maintenir)</button>
+        <label class="check" style="margin:0"><input type="checkbox" id="rotSync" data-control="master.rot.sync" title="master.rot.sync"> Synchro tempo</label>
+        <button id="rotReverse" data-control="master.rot.reverse" title="master.rot.reverse (maintenir, ou touche &lt;)">⟲ Inverser (maintenir)</button>
       </div>
       <label>Taille maître <span class="v" id="mSizeV"></span></label>
-      <input type="range" id="mSize" min="0" max="200" data-live="size" data-k="100" title="master.size">
+      <input type="range" id="mSize" min="0" max="200" data-live="size" data-k="100" data-control="master.size" title="master.size">
       <label>Position X <span class="v" id="mPosXV"></span></label>
-      <input type="range" id="mPosX" min="-100" max="100" data-live="pos_x" data-k="100" title="master.pos_x">
+      <input type="range" id="mPosX" min="-100" max="100" data-live="pos_x" data-k="100" data-control="master.pos_x" title="master.pos_x">
       <label>Position Y <span class="v" id="mPosYV"></span></label>
-      <input type="range" id="mPosY" min="-100" max="100" data-live="pos_y" data-k="100" title="master.pos_y">
+      <input type="range" id="mPosY" min="-100" max="100" data-live="pos_y" data-k="100" data-control="master.pos_y" title="master.pos_y">
       <label>Inclinaison X (3D) <span class="v" id="mTiltXV"></span></label>
-      <input type="range" id="mTiltX" min="-180" max="180" data-live="rot_angle.0" data-k="1" title="master.rot_x.angle">
+      <input type="range" id="mTiltX" min="-180" max="180" data-live="rot_angle.0" data-k="1" data-control="master.rot_x.angle" title="master.rot_x.angle">
       <label>Inclinaison Y (3D) <span class="v" id="mTiltYV"></span></label>
-      <input type="range" id="mTiltY" min="-180" max="180" data-live="rot_angle.1" data-k="1" title="master.rot_y.angle">
+      <input type="range" id="mTiltY" min="-180" max="180" data-live="rot_angle.1" data-k="1" data-control="master.rot_y.angle" title="master.rot_y.angle">
       <label>Vitesse d'animation <span class="v" id="mSpeedV"></span></label>
-      <input type="range" id="mSpeed" min="0" max="400" data-live="speed" data-k="100" title="master.speed">
+      <input type="range" id="mSpeed" min="0" max="400" data-live="speed" data-k="100" data-control="master.speed" title="master.speed">
       <label>Luminosité maître <span class="v" id="mBrightV"></span></label>
-      <input type="range" id="mBright" min="0" max="100" data-live="brightness" data-k="100" title="master.brightness">
+      <input type="range" id="mBright" min="0" max="100" data-live="brightness" data-k="100" data-control="master.brightness" title="master.brightness">
       <div id="colorBlock" title="Clic droit = couleurs du cue (Normal)">
         <label>Couleur</label>
-        <div class="seg wrap" id="colorModes">
+        <div class="seg wrap" id="colorModes" data-control="master.color.mode">
           <button data-mode="0">Normal</button><button data-mode="1">Fixe</button><button data-mode="2">Teinte</button>
           <button data-mode="3">Palette</button><button data-mode="4">Arc-en-ciel</button><button data-mode="5">Chenillard</button>
         </div>
         <div class="row"><input type="color" id="colorFixed" value="#ff0000" title="Couleur fixe (master.color.red/green/blue)"></div>
-        <div class="hue-strip" id="hueStrip" title="Teinte (master.color.hue)"><span id="hueMark"></span></div>
-        <div class="palettes" id="palettes"></div>
+        <div class="hue-strip" id="hueStrip" data-control="master.color.hue" title="Teinte (master.color.hue)"><span id="hueMark"></span></div>
+        <div class="palettes" id="palettes" data-control="master.color.palette"></div>
         <div class="row">
-          <div class="seg" id="paletteModes"><button data-pm="0">Plus proche</button><button data-pm="1">Pas à pas</button></div>
+          <div class="seg" id="paletteModes" data-control="master.color.palette_mode"><button data-pm="0">Plus proche</button><button data-pm="1">Pas à pas</button></div>
           <button id="paletteNew" title="Nouvelle palette utilisateur" style="flex:0 0 auto">+ Palette</button>
         </div>
         <label>Décalage <span class="v" id="colorOffsetV"></span></label>
-        <input type="range" id="colorOffset" min="0" max="15" step="1" value="0" title="master.color.offset">
+        <input type="range" id="colorOffset" min="0" max="15" step="1" value="0" data-control="master.color.offset" title="master.color.offset">
         <label>Pas (temps)</label>
-        <div class="seg" id="colorSteps">
+        <div class="seg" id="colorSteps" data-control="master.color.rate">
           <button data-step="0">1/8</button><button data-step="1">1/4</button><button data-step="2">1/2</button>
           <button data-step="3">1</button><button data-step="4">2</button><button data-step="5">4</button>
         </div>
         <label>Étalement <span class="v" id="colorSpreadV"></span></label>
-        <input type="range" id="colorSpread" min="0" max="400" value="100" title="master.color.spread">
+        <input type="range" id="colorSpread" min="0" max="400" value="100" data-control="master.color.spread" title="master.color.spread">
         <label>Chenillard</label>
-        <div class="seg" id="chaseSpreads"><button data-cs="0">Tout</button><button data-cs="1">Par trait</button><button data-cs="2">Par point</button></div>
+        <div class="seg" id="chaseSpreads" data-control="master.color.chase_spread"><button data-cs="0">Tout</button><button data-cs="1">Par trait</button><button data-cs="2">Par point</button></div>
       </div>
     </section>
 
@@ -526,7 +555,12 @@
     <section>
       <details id="midiPanel">
         <summary>Contrôleur</summary>
+        <div class="row"><button id="midiLearnMode" title="Puis cliquez un contrôle et touchez le contrôleur (ou clic droit sur un contrôle, à tout moment)">Apprendre MIDI</button></div>
         <div id="midiDevices"></div>
+        <div class="mdev">
+          <div class="n">Affectations</div>
+          <div id="midiMappings"></div>
+        </div>
         <div class="mdev">
           <div class="n">Sécurité</div>
           <label class="check"><input type="checkbox" id="midiAllowArm"> Autoriser l'armement depuis le contrôleur (Shift + maintien 1 s)</label>
@@ -784,7 +818,13 @@ $('estopBtn').addEventListener('click', () => emergencyStop('ui'));
 $('estopReset').addEventListener('click', async () => { if (await post('/api/estop/reset')) { $('estopBanner').hidden = true; } });
 document.addEventListener('keydown', e => {
   // Before anything else, whatever has focus.
-  if (e.key === 'Escape') { e.preventDefault(); pickingHoldKey = false; if (shiftMod(e)) setArmed(false, 'keyboard'); else emergencyStop('keyboard'); return; }
+  if (e.key === 'Escape') {
+    e.preventDefault(); pickingHoldKey = false;
+    if (shiftMod(e)) setArmed(false, 'keyboard'); else emergencyStop('keyboard');
+    // Échap also cancels a MIDI learn (after the stop, never instead of it).
+    stopLearning();
+    return;
+  }
   downCodes.add(e.code);
   if (pickingHoldKey) { e.preventDefault(); pickHoldKey(e.code); return; }
   // Hold-to-run key (dead man): works whatever has focus.
@@ -1355,7 +1395,7 @@ function renderCues() {
     const b = document.createElement('button');
     b.className = 'cue';
     b.dataset.id = p.id;
-    if (i < 40) b.title = `grid.${cueCategories.indexOf(cuePage) + 1}.${Math.floor(i / 8) + 1}.${i % 8 + 1}`;
+    if (i < 40) b.title = b.dataset.control = `grid.${cueCategories.indexOf(cuePage) + 1}.${Math.floor(i / 8) + 1}.${i % 8 + 1}`;
     const slot = slots[p.id] || {};
     const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '']
       .filter(Boolean).join(' ');
@@ -1424,6 +1464,9 @@ function openCueMenu(p, x, y) {
   $('cueMenuGroup').value = slot.group ? String(slot.group) : '';
   $('cueMenuLayer').value = String(slot.layer || 1);
   fillShowSelect($('cueMenuShow'), 'Aucun', slot.show || '');
+  const cell = document.querySelector(`#cues .cue[data-id="${CSS.escape(p.id)}"]`);
+  menuControl = cell?.dataset.control || null;
+  $('cueMenuMidi').hidden = !menuControl;
   const m = $('cueMenu');
   m.hidden = false;
   m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
@@ -1502,10 +1545,10 @@ function buildLayers() {
     d.className = 'layer';
     d.dataset.layer = n;
     d.innerHTML = `<span class="t">Calque ${n}</span><span class="pts">0 pts</span>
-      <input type="range" min="0" max="100" value="100" title="layer.${n}.dimmer" aria-label="Gradateur calque ${n}">
+      <input type="range" min="0" max="100" value="100" data-control="layer.${n}.dimmer" title="layer.${n}.dimmer" aria-label="Gradateur calque ${n}">
       <span class="dv">100 %</span>
-      <div class="btns"><button class="mute" title="layer.${n}.mute">Muet</button><button class="solo" title="layer.${n}.solo">Solo</button></div>
-      <button class="clear" title="layer.${n}.clear : arrête les cues du calque" style="width:100%;padding:4px;font-size:11px">Vider</button>`;
+      <div class="btns"><button class="mute" data-control="layer.${n}.mute" title="layer.${n}.mute">Muet</button><button class="solo" data-control="layer.${n}.solo" title="layer.${n}.solo">Solo</button></div>
+      <button class="clear" data-control="layer.${n}.clear" title="layer.${n}.clear : arrête les cues du calque" style="width:100%;padding:4px;font-size:11px">Vider</button>`;
     const range = d.querySelector('input');
     range.addEventListener('input', () => {
       d.querySelector('.dv').textContent = range.value + ' %';
@@ -1741,13 +1784,16 @@ async function loadState() {
 // Tooltips show each control's stable id, to help with MIDI mapping.
 for (const [el, id] of [['scale', 'look.size'], ['bright', 'look.brightness'], ['rot', 'look.rotation_speed'],
   ['aOn', 'audio.enabled'], ['aSize', 'audio.size'], ['aRot', 'audio.rotate'], ['aFlash', 'audio.flash'],
-  ['aColor', 'audio.color_on_beat']]) $(el).title = id;
+  ['aColor', 'audio.color_on_beat']]) $(el).title = $(el).dataset.control = id;
 $('armBtn').title += ' · transport.arm';
 
 // ---------- MIDI controllers ----------
 const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-let midiProfiles = [], midiKey = '';
+let midiProfiles = [], midiKey = '', midiTimer = null, mapsKey = '';
+// Refresh now (after a learn/delete request) instead of at the next tick.
+function midiNow() { clearTimeout(midiTimer); midiLoop(); }
 async function midiLoop() {
+  clearTimeout(midiTimer);
   try {
     const m = await (await fetch('/api/midi')).json();
     if (!midiProfiles.length) midiProfiles = await (await fetch('/api/midi/profiles')).json();
@@ -1764,8 +1810,12 @@ async function midiLoop() {
     // Only rebuild the list when something changed, so an open menu isn't reset.
     const key = JSON.stringify([m.enabled, m.devices.map(d => [d.name, d.connected, d.enabled, d.model, d.profile, d.profile_error]), m.errors]);
     if (key !== midiKey) { midiKey = key; renderMidi(m); }
+    showLearn(m);
+    const mk = JSON.stringify(midiMaps);
+    if (mk !== mapsKey) { mapsKey = mk; renderMappings(); }
   } catch (e) { /* studio restarting */ }
-  setTimeout(midiLoop, 2000);
+  // Every 250 ms while learning, so the banner follows the controller.
+  midiTimer = setTimeout(midiLoop, learnBusy || learnMode ? 250 : 2000);
 }
 function renderMidi(m) {
   const opts = midiProfiles.map(p => `<option value="${esc(p.slug)}">${esc(p.name || p.slug)}${p.builtin ? ' (intégré)' : ' (perso)'}</option>`).join('');
@@ -1786,6 +1836,145 @@ function renderMidi(m) {
   document.querySelectorAll('[data-mprof]').forEach(el => el.onchange = () => post('/api/midi/profile', { port: portOf(el), profile: el.value }));
   document.querySelectorAll('[data-mreset]').forEach(el => el.onclick = () => post('/api/midi/profile', { port: portOf(el), profile: null }));
 }
+
+// ---------- MIDI learn (T-203) ----------
+// Right click on any [data-control] (or « Apprendre MIDI » mode, then a
+// click) → the server waits 15 s for the next controller message and maps
+// it in the port's profile. Échap cancels (and still stops the laser).
+const MODE_FR = { trigger: 'Déclencher', toggle: 'Bascule', momentary: 'Maintenu', absolute: 'Absolu', relative: 'Relatif', grid: 'Grille' };
+let controlLabels = {}, midiMaps = [], learnMode = false, learnBusy = false, seenLearn = -1, bannerTimer = null, menuControl = null;
+fetch('/api/controls').then(r => r.json()).then(list => {
+  for (const c of (list.controls || list)) controlLabels[c.id] = c.label_fr;
+}).catch(() => {});
+const labelOf = id => controlLabels[id] || id;
+const mapLabel = mp => mp.message + (mp.channel != null ? ` · can. ${mp.channel + 1}` : '') + (mp.shift ? ' + Shift' : '');
+
+async function startLearn(target, shift) {
+  closeMidiMenu();
+  const r = await fetch('/api/midi/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target, shift }) });
+  if (!r.ok) { showBanner(await r.text(), 6000); return; }
+  learnBusy = true;
+  midiNow();
+}
+async function forgetMidi(target) {
+  closeMidiMenu();
+  const r = await fetch('/api/midi/mapping/forget', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target }) });
+  const n = r.ok ? (await r.json()).removed : 0;
+  showBanner(n ? `Affectation MIDI oubliée : ${labelOf(target)}` : `Aucune affectation MIDI pour ${labelOf(target)}`, 3000);
+  midiNow();
+}
+function stopLearning() {
+  if (!learnBusy && !learnMode) return;
+  setLearnMode(false);
+  learnBusy = false;
+  post('/api/midi/learn/cancel').then(midiNow);
+}
+function setLearnMode(on) {
+  learnMode = on;
+  document.body.classList.toggle('learning', on);
+  $('midiLearnMode').textContent = on ? 'Terminer' : 'Apprendre MIDI';
+  $('midiLearnMode').classList.toggle('active', on);
+  if (!on && !learnBusy) $('learnBanner').hidden = true;
+  else if (on && !learnBusy) showBanner('Cliquez un contrôle à affecter, puis touchez le contrôleur (Échap pour annuler)');
+}
+function showBanner(text, ms, buttons = []) {
+  $('learnText').textContent = text;
+  for (const b of ['learnYes', 'learnNo', 'learnCancel']) $(b).hidden = !buttons.includes(b);
+  $('learnBanner').hidden = false;
+  clearTimeout(bannerTimer);
+  if (ms) bannerTimer = setTimeout(() => { if (!learnBusy) { learnMode ? setLearnMode(true) : ($('learnBanner').hidden = true); } }, ms);
+}
+function showLearn(m) {
+  midiMaps = m.mappings || [];
+  // What happened before the page loaded isn't news.
+  if (seenLearn < 0) seenLearn = Math.max(0, m.learned?.seq || 0, m.learn_notice?.seq || 0);
+  const learned = m.learned && m.learned.seq > seenLearn ? m.learned : null;
+  const notice = m.learn_notice && m.learn_notice.seq > seenLearn ? m.learn_notice : null;
+  seenLearn = Math.max(seenLearn, m.learned?.seq || 0, m.learn_notice?.seq || 0);
+  if (m.learn) {
+    learnBusy = true;
+    showBanner(`« ${m.learn.target_label} »${m.learn.shift ? ' (avec Shift)' : ''} : touchez un bouton, un potard ou un fader de votre contrôleur… (Échap pour annuler)`, 0, ['learnCancel']);
+  } else if (m.learn_conflict) {
+    learnBusy = true;
+    const c = m.learn_conflict;
+    showBanner(`${c.message} pilote déjà « ${c.existing} ». Remplacer l'ancienne affectation (${c.existing}) par « ${c.target_label} » ?`, 0, ['learnYes', 'learnNo']);
+  } else {
+    const was = learnBusy;
+    learnBusy = false;
+    if (learned) showBanner(`${mapLabel(learned)} → ${learned.target_label} (${MODE_FR[learned.mode] || learned.mode})` + (learned.replaced ? ` — remplace ${learned.replaced}` : ''), 4000);
+    else if (notice) showBanner(notice.text, 5000);
+    else if (was) learnMode ? setLearnMode(true) : ($('learnBanner').hidden = true);
+  }
+  paintPills();
+}
+// Mapped controls show their message(s) while learning.
+function paintPills() {
+  const by = {};
+  for (const mp of midiMaps) (by[mp.target] ||= []).push(mapLabel(mp));
+  document.querySelectorAll('[data-midi]').forEach(el => { if (!by[el.dataset.control]) el.removeAttribute('data-midi'); });
+  document.querySelectorAll('[data-midi-pill]').forEach(el => el.removeAttribute('data-midi-pill'));
+  document.querySelectorAll('[data-control]').forEach(el => {
+    const maps = by[el.dataset.control];
+    if (!maps) return;
+    el.dataset.midi = maps.join(', ');
+    // Inputs can't show ::after: the pill goes on their label.
+    const host = el.tagName === 'INPUT' ? (el.closest('label') || (el.previousElementSibling?.tagName === 'LABEL' ? el.previousElementSibling : null)) : el;
+    if (host) host.dataset.midiPill = maps.join(', ');
+  });
+}
+function renderMappings() {
+  const rows = midiMaps.map((mp, i) => `
+    <span>${esc(mapLabel(mp))}</span><span>${esc(mp.target_label)}</span><span class="hint" style="margin:0">${esc(MODE_FR[mp.mode] || mp.mode)}</span>
+    <button data-mdel="${i}" title="${esc(mp.port)} · profil ${esc(mp.profile)}">Supprimer</button>`).join('');
+  $('midiMappings').innerHTML = rows
+    ? `<div class="mmap"><span class="h">Message</span><span class="h">Cible</span><span class="h">Mode</span><span></span>${rows}</div>`
+    : '<div class="hint">Aucune affectation. Clic droit sur un contrôle → « Apprendre MIDI ».</div>';
+  document.querySelectorAll('[data-mdel]').forEach(el => el.onclick = async () => {
+    const mp = midiMaps[+el.dataset.mdel];
+    await post('/api/midi/mapping/delete', { port: mp.port, index: mp.index });
+    midiNow();
+  });
+}
+function openMidiMenu(id, x, y) {
+  menuControl = id;
+  $('midiMenuName').textContent = labelOf(id) + ' · ' + id;
+  const maps = midiMaps.filter(mp => mp.target === id).map(mapLabel);
+  $('midiMenuMaps').textContent = maps.length ? 'Affecté : ' + maps.join(', ') : 'Pas d\'affectation MIDI';
+  const m = $('midiMenu');
+  m.hidden = false;
+  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 8)) + 'px';
+}
+function closeMidiMenu() { $('midiMenu').hidden = true; }
+document.addEventListener('contextmenu', e => {
+  const el = e.target.closest?.('[data-control]');
+  // Cues keep their own menu (« Propriétés du cue »), which has the MIDI entries.
+  if (!el || el.closest('#cues')) return;
+  e.preventDefault(); e.stopPropagation();
+  openMidiMenu(el.dataset.control, e.clientX, e.clientY);
+}, true);
+document.addEventListener('pointerdown', e => {
+  if (!$('midiMenu').hidden && !e.target.closest('#midiMenu')) closeMidiMenu();
+  // Learn mode: a click picks the control instead of using it.
+  if (learnMode && e.target.closest?.('[data-control]')) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+document.addEventListener('click', e => {
+  if (!learnMode) return;
+  const el = e.target.closest?.('[data-control]');
+  if (!el) return;
+  e.preventDefault(); e.stopPropagation();
+  startLearn(el.dataset.control, false);
+}, true);
+$('midiMenuLearn').onclick = () => startLearn(menuControl, false);
+$('midiMenuShift').onclick = () => startLearn(menuControl, true);
+$('midiMenuForget').onclick = () => forgetMidi(menuControl);
+$('cueMenuLearn').onclick = () => { $('cueMenu').hidden = true; startLearn(menuControl, false); };
+$('cueMenuShift').onclick = () => { $('cueMenu').hidden = true; startLearn(menuControl, true); };
+$('cueMenuForget').onclick = () => { $('cueMenu').hidden = true; forgetMidi(menuControl); };
+$('midiLearnMode').onclick = () => { if (learnMode) stopLearning(); else setLearnMode(true); };
+$('learnCancel').onclick = stopLearning;
+$('learnYes').onclick = () => post('/api/midi/learn/confirm', { replace: true }).then(midiNow);
+$('learnNo').onclick = () => post('/api/midi/learn/confirm', { replace: false }).then(midiNow);
 
 $('midiAllowArm').onchange = e => post('/api/midi/safety', { allow_arm: e.target.checked });
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
