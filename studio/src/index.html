@@ -130,6 +130,15 @@
   .layer .btns button { flex: 1; padding: 4px 2px; font-size: 11px; }
   .layer button.mute.active { background: var(--danger); border-color: var(--danger); color: #fff; }
   .layer button.solo.active { background: var(--warn); border-color: var(--warn); color: #2b1d00; }
+  .viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .viewbar .seg button { padding: 5px 14px; font-size: 12px; }
+  .viewbar > button { padding: 5px 10px; font-size: 12px; }
+  .viewbar .hint { margin: 0; }
+  .view { position: relative; }
+  .view [hidden], .render3d[hidden] { display: none !important; }
+  #beamsMsg { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
+  .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
+  .render3d .check { margin-top: 6px; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -164,8 +173,34 @@
 
 <main>
   <div class="stage">
-    <canvas id="preview" width="900" height="900"></canvas>
-    <div id="offBadge">Laser éteint : aperçu seulement</div>
+    <div class="viewbar">
+      <div class="seg" id="viewSeg" title="Aperçu 2D (image du laser) ou vue 3D (faisceaux dans la brume)">
+        <button data-view="2d" class="active">2D</button>
+        <button data-view="3d">3D</button>
+      </div>
+      <button id="recenter3d" hidden title="Double-clic sur la vue : même effet">Recentrer</button>
+      <span class="hint" id="hint3d" hidden>Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer</span>
+    </div>
+    <div class="view">
+      <canvas id="preview" width="900" height="900"></canvas>
+      <canvas id="beams" width="900" height="900" hidden></canvas>
+      <div id="beamsMsg" hidden>Visualiseur 3D indisponible sur ce navigateur</div>
+      <div id="offBadge">Laser éteint : aperçu seulement</div>
+    </div>
+    <div class="render3d" id="render3d" hidden>
+      <div><label title="Aide à la conception, pas une mesure photométrique">Exposition <span class="v" id="r3exposureV"></span></label>
+        <input type="range" id="r3exposure" min="10" max="400" step="5" title="Aide à la conception, pas une mesure photométrique"></div>
+      <div><label>Brume : densité <span class="v" id="r3hazeV"></span></label><input type="range" id="r3haze" min="0" max="100"></div>
+      <div><label>Lumière de salle <span class="v" id="r3roomLightV"></span></label><input type="range" id="r3roomLight" min="0" max="100"></div>
+      <label class="check"><input type="checkbox" id="r3sheets"> Nappes</label>
+      <label class="check"><input type="checkbox" id="r3spots"> Impacts</label>
+      <label class="check"><input type="checkbox" id="r3bloom"> Halo</label>
+      <label class="check"><input type="checkbox" id="r3hazeNoise"> Brume animée</label>
+      <div><label>Qualité</label><select id="r3quality">
+        <option value="auto">Auto</option><option value="low">Basse</option><option value="medium">Moyenne</option><option value="high">Haute</option>
+      </select></div>
+      <div class="hint" id="r3info"></div>
+    </div>
     <div class="stats">
       <span>Points <b id="stPoints">0</b></span>
       <span>Images/s <b id="stFps">–</b></span>
@@ -688,7 +723,9 @@ async function previewLoop() {
   try {
     const fetchedAt = performance.now();
     const f = await (await fetch('/api/frame')).json();
-    draw(f.points);
+    lastPoints = f.points;
+    // One fetch feeds whichever view is shown; the 3D view only reads it.
+    if (view3d && show3d) view3d.setFrame(f.points); else draw(f.points);
     if (fetchedAt > armAnsweredAt) armed = f.armed;
     arm = f.arm; pps = f.pps; showArmed();
     $('output').textContent = f.output_error ? '⚠ ' + f.output_error
@@ -716,6 +753,65 @@ async function previewLoop() {
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
+
+// ---------- 3D beam view (T-275, T-276) ----------
+// Preview only: beam3d.js gets the same points as the 2D canvas and has no
+// way to reach the server. It is loaded on the first click on "3D", runs
+// its render loop only while shown, and remembers its render settings in
+// this browser.
+let view3d = null, show3d = false, lastPoints = [], beam3d = null;
+const R3_KEY = 'laserStudio.beam3d.render';
+function loadRender3d() {
+  try { return JSON.parse(localStorage.getItem(R3_KEY) || '{}') || {}; } catch { return {}; }
+}
+function saveRender3d() {
+  try { localStorage.setItem(R3_KEY, JSON.stringify(view3d.render)); } catch { /* private window: not remembered */ }
+}
+const QUALITY_FR = { low: 'Basse', medium: 'Moyenne', high: 'Haute' };
+function showRender3d() {
+  const r = view3d.render;
+  $('r3exposure').value = Math.round(r.exposure * 100); $('r3exposureV').textContent = Math.round(r.exposure * 100) + ' %';
+  $('r3haze').value = Math.round(r.haze * 100); $('r3hazeV').textContent = Math.round(r.haze * 100) + ' %';
+  $('r3roomLight').value = Math.round(r.roomLight * 100); $('r3roomLightV').textContent = Math.round(r.roomLight * 100) + ' %';
+  for (const k of ['sheets', 'spots', 'bloom', 'hazeNoise']) $('r3' + k).checked = r[k];
+  $('r3quality').value = r.quality;
+}
+function bindRender3d() {
+  const set = patch => { view3d.setRender(patch); saveRender3d(); showRender3d(); };
+  for (const k of ['exposure', 'haze', 'roomLight']) $('r3' + k).oninput = e => set({ [k]: e.target.value / 100 });
+  for (const k of ['sheets', 'spots', 'bloom', 'hazeNoise']) $('r3' + k).onchange = e => set({ [k]: e.target.checked });
+  $('r3quality').onchange = e => set({ quality: e.target.value });
+  $('recenter3d').onclick = () => view3d.recenter();
+  // Which level Auto picked, and the render cost.
+  setInterval(() => {
+    if (!show3d || !view3d) return;
+    const q = QUALITY_FR[beam3d.QUALITIES[view3d.qualityLevel()]];
+    $('r3info').textContent = `${view3d.render.quality === 'auto' ? 'Auto : ' + q : q} · ${view3d.stats.drawMs.toFixed(1)} ms`;
+  }, 500);
+}
+async function setView(mode) {
+  const want3d = mode === '3d';
+  if (want3d && !view3d && $('beamsMsg').hidden) {
+    try {
+      beam3d ??= await import('/beam3d.js');
+      if (!beam3d.BeamView.supported()) throw new Error('no WebGL2');
+      view3d = new beam3d.BeamView($('beams'), { render: { ...beam3d.DEFAULT_RENDER, ...loadRender3d() } });
+      bindRender3d(); showRender3d();
+    } catch (e) {
+      console.warn('3D view unavailable:', e);
+      $('beamsMsg').hidden = false;
+    }
+  }
+  show3d = want3d && !!view3d;
+  document.querySelectorAll('#viewSeg button').forEach(b => b.classList.toggle('active', b.dataset.view === mode));
+  $('preview').hidden = want3d;
+  $('beams').hidden = !show3d;
+  $('beamsMsg').hidden = !want3d || !!view3d;
+  for (const id of ['recenter3d', 'hint3d', 'render3d']) $(id).hidden = !show3d;
+  if (show3d) { view3d.setFrame(lastPoints); view3d.start(); }
+  else { view3d?.stop(); draw(lastPoints); }
+}
+document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
 
 // ---------- music ----------
 let audio = null, beat = 0, bassAvg = 0, lastBeat = 0, sending = false;
