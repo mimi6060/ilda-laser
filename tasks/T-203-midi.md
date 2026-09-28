@@ -1,12 +1,12 @@
 ---
 id: T-203
 title: Apprentissage MIDI (clic droit → « Apprendre MIDI »)
-status: todo
+status: done
 area: midi
 priority: P1
 depends_on: [T-202, T-145, T-209]
-owner: ""
-branch: ""
+owner: "dev-agent (Claude)"
+branch: feat/midi-learn
 source: docs/research/midi-apc40.md#6-midi-learn-and-mapping-storage
 ---
 
@@ -52,11 +52,11 @@ que l'APC40.
 - Pas de raccourci à une lettre (toutes les lettres sont des touches de cues AZERTY).
 
 ## Critères d'acceptation
-- [ ] Clic droit sur le curseur « Taille » → « Apprendre MIDI » → tourner un potard : le potard pilote la taille, l'affectation apparaît dans la liste.
-- [ ] Le mapping survit au redémarrage (fichier dans `<data-dir>/midi/profiles/`).
-- [ ] Apprendre sur un profil intégré crée `apc40-mk2-perso` sans modifier le profil intégré.
-- [ ] « Oublier MIDI » supprime l'affectation.
-- [ ] Sans message dans les 15 s, l'apprentissage s'annule avec un message.
+- [x] Clic droit sur le curseur « Taille » → « Apprendre MIDI » → tourner un potard : le potard pilote la taille, l'affectation apparaît dans la liste.
+- [x] Le mapping survit au redémarrage (fichier dans `<data-dir>/midi/profiles/`).
+- [x] Apprendre sur un profil intégré crée `apc40-mk2-perso` sans modifier le profil intégré.
+- [x] « Oublier MIDI » supprime l'affectation.
+- [x] Sans message dans les 15 s, l'apprentissage s'annule avec un message.
 
 ## Tests
 - Unitaires : déduction du mode (note, CC absolu, encodeur connu), remplacement d'un doublon, expiration, création de la copie `-perso`.
@@ -67,3 +67,15 @@ que l'APC40.
 - Règles de CLAUDE.md (sécurité laser, propriété intellectuelle). L'armement du laser ne peut pas être appris sans l'option de T-208.
 
 ## Journal
+- 2026-09-28 — dev-agent (Claude), branche `feat/midi-learn` : `midi/learn.rs`
+  (apprentissage, déduction du mode, conflit Oui/Non, copie `-perso`,
+  expiration 15 s, `transport.arm` refusé sans l'option T-208 et toujours
+  avec Shift), routes `/api/midi/learn`, `/learn/cancel`, `/learn/confirm`,
+  `/mapping/delete`, `/mapping/forget`, `encoders` dans les profils APC,
+  UI (`data-control` partout, clic droit, mode apprentissage avec pastilles,
+  bandeau, Échap = arrêt + annulation, liste des affectations).
+  Tests : unitaires verts, clippy propre, e2e `midi-learn.spec.ts` (5) et
+  suite complète verts après rebase sur develop eeb0932 (profils APC de
+  T-204, `encoders` désormais typé) : 437 tests unitaires, clippy propre,
+  110 e2e (voir `docs/prs/midi-learn.md`). En review.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.

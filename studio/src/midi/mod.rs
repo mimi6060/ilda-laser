@@ -16,6 +16,7 @@ pub mod backend;
 pub mod decode;
 pub mod detect;
 pub mod engine;
+pub mod learn;
 pub mod mapping;
 pub mod profile;
 pub mod safety;
@@ -128,11 +129,13 @@ pub struct MidiState {
     /// `/api/midi/inject` and `/api/midi/sent` (T-209). `None` in normal
     /// runs, and those routes then don't exist.
     pub sim: Option<testing::SimMidi>,
+    /// MIDI learn (T-203): pending request, last result.
+    pub learn: learn::LearnState,
 }
 
 impl MidiState {
     pub fn new(enabled: bool, store: profile::ProfileStore) -> Self {
-        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default(), sim: None }
+        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default(), sim: None, learn: learn::LearnState::default() }
     }
 
     pub fn device_mut(&mut self, name: &str) -> &mut MidiDevice {
