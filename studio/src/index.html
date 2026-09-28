@@ -82,6 +82,23 @@
   #figLib .figitem .del { flex: none; padding: 4px 8px; color: var(--muted); }
   #figStats.bad { color: var(--warn); }
   #figMsg.err { color: var(--danger); }
+  /* Import (T-297): a modal over the editor. */
+  #figImportDlg { width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 14px 16px; border: 1px solid var(--line);
+    border-radius: 10px; background: var(--panel); color: var(--text); overflow: auto; }
+  #figImportDlg::backdrop { background: #000a; }
+  .imp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .imp-head h2 { margin: 0; font-size: 16px; }
+  .imp-rights { margin: 6px 0 10px; color: var(--warn); }
+  .imp-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+  @media (max-width: 700px) { .imp-body { grid-template-columns: minmax(0, 1fr); } }
+  .imp-right { display: flex; flex-direction: column; }
+  .imp-right select, .imp-right input[type=text], .imp-right input[type=number] { width: 100%; }
+  #impDrop { border: 2px dashed var(--line); border-radius: 8px; padding: 12px; text-align: center; margin-bottom: 8px; }
+  #impDrop.over { border-color: var(--accent); background: var(--panel-2); }
+  #impDrop input[type=file] { max-width: 100%; }
+  #impCanvas { max-width: 520px; margin: 0 auto; }
+  #impStats.bad { color: var(--warn); }
+  #impMsg.err { color: var(--danger); font-weight: 600; }
   .stage { grid-area: stage; position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   .ws-panel { grid-area: panel; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; padding-right: 2px; }
   .ws-panel > section { flex: none; }
@@ -671,7 +688,7 @@
       <label>Luminosité du look <span class="v" id="brightV"></span></label>
       <input type="range" id="bright" min="0" max="100">
     </section>
-    <div class="hint soon" data-cpanel="look">À venir ici : import SVG/image, éditeur de cues évolutifs, médiathèque ILDA.</div>
+    <div class="hint soon" data-cpanel="look">À venir ici : éditeur de cues évolutifs, médiathèque ILDA. (Import SVG / image : onglet Figures, « Importer… ».)</div>
 
     <!-- Figures (T-296) : propriétés, bibliothèque, animation -->
     <section data-cpanel="figures" id="figProps" hidden>
@@ -682,6 +699,7 @@
         <button id="figNew" title="Nouvelle figure vide">Nouvelle</button>
         <button id="figSave" class="primary" title="Enregistrer dans la bibliothèque (studio-data/figures)">Enregistrer</button>
         <button id="figPlay" title="Enregistrer puis jouer comme un cue (page Figures)">Jouer</button>
+        <button id="figImport" title="Créer une figure depuis un SVG ou une image (PNG, JPEG)">Importer…</button>
       </div>
       <div id="figMsg" class="hint" role="status"></div>
       <label>Bibliothèque</label>
@@ -754,6 +772,68 @@
       <div id="figFrames"></div>
     </div>
   </section>
+
+  <!-- CRÉATION › Figures › Importer (T-297) : fichier, réglages, aperçu, « Créer la figure » -->
+  <dialog id="figImportDlg" aria-labelledby="impTitle">
+    <div class="imp-head">
+      <h2 id="impTitle">Importer un SVG ou une image</h2>
+      <button id="impClose" title="Fermer sans créer">×</button>
+    </div>
+    <p class="hint imp-rights" id="impRights">N'importez que des fichiers dont vous avez les droits : vos propres créations, ou un contenu dont la licence le permet.
+      Le fichier n'est pas conservé : seule la figure créée est enregistrée, dans studio-data.</p>
+    <div class="imp-body">
+      <div class="imp-left">
+        <div id="impDrop" tabindex="0">
+          <div>Glissez un fichier SVG, PNG ou JPEG ici</div>
+          <label class="imp-pick">ou <input type="file" id="impFile" accept=".svg,image/svg+xml,image/png,image/jpeg,.png,.jpg,.jpeg"></label>
+          <div class="hint" id="impFileName"></div>
+        </div>
+        <canvas id="impCanvas" width="600" height="600"></canvas>
+        <div id="impStats" class="hint"></div>
+        <div id="impMsg" class="hint" role="status"></div>
+      </div>
+      <div class="imp-right">
+        <label>Simplification <span class="v" id="impSimplifyV"></span></label>
+        <input type="range" id="impSimplify" min="0" max="100" value="20">
+        <label>Taille <span class="v" id="impSizeV"></span></label>
+        <input type="range" id="impSize" min="10" max="100" value="90">
+        <label for="impBudget">Budget de points (par image)</label>
+        <input type="number" id="impBudget" min="100" max="10000" step="50" value="750">
+        <label for="impColor">Couleur (noir du SVG, image en une couleur)</label>
+        <input type="color" id="impColor" value="#ffffff">
+        <div id="impSvgOpts">
+          <div class="check"><input type="checkbox" id="impFills" checked><span>Contour des formes pleines (sans trait)</span></div>
+        </div>
+        <div id="impRasterOpts" hidden>
+          <label for="impMode">Mode</label>
+          <select id="impMode">
+            <option value="contours">Contours des formes (seuil)</option>
+            <option value="lines">Lignes (centre des traits)</option>
+            <option value="edges">Bords (détection de contours)</option>
+            <option value="colors">Couleurs</option>
+          </select>
+          <label>Seuil <span class="v" id="impThresholdV"></span></label>
+          <input type="range" id="impThreshold" min="1" max="254" value="128">
+          <div class="check"><input type="checkbox" id="impAuto" checked><span>Seuil automatique</span></div>
+          <div class="check"><input type="checkbox" id="impInvert"><span>Inverser (tracer le clair)</span></div>
+          <label>Lissage <span class="v" id="impSmoothV"></span></label>
+          <input type="range" id="impSmooth" min="0" max="5" value="2">
+          <label>Nombre de couleurs <span class="v" id="impColorsV"></span></label>
+          <input type="range" id="impColors" min="1" max="6" value="3">
+          <label>Résolution de travail <span class="v" id="impResV"></span></label>
+          <input type="range" id="impRes" min="64" max="800" step="16" value="320">
+          <label>Taches ignorées <span class="v" id="impMinV"></span></label>
+          <input type="range" id="impMin" min="0" max="40" value="4">
+        </div>
+        <label for="impName">Nom de la figure</label>
+        <input type="text" id="impName" maxlength="64" autocomplete="off">
+        <div class="row">
+          <button id="impCreate" class="primary" disabled>Créer la figure</button>
+          <button id="impCancel">Annuler</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
 
   <!-- RÉGLAGES : sécurité, calibration, contrôleurs MIDI (le projet est dans la barre du haut) -->
   <div class="ws-panel ws-grid" data-ws="settings" id="settingsPanel" hidden>
@@ -3023,9 +3103,138 @@ $('figNew').onclick = () => {
   showFigProps(); figMsg('');
 };
 
+// ----- import (T-297): SVG or picture → figure, previewed before it is created -----
+// The file is sent to /api/figures/import (settings in the query), which
+// only answers with a preview; « Créer la figure » saves it like
+// « Enregistrer » and opens it in the editor. The file itself is not kept.
+const IMP_MAX_BYTES = 20 * 1024 * 1024;
+const imp = { bytes: null, name: '', raster: false, result: null, timer: null, seq: 0, dirty: false, inflight: null };
+const IMP_LABELS = {
+  impSimplify: v => v + ' %', impSize: v => v + ' %', impSmooth: v => v, impColors: v => v,
+  impRes: v => v + ' px', impMin: v => v + ' px', impThreshold: v => $('impAuto').checked ? 'auto' : v,
+};
+function impLabels() { for (const [id, f] of Object.entries(IMP_LABELS)) $(id + 'V').textContent = f($(id).value); }
+function impMsg(text, err = false) { $('impMsg').textContent = text; $('impMsg').classList.toggle('err', err); }
+function impParams() {
+  const p = new URLSearchParams({
+    name: imp.name, simplify: $('impSimplify').value, size: $('impSize').value, budget: $('impBudget').value,
+    color: $('impColor').value.slice(1), fills: $('impFills').checked ? '1' : '0', mode: $('impMode').value,
+    invert: $('impInvert').checked ? '1' : '0', smooth: $('impSmooth').value, colors: $('impColors').value,
+    resolution: $('impRes').value, min_size: $('impMin').value,
+  });
+  if (!$('impAuto').checked) p.set('threshold', $('impThreshold').value);
+  return p.toString();
+}
+function impRender() {
+  const c = $('impCanvas'), g = c.getContext('2d'), W = c.width;
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, W);
+  g.strokeStyle = '#ffffff14'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, W); g.moveTo(0, W / 2); g.lineTo(W, W / 2); g.stroke();
+  if (imp.result) drawStrokes(g, imp.result.figure.frames[0].strokes, W, 1, { travel: true });
+}
+function impFail(text) {
+  imp.result = null; $('impCreate').disabled = true;
+  $('impStats').textContent = ''; $('impStats').classList.remove('bad');
+  impMsg(text, true); impRender();
+}
+function impPreview() {
+  clearTimeout(imp.timer);
+  imp.dirty = false;
+  if (!imp.bytes) return Promise.resolve();
+  imp.inflight = impFetch().finally(() => { imp.inflight = null; });
+  return imp.inflight;
+}
+async function impFetch() {
+  const seq = ++imp.seq;
+  impMsg('Analyse du fichier…');
+  let r, body;
+  try {
+    r = await fetch('/api/figures/import?' + impParams(), { method: 'POST', body: imp.bytes });
+    body = r.ok ? await r.json() : await r.text();
+  } catch { if (seq === imp.seq) impFail('Le studio ne répond pas.'); return; }
+  if (seq !== imp.seq) return; // a newer preview is on its way
+  if (!r.ok) { impFail('Import impossible : ' + (body || r.status)); return; }
+  imp.result = body;
+  const s = body.stats;
+  if ($('impName').dataset.auto === '1') { $('impName').value = body.figure.name; }
+  if (s.threshold != null && $('impAuto').checked) $('impThreshold').value = s.threshold;
+  impLabels();
+  $('impStats').textContent = `${s.strokes} tracé(s), ${s.points} point(s) ; ≈ ${s.laser_points} points laser par image pour un budget de ${s.budget}`
+    + ` ; trajets éteints ${s.travel_before.toFixed(1)} → ${s.travel_after.toFixed(1)} (ordre optimisé)`
+    + (s.threshold != null ? ` ; seuil ${s.threshold}` : '') + '.';
+  $('impStats').classList.toggle('bad', s.over_budget);
+  impMsg(body.warnings.length ? 'Attention : ' + body.warnings.join(' ; ') + '.' : 'Aperçu prêt. Vérifiez-le puis « Créer la figure ».');
+  $('impCreate').disabled = false;
+  impRender();
+}
+const impSoon = () => { clearTimeout(imp.timer); imp.dirty = true; imp.timer = setTimeout(impPreview, 250); };
+async function impLoad(file) {
+  if (!file) return;
+  imp.result = null; imp.bytes = null; $('impCreate').disabled = true;
+  $('impFileName').textContent = `${file.name} · ${Math.max(1, Math.round(file.size / 1024))} Ko`;
+  if (file.size > IMP_MAX_BYTES) { impFail(`Fichier trop gros : ${IMP_MAX_BYTES / 1024 / 1024} Mo au plus.`); return; }
+  let buf;
+  try { buf = await file.arrayBuffer(); } catch { impFail('Fichier illisible.'); return; }
+  const b = new Uint8Array(buf.slice(0, 4));
+  imp.raster = (b[0] === 0x89 && b[1] === 0x50) || (b[0] === 0xff && b[1] === 0xd8);
+  $('impRasterOpts').hidden = !imp.raster;
+  $('impSvgOpts').hidden = imp.raster;
+  imp.bytes = buf; imp.name = file.name;
+  $('impName').dataset.auto = '1';
+  await impPreview();
+}
+$('impFile').onchange = () => impLoad($('impFile').files[0]);
+const drop = $('impDrop');
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); impLoad(e.dataTransfer?.files?.[0]); });
+Object.keys(IMP_LABELS).forEach(id => $(id).addEventListener('input', () => { impLabels(); impSoon(); }));
+['impBudget', 'impColor', 'impFills', 'impMode', 'impInvert'].forEach(id => $(id).addEventListener('change', impSoon));
+// Only the settings of the chosen mode are active.
+function impModeOpts() {
+  const m = $('impMode').value;
+  $('impColors').disabled = m !== 'colors';
+  $('impAuto').disabled = $('impInvert').disabled = m === 'colors';
+  $('impThreshold').disabled = m === 'colors' || $('impAuto').checked;
+}
+$('impMode').addEventListener('change', impModeOpts);
+$('impAuto').onchange = () => { impModeOpts(); impLabels(); impSoon(); };
+$('impName').oninput = () => { $('impName').dataset.auto = '0'; };
+function impCloseDlg() { clearTimeout(imp.timer); imp.seq++; $('figImportDlg').close(); }
+$('impClose').onclick = impCloseDlg;
+$('impCancel').onclick = impCloseDlg;
+$('figImport').onclick = () => {
+  imp.bytes = null; imp.result = null; imp.name = '';
+  $('impFile').value = ''; $('impFileName').textContent = ''; $('impName').value = ''; $('impName').dataset.auto = '1';
+  $('impStats').textContent = ''; impMsg(''); $('impCreate').disabled = true;
+  $('impBudget').value = fe.budget;
+  impModeOpts();
+  impLabels(); impRender();
+  $('figImportDlg').showModal();
+};
+$('impCreate').onclick = async () => {
+  // Settings just changed: create what they show, not the previous preview.
+  if (imp.dirty) await impPreview(); else if (imp.inflight) await imp.inflight;
+  if (!imp.result) return;
+  const name = $('impName').value.trim();
+  if (!FIG_NAME_RE.test(name)) { impMsg('Nom invalide : lettres, chiffres, espaces, - et _ seulement, 64 caractères au plus.', true); $('impName').focus(); return; }
+  if (fe.lib.some(f => f.name === name) && !confirm(`Une figure « ${name} » existe déjà : la remplacer ?`)) return;
+  const fig = structuredClone(imp.result.figure);
+  fig.name = name;
+  const r = await fetch('/api/figures', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fig) });
+  if (!r.ok) { impMsg(await r.text(), true); return; }
+  impCloseDlg();
+  stopFigPreview();
+  figChange(() => { fe.fig = fig; fe.frame = 0; fe.sel.clear(); fe.draft = null; });
+  showFigProps();
+  figMsg(`« ${name} » créée depuis l'import (cue de la page Figures) : modifiable ici.`);
+  await loadFigLib(); await loadPresets();
+};
+impLabels();
+
 // Cmd/Ctrl+Z, Cmd/Ctrl+Maj+Z (or Ctrl+Y), Suppr: only in the editor, never while typing.
 document.addEventListener('keydown', e => {
-  if ($('figEditor').hidden || isTyping()) return;
+  if ($('figEditor').hidden || isTyping() || $('figImportDlg').open) return;
   const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
   if (mod && !e.altKey && k === 'z') { e.preventDefault(); if (e.shiftKey) figRedo(); else figUndo(); }
   else if (mod && !e.altKey && k === 'y') { e.preventDefault(); figRedo(); }

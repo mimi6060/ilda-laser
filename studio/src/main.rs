@@ -15,6 +15,7 @@ mod cues;
 mod engine;
 mod evolving;
 mod fans;
+mod figure_import;
 mod figures;
 mod font;
 mod generators;

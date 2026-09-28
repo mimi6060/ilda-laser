@@ -1,12 +1,12 @@
 ---
 id: T-297
 title: Espace CRÉATION : import SVG et vectorisation d'image vers figure laser
-status: todo
+status: done
 area: cues
 priority: P2
 depends_on: [T-296]
-owner: ""
-branch: ""
+owner: "dev-agent (Claude)"
+branch: "feat/figure-import"
 source: demande utilisateur 2026-09-28 (idée « Tracer / SVG Tool »)
 ---
 
@@ -32,9 +32,9 @@ Onglet CRÉATION → « Importer » : glisser-déposer un fichier, réglages,
 aperçu, « Créer la figure ».
 
 ## Critères d'acceptation
-- [ ] Un SVG simple (logo) devient une figure fidèle et éditable
-- [ ] Une image contrastée devient une figure sous le budget de points
-- [ ] Fichiers invalides → message clair, aucun plantage
+- [x] Un SVG simple (logo) devient une figure fidèle et éditable
+- [x] Une image contrastée devient une figure sous le budget de points
+- [x] Fichiers invalides → message clair, aucun plantage
 
 ## Tests
 Unitaires avec SVG/images générés dans les tests (aucun fichier tiers).
@@ -46,3 +46,13 @@ avoir les droits sur ce qu'il importe (rappel dans l'interface).
 
 ## Journal
 - 2026-09-28 — architecte : créée à la demande de l'utilisateur.
+- 2026-09-28 — dev-agent (Claude), branche `feat/figure-import` : import SVG
+  (lecteur maison sur `roxmltree`) et vectorisation PNG/JPEG (`image`,
+  vectorisation maison : seuil Otsu, marching squares, amincissement
+  Zhang-Suen, Sobel, k-means), simplification RDP, ordre plus proche
+  voisin, budget mesuré après `densify`. Dialogue « Importer… » dans
+  CRÉATION › Figures avec aperçu et rappel des droits ; le fichier source
+  n'est jamais conservé. Crates MIT OR Apache-2.0 (voir
+  `docs/prs/figure-import.md`). Rebasé sur develop ad2e974 : `cargo test`
+  576 + 2 verts, clippy propre, e2e 148/148 (3 nouveaux). Statut `review`.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné ; import déplacé hors du fil HTTP principal.

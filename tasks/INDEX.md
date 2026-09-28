@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (97)
+## À faire (96)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -88,7 +88,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-285](T-285-ui.md) | Annuler / rétablir et historique des modifications | ui | P2 | [T-286] |  |
 | [T-288](T-288-infra.md) | Versions du format (migrations) et versions nommées | infra | P2 | [T-286] |  |
 | [T-289](T-289-infra.md) | Import partiel, profil de site et paquet d'export `.lspack` | infra | P2 | [T-286, T-288] |  |
-| [T-297](T-297-cues.md) | Espace CRÉATION : import SVG et vectorisation d'image vers figure laser | cues | P2 | [T-296] |  |
 | [T-013](T-013-midi.md) | Entrées OSC et Art-Net/DMX | midi | P3 | [] |  |
 | [T-109](T-109-output.md) | Cibles miroir : faisceaux dirigés vers des points calibrés | output | P3 | [T-003, T-100] |  |
 | [T-148](T-148-cues.md) | Pilote automatique (Virtual LJ) calé sur le tempo | cues | P3 | [T-159] |  |
@@ -111,7 +110,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (44)
+## Fait (45)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -158,4 +157,5 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-161](T-161-timeline.md) | Fichier audio et forme d'onde dans la timeline | timeline | P2 | [T-160] | feat/timeline-audio |
 | [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] | fix/arm-keys |
 | [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] | fix/ui-state |
+| [T-297](T-297-cues.md) | Espace CRÉATION : import SVG et vectorisation d'image vers figure laser | cues | P2 | [T-296] | feat/figure-import |
 | [T-294](T-294-qa.md) | Test e2e intermittent : « Synchro tempo keeps the preset step » (live.spec.ts:43) | qa | P3 | [] |  |
