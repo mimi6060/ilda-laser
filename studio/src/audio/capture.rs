@@ -437,7 +437,7 @@ pub mod testing {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
@@ -481,7 +481,8 @@ mod tests {
     #[global_allocator]
     static GLOBAL: CountingAlloc = CountingAlloc;
 
-    fn allocations_during(f: impl FnOnce()) -> usize {
+    /// Allocations made by `f` on this thread (also used by the analysis tests).
+    pub(crate) fn allocations_during(f: impl FnOnce()) -> usize {
         ALLOCATIONS.with(|n| n.set(0));
         COUNTING.with(|c| c.set(true));
         f();
