@@ -2,7 +2,7 @@
 // the same --data-dir; the output always stays inside -1..1.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { test, expect, useStudio, openUi, centroid, extent } from '../studio';
+import { test, expect, useStudio, openUi, reveal, centroid, extent } from '../studio';
 
 const studio = useStudio();
 const calibration = async () => (await studio.state()).calibration;
@@ -14,6 +14,7 @@ test.describe.configure({ mode: 'serial' });
 
 test('calibration sliders move the output and persist after a restart', async ({ page }) => {
   await openUi(page, studio);
+  await reveal(page, 'details:has(#cOx) > summary');
   await page.locator('summary', { hasText: 'Calibration' }).click();
   await page.locator('#cOx').fill('30');
   await expect(page.locator('#cOxV')).toHaveText('0.30');
@@ -26,6 +27,7 @@ test('calibration sliders move the output and persist after a restart', async ({
   await studio.restart();
   expect(await calibration()).toEqual(expect.objectContaining({ offset_x: expect.closeTo(0.3, 3), rotation_deg: 45 }));
   await openUi(page, studio);
+  await reveal(page, 'details:has(#cOx) > summary');
   await page.locator('summary', { hasText: 'Calibration' }).click();
   await expect(page.locator('#cOx')).toHaveValue('30');
   await expect(page.locator('#cOxV')).toHaveText('0.30');
@@ -35,10 +37,13 @@ test('calibration sliders move the output and persist after a restart', async ({
 
 test('the output stays inside -1..1 whatever the sliders say', async ({ page }) => {
   await openUi(page, studio);
+  await reveal(page, 'details:has(#cOx) > summary');
   await page.locator('summary', { hasText: 'Calibration' }).click();
   await page.locator('#cSx').fill('200');
   await page.locator('#cSy').fill('200');
+  await reveal(page, '#mSize');
   await page.locator('#mSize').fill('200');
+  await reveal(page, '#scale');
   await page.locator('#scale').fill('100');
   await expect.poll(async () => (await studio.live()).size).toBe(2);
   await expect.poll(calibration).toEqual(expect.objectContaining({ scale_x: 2, scale_y: 2 }));
@@ -52,6 +57,7 @@ test('scenes and master live modifiers persist after a restart', async ({ page }
   await openUi(page, studio);
   await page.locator('#mSize').fill('120');
   await page.locator('#rotPresets button', { hasText: 'Lent' }).click();
+  await reveal(page, '#sceneName'); // LIVE › Scènes
   await page.locator('#sceneName').fill('Gardée');
   await page.locator('#sceneSave').click();
   await expect(page.locator('#sceneList .scene', { hasText: 'Gardée' })).toBeVisible();
@@ -63,7 +69,9 @@ test('scenes and master live modifiers persist after a restart', async ({ page }
   expect((await studio.state()).scenes.map((s: { name: string }) => s.name)).toEqual(['Gardée']);
   expect(await studio.live()).toEqual(expect.objectContaining({ size: expect.closeTo(1.2, 3), rot_speed: [0, 0, 30] }));
   await openUi(page, studio);
+  await reveal(page, '#sceneList');
   await expect(page.locator('#sceneList .scene', { hasText: 'Gardée' })).toBeVisible();
+  await reveal(page, '#mSizeV'); // LIVE › Direct
   await expect(page.locator('#mSizeV')).toHaveText('120 %');
   await expect(page.locator('#rotPresets button', { hasText: 'Lent' })).toHaveClass(/active/);
   // Still preview-only and disarmed after the restart.

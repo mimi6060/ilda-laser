@@ -163,9 +163,33 @@ export function useStudio(opts: StudioOptions = {}): Studio {
   return studio;
 }
 
-/** Open the UI and wait until it has loaded its state and cue grid. */
+export type Workspace = 'live' | 'timeline' | 'creation' | 'settings';
+
+/** Click a workspace tab (T-295: LIVE, TIMELINE, CRÉATION, RÉGLAGES). */
+export async function openWorkspace(page: Page, ws: Workspace) {
+  await page.locator(`#wsTabs [data-ws-tab="${ws}"]`).click();
+  await expect(page.locator(`#wsTabs [data-ws-tab="${ws}"]`)).toHaveClass(/active/);
+}
+
+/**
+ * Show the workspace (and the LIVE panel tab) holding `selector`, by
+ * clicking their tabs like a user would. Controls of a hidden workspace
+ * can't be clicked or typed in.
+ */
+export async function reveal(page: Page, selector: string) {
+  const where = await page.locator(selector).first().evaluate(el => ({
+    ws: (el.closest('[data-ws]') as HTMLElement | null)?.dataset.ws ?? null,
+    panel: (el.closest('[data-panel]') as HTMLElement | null)?.dataset.panel ?? null,
+  }));
+  if (where.ws) await openWorkspace(page, where.ws as Workspace);
+  if (where.panel) await page.locator(`#liveTabs [data-panel-tab="${where.panel}"]`).click();
+  await expect(page.locator(selector).first()).toBeVisible();
+}
+
+/** Open the UI on the LIVE workspace and wait until it has loaded its state and cue grid. */
 export async function openUi(page: Page, studio: Studio) {
   await page.goto(studio.url + '/');
+  await openWorkspace(page, 'live');
   await expect(page.locator('#shapes button')).not.toHaveCount(0);
   await expect(page.locator('#cues .cue').first()).toBeVisible();
   await expect(page.locator('#stPoints')).not.toHaveText('0');
