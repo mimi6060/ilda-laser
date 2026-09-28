@@ -717,7 +717,7 @@ mod tests {
     fn momentary_flash_cue_stops_on_release_even_after_a_page_change() {
         let mut s = setup(vec![Mapping { args: json!({ "slot": 1 }), ..note(0x21, "", MapMode::Grid) }, note(0x5E, "page.next", MapMode::Trigger)], Instant::now());
         let cue = s.presets.iter().filter(|p| p.category == crate::presets::CATEGORIES[0]).nth(1).unwrap().id.clone();
-        s.deck.set_slot(&cue, crate::cues::CueSlot { mode: Some(crate::cues::ClickMode::Flash), group: None });
+        s.deck.set_slot(&cue, crate::cues::CueSlot { mode: Some(crate::cues::ClickMode::Flash), group: None, layer: None });
         send_msgs(&mut s, &[on(0x21)]);
         assert_eq!(s.active_cue.as_deref(), Some(cue.as_str()));
         send_msgs(&mut s, &[on(0x5E), off(0x5E), off(0x21)]);
