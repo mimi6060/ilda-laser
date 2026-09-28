@@ -431,6 +431,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         }
         (Method::Post, p) if p.starts_with("/api/timeline/") => timeline_route(request, shared, &p["/api/timeline/".len()..]),
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
+        (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         _ => text(404, "not found"),
     }
 }
@@ -510,6 +511,23 @@ fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, pa
     match crate::midi::api::route(&mut shared.lock().unwrap(), post, path, &raw) {
         Some(crate::midi::api::Reply::Json(v)) => json_response(v),
         Some(crate::midi::api::Reply::Text(code, t)) => text(code, &t),
+        None => text(404, "not found"),
+    }
+}
+
+/// `GET /api/project`, `POST /api/project/{new,open,save,save-as}` (T-286).
+/// Nothing here can arm, or change calibration or safety settings.
+fn project_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, path: &str) -> HttpResponse {
+    let mut raw = String::new();
+    if post {
+        if let Err(e) = request.as_reader().read_to_string(&mut raw) {
+            return text(400, &format!("unreadable body: {e}"));
+        }
+    }
+    let action = path.strip_prefix("/api/project").unwrap_or("").trim_start_matches('/');
+    match crate::project::route(shared, post, action, &raw) {
+        Some(crate::project::Reply::Json(v)) => json_response(v),
+        Some(crate::project::Reply::Text(code, t)) => text(code, &t),
         None => text(404, "not found"),
     }
 }

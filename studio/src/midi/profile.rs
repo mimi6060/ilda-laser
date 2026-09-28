@@ -223,6 +223,23 @@ impl ProfileStore {
         store
     }
 
+    /// `<data-dir>/midi`, or `None` in memory.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// User profiles by slug (built-ins excluded).
+    pub fn user_profiles(&self) -> &BTreeMap<String, Profile> {
+        &self.user
+    }
+
+    /// Replaces every user profile in memory only (slugs and profiles
+    /// already checked); the caller writes the files (project open, T-286).
+    /// `devices.json`, with the MIDI safety options, is never touched.
+    pub fn replace_user_in_memory(&mut self, user: BTreeMap<String, Profile>) {
+        self.user = user;
+    }
+
     pub fn is_builtin(&self, slug: &str) -> bool {
         self.builtin.iter().any(|(s, _)| s == slug)
     }

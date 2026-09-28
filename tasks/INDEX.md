@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (106)
+## À faire (105)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -36,7 +36,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-277](T-277-output.md) | Lieu et projecteurs multiples (modèle `Venue`, `/api/frames`) | output | P1 | [T-275] |  |
 | [T-279](T-279-safety.md) | Surcouches de sécurité dans le visualiseur (zone public, horizon) | safety | P1 | [T-277, T-003] |  |
 | [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
-| [T-286](T-286-infra.md) | Fichier projet `.lsproj` : ouvrir, enregistrer, récents | infra | P1 | [] |  |
 | [T-287](T-287-infra.md) | Sauvegarde automatique et récupération après plantage | infra | P1 | [T-286] |  |
 | [T-295](T-295-ui.md) | Trois espaces de travail en onglets : LIVE, TIMELINE, CRÉATION (+ Réglages) | ui | P1 | [T-270] |  |
 | [T-296](T-296-cues.md) | Espace CRÉATION : éditeur de figures laser (dessin point par point, animation) | cues | P1 | [T-295] |  |
@@ -120,7 +119,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (34)
+## Fait (35)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -152,6 +151,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] | feat/heartbeat |
 | [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] | feat/beam-view |
 | [T-276](T-276-ui.md) | Rendu des faisceaux : énergie conservée, nappes, brume, halo | ui | P1 | [T-275] | feat/beam-view |
+| [T-286](T-286-infra.md) | Fichier projet `.lsproj` : ouvrir, enregistrer, récents | infra | P1 | [] | feat/project-file |
 | [T-291](T-291-ui.md) | Raccourcis clavier morts après un curseur ou une case à cocher (Espace n'éteint plus) | ui | P1 | [] | fix/arm-keys |
 | [T-293](T-293-ui.md) | Pendant la playlist, un curseur du look renvoie l'ancien look (la scène saute) | ui | P1 | [] | fix/ui-state |
 | [T-160](T-160-timeline.md) | Timeline : modèle de show et lecteur (pistes, événements, carte de tempo) | timeline | P2 | [T-150, T-156] | feat/timeline |
