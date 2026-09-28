@@ -26,6 +26,18 @@ use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 const INDEX_HTML: &str = include_str!("index.html");
+/// The 3D beam view (preview only), an ES module the page loads on demand.
+const BEAM3D_JS: &str = include_str!("beam3d.js");
+
+/// Files the UI loads besides the page itself: (body, content type).
+/// Everything is compiled in, so the studio works offline.
+fn static_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        "/" => Some((INDEX_HTML, "text/html; charset=utf-8")),
+        "/beam3d.js" => Some((BEAM3D_JS, "text/javascript; charset=utf-8")),
+        _ => None,
+    }
+}
 
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
@@ -99,7 +111,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
     let path = request.url().split('?').next().unwrap_or("").to_string();
 
     match (method, path.as_str()) {
-        (Method::Get, "/") => with_type(Response::from_string(INDEX_HTML), "text/html; charset=utf-8"),
+        (Method::Get, p) if static_asset(p).is_some() => {
+            let (body, content_type) = static_asset(p).expect("checked by the guard");
+            with_type(Response::from_string(body), content_type)
+        }
         (Method::Get, "/api/state") => state(shared),
         (Method::Get, "/api/frame") => frame(shared),
         (Method::Post, "/api/settings") => match body::<Settings>(request) {
@@ -713,5 +728,28 @@ mod tests {
         assert_eq!(query_u64("/api/settings?x=1&rev=3", "rev"), Some(3));
         assert_eq!(query_u64("/api/settings?revision=3", "rev"), None);
         assert_eq!(query_u64("/api/settings", "rev"), None);
+    }
+
+    #[test]
+    fn serves_the_page_and_the_beam_view_module() {
+        let (page, page_type) = static_asset("/").unwrap();
+        assert!(page_type.starts_with("text/html"));
+        assert!(page.contains("/beam3d.js"), "the page loads the 3D view from our own server");
+
+        // Browsers refuse ES modules served with a non-JavaScript type.
+        let (module, module_type) = static_asset("/beam3d.js").unwrap();
+        assert!(module_type.starts_with("text/javascript"));
+        assert!(module.contains("export class BeamView"));
+        assert!(static_asset("/vendor/nothing.js").is_none());
+    }
+
+    #[test]
+    fn the_beam_view_has_no_way_to_reach_the_server() {
+        // Preview only (CLAUDE.md): the 3D view gets frames from the page and
+        // must never fetch, post or arm anything itself.
+        let (module, _) = static_asset("/beam3d.js").unwrap();
+        for forbidden in ["fetch(", "XMLHttpRequest", "WebSocket", "/api/", "sendBeacon", "import("] {
+            assert!(!module.contains(forbidden), "beam3d.js must not use {forbidden}");
+        }
     }
 }

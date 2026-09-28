@@ -2,7 +2,14 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (116)
+## En review (2)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] | feat/beam-view |
+| [T-276](T-276-ui.md) | Rendu des faisceaux : énergie conservée, nappes, brume, halo | ui | P1 | [T-275] | feat/beam-view |
+
+## À faire (114)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -43,8 +50,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-264](T-264-qa.md) | Suite de tests des invariants de sécurité | qa | P1 | [T-250, T-251, T-252, T-253, T-254, T-256] |  |
 | [T-270](T-270-ui.md) | Nouvelle disposition de l'écran (régions, onglets de panneau) | ui | P1 | [] |  |
 | [T-272](T-272-ui.md) | Grille de cues à taille fixe (8×5 par défaut), pages sur touches F | ui | P1 | [T-270] |  |
-| [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] |  |
-| [T-276](T-276-ui.md) | Rendu des faisceaux : énergie conservée, nappes, brume, halo | ui | P1 | [T-275] |  |
 | [T-277](T-277-output.md) | Lieu et projecteurs multiples (modèle `Venue`, `/api/frames`) | output | P1 | [T-275] |  |
 | [T-279](T-279-safety.md) | Surcouches de sécurité dans le visualiseur (zone public, horizon) | safety | P1 | [T-277, T-003] |  |
 | [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
