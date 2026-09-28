@@ -53,6 +53,10 @@ pub struct GenParams {
     pub group_mode: GroupMode,
     /// Shape of back-and-forth motion (the fan sweep).
     pub easing: Easing,
+    /// `polygon_tunnel`: turn by whole steps of 1/sides of a turn, one per
+    /// step (`steps_per_beat`, so one per beat by default), instead of
+    /// turning smoothly.
+    pub snap: bool,
 }
 
 impl Default for GenParams {
@@ -72,6 +76,7 @@ impl Default for GenParams {
             groups: 1,
             group_mode: GroupMode::Unison,
             easing: Easing::Sine,
+            snap: false,
         }
     }
 }
@@ -141,6 +146,8 @@ pub const GENERATOR_NAMES: &[&str] = &[
     // Festival beam fans (T-102), see `fans.rs`. Append-only: saved looks
     // refer to generators by name.
     "fan", "fan_sweep", "fan_tilt", "fan_wave", "positions",
+    // Festival tunnels, cones and sun rays (T-105), see `tunnels.rs`.
+    "finger_tunnel", "tunnel_pump", "twin_tunnel", "sunburst",
 ];
 
 pub struct Geometry {
@@ -249,14 +256,22 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
                 .collect(),
         ),
 
-        // Rotating nested polygons with `a` sides, each ring twisted a bit more.
+        // Rotating nested polygons with `a` sides, each ring twisted a bit
+        // more. `snap`: the rotation steps 1/sides of a turn per step (a
+        // triangle snapping 120° on every kick), still between steps.
         "polygon_tunnel" => {
             let sides = (p.a.round() as usize).clamp(3, 12);
+            let spin = if p.snap {
+                let dir = if p.direction < 0 { -1.0 } else { 1.0 };
+                dir * (ctx.step(p) % sides as u64) as f32 / sides as f32 * TAU
+            } else {
+                t * 0.5
+            };
             lines(
                 (0..n)
                     .map(|i| {
                         let f = (i as f32 + 1.0) / n as f32;
-                        polygon_stroke(sides, scale * f, t * 0.5 + f * p.b)
+                        polygon_stroke(sides, scale * f, spin + f * p.b)
                     })
                     .collect(),
             )
@@ -432,7 +447,7 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
                 .collect(),
         ),
 
-        _ => crate::fans::generate(name, p, ctx),
+        _ => crate::fans::generate(name, p, ctx).or_else(|| crate::tunnels::generate(name, p, ctx)),
     }
 }
 
@@ -743,6 +758,32 @@ mod tests {
         // Unison: both groups move together.
         let geo = test_fan(&GenParams { group_mode: GroupMode::Unison, ..p }, &ctx);
         assert!((geo.strokes[0][0].0 - (-0.2 + 0.3)).abs() < 1e-5 && geo.strokes[3][0].0 > 0.4);
+    }
+
+    #[test]
+    fn polygon_tunnel_snap_steps_one_side_per_beat_and_holds_between() {
+        let p = GenParams { count: 3, a: 3.0, b: 0.0, snap: true, ..Default::default() };
+        let corner = |p: &GenParams, beat: f64, t: f32| {
+            let g = generate("polygon_tunnel", p, &GenCtx { beat_pos: beat, ..GenCtx::at_time(t, 0.0, 0.0, 0.6) }).unwrap();
+            let (x, y) = g.strokes[2][0];
+            (y.atan2(x) / TAU).rem_euclid(1.0)
+        };
+        let turn = |a: f32, b: f32| (b - a).rem_euclid(1.0);
+        // Constant from one beat to the next, whatever the seconds say.
+        assert!(turn(corner(&p, 1.0, 0.0), corner(&p, 1.99, 5.0)) < 1e-5);
+        // A third of a turn on each beat (a triangle snapping 120°).
+        assert!((turn(corner(&p, 1.5, 0.0), corner(&p, 2.0, 0.0)) - 1.0 / 3.0).abs() < 1e-5);
+        assert!((turn(corner(&p, 0.5, 0.0), corner(&p, 1.0, 0.0)) - 1.0 / 3.0).abs() < 1e-5);
+        let rev = GenParams { direction: -1, ..p.clone() };
+        assert!((turn(corner(&rev, 2.0, 0.0), corner(&rev, 1.5, 0.0)) - 1.0 / 3.0).abs() < 1e-5, "reversed");
+        let square = GenParams { a: 4.0, ..p.clone() };
+        assert!((turn(corner(&square, 0.0, 0.0), corner(&square, 1.0, 0.0)) - 0.25).abs() < 1e-5);
+        // Without snap: the old smooth turn from `t`, blind to the beat.
+        let smooth = GenParams { snap: false, ..p };
+        assert_eq!(corner(&smooth, 0.0, 1.0), corner(&smooth, 3.0, 1.0));
+        assert!(turn(corner(&smooth, 0.0, 0.0), corner(&smooth, 0.0, 1.0)) > 0.05);
+        // Old saved looks load without it.
+        assert!(!serde_json::from_str::<GenParams>(r#"{"count":5}"#).unwrap().snap);
     }
 
     #[test]

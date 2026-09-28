@@ -29,6 +29,7 @@ mod safety;
 mod scenes;
 mod tempo;
 mod timeline;
+mod tunnels;
 mod watchdog;
 mod web;
 
