@@ -130,6 +130,53 @@ test('« Soleil levant » only lights rays above the horizon; polygon tunnel can
   await expect.poll(async () => (await settings()).content.params.snap).toBe(true);
 });
 
+test('« Plafond liquide » draws a sheet above the audience and its parameters are saved', async ({ page }) => {
+  await page.locator('[data-kind="generator"]').click();
+  await page.locator('#gen').selectOption({ label: 'Plafond liquide' });
+  await expect.poll(async () => (await settings()).content.generator).toBe('ceiling');
+  // Picking a sheet starts it in tempo from its own starting values.
+  const p = (await settings()).content.params;
+  expect(p.beat_sync).toBe(true);
+  expect(p.a).toBeCloseTo(0.02, 3);
+  expect(p.b).toBeCloseTo(0.15, 3);
+  await expect(page.locator('#gBH')).toContainText('Hauteur du plafond');
+  await expect(page.locator('#gAV')).toHaveText('0.02');
+
+  // One flat, rippling line just above the horizon, never below it.
+  const lit = async () => (await points()).filter(isLit);
+  await expect.poll(async () => (await lit()).length).toBeGreaterThan(50);
+  const ys = (await lit()).map(q => q[1]);
+  expect(Math.min(...ys)).toBeGreaterThanOrEqual(0.15 - 0.02 - 1e-3);
+  expect(Math.max(...ys)).toBeLessThanOrEqual(0.15 + 0.02 + 1e-3);
+
+  // Lower the ceiling and choose how a pass ends, then save it as a scene.
+  await page.locator('#gB').fill('0.3');
+  await expect.poll(async () => (await settings()).content.params.b).toBeCloseTo(0.3, 3);
+  await page.locator('#gLoop').selectOption('wrap');
+  await expect.poll(async () => (await settings()).content.params.loop_mode).toBe('wrap');
+  await page.locator('#sceneName').fill('Plafond');
+  await page.locator('#sceneSave').click();
+  await expect(page.locator('#sceneList .scene', { hasText: 'Plafond' })).toBeVisible();
+  const saved = ((await studio.state()).scenes as { name: string; settings: { content: { generator: string; params: Record<string, unknown> } } }[])
+    .find(sc => sc.name === 'Plafond')!;
+  expect(saved.settings.content.generator).toBe('ceiling');
+  expect(saved.settings.content.params).toMatchObject({ beat_sync: true, loop_mode: 'wrap', period_beats: 16 });
+  expect(saved.settings.content.params.b as number).toBeCloseTo(0.3, 3);
+
+  // Another look, then the scene brings the ceiling back with its parameters.
+  await page.locator('[data-kind="shape"]').click();
+  await page.getByRole('button', { name: 'Carré', exact: true }).click();
+  // (Wait for the square itself, not just the Forme tab, so no edit is still unsent.)
+  await expect.poll(async () => (await settings()).content.shape).toBe('square');
+  await page.locator('#sceneList .scene', { hasText: 'Plafond' }).getByRole('button', { name: '▶' }).click();
+  await expect.poll(async () => (await settings()).content.generator).toBe('ceiling');
+  expect((await settings()).content.params.b).toBeCloseTo(0.3, 3);
+  await expect(page.locator('#gen')).toHaveValue('ceiling');
+  await expect(page.locator('#gLoop')).toHaveValue('wrap');
+  await expect.poll(async () => Math.min(...(await lit()).map(q => q[1]))).toBeGreaterThan(0.25);
+  await studio.post('/api/scenes/delete', { name: 'Plafond' });
+});
+
 test('look size slider scales the drawing', async ({ page }) => {
   expect(extent(await points())).toBeCloseTo(0.5, 1);
   await page.locator('#scale').fill('100');
