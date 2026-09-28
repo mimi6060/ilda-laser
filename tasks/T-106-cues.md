@@ -1,12 +1,12 @@
 ---
 id: T-106
 title: Nappes : liquid sky, lame, rideaux, cascade, scanner, lamelles, aurore, grille
-status: todo
+status: in-progress
 area: cues
 priority: P1
 depends_on: [T-100]
-owner: ""
-branch: ""
+owner: "dev-agent (sheet-gens)"
+branch: feat/sheet-gens
 source: docs/research/festival-looks.md#c-sheets-ceilings-and-walls
 ---
 
