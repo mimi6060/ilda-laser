@@ -9,7 +9,9 @@ check what the user sees plus the studio's API (`/api/state`,
 The harness (`studio.ts`) only ever starts a **preview-only** studio:
 
 - never with `--device` (no laser output; it also checks `output` is null),
-- always with `--no-midi` (never opens the user's MIDI controller),
+- always with `--no-midi` (never opens the user's MIDI controller); MIDI
+  specs add `--midi-test`, which plugs in a *simulated* APC40 mkII
+  (« Test APC40 mkII ») fed by `POST /api/midi/inject` — still no real port,
 - on a free port, never 8080 (the user's instance),
 - with a fresh temporary `--data-dir` per spec file, deleted afterwards —
   never the user's `studio-data/`,
@@ -46,10 +48,14 @@ Failures keep a screenshot and a trace in `test-results/`
 
 - `playwright.config.ts` — headless Chromium, 4 workers (one studio per spec file).
 - `global-setup.ts` — `cargo build -p laser-studio` before the run.
-- `studio.ts` — the harness: `useStudio()`, `openUi()`, `focusPage()`,
-  API helpers and frame maths (`extent`, `centroid`).
+- `studio.ts` — the harness: `useStudio({ midiTest?, files? })`, `openUi()`,
+  `focusPage()`, API helpers and frame maths (`extent`, `centroid`).
+- `midi.ts` — the simulated APC40 mkII (`--midi-test`): `new Apc(studio)`
+  with `pressPad(r, c)`, `moveFader(n, v)`, `turnKnob(cc, delta)`,
+  `shift(down)`, `ledAt(r, c)` (from `GET /api/midi/sent`), and
+  `testProfileFiles()`, a test layout seeded into the data dir.
 - `tests/` — one file per area: `content`, `laser`, `cues`, `live`,
-  `tempo`, `scenes`, `persistence`.
+  `tempo`, `scenes`, `persistence`, `midi`, …
 
 ## Writing tests
 

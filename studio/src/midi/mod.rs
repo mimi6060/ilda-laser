@@ -19,6 +19,7 @@ pub mod engine;
 pub mod mapping;
 pub mod profile;
 pub mod safety;
+pub mod testing;
 pub mod worker;
 
 pub use decode::MidiMsg;
@@ -123,11 +124,15 @@ pub struct MidiState {
     pub sender: Option<MidiSender>,
     /// Mapping engine runtime state (Shift, held buttons, pickup…).
     pub map: engine::MapState,
+    /// `--midi-test` only: the simulated devices behind
+    /// `/api/midi/inject` and `/api/midi/sent` (T-209). `None` in normal
+    /// runs, and those routes then don't exist.
+    pub sim: Option<testing::SimMidi>,
 }
 
 impl MidiState {
     pub fn new(enabled: bool, store: profile::ProfileStore) -> Self {
-        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default() }
+        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default(), sim: None }
     }
 
     pub fn device_mut(&mut self, name: &str) -> &mut MidiDevice {

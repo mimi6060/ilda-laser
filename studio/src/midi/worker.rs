@@ -29,9 +29,14 @@ const IDLE_WAIT: Duration = Duration::from_millis(20);
 /// Starts the MIDI thread on CoreMIDI. Returns `None` (and logs) if the
 /// thread can't be created; the studio then simply runs without MIDI.
 pub fn spawn(shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+    spawn_on(MidirBackend, shared, running)
+}
+
+/// Same on another backend: `--midi-test` runs it on simulated devices.
+pub fn spawn_on<B: Backend + Send + 'static>(backend: B, shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("midi".into())
-        .spawn(move || Worker::new(MidirBackend, shared).run(&running))
+        .spawn(move || Worker::new(backend, shared).run(&running))
         .map_err(|e| log::warn!("MIDI : impossible de démarrer le thread : {e}"))
         .ok()
 }
@@ -335,6 +340,7 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
 pub mod tests {
     use super::*;
     use crate::midi::detect::{introduction, MODE_ABLETON, PID_APC40, PID_APC40_MK2};
+    use crate::midi::testing::FakeApc;
     use crate::test_support;
     use std::collections::HashMap;
 
@@ -675,7 +681,7 @@ pub mod tests {
         struct OnlyTestPorts(MidirBackend);
         impl Backend for OnlyTestPorts {
             fn ports(&mut self) -> Result<(Vec<String>, Vec<String>), String> {
-                let (i, o) = self.0.ports()?;
+                let (i, o) = self.0.all_ports()?;
                 Ok((i.into_iter().filter(|n| n == NAME).collect(), o.into_iter().filter(|n| n == NAME).collect()))
             }
             fn open_input(&mut self, name: &str, cb: InputCallback) -> Result<InputHandle, String> {
@@ -688,21 +694,21 @@ pub mod tests {
             }
         }
 
-        // The fake device: a source (what the studio reads) and a
-        // destination that answers the inquiry and records the rest.
+        // The fake device (T-209 `FakeApc`) behind two virtual ports: a
+        // source (what the studio reads) and a destination that answers
+        // like an APC40 mkII and records the rest.
         let source = Arc::new(Mutex::new(midir::MidiOutput::new("fake apc").unwrap().create_virtual(NAME).unwrap()));
-        let received = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let apc = Arc::new(Mutex::new(FakeApc::new(Model::Apc40Mk2)));
         let _dest = midir::MidiInput::new("fake apc")
             .unwrap()
             .create_virtual(
                 NAME,
                 {
-                    let (source, received) = (Arc::clone(&source), Arc::clone(&received));
+                    let (source, apc) = (Arc::clone(&source), Arc::clone(&apc));
                     move |_, bytes, _| {
-                        if bytes == DEVICE_INQUIRY {
-                            source.lock().unwrap().send(&identity_reply(PID_APC40_MK2)).unwrap();
+                        for reply in apc.lock().unwrap().receive(bytes) {
+                            source.lock().unwrap().send(&reply).unwrap();
                         }
-                        received.lock().unwrap().push(bytes.to_vec());
                     }
                 },
                 (),
@@ -717,17 +723,25 @@ pub mod tests {
             std::thread::sleep(ms(10));
             w.step(t0 + ms(10), None);
         }
-        source.lock().unwrap().send(&[0x90, 0x20, 0x7F]).unwrap();
+        let pad = apc.lock().unwrap().pad(0, 0, true);
+        source.lock().unwrap().send(&pad).unwrap();
         std::thread::sleep(ms(50));
         w.step(t0 + ms(20), None);
         let d = device(&shared, NAME);
         assert_eq!((d.model, d.profile.as_str(), d.connected), (Model::Apc40Mk2, "apc40-mk2", true));
+        assert_eq!(d.faders, Some([0; 9]), "0x61 reply received");
         assert_eq!(shared.lock().unwrap().midi.last.as_ref().unwrap().msg, MidiMsg::NoteOn { channel: 0, note: 0x20, velocity: 127 });
+        assert_eq!(apc.lock().unwrap().mode(), Some(MODE_ABLETON));
+
+        // A LED sent to the pad reaches the device.
+        shared.lock().unwrap().midi.sender.clone().unwrap().send(NAME, &[0x90, 0x20, 21]);
+        w.step(t0 + ms(30), None);
+        std::thread::sleep(ms(50));
+        assert_eq!(apc.lock().unwrap().led_at(0, 0), Some(21));
+
         w.shutdown();
         std::thread::sleep(ms(50));
-        let got = received.lock().unwrap();
-        assert!(got.contains(&introduction(PID_APC40_MK2, MODE_ABLETON)));
-        assert_eq!(got.last().unwrap(), &introduction(PID_APC40_MK2, MODE_GENERIC));
+        assert_eq!(apc.lock().unwrap().mode(), Some(MODE_GENERIC));
     }
 
     /// Hot-plug over real CoreMIDI: a port that appears and disappears is
@@ -738,13 +752,14 @@ pub mod tests {
         use midir::os::unix::VirtualOutput;
         const NAME: &str = "Laser Studio Test Hotplug";
         let mut backend = MidirBackend;
-        assert!(!backend.ports().unwrap().0.contains(&NAME.to_string()));
+        assert!(!backend.all_ports().unwrap().0.contains(&NAME.to_string()));
         let port = midir::MidiOutput::new("fake").unwrap().create_virtual(NAME).unwrap();
         std::thread::sleep(ms(50));
-        assert!(backend.ports().unwrap().0.contains(&NAME.to_string()), "plugged");
+        assert!(backend.all_ports().unwrap().0.contains(&NAME.to_string()), "plugged");
+        assert!(!backend.ports().unwrap().0.contains(&NAME.to_string()), "hidden from a running studio");
         drop(port);
         std::thread::sleep(ms(50));
-        assert!(!backend.ports().unwrap().0.contains(&NAME.to_string()), "unplugged");
+        assert!(!backend.all_ports().unwrap().0.contains(&NAME.to_string()), "unplugged");
     }
 
     #[test]
