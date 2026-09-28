@@ -14,9 +14,17 @@
 //!
 //! The browser source (`POST /api/audio`) is kept: it is the *Navigateur*
 //! source, and the fallback when the native one has nothing fresh.
+//!
+//! Audio *output* lives here too: the timeline's song (T-161) is decoded
+//! (decode.rs), kept in `studio-data/media/audio/` (media.rs) and played on
+//! the Mac's output by its own thread, its clock driving the timeline
+//! (playback.rs).
 
 pub mod analysis;
 pub mod capture;
+pub mod decode;
+pub mod media;
+pub mod playback;
 pub mod spectrum;
 pub mod worker;
 

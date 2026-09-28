@@ -188,6 +188,20 @@
   .tl-bar { position: relative; height: 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; overflow: hidden; }
   .tl-bar .region { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .18; }
   #tlHead { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--accent); }
+  .tl-audio { margin-bottom: 6px; }
+  .tl-audio .cue-bar { margin-bottom: 4px; }
+  .tl-track { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  #tlSong { max-width: 220px; padding: 5px; }
+  .tl-knob { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .tl-knob input { width: 110px; }
+  .tl-knob span { min-width: 52px; font-variant-numeric: tabular-nums; }
+  #tlSongStatus { margin: 0; }
+  #tlSongStatus.bad { color: var(--warn); }
+  .tl-wave { position: relative; height: 64px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; overflow: hidden; }
+  #tlWave { width: 100%; height: 100%; aspect-ratio: auto; border: 0; border-radius: 0; background: transparent; }
+  #tlWaveHead { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--accent); }
+  #tlWaveEmpty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--muted); pointer-events: none; }
+  #tlWaveEmpty[hidden] { display: none; }
   #cueMenu { position: fixed; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 220px; box-shadow: 0 8px 24px #0008; }
   #cueMenu[hidden] { display: none; }
   #cueMenu h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
@@ -535,10 +549,22 @@
         <button id="tlLoop" title="timeline.loop : rejoue la région de boucle (ou tout le show)">⟲ Boucle</button>
         <span id="tlPos">–</span>
       </div>
+      <div class="tl-audio" id="tlAudio">
+        <div class="cue-bar">
+          <span class="tl-track">Audio</span>
+          <select id="tlSong" title="Morceau du show (fichiers de studio-data/media/audio)"><option value="">Aucun morceau</option></select>
+          <button id="tlImport" title="WAV, MP3, AIFF ou FLAC : copié dans studio-data/media/audio, jamais ailleurs">Importer un morceau…</button>
+          <input type="file" id="tlImportFile" accept=".wav,.mp3,.aif,.aiff,.flac" hidden>
+          <label class="tl-knob" title="Décalage du son par rapport au laser (±500 ms) : positif = le son plus tard, pour compenser la latence">Décalage <input type="range" id="tlOffset" min="-500" max="500" step="5" value="0"> <span id="tlOffsetV">0 ms</span></label>
+          <label class="tl-knob" title="Volume du morceau">Volume <input type="range" id="tlGain" min="0" max="100" step="1" value="100"> <span id="tlGainV">100 %</span></label>
+          <span class="hint" id="tlSongStatus"></span>
+        </div>
+        <div class="tl-wave" id="tlWaveBox" title="Forme d'onde : cliquer pour se placer"><canvas id="tlWave"></canvas><div id="tlWaveEmpty">Pas de morceau</div><div id="tlWaveHead"></div></div>
+      </div>
       <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
       <div class="hint" id="tlMsg"></div>
     </section>
-    <div class="hint soon">À venir ici : éditeur de timeline glisser-déposer, forme d'onde audio, modèles, timecode.</div>
+    <div class="hint soon">À venir ici : éditeur de timeline glisser-déposer, modèles, timecode.</div>
   </div>
 
   <!-- CRÉATION : contenu (générateurs, texte, cues évolutifs) et réglages du look -->
@@ -1271,6 +1297,7 @@ async function previewLoop() {
     figFrameInfo(f);
     showEvolving(f.evolving);
     showTimeline(f.timeline);
+    showSong(f.timeline, f.timeline_audio);
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -1842,12 +1869,114 @@ $('tlPlay').onclick = async () => {
   $('tlMsg').textContent = r.ok ? '' : await r.text();
 };
 $('tlLoop').onclick = () => post('/api/timeline/loop', { on: !(timeline && timeline.loop) });
-$('tlBar').addEventListener('click', e => {
+function seekFromClick(el, e) {
   if (!timeline || !timeline.length) return;
-  const b = $('tlBar').getBoundingClientRect();
+  const b = el.getBoundingClientRect();
   post('/api/timeline/seek', { position: timeline.length * Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)) });
-});
+}
+$('tlBar').addEventListener('click', e => seekFromClick($('tlBar'), e));
 loadShows();
+
+// ---------- timeline audio (T-161) ----------
+// The show's song: import, pick, offset, volume, and its waveform (peaks
+// computed and cached by the studio). The studio plays it itself on the
+// Mac's output and the timeline follows the song's clock; the page only
+// shows it.
+let songs = [], waveKey = '', waveBusy = false;
+async function loadSongs() {
+  try { songs = (await (await fetch('/api/media/audio')).json()).files; } catch { songs = []; }
+  fillSongSelect();
+}
+function fillSongSelect() {
+  const cur = timeline && timeline.audio ? timeline.audio.file : '';
+  $('tlSong').innerHTML = '<option value="">Aucun morceau</option>' + songs.map(s => `<option>${esc(s.file)}</option>`).join('');
+  if (cur && !songs.some(s => s.file === cur)) $('tlSong').insertAdjacentHTML('beforeend', `<option>${esc(cur)}</option>`);
+  $('tlSong').value = cur;
+}
+const SONG_STATE = {
+  disabled: () => 'lecture audio désactivée (--no-audio) : horloge système',
+  idle: () => '',
+  loading: () => 'chargement du morceau…',
+  ready: st => `lecture sur ${st.device || 'la sortie par défaut'} · horloge ${st.clock === 'audio' ? 'du morceau' : 'système'}`,
+  error: st => 'morceau illisible : ' + st.message,
+  no_device: st => 'pas de sortie audio (' + st.message + ') : horloge système',
+};
+function showSong(t, st) {
+  if (!t) return;
+  const a = t.audio, seconds = !!t.name && t.time_base === 'seconds';
+  $('tlSong').disabled = !seconds;
+  $('tlImport').title = seconds ? 'WAV, MP3, AIFF ou FLAC : copié dans studio-data/media/audio, jamais ailleurs' : 'Importer dans studio-data/media/audio (chargez un show en secondes pour l\'y associer)';
+  $('tlOffset').disabled = $('tlGain').disabled = !a;
+  if (document.activeElement !== $('tlSong') && $('tlSong').value !== (a ? a.file : '')) fillSongSelect();
+  if (document.activeElement !== $('tlOffset')) $('tlOffset').value = a ? Math.round(a.offset_s * 1000) : 0;
+  if (document.activeElement !== $('tlGain')) $('tlGain').value = a ? Math.round(a.gain * 100) : 100;
+  $('tlOffsetV').textContent = `${$('tlOffset').value > 0 ? '+' : ''}${$('tlOffset').value} ms`;
+  $('tlGainV').textContent = `${$('tlGain').value} %`;
+  const text = a && st ? (SONG_STATE[st.state] || (() => st.state))(st) : '';
+  $('tlSongStatus').textContent = text;
+  $('tlSongStatus').classList.toggle('bad', !!st && (st.state === 'error' || st.state === 'no_device'));
+  $('tlWaveHead').style.left = (t.length > 0 ? Math.min(100, 100 * t.position / t.length) : 0) + '%';
+  $('tlWaveEmpty').hidden = !!a;
+  if (!$('tlWave').clientWidth) return; // workspace hidden: drawn when shown
+  const w = Math.round($('tlWave').clientWidth * (window.devicePixelRatio || 1));
+  const key = a ? `${a.file}|${a.offset_s}|${t.length}|${w}` : '';
+  if (key !== waveKey && !waveBusy) drawWave(key, a, t.length, w);
+}
+async function drawWave(key, a, length, w) {
+  const c = $('tlWave'), h = Math.max(1, Math.round(c.clientHeight * (window.devicePixelRatio || 1)));
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, w, h);
+  waveKey = key;
+  if (!a || !(length > 0)) return;
+  waveBusy = true;
+  try {
+    const r = await fetch(`/api/timeline/waveform?from=0&to=${length}&px=${w}`);
+    if (!r.ok) return; // file missing or unreadable: not asked again until something changes
+    const wave = await r.json();
+    g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#3ddc84';
+    g.globalAlpha = 0.75;
+    g.beginPath();
+    for (let x = 0; x < wave.max.length; x++) {
+      const top = h / 2 - wave.max[x] * h / 2, bottom = h / 2 - wave.min[x] * h / 2;
+      g.moveTo(x + 0.5, top);
+      g.lineTo(x + 0.5, Math.max(bottom, top + 1));
+    }
+    g.stroke();
+    c.dataset.file = wave.file;
+  } catch { waveKey = ''; } finally { waveBusy = false; }
+}
+async function setSong(patch) {
+  const r = await fetch('/api/timeline/audio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+  $('tlMsg').textContent = r.ok ? '' : await r.text();
+  return r.ok;
+}
+$('tlSong').addEventListener('focus', loadSongs);
+$('tlSong').addEventListener('change', () => setSong({ file: $('tlSong').value || null }));
+$('tlOffset').addEventListener('input', () => { $('tlOffsetV').textContent = `${$('tlOffset').value > 0 ? '+' : ''}${$('tlOffset').value} ms`; });
+$('tlOffset').addEventListener('change', () => setSong({ offset_s: $('tlOffset').value / 1000 }));
+$('tlGain').addEventListener('input', () => { $('tlGainV').textContent = `${$('tlGain').value} %`; });
+$('tlGain').addEventListener('change', () => setSong({ gain: $('tlGain').value / 100 }));
+$('tlImport').onclick = () => $('tlImportFile').click();
+$('tlImportFile').addEventListener('change', async () => {
+  const f = $('tlImportFile').files[0];
+  $('tlImportFile').value = '';
+  if (!f) return;
+  $('tlMsg').textContent = `Import de « ${f.name} »…`;
+  let r;
+  try { r = await fetch('/api/media/audio?name=' + encodeURIComponent(f.name), { method: 'POST', body: f }); }
+  catch { $('tlMsg').textContent = 'Import impossible : studio injoignable'; return; }
+  if (!r.ok) { $('tlMsg').textContent = 'Import refusé : ' + await r.text(); return; }
+  const info = await r.json();
+  await loadSongs();
+  if (timeline && timeline.name && timeline.time_base === 'seconds') {
+    if (await setSong({ file: info.file })) $('tlMsg').textContent = `Morceau « ${info.file} » (${fmtTime(info.duration_s)}) ajouté au show.`;
+  } else {
+    $('tlMsg').textContent = `Morceau « ${info.file} » importé : chargez un show en secondes pour l'y associer.`;
+  }
+});
+$('tlWaveBox').addEventListener('click', e => seekFromClick($('tlWaveBox'), e));
+loadSongs();
 
 // ---------- layers ----------
 // Four strips: dimmer, Muet, Solo, Vider. Values follow the server (MIDI

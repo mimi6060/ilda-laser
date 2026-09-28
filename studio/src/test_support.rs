@@ -49,6 +49,10 @@ pub fn shared() -> Shared {
         timeline: timeline::Player::default(),
         figures: crate::figures::FigureStore::in_memory(),
         shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id()))),
+        media: std::sync::Arc::new(crate::audio::media::MediaStore::new(&std::env::temp_dir().join(format!("laser-studio-test-media-{}", std::process::id())))),
+        // No song-playback thread in unit tests: the timeline runs on the system clock.
+        song: std::sync::Arc::new(crate::audio::playback::SongHub::new(Instant::now(), false)),
+        song_sync: Default::default(),
         // Not enforced: tests that arm without a page keep working. Tests
         // of presence build an enforced one themselves.
         presence: Default::default(),
