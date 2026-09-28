@@ -47,6 +47,7 @@ pub fn shared() -> Shared {
         strobe: Default::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
+        figures: crate::figures::FigureStore::in_memory(),
         shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id()))),
         // Not enforced: tests that arm without a page keep working. Tests
         // of presence build an enforced one themselves.
