@@ -17,6 +17,7 @@ pub mod decode;
 pub mod detect;
 pub mod engine;
 pub mod learn;
+pub mod led;
 pub mod mapping;
 pub mod profile;
 pub mod safety;
@@ -73,6 +74,8 @@ pub struct MidiDevice {
     /// Unplugged while in use: the UI shows « Contrôleur MIDI déconnecté »
     /// until it comes back (not set when disabled by hand).
     pub lost: bool,
+    /// « Retour LED » ticked (T-205).
+    pub leds: bool,
 }
 
 impl MidiDevice {
@@ -90,6 +93,7 @@ impl MidiDevice {
             faders: None,
             connected_at: None,
             lost: false,
+            leds: true,
         }
     }
 }
