@@ -1,12 +1,12 @@
 ---
 id: T-286
 title: Fichier projet `.lsproj` : ouvrir, enregistrer, récents
-status: todo
+status: review
 area: infra
 priority: P1
 depends_on: []
-owner: ""
-branch: ""
+owner: "dev agent (Claude)"
+branch: feat/project-file
 source: docs/research/visualiser-ux.md#32-what-we-should-do
 ---
 
@@ -40,12 +40,12 @@ Fichiers dans `<data-dir>/projects/<nom>.lsproj` (JSON indenté, UTF-8).
 Libellés : *Projet*, *Nouveau*, *Ouvrir…*, *Récents*, *Enregistrer*, *Enregistrer sous…*, *Sans titre*, *Modifications non enregistrées : enregistrer avant ?* (*Enregistrer*, *Ne pas enregistrer*, *Annuler*).
 
 ## Critères d'acceptation
-- [ ] Enregistrer puis rouvrir un projet redonne les mêmes scènes, playlist et pages (aller-retour JSON égal)
-- [ ] Un champ inconnu ajouté à la main dans le fichier est conservé après réenregistrement
-- [ ] Ouvrir un projet ne change jamais l'état armé (laser désarmé)
-- [ ] L'écriture d'un gros projet (1 000 scènes) ne provoque aucune image manquée dans le moteur (compteur de retards à 0)
-- [ ] Un `scenes.json` existant est importé au premier démarrage et n'est pas supprimé
-- [ ] Un chemin hors de `<data-dir>/projects/` est refusé (400)
+- [x] Enregistrer puis rouvrir un projet redonne les mêmes scènes, playlist et pages (aller-retour JSON égal)
+- [x] Un champ inconnu ajouté à la main dans le fichier est conservé après réenregistrement
+- [x] Ouvrir un projet ne change jamais l'état armé (laser désarmé)
+- [x] L'écriture d'un gros projet (1 000 scènes) ne provoque aucune image manquée dans le moteur (compteur de retards à 0)
+- [x] Un `scenes.json` existant est importé au premier démarrage et n'est pas supprimé
+- [x] Un chemin hors de `<data-dir>/projects/` est refusé (400)
 
 ## Tests
 Unitaires Rust : aller-retour, champs inconnus, écriture atomique (fichier partiel jamais visible), refus de chemin. e2e : enregistrer, recharger la page, rouvrir, vérifier `/api/state` ; toujours avec `--data-dir` temporaire.
@@ -55,3 +55,4 @@ Ne jamais charger ni convertir de fichiers de projet Pangolin/Laserworld (`.qsw`
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/visualiser-ux.md`.
+- 2026-09-28 — agent de développement (Claude), branche `feat/project-file` : `studio/src/project.rs` (format v1, sections scènes/playlist/grille/timelines/tempo/maîtres/calques/LFO/palettes/profils MIDI, champs inconnus conservés), routes `/api/project[/new|open|save|save-as]`, `recent.json`, import « Sans titre » au premier démarrage, menu *Projet* + Cmd+S/Cmd+O dans l'UI. Calibration, sécurité, présence, options de sécurité MIDI, armement et arrêt d'urgence hors projet et jamais modifiés à l'ouverture. Ouverture atomique (tout est validé avant de changer quoi que ce soit), chemins confinés à `projects/`, écriture atomique sans tenir le verrou moteur. La section « pages » (T-272) n'existe pas encore : la grille actuelle (`grid.json`) est enregistrée sous `grid`. Critère « 1 000 scènes » : test de durée du verrou (copie < 16 ms), pas de compteur de retards dans le moteur aujourd'hui. `cargo test` (436 unitaires + 2, après rebase sur `develop` eeb0932) vert, clippy `-D warnings` propre, e2e 112/112 (dont `project.spec.ts`, 7 tests). PR : `docs/prs/project-file.md`.

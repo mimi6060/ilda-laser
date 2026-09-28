@@ -25,6 +25,7 @@ mod output;
 mod patterns;
 mod presence;
 mod presets;
+mod project;
 mod safety;
 mod scenes;
 mod sheets;
@@ -169,6 +170,9 @@ pub struct Shared {
     pub presence: presence::Presence,
     /// Engine ticks, read lock-free by the watchdog (watchdog.rs).
     pub health: Arc<watchdog::EngineHealth>,
+    /// The open project (project.rs, T-286). Never holds calibration,
+    /// safety or arming.
+    pub project: project::ProjectState,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
     /// A pending simulated stall (ms): the engine sleeps this long while
@@ -379,7 +383,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
-    Shared {
+    let mut state = Shared {
         settings: Settings::default(),
         calibration: web::load_calibration(&cli.data_dir.join("calibration.json")),
         audio: AudioFeatures::default(),
@@ -425,9 +429,13 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
         presence: presence::Presence::load(cli.data_dir.join("presence.json")),
         health: Arc::new(watchdog::EngineHealth::default()),
+        project: project::ProjectState::load(&cli.data_dir),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
-    }
+    };
+    // First start: the existing data becomes a « Sans titre » project.
+    project::startup(&mut state);
+    state
 }
 
 fn run_engine(

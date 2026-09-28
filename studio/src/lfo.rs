@@ -231,6 +231,17 @@ pub fn modulate(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settin
     }
 }
 
+/// At most `MAX_MODULATORS`, each on a control that can be modulated.
+pub fn validate(list: &[Modulator], reg: &ControlRegistry) -> Result<()> {
+    if list.len() > MAX_MODULATORS {
+        bail!("{MAX_MODULATORS} modulateurs au maximum");
+    }
+    if let Some(m) = list.iter().find(|m| modulatable(reg, &m.target).is_none()) {
+        bail!("« {} » ne peut pas être modulé", m.target);
+    }
+    Ok(())
+}
+
 /// The master modulators, saved to `lfos.json` on every change.
 pub struct LfoStore {
     path: PathBuf,
@@ -255,14 +266,19 @@ impl LfoStore {
         &self.list
     }
 
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Replaces every modulator in memory only (checked with `validate`,
+    /// numbers clamped); the caller saves the file (project open, T-286).
+    pub fn replace_in_memory(&mut self, list: Vec<Modulator>) {
+        self.list = list.into_iter().map(Modulator::sanitized).collect();
+    }
+
     /// Replaces every modulator (numbers clamped to their ranges) and saves.
     pub fn set(&mut self, list: Vec<Modulator>, reg: &ControlRegistry) -> Result<()> {
-        if list.len() > MAX_MODULATORS {
-            bail!("{MAX_MODULATORS} modulateurs au maximum");
-        }
-        if let Some(m) = list.iter().find(|m| modulatable(reg, &m.target).is_none()) {
-            bail!("« {} » ne peut pas être modulé", m.target);
-        }
+        validate(&list, reg)?;
         let list: Vec<Modulator> = list.into_iter().map(Modulator::sanitized).collect();
         let json = serde_json::to_string_pretty(&list).context("failed to serialize modulators")?;
         std::fs::write(&self.path, json).with_context(|| format!("failed to write {}", self.path.display()))?;

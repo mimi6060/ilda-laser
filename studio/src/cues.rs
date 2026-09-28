@@ -137,7 +137,22 @@ impl CueDeck {
         }
     }
 
-    fn sanitize(&mut self) {
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Takes the grid settings of `other` (a project's grid, T-286); the
+    /// playing cues stay, within the new `max_active`. Memory only.
+    pub fn set_config(&mut self, other: &CueDeck) {
+        self.click_mode = other.click_mode;
+        self.multi = other.multi;
+        self.slots = other.slots.clone();
+        self.sanitize();
+        self.set_max_active(other.max_active);
+    }
+
+    /// Clamps and drops out-of-range grid properties.
+    pub fn sanitize(&mut self) {
         self.max_active = self.max_active.clamp(1, MAX_ACTIVE_LIMIT);
         self.next_id = self.next_id.max(1);
         for slot in self.slots.values_mut() {

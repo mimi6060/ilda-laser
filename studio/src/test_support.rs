@@ -51,6 +51,7 @@ pub fn shared() -> Shared {
         // of presence build an enforced one themselves.
         presence: Default::default(),
         health: Default::default(),
+        project: crate::project::ProjectState::load(&std::env::temp_dir().join("laser-studio-test-unused")),
         test_hooks: false,
         test_stall_ms: 0,
     }

@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (107)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-286](T-286-infra.md) | Fichier projet `.lsproj` : ouvrir, enregistrer, récents | infra | P1 | [] | feat/project-file |
+
+## À faire (106)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -37,7 +43,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-277](T-277-output.md) | Lieu et projecteurs multiples (modèle `Venue`, `/api/frames`) | output | P1 | [T-275] |  |
 | [T-279](T-279-safety.md) | Surcouches de sécurité dans le visualiseur (zone public, horizon) | safety | P1 | [T-277, T-003] |  |
 | [T-283](T-283-safety.md) | Mode spectacle (verrouillage) et protection contre les clics accidentels | safety | P1 | [T-270] |  |
-| [T-286](T-286-infra.md) | Fichier projet `.lsproj` : ouvrir, enregistrer, récents | infra | P1 | [] |  |
 | [T-287](T-287-infra.md) | Sauvegarde automatique et récupération après plantage | infra | P1 | [T-286] |  |
 | [T-295](T-295-ui.md) | Trois espaces de travail en onglets : LIVE, TIMELINE, CRÉATION (+ Réglages) | ui | P1 | [T-270] |  |
 | [T-296](T-296-cues.md) | Espace CRÉATION : éditeur de figures laser (dessin point par point, animation) | cues | P1 | [T-295] |  |
