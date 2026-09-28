@@ -93,6 +93,17 @@ mod tests {
     }
 
     #[test]
+    fn an_evolving_cue_saved_in_a_scene_reloads() {
+        let path = temp_path("evolving");
+        let mut store = SceneStore::load_or_create(path.clone());
+        let settings = Settings { content: crate::engine::Content::Evolving(crate::evolving::test_cue(true)), ..Settings::default() };
+        store.upsert(Scene { name: "Montée".into(), settings: settings.clone(), duration_secs: 8.0 }).unwrap();
+        let reloaded = SceneStore::load_or_create(path.clone());
+        assert_eq!(reloaded.get("Montée").unwrap().settings, settings);
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn remove_deletes_by_name() {
         let path = temp_path("remove");
         let mut store = SceneStore::load_or_create(path.clone());

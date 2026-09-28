@@ -37,6 +37,12 @@
   .stats { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .stats b { color: var(--text); font-weight: 600; }
   .stats .bad { color: var(--warn); }
+  #evoBar { display: flex; gap: 10px; align-items: center; margin-top: 6px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #evoBar[hidden] { display: none; }
+  #evoBar b { color: var(--text); font-weight: 600; }
+  #evoTrack { flex: 1; position: relative; height: 10px; border-radius: 5px; background-color: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+  #evoFill { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: .55; }
+  #evoTicks { position: absolute; inset: 0; background-image: linear-gradient(to right, var(--muted) 1px, transparent 1px); opacity: .6; }
   .col { display: flex; flex-direction: column; gap: 12px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
   section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; }
@@ -208,6 +214,11 @@
       <span>Images/s <b id="stFps">–</b></span>
       <span><kbd>Espace</kbd> laser on/off · <kbd>Échap</kbd> arrêt d'urgence · <kbd>Maj</kbd>+<kbd>Échap</kbd> désarmer</span>
     </div>
+    <div id="evoBar" hidden title="Cue évolutif : temps courant / longueur, un trait par mesure">
+      <span>Évolutif <b id="evoPos"></b></span>
+      <div id="evoTrack"><div id="evoTicks"></div><div id="evoFill"></div></div>
+      <span id="evoState"></span>
+    </div>
     <section style="margin-top:12px">
       <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
       <div class="cue-bar">
@@ -326,6 +337,7 @@
       <div id="shapePanel"><div class="shapes" id="shapes"></div></div>
       <div id="textPanel"><label>Texte</label><input type="text" id="text" maxlength="24" value="HELLO"></div>
       <div id="wavePanel" class="hint">Une onde qui défile ; avec la musique, son amplitude suit le volume.</div>
+      <div id="evoPanel" class="hint" hidden></div>
       <div id="genPanel">
         <label>Effet</label>
         <select id="gen"></select>
@@ -503,6 +515,13 @@ function showSettings() {
   $('textPanel').hidden = kind !== 'text';
   $('wavePanel').hidden = kind !== 'wave';
   $('genPanel').hidden = kind !== 'generator';
+  $('evoPanel').hidden = kind !== 'evolving';
+  if (kind === 'evolving') {
+    const c = s.content;
+    $('evoPanel').textContent = `Cue évolutif : ${c.keys.length} clé${c.keys.length > 1 ? 's' : ''} sur ${c.length_beats} temps`
+      + (c.loop ? ', en boucle' : ', une fois') + '. Les clés se modifient par l\'API (pas d\'éditeur pour l\'instant) ; '
+      + 'Couleur et Taille viennent des clés, la luminosité s\'applique par-dessus.';
+  }
   if (kind === 'generator') {
     const p = s.content.params;
     setVal('gen', s.content.generator);
@@ -782,6 +801,7 @@ async function previewLoop() {
     // control); our own requests update settingsRev themselves.
     if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
     showLayers(f.layers);
+    showEvolving(f.evolving);
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -1095,6 +1115,19 @@ $('paletteNew').addEventListener('click', async () => {
 });
 
 // ---------- tempo ----------
+// The newest evolving cue on show: where it is in its length, one tick per bar.
+function showEvolving(list) {
+  const e = list && list[list.length - 1];
+  $('evoBar').hidden = !e;
+  if (!e) return;
+  const pos = e.waiting ? 0 : e.pos, len = e.length;
+  $('evoPos').textContent = `${pos.toFixed(1)} / ${+len.toFixed(2)} temps`;
+  $('evoFill').style.width = Math.min(100, 100 * pos / len) + '%';
+  $('evoTicks').style.backgroundSize = (100 * (e.beats_per_bar || 4) / len) + '% 100%';
+  $('evoState').textContent = e.waiting ? 'attend le temps' : e.ended ? 'fin (dernière clé)'
+    : `clé ${e.key + 1}/${e.keys}` + (e.loop ? ` · boucle ${e.pass + 1}` : '');
+}
+
 function showTempo(t) {
   if (!t) return;
   if (document.activeElement !== $('bpm')) $('bpm').value = t.bpm.toFixed(1);
