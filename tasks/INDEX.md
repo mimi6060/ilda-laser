@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (98)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-297](T-297-cues.md) | Espace CRÉATION : import SVG et vectorisation d'image vers figure laser | cues | P2 | [T-296] | feat/figure-import |
+
+## À faire (97)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -89,7 +95,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-285](T-285-ui.md) | Annuler / rétablir et historique des modifications | ui | P2 | [T-286] |  |
 | [T-288](T-288-infra.md) | Versions du format (migrations) et versions nommées | infra | P2 | [T-286] |  |
 | [T-289](T-289-infra.md) | Import partiel, profil de site et paquet d'export `.lspack` | infra | P2 | [T-286, T-288] |  |
-| [T-297](T-297-cues.md) | Espace CRÉATION : import SVG et vectorisation d'image vers figure laser | cues | P2 | [T-296] |  |
 | [T-013](T-013-midi.md) | Entrées OSC et Art-Net/DMX | midi | P3 | [] |  |
 | [T-109](T-109-output.md) | Cibles miroir : faisceaux dirigés vers des points calibrés | output | P3 | [T-003, T-100] |  |
 | [T-148](T-148-cues.md) | Pilote automatique (Virtual LJ) calé sur le tempo | cues | P3 | [T-159] |  |
