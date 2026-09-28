@@ -4,9 +4,10 @@
 //! The format is recognised from the file's first bytes, not its name.
 //! Decoders: `hound` (WAV), `claxon` (FLAC), `nanomp3` (MP3, a pure-Rust
 //! port of minimp3) and a small AIFF / AIFF-C reader here. Every decoder
-//! returns an error on a damaged file; nothing here may panic (a panic on
-//! the HTTP worker would take the API down), so the tests throw garbage,
-//! truncated and mutated files at it.
+//! returns an error on a damaged file and nothing here should panic, so the
+//! tests throw garbage, truncated and mutated files at it. The studio never
+//! calls `decode` in its own threads anyway: it runs in a child process or a
+//! contained thread (isolate.rs, T-298), in case a decoder crashes all the same.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -140,6 +141,7 @@ fn sniff(bytes: &[u8]) -> Option<Format> {
 
 /// Decode a whole file. The error says what is wrong in French, for the UI.
 pub fn decode(bytes: &[u8]) -> Result<Decoded> {
+    super::isolate::test_crash(bytes);
     if bytes.is_empty() {
         bail!("fichier audio vide");
     }
@@ -701,5 +703,110 @@ mod tests {
                 let _ = decode(&bytes);
             }
         }
+    }
+
+    /// T-298: a heavier fuzz of every decoder, MP3 first (nanomp3 is
+    /// machine-translated C with `unsafe` inside): mutations anywhere in the
+    /// file (not only its head), bit flips, inserted / deleted / duplicated
+    /// runs, spliced files, and MPEG frame headers of every version, layer,
+    /// bitrate and rate with random bodies. Always an error or a decode,
+    /// never a panic, and never more than the 2-channel, 30-min limits. The
+    /// studio isolates the decoders anyway (isolate.rs); this is what keeps
+    /// the child from crashing in the first place.
+    #[test]
+    fn fuzzed_files_never_panic_the_decoders() {
+        let mut seed = 0x853c_49e6_748f_ea9bu64;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let check = |bytes: &[u8]| {
+            if let Ok(d) = decode(bytes) {
+                assert!((1..=2).contains(&d.channels) && d.frames() > 0);
+                assert!(d.frames() as u64 <= MAX_SECONDS * d.sample_rate as u64);
+            }
+        };
+        let tone: Vec<i16> = (0..2000).map(|i| ((i * 37) % 2000) as i16 * 8 - 8000).collect();
+        let bases = [
+            wav16(22_050, 2, &sine(22_050, 0.05, 300.0, 0.7)),
+            flac_verbatim(8_000, 2, &tone),
+            aiff(8_000, 1, &tone, None),
+            aiff(8_000, 2, &tone, Some(b"sowt")),
+            silent_mp3(12),
+        ];
+        let mut runs = 0;
+        for base in &bases {
+            for _ in 0..300 {
+                let mut bytes = base.clone();
+                match rand() % 5 {
+                    0 => {
+                        // Random bytes anywhere.
+                        for _ in 0..1 + rand() % 16 {
+                            let i = rand() as usize % bytes.len();
+                            bytes[i] = rand() as u8;
+                        }
+                    }
+                    1 => {
+                        // Single bit flips.
+                        for _ in 0..1 + rand() % 8 {
+                            let i = rand() as usize % bytes.len();
+                            bytes[i] ^= 1 << (rand() % 8);
+                        }
+                    }
+                    2 => {
+                        // A run deleted.
+                        let a = rand() as usize % bytes.len();
+                        let b = (a + 1 + rand() as usize % 64).min(bytes.len());
+                        bytes.drain(a..b);
+                    }
+                    3 => {
+                        // Random bytes inserted.
+                        let a = rand() as usize % bytes.len();
+                        let n = 1 + rand() as usize % 64;
+                        bytes.splice(a..a, (0..n).map(|_| rand() as u8));
+                    }
+                    _ => {
+                        // A run duplicated, or the tail of another file spliced in.
+                        let other = &bases[rand() as usize % bases.len()];
+                        let a = rand() as usize % bytes.len();
+                        let from = rand() as usize % other.len();
+                        bytes.truncate(a);
+                        bytes.extend_from_slice(&other[from..]);
+                    }
+                }
+                check(&bytes);
+                runs += 1;
+            }
+        }
+        // MPEG headers of every kind, each followed by a random body, a few
+        // frames in a row (so the decoder locks on and reads the body).
+        for version in [0u8, 2, 3] {
+            for layer in 1u8..=3 {
+                for bitrate in 0u8..16 {
+                    for rate in 0u8..4 {
+                        let mut bytes = Vec::new();
+                        for _ in 0..3 {
+                            let mode = (rand() % 4) as u8;
+                            bytes.extend([0xff, 0xe0 | version << 3 | layer << 1 | (rand() % 2) as u8, bitrate << 4 | rate << 2 | (rand() % 4) as u8, mode << 6 | (rand() % 64) as u8]);
+                            bytes.extend((0..rand() % 1500).map(|_| rand() as u8));
+                        }
+                        check(&bytes);
+                        runs += 1;
+                    }
+                }
+            }
+        }
+        // Pure noise of every length up to 4 kB, with and without an ID3 tag.
+        for len in (0..4096).step_by(61) {
+            let noise: Vec<u8> = (0..len).map(|_| rand() as u8).collect();
+            check(&noise);
+            let mut tagged = b"ID3\x04\0\0\0\0\0\x10".to_vec();
+            tagged.extend(&noise);
+            check(&tagged);
+            runs += 2;
+        }
+        assert!(runs > 2_000, "{runs} files");
     }
 }

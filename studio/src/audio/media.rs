@@ -1,15 +1,18 @@
 //! The user's songs, `studio-data/media/audio/` (T-161).
 //!
-//! Imported through the API (the page sends the file's bytes): checked by
-//! decoding it **before** anything is written, then stored under a safe
-//! name. Names are file names: letters, digits, spaces, `-`, `_`, then a
+//! Imported through the API (the page sends the file's bytes): written
+//! aside (`.<name>.part`), checked by decoding it, and only then renamed to
+//! its safe name (a damaged file leaves nothing). Every decode runs isolated
+//! (isolate.rs, T-298): in the studio, a child process that only reads
+//! files of this folder. Names are file names: letters, digits, spaces, `-`, `_`, then a
 //! known extension, so a name can never leave the folder; symlinks are not
 //! followed. The waveform overview is computed once and cached next to the
 //! files (`.peaks/<file>.peaks`), keyed by the file's size and date, and
 //! in memory. These are the user's own files: never in git, never in a
 //! project file (a project only names them).
 
-use super::decode::{self, Decoded, WaveformPeaks, PEAK_BLOCK};
+use super::decode::{Decoded, WaveformPeaks};
+use super::isolate::Isolation;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -66,17 +69,44 @@ pub fn safe_song_name(original: &str) -> Result<String> {
     Ok(format!("{stem}.{ext}"))
 }
 
+/// The songs' folder of a data directory.
+pub fn audio_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("media").join("audio")
+}
+
+/// The only files a decoder may read: a song of the folder, or an import
+/// in progress (`.<song name>.part`); a regular file, not a symlink.
+pub fn source_path(dir: &Path, name: &str) -> Result<PathBuf> {
+    let importing = name.strip_prefix('.').and_then(|n| n.strip_suffix(".part")).is_some_and(valid_song_name);
+    if !valid_song_name(name) && !importing {
+        bail!("nom de morceau invalide : {name}");
+    }
+    let path = dir.join(name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_file() => Ok(path),
+        Ok(_) => bail!("morceau refusé (pas un fichier ordinaire) : {name}"),
+        Err(_) => bail!("morceau introuvable : {name}"),
+    }
+}
+
 type Stamp = (u64, u128);
 
 pub struct MediaStore {
     dir: PathBuf,
     peaks: Mutex<HashMap<String, (Stamp, Arc<WaveformPeaks>)>>,
+    isolation: Isolation,
 }
 
 impl MediaStore {
-    /// `<data-dir>/media/audio/` (created on the first import).
+    /// `<data-dir>/media/audio/` (created on the first import). Decodes on
+    /// a contained thread; the studio sets a child process (`isolated`).
     pub fn new(data_dir: &Path) -> Self {
-        Self { dir: data_dir.join("media").join("audio"), peaks: Mutex::new(HashMap::new()) }
+        Self { dir: audio_dir(data_dir), peaks: Mutex::new(HashMap::new()), isolation: Isolation::Thread }
+    }
+
+    pub fn isolated(mut self, isolation: Isolation) -> Self {
+        self.isolation = isolation;
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -88,12 +118,7 @@ impl MediaStore {
         if !valid_song_name(name) {
             bail!("nom de morceau invalide : {name}");
         }
-        let path = self.dir.join(name);
-        match std::fs::symlink_metadata(&path) {
-            Ok(m) if m.file_type().is_file() => Ok(path),
-            Ok(_) => bail!("morceau refusé (pas un fichier ordinaire) : {name}"),
-            Err(_) => bail!("morceau introuvable : {name}"),
-        }
+        source_path(&self.dir, name)
     }
 
     fn stamp(path: &Path) -> Result<Stamp> {
@@ -117,21 +142,21 @@ impl MediaStore {
         list
     }
 
+    /// The song's samples, decoded in isolation (for playback).
     pub fn decode(&self, name: &str) -> Result<Decoded> {
-        let path = self.path(name)?;
-        let bytes = std::fs::read(&path).with_context(|| format!("lecture impossible : {name}"))?;
-        decode::decode(&bytes)
+        self.path(name)?;
+        self.isolation.samples(&self.dir, name)
     }
 
-    /// Adds a song. The bytes are decoded first: a damaged or unknown file
-    /// is refused and nothing is written. The same bytes imported again give
-    /// the existing file; another file with the same name gets « nom 2 ».
+    /// Adds a song. The bytes are written aside and decoded (in isolation)
+    /// before the song appears: a damaged, unknown or crafted file is
+    /// refused and leaves nothing. The same bytes imported again give the
+    /// existing file; another file with the same name gets « nom 2 ».
     pub fn import(&self, original_name: &str, bytes: &[u8]) -> Result<Imported> {
         let name = safe_song_name(original_name)?;
         if bytes.len() as u64 > MAX_IMPORT_BYTES {
             bail!("fichier trop gros ({} Mo au plus)", MAX_IMPORT_BYTES >> 20);
         }
-        let decoded = decode::decode(bytes)?;
         std::fs::create_dir_all(&self.dir).with_context(|| format!("failed to create {}", self.dir.display()))?;
         let (stem, ext) = name.rsplit_once('.').expect("safe names have an extension");
         let mut n = 1;
@@ -150,21 +175,33 @@ impl MediaStore {
             }
         };
         let path = self.dir.join(&file);
-        if !existing {
-            // Written aside, then renamed: a half-written song is never seen.
-            let tmp = self.dir.join(format!(".{file}.part"));
+        let (peaks, channels) = if existing {
+            self.isolation.peaks(&self.dir, &file)?
+        } else {
+            // Written aside, decoded, then renamed: a damaged or half-written
+            // song is never seen.
+            let part = format!(".{file}.part");
+            let tmp = self.dir.join(&part);
             let written = std::fs::File::create(&tmp).and_then(|mut f| {
                 f.write_all(bytes)?;
                 f.sync_all()
             });
-            if let Err(e) = written.and_then(|_| std::fs::rename(&tmp, &path)) {
+            if let Err(e) = written {
                 let _ = std::fs::remove_file(&tmp);
-                return Err(e).with_context(|| format!("failed to write {}", path.display()));
+                return Err(e).with_context(|| format!("failed to write {}", tmp.display()));
             }
-        }
-        let peaks = Arc::new(WaveformPeaks::compute(&decoded, PEAK_BLOCK));
+            let checked = self.isolation.peaks(&self.dir, &part).and_then(|got| {
+                std::fs::rename(&tmp, &path).with_context(|| format!("failed to write {}", path.display()))?;
+                Ok(got)
+            });
+            if checked.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            checked?
+        };
+        let peaks = Arc::new(peaks);
         self.remember(&file, &path, Arc::clone(&peaks));
-        Ok(Imported { file, duration_s: decoded.duration_s(), sample_rate: decoded.sample_rate, channels: decoded.channels, existing })
+        Ok(Imported { file, duration_s: peaks.duration_s(), sample_rate: peaks.sample_rate, channels, existing })
     }
 
     fn peaks_path(&self, name: &str) -> PathBuf {
@@ -194,8 +231,7 @@ impl MediaStore {
             self.peaks.lock().unwrap().insert(name.to_string(), (stamp, Arc::clone(&p)));
             return Ok(p);
         }
-        let decoded = self.decode(name)?;
-        let peaks = Arc::new(WaveformPeaks::compute(&decoded, PEAK_BLOCK));
+        let peaks = Arc::new(self.isolation.peaks(&self.dir, name)?.0);
         self.remember(name, &path, Arc::clone(&peaks));
         Ok(peaks)
     }
@@ -304,6 +340,39 @@ mod tests {
         assert!(fresh.peaks("nope.wav").is_err());
         assert!(fresh.peaks("../Démo.wav").is_err());
         assert!(store.import("x.wav", &[0u8; 16]).is_err());
+    }
+
+    /// T-298: a file that makes the decoder panic is refused like a damaged
+    /// one (the panic stays on the decoder's thread), and leaves nothing.
+    #[test]
+    fn a_decoder_panic_refuses_the_import_and_leaves_nothing() {
+        let dir = temp_dir("panic");
+        let store = MediaStore::new(&dir);
+        crate::audio::isolate::enable_test_hooks();
+        let err = format!("{:#}", store.import("piège.mp3", b"LSPANIC! crafted file").unwrap_err());
+        assert!(err.contains("le décodeur a planté") && err.contains("le studio continue"), "{err}");
+        assert!(std::fs::read_dir(store.dir()).unwrap().next().is_none(), "no song, no .part left");
+        // The store keeps working.
+        let wav = wav16(8_000, 1, &sine(8_000, 0.5, 100.0, 0.5));
+        assert_eq!(store.import("bon.wav", &wav).unwrap().file, "bon.wav");
+        assert_eq!(store.decode("bon.wav").unwrap().frames(), 4_000);
+    }
+
+    #[test]
+    fn decoders_only_read_songs_and_imports_in_progress() {
+        let dir = temp_dir("source");
+        let store = MediaStore::new(&dir);
+        std::fs::create_dir_all(store.dir()).unwrap();
+        for f in ["a.wav", ".a.wav.part", ".x.part", "notes.txt"] {
+            std::fs::write(store.dir().join(f), b"x").unwrap();
+        }
+        assert!(source_path(store.dir(), "a.wav").is_ok());
+        assert!(source_path(store.dir(), ".a.wav.part").is_ok());
+        for bad in [".x.part", "notes.txt", "../a.wav", "./a.wav", ".a.wav", "..a.wav.part", ".../a.wav.part", "absent.wav"] {
+            assert!(source_path(store.dir(), bad).is_err(), "{bad}");
+        }
+        assert!(store.path(".a.wav.part").is_err(), "an import in progress is not a song");
+        assert!(!store.list().iter().any(|s| s.file.ends_with(".part")));
     }
 
     #[test]

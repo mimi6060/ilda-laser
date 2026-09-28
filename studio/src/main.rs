@@ -104,6 +104,17 @@ struct Cli {
     /// for the watchdog e2e test).
     #[arg(long, hide = true)]
     test_hooks: bool,
+    /// Internal (T-298): decode this song of `<data-dir>/media/audio/` and
+    /// write the result on stdout, then exit. The studio runs itself this
+    /// way so a decoder crash can't stop it (audio/isolate.rs).
+    #[arg(long, hide = true, value_name = "FILE")]
+    decode: Option<String>,
+    /// With --decode: send the waveform only, not the samples.
+    #[arg(long, hide = true, requires = "decode")]
+    decode_peaks: bool,
+    /// Testing only: the decoding time limit in ms (default 120 s).
+    #[arg(long, hide = true, requires = "test_hooks")]
+    test_decode_timeout_ms: Option<u64>,
 }
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -285,6 +296,12 @@ pub struct Playlist {
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
+    if let Some(name) = &cli.decode {
+        // The decoder child (audio/isolate.rs): no panic hook, no output,
+        // nothing but one file read and a reply on stdout.
+        let want = if cli.decode_peaks { audio::isolate::Want::Peaks } else { audio::isolate::Want::Samples };
+        std::process::exit(audio::isolate::child_main(&cli.data_dir, name, want, cli.test_hooks));
+    }
     if cli.list_controls {
         print!("{}", controls::markdown(&controls::ControlRegistry::build(&presets::catalog())));
         return Ok(());
@@ -322,12 +339,16 @@ fn main() -> Result<()> {
 
     // A panic anywhere: cut the output first (the DAC kill switch, no lock),
     // then let the default report run and every loop wind down. The engine's
-    // output stage also blanks and disarms as its thread unwinds.
+    // output stage also blanks and disarms as its thread unwinds. The one
+    // exception is a contained audio decoder thread (only used if the
+    // decoder child can't be started): its panic is an import error.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new({
         let (estop, health, running) = (Arc::clone(&estop), Arc::clone(&health), Arc::clone(&running));
         move |info| {
-            watchdog::on_panic(&estop, &health, &running);
+            if !audio::isolate::panic_is_contained() {
+                watchdog::on_panic(&estop, &health, &running);
+            }
             default_hook(info);
         }
     }));
@@ -470,7 +491,11 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
         figures: figures::FigureStore::load(cli.data_dir.join("figures")),
-        media: Arc::new(audio::media::MediaStore::new(&cli.data_dir)),
+        media: Arc::new(audio::media::MediaStore::new(&cli.data_dir).isolated(audio::isolate::Isolation::child(
+            &cli.data_dir,
+            cli.test_hooks,
+            cli.test_decode_timeout_ms.map_or(audio::isolate::DECODE_TIMEOUT, Duration::from_millis),
+        ))),
         song: Arc::new(audio::playback::SongHub::new(epoch, !cli.no_audio)),
         song_sync: Default::default(),
         presence: presence::Presence::load(cli.data_dir.join("presence.json")),
