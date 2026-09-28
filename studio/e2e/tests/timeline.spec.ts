@@ -2,7 +2,7 @@
 // the Timeline section, follow the playhead, and check that the master
 // live modifiers apply on top and that Escape stops the show - all
 // without ever arming (preview only).
-import { test, expect, useStudio, openUi, focusPage, extent, isLit, type Point } from '../studio';
+import { test, expect, useStudio, openUi, openWorkspace, focusPage, extent, isLit, type Point } from '../studio';
 
 const studio = useStudio();
 
@@ -39,6 +39,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('load a show, play it, see the playhead move, then stop it', async ({ page }) => {
+  await openWorkspace(page, 'timeline');
   await page.locator('#tlShow').selectOption('Essai e2e');
   await expect.poll(async () => (await timeline()).name).toBe('Essai e2e');
   expect((await timeline()).length).toBe(60);
@@ -64,6 +65,7 @@ test('load a show, play it, see the playhead move, then stop it', async ({ page 
 });
 
 test('pause freezes the playhead, seeking jumps, and the loop button toggles', async ({ page }) => {
+  await openWorkspace(page, 'timeline');
   await page.locator('#tlShow').selectOption('Essai e2e');
   await expect.poll(async () => (await timeline()).name).toBe('Essai e2e');
   await page.locator('#tlPlay').click();
@@ -110,6 +112,7 @@ test('master modifiers apply on top of the show', async () => {
 });
 
 test('Escape stops the output and the timeline; it never arms', async ({ page }) => {
+  await openWorkspace(page, 'timeline');
   await page.locator('#tlShow').selectOption('Essai e2e');
   await expect.poll(async () => (await timeline()).name).toBe('Essai e2e');
   await page.locator('#tlPlay').click();

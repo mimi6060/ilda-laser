@@ -2,7 +2,7 @@
 // steady output after 5 s, beams below the horizon never reach the frame,
 // and the « Sécurité » panel can only tighten the limits.
 // Preview only: the studio has no output and stays disarmed.
-import { test, expect, useStudio, openUi, isLit, type Point } from '../studio';
+import { test, expect, useStudio, openUi, reveal, isLit, type Point } from '../studio';
 
 const studio = useStudio();
 
@@ -87,6 +87,7 @@ test('no beam below the horizon in the frame; lowering it is an explicit setting
 });
 
 test('the Sécurité panel shows the safe defaults and only tightens', async ({ page }) => {
+  await reveal(page, '#safetyPanel summary');
   await page.locator('#safetyPanel summary').click();
   await expect(page.locator('#sfHzV')).toHaveText('4 Hz');
   await expect(page.locator('#sfBurstV')).toHaveText('5 s');
@@ -107,6 +108,7 @@ test('the Sécurité panel shows the safe defaults and only tightens', async ({ 
 
   // Saved: a reload shows the tightened values.
   await page.reload();
+  await reveal(page, '#safetyPanel summary');
   await page.locator('#safetyPanel summary').click();
   await expect(page.locator('#sfHzV')).toHaveText('2 Hz');
 });

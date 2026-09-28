@@ -1,7 +1,7 @@
 // Operator presence (T-252): the UI heartbeat and hold-to-run.
 // Preview only: "armed" and output_lit come from a studio with no output.
 import type { Browser, Page } from '@playwright/test';
-import { test, expect, useStudio, openUi, focusPage } from '../studio';
+import { test, expect, useStudio, openUi, reveal, focusPage } from '../studio';
 
 const studio = useStudio();
 const arm = async () => (await studio.get('/api/arm')) as { armed: boolean; last_disarm: { reason: string; reason_fr: string } };
@@ -140,6 +140,7 @@ test('hold-to-run: Escape with the hold key down still latches the emergency sto
 
 test('the safety panel sets the timeout, capped at 10 000 ms, and hold mode', async ({ page }) => {
   await openUi(page, studio);
+  await reveal(page, '#safetyPanel summary');
   await page.locator('#safetyPanel summary').click();
   await expect(page.locator('#uiTimeout')).toHaveValue('2000');
   await page.locator('#uiTimeout').fill('60000');

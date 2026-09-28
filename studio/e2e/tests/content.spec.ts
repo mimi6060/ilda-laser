@@ -1,6 +1,6 @@
 // Content and appearance: shapes, text, effects and the look sliders
 // change what the studio renders (/api/state and /api/frame).
-import { test, expect, useStudio, openUi, extent, isLit, type Point } from '../studio';
+import { test, expect, useStudio, openUi, reveal, openWorkspace, extent, isLit, type Point } from '../studio';
 
 const studio = useStudio();
 const settings = async () => (await studio.state()).settings;
@@ -11,6 +11,7 @@ const radius = (pts: Point[]) => Math.max(0, ...pts.filter(isLit).map(p => Math.
 test.beforeEach(async ({ page }) => {
   await studio.reset();
   await openUi(page, studio);
+  await openWorkspace(page, 'creation'); // T-295: content and look controls
 });
 
 test('starts on a green circle, drawn in the preview', async ({ page }) => {
@@ -154,6 +155,7 @@ test('« Plafond liquide » draws a sheet above the audience and its parameters 
   await expect.poll(async () => (await settings()).content.params.b).toBeCloseTo(0.3, 3);
   await page.locator('#gLoop').selectOption('wrap');
   await expect.poll(async () => (await settings()).content.params.loop_mode).toBe('wrap');
+  await reveal(page, '#sceneName'); // Scènes: LIVE
   await page.locator('#sceneName').fill('Plafond');
   await page.locator('#sceneSave').click();
   await expect(page.locator('#sceneList .scene', { hasText: 'Plafond' })).toBeVisible();
@@ -164,10 +166,12 @@ test('« Plafond liquide » draws a sheet above the audience and its parameters 
   expect(saved.settings.content.params.b as number).toBeCloseTo(0.3, 3);
 
   // Another look, then the scene brings the ceiling back with its parameters.
+  await reveal(page, '[data-kind="shape"]');
   await page.locator('[data-kind="shape"]').click();
   await page.getByRole('button', { name: 'Carré', exact: true }).click();
   // (Wait for the square itself, not just the Forme tab, so no edit is still unsent.)
   await expect.poll(async () => (await settings()).content.shape).toBe('square');
+  await reveal(page, '#sceneList');
   await page.locator('#sceneList .scene', { hasText: 'Plafond' }).getByRole('button', { name: '▶' }).click();
   await expect.poll(async () => (await settings()).content.generator).toBe('ceiling');
   expect((await settings()).content.params.b).toBeCloseTo(0.3, 3);
