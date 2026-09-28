@@ -445,6 +445,58 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             },
             Err(e) => e,
         },
+        (Method::Get, "/api/figures") => {
+            let s = shared.lock().unwrap();
+            let list: Vec<_> = s
+                .figures
+                .list()
+                .iter()
+                .map(|f| json!({ "name": f.name, "id": crate::figures::cue_id(&f.name), "frames": f.frames.len(), "points": f.point_count() }))
+                .collect();
+            json_response(json!(list))
+        }
+        (Method::Post, "/api/figures") => match body::<crate::figures::Figure>(request) {
+            Ok(fig) => {
+                let mut s = shared.lock().unwrap();
+                match s.figures.save(fig) {
+                    Ok(kept) => {
+                        crate::figures::refresh(&mut s);
+                        json_response(json!({ "name": kept.name, "id": crate::figures::cue_id(&kept.name) }))
+                    }
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/figures/load") => match body::<NameRequest>(request) {
+            Ok(req) => match shared.lock().unwrap().figures.get(&req.name) {
+                Some(fig) => json_response(json!(fig)),
+                None => text(404, &format!("figure introuvable : {}", req.name.trim())),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, "/api/figures/delete") => match body::<NameRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match s.figures.remove(&req.name) {
+                    Ok(()) => {
+                        crate::figures::refresh(&mut s);
+                        ok()
+                    }
+                    Err(e) => text(404, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        // The editor's text tool: the laser font as strokes. No state.
+        (Method::Post, "/api/figures/text") => match body::<TextRequest>(request) {
+            Ok(req) => {
+                let text: String = req.text.to_uppercase().chars().take(64).collect();
+                let size = if req.size.is_finite() { req.size.clamp(0.02, 2.0) } else { 0.3 };
+                json_response(json!({ "strokes": crate::font::text_strokes(&text, size) }))
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/timeline") => {
             let s = shared.lock().unwrap();
             json_response(json!({ "state": s.timeline.state(&s.timeline_clock()), "show": s.timeline.show }))
@@ -617,6 +669,17 @@ impl NumOrBool {
 #[derive(Deserialize)]
 struct NameRequest {
     name: String,
+}
+
+#[derive(Deserialize)]
+struct TextRequest {
+    text: String,
+    #[serde(default = "default_text_size")]
+    size: f32,
+}
+
+fn default_text_size() -> f32 {
+    0.3
 }
 
 #[derive(Deserialize)]

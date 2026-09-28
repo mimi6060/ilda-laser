@@ -180,9 +180,12 @@ export async function reveal(page: Page, selector: string) {
   const where = await page.locator(selector).first().evaluate(el => ({
     ws: (el.closest('[data-ws]') as HTMLElement | null)?.dataset.ws ?? null,
     panel: (el.closest('[data-panel]') as HTMLElement | null)?.dataset.panel ?? null,
+    cpanel: (el.closest('[data-cpanel]') as HTMLElement | null)?.dataset.cpanel ?? null,
   }));
   if (where.ws) await openWorkspace(page, where.ws as Workspace);
   if (where.panel) await page.locator(`#liveTabs [data-panel-tab="${where.panel}"]`).click();
+  // CRÉATION sub-tabs (T-296): Look / Figures.
+  if (where.cpanel) await page.locator(`#creationTabs [data-ctab="${where.cpanel}"]`).click();
   await expect(page.locator(selector).first()).toBeVisible();
 }
 

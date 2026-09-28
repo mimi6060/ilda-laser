@@ -68,6 +68,7 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `page.6` | Page Géométrie | page | déclencheur | oui |
 | `page.7` | Page Audio | page | déclencheur | oui |
 | `page.8` | Page Texte & horloge | page | déclencheur | oui |
+| `page.9` | Page Figures | page | déclencheur | oui |
 | `cue.mode` | Mode de clic des cues | cue | choix : Basculer / Flash / Solo / Relancer | oui |
 | `cue.multi` | Plusieurs cues à la fois | cue | bascule | oui |
 | `cue.max_active` | Cues simultanés max | cue | continu 1…16 | oui |

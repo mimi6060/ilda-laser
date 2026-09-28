@@ -6,6 +6,7 @@
 
 use crate::beat;
 use crate::evolving::{self, EvolvingCue};
+use crate::figures::Figure;
 use crate::font;
 use crate::generators::{self, GenCtx, GenParams};
 use crate::patterns::{self, Point};
@@ -25,6 +26,9 @@ pub enum Content {
     },
     /// An evolving cue (T-111): keyframes over N beats (`evolving.rs`).
     Evolving(EvolvingCue),
+    /// One of the operator's figures (T-296, `figures.rs`): strokes drawn
+    /// in the CRÉATION editor, possibly animated.
+    Figure(Figure),
 }
 
 impl Content {
@@ -38,6 +42,7 @@ impl Content {
             (Content::Text { .. }, Content::Text { .. })
             | (Content::Wave, Content::Wave)
             | (Content::Evolving(_), Content::Evolving(_)) => true,
+            (Content::Figure(a), Content::Figure(b)) => a.name == b.name,
             _ => false,
         }
     }
@@ -171,6 +176,8 @@ pub struct Animator {
     hue_shift: f32,
     wave_phase: f32,
     gen_time: f32,
+    /// Seconds a per-second figure has been playing.
+    fig_time: f64,
     flash: f32,
     last_beat: u64,
     /// Tempo-clock beat the look started at (the cue's launch); `None`
@@ -279,6 +286,9 @@ impl Animator {
             // Bass speeds generators up, so their motion follows the music.
             self.gen_time += dt * params.speed * (1.0 + 2.0 * bass);
         }
+        if let Content::Figure(_) = &s.content {
+            self.fig_time += dt as f64;
+        }
 
         // size = 0 leaves the scale alone; size = 1 swings it 0.5x..1.5x.
         let scale = s.scale * (1.0 - 0.5 * react.size * (react.enabled as u8 as f32) + react.size * bass);
@@ -301,6 +311,16 @@ impl Animator {
             Content::Wave => patterns::wave(scale, 0.15 + 0.6 * level, self.wave_phase, r, g, b),
             // Drawn through `render_evolving`, never directly.
             Content::Evolving(_) => Vec::new(),
+            Content::Figure(fig) => {
+                let pos = match fig.per {
+                    crate::figures::RateUnit::Beat => beat_pos,
+                    crate::figures::RateUnit::Second => self.fig_time,
+                };
+                fig.frame_points(fig.frame_index(pos), scale, |c| {
+                    let (r, g, b) = shift_hue(c, hue_shift);
+                    (r * gain, g * gain, b * gain)
+                })
+            }
             Content::Generator { generator, params } => {
                 let t = if params.beat_sync { beat_time(params, beat_pos) } else { self.gen_time };
                 let ctx = GenCtx { t, beat_pos, bpm: clock.bpm as f32, level, bass, scale };

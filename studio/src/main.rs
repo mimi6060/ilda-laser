@@ -15,6 +15,7 @@ mod cues;
 mod engine;
 mod evolving;
 mod fans;
+mod figures;
 mod font;
 mod generators;
 mod layers;
@@ -177,6 +178,9 @@ pub struct Shared {
     pub timeline: timeline::Player,
     /// Saved shows, `studio-data/shows/`.
     pub shows: timeline::ShowStore,
+    /// The operator's figures (figures.rs, `studio-data/figures/`), also
+    /// the cues of the « Figures » page.
+    pub figures: figures::FigureStore,
     /// UI heartbeats and hold-to-run (presence.rs, presence.json).
     pub presence: presence::Presence,
     /// Engine ticks, read lock-free by the watchdog (watchdog.rs).
@@ -455,12 +459,14 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
+        figures: figures::FigureStore::load(cli.data_dir.join("figures")),
         presence: presence::Presence::load(cli.data_dir.join("presence.json")),
         health: Arc::new(watchdog::EngineHealth::default()),
         project: project::ProjectState::load(&cli.data_dir),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
     };
+    figures::refresh(&mut state);
     // First start: the existing data becomes a « Sans titre » project.
     project::startup(&mut state);
     state

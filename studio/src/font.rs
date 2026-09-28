@@ -145,6 +145,26 @@ pub fn text_to_points(text: &str, scale: f32, r: f32, g: f32, b: f32) -> Vec<Poi
     points
 }
 
+/// The same layout as `text_to_points`, as separate strokes (polylines)
+/// in -1..1 coordinates: what the figure editor's text tool inserts
+/// (T-296), one stroke per glyph stroke.
+pub fn text_strokes(text: &str, scale: f32) -> Vec<Vec<[f32; 2]>> {
+    let cell_w = scale * 0.7;
+    let cell_h = scale;
+    let advance = cell_w * 1.3;
+    let chars: Vec<char> = text.chars().collect();
+    let start_x = -advance * chars.len() as f32 / 2.0;
+    let base_y = -cell_h / 2.0;
+    let mut out = Vec::new();
+    for (i, c) in chars.into_iter().enumerate() {
+        let x0 = start_x + advance * i as f32;
+        for stroke in glyph(c).into_iter().filter(|s| s.len() >= 2) {
+            out.push(stroke.iter().map(|&(gx, gy)| [x0 + gx * cell_w, base_y + gy * cell_h]).collect());
+        }
+    }
+    out
+}
+
 fn push_blank_jump(points: &mut Vec<Point>, from: (f32, f32), to: (f32, f32)) {
     const SAMPLES: usize = 4;
     for i in 0..SAMPLES {
@@ -208,6 +228,19 @@ mod tests {
         let strokes = glyph('I');
         assert_eq!(strokes.len(), 1);
         assert!(strokes[0].iter().all(|&(x, _)| (x - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn text_strokes_follow_the_text_layout() {
+        let strokes = text_strokes("HI", 0.5);
+        assert_eq!(strokes.len(), glyph('H').len() + glyph('I').len());
+        let lit: Vec<(f32, f32)> = text_to_points("HI", 0.5, 1.0, 1.0, 1.0).iter().filter(|p| p.r > 0.0).map(|p| (p.x, p.y)).collect();
+        for s in &strokes {
+            for p in s {
+                assert!(lit.iter().any(|q| (q.0 - p[0]).abs() < 1e-5 && (q.1 - p[1]).abs() < 1e-5), "{p:?} not in the text");
+            }
+        }
+        assert!(text_strokes("", 0.5).is_empty());
     }
 
     #[test]
