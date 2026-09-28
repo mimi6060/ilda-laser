@@ -14,6 +14,7 @@ mod cues;
 mod engine;
 mod font;
 mod generators;
+mod layers;
 mod lfo;
 mod interlock;
 mod live;
@@ -124,6 +125,12 @@ pub struct Shared {
     /// Master LFO modulators (lfo.rs, lfos.json), applied every frame on
     /// top of the stored values.
     pub lfos: lfo::LfoStore,
+    /// The four cue layers and the point budget (layers.rs), saved to
+    /// layers.json when changed.
+    pub mixer: layers::Mixer,
+    pub mixer_dirty: bool,
+    /// What the point budget did to the last frame.
+    pub mix: layers::MixReport,
 }
 
 impl Shared {
@@ -173,6 +180,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
     let calibration_path = cli.data_dir.join("calibration.json");
     let live_path = cli.data_dir.join("live.json");
+    let layers_path = cli.data_dir.join("layers.json");
 
     let output: Option<Box<dyn Output>> = match &cli.device {
         Some(device) => {
@@ -226,6 +234,13 @@ fn main() -> Result<()> {
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
         midi: midi::MidiState::new(!cli.no_midi, midi::profile::ProfileStore::load(cli.data_dir.join("midi"))),
         lfos,
+        mixer: {
+            let mut m: layers::Mixer = load_json(&layers_path);
+            m.sanitize();
+            m
+        },
+        mixer_dirty: false,
+        mix: layers::MixReport::default(),
     }));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -238,7 +253,7 @@ fn main() -> Result<()> {
     let engine = std::thread::spawn({
         let shared = Arc::clone(&shared);
         let running = Arc::clone(&running);
-        move || run_engine(shared, output, running, live_path)
+        move || run_engine(shared, output, running, live_path, layers_path)
     });
 
     let midi_thread = if cli.no_midi {
@@ -260,7 +275,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_engine(shared: Arc<Mutex<Shared>>, output: Option<Box<dyn Output>>, running: Arc<AtomicBool>, live_path: PathBuf) {
+fn run_engine(
+    shared: Arc<Mutex<Shared>>,
+    output: Option<Box<dyn Output>>,
+    running: Arc<AtomicBool>,
+    live_path: PathBuf,
+    layers_path: PathBuf,
+) {
     // One animator per playing cue instance (0 = the manual look), so
     // every cue keeps its own motion and a restart starts it over.
     let mut animators: HashMap<u64, Animator> = HashMap::new();
@@ -274,15 +295,21 @@ fn run_engine(shared: Arc<Mutex<Shared>>, output: Option<Box<dyn Output>>, runni
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (looks, starts, clock, calibration, audio, armed, live, user_palettes, estop) = {
+        let (looks, starts, clock, mixer, calibration, audio, armed, live, user_palettes, estop) = {
             let mut s = shared.lock().unwrap();
             let shared_state = &mut *s;
             shared_state.gate.sync_estop(&shared_state.estop);
             frames_since_save += 1;
-            if s.live_dirty && frames_since_save >= 60 {
+            if (s.live_dirty || s.mixer_dirty) && frames_since_save >= 60 {
                 // At most once a second, so MIDI faders don't hammer the disk.
-                save_json(&live_path, &s.live);
+                if s.live_dirty {
+                    save_json(&live_path, &s.live);
+                }
+                if s.mixer_dirty {
+                    save_json(&layers_path, &s.mixer);
+                }
                 s.live_dirty = false;
+                s.mixer_dirty = false;
                 frames_since_save = 0;
             }
             advance_playlist(&mut s);
@@ -299,26 +326,29 @@ fn run_engine(shared: Arc<Mutex<Shared>>, output: Option<Box<dyn Output>>, runni
             // LFOs move copies: the stored values stay the operator's base.
             let (mut settings, mut live) = (s.settings.clone(), s.live.clone());
             lfo::modulate(s.lfos.list(), &s.controls, &mut settings, &mut live, t, clock.beat);
-            let looks = cues::looks(&s.deck, &settings, s.look_on);
+            let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
+            let mixer = s.mixer.clone();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
-            (looks, starts, clock, s.calibration, audio, s.gate.is_armed(), live, s.palettes.list().to_vec(), Arc::clone(&s.estop))
+            (looks, starts, clock, mixer, s.calibration, audio, s.gate.is_armed(), live, s.palettes.list().to_vec(), Arc::clone(&s.estop))
         };
 
         live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
         let anim_dt = dt * live.speed.clamp(0.0, 4.0);
-        animators.retain(|id, _| looks.iter().any(|(i, _)| i == id));
+        animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id));
+        // Muted layers keep animating, so they come back in motion.
         let rendered = looks
             .iter()
-            .map(|(id, settings)| {
+            .map(|(layer, id, settings)| {
                 let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
                     Some(&beat) => Animator::starting_at(beat),
                     None => Animator::default(),
                 });
-                animator.render(settings, audio, anim_dt, &clock)
+                (*layer, animator.render(settings, audio, anim_dt, &clock))
             })
             .collect();
-        let look = engine::join_looks(rendered);
+        // Layers 1 → 4 with their dimmers, within the point budget.
+        let (look, mix) = layers::mix(rendered, &mixer);
         let frame: Vec<Point> = live::apply(&look, &live, &live_state, &user_palettes)
             .into_iter()
             .map(|p| {
@@ -336,6 +366,7 @@ fn run_engine(shared: Arc<Mutex<Shared>>, output: Option<Box<dyn Output>>, runni
         }
         s.output_lit = emitted.lit;
         s.frame = frame;
+        s.mix = mix;
         drop(s);
 
         std::thread::sleep(FRAME_INTERVAL.saturating_sub(now.elapsed()));

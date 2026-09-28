@@ -1,12 +1,12 @@
 ---
 id: T-156
 title: Quatre calques avec gradateur, muet/solo et budget de points
-status: todo
+status: done
 area: cues
 priority: P1
 depends_on: [T-155, T-140]
-owner: ""
-branch: ""
+owner: "dev-agent (layers)"
+branch: feat/layers
 source: docs/research/pro-live-operation.md §2.5, §5
 ---
 
@@ -30,10 +30,10 @@ pub struct Mixer { pub layers: [Layer; 4], pub point_budget: usize /*750*/ }
 Quatre bandes *Calque 1–4* sous la grille : gradateur vertical, *Muet*, *Solo*, *Vider* ; compteur *Points : 620 / 750* qui devient orange au-delà du budget.
 
 ## Critères d'acceptation
-- [ ] Cue A calque 1 + cue B calque 2 : les deux dans `/api/frame`
-- [ ] Gradateur calque 2 à 0 : seuls les points du calque 1 sont allumés
-- [ ] *Solo* calque 2 : seul le calque 2 sort
-- [ ] Avec 4 calques lourds, le frame reste ≤ `point_budget` et l'avertissement s'affiche
+- [x] Cue A calque 1 + cue B calque 2 : les deux dans `/api/frame`
+- [x] Gradateur calque 2 à 0 : seuls les points du calque 1 sont allumés
+- [x] *Solo* calque 2 : seul le calque 2 sort
+- [x] Avec 4 calques lourds, le frame reste ≤ `point_budget` et l'avertissement s'affiche
 
 ## Tests
 Unitaires : concaténation, solo/muet, budget. e2e : deux cues sur deux calques.
@@ -43,3 +43,5 @@ Règles de CLAUDE.md : laser désarmé au démarrage, Échap = blackout instanta
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-27 — dev-agent (layers), branche `feat/layers` : `layers.rs` (Mixer, dimmer/muet/solo, budget : points espacés jusqu'à 1 sur 2 puis calques du haut coupés, le calque le plus bas jamais coupé), `CueSlot.layer` + `ActiveCue.layer`, « Un cue » remplace seulement dans le même calque, contrôles `layer.<n>.dimmer/mute/solo/clear`, `GET/POST /api/layers`, bandes *Calque 1–4* + compteur *Points* + avertissement, *Calque* dans « Propriétés du cue ». `Layer.modifiers` laissé à T-144 ; `lit_step` (T-002) absent → décimation régulière. `cargo test` 174 ok (+12), clippy propre, e2e 55 ok / 2 ignorés (dont 4 nouveaux dans `layers.spec.ts`). Note : `docs/prs/layers.md`. Statut → review.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.

@@ -114,6 +114,22 @@
   .merr { color: var(--warn); font-size: 12px; margin-top: 4px; }
   #midiLost { display: none; background: #b3261e; color: #fff; font-weight: 600; font-size: 13px; padding: 6px 12px; text-align: center; }
   #midiLost.on { display: block; }
+  .layers-head { display: flex; justify-content: space-between; align-items: baseline; margin: 12px 0 6px; font-size: 12px; color: var(--muted); }
+  #layerPoints { font-variant-numeric: tabular-nums; }
+  #layerPoints b { color: var(--text); font-weight: 600; }
+  #layerPoints.over, #layerPoints.over b, #layerWarn { color: var(--warn); }
+  .layers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .layer { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+  .layer.off { opacity: .6; }
+  .layer .t { font-size: 12px; font-weight: 600; }
+  .layer .pts { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .layer .pts.cut { color: var(--warn); }
+  .layer input[type=range] { writing-mode: vertical-lr; direction: rtl; width: 24px; height: 90px; }
+  .layer .dv { font-size: 11px; font-variant-numeric: tabular-nums; }
+  .layer .btns { display: flex; gap: 3px; width: 100%; }
+  .layer .btns button { flex: 1; padding: 4px 2px; font-size: 11px; }
+  .layer button.mute.active { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .layer button.solo.active { background: var(--warn); border-color: var(--warn); color: #2b1d00; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -174,7 +190,12 @@
       </div>
       <div class="cue-tabs" id="cueTabs"></div>
       <div class="cues" id="cues"></div>
-      <div class="hint"><kbd>Maj</kbd> + lettre = flash · clic droit sur un cue = propriétés</div>
+      <div class="hint"><kbd>Maj</kbd> + lettre = flash · clic droit sur un cue = propriétés (mode, groupe, calque)</div>
+      <div class="layers-head">
+        <span>Calques <span id="layerWarn"></span></span>
+        <span id="layerPoints" title="Points demandés par les calques / budget (au-delà : points espacés, puis calques du haut coupés)">Points : <b>0 / 750</b></span>
+      </div>
+      <div class="layers" id="layers"></div>
     </section>
     <div id="cueMenu" hidden>
       <h3>Propriétés du cue</h3>
@@ -188,6 +209,11 @@
       <select id="cueMenuGroup">
         <option value="">Aucun</option><option>1</option><option>2</option><option>3</option>
         <option>4</option><option>5</option><option>6</option><option>7</option><option>8</option>
+      </select>
+      <label>Calque</label>
+      <select id="cueMenuLayer">
+        <option value="1">Calque 1</option><option value="2">Calque 2</option>
+        <option value="3">Calque 3</option><option value="4">Calque 4</option>
       </select>
       <div class="row"><button id="cueMenuClose">Fermer</button></div>
     </div>
@@ -686,6 +712,7 @@ async function previewLoop() {
     // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
     // control); our own requests update settingsRev themselves.
     if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
+    showLayers(f.layers);
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -966,7 +993,8 @@ function renderCues() {
     b.dataset.id = p.id;
     if (i < 40) b.title = `grid.${cueCategories.indexOf(cuePage) + 1}.${Math.floor(i / 8) + 1}.${i % 8 + 1}`;
     const slot = slots[p.id] || {};
-    const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : ''].filter(Boolean).join(' ');
+    const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '']
+      .filter(Boolean).join(' ');
     b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><span class="n"></span><span class="tag">${tag}</span>`;
     b.querySelector('.n').textContent = p.name;
     b.addEventListener('pointerdown', e => {
@@ -1030,6 +1058,7 @@ function openCueMenu(p, x, y) {
   $('cueMenuName').textContent = p.name;
   $('cueMenuMode').value = slot.mode || '';
   $('cueMenuGroup').value = slot.group ? String(slot.group) : '';
+  $('cueMenuLayer').value = String(slot.layer || 1);
   const m = $('cueMenu');
   m.hidden = false;
   m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
@@ -1038,12 +1067,75 @@ function openCueMenu(p, x, y) {
 async function saveCueMenu() {
   if (!menuCue) return;
   const mode = $('cueMenuMode').value || null, group = $('cueMenuGroup').value ? +$('cueMenuGroup').value : null;
-  await post('/api/cues/slot', { id: menuCue, mode, group });
+  const layer = +$('cueMenuLayer').value > 1 ? +$('cueMenuLayer').value : null;
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer });
   await loadSlots();
 }
-['cueMenuMode', 'cueMenuGroup'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 $('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
 document.addEventListener('pointerdown', e => { if (!$('cueMenu').hidden && !$('cueMenu').contains(e.target)) $('cueMenu').hidden = true; });
+
+// ---------- layers ----------
+// Four strips: dimmer, Muet, Solo, Vider. Values follow the server (MIDI
+// faders show up here); a slider being dragged is left alone.
+let layerKey = '';
+function buildLayers() {
+  for (let n = 1; n <= 4; n++) {
+    const d = document.createElement('div');
+    d.className = 'layer';
+    d.dataset.layer = n;
+    d.innerHTML = `<span class="t">Calque ${n}</span><span class="pts">0 pts</span>
+      <input type="range" min="0" max="100" value="100" title="layer.${n}.dimmer" aria-label="Gradateur calque ${n}">
+      <span class="dv">100 %</span>
+      <div class="btns"><button class="mute" title="layer.${n}.mute">Muet</button><button class="solo" title="layer.${n}.solo">Solo</button></div>
+      <button class="clear" title="layer.${n}.clear : arrête les cues du calque" style="width:100%;padding:4px;font-size:11px">Vider</button>`;
+    const range = d.querySelector('input');
+    range.addEventListener('input', () => {
+      d.querySelector('.dv').textContent = range.value + ' %';
+      post('/api/control', { id: `layer.${n}.dimmer`, value: range.value / 100 });
+    });
+    for (const p of ['mute', 'solo']) {
+      const b = d.querySelector('.' + p);
+      // The next frame shows the new state.
+      b.addEventListener('click', () => post('/api/control', { id: `layer.${n}.${p}`, value: !b.classList.contains('active') }));
+    }
+    d.querySelector('.clear').addEventListener('click', async () => {
+      if (await post('/api/control', { id: `layer.${n}.clear` })) refreshLook();
+    });
+    $('layers').appendChild(d);
+  }
+}
+function showLayers(l) {
+  if (!l) return;
+  const key = JSON.stringify(l);
+  if (key === layerKey) return;
+  layerKey = key;
+  const { mixer, mix } = l;
+  const anySolo = mixer.layers.some(x => x.solo);
+  document.querySelectorAll('#layers .layer').forEach((d, i) => {
+    const x = mixer.layers[i], n = i + 1;
+    const range = d.querySelector('input');
+    if (document.activeElement !== range) {
+      range.value = Math.round(x.dimmer * 100);
+      d.querySelector('.dv').textContent = range.value + ' %';
+    }
+    d.querySelector('.mute').classList.toggle('active', x.mute);
+    d.querySelector('.solo').classList.toggle('active', x.solo);
+    d.classList.toggle('off', x.mute || x.dimmer <= 0 || (anySolo && !x.solo));
+    const pts = d.querySelector('.pts');
+    const cut = mix.dropped.includes(n);
+    pts.textContent = cut ? 'coupé' : mix.per_layer[i] + ' pts';
+    pts.classList.toggle('cut', cut);
+  });
+  const over = mix.demand > mix.budget;
+  $('layerPoints').classList.toggle('over', over);
+  $('layerPoints').querySelector('b').textContent = `${mix.demand} / ${mix.budget}`;
+  $('layerWarn').textContent = !over ? ''
+    : mix.dropped.length > 1 ? `· budget dépassé : calques ${mix.dropped.slice().sort().join(', ')} coupés`
+    : mix.dropped.length ? `· budget dépassé : calque ${mix.dropped[0]} coupé`
+    : '· budget dépassé : points espacés';
+}
+buildLayers();
 
 const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Rosace', tunnel: 'Tunnel',
   polygon_tunnel: 'Tunnel polygonal', spiral_arms: 'Spirale à bras', starburst: 'Soleil', beam_fan: 'Faisceaux en éventail',

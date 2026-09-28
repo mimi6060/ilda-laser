@@ -66,6 +66,22 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `cue.multi` | Plusieurs cues à la fois | cue | bascule | oui |
 | `cue.max_active` | Cues simultanés max | cue | continu 1…16 | oui |
 | `cue.stop_all` | Arrêter tous les cues | cue | déclencheur | oui |
+| `layer.1.dimmer` | Gradateur calque 1 | layer | continu 0…1 | oui |
+| `layer.1.mute` | Muet calque 1 | layer | bascule | oui |
+| `layer.1.solo` | Solo calque 1 | layer | bascule | oui |
+| `layer.1.clear` | Vider le calque 1 | layer | déclencheur | oui |
+| `layer.2.dimmer` | Gradateur calque 2 | layer | continu 0…1 | oui |
+| `layer.2.mute` | Muet calque 2 | layer | bascule | oui |
+| `layer.2.solo` | Solo calque 2 | layer | bascule | oui |
+| `layer.2.clear` | Vider le calque 2 | layer | déclencheur | oui |
+| `layer.3.dimmer` | Gradateur calque 3 | layer | continu 0…1 | oui |
+| `layer.3.mute` | Muet calque 3 | layer | bascule | oui |
+| `layer.3.solo` | Solo calque 3 | layer | bascule | oui |
+| `layer.3.clear` | Vider le calque 3 | layer | déclencheur | oui |
+| `layer.4.dimmer` | Gradateur calque 4 | layer | continu 0…1 | oui |
+| `layer.4.mute` | Muet calque 4 | layer | bascule | oui |
+| `layer.4.solo` | Solo calque 4 | layer | bascule | oui |
+| `layer.4.clear` | Vider le calque 4 | layer | déclencheur | oui |
 | `grid.1.1.1` | Lissajous 1:2 · vert | grid | momentané | oui |
 | `grid.1.1.2` | Lissajous 1:2 · arc-en-ciel | grid | momentané | oui |
 | `grid.1.1.3` | Lissajous 1:2 · cyan → magenta | grid | momentané | oui |
