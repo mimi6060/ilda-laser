@@ -1,6 +1,6 @@
 // Cue grid: page tabs, clicking a cue, AZERTY cue keys, and pages changed
 // from outside the UI (MIDI / API) showing up in it.
-import { test, expect, useStudio, openUi, focusPage } from '../studio';
+import { test, expect, useStudio, openUi, reveal, focusPage } from '../studio';
 
 const studio = useStudio();
 let catalog: Awaited<ReturnType<typeof studio.presets>>;
@@ -40,8 +40,10 @@ test('clicking a cue plays it', async ({ page }) => {
 });
 
 test('a cue keeps the operator\'s look brightness', async ({ page }) => {
+  await reveal(page, '#bright');
   await page.locator('#bright').fill('30');
   await expect.poll(async () => (await studio.state()).settings.brightness).toBeCloseTo(0.3, 3);
+  await reveal(page, '#cues');
   await page.locator('#cues .cue').nth(1).click();
   await expect.poll(activeCue).toBe(pageCues(catalog.categories[0])[1].id);
   expect((await studio.state()).settings.brightness).toBeCloseTo(0.3, 3);
@@ -82,10 +84,17 @@ test('an AZERTY key plays the matching cue of the current page', async ({ page }
 
 test('cue keys are ignored while typing in a text field', async ({ page }) => {
   const before = await activeCue();
+  await reveal(page, '[data-kind="text"]');
   await page.locator('[data-kind="text"]').click();
   await page.locator('#text').fill('');
   await page.locator('#text').pressSequentially('az');
   await expect.poll(async () => (await studio.state()).settings.content.text).toBe('az');
+  expect(await activeCue()).toBe(before);
+  await expect(page.locator('#cues .cue.active')).toHaveCount(0);
+  // Also in LIVE, where cue letters are live: typing a scene name plays nothing.
+  await reveal(page, '#sceneName');
+  await page.locator('#sceneName').pressSequentially('az');
+  await expect(page.locator('#sceneName')).toHaveValue('az');
   expect(await activeCue()).toBe(before);
   await expect(page.locator('#cues .cue.active')).toHaveCount(0);
 });
@@ -95,6 +104,7 @@ test('cue keys are ignored while typing in a text field', async ({ page }) => {
 test('T-292: changing the look by hand clears the active cue', async ({ page }) => {
   await page.locator('#cues .cue').first().click();
   await expect.poll(activeCue).toBe(pageCues(catalog.categories[0])[0].id);
+  await reveal(page, '[data-kind="shape"]');
   await page.locator('[data-kind="shape"]').click();
   await page.getByRole('button', { name: 'Carré', exact: true }).click();
   await expect.poll(async () => (await studio.state()).settings.content.shape).toBe('square');
@@ -110,6 +120,7 @@ test('T-292: a size edit or a master modifier keeps the cue playing', async ({ p
   await page.locator(`#cues .cue[data-id="${cue.id}"]`).click();
   await expect.poll(activeCue).toBe(cue.id);
   await expect(page.locator('#gen')).toHaveValue((await studio.state()).settings.content.generator);
+  await reveal(page, '#scale');
   await page.locator('#scale').fill('40');
   await expect.poll(async () => (await studio.state()).settings.scale).toBeCloseTo(0.4, 3);
   expect(await studio.post('/api/control', { id: 'master.size', value: 1.2 })).toBe(200);
@@ -118,6 +129,7 @@ test('T-292: a size edit or a master modifier keeps the cue playing', async ({ p
 });
 
 test('T-292: a scene stops the cue', async ({ page }) => {
+  await reveal(page, '#sceneName');
   await page.locator('#sceneName').fill('Fond');
   await page.locator('#sceneSave').click();
   await expect(page.locator('#sceneList .scene', { hasText: 'Fond' })).toBeVisible();
@@ -138,6 +150,7 @@ test('T-293: a cue played through the API updates the Effet panel', async ({ pag
   await expect(page.locator('#gen')).toHaveValue(st.settings.content.generator);
   await expect(page.locator('#gCount')).toHaveValue(String(st.settings.content.params.count));
   // And the next slider move edits that cue, not the look from before.
+  await reveal(page, '#bright');
   await page.locator('#bright').fill('70');
   await expect.poll(async () => (await studio.state()).settings.brightness).toBeCloseTo(0.7, 3);
   expect((await studio.state()).settings.content).toEqual(st.settings.content);

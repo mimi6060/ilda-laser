@@ -2,7 +2,7 @@
 // --midi-test gets a simulated APC40 mkII; bytes injected through
 // /api/midi/inject go through the real mapping engine and T-208 safety.
 // The profile is a small test layout (midi.ts), written before start.
-import { test, expect, useStudio, openUi } from '../studio';
+import { test, expect, useStudio, openUi, reveal } from '../studio';
 import { Apc, testProfileFiles, DEVICE_INQUIRY, NOTE_ARM, NOTE_SCENE_1, NOTE_STOP_ALL, NOTE_SHIFT, CC_CUE_LEVEL, TEST_PORT } from '../midi';
 
 /** APC40 mkII palette indexes used by LED feedback (T-205). */
@@ -72,6 +72,7 @@ test('a grid pad plays its cue, a second press stops it', async ({ page }) => {
 
 test('« Retour LED » unticked leaves the APC dark, ticked lights it again', async ({ page }) => {
   await expect.poll(() => apc.ledAt(0, 0)).toBe(MK2_WHITE);
+  await reveal(page, '#midiPanel summary');
   await page.locator('#midiPanel summary').click();
   const box = page.locator('[data-mled="0"]');
   await expect(box).toBeChecked();

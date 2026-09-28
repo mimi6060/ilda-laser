@@ -1,7 +1,7 @@
 // Laser on/off: the LASER button, Space, and Escape (always a blackout,
 // latched as an emergency stop since T-251).
 // Preview only: "armed" is just a flag in a studio that has no output.
-import { test, expect, useStudio, openUi, focusPage } from '../studio';
+import { test, expect, useStudio, openUi, reveal, focusPage } from '../studio';
 
 const studio = useStudio();
 const armed = async () => (await studio.state()).armed as boolean;
@@ -44,6 +44,7 @@ test('Space toggles armed', async ({ page }) => {
 });
 
 test('Space does not arm while typing in a text field', async ({ page }) => {
+  await reveal(page, '[data-kind="text"]');
   await page.locator('[data-kind="text"]').click();
   await page.locator('#text').click();
   await page.keyboard.press('Space');
@@ -71,6 +72,7 @@ test('Escape disarms after Space armed the laser', async ({ page }) => {
 test('Escape disarms even while typing in a text field', async ({ page }) => {
   await page.locator('#armBtn').click();
   await expect.poll(armed).toBe(true);
+  await reveal(page, '[data-kind="text"]');
   await page.locator('[data-kind="text"]').click();
   await page.locator('#text').click();
   await page.keyboard.press('Escape');
