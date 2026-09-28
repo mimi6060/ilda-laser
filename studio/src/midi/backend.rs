@@ -41,12 +41,26 @@ pub fn unique_names(names: Vec<String>) -> Vec<String> {
 
 const CLIENT: &str = "Laser Studio";
 
+/// Virtual CoreMIDI ports created by our own tests (T-209) start with
+/// this. They are visible to every app on the Mac while a test runs, so a
+/// running studio never lists (and never opens) them.
+pub const TEST_PORT_PREFIX: &str = "Laser Studio Test";
+
 /// CoreMIDI through midir. A fresh client is created for every listing and
 /// every connection: midir connections consume their client, and a new
 /// client always sees the current device list.
 pub struct MidirBackend;
 
 impl MidirBackend {
+    /// Every port, our own test ports included (the CoreMIDI tests only).
+    pub fn all_ports(&self) -> Result<(Vec<String>, Vec<String>), String> {
+        let input = midir::MidiInput::new(CLIENT).map_err(|e| format!("CoreMIDI indisponible : {e}"))?;
+        let output = midir::MidiOutput::new(CLIENT).map_err(|e| format!("CoreMIDI indisponible : {e}"))?;
+        let inputs = Self::input_ports(&input).into_iter().map(|(n, _)| n).collect();
+        let outputs = Self::output_ports(&output).into_iter().map(|(n, _)| n).collect();
+        Ok((inputs, outputs))
+    }
+
     fn input_ports(input: &midir::MidiInput) -> Vec<(String, midir::MidiInputPort)> {
         let ports = input.ports();
         let names = ports.iter().map(|p| input.port_name(p).unwrap_or_default()).collect();
@@ -62,11 +76,8 @@ impl MidirBackend {
 
 impl Backend for MidirBackend {
     fn ports(&mut self) -> Result<(Vec<String>, Vec<String>), String> {
-        let input = midir::MidiInput::new(CLIENT).map_err(|e| format!("CoreMIDI indisponible : {e}"))?;
-        let output = midir::MidiOutput::new(CLIENT).map_err(|e| format!("CoreMIDI indisponible : {e}"))?;
-        let inputs = Self::input_ports(&input).into_iter().map(|(n, _)| n).collect();
-        let outputs = Self::output_ports(&output).into_iter().map(|(n, _)| n).collect();
-        Ok((inputs, outputs))
+        let (inputs, outputs) = self.all_ports()?;
+        Ok((without_test_ports(inputs), without_test_ports(outputs)))
     }
 
     fn open_input(&mut self, name: &str, mut callback: InputCallback) -> Result<InputHandle, String> {
@@ -86,6 +97,10 @@ impl Backend for MidirBackend {
     }
 }
 
+fn without_test_ports(names: Vec<String>) -> Vec<String> {
+    names.into_iter().filter(|n| !n.starts_with(TEST_PORT_PREFIX)).collect()
+}
+
 struct MidirOutput(midir::MidiOutputConnection);
 
 impl OutputPort for MidirOutput {
@@ -102,5 +117,11 @@ mod tests {
     fn duplicate_port_names_are_numbered() {
         let names = unique_names(vec!["APC40 mkII".into(), "IAC".into(), "APC40 mkII".into(), "APC40 mkII".into()]);
         assert_eq!(names, vec!["APC40 mkII", "IAC", "APC40 mkII (2)", "APC40 mkII (3)"]);
+    }
+
+    #[test]
+    fn our_own_test_ports_are_never_listed() {
+        let names = vec!["APC40 mkII".into(), "Laser Studio Test APC40 mkII".into(), "Laser Studio Test Hotplug (2)".into()];
+        assert_eq!(without_test_ports(names), vec!["APC40 mkII"]);
     }
 }
