@@ -42,5 +42,7 @@ pub fn shared() -> Shared {
         mixer: layers::Mixer::default(),
         mixer_dirty: false,
         mix: layers::MixReport::default(),
+        safety: crate::safety::SafetyStore::in_memory(),
+        strobe: Default::default(),
     }
 }

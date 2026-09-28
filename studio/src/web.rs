@@ -176,6 +176,19 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             s.gate.reset_estop(&s.estop);
             ok()
         }
+        (Method::Get, "/api/safety") => {
+            let s = shared.lock().unwrap();
+            json_response(json!({ "settings": s.safety.get(), "defaults": crate::safety::SafetySettings::default(), "status": s.strobe }))
+        }
+        // Tighten-only for the strobe: looser values than the safe
+        // defaults are refused with a French message (400).
+        (Method::Post, "/api/safety") => match body::<crate::safety::SafetySettings>(request) {
+            Ok(cfg) => match shared.lock().unwrap().safety.set(cfg) {
+                Ok(()) => ok(),
+                Err(e) => text(400, &e.to_string()),
+            },
+            Err(e) => e,
+        },
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
                 let cal = Calibration {
@@ -452,6 +465,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "settings": s.settings,
         "settings_rev": s.settings_rev,
         "calibration": s.calibration,
+        "safety": s.safety.get(),
         "armed": arm.armed,
         "estop": arm.estop.is_some(),
         "arm": arm,
@@ -498,6 +512,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "tempo": s.tempo.state(s.now_s()),
         "live": s.live,
         "lfos": lfo_positions(s),
+        "strobe": s.strobe,
     }))
 }
 
@@ -751,5 +766,25 @@ mod tests {
         for forbidden in ["fetch(", "XMLHttpRequest", "WebSocket", "/api/", "sendBeacon", "import("] {
             assert!(!module.contains(forbidden), "beam3d.js must not use {forbidden}");
         }
+    }
+
+    #[test]
+    fn safety_settings_are_tighten_only_over_http() {
+        let t = TestServer::start(false);
+        let get = |t: &TestServer| -> serde_json::Value { serde_json::from_str(&t.request("GET", "/api/safety", "").1).unwrap() };
+        assert_eq!(get(&t)["settings"]["strobe_max_hz"], 4.0);
+        let (code, msg) = t.request("POST", "/api/safety", r#"{"strobe_max_hz":10}"#);
+        assert_eq!(code, 400, "{msg}");
+        assert!(msg.contains("Strobe max"), "{msg}");
+        assert_eq!(get(&t)["settings"]["strobe_max_hz"], 4.0, "unchanged");
+        let (code, _) = t.request("POST", "/api/safety", r#"{"strobe_max_hz":3,"beam_floor_y":0.25}"#);
+        assert_eq!(code, 200);
+        let st = get(&t);
+        assert_eq!(st["settings"]["strobe_max_hz"], 3.0);
+        assert_eq!(st["settings"]["beam_floor_y"], 0.25);
+        assert_eq!(st["settings"]["strobe_burst_s"], 5.0, "missing fields keep the safe default");
+        assert_eq!(st["status"]["active"], false);
+        let frame: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
+        assert_eq!(frame["strobe"]["active"], false);
     }
 }

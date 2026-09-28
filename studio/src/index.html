@@ -139,6 +139,8 @@
   #beamsMsg { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
   .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
   .render3d .check { margin-top: 6px; }
+  #strobeLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
+  #strobeLed.on { opacity: 1; background: var(--warn); border-color: var(--warn); color: #2b1d00; box-shadow: 0 0 8px var(--warn); }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -428,6 +430,17 @@
         <button id="plStart">▶ Playlist</button>
         <button id="plStop">■ Stop</button>
       </div>
+    </section>
+
+    <section>
+      <details id="safetyPanel">
+        <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span></summary>
+        <label>Strobe max (Hz) <span class="v" id="sfHzV"></span></label><input type="range" id="sfHz" min="0.5" max="4" step="0.5">
+        <label>Rafale max (s) <span class="v" id="sfBurstV"></span></label><input type="range" id="sfBurst" min="0" max="5" step="0.5">
+        <label>Horizon des faisceaux <span class="v" id="sfFloorV"></span></label><input type="range" id="sfFloor" min="-1" max="1" step="0.05">
+        <div class="hint">Au-delà de 4 Hz, un strobe est limité à 5 s puis la sortie reste allumée en continu (au moins 2 s). Les faisceaux sous l'horizon sont éteints. Ces limites ne peuvent qu'être resserrées ici.</div>
+        <div class="hint" id="strobeInfo"></div>
+      </details>
     </section>
 
     <section>
@@ -756,6 +769,7 @@ async function previewLoop() {
     showTempo(f.tempo);
     showLive(f.live);
     showLfos(f.lfos);
+    showStrobe(f.strobe);
     // Follow page changes made elsewhere (MIDI controller, API) - only
     // when the server's value changes, so a tab click that the server
     // hasn't processed yet isn't undone by an older frame.
@@ -941,6 +955,29 @@ Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
   showCalibration();
   clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
 }));
+
+// ---------- safety (T-101) ----------
+let safety = null, safetyTimer = null;
+const sfMap = { sfHz: ['strobe_max_hz', v => v + ' Hz'], sfBurst: ['strobe_burst_s', v => v + ' s'], sfFloor: ['beam_floor_y', v => (+v).toFixed(2)] };
+function showSafety() {
+  if (!safety) return;
+  for (const [id, [key, fmt]] of Object.entries(sfMap)) {
+    if (document.activeElement !== $(id)) $(id).value = safety[key];
+    $(id + 'V').textContent = fmt(safety[key]);
+  }
+}
+Object.keys(sfMap).forEach(id => $(id).addEventListener('input', () => {
+  for (const [cid, [key]] of Object.entries(sfMap)) safety[key] = +$(cid).value;
+  showSafety();
+  clearTimeout(safetyTimer); safetyTimer = setTimeout(() => post('/api/safety', safety), 60);
+}));
+function showStrobe(st) {
+  if (!st) return;
+  $('strobeLed').classList.toggle('on', st.active);
+  $('strobeInfo').textContent = st.active ? 'Limiteur actif : strobe trop long, sortie maintenue allumée.'
+    : st.fast ? `Strobe rapide (${st.rate_hz.toFixed(1)} Hz) depuis ${st.burst_s.toFixed(1)} s`
+    : st.beams_blanked ? `${st.beams_blanked} faisceau(x) sous l'horizon éteint(s)` : '';
+}
 
 // ---------- live (master) ----------
 let live = null;
@@ -1371,6 +1408,7 @@ function showLfos(pos) {
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
+  safety = st.safety; showSafety();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');
