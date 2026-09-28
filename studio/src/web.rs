@@ -6,7 +6,11 @@
 //!
 //! One thread receives requests; `POST /api/estop` is handled right there,
 //! lock-free, ahead of everything queued. All other requests go, in order,
-//! to a single worker thread, so a slow handler never delays a stop.
+//! to a single worker thread, so a slow handler never delays a stop. The
+//! requests that may decode a song (import, waveform, attach: seconds, up
+//! to the decoding time limit) get their own thread, so they never hold up
+//! the heartbeats queued behind them (T-298: a slow or hanging decode must
+//! not disarm the laser as « Interface perdue »).
 
 use crate::controls;
 use crate::cues::{ClickMode, CueSlot};
@@ -20,7 +24,7 @@ use crate::{Playlist, Shared};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -51,8 +55,13 @@ fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibrat
     let (queue, pending) = std::sync::mpsc::channel::<Request>();
     let worker = std::thread::spawn({
         let shared = Arc::clone(&shared);
+        let decoding = Arc::new(AtomicUsize::new(0));
         move || {
             for mut request in pending {
+                if may_decode(request.method(), request.url()) {
+                    decode_aside(request, &shared, &calibration_path, &decoding);
+                    continue;
+                }
                 let response = route(&mut request, &shared, &calibration_path);
                 if let Err(e) = request.respond(response) {
                     log::debug!("failed to send HTTP response: {e}");
@@ -78,6 +87,44 @@ fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibrat
     }
     drop(queue);
     worker.join().ok();
+}
+
+/// Requests whose handler may run an audio decoder.
+fn may_decode(method: &Method, url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    matches!((method, path), (Method::Post, "/api/media/audio") | (Method::Get, "/api/timeline/waveform") | (Method::Post, "/api/timeline/audio"))
+}
+
+/// At most this many decoding requests at once (each may run a decoder).
+const MAX_DECODING: usize = 4;
+
+/// Handles a request that may decode on its own thread (see the module
+/// doc). Beyond `MAX_DECODING` at once: 503.
+fn decode_aside(mut request: Request, shared: &Arc<Mutex<Shared>>, calibration_path: &Path, decoding: &Arc<AtomicUsize>) {
+    /// One decoding request in flight, released however its thread ends.
+    struct Slot(Arc<AtomicUsize>);
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let slot = Slot(Arc::clone(decoding));
+    if decoding.fetch_add(1, Ordering::SeqCst) >= MAX_DECODING {
+        drop(slot);
+        let _ = request.respond(text(503, "trop de décodages audio en cours, réessayez"));
+        return;
+    }
+    let (shared, calibration_path) = (Arc::clone(shared), calibration_path.to_path_buf());
+    let spawned = std::thread::Builder::new().name("http-decode".into()).spawn(move || {
+        let response = route(&mut request, &shared, &calibration_path);
+        drop(slot);
+        if let Err(e) = request.respond(response) {
+            log::debug!("failed to send HTTP response: {e}");
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("no thread for a decoding request: {e}");
+    }
 }
 
 fn is_estop(method: &Method, url: &str) -> bool {
@@ -1216,6 +1263,18 @@ mod tests {
         assert!(is_estop(&Method::Post, "/api/estop?source=keyboard"));
         assert!(!is_estop(&Method::Get, "/api/estop"));
         assert!(!is_estop(&Method::Post, "/api/estop/reset"));
+    }
+
+    /// T-298: only the requests that may decode a song leave the worker
+    /// (heartbeats, arm and the rest stay in order on it).
+    #[test]
+    fn only_decoding_requests_go_aside() {
+        assert!(may_decode(&Method::Post, "/api/media/audio?name=a.mp3"));
+        assert!(may_decode(&Method::Get, "/api/timeline/waveform?from=0&to=1"));
+        assert!(may_decode(&Method::Post, "/api/timeline/audio"));
+        for (m, p) in [(Method::Get, "/api/media/audio"), (Method::Post, "/api/heartbeat"), (Method::Post, "/api/arm"), (Method::Get, "/api/state"), (Method::Post, "/api/timeline/play")] {
+            assert!(!may_decode(&m, p), "{p}");
+        }
     }
 
     #[test]

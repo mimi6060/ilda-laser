@@ -1,12 +1,12 @@
 ---
 id: T-298
 title: Isoler le décodage audio (MP3) pour qu'un fichier piégé ne puisse pas arrêter le studio
-status: todo
+status: done
 area: infra
 priority: P1
 depends_on: []
-owner: ""
-branch: ""
+owner: "dev-agent (decode-isolation)"
+branch: fix/decode-isolation
 source: docs/prs/timeline-audio.md (review T-161)
 ---
 
@@ -25,9 +25,9 @@ couperait donc le show, même si c'est sans danger.
 - Fuzzing plus poussé du décodeur (fichiers tronqués / mutés / aléatoires).
 
 ## Critères d'acceptation
-- [ ] Un décodeur qui panique n'arrête pas le studio ni le laser en cours
-- [ ] Le hook de panique global reste actif pour tout le reste (moteur, sortie)
-- [ ] Message d'erreur clair dans l'interface
+- [x] Un décodeur qui panique n'arrête pas le studio ni le laser en cours
+- [x] Le hook de panique global reste actif pour tout le reste (moteur, sortie)
+- [x] Message d'erreur clair dans l'interface
 
 ## Tests
 Test qui force une panique dans le décodeur et vérifie que le studio répond encore.
@@ -38,3 +38,17 @@ toujours désarmer et éteindre.
 
 ## Journal
 - 2026-09-28 — architecte : créée depuis la review de feat/timeline-audio.
+- 2026-09-28 — dev-agent (decode-isolation) : pris, branche `fix/decode-isolation`.
+- 2026-09-28 — dev-agent (decode-isolation) : fait. Le décodage tourne dans
+  un sous-processus (`laser-studio --decode <nom> --data-dir <dossier>`,
+  lecture confinée à `media/audio/`, réponse binaire validée, limite 120 s),
+  avec un fil contenu (exempté du hook global) en secours seulement. Une
+  panique, un abort, un segfault ou un blocage du décodeur donnent
+  « Import refusé : … le studio continue » ; laser armé et sortie intacts.
+  Les requêtes qui décodent quittent le worker HTTP (sinon un décodage long
+  bloquait les battements → « Interface perdue »). Fuzz renforcé (≈ 2 200
+  fichiers). Tests : 566 unitaires + 2 shutdown + 2 nouveaux tests
+  sous-processus, clippy propre, e2e 146/146 (nouveau
+  `decode-isolation.spec.ts`). Note : `docs/prs/decode-isolation.md`.
+  Statut → review.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.
