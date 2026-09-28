@@ -1,12 +1,12 @@
 ---
 id: T-231
 title: Analyse spectrale : 5 bandes, niveaux dBFS et gain automatique
-status: todo
+status: review
 area: tempo
 priority: P1
 depends_on: [T-230]
-owner: ""
-branch: ""
+owner: "agent dev (T-231)"
+branch: feat/audio-bands
 source: docs/research/audio-analysis.md §2.1 et §6.2
 ---
 
@@ -33,11 +33,11 @@ pub struct SpectralFrame { pub t: f64, pub bands: Bands, pub bands_db: [f32; 5],
 Cinq vumètres *Sub / Basses / Bas-médiums / Médiums / Aigus*, case *Gain automatique*, curseur *Gain* (dB), seuil *Silence* (dB).
 
 ## Critères d'acceptation
-- [ ] Sinus 40 Hz → `sub` domine, les autres bandes < 0,1
-- [ ] Sinus 5 kHz → `high` domine
-- [ ] Un morceau à −30 dBFS et le même à −10 dBFS donnent des bandes normalisées à ±10 % après 10 s (gain auto)
-- [ ] Silence numérique → `silent` passe à vrai en 300 ms (±1 hop)
-- [ ] Coût < 2 % d'un cœur (mesuré en test de performance `--ignored`)
+- [x] Sinus 40 Hz → `sub` domine, les autres bandes < 0,1
+- [x] Sinus 5 kHz → `high` domine
+- [x] Un morceau à −30 dBFS et le même à −10 dBFS donnent des bandes normalisées à ±10 % après 10 s (gain auto)
+- [x] Silence numérique → `silent` passe à vrai en 300 ms (±1 hop)
+- [x] Coût < 2 % d'un cœur (mesuré en test de performance `--ignored`)
 
 ## Tests
 Unitaires sur signaux synthétiques (sinus, bruit rose, silence, changements de niveau).
@@ -47,3 +47,4 @@ Le gain automatique doit remonter lentement après un silence (pas d'explosion d
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/audio-analysis.md`.
+- 2026-09-28 — agent dev : réalisé sur `feat/audio-bands` (PR : `docs/prs/audio-bands.md`). Nouveau `studio/src/audio/spectrum.rs` sur le fil d'analyse : 5 bandes par Butterworth (ordre 8 aux frontières 60/150/500/2000 Hz), dBFS lissés, gain automatique par bande (plafond crête + relâche τ 7 s, plancher 5e centile sur 10 s, plafond d'une bande ≤ 10 dB sous la plus forte), gain manuel, silence (chaque hop < seuil pendant 300 ms, gain auto gelé), FFT `realfft` 1024 / Hann (centroïde, platitude, spectre gardé pour T-232). `AudioConfig.analysis` (`auto_gain`, `manual_gain_db`, `silence_db`), patch champ par champ, sans réouverture de l'entrée. `/api/state.audio.spectral`. `level`/`bass`/`beat` inchangés (T-237 les basculera). Tests : 40 Hz → sub, autres < 0,1 ; 5 kHz → high ; 10 sinus dans leur bande ; −30/−10 dBFS à ±0,1 ; silence en 300 ms ± 1 hop ; gel pendant le silence ; écrêtage/NaN bornés ; aucune allocation par hop ; coût 0,21 % d'un cœur (release, `--ignored`). `cargo test` 508 + 2 OK (4 ignorés), clippy propre, e2e 137/137. Interface (vumètres, cases) laissée à T-243.

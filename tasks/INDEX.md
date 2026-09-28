@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (101)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-231](T-231-tempo.md) | Analyse spectrale : 5 bandes, niveaux dBFS et gain automatique | tempo | P1 | [T-230] | feat/audio-bands |
+
+## À faire (100)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -17,7 +23,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
 | [T-157](T-157-cues.md) | Cues évolutifs : un cue = une mini-timeline (calques internes, courbes sur modificateurs, LFO) | cues | P1 | [T-111, T-151, T-140] |  |
 | [T-211](T-211-midi.md) | Contrôleurs MIDI génériques (n'importe quel appareil) | midi | P1 | [T-200, T-201, T-202, T-203] |  |
-| [T-231](T-231-tempo.md) | Analyse spectrale : 5 bandes, niveaux dBFS et gain automatique | tempo | P1 | [T-230] |  |
 | [T-232](T-232-tempo.md) | Fonction d'onsets (flux spectral) et détection kick / caisse claire / charleston | tempo | P1 | [T-231] |  |
 | [T-233](T-233-tempo.md) | Estimation du BPM et suivi des temps (autocorrélation, peigne, programmation dynamique) avec confiance | tempo | P1 | [T-232, T-150] |  |
 | [T-234](T-234-tempo.md) | Brancher la détection sur l'horloge de tempo : verrouillage, maintien, tap prioritaire, recalage de phase | tempo | P1 | [T-233, T-150] |  |
