@@ -223,9 +223,14 @@ impl Analysis {
     /// latest result. Returns the number of hops analysed.
     pub fn poll(&mut self) -> usize {
         while let Ok(feed) = self.feeds.try_recv() {
-            self.current = Some(Current { analyzer: Analyzer::new(feed.sample_rate, self.beat), feed, consumed: 0 });
+            let analyzer = Analyzer::with_config(feed.sample_rate, self.beat, self.hub.analysis_config());
+            self.current = Some(Current { analyzer, feed, consumed: 0 });
         }
         let Some(cur) = self.current.as_mut() else { return 0 };
+        if cur.feed.consumer.slots() >= HOP {
+            // A copy under a leaf lock, at most once per poll.
+            cur.analyzer.set_config(self.hub.analysis_config());
+        }
         let mut hops = 0;
         let mut last = None;
         while cur.feed.consumer.slots() >= HOP && cur.feed.consumer.pop_entire_slice(&mut self.buf).is_ok() {
@@ -239,7 +244,7 @@ impl Analysis {
         }
         self.beat = cur.analyzer.beat();
         if let Some((m, t)) = last {
-            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, t, at: Instant::now() });
+            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, t, at: Instant::now() });
         }
         if cur.feed.consumer.is_abandoned() && cur.feed.consumer.slots() < HOP {
             // The stream was closed and its ring is drained.
@@ -336,6 +341,17 @@ mod tests {
         let snap = r.hub.snapshot().expect("published");
         assert!((snap.rms_db + 9.0).abs() < 0.5, "{snap:?}");
         assert!(snap.t > 0.0);
+        // The bands come with it: a 1 kHz tone is `mid`.
+        assert_eq!(snap.spectral.t, snap.t);
+        assert!(snap.spectral.bands.mid > 0.9 && snap.spectral.bands.high < 0.1, "{:?}", snap.spectral);
+        assert!(!snap.spectral.silent);
+        // An analysis setting reaches the running analyser without a reopen.
+        r.hub.set_config(AudioConfig { analysis: super::super::spectrum::AnalysisConfig { auto_gain: false, manual_gain_db: -40.0, ..Default::default() }, ..AudioConfig::native() }).unwrap();
+        r.run(50, 0.5);
+        assert_eq!(r.fake.opens(), 1);
+        let mid = r.hub.snapshot().unwrap().spectral.bands.mid;
+        assert!((mid - 0.22).abs() < 0.03, "manual: (-9 - 40 + 60) / 50 = {mid}");
+        r.hub.set_config(AudioConfig::native()).unwrap();
         let never = Instant::now() - Duration::from_secs(60);
         let (f, active) = r.hub.effective(AudioFeatures::default(), never, Instant::now());
         assert_eq!(active, Active::Native);

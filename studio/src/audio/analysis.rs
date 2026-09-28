@@ -1,12 +1,14 @@
 //! Analysis of the captured mono signal, one hop (256 samples) at a time,
 //! on the analysis thread (never in the audio callback).
 //!
-//! For now (T-230) it gives the dBFS meter (RMS and peak) and the three
-//! features the engine already uses (`level`, `bass`, `beat`), computed
-//! the way the browser does it so a look reacts the same with either
-//! source. T-231/T-232 replace `bass` and `beat` with bands, auto-gain
-//! and real onsets.
+//! It gives the dBFS meter (RMS and peak), the three features the engine
+//! already uses (`level`, `bass`, `beat`, T-230), computed the way the
+//! browser does it so a look reacts the same with either source, and the
+//! spectral frame (five bands with auto-gain, centroid, flatness, silence:
+//! `spectrum.rs`, T-231). T-232/T-237 move `bass` and `beat` onto the
+//! bands and real onsets.
 
+use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame};
 use crate::engine::AudioFeatures;
 
 /// Samples per analysis step (5.3 ms at 48 kHz).
@@ -44,6 +46,7 @@ pub struct Meter {
     /// Peak with a 20 dB/s fall-back, dBFS.
     pub peak_db: f32,
     pub features: AudioFeatures,
+    pub spectral: SpectralFrame,
 }
 
 /// A second-order low-pass (RBJ cookbook, Q = 1/√2), transposed direct
@@ -95,12 +98,18 @@ pub struct Analyzer {
     last_beat_t: f64,
     beat_armed: bool,
     beat: u64,
+    spectral: SpectralAnalyzer,
 }
 
 impl Analyzer {
     /// `beat` continues an earlier counter (a reopened stream must not
     /// look like a new beat to the engine).
+    #[cfg(test)]
     pub fn new(sample_rate: u32, beat: u64) -> Self {
+        Self::with_config(sample_rate, beat, AnalysisConfig::default())
+    }
+
+    pub fn with_config(sample_rate: u32, beat: u64, config: AnalysisConfig) -> Self {
         let rate = sample_rate.max(1) as f32;
         Self {
             hop_s: HOP as f32 / rate,
@@ -112,7 +121,12 @@ impl Analyzer {
             last_beat_t: f64::NEG_INFINITY,
             beat_armed: true,
             beat,
+            spectral: SpectralAnalyzer::new(sample_rate, config),
         }
+    }
+
+    pub fn set_config(&mut self, config: AnalysisConfig) {
+        self.spectral.set_config(config);
     }
 
     /// One hop of mono samples ending at `t` (seconds, studio clock).
@@ -145,7 +159,9 @@ impl Analyzer {
             self.last_beat_t = t;
             self.beat_armed = false;
         }
-        Meter { rms_db: to_db(self.mean_sq), peak_db: self.peak_db, features: AudioFeatures { level, bass, beat: self.beat } }
+        let rms_db = to_db(self.mean_sq);
+        let spectral = self.spectral.process(hop, t, rms_db);
+        Meter { rms_db, peak_db: self.peak_db, features: AudioFeatures { level, bass, beat: self.beat }, spectral }
     }
 
     pub fn beat(&self) -> u64 {
@@ -248,5 +264,19 @@ mod tests {
         let mut a = Analyzer::new(RATE, 0);
         let m = a.process(&[f32::NAN, f32::INFINITY, 0.0, 0.0], 0.1);
         assert!(m.rms_db.is_finite() && m.peak_db.is_finite() && m.features.level.is_finite());
+        assert!(m.spectral.bands_db.iter().all(|d| d.is_finite()));
+    }
+
+    #[test]
+    fn each_hop_also_gives_the_spectral_frame() {
+        let mut a = Analyzer::new(RATE, 0);
+        let s = sine(5_000.0, 0.3, RATE, RATE as usize, 0);
+        let m = *run(&mut a, 0.5, |i| s[i]).last().unwrap();
+        assert!(m.spectral.bands.high > 0.9, "{m:?}");
+        assert_eq!(m.spectral.level_db, m.rms_db, "one meter");
+        assert!((m.spectral.t - 0.4960).abs() < 1e-3, "{m:?}");
+        a.set_config(AnalysisConfig { auto_gain: false, ..Default::default() });
+        let m = *run(&mut a, 0.1, |i| s[i]).last().unwrap();
+        assert!((m.spectral.bands.high - 0.93).abs() < 0.03, "manual: (-13.5 + 60) / 50: {m:?}");
     }
 }

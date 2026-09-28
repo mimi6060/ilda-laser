@@ -1,4 +1,4 @@
-// Audio input source (T-230), through the API only. The test studio runs
+// Audio input source (T-230) and analysis settings (T-231), through the API only. The test studio runs
 // with --no-audio: no microphone or interface is ever opened, the native
 // capture reports « disabled », and the browser source (POST /api/audio)
 // keeps driving the looks as before.
@@ -7,6 +7,7 @@ import { test, expect, useStudio, extent } from '../studio';
 const studio = useStudio();
 const audio = async () => (await studio.state()).audio;
 const setSource = (source: string) => studio.post('/api/audio/config', { source });
+const ANALYSIS = { auto_gain: true, manual_gain_db: 0, silence_db: -60 };
 
 /** Posts browser features until the frame has picked them up (they go stale after 500 ms). */
 async function extentWith(bass: number) {
@@ -26,8 +27,9 @@ test('--no-audio: no capture, no device, nothing fails', async () => {
   expect(a.capture).toBe(false);
   expect(a.state).toBe('disabled');
   expect(a.level_db).toBeNull();
+  expect(a.spectral).toBeNull();
   // Default source is the browser: the studio never opens the Mac's mic by itself.
-  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: null, buffer_frames: 256 });
+  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: null, buffer_frames: 256, analysis: ANALYSIS });
 });
 
 test('Native without a capture: the browser features stand in', async () => {
@@ -62,9 +64,23 @@ test('source « Navigateur » works as before T-230', async () => {
 test('the config is validated, patched field by field and kept across a restart', async () => {
   expect(await studio.post('/api/audio/config', { source: 'spotify' })).toBe(400);
   expect(await studio.post('/api/audio/config', { buffer_frames: 64, device: 'Scarlett 2i2 USB' })).toBe(200);
-  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128 });
+  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128, analysis: ANALYSIS });
   await studio.restart();
-  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128 });
+  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128, analysis: ANALYSIS });
   expect((await audio()).state).toBe('disabled');
   expect(await studio.post('/api/audio/config', { device: null, buffer_frames: 256 })).toBe(200);
+});
+
+test('the band analysis settings are patched field by field and kept across a restart', async () => {
+  expect(await studio.post('/api/audio/config', { analysis: { auto_gain: 'oui' } })).toBe(400);
+  expect(await studio.post('/api/audio/config', { analysis: { gain: 3 } })).toBe(400);
+  expect(await studio.post('/api/audio/config', { analysis: { auto_gain: false, manual_gain_db: 99 } })).toBe(200);
+  const kept = { auto_gain: false, manual_gain_db: 40, silence_db: -60 };
+  expect((await studio.get('/api/audio/config')).analysis).toEqual(kept);
+  expect(await studio.post('/api/audio/config', { analysis: { silence_db: -45 } })).toBe(200);
+  await studio.restart();
+  const c = await studio.get('/api/audio/config');
+  expect(c.analysis).toEqual({ ...kept, silence_db: -45 });
+  expect(c.source).toBe('browser');
+  expect(await studio.post('/api/audio/config', { analysis: ANALYSIS })).toBe(200);
 });

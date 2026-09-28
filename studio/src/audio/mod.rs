@@ -8,14 +8,16 @@
 //! - the **capture** thread (worker.rs): opens/closes the input, lists
 //!   devices, retries every 2 s after an unplug or a refusal;
 //! - the **analysis** thread (worker.rs): reads the ring by hops of 256
-//!   samples and publishes a snapshot in `AudioHub`, which the 60 fps
-//!   engine reads at the top of each frame (a mutex held for a copy).
+//!   samples (analysis.rs, spectrum.rs: meter, bands, auto-gain, silence)
+//!   and publishes a snapshot in `AudioHub`, which the 60 fps engine reads
+//!   at the top of each frame (a mutex held for a copy).
 //!
 //! The browser source (`POST /api/audio`) is kept: it is the *Navigateur*
 //! source, and the fallback when the native one has nothing fresh.
 
 pub mod analysis;
 pub mod capture;
+pub mod spectrum;
 pub mod worker;
 
 use crate::engine::AudioFeatures;
@@ -23,6 +25,7 @@ use anyhow::{Context, Result};
 use capture::{InputDevice, MAX_BUFFER_FRAMES, MIN_BUFFER_FRAMES};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use spectrum::{AnalysisConfig, SpectralFrame};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -58,6 +61,9 @@ pub struct AudioConfig {
     /// Buffer asked of CoreAudio, in frames (128..=4096; the device's
     /// default if it refuses).
     pub buffer_frames: u32,
+    /// Bands: auto-gain, manual gain, silence threshold (T-231). Changing
+    /// it never reopens the input.
+    pub analysis: AnalysisConfig,
 }
 
 #[cfg(test)]
@@ -70,7 +76,7 @@ impl AudioConfig {
 
 impl Default for AudioConfig {
     fn default() -> Self {
-        Self { source: AudioInputSource::Browser, device: None, buffer_frames: 256 }
+        Self { source: AudioInputSource::Browser, device: None, buffer_frames: 256, analysis: AnalysisConfig::default() }
     }
 }
 
@@ -78,7 +84,13 @@ impl AudioConfig {
     pub fn sanitized(mut self) -> Self {
         self.buffer_frames = self.buffer_frames.clamp(MIN_BUFFER_FRAMES, MAX_BUFFER_FRAMES);
         self.device = self.device.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+        self.analysis = self.analysis.sanitized();
         self
+    }
+
+    /// The fields that need the input reopened when they change.
+    fn capture_part(&self) -> (AudioInputSource, Option<&str>, u32) {
+        (self.source, self.device.as_deref(), self.buffer_frames)
     }
 
     /// `--audio-device`: `none` disables capture, `default` is the system
@@ -114,6 +126,18 @@ impl AudioConfig {
         }
         if let Some(v) = obj.get("buffer_frames") {
             c.buffer_frames = v.as_u64().context("buffer_frames : entier")?.min(u32::MAX as u64) as u32;
+        }
+        if let Some(v) = obj.get("analysis") {
+            // Field by field too: `{"analysis": {"auto_gain": false}}`.
+            let fields = v.as_object().context("analysis : objet attendu")?;
+            let mut merged = serde_json::to_value(c.analysis)?;
+            for (k, v) in fields {
+                if merged.get(k).is_none() {
+                    anyhow::bail!("analysis : champ inconnu « {k} »");
+                }
+                merged[k] = v.clone();
+            }
+            c.analysis = serde_json::from_value(merged).context("analysis : auto_gain (booléen), manual_gain_db, silence_db (nombres)")?;
         }
         Ok(c.sanitized())
     }
@@ -164,6 +188,8 @@ pub struct NativeSnapshot {
     pub features: AudioFeatures,
     pub rms_db: f32,
     pub peak_db: f32,
+    /// Bands, centroid, flatness, silence of the last hop.
+    pub spectral: SpectralFrame,
     /// Audio time of the end of the last hop, seconds since the studio
     /// epoch (the tempo clock's time base).
     pub t: f64,
@@ -243,7 +269,8 @@ impl AudioHub {
     }
 
     /// Saves and applies a new config; the capture thread picks it up
-    /// within 50 ms.
+    /// within 50 ms (the generation only moves when the input must be
+    /// reopened), the analysis thread at its next hop.
     pub fn set_config(&self, config: AudioConfig) -> Result<AudioConfig> {
         let config = config.sanitized();
         if let Some(path) = &self.path {
@@ -251,10 +278,14 @@ impl AudioHub {
             std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
         }
         let mut c = lock(&self.config);
-        if c.0 != config {
-            *c = (config.clone(), c.1 + 1);
-        }
+        let generation = if c.0.capture_part() != config.capture_part() { c.1 + 1 } else { c.1 };
+        *c = (config.clone(), generation);
         Ok(config)
+    }
+
+    /// For the analysis thread: a copy, no allocation.
+    pub fn analysis_config(&self) -> AnalysisConfig {
+        lock(&self.config).0.analysis
     }
 
     pub fn status(&self) -> CaptureStatus {
@@ -338,6 +369,9 @@ impl AudioHub {
             "level_db": native.map(|n| n.rms_db),
             "peak_db": native.map(|n| n.peak_db),
             "t": native.map(|n| n.t),
+            // Bands (0..1 and dBFS), centroid, flatness, silence (T-231);
+            // null when nothing fresh is captured.
+            "spectral": native.map(|n| n.spectral),
             "stats": stats,
             "level": features.level,
             "bass": features.bass,
@@ -355,7 +389,7 @@ mod tests {
     }
 
     fn snap(level: f32, beat: u64, at: Instant) -> NativeSnapshot {
-        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, t: 1.0, at }
+        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), t: 1.0, at }
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {
@@ -365,7 +399,7 @@ mod tests {
     #[test]
     fn config_defaults_and_old_files_load() {
         let c: AudioConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(c, AudioConfig { source: AudioInputSource::Browser, device: None, buffer_frames: 256 });
+        assert_eq!(c, AudioConfig { source: AudioInputSource::Browser, device: None, buffer_frames: 256, analysis: AnalysisConfig::default() });
         let c: AudioConfig = serde_json::from_str(r#"{"source":"browser","device":"Scarlett 2i2","extra":1}"#).unwrap();
         assert_eq!((c.source, c.device.as_deref(), c.buffer_frames), (AudioInputSource::Browser, Some("Scarlett 2i2"), 256));
         assert_eq!(AudioConfig { buffer_frames: 16, ..Default::default() }.sanitized().buffer_frames, 128, "never under 128 frames");
@@ -374,7 +408,7 @@ mod tests {
 
     #[test]
     fn the_cli_device_overrides_the_file() {
-        let saved = AudioConfig { source: AudioInputSource::Browser, device: Some("Old".into()), buffer_frames: 512 };
+        let saved = AudioConfig { source: AudioInputSource::Browser, device: Some("Old".into()), buffer_frames: 512, ..Default::default() };
         assert_eq!(saved.clone().with_cli_device("none").source, AudioInputSource::None);
         let c = saved.clone().with_cli_device("Scarlett 2i2 USB");
         assert_eq!((c.source, c.device.as_deref(), c.buffer_frames), (AudioInputSource::Native, Some("Scarlett 2i2 USB"), 512));
@@ -392,6 +426,33 @@ mod tests {
         assert!(base.patched(&json!({ "source": "spotify" })).is_err());
         assert!(base.patched(&json!({ "device": 3 })).is_err());
         assert!(base.patched(&json!([1])).is_err());
+    }
+
+    #[test]
+    fn the_analysis_settings_are_patched_field_by_field() {
+        let base = AudioConfig::default();
+        let c = base.patched(&json!({ "analysis": { "auto_gain": false } })).unwrap();
+        assert_eq!(c.analysis, AnalysisConfig { auto_gain: false, ..Default::default() });
+        let c = c.patched(&json!({ "analysis": { "manual_gain_db": 99, "silence_db": -50 } })).unwrap();
+        assert_eq!(c.analysis, AnalysisConfig { auto_gain: false, manual_gain_db: 40.0, silence_db: -50.0 });
+        assert!(base.patched(&json!({ "analysis": { "auto_gain": "oui" } })).is_err());
+        assert!(base.patched(&json!({ "analysis": { "gain": 3 } })).is_err());
+        assert!(base.patched(&json!({ "analysis": 3 })).is_err());
+        // Old audio.json files without it load with the defaults.
+        let c: AudioConfig = serde_json::from_str(r#"{"source":"native","analysis":{"silence_db":-70}}"#).unwrap();
+        assert_eq!(c.analysis, AnalysisConfig { silence_db: -70.0, ..Default::default() });
+    }
+
+    #[test]
+    fn an_analysis_change_does_not_reopen_the_input() {
+        let hub = AudioHub::in_memory(true);
+        let (c, g) = hub.config();
+        hub.set_config(AudioConfig { analysis: AnalysisConfig { auto_gain: false, ..Default::default() }, ..c.clone() }).unwrap();
+        assert_eq!(hub.config().1, g, "same generation: the capture thread leaves the stream alone");
+        assert!(!hub.analysis_config().auto_gain);
+        hub.set_config(AudioConfig { buffer_frames: 512, ..hub.config().0 }).unwrap();
+        assert_eq!(hub.config().1, g + 1);
+        assert!(!hub.analysis_config().auto_gain, "kept");
     }
 
     #[test]
@@ -451,6 +512,7 @@ mod tests {
         let now = Instant::now();
         let v = hub.view(AudioFeatures::default(), now - Duration::from_secs(5), now);
         assert_eq!(v["level_db"], Value::Null);
+        assert_eq!(v["spectral"], Value::Null);
         assert_eq!(v["source"], "native");
         assert_eq!(v["active"], "none");
         assert_eq!(v["stats"]["rms_db"], analysis::FLOOR_DB as f64);
@@ -458,6 +520,11 @@ mod tests {
         let v = hub.view(AudioFeatures::default(), now - Duration::from_secs(5), now);
         assert_eq!(v["level_db"], -20.0);
         assert_eq!(v["active"], "native");
+        assert_eq!(v["spectral"]["bands"]["low_mid"], 0.0);
+        assert_eq!(v["spectral"]["bands_db"].as_array().unwrap().len(), 5);
+        assert_eq!(v["spectral"]["silent"], true);
+        set_source(&hub, AudioInputSource::Browser);
+        assert_eq!(hub.view(AudioFeatures::default(), now, now)["spectral"], Value::Null, "native only");
         let off = AudioHub::in_memory(false);
         assert_eq!(off.view(AudioFeatures::default(), now, now)["state"], "disabled");
         assert_eq!(off.view(AudioFeatures::default(), now, now)["capture"], false);
