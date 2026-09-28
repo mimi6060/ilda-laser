@@ -61,18 +61,28 @@ impl Default for TempoPoint {
     }
 }
 
-/// The song a Secondes show is locked to (playback is T-161).
+/// Largest audio offset, either way (latency compensation, T-161).
+pub const MAX_AUDIO_OFFSET_S: f64 = 0.5;
+
+/// The song a Secondes show is locked to (T-161, `audio/playback.rs`): a
+/// file of `studio-data/media/audio/`, heard from show time `offset_s`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioRef {
     pub file: String,
+    /// *Décalage*, ±0.5 s: positive = the song is heard later than the
+    /// laser (compensates a laser path slower than the sound).
     pub offset_s: f64,
+    /// *Volume*, 0..1.
     pub gain: f32,
+    /// Length of the song, noted when it is attached, so the show lasts
+    /// until the end of the song.
+    pub duration_s: f64,
 }
 
 impl Default for AudioRef {
     fn default() -> Self {
-        Self { file: String::new(), offset_s: 0.0, gain: 1.0 }
+        Self { file: String::new(), offset_s: 0.0, gain: 1.0, duration_s: 0.0 }
     }
 }
 
@@ -303,11 +313,23 @@ impl Show {
             track.events.sort_by(|a, b| a.start.total_cmp(&b.start));
         }
         self.loop_region = self.loop_region.filter(|&(a, b)| a.is_finite() && b.is_finite() && a >= 0.0 && b > a);
+        if let Some(a) = &mut self.audio {
+            a.file = a.file.trim().to_string();
+            a.offset_s = if a.offset_s.is_finite() { a.offset_s.clamp(-MAX_AUDIO_OFFSET_S, MAX_AUDIO_OFFSET_S) } else { 0.0 };
+            a.gain = if a.gain.is_finite() { a.gain.clamp(0.0, 1.0) } else { 1.0 };
+            a.duration_s = finite(a.duration_s);
+        }
     }
 
-    /// End of the last event, in show units.
+    /// The song this show plays: Secondes shows with a file only.
+    pub fn song(&self) -> Option<&AudioRef> {
+        self.audio.as_ref().filter(|a| self.time_base == TimeBase::Seconds && !a.file.is_empty())
+    }
+
+    /// End of the last event, or of the song if it lasts longer, in show units.
     pub fn end(&self) -> f64 {
-        self.tracks.iter().flat_map(|t| &t.events).map(|e| e.start + e.len).fold(0.0, f64::max)
+        let events = self.tracks.iter().flat_map(|t| &t.events).map(|e| e.start + e.len).fold(0.0, f64::max);
+        self.song().map_or(events, |a| events.max(a.offset_s + a.duration_s))
     }
 
     fn tempo_points(&self) -> Vec<TempoPoint> {
@@ -430,6 +452,9 @@ pub struct Player {
     instances: HashMap<u64, Instance>,
     next_instance: u64,
     last_active: Vec<u64>,
+    /// Counts every discontinuity of the playhead (load, play, pause, stop,
+    /// seek, loop wrap, halt), so the song player knows when to re-seek.
+    jumps: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -453,6 +478,8 @@ pub struct TimelineState {
     pub loop_region: Option<(f64, f64)>,
     /// Ids of the events active in the last frame.
     pub active: Vec<u64>,
+    /// The show's song (T-161), if any.
+    pub audio: Option<AudioRef>,
 }
 
 impl Player {
@@ -461,6 +488,26 @@ impl Player {
         show.sanitize();
         self.stop();
         self.show = Some(show);
+    }
+
+    /// See `jumps` on the struct.
+    pub fn jumps(&self) -> u64 {
+        self.jumps
+    }
+
+    /// Follow an outside clock (the song, T-161): while a Secondes show
+    /// plays, pull the playhead towards `position`. Small errors are taken
+    /// up by 10 % a frame (callback jitter is smoothed, a steady drift
+    /// leaves no lag worth measuring); beyond `SNAP_S` it jumps there.
+    pub fn follow(&mut self, position: f64, c: &Clock) {
+        if !self.is_playing() || self.base() != TimeBase::Seconds || !position.is_finite() {
+            return;
+        }
+        const SNAP_S: f64 = 0.1;
+        let now = self.position_at(c);
+        let err = position - now;
+        self.anchor = if err.abs() > SNAP_S { position } else { now + 0.1 * err };
+        self.anchor_clock = c.t;
     }
 
     fn base(&self) -> TimeBase {
@@ -507,6 +554,7 @@ impl Player {
             }
         };
         self.transport = Transport::Playing;
+        self.jumps += 1;
         true
     }
 
@@ -514,6 +562,7 @@ impl Player {
         if self.is_playing() {
             self.position = self.position_at(c);
             self.transport = Transport::Paused;
+            self.jumps += 1;
         }
     }
 
@@ -523,6 +572,7 @@ impl Player {
         self.position = 0.0;
         self.instances.clear();
         self.last_active.clear();
+        self.jumps += 1;
     }
 
     /// Jump to `position` (show units). Playing continues from there at
@@ -535,6 +585,7 @@ impl Player {
             self.anchor_clock = self.clock_value(c);
         }
         self.instances.clear();
+        self.jumps += 1;
     }
 
     /// The loop region in use: the show's, else the whole show.
@@ -557,6 +608,7 @@ impl Player {
                 let shift = ((pos - a) / (b - a)).floor() * (b - a);
                 pos -= shift;
                 self.anchor -= shift;
+                self.jumps += 1;
             }
             _ => {}
         }
@@ -579,6 +631,7 @@ impl Player {
         self.transport = Transport::Stopped;
         self.instances.clear();
         self.last_active.clear();
+        self.jumps += 1;
     }
 
     /// Advance the playhead and list the events to render this frame.
@@ -647,6 +700,7 @@ impl Player {
             loop_on: self.loop_on,
             loop_region: show.and_then(|s| s.loop_region),
             active: self.last_active.clone(),
+            audio: show.and_then(|s| s.song()).cloned(),
         }
     }
 }
@@ -1182,5 +1236,66 @@ mod tests {
         assert!((s.brightness - presets[0].settings.brightness * 0.5).abs() < 1e-6);
         c.source = cue("no-such-cue");
         assert!(look_of(&c, &presets).is_none());
+    }
+
+    #[test]
+    fn a_song_sets_the_length_and_is_sanitized() {
+        let mut s = show(TimeBase::Seconds, vec![event(1, 0.0, 10.0)]);
+        s.audio = Some(AudioRef { file: " chanson.wav ".into(), offset_s: 3.0, gain: 7.0, duration_s: 12.0 });
+        s.sanitize();
+        let a = s.song().unwrap();
+        assert_eq!((a.file.as_str(), a.offset_s, a.gain), ("chanson.wav", MAX_AUDIO_OFFSET_S, 1.0));
+        assert_eq!(s.end(), 12.5, "until the end of the song");
+        s.audio.as_mut().unwrap().offset_s = f64::NAN;
+        s.sanitize();
+        assert_eq!(s.end(), 12.0);
+        // Old show files without the new fields still load.
+        let old: Show = serde_json::from_str(r#"{"name":"x","audio":{"file":"a.wav","offset_s":0.1}}"#).unwrap();
+        assert_eq!(old.audio.unwrap().gain, 1.0);
+        // No song for a Temps show, or with no file.
+        s.time_base = TimeBase::Beats;
+        assert!(s.song().is_none());
+        assert_eq!(s.end(), 10.0);
+        s.time_base = TimeBase::Seconds;
+        s.audio.as_mut().unwrap().file.clear();
+        assert!(s.song().is_none());
+    }
+
+    #[test]
+    fn follow_pulls_the_playhead_and_jumps_are_counted() {
+        let mut p = player(show(TimeBase::Seconds, vec![event(1, 0.0, 100.0)]));
+        let j0 = p.jumps();
+        p.follow(5.0, &clock(0.0));
+        assert_eq!(p.position_at(&clock(0.0)), 0.0, "not playing: ignored");
+        p.play(&clock(0.0));
+        assert_eq!(p.jumps(), j0 + 1);
+        // A small error is taken up by 10 % a frame, a big one at once.
+        p.follow(1.01, &clock(1.0));
+        assert!((p.position_at(&clock(1.0)) - 1.001).abs() < 1e-9);
+        p.follow(3.0, &clock(1.0));
+        assert_eq!(p.position_at(&clock(1.0)), 3.0);
+        assert_eq!(p.position_at(&clock(1.5)), 3.5, "runs on from there");
+        p.follow(f64::NAN, &clock(1.5));
+        assert_eq!(p.position_at(&clock(1.5)), 3.5);
+        let j = p.jumps();
+        p.seek(10.0, &clock(2.0));
+        p.pause(&clock(2.1));
+        p.stop();
+        assert_eq!(p.jumps(), j + 3);
+        // The loop wrap is a jump too (the song seeks back with it).
+        let mut p = player(show(TimeBase::Seconds, vec![event(1, 0.0, 4.0)]));
+        p.loop_on = true;
+        p.play(&clock(0.0));
+        let j = p.jumps();
+        p.frame(&clock(3.0));
+        assert_eq!(p.jumps(), j);
+        p.frame(&clock(5.0));
+        assert_eq!(p.jumps(), j + 1);
+        // A Temps show never follows a song.
+        let mut p = player(show(TimeBase::Beats, vec![event(1, 0.0, 100.0)]));
+        p.play(&clock(0.0));
+        let at = p.position_at(&clock(1.0));
+        p.follow(50.0, &clock(1.0));
+        assert_eq!(p.position_at(&clock(1.0)), at);
     }
 }
