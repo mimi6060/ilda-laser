@@ -2,13 +2,19 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (109)
+## En cours (2)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-252](T-252-safety.md) | Présence opérateur — battement de l'interface et mode maintien | safety | P0 | [T-250] | feat/heartbeat |
+| [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] | feat/heartbeat |
+
+## À faire (107)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
 | [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] |  |
 | [T-245](T-245-safety.md) | Sécurité de la réactivité audio (limiteur, péremption, silence, pas d'armement) | safety | P0 | [T-237, T-101] |  |
-| [T-252](T-252-safety.md) | Présence opérateur — battement de l'interface et mode maintien | safety | P0 | [T-250] |  |
 | [T-254](T-254-safety.md) | Plafonds de puissance par sortie et fiche projecteur | safety | P0 | [T-250] |  |
 | [T-271](T-271-safety.md) | Barre du haut fixe : noir, armement, maître, tempo, état de sortie | safety | P0 | [T-270] |  |
 | [T-001](T-001-ilda.md) | Lecteur/écrivain ILDA maison | ilda | P1 | [] |  |
@@ -31,7 +37,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-237](T-237-live.md) | AudioFeatures v2 : instantané complet côté moteur et dans /api/state | live | P1 | [T-231] |  |
 | [T-238](T-238-live.md) | Conditionnement des signaux audio : seuil, courbe, attaque/relâche, enveloppes en temps musicaux | live | P1 | [T-237, T-150] |  |
 | [T-244](T-244-qa.md) | Banc d'essai de l'analyse audio : signaux synthétiques, corpus annoté, métriques, latence | qa | P1 | [T-231] |  |
-| [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] |  |
 | [T-255](T-255-safety.md) | Mode balayage public verrouillé par défaut | safety | P1 | [T-003, T-250, T-252, T-254, T-256, T-258] |  |
 | [T-256](T-256-safety.md) | Garde anti-point fixe (taille minimum, vitesse, temps de pose) | safety | P1 | [T-250, T-003] |  |
 | [T-258](T-258-safety.md) | Liste de contrôle avant show | safety | P1 | [T-250, T-259] |  |

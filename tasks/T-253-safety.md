@@ -1,12 +1,12 @@
 ---
 id: T-253
 title: Chien de garde du moteur et extinction propre
-status: todo
+status: in-progress
 area: safety
 priority: P1
 depends_on: [T-250]
-owner: ""
-branch: ""
+owner: "dev-agent (heartbeat)"
+branch: feat/heartbeat
 source: docs/research/safety-regulation.md#6-gaps-in-laser-studio-today
 ---
 

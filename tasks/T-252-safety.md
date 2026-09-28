@@ -1,12 +1,12 @@
 ---
 id: T-252
 title: Présence opérateur — battement de l'interface et mode maintien
-status: todo
+status: in-progress
 area: safety
 priority: P0
 depends_on: [T-250]
-owner: ""
-branch: ""
+owner: "dev-agent (heartbeat)"
+branch: feat/heartbeat
 source: docs/research/safety-regulation.md#6-gaps-in-laser-studio-today
 ---
 
