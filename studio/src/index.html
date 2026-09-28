@@ -102,6 +102,12 @@
   .cue-bar .seg button { padding: 6px 10px; font-size: 12px; white-space: nowrap; }
   .cue-bar input { width: 56px; padding: 5px; }
   .cue-bar > button { padding: 6px 10px; font-size: 12px; }
+  #tlShow { max-width: 220px; padding: 5px; }
+  #tlPos { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+  #tlPos.waiting { color: var(--warn); }
+  .tl-bar { position: relative; height: 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; overflow: hidden; }
+  .tl-bar .region { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .18; }
+  #tlHead { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--accent); }
   #cueMenu { position: fixed; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 220px; box-shadow: 0 8px 24px #0008; }
   #cueMenu[hidden] { display: none; }
   #cueMenu h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
@@ -245,6 +251,19 @@
       </div>
       <div class="layers" id="layers"></div>
     </section>
+    <section style="margin-top:12px" id="timeline">
+      <h2>Timeline <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">shows enregistrés dans studio-data/shows</span></h2>
+      <div class="cue-bar">
+        <select id="tlShow" title="Show à charger"><option value="">Aucun show</option></select>
+        <button id="tlPlay" title="timeline.play (une phrase en temps démarre à la mesure suivante)">▶ Lecture</button>
+        <button data-ctl="timeline.pause" id="tlPause" title="timeline.pause">❚❚ Pause</button>
+        <button data-ctl="timeline.stop" id="tlStop" title="timeline.stop">■ Arrêt</button>
+        <button id="tlLoop" title="timeline.loop : rejoue la région de boucle (ou tout le show)">⟲ Boucle</button>
+        <span id="tlPos">–</span>
+      </div>
+      <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
+      <div class="hint" id="tlMsg"></div>
+    </section>
     <div id="cueMenu" hidden>
       <h3>Propriétés du cue</h3>
       <div class="hint" id="cueMenuName" style="margin:0"></div>
@@ -263,6 +282,8 @@
         <option value="1">Calque 1</option><option value="2">Calque 2</option>
         <option value="3">Calque 3</option><option value="4">Calque 4</option>
       </select>
+      <label>Show (joué à la place du cue)</label>
+      <select id="cueMenuShow"><option value="">Aucun</option></select>
       <div class="row"><button id="cueMenuClose">Fermer</button></div>
     </div>
   </div>
@@ -802,6 +823,7 @@ async function previewLoop() {
     if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
     showLayers(f.layers);
     showEvolving(f.evolving);
+    showTimeline(f.timeline);
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -1252,6 +1274,7 @@ function openCueMenu(p, x, y) {
   $('cueMenuMode').value = slot.mode || '';
   $('cueMenuGroup').value = slot.group ? String(slot.group) : '';
   $('cueMenuLayer').value = String(slot.layer || 1);
+  fillShowSelect($('cueMenuShow'), 'Aucun', slot.show || '');
   const m = $('cueMenu');
   m.hidden = false;
   m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
@@ -1261,12 +1284,64 @@ async function saveCueMenu() {
   if (!menuCue) return;
   const mode = $('cueMenuMode').value || null, group = $('cueMenuGroup').value ? +$('cueMenuGroup').value : null;
   const layer = +$('cueMenuLayer').value > 1 ? +$('cueMenuLayer').value : null;
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer });
+  const show = $('cueMenuShow').value || null;
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show });
   await loadSlots();
 }
-['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuShow'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 $('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
 document.addEventListener('pointerdown', e => { if (!$('cueMenu').hidden && !$('cueMenu').contains(e.target)) $('cueMenu').hidden = true; });
+
+// ---------- timeline (T-160) ----------
+// Load / play / pause / stop a saved show and follow its playhead. The
+// editor is T-162; shows are written through POST /api/shows for now.
+let shows = [], timeline = null;
+async function loadShows() {
+  try { shows = await (await fetch('/api/shows')).json(); } catch { shows = []; }
+  fillShowSelect($('tlShow'), 'Aucun show', timeline && timeline.name || '');
+}
+function fillShowSelect(sel, none, value) {
+  sel.innerHTML = `<option value="">${none}</option>` + shows.map(s => `<option>${esc(s.name)}</option>`).join('');
+  if (value && !shows.some(s => s.name === value)) sel.insertAdjacentHTML('beforeend', `<option>${esc(value)}</option>`);
+  sel.value = value;
+}
+function fmtTime(s) { const m = Math.floor(s / 60); return m + ':' + (s - m * 60).toFixed(1).padStart(4, '0'); }
+function showTimeline(t) {
+  if (!t) return;
+  timeline = t;
+  if (document.activeElement !== $('tlShow') && $('tlShow').value !== (t.name || '')) fillShowSelect($('tlShow'), 'Aucun show', t.name || '');
+  $('tlPlay').classList.toggle('active', t.playing);
+  $('tlPause').classList.toggle('active', t.paused);
+  $('tlLoop').classList.toggle('active', t.loop);
+  const bar = `mesure ${Math.floor(t.bar) + 1}.${Math.floor((t.bar % 1) * t.beats_per_bar + 1e-6) + 1}`;
+  const pos = !t.name ? '–' : t.time_base === 'beats'
+    ? `temps ${t.position.toFixed(1)} / ${t.length.toFixed(0)} · ${bar}`
+    : `${fmtTime(t.position)} / ${fmtTime(t.length)} · ${bar}`;
+  $('tlPos').textContent = t.waiting ? 'attend la mesure suivante…' : pos;
+  $('tlPos').classList.toggle('waiting', t.waiting);
+  const pct = x => (t.length > 0 ? Math.min(100, 100 * x / t.length) : 0) + '%';
+  $('tlHead').style.left = pct(t.position);
+  const r = t.loop_region;
+  $('tlRegion').hidden = !r;
+  if (r) { $('tlRegion').style.left = pct(r[0]); $('tlRegion').style.width = `calc(${pct(r[1])} - ${pct(r[0])})`; }
+}
+$('tlShow').addEventListener('focus', loadShows);
+$('tlShow').addEventListener('change', async () => {
+  $('tlMsg').textContent = '';
+  if ($('tlShow').value) await post('/api/timeline/load', { name: $('tlShow').value });
+  else await post('/api/timeline/stop');
+});
+$('tlPlay').onclick = async () => {
+  const r = await fetch('/api/timeline/play', { method: 'POST' });
+  $('tlMsg').textContent = r.ok ? '' : await r.text();
+};
+$('tlLoop').onclick = () => post('/api/timeline/loop', { on: !(timeline && timeline.loop) });
+$('tlBar').addEventListener('click', e => {
+  if (!timeline || !timeline.length) return;
+  const b = $('tlBar').getBoundingClientRect();
+  post('/api/timeline/seek', { position: timeline.length * Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)) });
+});
+loadShows();
 
 // ---------- layers ----------
 // Four strips: dimmer, Muet, Solo, Vider. Values follow the server (MIDI

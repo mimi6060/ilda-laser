@@ -1,12 +1,12 @@
 ---
 id: T-160
 title: Timeline : modèle de show et lecteur (pistes, événements, carte de tempo)
-status: todo
+status: done
 area: timeline
 priority: P2
 depends_on: [T-150, T-156]
-owner: ""
-branch: ""
+owner: "dev-agent (timeline)"
+branch: feat/timeline
 source: docs/research/pro-live-operation.md §3.1, §6 (C)
 ---
 
@@ -41,13 +41,13 @@ pub struct Marker { pub at: f64, pub name: String, pub color: [u8; 3] }
 API : `GET/POST /api/shows`, `POST /api/timeline/{load,play,pause,stop,seek,loop}`, état dans `/api/state.timeline { name, position, beat, bar, playing }`. L'éditeur est T-162.
 
 ## Critères d'acceptation
-- [ ] Show *Secondes* : un événement de 2 s à 4 s est actif exactement dans [4, 6[ s
-- [ ] Carte de tempo 120 puis 140 BPM à 30 s : conversion secondes↔temps continue et exacte
-- [ ] Show *Temps* : passer de 128 à 150 BPM en cours de lecture garde l'événement courant sur la même mesure (pas de saut)
-- [ ] Show *Temps* lancé à la mesure 3,5 : démarre à la mesure 4,0
-- [ ] Boucle de région : la position revient au début sans saut visible
-- [ ] Les modificateurs maîtres s'appliquent aussi en lecture de timeline
-- [ ] Le lecteur n'arme jamais le laser ; Échap arrête la sortie et la timeline
+- [x] Show *Secondes* : un événement de 2 s à 4 s est actif exactement dans [4, 6[ s
+- [x] Carte de tempo 120 puis 140 BPM à 30 s : conversion secondes↔temps continue et exacte
+- [x] Show *Temps* : passer de 128 à 150 BPM en cours de lecture garde l'événement courant sur la même mesure (pas de saut)
+- [x] Show *Temps* lancé à la mesure 3,5 : démarre à la mesure 4,0
+- [x] Boucle de région : la position revient au début sans saut visible
+- [x] Les modificateurs maîtres s'appliquent aussi en lecture de timeline
+- [x] Le lecteur n'arme jamais le laser ; Échap arrête la sortie et la timeline
 
 ## Tests
 Unitaires : activité des événements dans les deux bases de temps, carte de tempo, fondus, boucle ; lecture simulée 60 s.
@@ -57,3 +57,5 @@ Les timelines festival T-124–T-129 utilisent la base *Temps*. Règles de CLAUD
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/pro-live-operation.md`.
+- 2026-09-28 — agent de développement (branche `feat/timeline`) : `timeline.rs` (modèle `Show`, carte de tempo, lecteur, `ShowStore` → `studio-data/shows/`). Les événements actifs sont rendus par le moteur dans le même mix de calques, étage direct, calibration, limiteur de sécurité et porte de sortie que les cues. Contrôles `timeline.play/pause/stop/loop` ; API `GET/POST /api/shows`, `GET /api/timeline`, `POST /api/timeline/{load,play,pause,stop,seek,loop}`, `timeline` dans `/api/state` et `/api/frame` ; case de grille « Show » (`CueSlot.show`) ; section UI *Timeline* minimale (choix du show, Lecture/Pause/Arrêt/Boucle, tête de lecture, clic = se placer). Adapté : durées de fondu/transition en `Dur` (secondes ou temps) au lieu de `Rate` ; enveloppes et pistes *Bus* stockées mais évaluées par T-163 ; *Ajuster* étire un programme nominal de 16 temps (en attendant T-157) ; *Morph* joué comme un fondu enchaîné. Échap : la timeline s'arrête sur place (position gardée) et *Lecture* est refusée tant que l'arrêt d'urgence n'est pas réinitialisé. Tests (après rebase sur develop 04227e5) : 355 unitaires OK (2 ignorés), clippy `-D warnings` propre, e2e 86/86 (dont `timeline.spec.ts`, 6 tests). Statut → review.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.

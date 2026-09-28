@@ -2,7 +2,7 @@
 
 use crate::engine::{AudioFeatures, Calibration, Settings};
 use crate::scenes::SceneStore;
-use crate::{controls, cues, layers, lfo, live, midi, presets, tempo, Shared};
+use crate::{controls, cues, layers, lfo, live, midi, presets, tempo, timeline, Shared};
 use std::time::Instant;
 
 /// A fresh `Shared` like the one `main` builds, with scenes stored in a
@@ -45,5 +45,7 @@ pub fn shared() -> Shared {
         safety: crate::safety::SafetyStore::in_memory(),
         strobe: Default::default(),
         evolving: Vec::new(),
+        timeline: timeline::Player::default(),
+        shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id()))),
     }
 }
