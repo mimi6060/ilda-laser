@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (104)
+## À faire (103)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -16,7 +16,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-110](T-110-cues.md) | Page de cues « Festival » | cues | P1 | [T-102, T-103, T-104, T-105, T-106, T-107, T-130] |  |
 | [T-143](T-143-ui.md) | Panneau « Direct » (modificateurs en direct dans l'interface) | ui | P1 | [T-140, T-141, T-150] |  |
 | [T-157](T-157-cues.md) | Cues évolutifs : un cue = une mini-timeline (calques internes, courbes sur modificateurs, LFO) | cues | P1 | [T-111, T-151, T-140] |  |
-| [T-205](T-205-midi.md) | Retour LED sur l'APC40 (cue active, page, calques, battement) | midi | P1 | [T-201, T-204, T-150] |  |
 | [T-211](T-211-midi.md) | Contrôleurs MIDI génériques (n'importe quel appareil) | midi | P1 | [T-200, T-201, T-202, T-203] |  |
 | [T-231](T-231-tempo.md) | Analyse spectrale : 5 bandes, niveaux dBFS et gain automatique | tempo | P1 | [T-230] |  |
 | [T-232](T-232-tempo.md) | Fonction d'onsets (flux spectral) et détection kick / caisse claire / charleston | tempo | P1 | [T-231] |  |
@@ -118,7 +117,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (36)
+## Fait (37)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -146,6 +145,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-202](T-202-midi.md) | Moteur de correspondances MIDI → contrôles (boutons, faders, encodeurs, Shift) | midi | P1 | [T-200, T-201, T-145] | feat/midi-map |
 | [T-203](T-203-midi.md) | Apprentissage MIDI (clic droit → « Apprendre MIDI ») | midi | P1 | [T-202, T-145, T-209] | feat/midi-learn |
 | [T-204](T-204-midi.md) | Profil APC40 par défaut (disposition Laser Studio) pour APC40 et APC40 mkII | midi | P1 | [T-201, T-202, T-140, T-145, T-150, T-155, T-160, T-208, T-209] | feat/apc40-profile |
+| [T-205](T-205-midi.md) | Retour LED sur l'APC40 (cue active, page, calques, battement) | midi | P1 | [T-201, T-204, T-150] | feat/apc-leds |
 | [T-209](T-209-qa.md) | Tests MIDI sans matériel (APC40 simulé, ports virtuels, injection e2e) | qa | P1 | [T-200] | feat/midi-tests |
 | [T-230](T-230-infra.md) | Capture audio native (cpal, CoreAudio) sur un fil dédié | infra | P1 | [] | feat/audio-capture |
 | [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] | feat/heartbeat |

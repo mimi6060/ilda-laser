@@ -129,6 +129,9 @@ pub struct PortPrefs {
     pub profile: Option<String>,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// « Retour LED » (T-205): the studio drives the device's LEDs.
+    #[serde(default = "yes")]
+    pub leds: bool,
 }
 
 fn yes() -> bool {
@@ -137,7 +140,7 @@ fn yes() -> bool {
 
 impl Default for PortPrefs {
     fn default() -> Self {
-        PortPrefs { profile: None, enabled: true }
+        PortPrefs { profile: None, enabled: true, leds: true }
     }
 }
 
@@ -296,6 +299,15 @@ impl ProfileStore {
         self.save_devices()
     }
 
+    pub fn port_leds(&self, port: &str) -> bool {
+        self.devices.ports.get(port).is_none_or(|p| p.leds)
+    }
+
+    pub fn set_port_leds(&mut self, port: &str, leds: bool) -> Result<(), String> {
+        self.devices.ports.entry(port.to_string()).or_default().leds = leds;
+        self.save_devices()
+    }
+
     /// `None` = back to automatic choice ("Réinitialiser le profil").
     pub fn set_port_profile(&mut self, port: &str, slug: Option<&str>) -> Result<(), String> {
         if let Some(slug) = slug {
@@ -432,7 +444,7 @@ mod tests {
     #[test]
     fn missing_preferred_profile_falls_back_to_generic_with_an_error() {
         let mut store = ProfileStore::in_memory();
-        store.devices.ports.insert("APC40 mkII".into(), PortPrefs { profile: Some("broken".into()), enabled: true });
+        store.devices.ports.insert("APC40 mkII".into(), PortPrefs { profile: Some("broken".into()), enabled: true, leds: true });
         let choice = store.choose("APC40 mkII", Model::Apc40Mk2);
         assert_eq!(choice.slug, GENERIC);
         assert!(choice.error.unwrap().contains("broken"));
