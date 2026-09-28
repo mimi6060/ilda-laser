@@ -62,6 +62,29 @@ test('the Effet tab plays a generator and its selector switches it', async ({ pa
   expect((await points()).filter(isLit).length).toBeGreaterThan(10);
 });
 
+test('« Éventail balayé » sweeps a beam fan with the tempo, above the audience', async ({ page }) => {
+  await page.locator('[data-kind="generator"]').click();
+  await page.locator('#gen').selectOption({ label: 'Éventail balayé' });
+  await expect.poll(async () => (await settings()).content.generator).toBe('fan_sweep');
+  // Picking a fan starts it in tempo from its own starting values.
+  const p = (await settings()).content.params;
+  expect(p.beat_sync).toBe(true);
+  expect(p.a).toBeCloseTo(0.35, 3);
+  expect(p.count).toBe(8);
+  await expect(page.locator('#gSyncPanel')).toBeVisible();
+  await expect(page.locator('#gAH')).toContainText('Amplitude');
+  await page.locator('#gEasing').selectOption('trapezoid');
+  await expect.poll(async () => (await settings()).content.params.easing).toBe('trapezoid');
+
+  const lit = async () => (await points()).filter(isLit);
+  await expect.poll(async () => (await lit()).length).toBeGreaterThan(8 * 10);
+  expect((await lit()).every(q => q[1] >= -1e-6)).toBe(true);
+  // The fan moves between two reads (the centre of its beams shifts).
+  const centre = (pts: Point[]) => pts.reduce((s, q) => s + q[0], 0) / pts.length;
+  const first = centre(await lit());
+  await expect.poll(async () => Math.abs(centre(await lit()) - first), { timeout: 5000 }).toBeGreaterThan(0.02);
+});
+
 test('look size slider scales the drawing', async ({ page }) => {
   expect(extent(await points())).toBeCloseTo(0.5, 1);
   await page.locator('#scale').fill('100');

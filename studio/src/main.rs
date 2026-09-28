@@ -12,6 +12,7 @@ mod beat;
 mod controls;
 mod cues;
 mod engine;
+mod fans;
 mod font;
 mod generators;
 mod layers;

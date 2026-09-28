@@ -11,7 +11,7 @@
 //! motion reads `ctx.beat_pos` (beats from the tempo clock, see
 //! `beat.rs`), free-running motion reads `ctx.t`.
 
-pub use crate::beat::GroupMode;
+pub use crate::beat::{Easing, GroupMode};
 use crate::beat;
 use crate::patterns::Point;
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,8 @@ pub struct GenParams {
     /// Virtual heads: the beams split into 1..=4 contiguous groups.
     pub groups: u32,
     pub group_mode: GroupMode,
+    /// Shape of back-and-forth motion (the fan sweep).
+    pub easing: Easing,
 }
 
 impl Default for GenParams {
@@ -69,6 +71,7 @@ impl Default for GenParams {
             direction: 1,
             groups: 1,
             group_mode: GroupMode::Unison,
+            easing: Easing::Sine,
         }
     }
 }
@@ -135,6 +138,9 @@ pub const GENERATOR_NAMES: &[&str] = &[
     "lissajous", "spirograph", "rose", "tunnel", "polygon_tunnel", "spiral_arms", "starburst",
     "beam_fan", "beam_circle", "beam_wave", "sweep", "liquid_sky", "grid_scan", "sine_stack",
     "helix", "pulse_rings", "spectrum", "clock", "vortex", "flower",
+    // Festival beam fans (T-102), see `fans.rs`. Append-only: saved looks
+    // refer to generators by name.
+    "fan", "fan_sweep", "fan_tilt", "fan_wave", "positions",
 ];
 
 pub struct Geometry {
@@ -426,7 +432,7 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
                 .collect(),
         ),
 
-        _ => None,
+        _ => crate::fans::generate(name, p, ctx),
     }
 }
 
@@ -638,7 +644,9 @@ mod tests {
             GenParams { count: 13, a: 0.7, b: -0.3, ..Default::default() },
         ];
         let mut h = 0xcbf2_9ce4_8422_2325u64;
-        for name in GENERATOR_NAMES.iter().filter(|n| **n != "clock") {
+        // The 20 generators that existed before the festival ones: the
+        // pinned digest must not move when new generators are appended.
+        for name in GENERATOR_NAMES[..20].iter().filter(|n| **n != "clock") {
             for p in &params {
                 for t in [0.0, 0.37, 2.9, 11.2] {
                     let geo = render(name, p, t);
