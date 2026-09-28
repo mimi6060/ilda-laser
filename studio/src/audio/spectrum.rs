@@ -16,6 +16,7 @@
 //! - **Silence**: every hop under `silence_db` for 300 ms.
 
 use super::analysis::{to_db, FLOOR_DB};
+use super::onsets::OnsetConfig;
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
 use serde::{Deserialize, Serialize};
@@ -118,11 +119,13 @@ pub struct AnalysisConfig {
     pub manual_gain_db: f32,
     /// Under this (dBFS) for 300 ms = silence.
     pub silence_db: f32,
+    /// Onset detection: sensitivity, look-ahead, kick spacing (T-232).
+    pub onsets: OnsetConfig,
 }
 
 impl Default for AnalysisConfig {
     fn default() -> Self {
-        Self { auto_gain: true, manual_gain_db: 0.0, silence_db: -60.0 }
+        Self { auto_gain: true, manual_gain_db: 0.0, silence_db: -60.0, onsets: OnsetConfig::default() }
     }
 }
 
@@ -131,6 +134,7 @@ impl AnalysisConfig {
         let d = Self::default();
         self.manual_gain_db = if self.manual_gain_db.is_finite() { self.manual_gain_db.clamp(-40.0, 40.0) } else { d.manual_gain_db };
         self.silence_db = if self.silence_db.is_finite() { self.silence_db.clamp(-100.0, -20.0) } else { d.silence_db };
+        self.onsets = self.onsets.sanitized();
         self
     }
 }
@@ -294,7 +298,6 @@ impl SpectralAnalyzer {
 
     /// Power spectrum of the last hop's FFT (`FFT_SIZE / 2 + 1` bins of
     /// `rate / FFT_SIZE` Hz), for the onset function (T-232).
-    #[allow(dead_code)] // read by T-232's spectral flux
     pub fn power(&self) -> &[f32] {
         &self.power
     }
@@ -618,9 +621,9 @@ mod tests {
     #[test]
     fn config_defaults_and_sanitising() {
         let c: AnalysisConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(c, AnalysisConfig { auto_gain: true, manual_gain_db: 0.0, silence_db: -60.0 });
-        let c = AnalysisConfig { manual_gain_db: 99.0, silence_db: f32::NAN, auto_gain: false }.sanitized();
-        assert_eq!(c, AnalysisConfig { auto_gain: false, manual_gain_db: 40.0, silence_db: -60.0 });
+        assert_eq!(c, AnalysisConfig { auto_gain: true, manual_gain_db: 0.0, silence_db: -60.0, onsets: OnsetConfig::default() });
+        let c = AnalysisConfig { manual_gain_db: 99.0, silence_db: f32::NAN, auto_gain: false, ..Default::default() }.sanitized();
+        assert_eq!(c, AnalysisConfig { auto_gain: false, manual_gain_db: 40.0, silence_db: -60.0, ..Default::default() });
         assert_eq!(AnalysisConfig { silence_db: -5.0, ..Default::default() }.sanitized().silence_db, -20.0);
     }
 
