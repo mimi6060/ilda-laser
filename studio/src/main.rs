@@ -27,6 +27,7 @@ mod presence;
 mod presets;
 mod safety;
 mod scenes;
+mod sheets;
 mod tempo;
 mod timeline;
 mod tunnels;

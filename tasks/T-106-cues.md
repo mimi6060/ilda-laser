@@ -1,12 +1,12 @@
 ---
 id: T-106
 title: Nappes : liquid sky, lame, rideaux, cascade, scanner, lamelles, aurore, grille
-status: todo
+status: done
 area: cues
 priority: P1
 depends_on: [T-100]
-owner: ""
-branch: ""
+owner: "dev-agent (sheet-gens)"
+branch: feat/sheet-gens
 source: docs/research/festival-looks.md#c-sheets-ceilings-and-walls
 ---
 
@@ -30,11 +30,11 @@ Réutilise `count`, `a`, `b`, `period_beats`. Ajout `loop_mode: LoopMode { Wrap,
 Libellés : « Plafond liquide », « Lame », « Rideaux », « Cascade », « Scanner », « Lamelles », « Aurore », « Grille ».
 
 ## Critères d'acceptation
-- [ ] Tous les nouveaux générateurs restent au-dessus de l'horizon
-- [ ] `waterfall` : un trait met exactement 2 temps pour descendre
-- [ ] `slats` : motif décalé d'un segment tous les 1/2 temps
-- [ ] `liquid_sky` sans `beat_sync` produit les mêmes points qu'avant
-- [ ] Budget de points respecté
+- [x] Tous les nouveaux générateurs restent au-dessus de l'horizon
+- [x] `waterfall` : un trait met exactement 2 temps pour descendre
+- [x] `slats` : motif décalé d'un segment tous les 1/2 temps
+- [x] `liquid_sky` sans `beat_sync` produit les mêmes points qu'avant
+- [x] Budget de points respecté
 
 ## Tests
 Unitaires géométriques et de non-régression ; e2e : sélectionner « Plafond liquide », vérifier la sauvegarde des paramètres.
@@ -45,3 +45,5 @@ Le plafond liquide est volontairement proche du public : il doit toujours respec
 Règles de CLAUDE.md (sécurité laser, propriété intellectuelle) : looks écrits par nous en maths, rien de copié depuis Pangolin/Laserworld. Tests uniquement en aperçu, jamais `--device`.
 
 ## Journal
+- 2026-09-28 — dev-agent (sheet-gens), branche `feat/sheet-gens` : huit générateurs de nappes dans `studio/src/sheets.rs`, ajoutés à la fin de `GENERATOR_NAMES` (`ceiling`, `blade`, `curtain`, `waterfall`, `scanner`, `slats`, `aurora`, `grid`), `GenParams.loop_mode` (`wrap` / `ping_pong`, défaut aller-retour), libellés, aides et valeurs de départ dans l'onglet Effet, sélecteur « Fin de passage ». Écart assumé : le liquid sky v2 et la grille à défilement sont de **nouveaux noms** (« Plafond liquide » = `ceiling`, « Grille » = `grid`) au lieu de modifier `liquid_sky` / `grid_scan`, qui restent identiques bit à bit (empreinte des générateurs inchangée), y compris en tempo. Tout reste à y ≥ 0 dans l'espace du look ; aucun look ne vise le public. Rebasée sur develop `ad9c9fd` (tunnels T-105 gardés, noms des nappes après eux). Tests : `cargo test` 424 ok (+14), clippy propre, e2e 105 ok (nouveau : « Plafond liquide » + sauvegarde/relecture en scène). Points max (taille 1.0) : grille 730, cascade 283, rideaux 188, autres ≤ 132 (budget 750). Note PR : `docs/prs/sheet-gens.md`.
+- 2026-09-28 — architecte (review) : APPROUVÉ et fusionné dans develop.

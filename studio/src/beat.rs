@@ -81,6 +81,32 @@ pub fn bar_start(beat: f64, beats_per_bar: u8) -> f64 {
     ((beat + 1e-6) / bpb).floor() * bpb
 }
 
+/// How a travelling motion (a scanner line) starts its next pass: jump
+/// back to the start, or come back the other way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopMode {
+    /// Start again from the beginning (the jump back is a move, not a flash).
+    Wrap,
+    /// Go back and forth.
+    #[default]
+    PingPong,
+}
+
+impl LoopMode {
+    /// Position along the path, 0..1, after `passes` passes (one pass =
+    /// once from start to end).
+    pub fn travel(self, passes: f64) -> f32 {
+        match self {
+            LoopMode::Wrap => passes.rem_euclid(1.0) as f32,
+            LoopMode::PingPong => {
+                let x = passes.rem_euclid(2.0) as f32;
+                if x <= 1.0 { x } else { 2.0 - x }
+            }
+        }
+    }
+}
+
 /// Shape of a back-and-forth motion (a fan sweep): how the move eases
 /// into its extremes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

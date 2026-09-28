@@ -11,7 +11,7 @@
 //! motion reads `ctx.beat_pos` (beats from the tempo clock, see
 //! `beat.rs`), free-running motion reads `ctx.t`.
 
-pub use crate::beat::{Easing, GroupMode};
+pub use crate::beat::{Easing, GroupMode, LoopMode};
 use crate::beat;
 use crate::patterns::Point;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,8 @@ pub struct GenParams {
     /// step (`steps_per_beat`, so one per beat by default), instead of
     /// turning smoothly.
     pub snap: bool,
+    /// What a travelling sheet (the scanner) does at the end of a pass.
+    pub loop_mode: LoopMode,
 }
 
 impl Default for GenParams {
@@ -77,6 +79,7 @@ impl Default for GenParams {
             group_mode: GroupMode::Unison,
             easing: Easing::Sine,
             snap: false,
+            loop_mode: LoopMode::PingPong,
         }
     }
 }
@@ -148,6 +151,8 @@ pub const GENERATOR_NAMES: &[&str] = &[
     "fan", "fan_sweep", "fan_tilt", "fan_wave", "positions",
     // Festival tunnels, cones and sun rays (T-105), see `tunnels.rs`.
     "finger_tunnel", "tunnel_pump", "twin_tunnel", "sunburst",
+    // Sheets (T-106), see `sheets.rs`.
+    "ceiling", "blade", "curtain", "waterfall", "scanner", "slats", "aurora", "grid",
 ];
 
 pub struct Geometry {
@@ -447,7 +452,9 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
                 .collect(),
         ),
 
-        _ => crate::fans::generate(name, p, ctx).or_else(|| crate::tunnels::generate(name, p, ctx)),
+        _ => crate::fans::generate(name, p, ctx)
+            .or_else(|| crate::tunnels::generate(name, p, ctx))
+            .or_else(|| crate::sheets::generate(name, p, ctx)),
     }
 }
 

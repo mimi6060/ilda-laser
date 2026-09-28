@@ -379,7 +379,7 @@
         <input type="range" id="gCount" min="1" max="32">
         <div class="hint" id="gCountH" hidden></div>
         <label>Forme A <span class="v" id="gAV"></span></label>
-        <input type="range" id="gA" min="0" max="10" step="0.05">
+        <input type="range" id="gA" min="0" max="10" step="0.01">
         <div class="hint" id="gAH" hidden></div>
         <div id="gTurnsRow" hidden>
           <label>Vitesse (tours par temps)</label>
@@ -436,6 +436,10 @@
           <label>Courbe du balayage</label>
           <select id="gEasing">
             <option value="sine">Sinus (ralentit aux bords)</option><option value="triangle">Triangle</option><option value="trapezoid">Trapèze (tenue aux bords)</option>
+          </select>
+          <label>Fin de passage</label>
+          <select id="gLoop">
+            <option value="ping_pong">Aller-retour</option><option value="wrap">Bouclé (repart du début)</option>
           </select>
           <div class="hint" id="gSyncH" hidden></div>
         </div>
@@ -591,6 +595,7 @@ function showSettings() {
     setVal('gEasing', p.easing ?? 'sine');
     setCheck('gSnap', !!p.snap);
     setVal('gTurns', TURNS.includes(+p.a) ? String(+p.a) : '');
+    setVal('gLoop', p.loop_mode ?? 'ping_pong');
     showGenHelp(s.content.generator);
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
@@ -617,7 +622,7 @@ function showValues() {
   $('gainV').textContent = '×' + (+$('gain').value).toFixed(1);
   $('gCountV').textContent = $('gCount').value;
   const a = +$('gA').value;
-  $('gAV').textContent = ROTATING.has(settings?.content?.generator) ? a.toFixed(3) + ' tour/temps' : a.toFixed(1);
+  $('gAV').textContent = ROTATING.has(settings?.content?.generator) ? a.toFixed(3) + ' tour/temps' : a.toFixed(2);
   $('gBV').textContent = (+$('gB').value).toFixed(2);
   $('gSpeedV').textContent = '×' + (+$('gSpeed').value).toFixed(2);
   $('gGateV').textContent = +$('gGate').value ? (+$('gGate').value).toFixed(2) : 'off';
@@ -636,11 +641,12 @@ const LOOK_EDITS = {
   aFlash: v => s => { s.audio.flash = v / 100; },
   aColor: v => s => { s.audio.color_on_beat = v; },
   text: v => s => { if (s.content.kind === 'text') s.content.text = v; },
-  // Picking a festival fan starts it from its own starting values, in tempo.
+  // Picking a festival fan or sheet starts it from its own starting values, in tempo.
   gen: v => genEdit(c => {
     c.generator = v;
     const d = GEN_DEFAULTS[v];
-    if (d) Object.assign(c.params, { count: d.count, a: d.a, b: d.b, beat_sync: true, period_beats: d.period, steps_per_beat: d.steps });
+    if (d) Object.assign(c.params, { count: d.count, a: d.a, b: d.b, beat_sync: true, period_beats: d.period, steps_per_beat: d.steps },
+      d.mode ? { color_mode: d.mode } : {});
   }),
   gCount: v => genEdit(c => { c.params.count = +v; }),
   gA: v => genEdit(c => { c.params.a = +v; }),
@@ -658,6 +664,7 @@ const LOOK_EDITS = {
   gEasing: v => genEdit(c => { c.params.easing = v; }),
   gSnap: v => genEdit(c => { c.params.snap = v; }),
   gTurns: v => genEdit(c => { if (v !== '') c.params.a = +v; }),
+  gLoop: v => genEdit(c => { c.params.loop_mode = v; }),
 };
 for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   $(id).addEventListener('input', () => {
@@ -1554,10 +1561,13 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   spectrum: 'Spectre audio', clock: 'Horloge', vortex: 'Vortex', flower: 'Fleur',
   fan: 'Éventail', fan_sweep: 'Éventail balayé', fan_tilt: 'Éventail qui se lève', fan_wave: 'Éventail vague',
   positions: 'Positions au temps', finger_tunnel: 'Tunnel de faisceaux', tunnel_pump: 'Tunnel qui pompe',
-  twin_tunnel: 'Double tunnel', sunburst: 'Soleil levant' };
+  twin_tunnel: 'Double tunnel', sunburst: 'Soleil levant',
+  ceiling: 'Plafond liquide', blade: 'Lame', curtain: 'Rideaux', waterfall: 'Cascade', scanner: 'Scanner',
+  slats: 'Lamelles', aurora: 'Aurore', grid: 'Grille' };
 
-// Festival fans (T-102): what Nombre / A / B mean for each, plus how the
-// tempo settings drive it. Old generators keep the generic labels.
+// Festival fans (T-102) and sheets (T-106): what Nombre / A / B mean for
+// each, plus how the tempo settings drive it. Old generators keep the
+// generic labels. Sheets stay above the audience (never scan it).
 const GEN_HELP = {
   fan: ['Faisceaux (6 à 16).', 'Pompage : 0 = fixe, 1 = s’ouvre sur chaque temps puis se referme.', 'Hauteur au-dessus du public.',
     'Taille = demi-largeur de l’éventail.'],
@@ -1579,6 +1589,22 @@ const GEN_HELP = {
     'Deux anneaux qui tournent en sens contraires, avec un trou pour voir la rotation. Taille = rayon extérieur.'],
   sunburst: ['Rayons (12 à 24).', 'Tours par temps (voir Vitesse).', '0 = tous pareils, 1 = pair/impair : 100 % / 40 % qui s’échangent à chaque temps.',
     'Rayons au-dessus de l’horizon seulement ; ceux qui passent dessous sont éteints. Taille = longueur des rayons.'],
+  ceiling: ['Non utilisé.', 'Ondulation (0,01 à 0,03).', 'Hauteur du plafond au-dessus du public (0,05 à 0,6).',
+    'L’ondulation avance d’un quart de cycle par temps ; en tempo, la luminosité respire (70 à 100 %) sur 8 temps.'],
+  blade: ['Non utilisé.', 'Non utilisé.', 'Hauteur du pivot au-dessus du public.',
+    'S’incline de ±30° sur une période (16 temps conseillés) ; la partie qui passerait sous l’horizon est coupée.'],
+  curtain: ['Rideaux (3 à 5).', 'Glissement latéral (0 = fixes, jusqu’à 0,3).', 'Bas des rideaux au-dessus du public.',
+    'Traits verticaux de 0,6 de haut ; avec A, ils glissent d’un côté à l’autre sur une période.'],
+  waterfall: ['Couloirs en quinconce (4 à 8).', 'Non utilisé.', 'Hauteur d’arrivée au-dessus du public.',
+    'Chaque trait descend de 0,9 à l’arrivée en 2 temps ; un nouveau part à chaque pas (Pas par temps 2 = tous les 1/2 temps).'],
+  scanner: ['Non utilisé.', '0 = barre horizontale qui monte et descend, 1 = barre verticale qui balaye.', 'Bas de la zone au-dessus du public.',
+    'Un passage par période (4 temps = une mesure), linéaire ; Fin de passage : aller-retour ou bouclé.'],
+  slats: ['Segments (6 à 12).', 'Longueur des parties allumées, en segments (moitié allumée).', 'Hauteur de la nappe.',
+    'Le motif avance d’un segment à chaque pas (Pas par temps 2 = tous les 1/2 temps) ; ← : dans l’autre sens.'],
+  aurora: ['Non utilisé.', 'Amplitude (0,1 à 0,25).', 'Hauteur moyenne au-dessus du public.',
+    'Trois ondulations lentes (0,03, 0,05 et 0,08 cycle par temps) ; mode Dégradé conseillé.'],
+  grid: ['Lignes horizontales (6 max).', 'Lignes verticales (0 à 6).', 'Bas de la grille au-dessus du public.',
+    'La grille défile d’une ligne par temps ; ← : dans l’autre sens.'],
 };
 const GEN_DEFAULTS = {
   fan: { count: 8, a: 0, b: 0.3, period: 4, steps: 1 },
@@ -1590,14 +1616,23 @@ const GEN_DEFAULTS = {
   tunnel_pump: { count: 8, a: 0.3, b: 0, period: 16, steps: 1 },
   twin_tunnel: { count: 8, a: 0.125, b: 0, period: 8, steps: 1 },
   sunburst: { count: 16, a: 0.03125, b: 0, period: 4, steps: 1 },
+  ceiling: { count: 1, a: 0.02, b: 0.15, period: 16, steps: 1 },
+  blade: { count: 1, a: 0, b: 0.4, period: 16, steps: 1 },
+  curtain: { count: 4, a: 0, b: 0, period: 8, steps: 1 },
+  waterfall: { count: 6, a: 0, b: 0, period: 4, steps: 2 },
+  scanner: { count: 1, a: 0, b: 0.05, period: 4, steps: 1 },
+  slats: { count: 8, a: 2, b: 0.3, period: 4, steps: 2 },
+  aurora: { count: 1, a: 0.2, b: 0.4, period: 16, steps: 1, mode: 'gradient' },
+  grid: { count: 4, a: 4, b: 0.1, period: 4, steps: 1 },
 };
 function showGenHelp(name) {
   const h = GEN_HELP[name] || [];
   ['gCountH', 'gAH', 'gBH', 'gSyncH'].forEach((id, i) => { $(id).textContent = h[i] || ''; $(id).hidden = !h[i]; });
   $('gTurnsRow').hidden = !ROTATING.has(name);
   $('gSnapRow').hidden = name !== 'polygon_tunnel';
-  // Slow rotations (1/64 turn per beat) need a finer slider than 0.05.
-  $('gA').step = ROTATING.has(name) ? 'any' : '0.05';
+  // Slow rotations (1/64 turn per beat) need any value; the ceiling's
+  // ripple (0.01 to 0.03) needs hundredths.
+  $('gA').step = ROTATING.has(name) ? 'any' : '0.01';
 }
 
 // ---------- LFO modulators ----------
