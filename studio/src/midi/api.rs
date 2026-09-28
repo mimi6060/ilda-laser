@@ -2,6 +2,7 @@
 //! without an HTTP server. `web.rs` only reads the body and forwards.
 
 use super::profile::GENERIC;
+use super::testing::InjectError;
 use crate::Shared;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -37,6 +38,18 @@ struct DeviceRequest {
     port: String,
     enabled: bool,
 }
+
+/// `--midi-test` only: bytes "played" on a simulated controller.
+#[derive(Deserialize)]
+struct InjectRequest {
+    /// Default: the first simulated device.
+    #[serde(default)]
+    port: Option<String>,
+    bytes: Vec<u8>,
+}
+
+/// Longest injection accepted at once.
+const INJECT_MAX: usize = 1024;
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, Reply> {
     serde_json::from_str(body).map_err(|e| Reply::Text(400, format!("invalid JSON: {e}")))
@@ -83,8 +96,47 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             }
             Err(e) => e,
         },
+        // Test mode only (`--midi-test`): without it these routes don't exist.
+        (true, "/api/midi/inject") if s.midi.sim.is_some() => match parse::<InjectRequest>(body) {
+            Ok(req) => inject(s, req),
+            Err(e) => e,
+        },
+        (false, "/api/midi/sent") if s.midi.sim.is_some() => Reply::Json(sent(s)),
         _ => return None,
     })
+}
+
+/// Hands the bytes to the simulated device's input, exactly as CoreMIDI
+/// would: the worker decodes them and the mapping engine applies them
+/// with every T-208 rule. Nothing here touches the laser directly.
+fn inject(s: &Shared, req: InjectRequest) -> Reply {
+    let Some(sim) = &s.midi.sim else { return Reply::Text(404, "not found".into()) };
+    if req.bytes.is_empty() || req.bytes.len() > INJECT_MAX {
+        return Reply::Text(400, format!("« bytes » : 1 à {INJECT_MAX} octets"));
+    }
+    let Some(port) = req.port.or_else(|| sim.ports().into_iter().next()) else {
+        return Reply::Text(404, "aucun appareil simulé".into());
+    };
+    match sim.inject(&port, &req.bytes) {
+        Ok(()) => ok(),
+        Err(InjectError::NoSuchPort) => Reply::Text(404, format!("appareil simulé inconnu : {port}")),
+        Err(InjectError::NotOpen) => Reply::Text(409, format!("{port} n'est pas ouvert (désactivé ?)")),
+    }
+}
+
+/// What the studio sent to each simulated device, and its pads' LEDs.
+fn sent(s: &Shared) -> Value {
+    let Some(sim) = &s.midi.sim else { return Value::Null };
+    let devices: Vec<Value> = sim
+        .ports()
+        .iter()
+        .filter_map(|port| {
+            sim.with_device(port, |apc| {
+                json!({ "port": port, "model": apc.model, "mode": apc.mode(), "sent": apc.received, "pads": apc.pads() })
+            })
+        })
+        .collect();
+    json!({ "devices": devices })
 }
 
 fn state(s: &Shared) -> Value {
@@ -100,6 +152,7 @@ fn state(s: &Shared) -> Value {
         "errors": errors,
         "default_profile": GENERIC,
         "safety": m.store.devices.safety,
+        "test": m.sim.is_some(),
     })
 }
 
@@ -181,5 +234,54 @@ mod tests {
         assert_eq!(v["safety"], json!({ "allow_arm": true, "blackout_on_disconnect": true }));
         assert_eq!(status(route(&mut s, true, "/api/midi/safety", "[")), 400);
         assert!(!s.gate.is_armed(), "changing the option never arms");
+    }
+
+    #[test]
+    fn test_routes_do_not_exist_without_midi_test() {
+        let mut s = test_support::shared();
+        assert!(route(&mut s, true, "/api/midi/inject", r#"{"bytes":[144,32,127]}"#).is_none(), "404 in web.rs");
+        assert!(route(&mut s, false, "/api/midi/sent", "").is_none());
+        assert_eq!(json(route(&mut s, false, "/api/midi", ""))["test"], false);
+    }
+
+    #[test]
+    fn inject_reaches_the_worker_and_sent_shows_the_device() {
+        use crate::midi::testing::{FakeApc, SimMidi, TEST_MK2_PORT};
+        use crate::midi::worker::Worker;
+        use std::sync::{Arc, Mutex};
+
+        let sim = SimMidi::default();
+        sim.plug(TEST_MK2_PORT, FakeApc::new(crate::midi::Model::Apc40Mk2));
+        let shared = Arc::new(Mutex::new(test_support::shared()));
+        shared.lock().unwrap().midi.sim = Some(sim.clone());
+        let mut w = Worker::new(sim, Arc::clone(&shared));
+        for _ in 0..3 {
+            w.step(Instant::now(), None);
+        }
+        let call = |post, path: &str, body: &str| route(&mut shared.lock().unwrap(), post, path, body);
+        assert_eq!(json(call(false, "/api/midi", ""))["test"], true);
+        assert_eq!(status(call(true, "/api/midi/inject", r#"{"bytes":[144,32,127]}"#)), 200, "default port");
+        assert_eq!(status(call(true, "/api/midi/inject", r#"{"port":"Test APC40 mkII","bytes":[128,32,0]}"#)), 200);
+        assert_eq!(status(call(true, "/api/midi/inject", r#"{"port":"APC40 mkII","bytes":[144,32,127]}"#)), 404, "only simulated ports");
+        assert_eq!(status(call(true, "/api/midi/inject", r#"{"bytes":[]}"#)), 400);
+        assert_eq!(status(call(true, "/api/midi/inject", r#"{"bytes":[300]}"#)), 400);
+        assert_eq!(status(call(true, "/api/midi/inject", &format!(r#"{{"bytes":{:?}}}"#, vec![0xFEu8; INJECT_MAX + 1]))), 400);
+        w.step(Instant::now(), None);
+        let recent: Vec<Value> = shared.lock().unwrap().midi.recent.iter().map(|e| e.to_json()).collect();
+        assert_eq!(recent[recent.len() - 2]["msg"]["kind"], "note_on");
+        assert_eq!(recent[recent.len() - 1]["msg"]["kind"], "note_off");
+
+        let sent = json(call(false, "/api/midi/sent", ""));
+        let dev = &sent["devices"][0];
+        assert_eq!(dev["port"], TEST_MK2_PORT);
+        assert_eq!(dev["mode"], 0x41, "taken over by the studio");
+        assert_eq!(dev["sent"][0], json!(crate::midi::detect::DEVICE_INQUIRY));
+        assert_eq!(dev["pads"].as_array().unwrap().len(), 5);
+        assert!(!shared.lock().unwrap().gate.is_armed());
+
+        // A disabled port can't be injected into.
+        call(true, "/api/midi/device", r#"{"port":"Test APC40 mkII","enabled":false}"#);
+        w.step(Instant::now() + std::time::Duration::from_millis(300), None);
+        assert_eq!(status(call(true, "/api/midi/inject", r#"{"bytes":[144,32,127]}"#)), 409);
     }
 }

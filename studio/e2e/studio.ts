@@ -4,10 +4,12 @@
 // with --no-midi (never grab the user's controller), never on port 8080
 // (the user's instance) and never with the user's studio-data/.
 // Each spec file gets a fresh temporary --data-dir, deleted afterwards.
+// MIDI specs add --midi-test (T-209): a simulated APC40 mkII fed by
+// POST /api/midi/inject; still --no-midi, so no real port is ever opened.
 
 import { test as base, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -38,6 +40,13 @@ export interface Frame { points: Point[]; armed: boolean; output: string | null;
 export interface Tempo { bpm: number; beat: number; bar: number; beat_in_bar: number; phase: number; beats_per_bar: number; source: 'manual' | 'tap' }
 export interface Live { brightness: number; size: number; pos_x: number; pos_y: number; rot_angle: number[]; rot_speed: number[]; rot_sync: boolean; rot_reverse: boolean; speed: number; [k: string]: unknown }
 
+export interface StudioOptions {
+  /** Start with --midi-test: a simulated APC40 mkII and /api/midi/inject. */
+  midiTest?: boolean;
+  /** Files written into the fresh data dir before the first start (path → content). */
+  files?: Record<string, string>;
+}
+
 export class Studio {
   /** Created on the first start (not at import: Playwright imports spec files more than once). */
   dataDir = '';
@@ -45,14 +54,26 @@ export class Studio {
   private proc: ChildProcess | null = null;
   private log = '';
 
+  constructor(private readonly opts: StudioOptions = {}) {}
+
   get url() { return `http://127.0.0.1:${this.port}`; }
 
   async start() {
-    this.dataDir ||= mkdtempSync(path.join(tmpdir(), 'laser-studio-e2e-'));
+    if (!this.dataDir) {
+      this.dataDir = mkdtempSync(path.join(tmpdir(), 'laser-studio-e2e-'));
+      for (const [rel, content] of Object.entries(this.opts.files ?? {})) {
+        const file = path.join(this.dataDir, rel);
+        if (!file.startsWith(this.dataDir + path.sep)) throw new Error(`seed file outside the data dir: ${rel}`);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, content);
+      }
+    }
     this.port = await freePort();
     // Deliberately no --device: preview only, no laser output. --no-midi so
-    // a test never opens the user's MIDI controller.
+    // a test never opens the user's MIDI controller (--midi-test only adds
+    // a simulated one).
     const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi'];
+    if (this.opts.midiTest) args.push('--midi-test');
     if (args.includes('--device') || !args.includes('--no-midi') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc.stdout!.on('data', d => { this.log += d; });
@@ -127,8 +148,8 @@ export class Studio {
  * One studio per spec file: started before the file's first test,
  * stopped and deleted after its last one. Always disarms at the end.
  */
-export function useStudio(): Studio {
-  const studio = new Studio();
+export function useStudio(opts: StudioOptions = {}): Studio {
+  const studio = new Studio(opts);
   base.beforeAll(async () => { await studio.start(); });
   base.afterAll(async () => {
     try { await studio.post('/api/arm', { on: false }); } catch { /* already stopped */ }

@@ -72,6 +72,12 @@ struct Cli {
     /// is always refused (e2e tests of the refusal message).
     #[arg(long, hide = true)]
     test_interlock: bool,
+    /// Testing only (e2e, T-209): plug in a simulated APC40 mkII
+    /// (« Test APC40 mkII ») and enable `POST /api/midi/inject` and
+    /// `GET /api/midi/sent`. Needs --no-midi (no real MIDI port is ever
+    /// opened) and refuses --device (preview only).
+    #[arg(long, hide = true, requires = "no_midi", conflicts_with = "device")]
+    midi_test: bool,
 }
 
 /// Audio features older than this are treated as silence (the browser tab
@@ -209,6 +215,12 @@ fn main() -> Result<()> {
         gate.register(interlock::TEST, "Verrou de test (--test-interlock)", false);
     }
 
+    let sim = cli.midi_test.then(|| {
+        let sim = midi::testing::SimMidi::default();
+        sim.plug(midi::testing::TEST_MK2_PORT, midi::testing::FakeApc::new(midi::Model::Apc40Mk2));
+        sim
+    });
+
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
@@ -238,7 +250,11 @@ fn main() -> Result<()> {
         live: load_json(&live_path),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
-        midi: midi::MidiState::new(!cli.no_midi, midi::profile::ProfileStore::load(cli.data_dir.join("midi"))),
+        midi: {
+            let mut m = midi::MidiState::new(!cli.no_midi || cli.midi_test, midi::profile::ProfileStore::load(cli.data_dir.join("midi")));
+            m.sim = sim.clone();
+            m
+        },
         lfos,
         mixer: {
             let mut m: layers::Mixer = load_json(&layers_path);
@@ -264,7 +280,10 @@ fn main() -> Result<()> {
         move || run_engine(shared, output, running, live_path, layers_path)
     });
 
-    let midi_thread = if cli.no_midi {
+    let midi_thread = if let Some(sim) = sim {
+        println!("--midi-test: simulated APC40 mkII only, MIDI injection enabled (tests only).");
+        midi::worker::spawn_on(sim, Arc::clone(&shared), Arc::clone(&running))
+    } else if cli.no_midi {
         println!("--no-midi: MIDI disabled.");
         None
     } else {
@@ -432,6 +451,16 @@ fn advance_playlist(s: &mut Shared) {
 mod tests {
     use super::*;
     use crate::scenes::Scene;
+
+    #[test]
+    fn midi_test_needs_no_midi_and_refuses_a_device() {
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("laser-studio").chain(args.iter().copied()));
+        assert!(parse(&["--midi-test"]).is_err(), "never next to the real CoreMIDI");
+        assert!(parse(&["--no-midi", "--midi-test", "--device", "auto"]).is_err(), "preview only");
+        let cli = parse(&["--no-midi", "--midi-test"]).unwrap();
+        assert!(cli.midi_test && cli.no_midi);
+        assert!(!parse(&[]).unwrap().midi_test, "off by default");
+    }
     use crate::test_support;
     use std::time::Duration;
 
