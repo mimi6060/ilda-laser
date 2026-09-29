@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (93)
+## À faire (92)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -59,7 +59,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-153](T-153-live.md) | Routage des bandes audio vers n'importe quel contrôle | live | P2 | [T-145, T-151] |  |
 | [T-158](T-158-cues.md) | Transitions entre cues : coupe, fondu, fondu au noir, morph | cues | P2 | [T-155, T-150] |  |
 | [T-159](T-159-cues.md) | Lancement quantifié et mode beat (changement automatique au temps) | cues | P2 | [T-150, T-155] |  |
-| [T-162](T-162-timeline.md) | Éditeur de timeline (pistes, glisser, magnétisme, zoom, marqueurs, copier-coller) | ui | P2 | [T-160, T-161] |  |
 | [T-163](T-163-timeline.md) | Enveloppes de paramètres sur n'importe quel contrôle | timeline | P2 | [T-160, T-145] |  |
 | [T-164](T-164-cues.md) | Éditeur de cue évolutif | ui | P2 | [T-157, T-162] |  |
 | [T-165](T-165-timeline.md) | Modèles de timeline (phrases prêtes à poser) | timeline | P2 | [T-160, T-163] |  |
@@ -107,7 +106,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (48)
+## Fait (49)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -155,6 +154,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-298](T-298-infra.md) | Isoler le décodage audio (MP3) pour qu'un fichier piégé ne puisse pas arrêter le studio | infra | P1 | [] | fix/decode-isolation |
 | [T-160](T-160-timeline.md) | Timeline : modèle de show et lecteur (pistes, événements, carte de tempo) | timeline | P2 | [T-150, T-156] | feat/timeline |
 | [T-161](T-161-timeline.md) | Fichier audio et forme d'onde dans la timeline | timeline | P2 | [T-160] | feat/timeline-audio |
+| [T-162](T-162-timeline.md) | Éditeur de timeline (pistes, glisser, magnétisme, zoom, marqueurs, copier-coller) | ui | P2 | [T-160, T-161] | feat/timeline-editor |
 | [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] | fix/arm-keys |
 | [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] | fix/ui-state |
 | [T-297](T-297-cues.md) | Espace CRÉATION : import SVG et vectorisation d'image vers figure laser | cues | P2 | [T-296] | feat/figure-import |
