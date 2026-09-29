@@ -35,6 +35,13 @@ pub const FIT_BEATS: f64 = 16.0;
 /// instance ids (which count up from 1; 0 is the manual look).
 pub const INSTANCE_BASE: u64 = 1 << 62;
 const EPS: f64 = 1e-9;
+/// Editor limits (T-162), checked by `Show::validate_edit`.
+pub const MAX_TRACKS: usize = 64;
+pub const MAX_EVENTS: usize = 5000;
+pub const MAX_MARKERS: usize = 500;
+/// Longest track or marker name, and cue id.
+pub const MAX_LABEL: usize = 64;
+const MAX_CUE_ID: usize = 128;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -287,6 +294,18 @@ pub struct Show {
 }
 
 impl Show {
+    /// *Nouveau show*: two cue tracks on layers 1 and 2, 120 BPM in 4/4.
+    pub fn new_empty(name: &str, time_base: TimeBase) -> Self {
+        let track = |n: u8| Track { name: format!("Piste {n}"), layer: n, ..Default::default() };
+        Self {
+            name: name.to_string(),
+            time_base,
+            tempo_map: if time_base == TimeBase::Seconds { vec![TempoPoint::default()] } else { Vec::new() },
+            tracks: vec![track(1), track(2)],
+            ..Default::default()
+        }
+    }
+
     /// Clamp everything into range, sort, and give events unique ids.
     pub fn sanitize(&mut self) {
         let finite = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
@@ -296,6 +315,10 @@ impl Show {
             p.beats_per_bar = p.beats_per_bar.clamp(1, 16);
         }
         self.tempo_map.sort_by(|a, b| a.at_s.total_cmp(&b.at_s));
+        for m in &mut self.markers {
+            m.at = finite(m.at);
+        }
+        self.markers.sort_by(|a, b| a.at.total_cmp(&b.at));
         let mut seen = std::collections::HashSet::new();
         let mut next_id = self.tracks.iter().flat_map(|t| &t.events).map(|e| e.id).max().unwrap_or(0) + 1;
         for track in &mut self.tracks {
@@ -304,6 +327,7 @@ impl Show {
                 e.start = finite(e.start);
                 e.len = finite(e.len);
                 e.offset_beats = finite(e.offset_beats);
+                sanitize_modifiers(&mut e.modifiers);
                 if e.id == 0 || !seen.insert(e.id) {
                     e.id = next_id;
                     seen.insert(next_id);
@@ -319,6 +343,51 @@ impl Show {
             a.gain = if a.gain.is_finite() { a.gain.clamp(0.0, 1.0) } else { 1.0 };
             a.duration_s = finite(a.duration_s);
         }
+    }
+
+    /// What the editor may send (T-162), checked before it replaces the
+    /// loaded show: limits, name lengths, positive lengths, and cues that
+    /// exist (`known`). French messages, shown as they are.
+    pub fn validate_edit(&self, known: impl Fn(&str) -> bool) -> Result<()> {
+        if self.tracks.len() > MAX_TRACKS {
+            bail!("trop de pistes ({} au plus)", MAX_TRACKS);
+        }
+        let events = self.tracks.iter().map(|t| t.events.len()).sum::<usize>();
+        if events > MAX_EVENTS {
+            bail!("trop d'événements ({} au plus)", MAX_EVENTS);
+        }
+        if self.markers.len() > MAX_MARKERS {
+            bail!("trop de marqueurs ({} au plus)", MAX_MARKERS);
+        }
+        if let Some(t) = self.tracks.iter().find(|t| t.name.chars().count() > MAX_LABEL) {
+            bail!("nom de piste trop long ({} caractères au plus) : {}", MAX_LABEL, t.name.chars().take(20).collect::<String>());
+        }
+        if self.markers.iter().any(|m| m.name.chars().count() > MAX_LABEL) {
+            bail!("nom de marqueur trop long ({} caractères au plus)", MAX_LABEL);
+        }
+        for e in self.tracks.iter().flat_map(|t| &t.events) {
+            if !(e.start.is_finite() && e.len.is_finite() && e.start >= 0.0 && e.len > 0.0) {
+                bail!("événement {} : début ou durée invalide", e.id);
+            }
+            if let EventSource::Cue { id } = &e.source {
+                if id.is_empty() || id.len() > MAX_CUE_ID || !known(id) {
+                    bail!("cue inconnu : {}", id.chars().take(40).collect::<String>());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cue ids used by the show's events.
+    pub fn cue_ids(&self) -> std::collections::HashSet<&str> {
+        self.tracks
+            .iter()
+            .flat_map(|t| &t.events)
+            .filter_map(|e| match &e.source {
+                EventSource::Cue { id } => Some(id.as_str()),
+                EventSource::Look { .. } => None,
+            })
+            .collect()
     }
 
     /// The song this show plays: Secondes shows with a file only.
@@ -455,6 +524,11 @@ pub struct Player {
     /// Counts every discontinuity of the playhead (load, play, pause, stop,
     /// seek, loop wrap, halt), so the song player knows when to re-seek.
     jumps: u64,
+    /// Counts every change of the loaded show (load, edit, song, loop
+    /// region, save), so the editor knows when to fetch it again (T-162).
+    rev: u64,
+    /// Edited since it was loaded or saved.
+    modified: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -480,6 +554,10 @@ pub struct TimelineState {
     pub active: Vec<u64>,
     /// The show's song (T-161), if any.
     pub audio: Option<AudioRef>,
+    /// See `Player::rev`.
+    pub rev: u64,
+    /// Edited and not saved yet.
+    pub modified: bool,
 }
 
 impl Player {
@@ -488,6 +566,36 @@ impl Player {
         show.sanitize();
         self.stop();
         self.show = Some(show);
+        self.rev += 1;
+        self.modified = false;
+    }
+
+    /// The editor's change (T-162): the loaded show's tracks, markers,
+    /// tempo map and loop region are replaced; its name, time base and
+    /// song are kept. Playback carries on where it is: events that stay
+    /// under the playhead keep their animation, others start or stop as
+    /// if the playhead had reached them. False without a loaded show.
+    pub fn edit(&mut self, mut show: Show) -> bool {
+        let Some(cur) = self.show.as_mut() else { return false };
+        show.name = cur.name.clone();
+        show.time_base = cur.time_base;
+        show.audio = cur.audio.take();
+        show.sanitize();
+        *cur = show;
+        self.rev += 1;
+        self.modified = true;
+        true
+    }
+
+    /// The loaded show changed outside the editor (song, loop region).
+    pub fn touch(&mut self) {
+        self.rev += 1;
+    }
+
+    /// The loaded show was written to disk, maybe under a new name.
+    pub fn saved(&mut self) {
+        self.rev += 1;
+        self.modified = false;
     }
 
     /// See `jumps` on the struct.
@@ -701,6 +809,8 @@ impl Player {
             loop_region: show.and_then(|s| s.loop_region),
             active: self.last_active.clone(),
             audio: show.and_then(|s| s.song()).cloned(),
+            rev: self.rev,
+            modified: self.modified,
         }
     }
 }
@@ -822,6 +932,25 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
         }
     }
     out
+}
+
+/// Event modifiers into the ranges of the master controls (non-finite →
+/// neutral), so no show file or edit can push the geometry far off.
+fn sanitize_modifiers(m: &mut LiveModifiers) {
+    let d = LiveModifiers::default();
+    let fix = |v: f32, lo: f32, hi: f32, def: f32| if v.is_finite() { v.clamp(lo, hi) } else { def };
+    m.brightness = fix(m.brightness, 0.0, 1.0, d.brightness);
+    m.size = fix(m.size, 0.0, 2.0, d.size);
+    m.size_x = fix(m.size_x, -2.0, 2.0, d.size_x);
+    m.size_y = fix(m.size_y, -2.0, 2.0, d.size_y);
+    m.pos_x = fix(m.pos_x, -1.0, 1.0, d.pos_x);
+    m.pos_y = fix(m.pos_y, -1.0, 1.0, d.pos_y);
+    for i in 0..3 {
+        m.rot_angle[i] = fix(m.rot_angle[i], -3600.0, 3600.0, 0.0);
+        m.rot_speed[i] = fix(m.rot_speed[i], -3600.0, 3600.0, 0.0);
+    }
+    m.perspective = fix(m.perspective, 0.0, 1.0, d.perspective);
+    m.speed = fix(m.speed, 0.0, 4.0, d.speed);
 }
 
 /// The look an event draws: its catalogue cue or its own look, with the
@@ -1297,5 +1426,98 @@ mod tests {
         let at = p.position_at(&clock(1.0));
         p.follow(50.0, &clock(1.0));
         assert_eq!(p.position_at(&clock(1.0)), at);
+    }
+
+    #[test]
+    fn an_edit_keeps_playback_and_the_show_identity() {
+        let mut s = show(TimeBase::Seconds, vec![event(1, 0.0, 10.0), event(2, 20.0, 5.0)]);
+        s.audio = Some(AudioRef { file: "a.wav".into(), duration_s: 30.0, ..Default::default() });
+        let mut p = player(s);
+        let rev = p.state(&clock(0.0)).rev;
+        p.play(&clock(100.0));
+        let before = p.frame(&clock(102.0));
+        assert_eq!(before.len(), 1);
+        let jumps = p.jumps();
+
+        // The editor moves event 1 (still under the playhead) and event 2, and
+        // tries to rename the show, change its base and drop its song.
+        let mut edited = p.show.clone().unwrap();
+        edited.name = "autre".into();
+        edited.time_base = TimeBase::Beats;
+        edited.audio = None;
+        edited.tracks[0].events[0].len = 12.0;
+        edited.tracks[0].events[1].start = 1.0;
+        edited.markers = vec![Marker { at: 8.0, name: "Refrain".into(), color: [255, 0, 0] }, Marker { at: 4.0, ..Default::default() }];
+        assert!(p.edit(edited));
+
+        let st = p.state(&clock(102.5));
+        assert!(st.playing && st.modified);
+        assert_eq!(st.rev, rev + 1);
+        assert_eq!(p.jumps(), jumps, "an edit is no playhead jump: the song carries on");
+        let sh = p.show.as_ref().unwrap();
+        assert_eq!((sh.name.as_str(), sh.time_base), ("t", TimeBase::Seconds));
+        assert_eq!(sh.audio.as_ref().unwrap().file, "a.wav");
+        assert_eq!(sh.markers[0].at, 4.0, "markers sorted");
+        let after = p.frame(&clock(102.5));
+        let ids: Vec<u64> = after.iter().map(|c| c.event).collect();
+        assert_eq!(ids, vec![1, 2], "event 2 now starts under the playhead");
+        assert_eq!(after[0].instance, before[0].instance, "event 1 keeps its animation");
+        assert!(p.state(&clock(102.5)).position > 2.0);
+
+        p.saved();
+        assert!(!p.state(&clock(103.0)).modified);
+        let mut empty = Player::default();
+        assert!(!empty.edit(Show::default()), "nothing loaded");
+    }
+
+    #[test]
+    fn edits_are_validated() {
+        let known = |id: &str| id == "c";
+        let ok = show(TimeBase::Seconds, vec![event(1, 0.0, 1.0)]);
+        assert!(ok.validate_edit(known).is_ok());
+        let mut bad = ok.clone();
+        bad.tracks[0].events[0].source = cue("inconnu");
+        assert!(bad.validate_edit(known).unwrap_err().to_string().contains("cue inconnu"));
+        let mut bad = ok.clone();
+        bad.tracks[0].events[0].len = 0.0;
+        assert!(bad.validate_edit(known).is_err());
+        let mut bad = ok.clone();
+        bad.tracks[0].events[0].start = -1.0;
+        assert!(bad.validate_edit(known).is_err());
+        let mut bad = ok.clone();
+        bad.tracks = vec![Track::default(); MAX_TRACKS + 1];
+        assert!(bad.validate_edit(known).is_err());
+        let mut bad = ok.clone();
+        bad.tracks[0].events = (0..MAX_EVENTS as u64 + 1).map(|i| event(i + 1, i as f64, 1.0)).collect();
+        assert!(bad.validate_edit(known).unwrap_err().to_string().contains("trop d'événements"));
+        let mut bad = ok.clone();
+        bad.markers = vec![Marker::default(); MAX_MARKERS + 1];
+        assert!(bad.validate_edit(known).is_err());
+        let mut bad = ok.clone();
+        bad.tracks[0].name = "x".repeat(MAX_LABEL + 1);
+        assert!(bad.validate_edit(known).is_err());
+        let mut bad = ok;
+        bad.markers = vec![Marker { name: "é".repeat(MAX_LABEL + 1), ..Default::default() }];
+        assert!(bad.validate_edit(known).is_err());
+    }
+
+    #[test]
+    fn event_modifiers_are_kept_in_range() {
+        let mut e = event(1, 0.0, 1.0);
+        e.modifiers.size = 1e30;
+        e.modifiers.pos_x = -7.0;
+        e.modifiers.rot_speed = [f32::NAN, f32::INFINITY, 10.0];
+        e.modifiers.brightness = f32::NAN;
+        let s = show(TimeBase::Seconds, vec![e]);
+        let m = &s.tracks[0].events[0].modifiers;
+        assert_eq!((m.size, m.pos_x, m.rot_speed, m.brightness), (2.0, -1.0, [0.0, 0.0, 10.0], 1.0));
+    }
+
+    #[test]
+    fn a_new_show_has_two_tracks_and_a_tempo() {
+        let s = Show::new_empty("Nouveau", TimeBase::Seconds);
+        assert_eq!(s.tracks.iter().map(|t| t.layer).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(s.tempo_map, vec![TempoPoint::default()]);
+        assert!(Show::new_empty("P", TimeBase::Beats).tempo_map.is_empty());
     }
 }
