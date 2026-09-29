@@ -97,14 +97,173 @@ impl Default for Settings {
     }
 }
 
-/// Features the browser extracts from the microphone (see `index.html`).
-/// `level` and `bass` are 0.0..=1.0; `beat` counts detected beats, so a
-/// change means "a new beat happened since the last frame".
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub use crate::audio::spectrum::Bands;
+
+/// Musical section (T-236 detects them; until then the native source only
+/// tells `Silence` from `Normal`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Section {
+    Silence,
+    #[default]
+    Normal,
+    Break,
+    Buildup,
+    Drop,
+}
+
+/// Everything the audio analysis tells the engine, one snapshot per frame
+/// (T-237). Filled by the native analysis (`audio/`) or by the browser
+/// (`POST /api/audio`, which may send only the first three fields).
+///
+/// - `level`, `bass`, `beat` are the legacy fields every look uses, always
+///   filled: `level` 0..1, `bass` 0..1 (native: the normalised low end,
+///   `max(bands.sub, bands.bass)`), `beat` counts beats (native: kicks),
+///   so a change means "a new beat happened since the last frame".
+/// - Counters (`onset`, `kick`, `snare`, `hat`, `drop`) only ever grow:
+///   compare with the last frame's value to see an event.
+/// - Continuous values are 0..1 unless their name says otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AudioFeatures {
     pub level: f32,
     pub bass: f32,
     pub beat: u64,
+    /// Full-band RMS, dBFS (−120 = silence).
+    pub level_db: f32,
+    /// Five bands, auto-gained (T-231).
+    pub bands: Bands,
+    pub onset: u64,
+    pub kick: u64,
+    pub snare: u64,
+    pub hat: u64,
+    /// Strength of the last kick / snare / hat (T-232).
+    pub kick_strength: f32,
+    pub snare_strength: f32,
+    pub hat_strength: f32,
+    pub centroid_hz: f32,
+    pub silent: bool,
+    /// Detected tempo (T-233; 0 = none) and how sure the detector is. A
+    /// proposal: the beat clock is `TempoClock`'s.
+    pub bpm: f32,
+    pub bpm_confidence: f32,
+    pub section: Section,
+    /// Build-up 0..1 and drop counter (T-236).
+    pub buildup: f32,
+    pub drop: u64,
+    /// Audio time of the analysis (seconds, studio clock).
+    pub t: f64,
+}
+
+impl Default for AudioFeatures {
+    fn default() -> Self {
+        Self {
+            level: 0.0,
+            bass: 0.0,
+            beat: 0,
+            level_db: crate::audio::analysis::FLOOR_DB,
+            bands: Bands::default(),
+            onset: 0,
+            kick: 0,
+            snare: 0,
+            hat: 0,
+            kick_strength: 0.0,
+            snare_strength: 0.0,
+            hat_strength: 0.0,
+            centroid_hz: 0.0,
+            silent: false,
+            bpm: 0.0,
+            bpm_confidence: 0.0,
+            section: Section::Normal,
+            buildup: 0.0,
+            drop: 0,
+            t: 0.0,
+        }
+    }
+}
+
+/// Continuous signals a route or modulator can read (`AudioFeatures::value`).
+pub const AUDIO_VALUES: [&str; 13] =
+    ["level", "bass", "sub", "bass_band", "low_mid", "mid", "high", "kick_strength", "snare_strength", "hat_strength", "buildup", "bpm_confidence", "centroid"];
+/// Event counters (`AudioFeatures::counter`).
+pub const AUDIO_EVENTS: [&str; 6] = ["beat", "onset", "kick", "snare", "hat", "drop"];
+
+fn unit(x: f32) -> f32 {
+    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+impl AudioFeatures {
+    /// Silence that keeps the event counters and the audio time (so going
+    /// silent is never an event), for stale or absent input.
+    pub fn neutral(&self) -> Self {
+        Self {
+            beat: self.beat,
+            onset: self.onset,
+            kick: self.kick,
+            snare: self.snare,
+            hat: self.hat,
+            drop: self.drop,
+            bpm: self.bpm,
+            t: self.t,
+            silent: true,
+            section: Section::Silence,
+            ..Default::default()
+        }
+    }
+
+    /// Every value in its range, nothing NaN (the browser may send anything).
+    pub fn sanitized(mut self) -> Self {
+        self.level = unit(self.level);
+        self.bass = unit(self.bass);
+        self.bands = Bands::from_array(self.bands.to_array().map(unit));
+        self.kick_strength = unit(self.kick_strength);
+        self.snare_strength = unit(self.snare_strength);
+        self.hat_strength = unit(self.hat_strength);
+        self.buildup = unit(self.buildup);
+        self.bpm_confidence = unit(self.bpm_confidence);
+        let db = crate::audio::analysis::FLOOR_DB;
+        self.level_db = if self.level_db.is_finite() { self.level_db.clamp(db, 12.0) } else { db };
+        self.centroid_hz = if self.centroid_hz.is_finite() { self.centroid_hz.clamp(0.0, 24_000.0) } else { 0.0 };
+        self.bpm = if self.bpm.is_finite() { self.bpm.clamp(0.0, 400.0) } else { 0.0 };
+        if !self.t.is_finite() {
+            self.t = 0.0;
+        }
+        self
+    }
+
+    /// A continuous signal by id (`AUDIO_VALUES`), 0..1 (`centroid`:
+    /// 0..12 kHz mapped to 0..1).
+    pub fn value(&self, id: &str) -> Option<f32> {
+        Some(match id {
+            "level" => self.level,
+            "bass" => self.bass,
+            "sub" => self.bands.sub,
+            "bass_band" => self.bands.bass,
+            "low_mid" => self.bands.low_mid,
+            "mid" => self.bands.mid,
+            "high" => self.bands.high,
+            "kick_strength" => self.kick_strength,
+            "snare_strength" => self.snare_strength,
+            "hat_strength" => self.hat_strength,
+            "buildup" => self.buildup,
+            "bpm_confidence" => self.bpm_confidence,
+            "centroid" => (self.centroid_hz / 12_000.0).clamp(0.0, 1.0),
+            _ => return None,
+        })
+    }
+
+    /// An event counter by id (`AUDIO_EVENTS`).
+    pub fn counter(&self, id: &str) -> Option<u64> {
+        Some(match id {
+            "beat" => self.beat,
+            "onset" => self.onset,
+            "kick" => self.kick,
+            "snare" => self.snare,
+            "hat" => self.hat,
+            "drop" => self.drop,
+            _ => return None,
+        })
+    }
 }
 
 /// Global output alignment, applied to every point last - the laser
@@ -517,7 +676,7 @@ mod tests {
     #[test]
     fn audio_is_ignored_when_disabled() {
         let s = Settings::default();
-        let loud = AudioFeatures { level: 1.0, bass: 1.0, beat: 7 };
+        let loud = AudioFeatures { level: 1.0, bass: 1.0, beat: 7, ..Default::default() };
         let quiet = a_frame(&s, AudioFeatures::default());
         assert_eq!(a_frame(&s, loud), quiet);
     }
@@ -755,6 +914,65 @@ mod tests {
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
         assert!(s.content.same_drawing(&Content::Evolving(Default::default())));
+    }
+
+    /// A look saved before T-237 (audio reaction on), rendered through a
+    /// beat, a swell and a silence: the new fields change nothing, and the
+    /// old `POST /api/audio` body gives the very same frames.
+    #[test]
+    fn a_look_saved_before_v2_renders_the_same_with_the_v2_snapshot() {
+        let saved = r#"{"content":{"kind":"shape","shape":"star"},"color":[255,0,0],"scale":0.6,"rotation_speed":45.0,"brightness":0.8,
+            "audio":{"enabled":true,"size":0.8,"rotate":0.5,"color_on_beat":true,"flash":0.6}}"#;
+        let s: Settings = serde_json::from_str(saved).unwrap();
+        let legacy = |i: u64| {
+            let x = (i as f32 / 40.0).min(1.0);
+            AudioFeatures { level: x * 0.7, bass: x, beat: i / 15, ..Default::default() }
+        };
+        let (mut old, mut new, mut posted) = (Animator::default(), Animator::default(), Animator::default());
+        for i in 0..90u64 {
+            let l = legacy(i);
+            let v2 = AudioFeatures {
+                level_db: -12.0,
+                bands: Bands { sub: 0.9, bass: 0.1, low_mid: 0.5, mid: 0.7, high: 1.0 },
+                onset: i,
+                kick: i / 3,
+                snare: i / 7,
+                hat: i,
+                kick_strength: 1.0,
+                centroid_hz: 3000.0,
+                bpm: 128.0,
+                bpm_confidence: 0.9,
+                section: Section::Buildup,
+                buildup: 0.7,
+                drop: i / 30,
+                t: i as f64,
+                ..l
+            };
+            let body = serde_json::json!({ "level": l.level, "bass": l.bass, "beat": l.beat });
+            let from_page = crate::audio::browser_features(&body, 0.0).unwrap();
+            let clock = BeatClock { beat: i as f64 * 0.03, ..Default::default() };
+            let a = old.render(&s, l, 1.0 / 60.0, &clock);
+            assert_eq!(new.render(&s, v2, 1.0 / 60.0, &clock), a, "frame {i}");
+            assert_eq!(posted.render(&s, from_page, 1.0 / 60.0, &clock), a, "frame {i}");
+        }
+    }
+
+    #[test]
+    fn audio_features_v2_load_the_old_format_and_round_trip() {
+        let f: AudioFeatures = serde_json::from_str(r#"{"level":0.5,"bass":0.25,"beat":3}"#).unwrap();
+        assert_eq!((f.level, f.bass, f.beat), (0.5, 0.25, 3));
+        assert_eq!(f, AudioFeatures { level: 0.5, bass: 0.25, beat: 3, ..Default::default() });
+        let full = AudioFeatures { kick: 4, bands: Bands { high: 0.5, ..Default::default() }, section: Section::Drop, drop: 2, t: 1.5, ..f };
+        let text = serde_json::to_string(&full).unwrap();
+        assert!(text.contains(r#""section":"drop""#), "{text}");
+        assert_eq!(serde_json::from_str::<AudioFeatures>(&text).unwrap(), full);
+        // Every signal id resolves; a stale snapshot keeps the counters.
+        assert!(AUDIO_VALUES.iter().all(|id| full.value(id).is_some()) && full.value("nope").is_none());
+        assert!(AUDIO_EVENTS.iter().all(|id| full.counter(id).is_some()) && full.counter("nope").is_none());
+        let n = full.neutral();
+        assert_eq!((n.level, n.bands.high, n.kick, n.drop, n.beat, n.silent), (0.0, 0.0, 4, 2, 3, true));
+        let bad = AudioFeatures { level: f32::NAN, bands: Bands { mid: -2.0, ..Default::default() }, bpm: f32::INFINITY, t: f64::NAN, ..Default::default() }.sanitized();
+        assert_eq!((bad.level, bad.bands.mid, bad.bpm, bad.t), (0.0, 0.0, 0.0, 0.0));
     }
 
     fn a_frame(s: &Settings, audio: AudioFeatures) -> Vec<Point> {

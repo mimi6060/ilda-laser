@@ -32,14 +32,14 @@ pub mod playback;
 pub mod spectrum;
 pub mod worker;
 
-use crate::engine::AudioFeatures;
+use crate::engine::{AudioFeatures, Section, AUDIO_EVENTS, AUDIO_VALUES};
 use anyhow::{Context, Result};
 use bpm::TempoEstimate;
 use capture::{InputDevice, MAX_BUFFER_FRAMES, MIN_BUFFER_FRAMES};
 use onsets::Onsets;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use spectrum::{AnalysisConfig, SpectralFrame};
+use spectrum::{AnalysisConfig, SpectralFrame, SPECTRUM_BANDS};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -48,6 +48,80 @@ use std::time::{Duration, Instant};
 /// Features older than this are treated as silence (tab closed, mic
 /// stopped, device unplugged).
 pub const STALE: Duration = Duration::from_millis(500);
+/// Once stale, the engine's continuous values fall to neutral with this
+/// time constant (T-237): after `STALE` + 5 τ = 1 s they are < 1 % of
+/// where they were, and they never jump.
+pub const RELEASE_TAU_S: f32 = 0.1;
+/// `/api/state.audio` shows the engine's decaying frame while it is this
+/// recent (else it computes the features itself).
+const FRAME_RECENT: Duration = Duration::from_millis(250);
+
+/// Features from `POST /api/audio` (the *Navigateur* source). The old
+/// body `{level, bass, beat}` still works; what it doesn't send is filled
+/// from it where that means something (`bands.sub`/`bands.bass` = `bass`,
+/// `kick` = `onset` = `beat`, `level_db` from `level`, `silent` under
+/// −60 dBFS, `t` = when it arrived), the rest stays neutral. Everything is
+/// then sanitised (0..1, finite).
+pub fn browser_features(body: &Value, received_t: f64) -> Result<AudioFeatures> {
+    body.as_object().context("objet JSON attendu")?;
+    let mut f: AudioFeatures = serde_json::from_value(body.clone()).context("level, bass (0..1), beat (entier) attendus")?;
+    let sent = |k: &str| body.get(k).is_some();
+    if !sent("bands") {
+        f.bands.sub = f.bass;
+        f.bands.bass = f.bass;
+    }
+    if !sent("kick") {
+        f.kick = f.beat;
+    }
+    if !sent("onset") {
+        f.onset = f.beat;
+    }
+    if !sent("level_db") {
+        // The page's level is RMS × 6.
+        let rms = (f.level / 6.0).max(0.0);
+        f.level_db = analysis::to_db(rms * rms);
+    }
+    if !sent("silent") {
+        f.silent = f.level_db < -60.0;
+    }
+    if !sent("section") {
+        f.section = if f.silent { Section::Silence } else { Section::Normal };
+    }
+    if !sent("t") {
+        f.t = received_t;
+    }
+    Ok(f.sanitized())
+}
+
+/// The engine's features as they fall back to neutral after the source
+/// went stale or away.
+#[derive(Clone, Copy, Debug)]
+struct Release {
+    out: AudioFeatures,
+    active: Active,
+    at: Option<Instant>,
+}
+
+/// One step of `y += (x − y)(1 − e^(−dt/τ))` on every continuous value of
+/// `from` towards `to`; counters, flags, section, tempo and time are `to`'s.
+fn release(from: &AudioFeatures, to: &AudioFeatures, dt: f32) -> AudioFeatures {
+    let k = 1.0 - (-dt.max(0.0) / RELEASE_TAU_S).exp();
+    let f = |a: f32, b: f32| a + (b - a) * k;
+    let (fb, tb) = (from.bands.to_array(), to.bands.to_array());
+    AudioFeatures {
+        level: f(from.level, to.level),
+        bass: f(from.bass, to.bass),
+        level_db: f(from.level_db, to.level_db),
+        bands: spectrum::Bands::from_array(std::array::from_fn(|i| f(fb[i], tb[i]))),
+        kick_strength: f(from.kick_strength, to.kick_strength),
+        snare_strength: f(from.snare_strength, to.snare_strength),
+        hat_strength: f(from.hat_strength, to.hat_strength),
+        centroid_hz: f(from.centroid_hz, to.centroid_hz),
+        bpm_confidence: f(from.bpm_confidence, to.bpm_confidence),
+        buildup: f(from.buildup, to.buildup),
+        ..*to
+    }
+}
 
 /// Where the engine's audio features come from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +295,9 @@ pub struct NativeSnapshot {
     /// BPM, confidence, last / next beat, detector state (T-233). A
     /// proposal only: the tempo clock is not touched here.
     pub tempo: TempoEstimate,
+    /// Display spectrum of the last hop: 64 log bands 20 Hz–20 kHz, dBFS
+    /// (`GET /api/audio/spectrum`).
+    pub spectrum: [f32; SPECTRUM_BANDS],
     /// Audio time of the end of the last hop, seconds since the studio
     /// epoch (the tempo clock's time base).
     pub t: f64,
@@ -255,6 +332,8 @@ pub struct AudioHub {
     snapshot: Mutex<Option<NativeSnapshot>>,
     /// *Nouveau morceau* requests, counted (the analysis thread compares).
     new_tracks: AtomicU64,
+    /// The engine's last frame of features (`frame`).
+    release: Mutex<Release>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -271,7 +350,7 @@ impl AudioHub {
         } else {
             CaptureStatus { state: CaptureState::Disabled, message: "Capture audio désactivée (--no-audio)".into(), ..Default::default() }
         };
-        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0) }
+        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }) }
     }
 
     /// From `<data_dir>/audio.json`, then `--audio-device` (for this run).
@@ -378,17 +457,64 @@ impl AudioHub {
             AudioInputSource::Native => match native {
                 Some(n) if fresh(n.at) => (n.features, Active::Native),
                 _ if browser_ok => (browser, Active::Browser),
-                Some(n) => (AudioFeatures { beat: n.features.beat, ..Default::default() }, Active::None),
-                None => (AudioFeatures { beat: browser.beat, ..Default::default() }, Active::None),
+                Some(n) => (n.features.neutral(), Active::None),
+                None => (browser.neutral(), Active::None),
             },
             AudioInputSource::Browser if browser_ok => (browser, Active::Browser),
-            AudioInputSource::Browser | AudioInputSource::None => (AudioFeatures { beat: browser.beat, ..Default::default() }, Active::None),
+            AudioInputSource::Browser | AudioInputSource::None => (browser.neutral(), Active::None),
         }
+    }
+
+    /// What the engine uses this frame (called once per frame, at its top).
+    /// Fresh features pass through untouched; stale or absent ones make
+    /// the continuous values *fall* to neutral (τ = `RELEASE_TAU_S`)
+    /// instead of freezing or jumping, while the counters stay put.
+    pub fn frame(&self, browser: AudioFeatures, browser_at: Instant, now: Instant) -> (AudioFeatures, Active) {
+        let (target, active) = self.effective(browser, browser_at, now);
+        let mut r = lock(&self.release);
+        r.out = match (active, r.at) {
+            (Active::None, Some(at)) => release(&r.out, &target, now.saturating_duration_since(at).as_secs_f32().min(0.1)),
+            _ => target,
+        };
+        r.active = active;
+        r.at = Some(now);
+        (r.out, active)
+    }
+
+    /// For `/api/state`: the features as the engine sees them. Fresh ones
+    /// are computed here (the next frame will use exactly these); while
+    /// falling back to neutral, the engine's last frame.
+    fn features_view(&self, browser: AudioFeatures, browser_at: Instant, now: Instant) -> (AudioFeatures, Active) {
+        let (target, active) = self.effective(browser, browser_at, now);
+        if active != Active::None {
+            return (target, active);
+        }
+        let r = *lock(&self.release);
+        match r.at {
+            Some(at) if now.saturating_duration_since(at) < FRAME_RECENT => (r.out, Active::None),
+            _ => (target, active),
+        }
+    }
+
+    /// `GET /api/audio/spectrum`: the native capture's 64-band display
+    /// spectrum (`db` in dBFS, `values` 0..1 over −90..0 dBFS), or nulls
+    /// when nothing fresh is captured (the *Navigateur* source has none).
+    pub fn spectrum_view(&self, now: Instant) -> Value {
+        let source = lock(&self.config).0.source;
+        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && source == AudioInputSource::Native);
+        json!({
+            "bands": SPECTRUM_BANDS,
+            "lo_hz": 20.0,
+            "hi_hz": 20_000.0,
+            "t": native.map(|n| n.t),
+            "db": native.map(|n| n.spectrum.to_vec()),
+            "values": native.map(|n| n.spectrum.iter().map(|db| ((db + 90.0) / 90.0).clamp(0.0, 1.0)).collect::<Vec<f32>>()),
+        })
     }
 
     /// `/api/state.audio`.
     pub fn view(&self, browser: AudioFeatures, browser_at: Instant, now: Instant) -> Value {
-        let (features, active) = self.effective(browser, browser_at, now);
+        let (features, active) = self.features_view(browser, browser_at, now);
         let (config, _) = self.config();
         let status = self.status();
         let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && config.source == AudioInputSource::Native);
@@ -422,9 +548,22 @@ impl AudioHub {
             // (T-233); null when nothing fresh is captured.
             "tempo": native.map(|n| n.tempo),
             "stats": stats,
+            // What the engine uses (T-237), whichever the source: the legacy
+            // three, then the whole snapshot. `bands` always present, 0..1.
             "level": features.level,
             "bass": features.bass,
             "beat": features.beat,
+            "bands": features.bands,
+            "silent": features.silent,
+            "section": features.section,
+            "buildup": features.buildup,
+            // By the ids routes and modulators use (`engine::AUDIO_EVENTS`,
+            // `engine::AUDIO_VALUES`).
+            "counters": AUDIO_EVENTS.iter().map(|&id| (id.to_string(), json!(features.counter(id)))).collect::<serde_json::Map<_, _>>(),
+            "signals": AUDIO_VALUES.iter().map(|&id| (id.to_string(), json!(features.value(id)))).collect::<serde_json::Map<_, _>>(),
+            "detected_bpm": features.bpm,
+            "detected_confidence": features.bpm_confidence,
+            "features": features,
         })
     }
 }
@@ -434,13 +573,13 @@ mod tests {
     use super::*;
 
     fn feat(level: f32, beat: u64) -> AudioFeatures {
-        AudioFeatures { level, bass: level, beat }
+        AudioFeatures { level, bass: level, beat, ..Default::default() }
     }
 
     fn snap(level: f32, beat: u64, at: Instant) -> NativeSnapshot {
         let onsets = Onsets { kick: beat, onset: beat + 2, ..Default::default() };
         let tempo = TempoEstimate { bpm: 128.0, confidence: 0.8, beat_time: 0.9, next_beat: 1.37, state: bpm::DetectState::Locked };
-        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, t: 1.0, at }
+        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], t: 1.0, at }
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {
@@ -551,6 +690,129 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_sends_the_old_format_or_the_new_one() {
+        // Before T-237: three fields. What can be derived is.
+        let f = browser_features(&json!({ "level": 0.6, "bass": 0.4, "beat": 7 }), 12.5).unwrap();
+        assert_eq!((f.level, f.bass, f.beat), (0.6, 0.4, 7));
+        assert_eq!((f.bands.sub, f.bands.bass, f.bands.mid), (0.4, 0.4, 0.0));
+        assert_eq!((f.kick, f.onset, f.snare, f.drop), (7, 7, 0, 0));
+        assert!((f.level_db - -20.0).abs() < 0.01, "level 0.6 = RMS 0.1 = −20 dBFS: {}", f.level_db);
+        assert_eq!((f.silent, f.section, f.t), (false, Section::Normal, 12.5));
+        let f = browser_features(&json!({ "level": 0, "bass": 0, "beat": 0 }), 1.0).unwrap();
+        assert_eq!((f.level_db, f.silent, f.section), (analysis::FLOOR_DB, true, Section::Silence));
+        // The whole snapshot: kept as sent, bounded.
+        let v = json!({
+            "level": 0.5, "bass": 0.3, "beat": 4, "level_db": -18, "bands": { "sub": 0.1, "bass": 0.2, "low_mid": 0.3, "mid": 0.4, "high": 7 },
+            "onset": 9, "kick": 4, "snare": 2, "hat": 11, "kick_strength": 0.8, "silent": false, "bpm": 128, "bpm_confidence": 0.7,
+            "section": "buildup", "buildup": 0.6, "drop": 1, "t": 3.25,
+        });
+        let f = browser_features(&v, 99.0).unwrap();
+        assert_eq!(f.bands, spectrum::Bands { sub: 0.1, bass: 0.2, low_mid: 0.3, mid: 0.4, high: 1.0 });
+        assert_eq!((f.onset, f.kick, f.snare, f.hat, f.drop), (9, 4, 2, 11, 1));
+        assert_eq!((f.level_db, f.bpm, f.section, f.buildup, f.t), (-18.0, 128.0, Section::Buildup, 0.6, 3.25));
+        // Nonsense is clamped, wrong types refused.
+        let f = browser_features(&json!({ "level": 9, "bass": -3, "bpm_confidence": 2, "level_db": 400 }), 0.0).unwrap();
+        assert_eq!((f.level, f.bass, f.bpm_confidence, f.level_db), (1.0, 0.0, 1.0, 12.0));
+        assert!(browser_features(&json!({ "level": "fort" }), 0.0).is_err());
+        assert!(browser_features(&json!({ "section": "chorus" }), 0.0).is_err());
+        assert!(browser_features(&json!([1]), 0.0).is_err());
+    }
+
+    /// 60 fps frames from `from` for `seconds`; returns (time since `from`, features).
+    fn frames(hub: &AudioHub, from: Instant, seconds: f32) -> Vec<(f32, AudioFeatures)> {
+        (0..=(seconds * 60.0) as u32)
+            .map(|i| {
+                let d = Duration::from_secs_f32(i as f32 / 60.0);
+                (d.as_secs_f32(), hub.frame(AudioFeatures::default(), from - Duration::from_secs(10), from + d).0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stale_features_fall_to_neutral_within_a_second_without_a_jump() {
+        let hub = AudioHub::in_memory(true);
+        let now = Instant::now();
+        let mut loud = snap(0.8, 5, now);
+        loud.features = AudioFeatures { level: 0.8, bass: 0.9, beat: 5, kick: 5, hat: 3, bands: spectrum::Bands { sub: 0.9, bass: 0.9, low_mid: 0.7, mid: 0.6, high: 0.5 }, buildup: 0.4, ..Default::default() };
+        hub.publish(loud);
+        // The analysis thread stops publishing here.
+        let run = frames(&hub, now, 1.2);
+        for (t, f) in &run {
+            if *t < 0.49 {
+                assert_eq!((f.level, f.bands.sub), (0.8, 0.9), "fresh until 500 ms: {t}");
+            }
+            if *t >= 1.0 {
+                assert!(f.level < 0.01 && f.bass < 0.01 && f.bands.to_array().iter().all(|&b| b < 0.01) && f.buildup < 0.01, "neutral by 1 s: {t} {f:?}");
+                assert!(f.silent && f.section == Section::Silence);
+            }
+            assert_eq!((f.beat, f.kick, f.hat), (5, 5, 3), "going stale is never an event");
+        }
+        for w in run.windows(2) {
+            let (a, b) = (w[0].1, w[1].1);
+            assert!(b.level <= a.level, "falls monotonically");
+            assert!(a.level - b.level < 0.8 * 0.2, "no step of more than 20 % in a frame: {} → {}", a.level, b.level);
+        }
+        // /api/state shows the falling values while the engine runs.
+        let hub2 = AudioHub::in_memory(true);
+        hub2.publish(loud);
+        frames(&hub2, now, 0.6);
+        let mid = now + Duration::from_millis(600);
+        let shown = hub2.view(AudioFeatures::default(), now - Duration::from_secs(10), mid + Duration::from_millis(5))["level"].as_f64().unwrap();
+        assert!(shown > 0.05 && shown < 0.8, "{shown}");
+        // New audio: straight back, untouched.
+        hub.publish(snap(0.3, 6, now + Duration::from_millis(1300)));
+        let (f, a) = hub.frame(AudioFeatures::default(), now - Duration::from_secs(10), now + Duration::from_millis(1310));
+        assert_eq!((a, f.level, f.beat), (Active::Native, 0.3, 6));
+    }
+
+    #[test]
+    fn a_stopped_browser_also_falls_back_gently() {
+        let hub = AudioHub::in_memory(true);
+        set_source(&hub, AudioInputSource::Browser);
+        let now = Instant::now();
+        let posted = browser_features(&json!({ "level": 1, "bass": 1, "beat": 3 }), 0.0).unwrap();
+        let at = |ms: u64| hub.frame(posted, now, now + Duration::from_millis(ms)).0;
+        assert_eq!(at(0).bass, 1.0);
+        assert_eq!(at(490).bass, 1.0);
+        let just_stale = at(510).bass;
+        assert!(just_stale > 0.8 && just_stale < 1.0, "{just_stale}");
+        let mut last = at(520);
+        for ms in (530..=1000).step_by(16) {
+            last = at(ms);
+        }
+        assert!(last.bass < 0.01 && last.beat == 3, "{last:?}");
+    }
+
+    #[test]
+    fn the_frame_path_does_not_allocate() {
+        let hub = AudioHub::in_memory(true);
+        let now = Instant::now();
+        hub.publish(snap(0.4, 9, now));
+        hub.frame(AudioFeatures::default(), now, now);
+        let n = capture::tests::allocations_during(|| {
+            for i in 0..120 {
+                hub.frame(AudioFeatures::default(), now, now + Duration::from_millis(i * 16));
+            }
+        });
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn the_spectrum_is_served_only_from_a_fresh_native_capture() {
+        let hub = AudioHub::in_memory(true);
+        let now = Instant::now();
+        let v = hub.spectrum_view(now);
+        assert_eq!((v["bands"].as_u64(), &v["db"], &v["values"]), (Some(64), &Value::Null, &Value::Null));
+        hub.publish(snap(0.4, 9, now));
+        let v = hub.spectrum_view(now);
+        assert_eq!(v["db"].as_array().unwrap().len(), 64);
+        let values = v["values"].as_array().unwrap();
+        assert_eq!(values.len(), 64);
+        assert!((values[0].as_f64().unwrap() - 60.0 / 90.0).abs() < 1e-4, "−30 dBFS over −90..0");
+        assert_eq!(hub.spectrum_view(now + Duration::from_secs(1))["db"], Value::Null, "stale");
+    }
+
+    #[test]
     fn browser_and_none_sources_ignore_the_native_capture() {
         let hub = AudioHub::in_memory(true);
         let now = Instant::now();
@@ -577,6 +839,8 @@ mod tests {
         assert_eq!(v["source"], "native");
         assert_eq!(v["active"], "none");
         assert_eq!(v["stats"]["rms_db"], analysis::FLOOR_DB as f64);
+        assert_eq!(v["bands"]["sub"], 0.0, "bands always present");
+        assert_eq!(v["silent"], true);
         hub.publish(snap(0.4, 9, now));
         let v = hub.view(AudioFeatures::default(), now - Duration::from_secs(5), now);
         assert_eq!(v["level_db"], -20.0);
@@ -588,6 +852,15 @@ mod tests {
         assert_eq!(v["beat"], 9, "the legacy beat is the kick counter");
         assert_eq!((v["tempo"]["bpm"].as_f64(), v["tempo"]["state"].as_str()), (Some(128.0), Some("locked")));
         assert_eq!(v["tempo"]["next_beat"], 1.37);
+        // The engine's whole snapshot (T-237).
+        assert_eq!(v["features"]["beat"], 9);
+        assert_eq!(v["counters"]["beat"], 9);
+        assert_eq!(v["counters"].as_object().unwrap().len(), AUDIO_EVENTS.len());
+        assert_eq!(v["signals"].as_object().unwrap().len(), AUDIO_VALUES.len());
+        assert_eq!(v["section"], "normal");
+        let bands = v["bands"].as_object().unwrap();
+        assert_eq!(bands.len(), 5);
+        assert!(bands.values().all(|b| (0.0..=1.0).contains(&b.as_f64().unwrap())));
         set_source(&hub, AudioInputSource::Browser);
         assert_eq!(hub.view(AudioFeatures::default(), now, now)["spectral"], Value::Null, "native only");
         let off = AudioHub::in_memory(false);

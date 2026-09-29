@@ -65,6 +65,11 @@ pub const SILENCE_HOLD_S: f32 = 0.3;
 /// overflow the filters.
 const SAMPLE_LIMIT: f32 = 4.0;
 
+/// Bands of the display spectrum (`log_spectrum`).
+pub const SPECTRUM_BANDS: usize = 64;
+const SPECTRUM_LO_HZ: f32 = 20.0;
+const SPECTRUM_HI_HZ: f32 = 20_000.0;
+
 /// Band levels normalised to 0..1 (auto-gain or manual gain applied).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -300,6 +305,35 @@ impl SpectralAnalyzer {
     /// `rate / FFT_SIZE` Hz), for the onset function (T-232).
     pub fn power(&self) -> &[f32] {
         &self.power
+    }
+
+    /// The last FFT as `SPECTRUM_BANDS` log-spaced bands from 20 Hz to
+    /// 20 kHz (or Nyquist), dBFS (a full-scale sine reads 0), each the
+    /// loudest bin in its range (the nearest bin where a low band is
+    /// narrower than a bin). For the display (`GET /api/audio/spectrum`);
+    /// no allocation.
+    pub fn log_spectrum(&self, out: &mut [f32; SPECTRUM_BANDS]) {
+        let hz_per_bin = self.rate / FFT_SIZE as f32;
+        let nyquist = self.rate / 2.0;
+        // A full-scale sine through the Hann window peaks at |X| = N/4.
+        let reference = (FFT_SIZE as f32 / 4.0).powi(2);
+        let ratio = SPECTRUM_HI_HZ / SPECTRUM_LO_HZ;
+        let last = self.power.len() - 1;
+        for (i, slot) in out.iter_mut().enumerate() {
+            let lo = SPECTRUM_LO_HZ * ratio.powf(i as f32 / SPECTRUM_BANDS as f32);
+            let hi = (SPECTRUM_LO_HZ * ratio.powf((i + 1) as f32 / SPECTRUM_BANDS as f32)).min(nyquist);
+            if lo >= nyquist {
+                *slot = FLOOR_DB;
+                continue;
+            }
+            let (k0, k1) = ((lo / hz_per_bin).ceil() as usize, ((hi / hz_per_bin).ceil() as usize).min(last + 1));
+            let p = if k0 < k1 {
+                self.power[k0..k1].iter().fold(0.0f32, |m, &p| m.max(p))
+            } else {
+                self.power[((lo * hi).sqrt() / hz_per_bin).round().min(last as f32) as usize]
+            };
+            *slot = to_db(p / reference);
+        }
     }
 
     /// One hop of mono samples ending at `t`; `level_db` is the smoothed
@@ -603,6 +637,27 @@ mod tests {
         };
         assert!(!quiet(&mut SpectralAnalyzer::new(RATE, AnalysisConfig::default())));
         assert!(quiet(&mut SpectralAnalyzer::new(RATE, AnalysisConfig { silence_db: -40.0, ..Default::default() })));
+    }
+
+    #[test]
+    fn the_display_spectrum_puts_a_tone_in_its_band_at_its_level() {
+        let mut a = SpectralAnalyzer::new(RATE, AnalysisConfig::default());
+        run(&mut a, 0, 0.3, tone(1_000.0, 0.5));
+        let mut out = [0.0; SPECTRUM_BANDS];
+        a.log_spectrum(&mut out);
+        let loudest = (0..SPECTRUM_BANDS).max_by(|&i, &j| out[i].total_cmp(&out[j])).unwrap();
+        // Band i spans 20 × 1000^(i/64) .. 20 × 1000^((i+1)/64) Hz: 1 kHz is band 36.
+        assert_eq!(loudest, 36, "{out:?}");
+        assert!((out[loudest] + 6.0).abs() < 1.5, "a half-scale sine reads about −6 dBFS: {}", out[loudest]);
+        assert!(out[10] < out[loudest] - 40.0 && out[60] < out[loudest] - 40.0, "{out:?}");
+        assert!(out.iter().all(|v| v.is_finite()));
+        // Silence: everything at the floor; 16 kHz: bands past 8 kHz too.
+        let mut quiet = SpectralAnalyzer::new(16_000, AnalysisConfig::default());
+        run(&mut quiet, 0, 0.1, |_| 0.0);
+        quiet.log_spectrum(&mut out);
+        assert!(out.iter().all(|&v| v == FLOOR_DB), "{out:?}");
+        let n = crate::audio::capture::tests::allocations_during(|| a.log_spectrum(&mut out));
+        assert_eq!(n, 0);
     }
 
     #[test]
