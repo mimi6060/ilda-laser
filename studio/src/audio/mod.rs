@@ -30,6 +30,7 @@ pub mod isolate;
 pub mod media;
 pub mod onsets;
 pub mod sections;
+pub mod shape;
 pub mod playback;
 pub mod spectrum;
 pub mod worker;

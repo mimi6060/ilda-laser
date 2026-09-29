@@ -216,19 +216,39 @@ pub fn modulate(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settin
     }
     let mut recolor = false;
     for (id, sum) in sums {
-        let Some((min, max)) = modulatable(reg, id) else { continue };
-        let Some(slot) = slot(id, settings, live) else { continue };
-        let base = slot.get();
-        let mut value = (base + sum * (max - min) / 2.0).clamp(min, max);
-        if is_brightness(id) {
-            value = value.min(base);
-        }
-        slot.set(value);
-        recolor |= id.starts_with("master.color.");
+        let Some(range) = modulatable(reg, id) else { continue };
+        recolor |= offset(id, range, sum * (range.1 - range.0) / 2.0, settings, live);
     }
     if recolor {
-        live.color = live.color_params.build(live.color.mode_index());
+        recolor_live(live);
     }
+}
+
+/// Moves one allowed control (`range` = what `modulatable` returned for
+/// it) by `delta`, in the control's units, on the engine's copies: value =
+/// base + delta, clamped to the range, and never above the fader on a
+/// brightness control. The one place every modulation source (LFOs, shaped
+/// audio signals: audio/shape.rs) goes through, so they all obey the same
+/// rules. Allocates nothing; an id outside the allow-list does nothing.
+/// Returns true for a colour target: call `recolor_live` once after the
+/// last one.
+pub fn offset(id: &str, (min, max): (f32, f32), delta: f32, settings: &mut Settings, live: &mut LiveModifiers) -> bool {
+    let Some(slot) = slot(id, settings, live) else { return false };
+    if !delta.is_finite() {
+        return false;
+    }
+    let base = slot.get();
+    let mut value = (base + delta).clamp(min, max);
+    if is_brightness(id) {
+        value = value.min(base);
+    }
+    slot.set(value);
+    id.starts_with("master.color.")
+}
+
+/// Rebuilds the active colour override from the (modulated) colour params.
+pub fn recolor_live(live: &mut LiveModifiers) {
+    live.color = live.color_params.build(live.color.mode_index());
 }
 
 /// At most `MAX_MODULATORS`, each on a control that can be modulated.
