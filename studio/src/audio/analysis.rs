@@ -1,19 +1,19 @@
 //! Analysis of the captured mono signal, one hop (256 samples) at a time,
 //! on the analysis thread (never in the audio callback).
 //!
-//! It gives the dBFS meter (RMS and peak), the three features the engine
-//! already uses (`level`, `bass`, `beat`; `level` and `bass` computed the
-//! way the browser does it, T-230), the spectral frame (five bands with
-//! auto-gain, centroid, flatness, silence: `spectrum.rs`, T-231) and the
-//! onsets (kick / snare / hat: `onsets.rs`, T-232) and the tempo estimate
-//! with its beat tracking (`bpm.rs`, T-233). The legacy `beat` is
-//! the kick counter: it no longer fires on a bass line. T-237 moves `bass`
-//! onto the bands.
+//! It gives the dBFS meter (RMS and peak), the spectral frame (five bands
+//! with auto-gain, centroid, flatness, silence: `spectrum.rs`, T-231), the
+//! onsets (kick / snare / hat: `onsets.rs`, T-232), the tempo estimate
+//! with its beat tracking (`bpm.rs`, T-233), and from all of them the
+//! engine's `AudioFeatures` (`native_features`, T-237). `level` is
+//! computed the way the browser does it (T-230); the legacy `bass` is the
+//! normalised low end and the legacy `beat` the kick counter: it no
+//! longer fires on a bass line.
 
 use super::bpm::{BpmTracker, TempoEstimate};
 use super::onsets::{OnsetDetector, Onsets};
-use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame, FFT_SIZE};
-use crate::engine::AudioFeatures;
+use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame, FFT_SIZE, SPECTRUM_BANDS};
+use crate::engine::{AudioFeatures, Section};
 
 /// Samples per analysis step (5.3 ms at 48 kHz).
 pub const HOP: usize = 256;
@@ -26,12 +26,6 @@ const RMS_TAU_S: f32 = 0.04;
 const PEAK_RELEASE_DB_PER_S: f32 = 20.0;
 /// `level` = RMS × this (the browser: RMS × gain 2 × 3).
 const LEVEL_GAIN: f32 = 6.0;
-/// Upper edge of the bass band.
-const BASS_HZ: f32 = 150.0;
-/// Bass level (dBFS) mapped to 0 and to 1.
-const BASS_FLOOR_DB: f32 = -60.0;
-const BASS_TOP_DB: f32 = -10.0;
-
 /// One hop's result.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Meter {
@@ -46,35 +40,34 @@ pub struct Meter {
     pub tempo: TempoEstimate,
 }
 
-/// A second-order low-pass (RBJ cookbook, Q = 1/√2), transposed direct
-/// form II.
-#[derive(Clone, Copy, Debug, Default)]
-struct LowPass {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    z1: f32,
-    z2: f32,
-}
-
-impl LowPass {
-    fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
-        let w0 = 2.0 * std::f32::consts::PI * (cutoff_hz / sample_rate).min(0.49);
-        let (sin, cos) = w0.sin_cos();
-        let alpha = sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
-        let a0 = 1.0 + alpha;
-        let b1 = (1.0 - cos) / a0;
-        Self { b0: b1 / 2.0, b1, b2: b1 / 2.0, a1: -2.0 * cos / a0, a2: (1.0 - alpha) / a0, z1: 0.0, z2: 0.0 }
+/// The engine's snapshot of one hop (T-237). The legacy fields stay
+/// filled for the existing looks: `bass` = the louder of the normalised
+/// `sub` and `bass` bands (the old meter was everything under 150 Hz),
+/// `beat` = the kick counter. Sections (T-236) only say silence or not yet.
+pub fn native_features(level: f32, spectral: &SpectralFrame, onsets: &Onsets, tempo: &TempoEstimate) -> AudioFeatures {
+    AudioFeatures {
+        level,
+        bass: spectral.bands.sub.max(spectral.bands.bass),
+        beat: onsets.kick,
+        level_db: spectral.level_db,
+        bands: spectral.bands,
+        onset: onsets.onset,
+        kick: onsets.kick,
+        snare: onsets.snare,
+        hat: onsets.hat,
+        kick_strength: onsets.kick_strength,
+        snare_strength: onsets.snare_strength,
+        hat_strength: onsets.hat_strength,
+        centroid_hz: spectral.centroid_hz,
+        silent: spectral.silent,
+        bpm: tempo.bpm,
+        bpm_confidence: tempo.confidence,
+        section: if spectral.silent { Section::Silence } else { Section::Normal },
+        buildup: 0.0,
+        drop: 0,
+        t: spectral.t,
     }
-
-    fn step(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.z1;
-        self.z1 = self.b1 * x - self.a1 * y + self.z2;
-        self.z2 = self.b2 * x - self.a2 * y;
-        y
-    }
+    .sanitized()
 }
 
 pub fn to_db(power: f32) -> f32 {
@@ -87,9 +80,7 @@ pub fn to_db(power: f32) -> f32 {
 
 pub struct Analyzer {
     hop_s: f32,
-    lp: LowPass,
     mean_sq: f32,
-    bass_mean_sq: f32,
     peak_db: f32,
     spectral: SpectralAnalyzer,
     onsets: OnsetDetector,
@@ -110,9 +101,7 @@ impl Analyzer {
         let bpm = BpmTracker::new(onsets.odf_rate(), FFT_SIZE);
         Self {
             hop_s: HOP as f32 / rate,
-            lp: LowPass::new(BASS_HZ, rate),
             mean_sq: 0.0,
-            bass_mean_sq: 0.0,
             peak_db: FLOOR_DB,
             spectral: SpectralAnalyzer::new(sample_rate, config),
             onsets,
@@ -128,29 +117,30 @@ impl Analyzer {
     /// One hop of mono samples ending at `t` (seconds, studio clock).
     pub fn process(&mut self, hop: &[f32], t: f64) -> Meter {
         let n = hop.len().max(1) as f32;
-        let (mut sum, mut bass_sum, mut peak) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut sum, mut peak) = (0.0f32, 0.0f32);
         for &x in hop {
             let x = if x.is_finite() { x } else { 0.0 };
             sum += x * x;
             peak = peak.max(x.abs());
-            let b = self.lp.step(x);
-            bass_sum += b * b;
         }
         let dt = hop.len() as f32 * self.hop_s / HOP as f32;
         let k = 1.0 - (-dt / RMS_TAU_S).exp();
         self.mean_sq += (sum / n - self.mean_sq) * k;
-        self.bass_mean_sq += (bass_sum / n - self.bass_mean_sq) * k;
         let peak_now = to_db(peak * peak);
         self.peak_db = peak_now.max(self.peak_db - PEAK_RELEASE_DB_PER_S * dt).max(FLOOR_DB);
 
         let level = (self.mean_sq.sqrt() * LEVEL_GAIN).min(1.0);
-        let bass = ((to_db(self.bass_mean_sq) - BASS_FLOOR_DB) / (BASS_TOP_DB - BASS_FLOOR_DB)).clamp(0.0, 1.0);
         let rms_db = to_db(self.mean_sq);
         let spectral = self.spectral.process(hop, t, rms_db);
         let onsets = self.onsets.process(self.spectral.power(), t, spectral.silent);
         let tempo = self.bpm.process(self.onsets.band_flux(), t, spectral.silent);
-        let features = AudioFeatures { level, bass, beat: onsets.kick };
+        let features = native_features(level, &spectral, &onsets, &tempo);
         Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets, tempo }
+    }
+
+    /// The last hop's display spectrum (`SpectralAnalyzer::log_spectrum`).
+    pub fn log_spectrum(&self, out: &mut [f32; SPECTRUM_BANDS]) {
+        self.spectral.log_spectrum(out);
     }
 
     pub fn onsets(&self) -> Onsets {
@@ -234,6 +224,23 @@ mod tests {
         run(&mut a, 0.05, |_| 1.0);
         let m = *run(&mut a, 0.5, |_| 0.0).last().unwrap();
         assert!((m.peak_db - (-10.0)).abs() < 0.3, "{m:?}");
+    }
+
+    #[test]
+    fn the_engine_snapshot_carries_every_feature() {
+        let mut a = Analyzer::new(RATE);
+        let s = sine(40.0, 0.3, RATE, RATE as usize, 0);
+        let m = *run(&mut a, 0.5, |i| s[i]).last().unwrap();
+        let f = m.features;
+        assert_eq!(f.bands, m.spectral.bands);
+        assert_eq!(f.bass, m.spectral.bands.sub.max(m.spectral.bands.bass), "legacy bass = the normalised low end");
+        assert!(f.bass > 0.9, "a 40 Hz sine is in `sub`, still bass for the old looks: {f:?}");
+        assert_eq!((f.kick, f.beat, f.onset), (m.onsets.kick, m.onsets.kick, m.onsets.onset));
+        assert_eq!((f.level_db, f.centroid_hz, f.t), (m.spectral.level_db, m.spectral.centroid_hz, m.spectral.t));
+        assert_eq!((f.silent, f.section), (false, Section::Normal));
+        assert_eq!((f.bpm, f.bpm_confidence), (m.tempo.bpm, m.tempo.confidence));
+        let m = *run(&mut Analyzer::new(RATE), 0.5, |_| 0.0).last().unwrap();
+        assert_eq!((m.features.silent, m.features.section, m.features.bass), (true, Section::Silence, 0.0));
     }
 
     #[test]

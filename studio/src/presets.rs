@@ -264,7 +264,7 @@ mod tests {
     fn every_cue_renders_something_within_budget() {
         for p in catalog() {
             let mut a = Animator::default();
-            let pts = a.render(&p.settings, AudioFeatures { level: 0.5, bass: 0.5, beat: 1 }, 1.0 / 60.0, &BeatClock::default());
+            let pts = a.render(&p.settings, AudioFeatures { level: 0.5, bass: 0.5, beat: 1, ..Default::default() }, 1.0 / 60.0, &BeatClock::default());
             assert!(pts.iter().any(|q| q.is_lit()), "cue '{}' ({}) is dark", p.name, p.id);
             assert!(pts.len() <= 4000, "cue '{}' makes {} points", p.name, pts.len());
         }
@@ -291,7 +291,7 @@ mod tests {
             let mut a = Animator::default();
             let mut pts = Vec::new();
             for i in 0..30u64 {
-                pts = a.render(&p.settings, AudioFeatures { level: 0.4, bass: 0.3, beat: i / 10 }, 1.0 / 60.0, &BeatClock::default());
+                pts = a.render(&p.settings, AudioFeatures { level: 0.4, bass: 0.3, beat: i / 10, ..Default::default() }, 1.0 / 60.0, &BeatClock::default());
             }
             values.extend(pts.iter().flat_map(|q| [q.x, q.y, q.r, q.g, q.b]));
         }

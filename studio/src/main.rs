@@ -561,8 +561,9 @@ fn run_engine(
             advance_playlist(&mut s);
             // MIDI faders/encoders: at most one write per control per frame.
             midi::engine::frame(&mut s, now);
-            // Native capture, else the browser's features, else silence.
-            let (audio, _) = s.audio_in.effective(s.audio, s.audio_at, now);
+            // Native capture, else the browser's features, else silence
+            // (falling, not jumping): one snapshot for the whole frame.
+            let (audio, _) = s.audio_in.frame(s.audio, s.audio_at, now);
             let t = s.now_s();
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             live_state.set_clock(t, clock.beat);
