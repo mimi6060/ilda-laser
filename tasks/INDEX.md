@@ -2,11 +2,10 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (89)
+## À faire (88)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
-| [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] |  |
 | [T-245](T-245-safety.md) | Sécurité de la réactivité audio (limiteur, péremption, silence, pas d'armement) | safety | P0 | [T-237, T-101] |  |
 | [T-254](T-254-safety.md) | Plafonds de puissance par sortie et fiche projecteur | safety | P0 | [T-250] |  |
 | [T-271](T-271-safety.md) | Barre du haut fixe : noir, armement, maître, tempo, état de sortie | safety | P0 | [T-270] |  |
@@ -103,10 +102,11 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (52)
+## Fait (53)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
+| [T-003](T-003-safety.md) | Zones de sécurité, horizon, calibration couleur | safety | P0 | [] | feat/safety-zones |
 | [T-208](T-208-safety.md) | Sécurité du pilotage MIDI (blackout prioritaire, armement opt-in, reprise en douceur) | safety | P0 | [T-202] | feat/midi-map |
 | [T-250](T-250-safety.md) | Verrous d'armement (interlocks) et raisons de désarmement | safety | P0 | [] | feat/arming |
 | [T-251](T-251-safety.md) | Arrêt d'urgence verrouillé (clavier, bouton, API, MIDI) | safety | P0 | [T-250] | feat/arming |
