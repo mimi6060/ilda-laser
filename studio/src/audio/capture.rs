@@ -8,7 +8,7 @@
 //! it never waits. Errors reported by the backend only set atomic flags,
 //! read by the capture thread (worker.rs).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -162,7 +162,7 @@ pub fn ring_with_capacity(capacity: usize, channels: u16, counters: Arc<CaptureC
 }
 
 /// An audio input as listed by `GET /api/audio/devices`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InputDevice {
     pub name: String,
     /// The system's default input (Réglages Système › Son › Entrée).

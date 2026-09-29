@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (90)
+## À faire (89)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -68,7 +68,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-239](T-239-live.md) | Préréglages de réactivité audio (correspondances bandes → paramètres laser) | live | P2 | [T-153, T-238] |  |
 | [T-240](T-240-cues.md) | Déclencheurs sur événements audio (kick, drop, break → cues) | cues | P2 | [T-232, T-236, T-155] |  |
 | [T-242](T-242-ui.md) | Permission micro macOS et diagnostic de l'entrée audio | ui | P2 | [T-230] |  |
-| [T-243](T-243-ui.md) | Panneau « Musique » v2 : bandes, spectre, onsets, tempo détecté, section | ui | P2 | [T-237, T-233, T-236] |  |
 | [T-246](T-246-tempo.md) | Compensation de latence : décalage de sortie réglable et temps prédits | tempo | P2 | [T-234] |  |
 | [T-257](T-257-safety.md) | Estimateur d'exposition (EMP) et distance de danger (DNRO) | safety | P2 | [T-254] |  |
 | [T-260](T-260-safety.md) | Profils de sécurité par lieu | safety | P2 | [T-003, T-254, T-101] |  |
@@ -104,7 +103,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (51)
+## Fait (52)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -155,6 +154,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-161](T-161-timeline.md) | Fichier audio et forme d'onde dans la timeline | timeline | P2 | [T-160] | feat/timeline-audio |
 | [T-162](T-162-timeline.md) | Éditeur de timeline (pistes, glisser, magnétisme, zoom, marqueurs, copier-coller) | ui | P2 | [T-160, T-161] | feat/timeline-editor |
 | [T-236](T-236-tempo.md) | Détection montée / drop / break et silence (sections musicales) | tempo | P2 | [T-231, T-232] | feat/audio-sections |
+| [T-243](T-243-ui.md) | Panneau « Musique » v2 : bandes, spectre, onsets, tempo détecté, section | ui | P2 | [T-237, T-233, T-236] | feat/music-panel |
 | [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] | fix/arm-keys |
 | [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] | fix/ui-state |
 | [T-297](T-297-cues.md) | Espace CRÉATION : import SVG et vectorisation d'image vers figure laser | cues | P2 | [T-296] | feat/figure-import |
