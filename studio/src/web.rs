@@ -1225,6 +1225,7 @@ impl SimEstimate {
             onsets: Default::default(),
             tempo,
             spectrum: [crate::audio::analysis::FLOOR_DB; crate::audio::spectrum::SPECTRUM_BANDS],
+            sections: Default::default(),
             t: now,
             at: Instant::now(),
         }

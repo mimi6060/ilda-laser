@@ -8,8 +8,9 @@
 //! - the **capture** thread (worker.rs): opens/closes the input, lists
 //!   devices, retries every 2 s after an unplug or a refusal;
 //! - the **analysis** thread (worker.rs): reads the ring by hops of 256
-//!   samples (analysis.rs, spectrum.rs, onsets.rs, bpm.rs: meter, bands,
-//!   auto-gain, silence, onsets, kick / snare / hat, BPM and beats)
+//!   samples (analysis.rs, spectrum.rs, onsets.rs, bpm.rs, sections.rs:
+//!   meter, bands, auto-gain, silence, onsets, kick / snare / hat, BPM and
+//!   beats, break / build-up / drop)
 //!   and publishes a snapshot in `AudioHub`, which the 60 fps engine reads
 //!   at the top of each frame (a mutex held for a copy).
 //!
@@ -28,6 +29,7 @@ pub mod decode;
 pub mod isolate;
 pub mod media;
 pub mod onsets;
+pub mod sections;
 pub mod playback;
 pub mod spectrum;
 pub mod worker;
@@ -37,6 +39,7 @@ use anyhow::{Context, Result};
 use bpm::TempoEstimate;
 use capture::{InputDevice, MAX_BUFFER_FRAMES, MIN_BUFFER_FRAMES};
 use onsets::Onsets;
+use sections::SectionState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spectrum::{AnalysisConfig, SpectralFrame, SPECTRUM_BANDS};
@@ -298,6 +301,9 @@ pub struct NativeSnapshot {
     /// Display spectrum of the last hop: 64 log bands 20 Hz–20 kHz, dBFS
     /// (`GET /api/audio/spectrum`).
     pub spectrum: [f32; SPECTRUM_BANDS],
+    /// Section (silence / normal / break / build-up / drop), build-up
+    /// value, drop counter (T-236). Detection only: nothing reacts to it yet.
+    pub sections: SectionState,
     /// Audio time of the end of the last hop, seconds since the studio
     /// epoch (the tempo clock's time base).
     pub t: f64,
@@ -574,6 +580,9 @@ impl AudioHub {
             // BPM, confidence, beat_time / next_beat (audio times), state
             // (T-233); null when nothing fresh is captured.
             "tempo": native.map(|n| n.tempo),
+            // Section, confidence, build-up 0..1, drop counter and time,
+            // last 5 changes (T-236); null when nothing fresh is captured.
+            "sections": native.map(|n| n.sections),
             "stats": stats,
             // What the engine uses (T-237), whichever the source: the legacy
             // three, then the whole snapshot. `bands` always present, 0..1.
@@ -606,7 +615,8 @@ mod tests {
     fn snap(level: f32, beat: u64, at: Instant) -> NativeSnapshot {
         let onsets = Onsets { kick: beat, onset: beat + 2, ..Default::default() };
         let tempo = TempoEstimate { bpm: 128.0, confidence: 0.8, beat_time: 0.9, next_beat: 1.37, state: bpm::DetectState::Locked };
-        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], t: 1.0, at }
+        let sections = SectionState { section: Section::Buildup, buildup: 0.4, drop: 2, ..Default::default() };
+        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], sections, t: 1.0, at }
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {
@@ -883,6 +893,7 @@ mod tests {
         assert_eq!(v["spectral"], Value::Null);
         assert_eq!(v["onsets"], Value::Null);
         assert_eq!(v["tempo"], Value::Null);
+        assert_eq!(v["sections"], Value::Null);
         assert_eq!(v["source"], "native");
         assert_eq!(v["active"], "none");
         assert_eq!(v["stats"]["rms_db"], analysis::FLOOR_DB as f64);
@@ -908,6 +919,8 @@ mod tests {
         let bands = v["bands"].as_object().unwrap();
         assert_eq!(bands.len(), 5);
         assert!(bands.values().all(|b| (0.0..=1.0).contains(&b.as_f64().unwrap())));
+        assert_eq!((v["sections"]["section"].as_str(), v["sections"]["drop"].as_u64()), (Some("buildup"), Some(2)));
+        assert_eq!(v["sections"]["history"], json!([]));
         set_source(&hub, AudioInputSource::Browser);
         assert_eq!(hub.view(AudioFeatures::default(), now, now)["spectral"], Value::Null, "native only");
         let off = AudioHub::in_memory(false);

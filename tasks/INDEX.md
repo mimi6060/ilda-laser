@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (92)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-236](T-236-tempo.md) | Détection montée / drop / break et silence (sections musicales) | tempo | P2 | [T-231, T-232] | feat/audio-sections |
+
+## À faire (91)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -66,7 +72,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-206](T-206-midi.md) | Couleurs RGB des pads sur l'APC40 mkII (couleur de la cue, pulsation) | midi | P2 | [T-205] |  |
 | [T-210](T-210-ui.md) | APC40 virtuel à l'écran (disposition, affectations, état des LED) | ui | P2 | [T-203, T-204, T-205] |  |
 | [T-235](T-235-tempo.md) | Détection du temps fort (début de mesure) et des phrases de 8/16 mesures | tempo | P2 | [T-234, T-236] |  |
-| [T-236](T-236-tempo.md) | Détection montée / drop / break et silence (sections musicales) | tempo | P2 | [T-231, T-232] |  |
 | [T-239](T-239-live.md) | Préréglages de réactivité audio (correspondances bandes → paramètres laser) | live | P2 | [T-153, T-238] |  |
 | [T-240](T-240-cues.md) | Déclencheurs sur événements audio (kick, drop, break → cues) | cues | P2 | [T-232, T-236, T-155] |  |
 | [T-242](T-242-ui.md) | Permission micro macOS et diagnostic de l'entrée audio | ui | P2 | [T-230] |  |
