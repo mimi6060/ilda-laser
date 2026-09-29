@@ -1,7 +1,7 @@
 ---
 id: T-237
 title: AudioFeatures v2 : instantané complet côté moteur et dans /api/state
-status: in-progress
+status: review
 area: live
 priority: P1
 depends_on: [T-231]
@@ -34,10 +34,10 @@ pub struct AudioFeatures { pub level: f32, pub bass: f32, pub beat: u64,        
 L'interface lit `/api/state.audio` pour tous les vumètres (plus d'analyse locale quand la source est *Native*).
 
 ## Critères d'acceptation
-- [ ] Une scène sauvegardée avant la tâche charge et rend à l'identique (test de non-régression)
-- [ ] `POST /api/audio {level, bass, beat}` (ancien format) fonctionne toujours
-- [ ] Fil d'analyse arrêté : en ≤ 1 s les valeurs retombent à neutre, sans saut brutal
-- [ ] `/api/state.audio.bands` présent et borné 0..1
+- [x] Une scène sauvegardée avant la tâche charge et rend à l'identique (test de non-régression)
+- [x] `POST /api/audio {level, bass, beat}` (ancien format) fonctionne toujours
+- [x] Fil d'analyse arrêté : en ≤ 1 s les valeurs retombent à neutre, sans saut brutal
+- [x] `/api/state.audio.bands` présent et borné 0..1
 
 ## Tests
 Unitaires : sérialisation ancien/nouveau format, décroissance à la péremption. e2e : `POST /api/audio` nouveau format → `/api/state.audio`.
@@ -47,3 +47,4 @@ Unitaires : sérialisation ancien/nouveau format, décroissance à la péremptio
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/audio-analysis.md`.
+- 2026-09-29 — agent de développement (branche `feat/audio-features-v2`) : `AudioFeatures` v2 (bandes, onsets, BPM détecté + confiance, `Section`, `buildup`, `drop`, `silent`, `t`), remplie par l'analyse native et par `POST /api/audio` (ancien et nouveau format). `AudioHub::frame` : instantané périmé → retour au neutre en τ 100 ms (neutre en ≤ 1 s). `/api/state.audio` : `bands`, `counters`, `signals`, `section`, `detected_bpm`… ; `GET /api/audio/spectrum` (64 bandes log). `bass` hérité natif = max(sub, bass) normalisés. 610 tests unitaires, clippy propre, e2e 153/153. Note : `docs/prs/audio-features-v2.md`. Statut `review`.

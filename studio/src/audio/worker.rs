@@ -13,7 +13,8 @@
 //! Neither ever takes the `Shared` lock: a stuck device can't stall the
 //! engine or the UI.
 
-use super::analysis::{Analyzer, HOP};
+use super::analysis::{Analyzer, FLOOR_DB, HOP};
+use super::spectrum::SPECTRUM_BANDS;
 use super::bpm::TempoEstimate;
 use super::onsets::Onsets;
 use super::capture::{self, CaptureCounters, CpalSource, OpenError, OpenRequest, SampleSource};
@@ -260,7 +261,11 @@ impl Analysis {
         self.onsets = cur.analyzer.onsets();
         self.tempo = cur.analyzer.tempo();
         if let Some((m, t)) = last {
-            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, tempo: m.tempo, t, at: Instant::now() });
+            // The display spectrum of the last hop only (64 maxima over 513
+            // bins, once per poll).
+            let mut spectrum = [FLOOR_DB; SPECTRUM_BANDS];
+            cur.analyzer.log_spectrum(&mut spectrum);
+            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, tempo: m.tempo, spectrum, t, at: Instant::now() });
         }
         if cur.feed.consumer.is_abandoned() && cur.feed.consumer.slots() < HOP {
             // The stream was closed and its ring is drained.
