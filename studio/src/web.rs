@@ -406,7 +406,12 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         }
         (Method::Get, "/api/presets") => {
             let s = shared.lock().unwrap();
-            let list: Vec<_> = s.presets.iter().map(|p| json!({ "id": p.id, "name": p.name, "category": p.category })).collect();
+            // `beats`: an evolving cue's length, the timeline editor's default event length (T-162).
+            let beats = |p: &crate::presets::Preset| match &p.settings.content {
+                crate::engine::Content::Evolving(e) => Some(e.length_beats),
+                _ => None,
+            };
+            let list: Vec<_> = s.presets.iter().map(|p| json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p) })).collect();
             json_response(json!({ "categories": CATEGORIES, "presets": list }))
         }
         (Method::Post, "/api/presets/play") => match body::<IdRequest>(request) {
@@ -730,6 +735,11 @@ fn attach_song(patch: SongPatch, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     }
     show.sanitize();
     let saved = crate::timeline::valid_show_name(&show.name) && s.shows.save(show).is_ok();
+    if saved {
+        s.timeline.saved();
+    } else {
+        s.timeline.touch();
+    }
     let c = s.timeline_clock();
     json_response(json!({ "state": s.timeline.state(&c), "audio": song_view(s), "saved": saved }))
 }
@@ -741,11 +751,11 @@ fn song_view(s: &Shared) -> serde_json::Value {
     v
 }
 
-/// `POST /api/timeline/{load,play,pause,stop,seek,loop}`. Transport only:
-/// nothing here can arm the laser.
+/// `POST /api/timeline/{load,play,pause,stop,seek,loop}` (transport) and
+/// `{new,edit,save}` (the editor, T-162). Nothing here can arm the laser.
 fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &str) -> HttpResponse {
     let req = match action {
-        "load" | "seek" | "loop" => match body::<TimelineRequest>(request) {
+        "load" | "seek" | "loop" | "new" | "edit" | "save" => match body::<TimelineRequest>(request) {
             Ok(req) => req,
             Err(e) => return e,
         },
@@ -783,7 +793,48 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
             if let (Some(region), Some(show)) = (req.region, s.timeline.show.as_mut()) {
                 show.loop_region = region;
                 show.sanitize();
+                s.timeline.touch();
             }
+        }
+        "new" => {
+            let name = req.name.unwrap_or_default().trim().to_string();
+            if !crate::timeline::valid_show_name(&name) {
+                return text(400, "nom de show invalide (lettres, chiffres, espaces, - et _ seulement)");
+            }
+            if s.shows.list().iter().any(|i| i.name == name) {
+                return text(409, &format!("un show s'appelle déjà « {name} »"));
+            }
+            let show = crate::timeline::Show::new_empty(&name, req.time_base.unwrap_or_default());
+            if let Err(e) = s.shows.save(&show) {
+                return text(500, &format!("{e:#}"));
+            }
+            s.timeline.load(show);
+        }
+        "edit" => {
+            let Some(show) = req.show else { return text(400, "expected \"show\"") };
+            let Some(cur) = s.timeline.show.as_ref() else { return text(409, "aucun show chargé") };
+            // A cue must exist, or already be in the show (a figure deleted
+            // since keeps its events until the operator removes them).
+            let before = cur.cue_ids();
+            if let Err(e) = show.validate_edit(|id| before.contains(id) || s.presets.iter().any(|p| p.id == id)) {
+                return text(400, &format!("{e:#}"));
+            }
+            s.timeline.edit(show);
+            return json_response(json!({ "state": s.timeline.state(&c), "show": s.timeline.show }));
+        }
+        "save" => {
+            let st = &mut *s;
+            let Some(show) = st.timeline.show.as_mut() else { return text(409, "aucun show chargé") };
+            if let Some(name) = req.name.map(|n| n.trim().to_string()).filter(|n| *n != show.name) {
+                if !crate::timeline::valid_show_name(&name) {
+                    return text(400, "nom de show invalide (lettres, chiffres, espaces, - et _ seulement)");
+                }
+                show.name = name;
+            }
+            if let Err(e) = st.shows.save(show) {
+                return text(400, &format!("{e:#}"));
+            }
+            st.timeline.saved();
         }
         _ => return text(404, "not found"),
     }
@@ -793,6 +844,8 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
 #[derive(Deserialize, Default)]
 struct TimelineRequest {
     name: Option<String>,
+    /// `new`: *Secondes* (default) or *Temps*.
+    time_base: Option<crate::timeline::TimeBase>,
     show: Option<crate::timeline::Show>,
     position: Option<f64>,
     on: Option<bool>,
@@ -1513,6 +1566,49 @@ mod tests {
         assert_eq!(t.request("POST", "/api/timeline/play", "").0, 409);
         assert_eq!(t.request("POST", "/api/timeline/stop", "").0, 200);
         assert!(!t.shared.lock().unwrap().timeline.is_playing());
+    }
+
+    /// T-162: the editor's routes. New show, edits validated and applied
+    /// while playing (never arming), save and save-as, names confined.
+    #[test]
+    fn timeline_editor_routes() {
+        let t = TestServer::start(false);
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        let json = |b: &str| serde_json::from_str::<serde_json::Value>(b).unwrap();
+        assert_eq!(t.request("POST", "/api/timeline/edit", r#"{"show":{}}"#).0, 409, "no show loaded");
+        assert_eq!(t.request("POST", "/api/timeline/save", "{}").0, 409);
+        assert_eq!(t.request("POST", "/api/timeline/new", r#"{"name":"../x"}"#).0, 400);
+        let (status, body) = t.request("POST", "/api/timeline/new", r#"{"name":"Editeur web","time_base":"seconds"}"#);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(json(&body)["name"], "Editeur web");
+        assert_eq!(t.request("POST", "/api/timeline/new", r#"{"name":"Editeur web"}"#).0, 409, "exists already");
+        assert!(t.shared.lock().unwrap().shows.load("Editeur web").is_ok(), "created on disk");
+
+        let (_, body) = t.request("GET", "/api/timeline", "");
+        let mut show = json(&body)["show"].clone();
+        assert_eq!(show["tracks"].as_array().unwrap().len(), 2);
+        show["tracks"][0]["events"] = json!([{ "id": 0, "start": 2.0, "len": 2.0, "source": { "kind": "cue", "id": cue } }]);
+        let bad = json!({ "show": { "tracks": [{ "events": [{ "start": 0, "len": 1, "source": { "kind": "cue", "id": "nope" } }] }] } });
+        let (status, body) = t.request("POST", "/api/timeline/edit", &bad.to_string());
+        assert_eq!((status, body.contains("cue inconnu")), (400, true));
+        assert_eq!(t.request("POST", "/api/timeline/play", "").0, 200);
+        let (status, body) = t.request("POST", "/api/timeline/edit", &json!({ "show": show }).to_string());
+        assert_eq!(status, 200, "{body}");
+        let r = json(&body);
+        assert_eq!((r["state"]["playing"].as_bool(), r["state"]["modified"].as_bool()), (Some(true), Some(true)));
+        assert!(r["show"]["tracks"][0]["events"][0]["id"].as_u64().unwrap() > 0, "ids given by the server");
+        assert_eq!(t.shared.lock().unwrap().shows.load("Editeur web").unwrap().end(), 0.0, "not saved yet");
+
+        let (status, body) = t.request("POST", "/api/timeline/save", "{}");
+        assert_eq!((status, json(&body)["modified"].as_bool()), (200, Some(false)));
+        assert_eq!(t.shared.lock().unwrap().shows.load("Editeur web").unwrap().end(), 4.0);
+        assert_eq!(t.request("POST", "/api/timeline/save", r#"{"name":"../../evil"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/timeline/save", r#"{"name":"Editeur copie"}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().shows.load("Editeur copie").unwrap().end(), 4.0);
+        let state = json(&t.request("GET", "/api/state", "").1);
+        assert_eq!(state["timeline"]["name"], "Editeur copie");
+        assert_eq!(state["armed"], false, "editing and saving never arm");
+        t.request("POST", "/api/timeline/stop", "");
     }
 
     /// Like `http`, with a binary body.
