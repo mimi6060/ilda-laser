@@ -1,12 +1,12 @@
 ---
 id: T-237
 title: AudioFeatures v2 : instantané complet côté moteur et dans /api/state
-status: todo
+status: in-progress
 area: live
 priority: P1
 depends_on: [T-231]
-owner: ""
-branch: ""
+owner: "dev-agent (T-237)"
+branch: feat/audio-features-v2
 source: docs/research/audio-analysis.md §2 et §3
 ---
 
