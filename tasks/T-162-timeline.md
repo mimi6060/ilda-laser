@@ -1,12 +1,12 @@
 ---
 id: T-162
 title: Éditeur de timeline (pistes, glisser, magnétisme, zoom, marqueurs, copier-coller)
-status: todo
+status: in-progress
 area: ui
 priority: P2
 depends_on: [T-160, T-161]
-owner: ""
-branch: ""
+owner: "dev-agent (timeline-editor)"
+branch: feat/timeline-editor
 source: docs/research/pro-live-operation.md §3.1, §3.3
 ---
 
