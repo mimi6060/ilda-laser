@@ -1,12 +1,12 @@
 ---
 id: T-153
 title: Routage des bandes audio vers n'importe quel contrôle
-status: todo
+status: in-progress
 area: live
 priority: P2
 depends_on: [T-145, T-151]
-owner: ""
-branch: ""
+owner: "dev agent (feat/audio-routing)"
+branch: feat/audio-routing
 source: docs/research/pro-live-operation.md §4
 ---
 
