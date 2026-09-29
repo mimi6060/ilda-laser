@@ -232,9 +232,9 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         },
         (Method::Post, "/api/audio/tempo/new_track") => {
             // *Nouveau morceau*: the native tempo estimator forgets its
-            // history (applied by the analysis thread; never blocks).
-            let hub = Arc::clone(&shared.lock().unwrap().audio_in);
-            hub.new_track();
+            // history and guide (applied by the analysis thread; never
+            // blocks), the clock its follower history.
+            shared.lock().unwrap().tempo_new_track();
             ok()
         }
         (Method::Post, "/api/heartbeat") => match body::<Heartbeat>(request) {
@@ -271,6 +271,23 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             s.test_stall_ms = ms;
             ok()
+        }
+        (Method::Post, "/api/test/tempo_estimate") => {
+            // `--test-hooks` only (e2e of Tempo auto, T-234): publishes a
+            // simulated detector estimate as if from the native analysis,
+            // its beats on the grid `offset_s + n·60/bpm` (studio time).
+            // Fresh for 500 ms, like a real one.
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            match body::<SimEstimate>(request) {
+                Ok(sim) => {
+                    let s = shared.lock().unwrap();
+                    s.audio_in.publish(sim.snapshot(s.now_s()));
+                    ok()
+                }
+                Err(e) => e,
+            }
         }
         (Method::Get, "/api/arm") => {
             let s = shared.lock().unwrap();
@@ -1132,6 +1149,35 @@ fn with_type(response: HttpResponse, content_type: &str) -> HttpResponse {
     response.with_header(header)
 }
 
+/// `POST /api/test/tempo_estimate` (`--test-hooks`): a simulated detector.
+#[derive(Deserialize)]
+struct SimEstimate {
+    bpm: f32,
+    confidence: f32,
+    state: crate::audio::bpm::DetectState,
+    #[serde(default)]
+    offset_s: f64,
+}
+
+impl SimEstimate {
+    fn snapshot(&self, now: f64) -> crate::audio::NativeSnapshot {
+        let spb = 60.0 / (self.bpm as f64).clamp(crate::tempo::MIN_BPM, crate::tempo::MAX_BPM);
+        let beat_time = self.offset_s + ((now - self.offset_s) / spb).floor() * spb;
+        let tempo = crate::audio::bpm::TempoEstimate { bpm: self.bpm, confidence: self.confidence, beat_time, next_beat: beat_time + spb, state: self.state };
+        crate::audio::NativeSnapshot {
+            features: crate::engine::AudioFeatures::default(),
+            rms_db: crate::audio::analysis::FLOOR_DB,
+            peak_db: crate::audio::analysis::FLOOR_DB,
+            spectral: Default::default(),
+            onsets: Default::default(),
+            tempo,
+            spectrum: [crate::audio::analysis::FLOOR_DB; crate::audio::spectrum::SPECTRUM_BANDS],
+            t: now,
+            at: Instant::now(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,6 +1423,20 @@ mod tests {
         t.shared.lock().unwrap().test_hooks = true;
         assert_eq!(t.request("POST", "/api/test/stall?ms=99999", "").0, 200);
         assert_eq!(t.shared.lock().unwrap().test_stall_ms, 2_000, "bounded");
+    }
+
+    #[test]
+    fn the_tempo_estimate_hook_exists_only_with_test_hooks() {
+        let t = TestServer::start(false);
+        let est = r#"{"bpm":128,"confidence":0.9,"state":"locked","offset_s":0.25}"#;
+        assert_eq!(t.request("POST", "/api/test/tempo_estimate", est).0, 404);
+        assert!(t.shared.lock().unwrap().audio_in.snapshot().is_none());
+        t.shared.lock().unwrap().test_hooks = true;
+        assert_eq!(t.request("POST", "/api/test/tempo_estimate", est).0, 200);
+        let snap = t.shared.lock().unwrap().audio_in.snapshot().unwrap();
+        assert_eq!((snap.tempo.bpm, snap.tempo.state), (128.0, crate::audio::bpm::DetectState::Locked));
+        let n = (snap.tempo.beat_time - 0.25) / (60.0 / 128.0);
+        assert!((n - n.round()).abs() < 1e-9 && snap.tempo.beat_time <= snap.t);
     }
 
     #[test]

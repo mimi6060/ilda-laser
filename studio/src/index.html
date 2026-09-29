@@ -320,6 +320,9 @@
     <button data-ctl="tempo.double" data-control="tempo.double" title="tempo.double">×2</button>
     <button data-ctl="tempo.nudge_down" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
     <button data-ctl="tempo.nudge_up" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
+    <button id="tempoAuto" data-control="tempo.auto" title="tempo.auto : le tempo suit la musique détectée (un tap reprend la main)">Auto</button>
+    <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" title="tempo.guide : tapez le tempo pour guider la détection, sans l'imposer" hidden>Guider</button>
+    <span class="hint" id="tempoSrc" style="margin:0" title="Tempo auto : état du suivi et confiance de la détection" hidden></span>
   </div>
   <div id="midiStatus" title="Contrôleurs MIDI : clic = RÉGLAGES › Contrôleur">MIDI : …</div>
   <div id="output">…</div>
@@ -1778,7 +1781,15 @@ function showTempo(t) {
     d.classList.toggle('on', i === t.beat_in_bar && t.phase < 0.5);
   });
   $('gBpm').textContent = t.bpm.toFixed(1) + ' BPM';
+  // Tempo auto (T-234): source, follower state and detection confidence.
+  const auto = t.source === 'audio';
+  $('tempoAuto').classList.toggle('active', auto);
+  $('tempoGuide').hidden = !auto;
+  const FOLLOW = { waiting: 'en attente', locked: 'verrouillé', coasting: 'maintien', unlocked: 'déverrouillé' };
+  $('tempoSrc').hidden = !auto;
+  $('tempoSrc').textContent = auto ? `${FOLLOW[t.follow] || t.follow} ${Math.round(100 * (t.confidence || 0))} %` + (t.guide_bpm ? ` · guide ${t.guide_bpm.toFixed(0)}` : '') : '';
 }
+$('tempoAuto').addEventListener('click', () => post('/api/control', { id: 'tempo.auto', value: $('tempoAuto').classList.contains('active') ? 0 : 1 }));
 document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => post('/api/control', { id: b.dataset.ctl })));
 $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm', value: +$('bpm').value }));
 

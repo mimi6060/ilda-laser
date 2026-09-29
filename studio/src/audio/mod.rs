@@ -334,6 +334,9 @@ pub struct AudioHub {
     new_tracks: AtomicU64,
     /// The engine's last frame of features (`frame`).
     release: Mutex<Release>,
+    /// The *Guider* tempo for the estimator (T-234) and a generation
+    /// bumped on each change (the analysis thread compares).
+    guide: Mutex<(Option<f32>, u64)>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -350,7 +353,7 @@ impl AudioHub {
         } else {
             CaptureStatus { state: CaptureState::Disabled, message: "Capture audio désactivée (--no-audio)".into(), ..Default::default() }
         };
-        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }) }
+        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }), guide: Mutex::new((None, 0)) }
     }
 
     /// From `<data_dir>/audio.json`, then `--audio-device` (for this run).
@@ -433,6 +436,30 @@ impl AudioHub {
 
     pub fn new_track_requests(&self) -> u64 {
         self.new_tracks.load(Ordering::Relaxed)
+    }
+
+    /// *Guider*: a tempo the estimator takes as a strong prior, or none.
+    /// Applied by the analysis thread at its next poll.
+    pub fn set_guide(&self, bpm: Option<f64>) {
+        let bpm = bpm.filter(|b| b.is_finite() && *b > 0.0).map(|b| b as f32);
+        let mut g = lock(&self.guide);
+        if g.0 != bpm {
+            *g = (bpm, g.1 + 1);
+        }
+    }
+
+    /// The guide and its generation.
+    pub fn guide(&self) -> (Option<f32>, u64) {
+        *lock(&self.guide)
+    }
+
+    /// The latest native tempo estimate, if fresh and the native input is
+    /// the audio source (what *Tempo auto* follows).
+    pub fn fresh_tempo(&self, now: Instant) -> Option<TempoEstimate> {
+        if lock(&self.config).0.source != AudioInputSource::Native {
+            return None;
+        }
+        self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE).map(|n| n.tempo)
     }
 
     pub fn publish(&self, snapshot: NativeSnapshot) {
@@ -584,6 +611,26 @@ mod tests {
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {
         hub.set_config(AudioConfig { source, ..hub.config().0 }).unwrap();
+    }
+
+    #[test]
+    fn tempo_auto_reads_only_a_fresh_native_estimate_and_guides_by_generation() {
+        let hub = AudioHub::in_memory(true);
+        let now = Instant::now();
+        let mut n = snap(0.5, 1, now);
+        n.tempo = TempoEstimate { bpm: 128.0, confidence: 0.9, state: bpm::DetectState::Locked, ..Default::default() };
+        hub.publish(n);
+        assert_eq!(hub.fresh_tempo(now).map(|t| t.bpm), Some(128.0));
+        assert_eq!(hub.fresh_tempo(now + STALE), None, "stale");
+        set_source(&hub, AudioInputSource::Browser);
+        assert_eq!(hub.fresh_tempo(now), None, "native input not selected");
+
+        assert_eq!(hub.guide(), (None, 0));
+        hub.set_guide(Some(127.5));
+        hub.set_guide(Some(127.5));
+        assert_eq!(hub.guide(), (Some(127.5), 1), "same guide: no new generation");
+        hub.set_guide(Some(f64::NAN));
+        assert_eq!(hub.guide(), (None, 2));
     }
 
     #[test]
