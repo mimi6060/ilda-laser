@@ -1,6 +1,6 @@
 //! Project files (T-286): one `.lsproj` file holds a whole show - scenes
 //! and playlist, cue-grid properties, timelines, default tempo, master
-//! live modifiers, layers, LFOs, user palettes, MIDI mappings and the
+//! live modifiers, layers, LFOs, audio routes (T-153), user palettes, MIDI mappings and the
 //! figure library (T-296) - as
 //! pretty-printed, versioned JSON in `<data-dir>/projects/`.
 //!
@@ -23,6 +23,7 @@
 //! thread with the engine lock released: the lock is only held to copy
 //! the state out, or to swap the checked state in.
 
+use crate::audio::routes::AudioRouting;
 use crate::cues::CueDeck;
 use crate::figures::Figure;
 use crate::layers::Mixer;
@@ -95,6 +96,9 @@ pub struct Project {
     pub live: LiveModifiers,
     pub layers: Mixer,
     pub lfos: Vec<Modulator>,
+    /// Audio routes and the *Temps ↔ Audio* crossfader. Missing in
+    /// projects saved before T-153: they open with none.
+    pub audio_routes: AudioRouting,
     pub palettes: Vec<Palette>,
     pub midi: MidiSection,
     /// The figure library (`figures/`). Missing in projects saved before
@@ -119,6 +123,7 @@ impl Default for Project {
             live: LiveModifiers::default(),
             layers: Mixer::default(),
             lfos: Vec::new(),
+            audio_routes: AudioRouting::default(),
             palettes: Vec::new(),
             midi: MidiSection::default(),
             figures: Vec::new(),
@@ -194,7 +199,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 8] = ["scenes.json", "grid.json", "live.json", "layers.json", "lfos.json", "palettes.json", "shows", "figures"];
+const WORKING_FILES: [&str; 9] = ["scenes.json", "grid.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -279,8 +284,9 @@ fn name_of(path: &Path) -> String {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string()
 }
 
-/// Reads and checks a project file. Everything but the LFO targets (which
-/// need the control registry, see `check_lfos`) is checked here.
+/// Reads and checks a project file. Everything but the LFO and audio
+/// route targets (which need the control registry, see `check_lfos`) is
+/// checked here.
 pub fn read(path: &Path) -> Result<Project> {
     let meta = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => anyhow::anyhow!("projet introuvable : {}", name_of(path)),
@@ -374,9 +380,11 @@ fn check(p: &mut Project) -> Result<()> {
     Ok(())
 }
 
-/// LFO targets must be controls that exist and can be modulated.
+/// LFO and audio route targets must be controls that exist and can be
+/// modulated; route sources must be known analysis values or events.
 fn check_lfos(p: &Project, reg: &crate::controls::ControlRegistry) -> Result<()> {
-    crate::lfo::validate(&p.lfos, reg).map_err(|e| anyhow::anyhow!("LFO : {e}"))
+    crate::lfo::validate(&p.lfos, reg).map_err(|e| anyhow::anyhow!("LFO : {e}"))?;
+    crate::audio::routes::validate(&p.audio_routes, reg).map_err(|e| anyhow::anyhow!("liens audio : {e}"))
 }
 
 /// The project sections as they are now, without the timelines (on disk,
@@ -390,6 +398,7 @@ pub fn snapshot(s: &Shared) -> Project {
         live: s.live.clone(),
         layers: s.mixer.clone(),
         lfos: s.lfos.list().to_vec(),
+        audio_routes: s.routes.routing().clone(),
         palettes: s.palettes.list().to_vec(),
         midi: MidiSection { profiles: s.midi.store.user_profiles().clone() },
         figures: s.figures.list().to_vec(),
@@ -412,6 +421,7 @@ fn apply(s: &mut Shared, p: &Project) {
     s.live = p.live.clone();
     s.mixer = p.layers.clone();
     s.lfos.replace_in_memory(p.lfos.clone());
+    s.routes.replace_in_memory(p.audio_routes.clone(), &s.controls);
     s.palettes.replace_in_memory(p.palettes.clone());
     s.midi.store.replace_user_in_memory(p.midi.profiles.clone());
     s.figures.replace_in_memory(p.figures.clone());
@@ -428,6 +438,7 @@ struct WorkingPaths {
     grid: Option<PathBuf>,
     shows: PathBuf,
     lfos: PathBuf,
+    routes: PathBuf,
     palettes: PathBuf,
     midi: Option<PathBuf>,
     figures: Option<PathBuf>,
@@ -441,6 +452,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         grid: s.deck.path().map(Path::to_path_buf),
         shows: s.shows.dir().to_path_buf(),
         lfos: s.lfos.path().to_path_buf(),
+        routes: s.routes.path().to_path_buf(),
         palettes: s.palettes.path().to_path_buf(),
         midi: s.midi.store.dir().map(|d| d.join("profiles")),
         figures: s.figures.dir().map(Path::to_path_buf),
@@ -464,6 +476,7 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
         put(grid, serde_json::to_vec_pretty(&p.grid));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
+    put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
     put(&w.palettes, serde_json::to_vec_pretty(&p.palettes));
     put(&w.live, serde_json::to_vec_pretty(&p.live));
     put(&w.layers, serde_json::to_vec_pretty(&p.layers));
@@ -742,6 +755,7 @@ mod tests {
         s.deck = CueDeck::load(dir.join("grid.json"));
         s.shows = crate::timeline::ShowStore::new(dir.join("shows"));
         s.lfos = crate::lfo::LfoStore::load_or_create(dir.join("lfos.json"), &s.controls);
+        s.routes = crate::audio::routes::RouteStore::load_or_create(dir.join("audio_routes.json"), &s.controls);
         s.palettes = crate::live::PaletteStore::load_or_create(dir.join("palettes.json"));
         s.midi.store = ProfileStore::load(dir.join("midi"));
         s.figures = crate::figures::FigureStore::load(dir.join("figures"));
@@ -814,6 +828,34 @@ mod tests {
         let on_disk: Vec<Scene> = serde_json::from_str(&std::fs::read_to_string(dir.join("scenes.json")).unwrap()).unwrap();
         assert_eq!(on_disk.len(), 2);
         drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn audio_routes_are_saved_in_the_project_and_old_projects_still_open() {
+        use crate::audio::routes::{AudioRoute, AudioRouting};
+        let dir = temp_dir("routes");
+        let shared = studio(&dir);
+        let routing = AudioRouting { mix: 0.7, routes: vec![AudioRoute { source: "kick".into(), target: "master.brightness".into(), ..Default::default() }, AudioRoute::default()] };
+        {
+            let s = &mut *shared.lock().unwrap();
+            s.routes.set(routing.clone(), &s.controls).unwrap();
+        }
+        assert!(modified(&shared), "a route is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Avec routes" })).unwrap();
+        {
+            let s = &mut *shared.lock().unwrap();
+            s.routes.set(AudioRouting::default(), &s.controls).unwrap();
+        }
+        post(&shared, &dir, "open", json!({ "path": "Avec routes" })).unwrap();
+        assert_eq!(shared.lock().unwrap().routes.routing(), &routing, "reopened identical");
+        let on_disk: AudioRouting = serde_json::from_str(&std::fs::read_to_string(dir.join("audio_routes.json")).unwrap()).unwrap();
+        assert_eq!(on_disk, routing, "the working copy is the project's");
+        // A project from before T-153 opens with no routes.
+        std::fs::write(dir.join("projects/Ancien.lsproj"), json!({ "format_version": 1, "scenes": [] }).to_string()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "Ancien" })).unwrap();
+        assert_eq!(shared.lock().unwrap().routes.routing(), &AudioRouting::default());
+        assert!(!modified(&shared));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -915,6 +957,8 @@ mod tests {
             ("dup", json!({ "format_version": 1, "scenes": [scenes[0], scenes[0]] }).to_string()),
             ("show", json!({ "format_version": 1, "scenes": scenes, "timelines": [{ "name": "../../evil" }] }).to_string()),
             ("lfo", json!({ "format_version": 1, "scenes": scenes, "lfos": [{ "target": "safety.estop" }] }).to_string()),
+            ("route", json!({ "format_version": 1, "scenes": scenes, "audio_routes": { "routes": [{ "source": "kick", "target": "transport.arm" }] } }).to_string()),
+            ("routesrc", json!({ "format_version": 1, "scenes": scenes, "audio_routes": { "routes": [{ "source": "volume" }] } }).to_string()),
             ("midi", json!({ "format_version": 1, "scenes": scenes, "midi": { "profiles": { "../x": {} } } }).to_string()),
             ("palette", json!({ "format_version": 1, "scenes": scenes, "palettes": [{ "name": "", "colors": [] }] }).to_string()),
             ("figure", json!({ "format_version": 1, "scenes": scenes, "figures": [{ "name": "../../evil" }] }).to_string()),

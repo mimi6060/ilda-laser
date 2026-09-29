@@ -11,6 +11,7 @@ pub fn shared() -> Shared {
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/lfos.json"), &controls);
+    let routes = crate::audio::routes::RouteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/audio_routes.json"), &controls);
     Shared {
         settings: Settings::default(),
         calibration: Calibration::default(),
@@ -40,6 +41,7 @@ pub fn shared() -> Shared {
         palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
         midi: midi::MidiState::new(false, midi::profile::ProfileStore::in_memory()),
         lfos,
+        routes,
         mixer: layers::Mixer::default(),
         mixer_dirty: false,
         mix: layers::MixReport::default(),
