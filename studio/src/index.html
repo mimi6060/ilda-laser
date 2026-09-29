@@ -52,7 +52,38 @@
     grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); grid-template-areas: "stage panel"; }
   main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 350px 400px; grid-template-rows: minmax(0, 1fr) minmax(250px, 36vh);
     grid-template-areas: "stage layers panel" "cues cues cues"; }
-  main[data-ws-active="timeline"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  main[data-ws-active="timeline"] { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); grid-template-rows: minmax(170px, 34%) minmax(0, 1fr);
+    grid-template-areas: "stage panel" "editor editor"; }
+  /* TIMELINE editor (T-162): toolbar, then library | track heads | canvas. */
+  #tlEditor { grid-area: editor; display: grid; min-height: 0; min-width: 0; gap: 6px 8px; padding: 8px 10px;
+    grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "tools tools" "lib tracks"; }
+  .tl-tools { grid-area: tools; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .tl-tools button { padding: 5px 9px; font-size: 12px; }
+  .tl-tools input[type=number] { width: 62px; padding: 4px; }
+  .tl-tools input[type=text] { width: 150px; padding: 4px; }
+  .tl-tools select { width: auto; padding: 4px; }
+  .tl-tools .seg button { flex: none; }
+  .tl-tools .sep { width: 1px; align-self: stretch; background: var(--line); }
+  #tlModified { color: var(--warn); font-size: 12px; }
+  #tlEdMsg { margin: 0; flex-basis: 100%; }
+  #tlEdMsg.err { color: var(--danger); }
+  #tlNewRow[hidden], #tlMarkRow[hidden] { display: none; }
+  .tl-lib { grid-area: lib; display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+  .tl-lib select, .tl-lib input { width: 100%; padding: 4px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  #tlLibList { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+  .tl-lib-item { flex: none; padding: 4px 6px; font-size: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); cursor: grab; user-select: none; -webkit-user-select: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tl-lib-item .d { color: var(--muted); font-size: 10px; margin-left: 4px; }
+  #tlTracks { grid-area: tracks; display: grid; grid-template-columns: 180px minmax(0, 1fr); align-items: start; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
+    border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
+  #tlHeads { display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+  #tlHeads .top { display: flex; align-items: flex-end; padding: 4px 6px; font-size: 11px; color: var(--muted); box-sizing: border-box; }
+  .tl-head { display: flex; align-items: center; gap: 3px; padding: 0 4px; border-top: 1px solid var(--line); box-sizing: border-box; border-left: 4px solid var(--line); }
+  .tl-head input[type=text] { flex: 1; min-width: 0; padding: 2px 4px; font-size: 11px; border-radius: 4px; }
+  .tl-head select { flex: none; width: auto; padding: 1px; font-size: 11px; border-radius: 4px; }
+  .tl-head button { flex: none; padding: 1px 4px; font-size: 11px; }
+  #tlCanvas { display: block; width: 100%; aspect-ratio: auto; border: 0; border-radius: 0; background: transparent; touch-action: none; outline: none; }
+  #tlCanvas:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
   main[data-ws-active="creation"] { grid-template-columns: minmax(0, 1fr) 440px; }
   main[data-ws-active="settings"] { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
   [data-ws][hidden], [data-panel][hidden] { display: none !important; }
@@ -122,6 +153,7 @@
   @media (max-width: 900px) {
     main, main[data-ws-active] { display: flex; flex-direction: column; height: auto; }
     .stage { order: 1; } .ws-cues { order: 2; } .ws-cues > .cue-scroll { overflow: visible; } .ws-panel { order: 3; overflow: visible; }
+    #tlEditor { order: 4; grid-template-columns: minmax(0, 1fr); grid-template-areas: "tools" "lib" "tracks"; } #tlLibList { max-height: 160px; } #tlTracks { max-height: 70vh; }
     .view { container-type: normal; flex-direction: column; }
     .view > canvas#preview, .view.both > canvas#preview, #beamsMsg { width: 100%; }
     .view > canvas#beams, .view.both > canvas#beams { width: 100%; height: auto; aspect-ratio: 1; }
@@ -584,8 +616,58 @@
       <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
       <div class="hint" id="tlMsg"></div>
     </section>
-    <div class="hint soon">À venir ici : éditeur de timeline glisser-déposer, modèles, timecode.</div>
+    <div class="hint soon">À venir ici : modèles, timecode.</div>
   </div>
+
+  <!-- TIMELINE : éditeur (T-162) — bibliothèque, pistes, règle, marqueurs -->
+  <section id="tlEditor" data-ws="timeline" aria-label="Éditeur de timeline" hidden>
+    <div class="tl-tools">
+      <button id="tlNew" title="Créer un show vide (deux pistes)">Nouveau show</button>
+      <span id="tlNewRow" hidden>
+        <input type="text" id="tlNewName" placeholder="Nom du show" maxlength="64" title="Lettres, chiffres, espaces, - et _">
+        <select id="tlNewBase" title="Secondes : show calé sur un morceau · Temps : phrase qui suit le tempo en direct">
+          <option value="seconds">Secondes</option><option value="beats">Temps</option>
+        </select>
+        <button id="tlNewOk" class="primary">Créer</button>
+      </span>
+      <button id="tlSave" title="Enregistrer le show dans studio-data/shows (ne touche jamais au laser)">Enregistrer</button>
+      <span id="tlModified"></span>
+      <span class="sep"></span>
+      <span class="hint" style="margin:0">Magnétisme :</span>
+      <div class="seg" id="tlSnap" title="Magnétisme : Fort (temps / mesures), Moyen (à quelques pixels), Off">
+        <button data-snap="strong">Fort</button><button data-snap="medium">Moyen</button><button data-snap="off">Off</button>
+      </div>
+      <label class="tl-knob" title="Tempo du show (secondes) : règle, magnétisme et copier-coller en mesures">BPM <input type="number" id="tlBpm" min="20" max="300" step="0.1"></label>
+      <label class="tl-knob" title="Temps par mesure">/ <input type="number" id="tlBpb" min="1" max="16" step="1"></label>
+      <span class="sep"></span>
+      <button id="tlAddMarker" title="À la tête de lecture (Entrée quand la timeline a le focus)">Ajouter un marqueur</button>
+      <button id="tlFit" title="Voir tout le show (molette : zoom centré sur le curseur, Maj+molette : défiler)">Tout afficher</button>
+      <label class="check" style="margin:0" title="La vue suit la tête de lecture"><input type="checkbox" id="tlFollow" checked> Suivre</label>
+      <span class="sep"></span>
+      <button id="tlCopy" title="Cmd+C : la sélection (sinon la région de boucle)">Copier la phrase</button>
+      <button id="tlPaste" title="Cmd+V : au prochain début de mesure après la tête de lecture">Coller</button>
+      <button id="tlDup" title="Cmd+D : juste après la sélection, en mesures entières (ou Alt+glisser)">Dupliquer</button>
+      <button id="tlDel" title="Suppr">Supprimer</button>
+      <button id="tlUndo" title="Cmd+Z">Annuler</button>
+      <button id="tlRedo" title="Cmd+Maj+Z">Rétablir</button>
+      <button id="tlAddTrack" title="Nouvelle piste de cues">+ Piste</button>
+      <span id="tlMarkRow" hidden>
+        <input type="text" id="tlMarkName" maxlength="64" title="Nom du marqueur">
+        <input type="color" id="tlMarkColor" title="Couleur du marqueur" style="width:36px;height:26px;padding:1px">
+        <button id="tlMarkDel" title="Supprimer le marqueur">✕ marqueur</button>
+      </span>
+      <div class="hint" id="tlEdMsg"></div>
+    </div>
+    <div class="tl-lib">
+      <select id="tlLibCat" title="Page de cues"></select>
+      <input type="search" id="tlLibFilter" placeholder="Filtrer…">
+      <div id="tlLibList" title="Glisser un cue sur une piste"></div>
+    </div>
+    <div id="tlTracks">
+      <div id="tlHeads"></div>
+      <canvas id="tlCanvas" tabindex="0" title="Glisser : déplacer · bords : durée · Alt+glisser : dupliquer · Maj+clic : sélection · règle : clic = se placer, glisser = boucle, double-clic = sans boucle · double-clic sur la ligne des marqueurs : marqueur"></canvas>
+    </div>
+  </section>
 
   <!-- CRÉATION : contenu (générateurs, texte, cues évolutifs) et réglages du look -->
   <div class="ws-panel" data-ws="creation" id="creationPanel" hidden>
@@ -1381,6 +1463,7 @@ async function previewLoop() {
     showEvolving(f.evolving);
     showTimeline(f.timeline);
     showSong(f.timeline, f.timeline_audio);
+    tlOnState(f.timeline, f.tempo);
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
   setTimeout(previewLoop, 33);
 }
@@ -1918,7 +2001,7 @@ document.addEventListener('pointerdown', e => { if (!$('cueMenu').hidden && !$('
 
 // ---------- timeline (T-160) ----------
 // Load / play / pause / stop a saved show and follow its playhead. The
-// editor is T-162; shows are written through POST /api/shows for now.
+// editor (T-162) is further down.
 let shows = [], timeline = null;
 async function loadShows() {
   try { shows = await (await fetch('/api/shows')).json(); } catch { shows = []; }
@@ -1952,6 +2035,10 @@ function showTimeline(t) {
 $('tlShow').addEventListener('focus', loadShows);
 $('tlShow').addEventListener('change', async () => {
   $('tlMsg').textContent = '';
+  // The editor's unsaved changes (T-162) would be lost.
+  if (timeline && timeline.modified && !confirm(`« ${timeline.name} » a des modifications non enregistrées : les abandonner ?`)) {
+    $('tlShow').value = timeline.name || ''; return;
+  }
   if ($('tlShow').value) await post('/api/timeline/load', { name: $('tlShow').value });
   else await post('/api/timeline/stop');
 });
@@ -2068,6 +2155,787 @@ $('tlImportFile').addEventListener('change', async () => {
 });
 $('tlWaveBox').addEventListener('click', e => seekFromClick($('tlWaveBox'), e));
 loadSongs();
+
+// ---------- timeline editor (T-162) ----------
+// The page keeps a mirror of the loaded show (`TL.show`), edits it, and
+// sends every finished change to POST /api/timeline/edit, which validates
+// it and swaps it into the player without stopping playback (events go
+// through the usual layers → live → calibration → safety → gate path).
+// Undo/redo are snapshots of that mirror (50 levels). Enregistrer writes
+// the show file; nothing here reads or writes the arm state.
+const TL = {
+  show: null, name: null, rev: -1, state: null, stateAt: 0, bpm: 120,
+  undo: [], redo: [], sel: new Set(), marker: -1, clip: null,
+  snap: remembered('laserStudio.tlSnap') || 'strong', follow: true,
+  t0: 0, pps: 40, drag: null, drop: null, need: true,
+  inflight: 0, fetching: false, drawMs: 0, draws: 0, libFor: null, headsKey: '',
+};
+const TL_RULER = 30, TL_MARK = 18, TL_WAVE = 40, TL_LANE = 34, TL_TOP = TL_RULER + TL_MARK + TL_WAVE;
+const TL_UNDO = 50, TL_MIN_LEN = 0.01, TL_SNAP_PX = 8;
+const TL_LAYER_COLORS = ['#3ddc84', '#4da3ff', '#ffb020', '#e062ff'];
+const TL_MARK_COLORS = [[255, 176, 32], [77, 163, 255], [224, 98, 255], [61, 220, 132], [255, 77, 79]];
+const tlSeconds = () => !TL.show || TL.show.time_base !== 'beats';
+
+// --- musical time: the show's tempo map (Secondes) or the live meter (Temps) ---
+function tlSegments() {
+  const tm = TL.show && TL.show.tempo_map && TL.show.tempo_map.length ? TL.show.tempo_map : [{ at_s: 0, bpm: 120, beats_per_bar: 4 }];
+  const out = [];
+  let beats = 0, bars = 0;
+  tm.forEach((p, i) => {
+    const from = i === 0 ? 0 : p.at_s, to = i + 1 < tm.length ? tm[i + 1].at_s : Infinity;
+    out.push({ from, to, bpm: p.bpm, bpb: p.beats_per_bar, beat0: beats, bar0: bars });
+    if (to < Infinity) { beats += (to - from) * p.bpm / 60; bars += (to - from) * p.bpm / 60 / p.beats_per_bar; }
+  });
+  return out;
+}
+function tlLiveBpb() { return (TL.state && TL.state.beats_per_bar) || 4; }
+function tlBeatAt(u) {
+  if (!tlSeconds()) return u;
+  const s = tlSegments().find(g => u < g.to);
+  return s.beat0 + (u - s.from) * s.bpm / 60;
+}
+function tlUAtBeat(b) {
+  if (!tlSeconds()) return b;
+  const segs = tlSegments();
+  const s = segs.find(g => b < g.beat0 + (g.to - g.from) * g.bpm / 60) || segs[segs.length - 1];
+  return s.from + (b - s.beat0) * 60 / s.bpm;
+}
+function tlBarAt(u) {
+  if (!tlSeconds()) return u / tlLiveBpb();
+  const s = tlSegments().find(g => u < g.to);
+  return s.bar0 + (u - s.from) * s.bpm / 60 / s.bpb;
+}
+function tlUAtBar(bar) {
+  if (!tlSeconds()) return bar * tlLiveBpb();
+  const segs = tlSegments();
+  const s = segs.find(g => bar < g.bar0 + (g.to - g.from) * g.bpm / 60 / g.bpb) || segs[segs.length - 1];
+  return s.from + (bar - s.bar0) * s.bpb * 60 / s.bpm;
+}
+const tlSecAt = u => tlSeconds() ? u : u * 60 / (TL.bpm || 120);
+function tlEnd() {
+  let end = 0;
+  if (TL.show) for (const t of TL.show.tracks) for (const e of t.events) end = Math.max(end, e.start + e.len);
+  if (TL.state && TL.state.length) end = Math.max(end, TL.state.length);
+  return end;
+}
+
+// --- view ---
+const tlCanvas = () => $('tlCanvas');
+const tlW = () => tlCanvas().clientWidth || 1;
+const tlUToX = u => (u - TL.t0) * TL.pps;
+const tlXToU = x => TL.t0 + x / TL.pps;
+const tlLaneY = i => TL_TOP + i * TL_LANE;
+function tlSetView(t0, pps) {
+  TL.fitPending = false;
+  TL.pps = Math.max(0.5, Math.min(2000, pps));
+  TL.t0 = Math.max(0, t0);
+  TL.need = true;
+}
+function tlFit() {
+  const end = Math.max(tlEnd(), tlSeconds() ? 30 : 32);
+  tlSetView(0, tlW() / (end * 1.03));
+}
+// The grid unit: beats when they are far enough apart, else bars (or groups of bars).
+function tlGrid() {
+  const beatPx = (tlUAtBeat(tlBeatAt(TL.t0) + 1) - tlUAtBeat(tlBeatAt(TL.t0))) * TL.pps;
+  if (beatPx >= 12) return { kind: 'beat', step: 1 };
+  const barPx = (tlUAtBar(tlBarAt(TL.t0) + 1) - tlUAtBar(tlBarAt(TL.t0))) * TL.pps;
+  let step = 1;
+  while (barPx * step < 12) step *= 2;
+  return { kind: 'bar', step };
+}
+function tlGridLines(u0, u1) {
+  const g = tlGrid(), out = [];
+  const at = g.kind === 'beat' ? tlBeatAt : tlBarAt, back = g.kind === 'beat' ? tlUAtBeat : tlUAtBar;
+  let n = Math.floor(Math.max(0, at(Math.max(0, u0))) / g.step) * g.step;
+  for (let i = 0; i < 4000; i++, n += g.step) {
+    const u = back(n);
+    if (u > u1) break;
+    if (u >= u0 - 1e-9) out.push(u);
+  }
+  return out;
+}
+
+// --- snapping (Magnétisme) ---
+function tlSnapU(u, skip = new Set()) {
+  if (TL.snap === 'off') return Math.max(0, u);
+  const tol = TL_SNAP_PX / TL.pps;
+  const g = tlGrid(), at = g.kind === 'beat' ? tlBeatAt : tlBarAt, back = g.kind === 'beat' ? tlUAtBeat : tlUAtBar;
+  const n = at(Math.max(0, u));
+  const grid = [back(Math.floor(n / g.step) * g.step), back(Math.ceil(n / g.step) * g.step)];
+  const marks = TL.show ? TL.show.markers.map(m => m.at) : [];
+  const nearest = list => list.reduce((b, v) => Math.abs(v - u) < Math.abs(b - u) ? v : b, Infinity);
+  // Markers win when close (strong and medium).
+  const m = nearest(marks);
+  if (Math.abs(m - u) <= tol) return m;
+  if (TL.snap === 'strong') return Math.max(0, nearest(grid));
+  const edges = [];
+  if (TL.show) for (const t of TL.show.tracks) for (const e of t.events) if (!skip.has(e.id)) edges.push(e.start, e.start + e.len);
+  const best = nearest(grid.concat(edges));
+  return Math.abs(best - u) <= tol ? best : Math.max(0, u);
+}
+
+// --- show mirror, server sync, undo ---
+function tlMsg(text, err = false) { $('tlEdMsg').textContent = text; $('tlEdMsg').classList.toggle('err', err); }
+function tlEvents() {
+  const out = [];
+  if (TL.show) TL.show.tracks.forEach((t, ti) => t.events.forEach(e => out.push({ t, ti, e })));
+  return out;
+}
+function tlNextId() { return tlEvents().reduce((m, x) => Math.max(m, x.e.id), 0) + 1; }
+function tlPushUndo(snapshot) {
+  TL.undo.push(snapshot);
+  if (TL.undo.length > TL_UNDO) TL.undo.shift();
+  TL.redo = [];
+}
+// One undoable change: snapshot, apply, send.
+function tlChange(fn) {
+  if (!TL.show) return;
+  const before = JSON.stringify(TL.show);
+  fn();
+  if (JSON.stringify(TL.show) === before) return;
+  tlPushUndo(before);
+  tlCommit();
+}
+async function tlCommit() {
+  TL.need = true;
+  tlHeads();
+  const body = JSON.stringify({ show: TL.show });
+  TL.inflight++;
+  try {
+    const r = await fetch('/api/timeline/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+    if (!r.ok) {
+      tlMsg('Modification refusée : ' + await r.text(), true);
+      TL.undo.pop();
+      TL.rev = -1; // fetch the server's show again
+      return;
+    }
+    const j = await r.json();
+    TL.rev = j.state.rev;
+    // The server's copy (ids, sorting) unless the page changed meanwhile.
+    if (TL.inflight === 1 && !TL.drag && JSON.stringify(TL.show) === body) TL.show = j.show;
+    tlShowFlags(j.state);
+  } catch { tlMsg('Studio injoignable : modification non envoyée', true); TL.rev = -1; }
+  finally { TL.inflight--; TL.need = true; }
+}
+function tlUndo() {
+  if (!TL.show || !TL.undo.length || TL.drag) return;
+  TL.redo.push(JSON.stringify(TL.show));
+  TL.show = JSON.parse(TL.undo.pop());
+  TL.sel.clear(); TL.marker = -1;
+  tlCommit();
+}
+function tlRedo() {
+  if (!TL.show || !TL.redo.length || TL.drag) return;
+  TL.undo.push(JSON.stringify(TL.show));
+  TL.show = JSON.parse(TL.redo.pop());
+  TL.sel.clear(); TL.marker = -1;
+  tlCommit();
+}
+async function tlFetch() {
+  TL.fetching = true;
+  try {
+    const j = await (await fetch('/api/timeline')).json();
+    if (TL.inflight || TL.drag) return; // an edit went out meanwhile: next frame
+    const show = j.show, name = show ? show.name : null;
+    if (name !== TL.name) {
+      TL.undo = []; TL.redo = []; TL.sel.clear(); TL.marker = -1;
+      TL.name = name; TL.show = show; TL.state = j.state;
+      TL.fitPending = true; // once the canvas has its width
+    } else {
+      TL.show = show;
+    }
+    TL.rev = j.state.rev;
+    tlShowFlags(j.state);
+    tlHeads(); tlTempoFields();
+    TL.need = true;
+  } catch { /* studio unreachable: tried again next frame */ } finally { TL.fetching = false; }
+}
+function tlShowFlags(st) {
+  $('tlModified').textContent = st && st.name && st.modified ? '● modifié, non enregistré' : '';
+}
+// Every frame (previewLoop): playhead, and the show if it changed elsewhere.
+function tlOnState(t, tempo) {
+  if (!t) return;
+  TL.state = t; TL.stateAt = performance.now();
+  if (tempo && tempo.bpm) TL.bpm = tempo.bpm;
+  if ((t.name !== TL.name || t.rev !== TL.rev) && !TL.inflight && !TL.drag && !TL.fetching) tlFetch();
+  if (!TL.inflight) tlShowFlags(t);
+  const has = !!TL.show;
+  for (const id of ['tlSave', 'tlAddMarker', 'tlCopy', 'tlPaste', 'tlDup', 'tlDel', 'tlAddTrack', 'tlFit']) $(id).disabled = !has;
+  $('tlUndo').disabled = !has || !TL.undo.length;
+  $('tlRedo').disabled = !has || !TL.redo.length;
+  $('tlPaste').disabled = !has || !TL.clip;
+  if (presets !== TL.libFor && activeWs === 'timeline') tlLib();
+  if (t.playing) TL.need = true;
+}
+// Where the playhead is now (extrapolated between two frames while playing).
+function tlPlayhead() {
+  const t = TL.state;
+  if (!t || !t.name) return 0;
+  if (!t.playing || t.waiting) return t.position;
+  const dt = Math.min(0.2, (performance.now() - TL.stateAt) / 1000);
+  return t.position + dt * (t.time_base === 'beats' ? (TL.bpm || 120) / 60 : 1);
+}
+
+// --- library (cue pages, figures, evolving cues) ---
+function tlLib() {
+  TL.libFor = presets;
+  const cat = $('tlLibCat'), cur = cat.value;
+  cat.innerHTML = '<option value="">Tous les cues</option>' + cueCategories.map(c => `<option>${esc(c)}</option>`).join('');
+  cat.value = cueCategories.includes(cur) ? cur : '';
+  const f = $('tlLibFilter').value.trim().toLowerCase();
+  const list = presets.filter(p => (!cat.value || p.category === cat.value) && (!f || p.name.toLowerCase().includes(f)));
+  $('tlLibList').innerHTML = list.map(p => `<div class="tl-lib-item" draggable="true" data-id="${esc(p.id)}" title="${esc(p.category)} · glisser sur une piste">${esc(p.name)}${p.beats ? `<span class="d">évolutif · ${+p.beats} t</span>` : ''}</div>`).join('')
+    || '<div class="hint">Aucun cue</div>';
+}
+$('tlLibCat').addEventListener('change', tlLib);
+$('tlLibFilter').addEventListener('input', tlLib);
+$('tlLibList').addEventListener('dragstart', e => {
+  const item = e.target.closest('.tl-lib-item');
+  if (!item) return;
+  TL.dragCue = item.dataset.id;
+  e.dataTransfer.setData('text/plain', item.dataset.id);
+  e.dataTransfer.effectAllowed = 'copy';
+});
+$('tlLibList').addEventListener('dragend', () => { TL.dragCue = null; TL.drop = null; TL.need = true; });
+const tlPresetName = id => (presets.find(p => p.id === id) || {}).name || id;
+// Default length: an evolving cue's own length, else 4 bars.
+function tlDefaultLen(id, start) {
+  const p = presets.find(q => q.id === id);
+  if (p && p.beats) return Math.max(TL_MIN_LEN, tlUAtBeat(tlBeatAt(start) + p.beats) - start);
+  return Math.max(TL_MIN_LEN, tlUAtBar(tlBarAt(start) + 4) - start);
+}
+
+// --- track heads (DOM, aligned with the canvas lanes) ---
+function tlHeads() {
+  const tracks = TL.show ? TL.show.tracks : [];
+  const key = JSON.stringify(tracks.map(t => [t.name, t.layer, t.mute, t.solo]));
+  const c = tlCanvas();
+  const h = TL_TOP + Math.max(1, tracks.length) * TL_LANE;
+  if (c.style.height !== h + 'px') { c.style.height = h + 'px'; TL.need = true; }
+  if (key === TL.headsKey && $('tlHeads').childElementCount) return;
+  if ($('tlHeads').contains(document.activeElement)) return; // renaming: redrawn afterwards
+  TL.headsKey = key;
+  $('tlHeads').innerHTML = `<div class="top" style="height:${TL_TOP}px">${TL.show ? 'Pistes' : 'Aucun show : Nouveau show ou choisir un show'}</div>` + tracks.map((t, i) => `
+    <div class="tl-head" data-ti="${i}" style="height:${TL_LANE}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
+      <input type="text" value="${esc(t.name)}" maxlength="64" data-f="name" title="Nom de la piste">
+      <select data-f="layer" title="Calque">${[1, 2, 3, 4].map(n => `<option value="${n}"${n === t.layer ? ' selected' : ''}>C${n}</option>`).join('')}</select>
+      <button data-f="mute" class="${t.mute ? 'active' : ''}" title="Muet">M</button>
+      <button data-f="solo" class="${t.solo ? 'active' : ''}" title="Solo">S</button>
+      <button data-f="del" title="Supprimer la piste (Annuler la rétablit)">✕</button>
+    </div>`).join('');
+}
+$('tlHeads').addEventListener('change', e => {
+  const head = e.target.closest('.tl-head');
+  if (!head || !TL.show) return;
+  const t = TL.show.tracks[+head.dataset.ti];
+  if (e.target.dataset.f === 'name') tlChange(() => { t.name = e.target.value.slice(0, 64); });
+  if (e.target.dataset.f === 'layer') tlChange(() => { t.layer = +e.target.value; });
+  e.target.blur();
+});
+$('tlHeads').addEventListener('click', e => {
+  const b = e.target.closest('button'), head = e.target.closest('.tl-head');
+  if (!b || !head || !TL.show) return;
+  const i = +head.dataset.ti, t = TL.show.tracks[i];
+  if (b.dataset.f === 'mute') tlChange(() => { t.mute = !t.mute; });
+  if (b.dataset.f === 'solo') tlChange(() => { t.solo = !t.solo; });
+  if (b.dataset.f === 'del') tlChange(() => { TL.show.tracks.splice(i, 1); TL.sel.clear(); });
+});
+$('tlAddTrack').onclick = () => tlChange(() => {
+  const n = TL.show.tracks.length;
+  TL.show.tracks.push({ name: `Piste ${n + 1}`, kind: 'cues', layer: (n % 4) + 1, mute: false, solo: false, events: [] });
+});
+
+// --- toolbar ---
+function tlSetSnap(v) {
+  TL.snap = ['strong', 'medium', 'off'].includes(v) ? v : 'strong';
+  remember('laserStudio.tlSnap', TL.snap);
+  document.querySelectorAll('#tlSnap button').forEach(b => b.classList.toggle('active', b.dataset.snap === TL.snap));
+}
+$('tlSnap').addEventListener('click', e => { if (e.target.dataset.snap) tlSetSnap(e.target.dataset.snap); });
+tlSetSnap(TL.snap);
+$('tlFit').onclick = tlFit;
+$('tlFollow').addEventListener('change', () => { TL.follow = $('tlFollow').checked; });
+$('tlNew').onclick = () => { $('tlNewRow').hidden = !$('tlNewRow').hidden; if (!$('tlNewRow').hidden) $('tlNewName').focus(); };
+async function tlNewShow() {
+  const name = $('tlNewName').value.trim();
+  if (!name) { tlMsg('Donnez un nom au show.', true); return; }
+  if (TL.state && TL.state.modified && !confirm(`« ${TL.name} » a des modifications non enregistrées : les abandonner ?`)) return;
+  const r = await fetch('/api/timeline/new', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, time_base: $('tlNewBase').value }) });
+  if (!r.ok) { tlMsg(await r.text(), true); return; }
+  $('tlNewRow').hidden = true; $('tlNewName').value = '';
+  tlMsg(`Show « ${name} » créé : glissez des cues de la bibliothèque sur les pistes.`);
+  TL.rev = -1;
+  await loadShows();
+}
+$('tlNewOk').onclick = tlNewShow;
+$('tlNewName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); tlNewShow(); } });
+$('tlSave').onclick = async () => {
+  const r = await fetch('/api/timeline/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  if (!r.ok) { tlMsg('Enregistrement impossible : ' + await r.text(), true); return; }
+  const st = await r.json();
+  TL.rev = st.rev; tlShowFlags(st);
+  tlMsg(`Show « ${st.name} » enregistré.`);
+  loadShows();
+};
+function tlTempoFields() {
+  const sec = tlSeconds() && !!TL.show, tm = TL.show && TL.show.tempo_map && TL.show.tempo_map[0];
+  $('tlBpm').disabled = $('tlBpb').disabled = !sec;
+  $('tlBpm').title = sec ? 'Tempo du show (secondes) : règle, magnétisme et copier-coller en mesures' : 'Show en temps : suit le tempo en direct';
+  if (document.activeElement !== $('tlBpm')) $('tlBpm').value = sec ? (tm ? tm.bpm : 120) : '';
+  if (document.activeElement !== $('tlBpb')) $('tlBpb').value = sec ? (tm ? tm.beats_per_bar : 4) : '';
+}
+function tlSetTempo() {
+  const bpm = +$('tlBpm').value, bpb = Math.round(+$('tlBpb').value);
+  if (!(bpm >= 20 && bpm <= 300) || !(bpb >= 1 && bpb <= 16)) { tlTempoFields(); return; }
+  tlChange(() => {
+    if (!TL.show.tempo_map.length) TL.show.tempo_map.push({ at_s: 0, bpm: 120, beats_per_bar: 4 });
+    TL.show.tempo_map[0].bpm = bpm; TL.show.tempo_map[0].beats_per_bar = bpb;
+  });
+}
+$('tlBpm').addEventListener('change', tlSetTempo);
+$('tlBpb').addEventListener('change', tlSetTempo);
+
+// --- markers ---
+function tlAddMarker(at) {
+  if (!TL.show) return;
+  tlChange(() => {
+    const n = TL.show.markers.length;
+    TL.show.markers.push({ at: Math.max(0, at), name: `Marqueur ${n + 1}`, color: TL_MARK_COLORS[n % TL_MARK_COLORS.length] });
+    TL.show.markers.sort((a, b) => a.at - b.at);
+    TL.marker = TL.show.markers.findIndex(m => m.at === Math.max(0, at));
+  });
+  tlMarkRow();
+}
+$('tlAddMarker').onclick = () => tlAddMarker(tlPlayhead());
+function tlMarkRow() {
+  const m = TL.show && TL.show.markers[TL.marker];
+  $('tlMarkRow').hidden = !m;
+  if (!m) return;
+  if (document.activeElement !== $('tlMarkName')) $('tlMarkName').value = m.name;
+  $('tlMarkColor').value = hex(m.color);
+}
+$('tlMarkName').addEventListener('change', () => { const i = TL.marker; if (i < 0) return; tlChange(() => { TL.show.markers[i].name = $('tlMarkName').value.slice(0, 64); }); });
+$('tlMarkColor').addEventListener('change', () => { const i = TL.marker; if (i < 0) return; tlChange(() => { TL.show.markers[i].color = rgb($('tlMarkColor').value); }); });
+$('tlMarkDel').onclick = () => { const i = TL.marker; if (i < 0) return; tlChange(() => { TL.show.markers.splice(i, 1); }); TL.marker = -1; tlMarkRow(); };
+
+// --- selection, copy / paste / duplicate / delete ---
+function tlSelected() { return tlEvents().filter(x => TL.sel.has(x.e.id)); }
+function tlDelete() {
+  if (!TL.sel.size) return;
+  tlChange(() => { for (const t of TL.show.tracks) t.events = t.events.filter(e => !TL.sel.has(e.id)); });
+  TL.sel.clear();
+}
+// A phrase: events with their position in bars, so a paste moves them by whole bars.
+function tlPhrase(items) {
+  const fromBar = Math.floor(Math.min(...items.map(x => tlBarAt(x.e.start))) + 1e-6);
+  const toBar = Math.ceil(Math.max(...items.map(x => tlBarAt(x.e.start + x.e.len))) - 1e-6);
+  return { fromBar, bars: Math.max(1, toBar - fromBar), items: items.map(x => ({ ti: x.ti, e: JSON.parse(JSON.stringify(x.e)), bar: tlBarAt(x.e.start), endBar: tlBarAt(x.e.start + x.e.len) })) };
+}
+function tlCopy() {
+  let items = tlSelected();
+  const r = TL.show && TL.show.loop_region;
+  if (!items.length && r) items = tlEvents().filter(x => x.e.start >= r[0] - 1e-9 && x.e.start < r[1]);
+  if (!items.length) { tlMsg('Rien à copier : sélectionnez des événements (ou une région de boucle).', true); return; }
+  TL.clip = tlPhrase(items);
+  tlMsg(`Phrase copiée : ${items.length} événement(s), ${TL.clip.bars} mesure(s).`);
+  $('tlPaste').disabled = false;
+}
+// Paste `phrase` shifted by `bars` whole bars; the new events become the selection.
+function tlPasteShift(phrase, bars) {
+  tlChange(() => {
+    let id = tlNextId();
+    TL.sel.clear();
+    for (const it of phrase.items) {
+      const ti = Math.min(it.ti, TL.show.tracks.length - 1);
+      if (ti < 0) return;
+      const start = tlUAtBar(it.bar + bars), end = tlUAtBar(it.endBar + bars);
+      const e = { ...JSON.parse(JSON.stringify(it.e)), id: id++, start, len: Math.max(TL_MIN_LEN, end - start) };
+      TL.show.tracks[ti].events.push(e);
+      TL.sel.add(e.id);
+    }
+  });
+}
+function tlPaste() {
+  if (!TL.clip || !TL.show) return;
+  if (!TL.show.tracks.length) { tlMsg('Ajoutez une piste d\'abord.', true); return; }
+  const to = Math.ceil(tlBarAt(tlPlayhead()) - 1e-6);
+  tlPasteShift(TL.clip, to - TL.clip.fromBar);
+  tlMsg(`Collé à la mesure ${to + 1}.`);
+}
+function tlDuplicate() {
+  const items = tlSelected();
+  if (!items.length) return;
+  const p = tlPhrase(items);
+  tlPasteShift(p, p.bars);
+}
+$('tlCopy').onclick = tlCopy;
+$('tlPaste').onclick = tlPaste;
+$('tlDup').onclick = tlDuplicate;
+$('tlDel').onclick = tlDelete;
+$('tlUndo').onclick = tlUndo;
+$('tlRedo').onclick = tlRedo;
+
+// --- drawing ---
+let tlColors = null;
+function tlDraw() {
+  const t0p = performance.now();
+  const c = tlCanvas(), dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!tlColors) { const cs = getComputedStyle(document.documentElement); tlColors = { line: cs.getPropertyValue('--line').trim(), muted: cs.getPropertyValue('--muted').trim(), accent: cs.getPropertyValue('--accent').trim(), text: cs.getPropertyValue('--text').trim(), panel: cs.getPropertyValue('--panel').trim() }; }
+  const C = tlColors;
+  g.clearRect(0, 0, W, H);
+  g.font = '11px system-ui, sans-serif';
+  g.textBaseline = 'middle';
+  const u0 = TL.t0, u1 = tlXToU(W);
+  if (!TL.show) { g.fillStyle = C.muted; g.fillText('Aucun show chargé', 10, TL_TOP / 2); return; }
+  // Lanes.
+  TL.show.tracks.forEach((t, i) => { g.fillStyle = i % 2 ? '#ffffff05' : '#00000030'; g.fillRect(0, tlLaneY(i), W, TL_LANE); });
+  g.fillStyle = C.panel; g.fillRect(0, 0, W, TL_RULER);
+  // Grid: bars bright, beats faint, labels in the ruler (bars on top, seconds below).
+  const grid = tlGrid();
+  let lastLabel = -1e9;
+  for (const u of tlGridLines(u0, u1)) {
+    const x = Math.round(tlUToX(u)) + 0.5, bar = tlBarAt(u), onBar = Math.abs(bar - Math.round(bar)) < 1e-6;
+    g.strokeStyle = onBar ? '#ffffff26' : '#ffffff0d';
+    g.beginPath(); g.moveTo(x, onBar ? 0 : TL_RULER / 2); g.lineTo(x, H); g.stroke();
+    if (onBar && x - lastLabel > 34) { g.fillStyle = C.text; g.fillText(String(Math.round(bar) + 1), x + 3, 8); lastLabel = x; }
+  }
+  // Seconds row.
+  const secPx = TL.pps * (tlSeconds() ? 1 : (TL.bpm || 120) / 60);
+  let step = 1; for (const s of [1, 2, 5, 10, 15, 30, 60, 120, 300]) { step = s; if (s * secPx >= 60) break; }
+  g.fillStyle = C.muted;
+  const s0 = Math.floor(tlSecAt(u0) / step) * step;
+  for (let s = s0; s <= tlSecAt(u1); s += step) {
+    const u = tlSeconds() ? s : s * (TL.bpm || 120) / 60, x = tlUToX(u);
+    g.fillRect(Math.round(x), TL_RULER - 5, 1, 5);
+    g.fillText(fmtTime(s).replace(/\.0$/, ''), x + 3, TL_RULER - 8);
+  }
+  g.strokeStyle = C.line; g.beginPath(); g.moveTo(0, TL_RULER + 0.5); g.lineTo(W, TL_RULER + 0.5); g.moveTo(0, TL_RULER + TL_MARK + 0.5); g.lineTo(W, TL_RULER + TL_MARK + 0.5); g.moveTo(0, TL_TOP + 0.5); g.lineTo(W, TL_TOP + 0.5); g.stroke();
+  // Loop region.
+  const r = TL.show.loop_region;
+  if (r) {
+    const a = tlUToX(r[0]), b = tlUToX(r[1]);
+    g.fillStyle = TL.state && TL.state.loop ? '#3ddc8455' : '#3ddc8428'; g.fillRect(a, 0, b - a, TL_RULER);
+    g.fillStyle = '#3ddc840c'; g.fillRect(a, TL_RULER, b - a, H - TL_RULER);
+    g.fillStyle = C.accent; g.fillRect(a - 1, 0, 3, TL_RULER); g.fillRect(b - 2, 0, 3, TL_RULER);
+  }
+  // Waveform (Secondes shows with a song): the last fetched view, mapped onto this one.
+  const w = TL.wave;
+  if (w && TL.state && TL.state.audio && tlSeconds() && w.file === TL.state.audio.file) {
+    const mid = TL_RULER + TL_MARK + TL_WAVE / 2, amp = TL_WAVE / 2 - 2, du = (w.to - w.from) / w.px;
+    g.strokeStyle = C.accent; g.globalAlpha = 0.6; g.beginPath();
+    for (let i = 0; i < w.max.length; i++) {
+      const x = tlUToX(w.from + i * du);
+      if (x < -1 || x > W + 1) continue;
+      g.moveTo(Math.round(x) + 0.5, mid - w.max[i] * amp); g.lineTo(Math.round(x) + 0.5, Math.max(mid - w.min[i] * amp, mid - w.max[i] * amp + 1));
+    }
+    g.stroke(); g.globalAlpha = 1;
+  } else {
+    g.fillStyle = C.muted; g.fillText(tlSeconds() ? 'Pas de morceau' : 'Show en temps : pas de morceau', 8, TL_RULER + TL_MARK + TL_WAVE / 2);
+  }
+  // Events.
+  const active = new Set(TL.state ? TL.state.active : []);
+  TL.show.tracks.forEach((t, ti) => {
+    const y = tlLaneY(ti) + 3, h = TL_LANE - 6, col = TL_LAYER_COLORS[(t.layer - 1) % 4];
+    for (const e of t.events) {
+      const x0 = tlUToX(e.start), x1 = tlUToX(e.start + e.len);
+      if (x1 < 0 || x0 > W) continue;
+      const sel = TL.sel.has(e.id);
+      g.globalAlpha = t.mute ? 0.35 : active.has(e.id) ? 1 : 0.75;
+      g.fillStyle = col; g.fillRect(x0, y, Math.max(2, x1 - x0), h);
+      g.globalAlpha = 1;
+      if (sel) { g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x0 + 1, y + 1, Math.max(2, x1 - x0) - 2, h - 2); g.lineWidth = 1; }
+      if (x1 - x0 > 24) {
+        g.save(); g.beginPath(); g.rect(x0, y, x1 - x0, h); g.clip();
+        g.fillStyle = '#06120b'; g.fillText(e.source.kind === 'cue' ? tlPresetName(e.source.id) : 'Look', Math.max(x0, 0) + 4, y + h / 2);
+        g.restore();
+      }
+    }
+  });
+  // Drop preview.
+  if (TL.drop) {
+    const x0 = tlUToX(TL.drop.start), x1 = tlUToX(TL.drop.start + TL.drop.len);
+    g.strokeStyle = '#fff'; g.setLineDash([4, 3]); g.strokeRect(x0, tlLaneY(TL.drop.ti) + 3, x1 - x0, TL_LANE - 6); g.setLineDash([]);
+  }
+  // Marquee.
+  const d = TL.drag;
+  if (d && d.kind === 'marquee') { g.strokeStyle = C.text; g.setLineDash([3, 3]); g.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0)); g.setLineDash([]); }
+  // Markers: flags in their lane, a line across the tracks.
+  TL.show.markers.forEach((m, i) => {
+    const x = Math.round(tlUToX(m.at)) + 0.5;
+    if (x < -60 || x > W + 2) return;
+    const col = `rgb(${m.color.join(',')})`;
+    g.strokeStyle = col; g.globalAlpha = 0.6; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(x, TL_RULER + TL_MARK); g.lineTo(x, H); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    g.fillStyle = col; g.beginPath(); g.moveTo(x, TL_RULER + 2); g.lineTo(x + 8, TL_RULER + 2); g.lineTo(x + 8, TL_RULER + TL_MARK - 6); g.lineTo(x, TL_RULER + TL_MARK - 2); g.closePath(); g.fill();
+    if (i === TL.marker) { g.strokeStyle = '#fff'; g.stroke(); }
+    g.fillStyle = C.text; g.fillText(m.name, x + 11, TL_RULER + TL_MARK / 2);
+  });
+  // Playhead.
+  if (TL.state && TL.state.name) {
+    const x = Math.round(tlUToX(tlPlayhead())) + 0.5;
+    g.strokeStyle = TL.state.waiting ? '#ffb020' : C.accent; g.lineWidth = 2; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); g.lineWidth = 1;
+  }
+  TL.draws++;
+  TL.drawMs = TL.drawMs * 0.9 + (performance.now() - t0p) * 0.1;
+}
+// The waveform of the part in view, fetched again when the view settles.
+let tlWaveTimer = 0;
+function tlWaveWanted() {
+  const a = TL.state && TL.state.audio;
+  if (!a || !tlSeconds() || !TL.show) return;
+  const W = Math.round(tlW()), u1 = tlXToU(W);
+  const key = `${a.file}|${a.offset_s}|${TL.t0.toFixed(3)}|${u1.toFixed(3)}|${W}`;
+  if (key === TL.waveKey) return;
+  TL.waveKey = key;
+  clearTimeout(tlWaveTimer);
+  tlWaveTimer = setTimeout(async () => {
+    try {
+      const r = await fetch(`/api/timeline/waveform?from=${TL.t0}&to=${u1}&px=${Math.max(1, Math.min(8192, W))}`);
+      if (r.ok) { TL.wave = await r.json(); TL.need = true; }
+    } catch { TL.waveKey = ''; }
+  }, 120);
+}
+function tlLoop() {
+  if (activeWs === 'timeline' && !$('tlEditor').hidden) {
+    const t = TL.state;
+    // Suivre: page the view along with the playhead.
+    if (TL.follow && t && t.playing && !TL.drag) {
+      const x = tlUToX(tlPlayhead()), W = tlW();
+      if (x > W * 0.92 || x < 0) tlSetView(tlPlayhead() - (W * 0.08) / TL.pps, TL.pps);
+    }
+    tlHeads();
+    if (TL.fitPending && tlCanvas().clientWidth) { TL.fitPending = false; tlFit(); }
+    tlWaveWanted();
+    if (TL.need || (t && t.playing)) { TL.need = false; tlDraw(); }
+  }
+  requestAnimationFrame(tlLoop);
+}
+
+// --- mouse: select, move, resize, duplicate, markers, loop region, seek ---
+function tlLocal(e) { const b = tlCanvas().getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; }
+function tlTrackAt(y) { return Math.floor((y - TL_TOP) / TL_LANE); }
+function tlEventAt(ti, x) {
+  const t = TL.show && TL.show.tracks[ti];
+  if (!t) return null;
+  for (let i = t.events.length - 1; i >= 0; i--) {
+    const e = t.events[i], x0 = tlUToX(e.start), x1 = tlUToX(e.start + e.len);
+    if (x >= x0 - 2 && x <= x1 + 2) {
+      const edge = x1 - x0 > 12 ? (x - x0 < 6 ? 'l' : x1 - x < 6 ? 'r' : null) : (x1 - x < 3 ? 'r' : null);
+      return { e, ti, edge };
+    }
+  }
+  return null;
+}
+function tlMarkerAt(x) {
+  if (!TL.show) return -1;
+  let best = -1, dist = 7;
+  TL.show.markers.forEach((m, i) => { const d = Math.abs(tlUToX(m.at) - x + 4); if (d < dist) { dist = d; best = i; } });
+  return best;
+}
+function tlSeek(u) { post('/api/timeline/seek', { position: Math.max(0, u) }); }
+// Move an event object to another track.
+function tlMoveTo(e, ti) {
+  for (const t of TL.show.tracks) { const i = t.events.indexOf(e); if (i >= 0) { t.events.splice(i, 1); break; } }
+  TL.show.tracks[ti].events.push(e);
+}
+const tlCv = tlCanvas();
+tlCv.addEventListener('pointerdown', e => {
+  if (!TL.show || e.button !== 0) return;
+  tlCv.focus();
+  const { x, y } = tlLocal(e), u = tlXToU(x);
+  const before = JSON.stringify(TL.show);
+  tlCv.setPointerCapture(e.pointerId);
+  if (y < TL_RULER) {
+    const r = TL.show.loop_region;
+    const which = r ? (Math.abs(tlUToX(r[0]) - x) < 6 ? 0 : Math.abs(tlUToX(r[1]) - x) < 6 ? 1 : -1) : -1;
+    TL.drag = which >= 0 ? { kind: 'loop', which, before, x0: x } : { kind: 'ruler', before, x0: x, u0: u };
+  } else if (y < TL_RULER + TL_MARK) {
+    const i = tlMarkerAt(x);
+    TL.marker = i; tlMarkRow();
+    if (i >= 0) {
+      const m = TL.show.markers[i];
+      // Events snapped to the marker move with it.
+      const stuck = tlEvents().filter(v => Math.abs(v.e.start - m.at) < 1e-6).map(v => v.e);
+      TL.drag = { kind: 'marker', m, at0: m.at, stuck, before, x0: x };
+    }
+  } else if (y < TL_TOP) {
+    TL.drag = { kind: 'seek', x0: x, u0: u };
+  } else {
+    const ti = tlTrackAt(y), hit = tlEventAt(ti, x);
+    if (hit) {
+      if (e.shiftKey) { TL.sel.has(hit.e.id) ? TL.sel.delete(hit.e.id) : TL.sel.add(hit.e.id); TL.need = true; TL.drag = null; return; }
+      if (!TL.sel.has(hit.e.id)) { TL.sel.clear(); TL.sel.add(hit.e.id); }
+      let primary = hit.e, dup = false;
+      if (e.altKey && !hit.edge) {
+        // Alt+glisser: the copies move, the originals stay.
+        let id = tlNextId();
+        const copies = new Set();
+        for (const s of tlSelected()) {
+          const c = { ...JSON.parse(JSON.stringify(s.e)), id: id++ };
+          s.t.events.push(c); copies.add(c.id);
+          if (s.e === hit.e) primary = c;
+        }
+        TL.sel = copies; dup = true;
+      }
+      const orig = tlSelected().map(s => ({ e: s.e, ti: s.ti, start: s.e.start, len: s.e.len }));
+      TL.drag = { kind: hit.edge ? 'resize' : 'move', edge: hit.edge, primary, p0: { start: primary.start, len: primary.len }, orig, ti0: ti, x0: x, before, dup };
+    } else {
+      if (!e.shiftKey) TL.sel.clear();
+      TL.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y, base: new Set(TL.sel) };
+    }
+    TL.marker = -1; tlMarkRow();
+  }
+  TL.need = true;
+});
+tlCv.addEventListener('pointermove', e => {
+  const { x, y } = tlLocal(e), d = TL.drag;
+  if (!d) {
+    const hit = TL.show && y >= TL_TOP ? tlEventAt(tlTrackAt(y), x) : null;
+    const r = TL.show && TL.show.loop_region;
+    const onEdge = r && y < TL_RULER && (Math.abs(tlUToX(r[0]) - x) < 6 || Math.abs(tlUToX(r[1]) - x) < 6);
+    tlCv.style.cursor = hit && hit.edge || onEdge ? 'ew-resize' : hit ? 'grab' : y < TL_RULER ? 'pointer' : 'default';
+    return;
+  }
+  if (Math.abs(x - d.x0) > 2) d.moved = true;
+  const du = (x - d.x0) / TL.pps;
+  if (d.kind === 'move') {
+    const skip = new Set(d.orig.map(o => o.e.id));
+    let delta = tlSnapU(d.p0.start + du, skip) - d.p0.start;
+    delta = Math.max(delta, -Math.min(...d.orig.map(o => o.start)));
+    const n = TL.show.tracks.length;
+    let dt = Math.max(0, Math.min(n - 1, tlTrackAt(y))) - d.ti0;
+    dt = Math.max(dt, -Math.min(...d.orig.map(o => o.ti)));
+    dt = Math.min(dt, n - 1 - Math.max(...d.orig.map(o => o.ti)));
+    if (dt) d.moved = true;
+    for (const o of d.orig) {
+      o.e.start = o.start + delta;
+      const cur = TL.show.tracks.findIndex(t => t.events.includes(o.e));
+      if (cur !== o.ti + dt) tlMoveTo(o.e, o.ti + dt);
+    }
+  } else if (d.kind === 'resize') {
+    const e0 = d.p0, skip = new Set([d.primary.id]);
+    if (d.edge === 'r') {
+      const end = tlSnapU(e0.start + e0.len + du, skip);
+      d.primary.len = Math.max(TL_MIN_LEN, end - e0.start);
+    } else {
+      const end = e0.start + e0.len, start = Math.min(end - TL_MIN_LEN, tlSnapU(e0.start + du, skip));
+      d.primary.start = Math.max(0, start); d.primary.len = end - d.primary.start;
+    }
+  } else if (d.kind === 'marker') {
+    const at = TL.snap === 'off' ? Math.max(0, d.at0 + du) : tlSnapU(d.at0 + du, new Set(d.stuck.map(s => s.id)));
+    d.m.at = Math.max(0, at);
+    for (const s of d.stuck) s.start = d.m.at;
+  } else if (d.kind === 'loop') {
+    const r = TL.show.loop_region, v = tlSnapU(tlXToU(x));
+    r[d.which] = v;
+    if (r[0] > r[1]) { r.reverse(); d.which = 1 - d.which; }
+  } else if (d.kind === 'ruler' && d.moved) {
+    const a = tlSnapU(d.u0), b = tlSnapU(tlXToU(x));
+    TL.show.loop_region = [Math.min(a, b), Math.max(a, b)];
+  } else if (d.kind === 'marquee') {
+    d.x1 = x; d.y1 = y;
+    const ua = tlXToU(Math.min(d.x0, x)), ub = tlXToU(Math.max(d.x0, x));
+    const ta = tlTrackAt(Math.min(d.y0, y)), tb = tlTrackAt(Math.max(d.y0, y));
+    TL.sel = new Set(d.base);
+    for (const v of tlEvents()) if (v.ti >= ta && v.ti <= tb && v.e.start < ub && v.e.start + v.e.len > ua) TL.sel.add(v.e.id);
+  }
+  TL.need = true;
+});
+function tlPointerUp(e) {
+  const d = TL.drag;
+  if (!d) return;
+  TL.drag = null;
+  if (d.kind === 'ruler' && !d.moved) tlSeek(d.u0);
+  else if (d.kind === 'seek' && !d.moved) tlSeek(d.u0);
+  else if (['move', 'resize', 'marker', 'loop', 'ruler'].includes(d.kind)) {
+    if (d.kind === 'ruler' && TL.show.loop_region && TL.show.loop_region[1] - TL.show.loop_region[0] < 1e-6) TL.show.loop_region = null;
+    if (d.moved) {
+      if (d.kind === 'marker') TL.show.markers.sort((a, b) => a.at - b.at), TL.marker = TL.show.markers.indexOf(d.m);
+      tlPushUndo(d.before);
+      tlCommit();
+    } else if (d.dup) {
+      TL.show = JSON.parse(d.before); TL.sel.clear(); // Alt+click without a move: no copy
+    }
+  }
+  TL.need = true;
+}
+tlCv.addEventListener('pointerup', tlPointerUp);
+tlCv.addEventListener('pointercancel', tlPointerUp);
+tlCv.addEventListener('dblclick', e => {
+  if (!TL.show) return;
+  const { x, y } = tlLocal(e);
+  if (y < TL_RULER) tlChange(() => { TL.show.loop_region = null; });
+  else if (y < TL_RULER + TL_MARK && tlMarkerAt(x) < 0) tlAddMarker(tlSnapU(tlXToU(x)));
+});
+// Molette: zoom around the cursor; Maj+molette or horizontal swipe: scroll.
+tlCv.addEventListener('wheel', e => {
+  if (!TL.show) return;
+  e.preventDefault();
+  const { x } = tlLocal(e);
+  if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    tlSetView(TL.t0 + (e.shiftKey ? e.deltaY || e.deltaX : e.deltaX) / TL.pps, TL.pps);
+  } else {
+    const u = tlXToU(x), pps = Math.max(0.5, Math.min(2000, TL.pps * Math.exp(-e.deltaY * 0.0015)));
+    tlSetView(u - x / pps, pps);
+  }
+}, { passive: false });
+// Drag from the library.
+function tlDropAt(e) {
+  const { x, y } = tlLocal(e), ti = tlTrackAt(y);
+  if (!TL.show || !TL.dragCue || y < TL_TOP || ti < 0 || ti >= TL.show.tracks.length) return null;
+  const start = tlSnapU(tlXToU(x));
+  return { ti, start, len: tlDefaultLen(TL.dragCue, start), id: TL.dragCue };
+}
+tlCv.addEventListener('dragover', e => {
+  const d = tlDropAt(e);
+  TL.drop = d; TL.need = true;
+  if (d) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+});
+tlCv.addEventListener('dragleave', () => { TL.drop = null; TL.need = true; });
+tlCv.addEventListener('drop', e => {
+  e.preventDefault();
+  const d = tlDropAt(e);
+  TL.drop = null; TL.dragCue = null;
+  if (!d) return;
+  tlChange(() => {
+    const ev = { id: tlNextId(), start: d.start, len: d.len, source: { kind: 'cue', id: d.id } };
+    TL.show.tracks[d.ti].events.push(ev);
+    TL.sel = new Set([ev.id]);
+  });
+  tlCv.focus();
+});
+// Keys while the timeline has the focus. Entrée = marker at the playhead
+// (elsewhere it stays the tap tempo); Espace and Échap are never taken.
+tlCv.addEventListener('keydown', e => {
+  if (!TL.show || e.key === 'Escape' || e.code === 'Space') return;
+  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+  let done = true;
+  if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !mod) tlAddMarker(tlPlayhead());
+  else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) tlDelete();
+  else if (mod && !e.altKey && k === 'c') tlCopy();
+  else if (mod && !e.altKey && k === 'v') tlPaste();
+  else if (mod && !e.altKey && k === 'd') tlDuplicate();
+  else if (mod && !e.altKey && k === 'a') { TL.sel = new Set(tlEvents().map(v => v.e.id)); TL.need = true; }
+  else done = false;
+  if (done) { e.preventDefault(); e.stopPropagation(); }
+});
+// Annuler / Rétablir anywhere in TIMELINE, except while typing.
+document.addEventListener('keydown', e => {
+  if (activeWs !== 'timeline' || isTyping() || !TL.show) return;
+  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+  if (mod && !e.altKey && k === 'z') { e.preventDefault(); if (e.shiftKey) tlRedo(); else tlUndo(); }
+  else if (mod && !e.altKey && k === 'y') { e.preventDefault(); tlRedo(); }
+});
+new ResizeObserver(() => { TL.need = true; }).observe(tlCanvas());
+// For the e2e tests: the view and the draw time.
+window.tlDebug = { view: () => ({ t0: TL.t0, pps: TL.pps, top: TL_TOP, lane: TL_LANE, ruler: TL_RULER, mark: TL_MARK }), setView: tlSetView, stats: () => ({ drawMs: TL.drawMs, draws: TL.draws }), show: () => TL.show };
+requestAnimationFrame(tlLoop);
 
 // ---------- layers ----------
 // Four strips: dimmer, Muet, Solo, Vider. Values follow the server (MIDI
