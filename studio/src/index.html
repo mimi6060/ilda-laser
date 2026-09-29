@@ -329,6 +329,17 @@
   .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
   .render3d .check { margin-top: 6px; }
   #strobeLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
+  #sfLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
+  #sfLoosenOk { border-color: var(--danger); color: var(--danger); }
+  .sf-error { color: var(--danger); }
+  .sf-sub { margin-top: 12px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .sfzone { margin-top: 8px; padding: 6px 8px; border: 1px solid #ff4d4f55; border-radius: 6px; }
+  .sfzone .row { margin-top: 4px; }
+  .sfzone .zname { flex: 1; min-width: 0; }
+  .sfzone .zpts { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: 11px; }
+  .sfzone .zlevel { width: 64px; }
+  .sfzone select { width: auto; }
+  .sfzone button { flex: 0; white-space: nowrap; }
   #strobeLed.on { opacity: 1; background: var(--warn); border-color: var(--warn); color: #2b1d00; box-shadow: 0 0 8px var(--warn); }
   /* MIDI learn (T-203) */
   #learnBanner { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; padding: 6px 12px; background: #0f3d24; color: #fff; font-size: 13px; }
@@ -1017,10 +1028,30 @@
     <section>
       <details id="safetyPanel">
         <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span></summary>
+        <div id="sfLoosen" hidden>
+          <div id="sfLoosenText"></div>
+          <div class="row"><button id="sfLoosenOk">Confirmer l'assouplissement</button><button id="sfLoosenCancel">Annuler</button></div>
+        </div>
+        <div class="hint sf-error" id="sfError"></div>
         <label>Strobe max (Hz) <span class="v" id="sfHzV"></span></label><input type="range" id="sfHz" min="0.5" max="4" step="0.5">
         <label>Rafale max (s) <span class="v" id="sfBurstV"></span></label><input type="range" id="sfBurst" min="0" max="5" step="0.5">
-        <label>Horizon des faisceaux <span class="v" id="sfFloorV"></span></label><input type="range" id="sfFloor" min="-1" max="1" step="0.05">
-        <div class="hint">Au-delà de 4 Hz, un strobe est limité à 5 s puis la sortie reste allumée en continu (au moins 2 s). Les faisceaux sous l'horizon sont éteints. Ces limites ne peuvent qu'être resserrées ici.</div>
+        <label>Horizon <span class="v" id="sfFloorV"></span></label><input type="range" id="sfFloor" min="-1" max="1" step="0.05">
+        <label class="check"><input type="checkbox" id="sfLines"> L'horizon coupe aussi lignes, textes et nappes</label>
+        <label>Rampe de l'horizon <span class="v" id="sfRampV"></span></label><input type="range" id="sfRamp" min="0" max="0.5" step="0.05">
+        <label>Luminosité sous l'horizon <span class="v" id="sfLevelV"></span></label><input type="range" id="sfLevel" min="0" max="1" step="0.05">
+        <div class="hint">Au-delà de 4 Hz, un strobe est limité à 5 s puis la sortie reste allumée en continu (au moins 2 s). Les faisceaux sous l'horizon sont toujours éteints ; cochée, la case éteint aussi tout le reste sous l'horizon (fondu sur la rampe, au-dessus).</div>
+        <div class="sf-sub">Zones de projection</div>
+        <div id="sfZones"></div>
+        <div class="row"><button id="sfZoneAdd">Ajouter une zone</button>
+          <label class="check" style="margin:0"><input type="checkbox" id="sfOverlay" checked> Afficher sur l'aperçu</label></div>
+        <div class="hint" id="sfDrawHint" hidden>Cliquez les sommets sur l'aperçu 2D, puis « Terminer ».</div>
+        <div class="hint">Masquer : rien n'est allumé dans la zone, même un trait qui la traverse. Atténuer : luminosité réduite au pourcentage indiqué. Coordonnées de sortie, de -1 à 1 (y vers le haut).</div>
+        <div class="sf-sub">Couleurs</div>
+        <label>Gain rouge <span class="v" id="sfGainRV"></span></label><input type="range" id="sfGainR" min="0" max="1" step="0.01">
+        <label>Gain vert <span class="v" id="sfGainGV"></span></label><input type="range" id="sfGainG" min="0" max="1" step="0.01">
+        <label>Gain bleu <span class="v" id="sfGainBV"></span></label><input type="range" id="sfGainB" min="0" max="1" step="0.01">
+        <label>Niveau minimum des diodes <span class="v" id="sfMinV"></span></label><input type="range" id="sfMin" min="0" max="0.5" step="0.01">
+        <div class="hint">Ces réglages appartiennent à cette machine (pas au projet). Resserrer s'applique tout de suite ; assouplir (zone supprimée ou déplacée, horizon abaissé, gain augmenté…) demande une confirmation.</div>
         <div class="hint" id="strobeInfo"></div>
         <label for="uiTimeout">Couper si l'interface ne répond plus (ms)</label>
         <input type="number" id="uiTimeout" min="1000" max="10000" step="100">
@@ -1504,6 +1535,7 @@ function draw(points) {
   g.strokeStyle = '#ffffff10'; g.lineWidth = 1;
   g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
   const px = p => [(p[0] + 1) / 2 * W, (1 - (p[1] + 1) / 2) * H];
+  drawSafetyOverlay(W, H, px);
   // Boost dim colors so a low-brightness look is still visible on screen.
   const col = (p, a) => `rgba(${[2, 3, 4].map(i => Math.round(255 * Math.sqrt(p[i]))).join(',')},${a})`;
   for (const [width, alpha] of [[9, 0.18], [2.5, 1]]) {
@@ -2046,27 +2078,186 @@ Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
   clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
 }));
 
-// ---------- safety (T-101) ----------
-let safety = null, safetyTimer = null;
-const sfMap = { sfHz: ['strobe_max_hz', v => v + ' Hz'], sfBurst: ['strobe_burst_s', v => v + ' s'], sfFloor: ['beam_floor_y', v => (+v).toFixed(2)] };
-function showSafety() {
+// ---------- safety (T-101, T-003) ----------
+// `safety` is what the server applies (the overlay draws it); the controls
+// may hold an edit waiting for the loosening confirmation.
+let safety = null, safetyTimer = null, sfLoadError = null, sfDrawing = null;
+const pct = v => Math.round(v * 100) + ' %';
+const sfFields = {
+  sfHz: [s => s.strobe_max_hz, (s, v) => { s.strobe_max_hz = v; }, v => v + ' Hz'],
+  sfBurst: [s => s.strobe_burst_s, (s, v) => { s.strobe_burst_s = v; }, v => v + ' s'],
+  sfFloor: [s => s.horizon.y, (s, v) => { s.horizon.y = v; }, v => (+v).toFixed(2)],
+  sfRamp: [s => s.horizon.ramp, (s, v) => { s.horizon.ramp = v; }, v => (+v).toFixed(2)],
+  sfLevel: [s => s.horizon.level, (s, v) => { s.horizon.level = v; }, pct],
+  sfGainR: [s => s.color_gain[0], (s, v) => { s.color_gain[0] = v; }, pct],
+  sfGainG: [s => s.color_gain[1], (s, v) => { s.color_gain[1] = v; }, pct],
+  sfGainB: [s => s.color_gain[2], (s, v) => { s.color_gain[2] = v; }, pct],
+  sfMin: [s => s.min_diode_level, (s, v) => { s.min_diode_level = v; }, pct],
+};
+const fmtPts = pts => pts.map(p => `${+p[0].toFixed(3)} ${+p[1].toFixed(3)}`).join(' ; ');
+function parsePts(text) {
+  const pts = text.split(';').map(t => t.trim()).filter(Boolean).map(t => t.split(/[\s,]+/).map(Number));
+  return pts.every(p => p.length === 2 && p.every(Number.isFinite)) ? pts : null;
+}
+function showSafety(force = false) {
   if (!safety) return;
-  for (const [id, [key, fmt]] of Object.entries(sfMap)) {
-    if (document.activeElement !== $(id)) $(id).value = safety[key];
-    $(id + 'V').textContent = fmt(safety[key]);
+  for (const [id, [get, , fmt]] of Object.entries(sfFields)) {
+    if (force || document.activeElement !== $(id)) $(id).value = get(safety);
+    $(id + 'V').textContent = fmt(get(safety));
+  }
+  $('sfLines').checked = safety.horizon.lines;
+  $('sfError').textContent = sfLoadError || '';
+  $('sfZoneAdd').disabled = safety.zones.length >= 8;
+  if (force || !$('sfZones').contains(document.activeElement)) renderZones();
+}
+function renderZones() {
+  $('sfZones').innerHTML = safety.zones.map((z, i) => `
+    <div class="sfzone" data-zi="${i}">
+      <div class="row">
+        <input type="text" class="zname" maxlength="40" title="Nom de la zone">
+        <select class="zkind" title="Masquer : rien d'allumé dedans · Atténuer : luminosité réduite">
+          <option value="blank">Masquer</option><option value="dim">Atténuer</option></select>
+        <input type="number" class="zlevel" min="0" max="100" step="5" title="Luminosité gardée dans la zone (%)">
+      </div>
+      <div class="row">
+        <input type="text" class="zpts" title="Sommets : x y ; x y ; … (de -1 à 1, y vers le haut)">
+        <button class="zdraw">${sfDrawing && sfDrawing.index === i ? 'Terminer' : 'Dessiner'}</button>
+        <button class="zdel">Supprimer</button>
+      </div>
+    </div>`).join('');
+  $('sfZones').querySelectorAll('.sfzone').forEach(row => {
+    const z = safety.zones[+row.dataset.zi];
+    row.querySelector('.zname').value = z.name;
+    row.querySelector('.zkind').value = z.kind;
+    row.querySelector('.zlevel').value = Math.round(z.level * 100);
+    row.querySelector('.zlevel').hidden = z.kind !== 'dim';
+    row.querySelector('.zpts').value = fmtPts(z.points);
+  });
+}
+/** The settings as the controls show them (strobe, horizon, colours, zones). */
+function sfFromControls() {
+  const next = structuredClone(safety);
+  for (const [id, [, set]] of Object.entries(sfFields)) set(next, +$(id).value);
+  next.horizon.lines = $('sfLines').checked;
+  $('sfZones').querySelectorAll('.sfzone').forEach(row => {
+    const z = next.zones[+row.dataset.zi];
+    z.name = row.querySelector('.zname').value;
+    z.kind = row.querySelector('.zkind').value;
+    z.level = Math.min(100, Math.max(0, +row.querySelector('.zlevel').value || 0)) / 100;
+    const pts = parsePts(row.querySelector('.zpts').value);
+    if (pts) z.points = pts;
+  });
+  return next;
+}
+async function reloadSafety() {
+  const j = await (await fetch('/api/safety')).json();
+  safety = j.settings; sfLoadError = j.load_error;
+  showSafety(true);
+}
+// Tighter or equal: applied at once. Looser: the server answers 409 with
+// what would be loosened, and only « Confirmer l'assouplissement » sends it.
+let sfPending = null;
+async function saveSafety(next, confirm = false) {
+  const r = await fetch('/api/safety', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(confirm ? { ...next, confirm_loosen: true } : next) });
+  if (r.ok) {
+    safety = (await r.json()).settings; sfLoadError = null; sfPending = null;
+    $('sfLoosen').hidden = true;
+    showSafety();
+  } else if (r.status === 409) {
+    const j = await r.json();
+    sfPending = next;
+    $('sfLoosenText').textContent = 'Assouplir la sécurité ? ' + j.loosen.join(' · ');
+    $('sfLoosen').hidden = false;
+  } else {
+    const msg = await r.text();
+    await reloadSafety();
+    $('sfError').textContent = msg;
   }
 }
-Object.keys(sfMap).forEach(id => $(id).addEventListener('input', () => {
-  for (const [cid, [key]] of Object.entries(sfMap)) safety[key] = +$(cid).value;
-  showSafety();
-  clearTimeout(safetyTimer); safetyTimer = setTimeout(() => post('/api/safety', safety), 60);
+function sfChanged() {
+  clearTimeout(safetyTimer); safetyTimer = setTimeout(() => saveSafety(sfFromControls()), 60);
+}
+Object.keys(sfFields).forEach(id => $(id).addEventListener('input', () => {
+  $(id + 'V').textContent = sfFields[id][2](+$(id).value);
+  sfChanged();
 }));
+$('sfLines').addEventListener('change', sfChanged);
+$('sfZones').addEventListener('change', e => { if (e.target.matches('input, select')) saveSafety(sfFromControls()); });
+$('sfZones').addEventListener('click', e => {
+  const row = e.target.closest('.sfzone');
+  if (!row) return;
+  const i = +row.dataset.zi;
+  if (e.target.matches('.zdel')) {
+    const next = sfFromControls();
+    next.zones.splice(i, 1);
+    saveSafety(next);
+  } else if (e.target.matches('.zdraw')) {
+    if (sfDrawing && sfDrawing.index === i) finishDrawing();
+    else { sfDrawing = { index: i, points: [] }; $('sfDrawHint').hidden = false; renderZones(); }
+  }
+});
+function finishDrawing() {
+  const d = sfDrawing;
+  sfDrawing = null; $('sfDrawHint').hidden = true;
+  if (d && d.points.length >= 3) {
+    const next = sfFromControls();
+    next.zones[d.index].points = d.points;
+    saveSafety(next);
+  } else renderZones();
+}
+$('sfZoneAdd').addEventListener('click', () => {
+  const next = sfFromControls();
+  // Default: a band over the lower part of the field (where the public is).
+  next.zones.push({ id: 0, name: `Zone ${next.zones.length + 1}`, kind: 'blank', level: 0.3, points: [[-1, -1], [1, -1], [1, -0.5], [-1, -0.5]] });
+  saveSafety(next);
+});
+$('sfLoosenOk').addEventListener('click', () => { if (sfPending) saveSafety(sfPending, true); });
+$('sfLoosenCancel').addEventListener('click', () => { sfPending = null; $('sfLoosen').hidden = true; reloadSafety(); });
+$('sfOverlay').addEventListener('change', () => { if (lastPoints && show2d) draw(lastPoints); });
+// Drawing a zone: each click on the 2D preview adds a vertex.
+$('preview').addEventListener('click', e => {
+  if (!sfDrawing) return;
+  const r = $('preview').getBoundingClientRect();
+  const q = v => Math.round(Math.min(1, Math.max(-1, v)) * 100) / 100;
+  sfDrawing.points.push([q((e.clientX - r.left) / r.width * 2 - 1), q(1 - (e.clientY - r.top) / r.height * 2)]);
+  if (sfDrawing.points.length >= 24) finishDrawing();
+});
+/** Zones and horizon over the 2D preview (translucent red), under the laser. */
+function drawSafetyOverlay(W, H, px) {
+  if (!safety || !$('sfOverlay').checked) return;
+  const h = safety.horizon, yh = (1 - (h.y + 1) / 2) * H;
+  if (h.lines) {
+    g.fillStyle = 'rgba(255,60,60,0.16)'; g.fillRect(0, yh, W, H - yh);
+    const top = (1 - (Math.min(1, h.y + h.ramp) + 1) / 2) * H;
+    if (yh > top) {
+      const grad = g.createLinearGradient(0, yh, 0, top);
+      grad.addColorStop(0, 'rgba(255,60,60,0.16)'); grad.addColorStop(1, 'rgba(255,60,60,0)');
+      g.fillStyle = grad; g.fillRect(0, top, W, yh - top);
+    }
+  }
+  g.save(); g.setLineDash([10, 8]); g.strokeStyle = 'rgba(255,77,79,0.55)'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(0, yh); g.lineTo(W, yh); g.stroke(); g.restore();
+  const poly = (pts, fill, stroke) => {
+    if (pts.length < 2) return;
+    g.beginPath(); pts.forEach((p, i) => { const [x, y] = px(p); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.closePath();
+    if (fill) { g.fillStyle = fill; g.fill(); }
+    g.strokeStyle = stroke; g.lineWidth = 2; g.stroke();
+  };
+  for (const z of safety.zones) poly(z.points, z.kind === 'dim' ? 'rgba(255,120,60,0.16)' : 'rgba(255,40,40,0.28)', 'rgba(255,77,79,0.9)');
+  if (sfDrawing) {
+    poly(sfDrawing.points, null, '#ffb020');
+    g.fillStyle = '#ffb020';
+    for (const p of sfDrawing.points) { const [x, y] = px(p); g.fillRect(x - 4, y - 4, 8, 8); }
+  }
+}
 function showStrobe(st) {
   if (!st) return;
   $('strobeLed').classList.toggle('on', st.active);
   $('strobeInfo').textContent = st.active ? 'Limiteur actif : strobe trop long, sortie maintenue allumée.'
     : st.fast ? `Strobe rapide (${st.rate_hz.toFixed(1)} Hz) depuis ${st.burst_s.toFixed(1)} s`
-    : st.beams_blanked ? `${st.beams_blanked} faisceau(x) sous l'horizon éteint(s)` : '';
+    : [st.beams_blanked ? `${st.beams_blanked} faisceau(x) sous l'horizon éteint(s)` : '',
+       st.points_masked ? `${st.points_masked} point(s) masqué(s) par les zones ou l'horizon` : ''].filter(Boolean).join(' · ');
 }
 
 // ---------- live (master) ----------
@@ -3519,6 +3710,7 @@ function showLfos(pos) {
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
   safety = st.safety; showSafety();
+  reloadSafety();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');

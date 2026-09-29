@@ -354,15 +354,38 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         }
         (Method::Get, "/api/safety") => {
             let s = shared.lock().unwrap();
-            json_response(json!({ "settings": s.safety.get(), "defaults": crate::safety::SafetySettings::default(), "status": s.strobe }))
+            json_response(json!({
+                "settings": s.safety.get(),
+                "defaults": crate::safety::SafetySettings::default(),
+                "status": s.strobe,
+                "load_error": s.safety.load_error(),
+                "limits": { "max_zones": crate::zones::MAX_ZONES, "max_vertices": crate::zones::MAX_VERTICES },
+            }))
         }
-        // Tighten-only for the strobe: looser values than the safe
-        // defaults are refused with a French message (400).
-        (Method::Post, "/api/safety") => match body::<crate::safety::SafetySettings>(request) {
-            Ok(cfg) => match shared.lock().unwrap().safety.set(cfg) {
-                Ok(()) => ok(),
-                Err(e) => text(400, &e.to_string()),
-            },
+        // Strobe limits never looser than the safe defaults (400). Anything
+        // looser than the current settings (zone removed or moved, horizon
+        // lowered, gain raised...) needs `"confirm_loosen": true`, which
+        // only the operator's confirmation in the UI sends (409 otherwise,
+        // with the French list of what would be loosened). Missing fields
+        // are the defaults, so a partial body that drops zones is refused.
+        (Method::Post, "/api/safety") => match body::<serde_json::Value>(request) {
+            Ok(mut v) => {
+                let confirm = v.get("confirm_loosen").and_then(|c| c.as_bool()).unwrap_or(false);
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("confirm_loosen");
+                }
+                match serde_json::from_value::<crate::safety::SafetySettings>(v) {
+                    Err(e) => text(400, &format!("invalid JSON: {e}")),
+                    Ok(cfg) => match shared.lock().unwrap().safety.set(cfg, confirm) {
+                        Ok(stored) => json_response(json!({ "settings": stored })),
+                        Err(crate::safety::SetError::Invalid(msg)) => text(400, &msg),
+                        Err(crate::safety::SetError::Loosens(list)) => with_status(
+                            json_response(json!({ "error": "Ces changements assouplissent la sécurité : confirmation requise", "loosen": list })),
+                            409,
+                        ),
+                    },
+                }
+            }
             Err(e) => e,
         },
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
@@ -1865,10 +1888,25 @@ mod tests {
         assert_eq!(code, 200);
         let st = get(&t);
         assert_eq!(st["settings"]["strobe_max_hz"], 3.0);
-        assert_eq!(st["settings"]["beam_floor_y"], 0.25);
+        assert_eq!(st["settings"]["horizon"]["y"], 0.25, "T-101's beam_floor_y is the horizon");
         assert_eq!(st["settings"]["strobe_burst_s"], 5.0, "missing fields keep the safe default");
         assert_eq!(st["status"]["active"], false);
         let frame: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
         assert_eq!(frame["strobe"]["active"], false);
+
+        // A zone is added at once and gets an id; dropping it needs the
+        // operator's confirmation.
+        let zone = r#"{"strobe_max_hz":3,"horizon":{"y":0.25},"zones":[{"name":"Public","points":[[-1,-1],[1,-1],[1,-0.4],[-1,-0.4]]}]}"#;
+        let (code, reply) = t.request("POST", "/api/safety", zone);
+        assert_eq!(code, 200, "{reply}");
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["settings"]["zones"][0]["id"], 1);
+        let (code, reply) = t.request("POST", "/api/safety", r#"{"strobe_max_hz":3,"horizon":{"y":0.25}}"#);
+        assert_eq!(code, 409);
+        assert!(reply.contains("Public"), "{reply}");
+        assert_eq!(get(&t)["settings"]["zones"].as_array().unwrap().len(), 1, "kept");
+        let (code, _) = t.request("POST", "/api/safety", r#"{"confirm_loosen":true}"#);
+        assert_eq!(code, 200);
+        assert_eq!(get(&t)["settings"], serde_json::to_value(crate::safety::SafetySettings::default()).unwrap());
     }
 }
