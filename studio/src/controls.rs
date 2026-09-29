@@ -154,6 +154,11 @@ impl ControlRegistry {
         add("tempo.nudge_down".into(), "Retarder la phase".into(), "tempo", ControlKind::Trigger, true);
         add("tempo.double".into(), "Tempo ×2".into(), "tempo", ControlKind::Trigger, true);
         add("tempo.half".into(), "Tempo ÷2".into(), "tempo", ControlKind::Trigger, true);
+        // Tempo auto (T-234): the clock follows the audio detection; a tap
+        // takes it back. Guider = taps that only guide the detection.
+        add("tempo.auto".into(), "Tempo auto (suit la musique)".into(), "tempo", ControlKind::Toggle { default: false }, true);
+        add("tempo.guide".into(), "Guider la détection (tap)".into(), "tempo", ControlKind::Trigger, true);
+        add("tempo.new_track".into(), "Nouveau morceau".into(), "tempo", ControlKind::Trigger, true);
 
         add("timeline.play".into(), "Lecture de la timeline".into(), "timeline", ControlKind::Trigger, true);
         add("timeline.pause".into(), "Pause de la timeline".into(), "timeline", ControlKind::Trigger, true);
@@ -331,6 +336,14 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
             let t = s.now_s();
             s.tempo.set_bpm_manual(value(input) as f64, t);
         }
+        "tempo.auto" => s.tempo.set_auto(truthy(input)),
+        "tempo.guide" => {
+            let t = s.now_s();
+            if let Some(bpm) = s.tempo.guide_tap(t) {
+                s.audio_in.set_guide(Some(bpm));
+            }
+        }
+        "tempo.new_track" => s.tempo_new_track(),
         "tempo.nudge_up" => s.tempo.nudge(1.0 / 32.0),
         "tempo.nudge_down" => s.tempo.nudge(-1.0 / 32.0),
         "tempo.double" | "tempo.half" => {
@@ -501,6 +514,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "transport.arm" => json!(s.gate.is_armed() && !s.estop.is_latched()),
         "safety.hold" => json!(s.presence.status().midi_hold),
         "tempo.bpm" => json!(s.tempo.bpm),
+        "tempo.auto" => json!(s.tempo.source == tempo::TempoSource::Audio),
         "timeline.play" => json!(s.timeline.is_playing()),
         "timeline.pause" => json!(s.timeline.transport == crate::timeline::Transport::Paused),
         "timeline.loop" => json!(s.timeline.loop_on),
@@ -900,6 +914,36 @@ mod tests {
         assert_eq!(s.tempo.bpm, 128.0);
         apply(&mut s, "tempo.bpm", ControlInput::Norm(1.0), true).unwrap();
         assert_eq!(s.tempo.bpm, tempo::MAX_BPM);
+    }
+
+    #[test]
+    fn tempo_auto_guide_and_new_track_controls() {
+        let mut s = shared();
+        apply(&mut s, "tempo.auto", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.tempo.source, tempo::TempoSource::Audio);
+        assert_eq!(current(&s, s.controls.get("tempo.auto").unwrap()), Some(serde_json::json!(true)));
+        // A tap takes the clock back at once.
+        apply(&mut s, "tempo.tap", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.tempo.source, tempo::TempoSource::Tap);
+        assert_eq!(current(&s, s.controls.get("tempo.auto").unwrap()), Some(serde_json::json!(false)));
+        apply(&mut s, "tempo.auto", ControlInput::Value(1.0), true).unwrap();
+        // One guide tap sets nothing yet, and never leaves Tempo auto.
+        apply(&mut s, "tempo.guide", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!((s.tempo.source, s.tempo.guide_bpm(), s.audio_in.guide().0), (tempo::TempoSource::Audio, None, None));
+        s.tempo.guide_tap(100.0);
+        s.tempo.guide_tap(100.5);
+        let g = s.tempo.guide_tap(101.0);
+        s.audio_in.set_guide(g);
+        assert_eq!(s.audio_in.guide().0, Some(120.0));
+        let requests = s.audio_in.new_track_requests();
+        apply(&mut s, "tempo.new_track", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!((s.tempo.guide_bpm(), s.audio_in.guide().0), (None, None));
+        assert_eq!(s.audio_in.new_track_requests(), requests + 1);
+        assert_eq!(s.tempo.source, tempo::TempoSource::Audio, "a new track keeps Tempo auto");
+        apply(&mut s, "tempo.auto", ControlInput::Value(0.0), true).unwrap();
+        assert_eq!(s.tempo.source, tempo::TempoSource::Manual);
+        // Arming is never touched by any of it.
+        assert!(!s.gate.is_armed());
     }
 
     #[test]

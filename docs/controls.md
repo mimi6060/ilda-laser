@@ -53,6 +53,9 @@ _Généré par `cargo test -p laser-studio controls` — ne pas éditer à la ma
 | `tempo.nudge_down` | Retarder la phase | tempo | déclencheur | oui |
 | `tempo.double` | Tempo ×2 | tempo | déclencheur | oui |
 | `tempo.half` | Tempo ÷2 | tempo | déclencheur | oui |
+| `tempo.auto` | Tempo auto (suit la musique) | tempo | bascule | oui |
+| `tempo.guide` | Guider la détection (tap) | tempo | déclencheur | oui |
+| `tempo.new_track` | Nouveau morceau | tempo | déclencheur | oui |
 | `timeline.play` | Lecture de la timeline | timeline | déclencheur | oui |
 | `timeline.pause` | Pause de la timeline | timeline | déclencheur | oui |
 | `timeline.stop` | Arrêt de la timeline | timeline | déclencheur | oui |
