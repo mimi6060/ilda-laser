@@ -205,10 +205,22 @@ pub fn modulatable(reg: &ControlRegistry, id: &str) -> Option<(f32, f32)> {
 /// Move the targets of the enabled modulators on the engine's copies of
 /// the look and the live modifiers. Several modulators on one control add
 /// up. Value = base + depth × (wave + offset) × (max - min) / 2, clamped.
+/// (The engine calls `modulate_scaled` with the crossfader's share.)
+#[cfg(test)]
 pub fn modulate(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settings, live: &mut LiveModifiers, t: f64, beat: f64) {
+    modulate_scaled(mods, reg, settings, live, t, beat, 1.0);
+}
+
+/// `modulate` with every depth scaled by `share` (0..1): the time side of
+/// the *Temps ↔ Audio* crossfader (audio/routes.rs).
+#[allow(clippy::too_many_arguments)]
+pub fn modulate_scaled(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settings, live: &mut LiveModifiers, t: f64, beat: f64, share: f32) {
+    if share <= 0.0 {
+        return;
+    }
     let mut sums: Vec<(&str, f32)> = Vec::new();
     for m in mods.iter().filter(|m| m.enabled && m.depth > 0.0) {
-        let amount = m.depth * (m.wave_at(t, beat) + m.offset);
+        let amount = share.min(1.0) * m.depth * (m.wave_at(t, beat) + m.offset);
         match sums.iter_mut().find(|(id, _)| *id == m.target) {
             Some((_, sum)) => *sum += amount,
             None => sums.push((&m.target, amount)),
@@ -427,6 +439,20 @@ mod tests {
         for i in 0..40 {
             assert!(size_at(std::slice::from_ref(&below), &clock, i as f64 * 0.05) <= 1.0 + 1e-6);
         }
+    }
+
+    #[test]
+    fn the_time_share_scales_every_modulator() {
+        let reg = reg();
+        let m = Modulator { wave: Wave::Square, depth: 0.5, ..Default::default() };
+        let size = |share: f32| {
+            let (mut settings, mut live) = (Settings::default(), LiveModifiers::default());
+            modulate_scaled(std::slice::from_ref(&m), &reg, &mut settings, &mut live, 0.0, 0.1, share);
+            live.size
+        };
+        // Square high, depth 0.5, range 0..2: +0.5 in full, +0.25 at half, nothing at 0.
+        assert_eq!((size(1.0), size(0.5), size(0.0)), (1.5, 1.25, 1.0));
+        assert_eq!(size(3.0), 1.5, "never more than in full");
     }
 
     #[test]

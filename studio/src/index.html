@@ -197,6 +197,10 @@
   .lfo canvas { width: 72px; height: 30px; aspect-ratio: auto; border-radius: 4px; flex: 0 0 72px; }
   .lfo .del { flex: 0 0 auto; padding: 4px 8px; }
   .lfo input[type=number] { max-width: 70px; }
+  .aroute .meters { flex: 0 0 72px; display: flex; flex-direction: column; gap: 3px; }
+  .aroute .meter { margin-top: 0; height: 6px; }
+  .aroute .meter.out > div { background: #3ddc84; }
+  .aroute .meter.shut > div { opacity: 0.35; }
   button { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font: inherit; }
   button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
@@ -562,6 +566,15 @@
       <h2>Modulateurs <button id="lfoAdd" title="Ajouter un modulateur (LFO calé sur le tempo)" style="padding:4px 8px;font-size:11px">+ Modulateur</button></h2>
       <div id="lfoList"></div>
       <div class="hint" id="lfoHint">Un modulateur fait osciller un réglage autour de sa valeur, calé sur le tempo.</div>
+    </section>
+
+    <!-- Liens audio (T-153) : une valeur ou un évènement de l'analyse audio, mis en forme, vers un réglage -->
+    <section data-panel="lfo" id="arPanel">
+      <h2>Liens audio <button id="arAdd" title="Ajouter un lien audio (la musique pilote un réglage)" style="padding:4px 8px;font-size:11px">+ Lien audio</button></h2>
+      <label title="0 = seuls les modulateurs (temps), 100 = seuls les liens audio, au milieu les deux en plein">Temps ↔ Audio <span class="v" id="arMixV"></span></label>
+      <input type="range" id="arMix" min="0" max="100" value="50">
+      <div id="arList"></div>
+      <div class="hint" id="arHint">Un lien audio fait réagir un réglage à la musique : basses → taille, kick → luminosité, montée → vitesse…</div>
     </section>
 
     <section data-panel="music" id="musPanel">
@@ -1570,6 +1583,7 @@ async function previewLoop() {
     showTempo(f.tempo);
     if (fetchedAt > liveAnsweredAt && liveAnsweredAt >= liveSentAt) showLive(f.live);
     showLfos(f.lfos);
+    showRoutes(f.audio_routes);
     showStrobe(f.strobe);
     // Follow page changes made elsewhere (MIDI controller, API) - only
     // when the server's value changes, so a tab click that the server
@@ -3706,6 +3720,105 @@ function showLfos(pos) {
   });
 }
 
+// ---------- audio routes (T-153) ----------
+// A source (band, level, kick…) → gate, curve, attack/release → a control.
+const AR_CURVES = [['linear', 'Linéaire'], ['square', 'Carré (plus de punch)'], ['sqrt', 'Racine (plus sensible)'], ['s_curve', 'En S (doux)']];
+let aroutes = [], arMix = 0.5, arSources = [], arTargets = [], arMax = 16;
+const arEvent = id => arSources.some(s => s.id === id && s.event);
+async function loadRoutes() {
+  const r = await (await fetch('/api/audio/routes')).json();
+  aroutes = r.routes; arMix = r.mix; arSources = r.sources; arTargets = r.targets; arMax = r.max;
+  renderRoutes();
+}
+async function saveRoutes() {
+  if (!await post('/api/audio/routes', { mix: arMix, routes: aroutes })) await loadRoutes();
+}
+function arSpan(r, f, label, title) {
+  const sp = r.shape[f], beats = sp.beats !== undefined, v = beats ? sp.beats : sp.ms;
+  return `<label title="${title}">${label}</label><div class="row" style="margin-top:0">
+    <input type="number" data-f="${f}" min="0" max="${beats ? 16 : 10000}" step="${beats ? 0.125 : 5}" value="${+v.toFixed(3)}" title="${title}">
+    <select data-u="${f}" title="Unité"><option value="ms"${beats ? '' : ' selected'}>ms</option><option value="beats"${beats ? ' selected' : ''}>temps</option></select></div>`;
+}
+function renderRoutes() {
+  const opts = (list, sel) => list.map(([v, t]) => `<option value="${v}"${String(v) === String(sel) ? ' selected' : ''}>${lfoEsc(t)}</option>`).join('');
+  const srcOpts = sel => `<optgroup label="Continu">${opts(arSources.filter(s => !s.event).map(s => [s.id, s.label]), sel)}</optgroup>`
+    + `<optgroup label="Évènements">${opts(arSources.filter(s => s.event).map(s => [s.id, s.label]), sel)}</optgroup>`;
+  $('arMix').value = Math.round(arMix * 100);
+  $('arMixV').textContent = Math.round(arMix * 100) + ' %';
+  $('arList').innerHTML = aroutes.map((r, i) => {
+    const ev = arEvent(r.source), amt = Math.round(r.shape.max * 100);
+    return `<div class="lfo aroute" data-i="${i}">
+      <div class="row"><div class="meters" title="Entrée / sortie"><div class="meter"><div data-in="${i}"></div></div><div class="meter out"><div data-out="${i}"></div></div></div>
+        <select data-f="source" title="Source">${srcOpts(r.source)}</select>
+        <button class="del" data-del="${i}" title="Supprimer ce lien audio">×</button></div>
+      <div class="row"><select data-f="target" title="Cible">${opts(arTargets.map(t => [t.id, t.label]), r.target)}</select></div>
+      <label>Quantité <span class="v">${amt} %</span></label>
+      <input type="range" data-f="amount" min="-100" max="100" value="${amt}" title="Part de la plage du réglage (négatif : vers le bas)">
+      <label>Seuil <span class="v">${Math.round(r.shape.gate * 100)} %</span></label>
+      <input type="range" data-f="gate" min="0" max="100" value="${Math.round(r.shape.gate * 100)}" title="En dessous, le signal est ignoré (bruit)">
+      <label>Courbe</label><select data-f="curve">${opts(AR_CURVES, r.shape.curve)}</select>
+      ${arSpan(r, 'attack', 'Attaque', 'Temps de montée')}
+      ${ev ? arSpan(r, 'decay', 'Déclin', 'Temps de retombée après un coup') : arSpan(r, 'release', 'Relâche', 'Temps de retombée')}
+      <label class="check" style="justify-content:flex-start"><input type="checkbox" data-f="enabled"${r.enabled ? ' checked' : ''}> Actif</label>
+    </div>`;
+  }).join('');
+  $('arAdd').disabled = aroutes.length >= arMax;
+  $('arHint').style.display = aroutes.length ? 'none' : '';
+}
+$('arAdd').addEventListener('click', () => {
+  if (aroutes.length >= arMax) return;
+  aroutes.push({ source: 'bass', target: 'master.size', enabled: true, shape: { gate: 0.05, hysteresis: 0.02, gain: 1, curve: 'linear',
+    attack: { ms: 10 }, release: { ms: 150 }, decay: { ms: 120 }, min: 0, max: 0.5 } });
+  renderRoutes(); saveRoutes();
+});
+$('arList').addEventListener('click', e => {
+  const del = e.target.dataset.del;
+  if (del === undefined) return;
+  aroutes.splice(+del, 1); renderRoutes(); saveRoutes();
+});
+$('arMix').addEventListener('input', () => {
+  arMix = +$('arMix').value / 100;
+  $('arMixV').textContent = Math.round(arMix * 100) + ' %';
+  saveRoutes();
+});
+function arEdit(e, final) {
+  const box = e.target.closest('.aroute');
+  if (!box) return;
+  const r = aroutes[+box.dataset.i], f = e.target.dataset.f, u = e.target.dataset.u, v = e.target.value;
+  if (u) {
+    const n = box.querySelector(`input[data-f="${u}"]`);
+    r.shape[u] = v === 'beats' ? { beats: 0.25 } : { ms: 100 };
+    if (n) n.value = v === 'beats' ? 0.25 : 100;
+    renderRoutes();
+  } else if (f === 'source' || f === 'target') {
+    r[f] = v;
+    if (final) renderRoutes();
+  } else if (f === 'amount' || f === 'gate') {
+    if (f === 'amount') r.shape.max = +v / 100; else r.shape.gate = +v / 100;
+    e.target.previousElementSibling.querySelector('.v').textContent = v + ' %';
+  } else if (f === 'curve') r.shape.curve = v;
+  else if (f === 'attack' || f === 'release' || f === 'decay') {
+    const beats = r.shape[f].beats !== undefined, n = Math.max(0, Math.min(beats ? 16 : 10000, +v || 0));
+    r.shape[f] = beats ? { beats: n } : { ms: n };
+  } else if (f === 'enabled') r.enabled = e.target.checked;
+  else return;
+  saveRoutes();
+}
+$('arList').addEventListener('input', e => { if (e.target.type === 'range' || e.target.type === 'number') arEdit(e, false); });
+$('arList').addEventListener('change', e => { if (e.target.type !== 'range' && e.target.type !== 'number') arEdit(e, true); });
+// Live meters: input (continuous sources) and shaped output, from /api/frame.
+function showRoutes(meters) {
+  if (!meters) return;
+  meters.forEach((m, i) => {
+    const inp = document.querySelector(`#arList [data-in="${i}"]`), out = document.querySelector(`#arList [data-out="${i}"]`);
+    if (!inp || !out) return;
+    inp.style.width = Math.round((m.input ?? Math.abs(m.value)) * 100) + '%';
+    inp.parentElement.classList.toggle('shut', m.input !== null && !m.open);
+    out.style.width = Math.round(Math.min(1, Math.abs(m.value)) * 100) + '%';
+    out.dataset.v = m.value.toFixed(3);
+  });
+}
+
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
@@ -3950,7 +4063,7 @@ async function projPost(action, body) {
 }
 // Everything a project brings back, reloaded into the page.
 async function afterOpen() {
-  await loadState(); await loadPresets(); await loadPalettes(); await loadLfos(); await loadShows();
+  await loadState(); await loadPresets(); await loadPalettes(); await loadLfos(); await loadRoutes(); await loadShows();
   if (!$('figEditor').hidden) loadFigLib();
 }
 // Unsaved changes: resolves true to go on, false to stay.
@@ -4668,7 +4781,7 @@ setFigTool('line');
 showFigProps();
 setCreationTab(remembered(CTAB_KEY));
 
-loadState().then(loadPresets).then(loadPalettes).then(loadLfos).then(previewLoop);
+loadState().then(loadPresets).then(loadPalettes).then(loadLfos).then(loadRoutes).then(previewLoop);
 midiLoop();
 loadPresence().catch(() => {});
 </script>

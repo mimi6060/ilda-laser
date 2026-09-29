@@ -549,6 +549,38 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/audio/routes") => {
+            let s = shared.lock().unwrap();
+            let targets: Vec<_> = s
+                .controls
+                .list()
+                .iter()
+                .filter_map(|d| {
+                    let target = crate::audio::shape::Target::bind(&s.controls, &d.id)?;
+                    let (min, max) = target.range();
+                    Some(json!({ "id": d.id, "label": d.label_fr, "group": d.group, "min": min, "max": max }))
+                })
+                .collect();
+            let sources: Vec<_> = crate::audio::routes::SOURCES
+                .iter()
+                .map(|(id, label)| {
+                    let event = crate::audio::shape::Source::parse(id).is_some_and(|src| src.is_event());
+                    json!({ "id": id, "label": label, "event": event })
+                })
+                .collect();
+            let r = s.routes.routing();
+            json_response(json!({ "routes": r.routes, "mix": r.mix, "sources": sources, "targets": targets, "max": crate::audio::routes::MAX_ROUTES }))
+        }
+        (Method::Post, "/api/audio/routes") => match body::<crate::audio::routes::AudioRouting>(request) {
+            Ok(routing) => {
+                let s = &mut *shared.lock().unwrap();
+                match s.routes.set(routing, &s.controls) {
+                    Ok(()) => ok(),
+                    Err(e) => text(400, &e.to_string()),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/controls") => json_response(json!(shared.lock().unwrap().controls.list())),
         (Method::Get, "/api/control-values") => {
             let s = shared.lock().unwrap();
@@ -1087,6 +1119,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "timeline_audio": song_view(s),
         "live": s.live,
         "lfos": lfo_positions(s),
+        "audio_routes": s.routes.meters().collect::<Vec<_>>(),
         "strobe": s.strobe,
         "evolving": evolving_status(s),
     }))
