@@ -36,6 +36,7 @@ mod tempo;
 mod timeline;
 mod tunnels;
 mod watchdog;
+mod zones;
 mod web;
 
 #[cfg(test)]
