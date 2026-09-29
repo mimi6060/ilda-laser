@@ -54,7 +54,7 @@
 
 use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// ODF frame rate aimed at (Hz).
@@ -122,7 +122,7 @@ const TIGHTNESS: f32 = 5.0;
 const ODF_DELAY_WINDOWS: f64 = 0.42;
 
 /// What the detector says about the audio's tempo (`/api/state.audio.tempo`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectState {
     /// Silence: no estimate (the BPM shown is the last one).
