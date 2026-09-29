@@ -208,6 +208,40 @@
   .meter > div { height: 100%; width: 0; background: var(--accent); transition: width 50ms linear; }
   #beatDot { width: 12px; height: 12px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--line); display: inline-block; }
   #beatDot.hit { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
+  /* Musique v2 (T-243) */
+  #musSrc { margin-top: 4px; }
+  .mus-info { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--panel-2); font-size: 12px; color: var(--muted); }
+  .mus-info b { color: var(--text); font-weight: 600; }
+  .mus-warn { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: #3a2a00; color: var(--warn); font-size: 12px; border: 1px solid var(--warn); }
+  .mus-warn[hidden], .mus-info[hidden], #musDevRow [hidden], #musNativeSettings[hidden], #musBrowserSettings[hidden] { display: none; }
+  #musStatus.err { color: var(--danger); }
+  #musStatus.ok { color: var(--accent); }
+  #musAnalysis, #musSettings { margin-top: 12px; }
+  .mus-db { position: relative; height: 10px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .mus-db .zone { position: absolute; top: 0; bottom: 0; left: 58.33%; right: 0; background: #3ddc8422; border-left: 1px dashed #3ddc8488; }
+  #musDbFill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--accent); transition: width 80ms linear; }
+  #musDbFill.hot { background: var(--danger); }
+  .mus-db .peak { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--text); opacity: .8; }
+  .mus-bands { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 10px; }
+  .mus-bands > div { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0; }
+  .mus-bands .bar { width: 100%; max-width: 44px; height: 54px; background: var(--panel-2); border-radius: 4px; overflow: hidden; display: flex; align-items: flex-end; }
+  .mus-bands .bar > div { width: 100%; height: 0; background: var(--accent); transition: height 80ms linear; }
+  .mus-bands span { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  #musSpectrum { aspect-ratio: auto; height: 90px; margin-top: 8px; border-radius: 6px; }
+  .mus-lights { display: flex; gap: 6px; margin-top: 8px; }
+  .mus-light { flex: 1; text-align: center; padding: 5px 0; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); font-size: 12px; color: var(--muted); transition: background 120ms, color 120ms; }
+  .mus-light.hit { background: var(--warn); color: #231800; border-color: var(--warn); box-shadow: 0 0 10px var(--warn); transition: none; }
+  .mus-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: center; margin-top: 10px; font-size: 12px; }
+  .mus-grid > span:nth-child(odd) { color: var(--muted); }
+  .mus-grid b { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .mus-gauge { display: flex; align-items: center; gap: 8px; }
+  .mus-gauge .meter { flex: 1; margin: 0; }
+  .mus-gauge b { min-width: 38px; text-align: right; }
+  #musSection[data-section="break"] { color: #6ab0ff; }
+  #musSection[data-section="buildup"] { color: var(--warn); }
+  #musSection[data-section="drop"] { color: var(--danger); }
+  #musSection[data-section="silence"] { color: var(--muted); }
+  #musBuildup { background: var(--warn); }
   .scene { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-top: 1px solid var(--line); }
   .scene .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .scene .d { color: var(--muted); font-size: 12px; }
@@ -519,17 +553,75 @@
       <div class="hint" id="lfoHint">Un modulateur fait osciller un réglage autour de sa valeur, calé sur le tempo.</div>
     </section>
 
-    <section data-panel="music">
+    <section data-panel="music" id="musPanel">
       <h2>Musique <span id="beatDot" title="Beat détecté"></span></h2>
-      <div class="row">
-        <button id="micBtn" class="primary">Activer le micro</button>
+      <!-- T-243 : source, écoute, analyse (niveau, bandes, spectre, coups, tempo, section) -->
+      <div class="seg" id="musSrc" role="radiogroup" aria-label="Source audio">
+        <button data-src="browser" role="radio" title="Le micro de cette page analysé par le navigateur (la source par défaut)">Navigateur</button>
+        <button data-src="native" role="radio" title="Le studio écoute lui-même une entrée du Mac, même onglet masqué ou fermé">Native</button>
+        <button data-src="none" role="radio" title="Aucune source : le laser ne réagit plus à la musique">Aucune</button>
       </div>
-      <label>Entrée audio</label>
-      <select id="micSelect"><option value="">Par défaut</option></select>
-      <label>Sensibilité <span class="v" id="gainV"></span></label>
-      <input type="range" id="gain" min="0.5" max="8" step="0.1" value="2">
-      <label>Volume</label><div class="meter"><div id="mLevel"></div></div>
-      <label>Basses</label><div class="meter"><div id="mBass"></div></div>
+      <div class="mus-info" id="musNativeInfo" hidden>
+        Avec <b>Native</b>, le studio écoute lui-même une entrée du Mac : le laser suit la musique même onglet masqué ou fermé.
+        Au premier « Écouter », <b>macOS demande l'autorisation d'accès au micro</b> pour l'application qui a lancé le studio
+        (Terminal, iTerm…). Sans cette autorisation, l'entrée reste muette. La source par défaut reste <b>Navigateur</b>.
+      </div>
+      <div id="musDevRow">
+        <label for="micSelect" id="musDevLabel">Entrée audio</label>
+        <select id="micSelect" title="Entrées vues par le navigateur"><option value="">Par défaut</option></select>
+        <select id="musDevice" title="Entrées du Mac (liste du studio)" hidden><option value="">Entrée par défaut du Mac</option></select>
+      </div>
+      <div class="row">
+        <button id="micBtn" class="primary">Écouter</button>
+        <button data-ctl="tempo.new_track" data-control="tempo.new_track" id="musNewTrack" title="tempo.new_track : la détection oublie le morceau précédent (tempo, sections)">Nouveau morceau</button>
+      </div>
+      <div class="hint" id="musStatus" aria-live="polite"></div>
+      <div class="mus-warn" id="musSilentHint" hidden></div>
+
+      <details id="musAnalysis" open>
+        <summary>Analyse</summary>
+        <label>Niveau <span class="v" id="musDb">– dBFS</span></label>
+        <div class="mus-db" id="musDbMeter" title="Zone conseillée : −25 à 0 dBFS"><i class="zone"></i><div id="musDbFill"></div><i class="peak" id="musDbPeak"></i></div>
+        <div class="mus-bands" id="musBands">
+          <div data-band="sub"><div class="bar"><div></div></div><span>Sub</span></div>
+          <div data-band="bass"><div class="bar"><div></div></div><span>Basses</span></div>
+          <div data-band="low_mid"><div class="bar"><div></div></div><span>Bas-médiums</span></div>
+          <div data-band="mid"><div class="bar"><div></div></div><span>Médiums</span></div>
+          <div data-band="high"><div class="bar"><div></div></div><span>Aigus</span></div>
+        </div>
+        <canvas id="musSpectrum" width="360" height="90" aria-label="Spectre 64 bandes"></canvas>
+        <div class="mus-lights">
+          <span class="mus-light" id="lKick" data-hit="kick">Kick</span>
+          <span class="mus-light" id="lSnare" data-hit="snare">Caisse</span>
+          <span class="mus-light" id="lHat" data-hit="hat">Charleston</span>
+        </div>
+        <div class="mus-grid">
+          <span>BPM détecté</span><b id="musBpm">–</b>
+          <span>Confiance</span><span class="mus-gauge"><span class="meter"><div id="musConf"></div></span><b id="musConfV">–</b></span>
+          <span>État</span><b id="musTempoState">–</b>
+          <span>Section</span><b id="musSection" data-section="">–</b>
+          <span>Montée</span><span class="mus-gauge"><span class="meter"><div id="musBuildup"></div></span><b id="musBuildupV">–</b></span>
+          <span>Drops</span><b id="musDrops">0</b>
+        </div>
+      </details>
+
+      <details id="musSettings">
+        <summary>Réglages de l'analyse</summary>
+        <div id="musNativeSettings">
+          <div class="check"><input type="checkbox" id="musAutoGain"><span>Gain automatique</span></div>
+          <label>Gain manuel <span class="v" id="musGainV"></span></label>
+          <input type="range" id="musGain" min="-40" max="40" step="1" value="0">
+          <label>Seuil de silence <span class="v" id="musSilenceV"></span></label>
+          <input type="range" id="musSilence" min="-100" max="-20" step="1" value="-60">
+          <label>Sensibilité des coups <span class="v" id="musSensV"></span></label>
+          <input type="range" id="musSens" min="0" max="100" step="1" value="48">
+          <div class="hint">Réglages de l'analyse native (gardés dans audio.json).</div>
+        </div>
+        <div id="musBrowserSettings">
+          <label>Gain du navigateur <span class="v" id="gainV"></span></label>
+          <input type="range" id="gain" min="0.5" max="8" step="0.1" value="2">
+        </div>
+      </details>
 
       <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
       <label>Taille suit les basses <span class="v" id="aSizeV"></span></label>
@@ -1584,12 +1676,19 @@ if (globalThis.ResizeObserver) new ResizeObserver(() => {
 }).observe($('top'));
 
 // ---------- music ----------
+// Two sources feed the engine (T-230): *Navigateur* = this page's micro,
+// analysed here and POSTed to /api/audio (the code below, unchanged in
+// substance); *Native* = the studio captures a Mac input itself. The
+// panel (T-243) shows what the engine hears, whatever the source, from
+// GET /api/audio/state (10/s, 6.7/s with the spectrum) and, for Native,
+// GET /api/audio/spectrum (20/s), only while the panel is on screen:
+// ≤ 30 requests/s, nothing when it is hidden.
 let audio = null, beat = 0, bassAvg = 0, lastBeat = 0, sending = false;
 
 async function listInputs() {
   const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
   const sel = $('micSelect'), cur = sel.value;
-  sel.innerHTML = '<option value="">Par défaut</option>' + devs.map(d => `<option value="${d.deviceId}">${d.label || 'Entrée ' + d.deviceId.slice(0, 6)}</option>`).join('');
+  sel.innerHTML = '<option value="">Par défaut</option>' + devs.map(d => `<option value="${d.deviceId}">${esc(d.label || 'Entrée ' + d.deviceId.slice(0, 6))}</option>`).join('');
   sel.value = cur;
 }
 
@@ -1603,8 +1702,9 @@ async function startMic() {
   const an = ctx.createAnalyser();
   an.fftSize = 2048; an.smoothingTimeConstant = 0.3;
   ctx.createMediaStreamSource(stream).connect(an);
-  audio = { ctx, an, stream, time: new Float32Array(an.fftSize), freq: new Uint8Array(an.frequencyBinCount) };
-  $('micBtn').textContent = 'Couper le micro'; $('micBtn').classList.remove('primary');
+  audio = { ctx, an, stream, time: new Float32Array(an.fftSize), freq: new Uint8Array(an.frequencyBinCount), fdb: new Float32Array(an.frequencyBinCount) };
+  musError = '';
+  showMusic();
   await listInputs();
   analyse();
 }
@@ -1614,8 +1714,7 @@ function stopMic() {
   audio.stream.getTracks().forEach(t => t.stop());
   audio.ctx.close();
   audio = null;
-  $('micBtn').textContent = 'Activer le micro'; $('micBtn').classList.add('primary');
-  $('mLevel').style.width = $('mBass').style.width = '0';
+  showMusic();
 }
 
 function analyse() {
@@ -1636,8 +1735,6 @@ function analyse() {
     beat++; lastBeat = now;
     $('beatDot').classList.add('hit'); setTimeout(() => $('beatDot').classList.remove('hit'), 90);
   }
-  $('mLevel').style.width = (level * 100) + '%';
-  $('mBass').style.width = (bass * 100) + '%';
 
   if (!sending) {
     sending = true;
@@ -1646,10 +1743,265 @@ function analyse() {
   setTimeout(analyse, 25);
 }
 
-$('micBtn').addEventListener('click', () => audio ? stopMic() : startMic().catch(e => alertMic(e)));
-$('micSelect').addEventListener('change', () => { if (audio) startMic().catch(alertMic); });
-$('gain').addEventListener('input', showValues);
-function alertMic(e) { $('micBtn').textContent = 'Micro refusé : ' + e.name; }
+// The 64-band spectrum of this page's analyser (Navigateur source), on the
+// server's scale: log bands 20 Hz–20 kHz, the loudest bin of each, −90..0 dB.
+function browserSpectrum() {
+  const { an, fdb, ctx } = audio;
+  an.getFloatFrequencyData(fdb);
+  const binHz = ctx.sampleRate / an.fftSize, out = new Array(64);
+  for (let i = 0; i < 64; i++) {
+    const lo = 20 * 1000 ** (i / 64), hi = 20 * 1000 ** ((i + 1) / 64);
+    const a = Math.min(fdb.length - 1, Math.max(1, Math.floor(lo / binHz))), z = Math.min(fdb.length - 1, Math.max(a, Math.ceil(hi / binHz) - 1));
+    let m = -Infinity; for (let k = a; k <= z; k++) m = Math.max(m, fdb[k]);
+    out[i] = Math.max(0, Math.min(1, (m + 90) / 90));
+  }
+  return out;
+}
+
+const TEMPO_FR = { no_input: "Pas d'entrée", checking: 'Vérification', locked: 'Verrouillé', coasting: 'Maintien', guided: 'Guidé' };
+const SECTION_FR = { silence: 'Silence', normal: 'Normal', break: 'Break', buildup: 'Montée', drop: 'Drop' };
+const BANDS = ['sub', 'bass', 'low_mid', 'mid', 'high'];
+// The last /api/audio/state, the source picked in the panel (Native can be
+// picked without listening yet: « Écouter » starts it), the server's source
+// last seen (a change made elsewhere is followed), the last counters (a
+// light flashes when its counter moves) and since when a running native
+// capture has been exactly silent.
+let mus = null, musPick = null, musServerSrc = null, musCounters = null, musSilentSince = 0, musError = '', musConfig = null, musSentAt = 0;
+const musSens = delta => Math.round(100 * Math.log10(0.3 / delta));      // delta 0.3 … 0.03 ↔ 0 … 100 %
+const musDelta = sens => +(0.3 * 10 ** (-sens / 100)).toFixed(4);
+const fmtDb = v => (v <= -119.5 ? '−∞' : (v < 0 ? '−' : '') + Math.abs(v).toFixed(1)) + ' dBFS';
+
+function musVisible() {
+  return document.visibilityState === 'visible' && $('musPanel').offsetParent !== null;
+}
+
+async function setMusSource(src, extra = {}) {
+  musServerSrc = src; // ours: not a change made elsewhere
+  musSentAt = performance.now(); // answers asked before this are stale
+  const ok = await post('/api/audio/config', { source: src, ...extra });
+  await loadMusConfig();
+  return ok;
+}
+
+function pickSource(src) {
+  musPick = src;
+  musError = '';
+  // Only one analysis at a time: the page stops listening unless it is the source.
+  if (src !== 'browser') stopMic();
+  // Navigateur and Aucune apply at once; Native waits for « Écouter »
+  // (that is when macOS may ask for the micro).
+  if (src !== 'native') setMusSource(src);
+  else loadDevices();
+  showMusic();
+}
+
+async function listenClick() {
+  const src = musPick || 'browser';
+  if (src === 'browser') {
+    if (audio) stopMic();
+    else startMic().catch(e => { musError = 'Micro refusé par le navigateur : ' + e.name; showMusic(); });
+  } else if (src === 'native') {
+    const device = $('musDevice').value || null;
+    // Arrêter: back to the default source, nothing listening.
+    if (musServerSrc === 'native') await setMusSource('browser');
+    else await setMusSource('native', { device });
+  }
+  showMusic();
+}
+
+async function loadMusConfig() {
+  const asked = performance.now();
+  try { musConfig = await (await fetch('/api/audio/config')).json(); } catch { return; }
+  if (asked >= musSentAt) followSource(musConfig.source);
+  const an = musConfig.analysis || {};
+  const focus = document.activeElement;
+  $('musAutoGain').checked = !!an.auto_gain;
+  if (focus !== $('musGain')) $('musGain').value = an.manual_gain_db ?? 0;
+  if (focus !== $('musSilence')) $('musSilence').value = an.silence_db ?? -60;
+  if (focus !== $('musSens')) $('musSens').value = musSens(an.onsets?.delta ?? 0.1);
+  showMusic();
+}
+
+async function loadDevices() {
+  let r; try { r = await (await fetch('/api/audio/devices')).json(); } catch { return; }
+  const sel = $('musDevice'), cur = musConfig?.device ?? sel.value;
+  const names = r.devices.map(d => d.name);
+  if (cur && !names.includes(cur)) names.push(cur); // the saved one, even unplugged
+  sel.innerHTML = '<option value="">Entrée par défaut du Mac</option>' + names.map(n => {
+    const d = r.devices.find(x => x.name === n);
+    return `<option value="${esc(n)}">${esc(n)}${d?.is_default ? ' (par défaut)' : d ? '' : ' (absente)'}</option>`;
+  }).join('');
+  sel.value = cur || '';
+}
+
+function showMusic() {
+  const pick = musPick || 'browser', a = mus;
+  document.querySelectorAll('#musSrc button').forEach(b => {
+    b.classList.toggle('active', b.dataset.src === pick);
+    b.setAttribute('aria-checked', String(b.dataset.src === pick));
+  });
+  // The permission note, until the native capture is on.
+  $('musNativeInfo').hidden = pick !== 'native' || musServerSrc === 'native';
+  $('musDevRow').hidden = pick === 'none';
+  $('micSelect').hidden = pick !== 'browser';
+  $('musDevice').hidden = pick !== 'native';
+  $('musNativeSettings').hidden = pick === 'browser';
+  $('musBrowserSettings').hidden = pick !== 'browser';
+  const listening = pick === 'browser' ? !!audio : pick === 'native' && musServerSrc === 'native';
+  $('micBtn').hidden = pick === 'none';
+  $('micBtn').textContent = listening ? 'Arrêter' : 'Écouter';
+  $('micBtn').classList.toggle('primary', !listening);
+  $('micBtn').title = pick === 'native' ? (listening ? 'Arrêter la capture native (retour à la source Navigateur, micro coupé)' : 'Le studio écoute l\'entrée choisie ; macOS peut demander l\'autorisation d\'accès au micro')
+    : 'Le navigateur écoute le micro de cette page';
+
+  // Status line.
+  let text = '', cls = '';
+  if (musError) { text = musError; cls = 'err'; }
+  else if (pick === 'none') text = 'Aucune source : le laser ne réagit plus à la musique.';
+  else if (pick === 'browser') text = audio ? 'Le micro de cette page est analysé par le navigateur.' : 'Micro de la page coupé. « Écouter » pour que le laser suive la musique.';
+  else if (musServerSrc !== 'native') text = 'Choisissez l\'entrée puis « Écouter ».';
+  else if (a && a.state === 'disabled') { text = 'Capture native indisponible : studio lancé avec --no-audio.'; cls = 'err'; }
+  else if (a && a.state === 'running') {
+    const st = a.stats || {};
+    text = `Capture de « ${a.capturing || a.device || 'entrée par défaut'} »` + (st.sample_rate ? ` · ${(st.sample_rate / 1000).toFixed(1)} kHz` : ''); cls = 'ok';
+  } else if (a) { text = a.message || 'Ouverture de l\'entrée…'; cls = ['permission_denied', 'no_device', 'device_lost', 'error'].includes(a.state) ? 'err' : ''; }
+  $('musStatus').textContent = text;
+  $('musStatus').className = 'hint ' + cls;
+
+  // Native capture running but exactly silent for > 2 s: probably a
+  // refused permission (macOS then delivers zeros, no error).
+  const nativeOn = a && musServerSrc === 'native' && a.source === 'native';
+  const denied = nativeOn && a.state === 'permission_denied';
+  const mute = nativeOn && a.state === 'running' && musSilentSince && performance.now() - musSilentSince > 2000;
+  $('musSilentHint').hidden = !(denied || mute);
+  $('musSilentHint').textContent = (denied ? 'Accès au micro refusé par macOS. ' : 'La capture native tourne mais l\'entrée est totalement muette depuis plus de 2 s : macOS a peut-être refusé l\'accès au micro. ')
+    + 'Réglages Système › Confidentialité et sécurité › Microphone : autorisez l\'application qui a lancé le studio (Terminal, iTerm…), puis relancez le studio. '
+    + '« tccutil reset Microphone » dans un terminal fait redemander macOS.';
+  if (mute || denied) $('musSilentHint').dataset.reason = denied ? 'denied' : 'silent';
+
+  // Settings.
+  $('musGain').disabled = $('musAutoGain').checked;
+  $('musGainV').textContent = $('musAutoGain').checked ? 'auto' : (+$('musGain').value > 0 ? '+' : '') + $('musGain').value + ' dB';
+  $('musSilenceV').textContent = $('musSilence').value + ' dBFS';
+  $('musSensV').textContent = $('musSens').value + ' %';
+  $('gainV').textContent = '×' + (+$('gain').value).toFixed(1);
+}
+
+function flashLight(el) {
+  el.classList.add('hit');
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('hit'), 140);
+}
+
+// The server's source changed elsewhere (API, another page, first load): follow it.
+function followSource(src) {
+  if (src === musServerSrc && musPick) return;
+  musServerSrc = src;
+  musPick = src;
+  if (src !== 'browser') stopMic();
+}
+
+function showAudioState(a, asked) {
+  mus = a;
+  if (asked >= musSentAt) followSource(a.source);
+  const f = a.features || {};
+  // Level: the native meter when it is fresh, else the features' dBFS.
+  const db = a.level_db ?? f.level_db ?? -120, peak = a.peak_db ?? db;
+  const pos = v => Math.max(0, Math.min(100, (v + 60) / 60 * 100));
+  $('musDb').textContent = fmtDb(db);
+  $('musDbFill').style.width = pos(db) + '%';
+  $('musDbFill').classList.toggle('hot', peak >= -0.5);
+  $('musDbPeak').style.left = `calc(${pos(peak)}% - 2px)`;
+  const running = a.source === 'native' && a.state === 'running';
+  if (running && a.level_db != null && a.level_db <= -119.5) musSilentSince ||= performance.now();
+  else musSilentSince = 0;
+  for (const k of BANDS) document.querySelector(`#musBands [data-band="${k}"] .bar > div`).style.height = Math.round(100 * (a.bands?.[k] ?? 0)) + '%';
+  // Lights: a counter that moved since the last poll.
+  const c = a.counters || {};
+  if (musCounters) {
+    for (const [k, id] of [['kick', 'lKick'], ['snare', 'lSnare'], ['hat', 'lHat']]) if ((c[k] ?? 0) > (musCounters[k] ?? 0)) flashLight($(id));
+    if ((c.beat ?? 0) > (musCounters.beat ?? 0) && !audio) flashLight($('beatDot'));
+  }
+  musCounters = c;
+  const bpm = a.detected_bpm || 0, conf = a.detected_confidence || 0;
+  $('musBpm').textContent = bpm > 0 ? bpm.toFixed(1) : '–';
+  $('musConf').style.width = Math.round(100 * conf) + '%';
+  $('musConfV').textContent = bpm > 0 ? Math.round(100 * conf) + ' %' : '–';
+  $('musTempoState').textContent = a.tempo ? TEMPO_FR[a.tempo.state] || a.tempo.state : 'estimation native seulement';
+  const sec = a.section || 'silence';
+  const since = a.sections && a.sections.since_s > 0 ? ` · ${Math.round(a.sections.since_s)} s` : '';
+  $('musSection').textContent = (SECTION_FR[sec] || sec) + since;
+  $('musSection').dataset.section = sec;
+  $('musBuildup').style.width = Math.round(100 * (a.buildup || 0)) + '%';
+  $('musBuildupV').textContent = Math.round(100 * (a.buildup || 0)) + ' %';
+  $('musDrops').textContent = c.drop ?? 0;
+  showMusic();
+}
+
+function drawSpectrum(values) {
+  const cv = $('musSpectrum'), w = cv.clientWidth | 0, h = cv.clientHeight | 0;
+  if (!w || !h) return;
+  if (cv.width !== w * devicePixelRatio) { cv.width = w * devicePixelRatio; cv.height = h * devicePixelRatio; }
+  const g = cv.getContext('2d');
+  g.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  g.clearRect(0, 0, w, h);
+  if (!values) {
+    g.fillStyle = '#8b929c'; g.font = '11px system-ui'; g.textAlign = 'center';
+    g.fillText(musPick === 'browser' ? 'Spectre : « Écouter » le micro de la page' : 'Spectre : pas de capture native en cours', w / 2, h / 2 + 4);
+    cv.dataset.bands = '0';
+    return;
+  }
+  const bw = w / values.length;
+  const grad = g.createLinearGradient(0, h, 0, 0);
+  grad.addColorStop(0, '#3ddc84'); grad.addColorStop(0.75, '#ffb020'); grad.addColorStop(1, '#ff4d4f');
+  g.fillStyle = grad;
+  values.forEach((v, i) => { const bh = Math.max(1, v * h); g.fillRect(i * bw + 0.5, h - bh, Math.max(1, bw - 1), bh); });
+  cv.dataset.bands = String(values.length);
+  cv.dataset.peak = String(values.indexOf(Math.max(...values)));
+}
+
+// Polling: state 10/s (6.7/s with the spectrum), spectrum 20/s (Native
+// only), devices every 5 s,
+// only while the panel is visible; the preview's /api/frame loop is not touched.
+let musTick = 0, musBusy = false, musWasVisible = false;
+async function musicLoop() {
+  const visible = musVisible();
+  if (visible && !musWasVisible) { musCounters = null; loadMusConfig(); loadDevices(); }
+  musWasVisible = visible;
+  if (visible && !musBusy) {
+    musBusy = true;
+    try {
+      const jobs = [];
+      const analysisOpen = $('musAnalysis').open;
+      const spectrum = analysisOpen && mus && mus.source === 'native' && musServerSrc === 'native';
+      const asked = performance.now();
+      if (musTick % (spectrum ? 3 : 2) === 0) jobs.push(fetch('/api/audio/state').then(r => r.json()).then(a => showAudioState(a, asked)));
+      if (spectrum) {
+        jobs.push(fetch('/api/audio/spectrum').then(r => r.json()).then(sp => drawSpectrum(sp.values)));
+      } else if (analysisOpen) drawSpectrum(audio && (musPick || 'browser') === 'browser' ? browserSpectrum() : null);
+      if (musTick % 100 === 0 && musTick && musPick === 'native') jobs.push(loadDevices());
+      await Promise.all(jobs);
+    } catch { /* studio unreachable: the preview says so */ }
+    musBusy = false;
+    musTick++;
+  }
+  setTimeout(musicLoop, visible ? 50 : 250);
+}
+
+document.querySelectorAll('#musSrc button').forEach(b => b.addEventListener('click', () => pickSource(b.dataset.src)));
+$('micBtn').addEventListener('click', listenClick);
+$('micSelect').addEventListener('change', () => { if (audio) startMic().catch(e => { musError = 'Micro refusé par le navigateur : ' + e.name; showMusic(); }); });
+$('musDevice').addEventListener('change', () => { if (musServerSrc === 'native') setMusSource('native', { device: $('musDevice').value || null }); });
+$('gain').addEventListener('input', showMusic);
+const musAnalysisPatch = patch => post('/api/audio/config', { analysis: patch }).then(loadMusConfig);
+$('musAutoGain').addEventListener('change', () => { showMusic(); musAnalysisPatch({ auto_gain: $('musAutoGain').checked }); });
+$('musGain').addEventListener('input', showMusic);
+$('musGain').addEventListener('change', () => musAnalysisPatch({ manual_gain_db: +$('musGain').value }));
+$('musSilence').addEventListener('input', showMusic);
+$('musSilence').addEventListener('change', () => musAnalysisPatch({ silence_db: +$('musSilence').value }));
+$('musSens').addEventListener('input', showMusic);
+$('musSens').addEventListener('change', () => musAnalysisPatch({ onsets: { delta: musDelta(+$('musSens').value) } }));
+loadMusConfig();
+musicLoop();
 
 // ---------- scenes ----------
 let scenes = [];

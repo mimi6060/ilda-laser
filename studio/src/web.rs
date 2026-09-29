@@ -206,6 +206,12 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/audio/state") => {
+            // `/api/state.audio` alone: what the « Musique » panel polls
+            // (T-243), a few hundred bytes instead of the whole state.
+            let s = shared.lock().unwrap();
+            json_response(s.audio_in.view(s.audio, s.audio_at, Instant::now()))
+        }
         (Method::Get, "/api/audio/spectrum") => {
             let hub = Arc::clone(&shared.lock().unwrap().audio_in);
             json_response(hub.spectrum_view(Instant::now()))
@@ -285,6 +291,24 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                     let s = shared.lock().unwrap();
                     s.audio_in.publish(sim.snapshot(s.now_s()));
                     ok()
+                }
+                Err(e) => e,
+            }
+        }
+        (Method::Post, "/api/test/native_audio") => {
+            // `--test-hooks` only (e2e of the « Musique » panel, T-243): a
+            // simulated native input: capture state, device list and/or one
+            // analysis snapshot (fresh for 500 ms, like a real one).
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            match body::<SimNative>(request) {
+                Ok(sim) => {
+                    let s = shared.lock().unwrap();
+                    match sim.apply(&s.audio_in, s.now_s()) {
+                        Ok(()) => ok(),
+                        Err(e) => text(400, &format!("{e:#}")),
+                    }
                 }
                 Err(e) => e,
             }
@@ -1232,6 +1256,90 @@ impl SimEstimate {
     }
 }
 
+/// `POST /api/test/native_audio` (`--test-hooks`): a simulated native input.
+/// Every field is optional; what is sent is applied.
+#[derive(Deserialize)]
+struct SimNative {
+    /// Capture state (and the device it names), as the capture thread would set it.
+    state: Option<crate::audio::CaptureState>,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    message: String,
+    /// The device list `GET /api/audio/devices` serves.
+    devices: Option<Vec<crate::audio::capture::InputDevice>>,
+    /// One analysis snapshot.
+    snapshot: Option<SimSnapshot>,
+}
+
+#[derive(Deserialize)]
+struct SimSnapshot {
+    /// An `AudioFeatures` v2 body, read like `POST /api/audio`'s.
+    #[serde(default)]
+    features: serde_json::Value,
+    /// Meter (dBFS); the analysis floor when absent.
+    level_db: Option<f32>,
+    peak_db: Option<f32>,
+    /// The 64-band display spectrum in dBFS (fewer values: the rest at the floor).
+    #[serde(default)]
+    spectrum_db: Vec<f32>,
+    /// The detector's tempo state (the BPM and confidence are the features').
+    #[serde(default)]
+    tempo_state: crate::audio::bpm::DetectState,
+    /// Seconds since the section started.
+    #[serde(default)]
+    section_since_s: f32,
+}
+
+impl SimNative {
+    fn apply(self, hub: &crate::audio::AudioHub, now: f64) -> anyhow::Result<()> {
+        use crate::audio::analysis::FLOOR_DB;
+        use crate::audio::spectrum::SPECTRUM_BANDS;
+        let snapshot = match self.snapshot {
+            Some(sim) => {
+                let body = if sim.features.is_null() { json!({}) } else { sim.features };
+                let mut features = crate::audio::browser_features(&body, now)?;
+                let level_db = sim.level_db.unwrap_or(FLOOR_DB);
+                if body.get("level_db").is_none() {
+                    features.level_db = level_db;
+                }
+                let mut spectrum = [FLOOR_DB; SPECTRUM_BANDS];
+                for (d, v) in spectrum.iter_mut().zip(&sim.spectrum_db) {
+                    *d = v.clamp(FLOOR_DB, 12.0);
+                }
+                let spb = 60.0 / f64::from(features.bpm.max(40.0));
+                let tempo = crate::audio::bpm::TempoEstimate { bpm: features.bpm, confidence: features.bpm_confidence, beat_time: now, next_beat: now + spb, state: sim.tempo_state };
+                let onsets = crate::audio::onsets::Onsets { onset: features.onset, kick: features.kick, snare: features.snare, hat: features.hat, ..Default::default() };
+                let sections = crate::audio::sections::SectionState { section: features.section, buildup: features.buildup, drop: features.drop, since_s: sim.section_since_s, ..Default::default() };
+                Some(crate::audio::NativeSnapshot {
+                    features,
+                    rms_db: level_db,
+                    peak_db: sim.peak_db.unwrap_or(level_db),
+                    spectral: Default::default(),
+                    onsets,
+                    tempo,
+                    spectrum,
+                    sections,
+                    t: now,
+                    at: Instant::now(),
+                })
+            }
+            None => None,
+        };
+        if let Some(state) = self.state {
+            let device = self.device.or_else(|| hub.status().device);
+            hub.set_status(crate::audio::CaptureStatus { state, device, message: self.message, sample_rate: 48_000, channels: 1, overruns: 0 });
+        }
+        if let Some(devices) = self.devices {
+            hub.set_devices(devices);
+        }
+        if let Some(snapshot) = snapshot {
+            hub.publish(snapshot);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1491,6 +1599,41 @@ mod tests {
         assert_eq!((snap.tempo.bpm, snap.tempo.state), (128.0, crate::audio::bpm::DetectState::Locked));
         let n = (snap.tempo.beat_time - 0.25) / (60.0 / 128.0);
         assert!((n - n.round()).abs() < 1e-9 && snap.tempo.beat_time <= snap.t);
+    }
+
+    #[test]
+    fn the_native_audio_hook_exists_only_with_test_hooks() {
+        let t = TestServer::start(false);
+        let sim = r#"{"state":"running","device":"Micro test","devices":[{"name":"Micro test","is_default":true}],
+            "snapshot":{"features":{"bands":{"sub":0.9,"bass":0.8,"low_mid":0.1,"mid":0.2,"high":0.3},"kick":5,"snare":2,"hat":7,
+            "bpm":128,"bpm_confidence":0.8,"section":"buildup","buildup":0.4,"drop":1},
+            "level_db":-18,"peak_db":-6,"spectrum_db":[-30,-40],"tempo_state":"locked","section_since_s":3.5}}"#;
+        assert_eq!(t.request("POST", "/api/test/native_audio", sim).0, 404);
+        assert!(t.shared.lock().unwrap().audio_in.snapshot().is_none());
+        t.shared.lock().unwrap().test_hooks = true;
+        assert_eq!(t.request("POST", "/api/test/native_audio", sim).0, 200);
+        assert_eq!(t.request("POST", "/api/audio/config", r#"{"source":"native"}"#).0, 200);
+        // The panel's light endpoint: /api/state.audio alone.
+        let a: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/audio/state", "").1).unwrap();
+        assert_eq!((a["state"].as_str(), a["capturing"].as_str(), a["active"].as_str()), (Some("running"), Some("Micro test"), Some("native")));
+        assert_eq!((a["level_db"].as_f64(), a["peak_db"].as_f64()), (Some(-18.0), Some(-6.0)));
+        assert_eq!(a["features"]["level_db"].as_f64(), Some(-18.0));
+        assert_eq!((a["counters"]["kick"].as_u64(), a["counters"]["hat"].as_u64(), a["counters"]["drop"].as_u64()), (Some(5), Some(7), Some(1)));
+        assert_eq!((a["tempo"]["state"].as_str(), a["tempo"]["bpm"].as_f64()), (Some("locked"), Some(128.0)));
+        assert_eq!((a["section"].as_str(), a["sections"]["since_s"].as_f64()), (Some("buildup"), Some(3.5)));
+        let devices: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/audio/devices", "").1).unwrap();
+        assert_eq!(devices["devices"][0]["name"], "Micro test");
+        let sp: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/audio/spectrum", "").1).unwrap();
+        assert_eq!((sp["db"][0].as_f64(), sp["db"][1].as_f64(), sp["db"][63].as_f64()), (Some(-30.0), Some(-40.0), Some(-120.0)));
+        // Only the state: the snapshot is kept, the device too.
+        assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"state":"permission_denied","message":"refusé"}"#).0, 200);
+        let st = t.shared.lock().unwrap().audio_in.status();
+        assert_eq!((st.state, st.device.as_deref()), (crate::audio::CaptureState::PermissionDenied, Some("Micro test")));
+        // Bad bodies are refused.
+        assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"state":"loud"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"snapshot":{"features":{"section":"chorus"}}}"#).0, 400);
+        // Never arms anything.
+        assert_eq!(arm_status(&t)["armed"], false);
     }
 
     #[test]
