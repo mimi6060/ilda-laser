@@ -282,6 +282,14 @@ impl Shared {
         self.epoch.elapsed().as_secs_f64()
     }
 
+    /// *Nouveau morceau*: the estimator forgets its history and guide, the
+    /// clock its follower history and guide (its BPM and phase stay).
+    pub fn tempo_new_track(&mut self) {
+        self.audio_in.new_track();
+        self.audio_in.set_guide(None);
+        self.tempo.new_track();
+    }
+
     /// The tempo clock now, for the timeline player.
     pub fn timeline_clock(&self) -> timeline::Clock {
         let t = self.now_s();
@@ -564,6 +572,12 @@ fn run_engine(
             // Native capture, else the browser's features, else silence.
             let (audio, _) = s.audio_in.effective(s.audio, s.audio_at, now);
             let t = s.now_s();
+            // Tempo auto (T-234): the clock follows the detection's proposal
+            // on its own terms. Only the one clock; arming untouched.
+            if s.tempo.source == tempo::TempoSource::Audio {
+                let est = s.audio_in.fresh_tempo(now).unwrap_or_default();
+                s.tempo.apply_detection(&est, t);
+            }
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             live_state.set_clock(t, clock.beat);
             // LFOs move copies: the stored values stay the operator's base.

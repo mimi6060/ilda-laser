@@ -172,7 +172,6 @@ impl Analyzer {
     }
 
     /// A guide tempo for the estimator (T-234's *Guider*), or none.
-    #[allow(dead_code)] // wired to the tap by T-234
     pub fn set_guide(&mut self, bpm: Option<f32>) {
         self.bpm.set_guide(bpm);
     }

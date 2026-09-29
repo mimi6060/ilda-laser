@@ -219,13 +219,15 @@ pub struct Analysis {
     tempo: TempoEstimate,
     /// *Nouveau morceau* requests already applied (`AudioHub::new_track`).
     new_tracks: u64,
+    /// Generation of the *Guider* tempo already applied (`AudioHub::set_guide`).
+    guides: u64,
     buf: [f32; HOP],
 }
 
 impl Analysis {
     pub fn new(hub: Arc<AudioHub>, feeds: Receiver<Feed>) -> Self {
         let new_tracks = hub.new_track_requests();
-        Self { hub, feeds, current: None, onsets: Onsets::default(), tempo: TempoEstimate::default(), new_tracks, buf: [0.0; HOP] }
+        Self { hub, feeds, current: None, onsets: Onsets::default(), tempo: TempoEstimate::default(), new_tracks, guides: 0, buf: [0.0; HOP] }
     }
 
     /// Reads every complete hop waiting in the ring and publishes the
@@ -234,6 +236,7 @@ impl Analysis {
         while let Ok(feed) = self.feeds.try_recv() {
             let mut analyzer = Analyzer::with_config(feed.sample_rate, self.onsets, self.hub.analysis_config());
             analyzer.carry_bpm(self.tempo.bpm);
+            analyzer.set_guide(self.hub.guide().0);
             self.current = Some(Current { analyzer, feed, consumed: 0 });
         }
         let Some(cur) = self.current.as_mut() else { return 0 };
@@ -241,6 +244,11 @@ impl Analysis {
         if new_tracks != self.new_tracks {
             self.new_tracks = new_tracks;
             cur.analyzer.new_track();
+        }
+        let (guide, guides) = self.hub.guide();
+        if guides != self.guides {
+            self.guides = guides;
+            cur.analyzer.set_guide(guide);
         }
         if cur.feed.consumer.slots() >= HOP {
             // A copy under a leaf lock, at most once per poll.
@@ -492,6 +500,17 @@ mod tests {
         r.hub.new_track();
         r.run(20, 0.5);
         assert_eq!((r.analysis.new_tracks, r.fake.opens()), (1, 2));
+        assert_eq!(r.hub.snapshot().unwrap().tempo.state, DetectState::Checking);
+        // *Guider* (T-234) reaches it the same way, and survives a reopen.
+        r.hub.set_guide(Some(128.0));
+        r.run(20, 0.5);
+        assert_eq!(r.hub.snapshot().unwrap().tempo.state, DetectState::Guided);
+        r.hub.set_config(AudioConfig { buffer_frames: 256, ..AudioConfig::native() }).unwrap();
+        r.run(100, 0.5);
+        assert_eq!(r.fake.opens(), 3);
+        assert_eq!(r.hub.snapshot().unwrap().tempo.state, DetectState::Guided);
+        r.hub.set_guide(None);
+        r.run(20, 0.5);
         assert_eq!(r.hub.snapshot().unwrap().tempo.state, DetectState::Checking);
     }
 
