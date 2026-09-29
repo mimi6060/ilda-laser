@@ -1,12 +1,12 @@
 ---
 id: T-003
 title: Zones de sécurité, horizon, calibration couleur
-status: todo
+status: in-progress
 area: safety
 priority: P0
 depends_on: []
-owner: ""
-branch: ""
+owner: "dev-agent (safety-zones)"
+branch: feat/safety-zones
 source: docs/research/pangolin.md
 ---
 
