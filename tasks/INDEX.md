@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (95)
+## À faire (94)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -18,7 +18,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-157](T-157-cues.md) | Cues évolutifs : un cue = une mini-timeline (calques internes, courbes sur modificateurs, LFO) | cues | P1 | [T-111, T-151, T-140] |  |
 | [T-211](T-211-midi.md) | Contrôleurs MIDI génériques (n'importe quel appareil) | midi | P1 | [T-200, T-201, T-202, T-203] |  |
 | [T-234](T-234-tempo.md) | Brancher la détection sur l'horloge de tempo : verrouillage, maintien, tap prioritaire, recalage de phase | tempo | P1 | [T-233, T-150] |  |
-| [T-237](T-237-live.md) | AudioFeatures v2 : instantané complet côté moteur et dans /api/state | live | P1 | [T-231] |  |
 | [T-238](T-238-live.md) | Conditionnement des signaux audio : seuil, courbe, attaque/relâche, enveloppes en temps musicaux | live | P1 | [T-237, T-150] |  |
 | [T-244](T-244-qa.md) | Banc d'essai de l'analyse audio : signaux synthétiques, corpus annoté, métriques, latence | qa | P1 | [T-231] |  |
 | [T-255](T-255-safety.md) | Mode balayage public verrouillé par défaut | safety | P1 | [T-003, T-250, T-252, T-254, T-256, T-258] |  |
@@ -109,7 +108,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (46)
+## Fait (47)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -143,6 +142,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-231](T-231-tempo.md) | Analyse spectrale : 5 bandes, niveaux dBFS et gain automatique | tempo | P1 | [T-230] | feat/audio-bands |
 | [T-232](T-232-tempo.md) | Fonction d'onsets (flux spectral) et détection kick / caisse claire / charleston | tempo | P1 | [T-231] | feat/audio-onsets |
 | [T-233](T-233-tempo.md) | Estimation du BPM et suivi des temps (autocorrélation, peigne, programmation dynamique) avec confiance | tempo | P1 | [T-232, T-150] | feat/audio-bpm |
+| [T-237](T-237-live.md) | AudioFeatures v2 : instantané complet côté moteur et dans /api/state | live | P1 | [T-231] | feat/audio-features-v2 |
 | [T-253](T-253-safety.md) | Chien de garde du moteur et extinction propre | safety | P1 | [T-250] | feat/heartbeat |
 | [T-270](T-270-ui.md) | Nouvelle disposition de l'écran (régions, onglets de panneau) | ui | P1 | [] | feat/workspaces |
 | [T-275](T-275-ui.md) | Visualiseur 3D : socle WebGL2, salle, caméra orbitale, un projecteur | ui | P1 | [] | feat/beam-view |

@@ -14,7 +14,7 @@
 
 use crate::controls;
 use crate::cues::{ClickMode, CueSlot};
-use crate::engine::{AudioFeatures, Calibration, Settings};
+use crate::engine::{Calibration, Settings};
 use crate::generators::GENERATOR_NAMES;
 use crate::interlock::{ArmSource, DisarmReason, EStop};
 use crate::patterns::SHAPE_NAMES;
@@ -190,15 +190,26 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
-        (Method::Post, "/api/audio") => match body::<AudioFeatures>(request) {
-            Ok(audio) => {
+        (Method::Post, "/api/audio") => match body::<serde_json::Value>(request) {
+            // The page's features: `{level, bass, beat}` as before, or the
+            // whole v2 snapshot (T-237).
+            Ok(v) => {
                 let mut s = shared.lock().unwrap();
-                s.audio = audio;
-                s.audio_at = Instant::now();
-                ok()
+                match crate::audio::browser_features(&v, s.now_s()) {
+                    Ok(audio) => {
+                        s.audio = audio;
+                        s.audio_at = Instant::now();
+                        ok()
+                    }
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/audio/spectrum") => {
+            let hub = Arc::clone(&shared.lock().unwrap().audio_in);
+            json_response(hub.spectrum_view(Instant::now()))
+        }
         (Method::Get, "/api/audio/devices") => {
             let hub = Arc::clone(&shared.lock().unwrap().audio_in);
             // The capture thread's last scan: this handler never calls CoreAudio.
