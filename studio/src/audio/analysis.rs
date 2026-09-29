@@ -4,14 +4,16 @@
 //! It gives the dBFS meter (RMS and peak), the spectral frame (five bands
 //! with auto-gain, centroid, flatness, silence: `spectrum.rs`, T-231), the
 //! onsets (kick / snare / hat: `onsets.rs`, T-232), the tempo estimate
-//! with its beat tracking (`bpm.rs`, T-233), and from all of them the
-//! engine's `AudioFeatures` (`native_features`, T-237). `level` is
-//! computed the way the browser does it (T-230); the legacy `bass` is the
-//! normalised low end and the legacy `beat` the kick counter: it no
-//! longer fires on a bass line.
+//! with its beat tracking (`bpm.rs`, T-233), the musical section
+//! (`sections.rs`, T-236), and from all of them the engine's
+//! `AudioFeatures` (`native_features`, T-237). `level` is computed the way
+//! the browser does it (T-230); the legacy `bass` is the normalised low end
+//! and the legacy `beat` the kick counter: it no longer fires on a bass
+//! line.
 
 use super::bpm::{BpmTracker, TempoEstimate};
 use super::onsets::{OnsetDetector, Onsets};
+use super::sections::{SectionDetector, SectionState};
 use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame, FFT_SIZE, SPECTRUM_BANDS};
 use crate::engine::{AudioFeatures, Section};
 
@@ -38,13 +40,16 @@ pub struct Meter {
     pub onsets: Onsets,
     /// BPM, confidence, beats, detector state (T-233).
     pub tempo: TempoEstimate,
+    /// Silence / normal / break / build-up / drop (T-236).
+    pub sections: SectionState,
 }
 
 /// The engine's snapshot of one hop (T-237). The legacy fields stay
 /// filled for the existing looks: `bass` = the louder of the normalised
 /// `sub` and `bass` bands (the old meter was everything under 150 Hz),
-/// `beat` = the kick counter. Sections (T-236) only say silence or not yet.
-pub fn native_features(level: f32, spectral: &SpectralFrame, onsets: &Onsets, tempo: &TempoEstimate) -> AudioFeatures {
+/// `beat` = the kick counter. `section`, `buildup` and `drop` come from the
+/// section detector (T-236); detection only, no look reads them yet.
+pub fn native_features(level: f32, spectral: &SpectralFrame, onsets: &Onsets, tempo: &TempoEstimate, sections: &SectionState) -> AudioFeatures {
     AudioFeatures {
         level,
         bass: spectral.bands.sub.max(spectral.bands.bass),
@@ -62,9 +67,9 @@ pub fn native_features(level: f32, spectral: &SpectralFrame, onsets: &Onsets, te
         silent: spectral.silent,
         bpm: tempo.bpm,
         bpm_confidence: tempo.confidence,
-        section: if spectral.silent { Section::Silence } else { Section::Normal },
-        buildup: 0.0,
-        drop: 0,
+        section: if spectral.silent { Section::Silence } else { sections.section },
+        buildup: sections.buildup,
+        drop: sections.drop,
         t: spectral.t,
     }
     .sanitized()
@@ -85,6 +90,7 @@ pub struct Analyzer {
     spectral: SpectralAnalyzer,
     onsets: OnsetDetector,
     bpm: BpmTracker,
+    sections: SectionDetector,
 }
 
 impl Analyzer {
@@ -106,6 +112,7 @@ impl Analyzer {
             spectral: SpectralAnalyzer::new(sample_rate, config),
             onsets,
             bpm,
+            sections: SectionDetector::new(sample_rate, HOP),
         }
     }
 
@@ -134,8 +141,9 @@ impl Analyzer {
         let spectral = self.spectral.process(hop, t, rms_db);
         let onsets = self.onsets.process(self.spectral.power(), t, spectral.silent);
         let tempo = self.bpm.process(self.onsets.band_flux(), t, spectral.silent);
-        let features = native_features(level, &spectral, &onsets, &tempo);
-        Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets, tempo }
+        let sections = self.sections.process(&spectral, &onsets, &tempo, t);
+        let features = native_features(level, &spectral, &onsets, &tempo, &sections);
+        Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets, tempo, sections }
     }
 
     /// The last hop's display spectrum (`SpectralAnalyzer::log_spectrum`).
@@ -156,9 +164,20 @@ impl Analyzer {
         self.bpm.carry_bpm(bpm);
     }
 
-    /// *Nouveau morceau*: the tempo history is forgotten.
+    pub fn sections(&self) -> SectionState {
+        self.sections.state()
+    }
+
+    /// A reopened input continues the drop counter and the history.
+    pub fn carry_sections(&mut self, s: &SectionState) {
+        self.sections.carry(s);
+    }
+
+    /// *Nouveau morceau*: the tempo history and the section references are
+    /// forgotten.
     pub fn new_track(&mut self) {
         self.bpm.new_track();
+        self.sections.forget();
     }
 
     /// A guide tempo for the estimator (T-234's *Guider*), or none.
@@ -238,6 +257,7 @@ mod tests {
         assert_eq!((f.level_db, f.centroid_hz, f.t), (m.spectral.level_db, m.spectral.centroid_hz, m.spectral.t));
         assert_eq!((f.silent, f.section), (false, Section::Normal));
         assert_eq!((f.bpm, f.bpm_confidence), (m.tempo.bpm, m.tempo.confidence));
+        assert_eq!((f.section, f.buildup, f.drop), (m.sections.section, m.sections.buildup, m.sections.drop), "from the section detector (T-236)");
         let m = *run(&mut Analyzer::new(RATE), 0.5, |_| 0.0).last().unwrap();
         assert_eq!((m.features.silent, m.features.section, m.features.bass), (true, Section::Silence, 0.0));
     }
