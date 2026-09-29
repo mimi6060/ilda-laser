@@ -1,12 +1,12 @@
 ---
 id: T-238
 title: Conditionnement des signaux audio : seuil, courbe, attaque/relâche, enveloppes en temps musicaux
-status: todo
+status: done
 area: live
 priority: P1
 depends_on: [T-237, T-150]
-owner: ""
-branch: ""
+owner: "dev-agent (T-238)"
+branch: feat/audio-shaping
 source: docs/research/audio-analysis.md §6.2
 ---
 
@@ -31,10 +31,10 @@ impl Shaper { fn process(&mut self, x: f32, dt: f32, beat_len_s: f32) -> f32; fn
 Éditeur de route (T-153) : champs *Seuil*, *Courbe*, *Attaque*, *Relâche*, *Déclin (ms / temps)* avec petite courbe de prévisualisation.
 
 ## Critères d'acceptation
-- [ ] Échelon 0→1 avec attaque 10 ms : 63 % atteints à 10 ms ±1 trame
-- [ ] Déclin `Beats(0.25)` à 120 BPM : retour sous 5 % en 125 ms ±1 trame
-- [ ] Signal oscillant autour du seuil ±0,01 : pas de battement grâce à l'hystérésis
-- [ ] Même résultat à 30 et 60 im/s (indépendance au pas de temps, ±2 %)
+- [x] Échelon 0→1 avec attaque 10 ms : 63 % atteints à 10 ms ±1 trame
+- [x] Déclin `Beats(0.25)` à 120 BPM : retour sous 5 % en 125 ms ±1 trame
+- [x] Signal oscillant autour du seuil ±0,01 : pas de battement grâce à l'hystérésis
+- [x] Même résultat à 30 et 60 im/s (indépendance au pas de temps, ±2 %)
 
 ## Tests
 Unitaires purs sur `Shaper` avec temps simulé.
@@ -44,3 +44,5 @@ Réutilisable par les LFO (T-151) pour le lissage. Règles de CLAUDE.md : laser 
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/audio-analysis.md`.
+- 2026-09-29 — dev-agent (T-238), branche `feat/audio-shaping` : `audio/shape.rs` (`Shaper` : seuil à hystérésis, gain, courbe, suiveur attaque/relâche exact en `dt`, enveloppe AD sur événement, plage −1..1 ; `Span` ms ou temps pour attaque, relâche et déclin, lus sur la longueur de temps de `TempoClock` ; `Source` + `feed` depuis `AudioFeatures` ; `Target` lié via la liste autorisée des LFO). `lfo::offset` devient le passage unique LFO + audio (copies seulement, luminosité ne fait que baisser). Déclin mesuré depuis le pic (125 ms avec attaque 0, 135 ms avec 10 ms). Pas encore branché dans le moteur ni l'UI (T-153). 660 tests unitaires, clippy propre, e2e 166/166. Note : docs/prs/audio-shaping.md. Statut `review`.
+- 2026-09-29 — architecte (review) : APPROUVÉ et fusionné dans develop.
