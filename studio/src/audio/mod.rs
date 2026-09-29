@@ -256,7 +256,7 @@ pub struct CaptureStats {
     pub peak_db: f32,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureState {
     /// Source is not *Native*: nothing open.

@@ -2,7 +2,13 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (91)
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-243](T-243-ui.md) | Panneau « Musique » v2 : bandes, spectre, onsets, tempo détecté, section | ui | P2 | [T-237, T-233, T-236] | feat/music-panel |
+
+## À faire (90)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -69,7 +75,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-239](T-239-live.md) | Préréglages de réactivité audio (correspondances bandes → paramètres laser) | live | P2 | [T-153, T-238] |  |
 | [T-240](T-240-cues.md) | Déclencheurs sur événements audio (kick, drop, break → cues) | cues | P2 | [T-232, T-236, T-155] |  |
 | [T-242](T-242-ui.md) | Permission micro macOS et diagnostic de l'entrée audio | ui | P2 | [T-230] |  |
-| [T-243](T-243-ui.md) | Panneau « Musique » v2 : bandes, spectre, onsets, tempo détecté, section | ui | P2 | [T-237, T-233, T-236] |  |
 | [T-246](T-246-tempo.md) | Compensation de latence : décalage de sortie réglable et temps prédits | tempo | P2 | [T-234] |  |
 | [T-257](T-257-safety.md) | Estimateur d'exposition (EMP) et distance de danger (DNRO) | safety | P2 | [T-254] |  |
 | [T-260](T-260-safety.md) | Profils de sécurité par lieu | safety | P2 | [T-003, T-254, T-101] |  |
