@@ -1,12 +1,12 @@
 ---
 id: T-254
 title: Plafonds de puissance par sortie et fiche projecteur
-status: todo
+status: in-progress
 area: safety
 priority: P0
 depends_on: [T-250]
-owner: ""
-branch: ""
+owner: "dev-agent (power-caps)"
+branch: feat/power-caps
 source: docs/research/safety-regulation.md#7-proposed-features
 ---
 
