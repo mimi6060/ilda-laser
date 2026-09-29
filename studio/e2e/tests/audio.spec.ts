@@ -1,4 +1,4 @@
-// Audio input source (T-230), analysis settings (T-231), onset settings (T-232), the tempo estimate (T-233) and the engine's features v2 (T-237), through the API only. The test studio runs
+// Audio input source (T-230), analysis settings (T-231), onset settings (T-232), the tempo estimate (T-233), the engine's features v2 (T-237) and the section detector (T-236), through the API only. The test studio runs
 // with --no-audio: no microphone or interface is ever opened, the native
 // capture reports « disabled », and the browser source (POST /api/audio)
 // keeps driving the looks as before.
@@ -31,6 +31,8 @@ test('--no-audio: no capture, no device, nothing fails', async () => {
   expect(a.spectral).toBeNull();
   expect(a.onsets).toBeNull();
   expect(a.tempo).toBeNull();
+  // Break / build-up / drop detection (T-236): native only.
+  expect(a.sections).toBeNull();
   // Default source is the browser: the studio never opens the Mac's mic by itself.
   expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: null, buffer_frames: 256, analysis: ANALYSIS });
 });

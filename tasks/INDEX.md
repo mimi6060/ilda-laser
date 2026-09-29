@@ -2,7 +2,7 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
-## À faire (92)
+## À faire (91)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -66,7 +66,6 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-206](T-206-midi.md) | Couleurs RGB des pads sur l'APC40 mkII (couleur de la cue, pulsation) | midi | P2 | [T-205] |  |
 | [T-210](T-210-ui.md) | APC40 virtuel à l'écran (disposition, affectations, état des LED) | ui | P2 | [T-203, T-204, T-205] |  |
 | [T-235](T-235-tempo.md) | Détection du temps fort (début de mesure) et des phrases de 8/16 mesures | tempo | P2 | [T-234, T-236] |  |
-| [T-236](T-236-tempo.md) | Détection montée / drop / break et silence (sections musicales) | tempo | P2 | [T-231, T-232] |  |
 | [T-239](T-239-live.md) | Préréglages de réactivité audio (correspondances bandes → paramètres laser) | live | P2 | [T-153, T-238] |  |
 | [T-240](T-240-cues.md) | Déclencheurs sur événements audio (kick, drop, break → cues) | cues | P2 | [T-232, T-236, T-155] |  |
 | [T-242](T-242-ui.md) | Permission micro macOS et diagnostic de l'entrée audio | ui | P2 | [T-230] |  |
@@ -106,7 +105,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-015](T-015-output.md) | Sortie ShowNET (API Laserworld) | output | P0 | [] |  |
 | [T-152](T-152-tempo.md) | Détection automatique du BPM depuis l'audio (avec confiance) | tempo | P2 | [T-150] |  |
 
-## Fait (49)
+## Fait (50)
 
 | id | tâche | domaine | priorité | dépend de | branche |
 |---|---|---|---|---|---|
@@ -155,6 +154,7 @@ _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 | [T-160](T-160-timeline.md) | Timeline : modèle de show et lecteur (pistes, événements, carte de tempo) | timeline | P2 | [T-150, T-156] | feat/timeline |
 | [T-161](T-161-timeline.md) | Fichier audio et forme d'onde dans la timeline | timeline | P2 | [T-160] | feat/timeline-audio |
 | [T-162](T-162-timeline.md) | Éditeur de timeline (pistes, glisser, magnétisme, zoom, marqueurs, copier-coller) | ui | P2 | [T-160, T-161] | feat/timeline-editor |
+| [T-236](T-236-tempo.md) | Détection montée / drop / break et silence (sections musicales) | tempo | P2 | [T-231, T-232] | feat/audio-sections |
 | [T-290](T-290-safety.md) | Bouton laser / Espace basculent depuis une copie locale périmée de « armed » | safety | P2 | [] | fix/arm-keys |
 | [T-292](T-292-cues.md) | La cue active reste « en cours » côté serveur après un changement de look à la main | cues | P2 | [] | fix/ui-state |
 | [T-297](T-297-cues.md) | Espace CRÉATION : import SVG et vectorisation d'image vers figure laser | cues | P2 | [T-296] | feat/figure-import |
