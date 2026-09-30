@@ -32,6 +32,7 @@ pub mod onsets;
 pub mod sections;
 pub mod shape;
 pub mod playback;
+pub mod routes;
 pub mod spectrum;
 pub mod worker;
 
