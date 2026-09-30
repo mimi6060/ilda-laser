@@ -43,8 +43,6 @@
 //! `Shaper::feed`, `Source::read` and `Target::apply` are plain arithmetic
 //! and `match`es (tested with the counting allocator).
 
-#![cfg_attr(not(test), allow(dead_code))] // until the routes (T-153) use it
-
 use crate::controls::ControlRegistry;
 use crate::engine::{AudioFeatures, Settings, AUDIO_EVENTS, AUDIO_VALUES};
 use crate::lfo;
@@ -211,6 +209,12 @@ impl Shaper {
         self.min = fin(self.min, d.min).clamp(-1.0, 1.0);
         self.max = fin(self.max, d.max).clamp(-1.0, 1.0);
         self
+    }
+
+    /// New settings, running state kept: a route edited while it plays
+    /// (a slider dragged) goes on from where it is instead of restarting.
+    pub fn retune(&mut self, settings: &Shaper) {
+        *self = Shaper { state: self.state, ..settings.clone() };
     }
 
     /// Back to rest (gate closed, envelopes at 0), settings kept.

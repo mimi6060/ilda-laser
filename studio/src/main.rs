@@ -173,6 +173,9 @@ pub struct Shared {
     /// Master LFO modulators (lfo.rs, lfos.json), applied every frame on
     /// top of the stored values.
     pub lfos: lfo::LfoStore,
+    /// Audio routes (audio/routes.rs, audio_routes.json): analysis values
+    /// and events shaped onto controls, every frame, on the same copies.
+    pub routes: audio::routes::RouteStore,
     /// The four cue layers and the point budget (layers.rs), saved to
     /// layers.json when changed.
     pub mixer: layers::Mixer,
@@ -454,6 +457,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
+    let routes = audio::routes::RouteStore::load_or_create(cli.data_dir.join("audio_routes.json"), &controls);
     let epoch = Instant::now();
     let mut state = Shared {
         settings: Settings::default(),
@@ -488,6 +492,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
             m
         },
         lfos,
+        routes,
         mixer: {
             let mut m: layers::Mixer = load_json(&cli.data_dir.join("layers.json"));
             m.sanitize();
@@ -582,9 +587,15 @@ fn run_engine(
             }
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             live_state.set_clock(t, clock.beat);
-            // LFOs move copies: the stored values stay the operator's base.
+            // LFOs, then audio routes, move copies: the stored values stay
+            // the operator's base. The Temps ↔ Audio crossfader shares them.
             let (mut settings, mut live) = (s.settings.clone(), s.live.clone());
-            lfo::modulate(s.lfos.list(), &s.controls, &mut settings, &mut live, t, clock.beat);
+            let time_share = s.routes.routing().time_share();
+            lfo::modulate_scaled(s.lfos.list(), &s.controls, &mut settings, &mut live, t, clock.beat, time_share);
+            let beat_len_s = (60.0 / clock.bpm.max(1.0)) as f32;
+            if s.routes.apply(&audio, dt, beat_len_s, &mut settings, &mut live) {
+                lfo::recolor_live(&mut live);
+            }
             let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
             let show_cues = timeline_cues(&mut s, t, &clock);
             let mixer = s.mixer.clone();
@@ -925,7 +936,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("laser-studio-startup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Files that try their luck with arming fields.
-        for name in ["presence.json", "live.json", "layers.json", "grid.json", "calibration.json", "scenes.json", "lfos.json", "palettes.json"] {
+        for name in ["presence.json", "live.json", "layers.json", "grid.json", "calibration.json", "scenes.json", "lfos.json", "audio_routes.json", "palettes.json"] {
             std::fs::write(dir.join(name), r#"{"armed": true, "arm": true, "on": true, "hold_to_run": false}"#).unwrap();
         }
         let data_dir = dir.to_str().unwrap();
