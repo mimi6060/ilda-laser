@@ -1,7 +1,7 @@
 ---
 id: T-254
 title: Plafonds de puissance par sortie et fiche projecteur
-status: in-progress
+status: review
 area: safety
 priority: P0
 depends_on: [T-250]
@@ -36,10 +36,10 @@ pub struct ProjectorInfo {
 Onglet « Sorties » → encadré « Limites de sécurité » : « Puissance max (%) », « Rouge / Vert / Bleu max (%) », puis « Fiche projecteur ». Le curseur de luminosité principal affiche une graduation à la position du plafond.
 
 ## Critères d'acceptation
-- [ ] Look à luminosité 1,0 avec `max_power=0,3` → aucune valeur de couleur > 0,3 en sortie
-- [ ] `max_color` vert 0,2 → canal vert ≤ 0,2 quel que soit le look
-- [ ] Hausse du plafond refusée pendant l'armement ; baisse appliquée au tick suivant
-- [ ] Anciennes installations sans `outputs.json` : défauts appliqués, rien ne casse
+- [x] Look à luminosité 1,0 avec `max_power=0,3` → aucune valeur de couleur > 0,3 en sortie
+- [x] `max_color` vert 0,2 → canal vert ≤ 0,2 quel que soit le look
+- [x] Hausse du plafond refusée pendant l'armement ; baisse appliquée au tick suivant
+- [x] Anciennes installations sans `outputs.json` : défauts appliqués, rien ne casse
 
 ## Tests
 Unitaires sur l'étage de plafonnement ; e2e : régler 30 %, luminosité à 100 %, vérifier `/api/frame` de sortie.
@@ -51,3 +51,4 @@ Unitaires sur l'étage de plafonnement ; e2e : régler 30 %, luminosité à 100 
 
 ## Journal
 - 2026-09-27 — agent de recherche : tâche créée depuis `docs/research/safety-regulation.md`.
+- 2026-09-29 — dev-agent (power-caps), branche `feat/power-caps` : `studio/src/power.rs` (plafond appliqué après tout l'étage de sécurité, avant la porte ; `outputs.json` ; `GET/POST /api/outputs/limits`, hausse 409 sans confirmation et toujours 409 armé), fiche projecteur (+ notes), carte RÉGLAGES › Sorties et projecteurs. rebasée sur develop 4164ab2 : 703 tests unitaires, clippy propre, e2e 187/187 (4 nouveaux dans `power-caps.spec.ts`). Écarts à valider : plafond MIDI T-208 laissé à 1,0 (le plafond étant multiplicatif, le reporter sur le fader l'appliquerait deux fois ; `max_brightness_effective` exposé dans l'API) et indication texte au lieu d'une graduation sur le curseur. Note : `docs/prs/power-caps.md`.

@@ -10,7 +10,8 @@
 //!
 //! What is **not** in a project, and never changed by opening one: the
 //! calibration, the safety settings (strobe limiter, horizon, hold-to-run,
-//! heartbeat), the MIDI safety options (`midi/devices.json`), the arming
+//! heartbeat), the output power caps and projector sheets (`outputs.json`),
+//! the MIDI safety options (`midi/devices.json`), the arming
 //! state and the e-stop. They belong to the rig and the venue (the future
 //! site profile, T-289), so a project made elsewhere can't loosen them.
 //! Nothing here can arm the laser.
@@ -919,7 +920,7 @@ mod tests {
         let text = json!({
             "format_version": 1, "armed": true, "arm": true, "estop": false,
             "calibration": { "offset_x": 5.0, "scale_x": 9.0 },
-            "safety": { "max_flash_hz": 100.0 }, "presence": { "hold_to_run": false },
+            "safety": { "max_flash_hz": 100.0 }, "outputs": { "outputs": [{ "id": "main", "limits": { "max_power": 1.0 } }] }, "presence": { "hold_to_run": false },
             "midi": { "profiles": {}, "safety": { "allow_arm": true }, "devices": { "safety": { "allow_arm": true } } },
         })
         .to_string();
@@ -938,6 +939,7 @@ mod tests {
         assert_eq!(serde_json::to_value(s.safety.get()).unwrap(), before.1);
         assert_eq!(s.midi.store.devices.safety, before.2);
         assert!(!s.midi.store.devices.safety.allow_arm);
+        assert_eq!(s.outputs.active_limits(), crate::power::OutputLimits::default(), "power caps untouched");
         assert_eq!(serde_json::to_value(&s.presence.settings).unwrap(), before.3);
         drop(s);
         let _ = std::fs::remove_dir_all(dir);

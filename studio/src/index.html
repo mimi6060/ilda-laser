@@ -337,6 +337,9 @@
   .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
   .render3d .check { margin-top: 6px; }
   #strobeLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
+  #pwLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
+  #pwLoosenOk { border-color: var(--danger); color: var(--danger); }
+  #pjNotes { width: 100%; padding: 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; resize: vertical; box-sizing: border-box; }
   #sfLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
   #sfLoosenOk { border-color: var(--danger); color: var(--danger); }
   .sf-error { color: var(--danger); }
@@ -649,6 +652,7 @@
       <input type="range" id="mSpeed" min="0" max="400" data-live="speed" data-k="100" data-control="master.speed" title="master.speed">
       <label>Luminosité maître <span class="v" id="mBrightV"></span></label>
       <input type="range" id="mBright" min="0" max="100" data-live="brightness" data-k="100" data-control="master.brightness" title="master.brightness">
+      <div class="hint" id="capHint" style="margin-top:0"></div>
       <div id="colorBlock" title="Clic droit = couleurs du cue (Normal)">
         <label>Couleur</label>
         <div class="seg wrap" id="colorModes" data-control="master.color.mode">
@@ -1219,9 +1223,36 @@
       </details>
     </section>
 
-    <section>
+    <section id="outputsPanel">
       <h2>Sorties et projecteurs</h2>
-      <div class="hint">La sortie en cours est indiquée dans la barre du haut. Projecteurs, zones et lieu : à venir.</div>
+      <div class="hint">La sortie en cours est indiquée dans la barre du haut.</div>
+      <div class="sf-sub">Limites de sécurité</div>
+      <div id="pwLoosen" hidden>
+        <div id="pwLoosenText"></div>
+        <div class="row"><button id="pwLoosenOk">Confirmer la hausse</button><button id="pwLoosenCancel">Annuler</button></div>
+      </div>
+      <div class="hint sf-error" id="pwError"></div>
+      <label>Puissance max (%) <span class="v" id="pwPowerV"></span></label><input type="range" id="pwPower" min="0" max="100" step="1">
+      <label>Rouge max (%) <span class="v" id="pwRedV"></span></label><input type="range" id="pwRed" min="0" max="100" step="1">
+      <label>Vert max (%) <span class="v" id="pwGreenV"></span></label><input type="range" id="pwGreen" min="0" max="100" step="1">
+      <label>Bleu max (%) <span class="v" id="pwBlueV"></span></label><input type="range" id="pwBlue" min="0" max="100" step="1">
+      <div class="hint">Plafond de cette sortie, appliqué en dernier à tout ce qui sort (cues, MIDI, LFO, audio, timeline) : chaque couleur est écrêtée à son maximum, puis tout est multiplié par la puissance max. Ces réglages appartiennent à cette machine (pas au projet). Baisser s'applique tout de suite ; relever demande une confirmation, laser désarmé.</div>
+      <div class="sf-sub">Fiche projecteur</div>
+      <label for="pjName">Nom / modèle</label><input type="text" id="pjName" maxlength="60" autocomplete="off">
+      <label for="pjClass">Classe (IEC 60825-1)</label>
+      <select id="pjClass"><option value="">Non renseignée</option><option>1</option><option>1M</option><option>2</option><option>2M</option><option>3R</option><option>3B</option><option>4</option></select>
+      <label>Puissance max par couleur (mW) : rouge, vert, bleu</label>
+      <div class="row"><input type="number" id="pjPowR" min="0" step="1" title="Rouge (mW)"><input type="number" id="pjPowG" min="0" step="1" title="Vert (mW)"><input type="number" id="pjPowB" min="0" step="1" title="Bleu (mW)"></div>
+      <label>Longueurs d'onde (nm) : rouge, vert, bleu</label>
+      <div class="row"><input type="number" id="pjWlR" min="0" max="2000" step="1" title="Rouge (nm)"><input type="number" id="pjWlG" min="0" max="2000" step="1" title="Vert (nm)"><input type="number" id="pjWlB" min="0" max="2000" step="1" title="Bleu (nm)"></div>
+      <label for="pjAperture">Diamètre de sortie (mm)</label><input type="number" id="pjAperture" min="0" max="100" step="0.1">
+      <label for="pjDiv">Divergence (mrad)</label><input type="number" id="pjDiv" min="0" max="100" step="0.1">
+      <label for="pjScan">Angle de balayage optique (°)</label><input type="number" id="pjScan" min="0" max="180" step="1">
+      <label for="pjScanFail">Anti-défaut de balayage matériel</label>
+      <select id="pjScanFail"><option value="">Inconnu</option><option value="yes">Oui</option><option value="no">Non</option></select>
+      <label class="check"><input type="checkbox" id="pjLens"> Lentille de divergence</label>
+      <label for="pjNotes">Notes</label><textarea id="pjNotes" maxlength="1000" rows="3"></textarea>
+      <div class="hint">Informative : sert aux estimations d'exposition et à la fiche de sécurité. 0 = inconnu.</div>
     </section>
   </div>
 </main>
@@ -3980,11 +4011,92 @@ function showRoutes(meters) {
   });
 }
 
+// ---------- power caps and projector sheet (T-254) ----------
+// `outputCfg` is what the server applies to the active output. Lowering a
+// cap is saved at once; raising one answers 409 and only « Confirmer la
+// hausse » sends it (never while armed: the server refuses it anyway).
+let outputCfg = null, pwTimer = null, pwPending = null, pwLoadError = null;
+const pwFields = { pwPower: l => l.max_power, pwRed: l => l.max_color[0], pwGreen: l => l.max_color[1], pwBlue: l => l.max_color[2] };
+function showCapHint() {
+  if (!outputCfg) return;
+  $('capHint').textContent = `Plafond de la sortie : ${Math.round(outputCfg.limits.max_power * 100)} % (appliqué après cette luminosité)`;
+}
+function showOutputs(force = false) {
+  if (!outputCfg) return;
+  for (const [id, get] of Object.entries(pwFields)) {
+    if (force || document.activeElement !== $(id)) $(id).value = Math.round(get(outputCfg.limits) * 100);
+    $(id + 'V').textContent = Math.round(get(outputCfg.limits) * 100) + ' %';
+  }
+  $('pwError').textContent = pwLoadError || '';
+  const p = outputCfg.projector;
+  if (force || !$('outputsPanel').contains(document.activeElement)) {
+    $('pjName').value = p.name; $('pjClass').value = p.class; $('pjNotes').value = p.notes;
+    ['pjPowR', 'pjPowG', 'pjPowB'].forEach((id, i) => { $(id).value = p.power_mw[i]; });
+    ['pjWlR', 'pjWlG', 'pjWlB'].forEach((id, i) => { $(id).value = p.wavelength_nm[i]; });
+    $('pjAperture').value = p.aperture_mm; $('pjDiv').value = p.divergence_mrad; $('pjScan').value = p.scan_angle_deg;
+    $('pjScanFail').value = p.hw_scan_fail === true ? 'yes' : p.hw_scan_fail === false ? 'no' : '';
+    $('pjLens').checked = p.divergence_lens;
+  }
+  showCapHint();
+}
+async function reloadOutputs() {
+  const j = await (await fetch('/api/outputs/limits')).json();
+  outputCfg = j.outputs.find(o => o.id === j.active); pwLoadError = j.load_error;
+  showOutputs(true);
+}
+function pwLimitsFromControls() {
+  const v = id => Math.min(100, Math.max(0, +$(id).value || 0)) / 100;
+  return { max_power: v('pwPower'), max_color: [v('pwRed'), v('pwGreen'), v('pwBlue')] };
+}
+function pjFromControls() {
+  const n = id => Math.max(0, +$(id).value || 0);
+  const sf = $('pjScanFail').value;
+  return {
+    name: $('pjName').value, class: $('pjClass').value, notes: $('pjNotes').value,
+    power_mw: ['pjPowR', 'pjPowG', 'pjPowB'].map(n), wavelength_nm: ['pjWlR', 'pjWlG', 'pjWlB'].map(id => Math.round(n(id))),
+    aperture_mm: n('pjAperture'), divergence_mrad: n('pjDiv'), scan_angle_deg: n('pjScan'),
+    hw_scan_fail: sf === 'yes' ? true : sf === 'no' ? false : null, divergence_lens: $('pjLens').checked,
+  };
+}
+async function saveOutputs(body, confirm = false) {
+  const r = await fetch('/api/outputs/limits', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(confirm ? { ...body, confirm_loosen: true } : body) });
+  if (r.ok) {
+    outputCfg = (await r.json()).output; pwLoadError = null; pwPending = null;
+    $('pwLoosen').hidden = true;
+    showOutputs();
+  } else if (r.status === 409) {
+    const j = await r.json();
+    if (j.armed) {
+      pwPending = null; $('pwLoosen').hidden = true;
+      await reloadOutputs();
+      $('pwError').textContent = j.error + ' (' + j.loosen.join(' · ') + ')';
+    } else {
+      pwPending = body;
+      $('pwLoosenText').textContent = 'Relever le plafond de puissance ? ' + j.loosen.join(' · ');
+      $('pwLoosen').hidden = false;
+    }
+  } else {
+    const msg = await r.text();
+    await reloadOutputs();
+    $('pwError').textContent = msg;
+  }
+}
+Object.keys(pwFields).forEach(id => $(id).addEventListener('input', () => {
+  $(id + 'V').textContent = $(id).value + ' %';
+  clearTimeout(pwTimer); pwTimer = setTimeout(() => saveOutputs({ limits: pwLimitsFromControls() }), 60);
+}));
+['pjName', 'pjClass', 'pjNotes', 'pjPowR', 'pjPowG', 'pjPowB', 'pjWlR', 'pjWlG', 'pjWlB', 'pjAperture', 'pjDiv', 'pjScan', 'pjScanFail', 'pjLens']
+  .forEach(id => $(id).addEventListener('change', () => saveOutputs({ projector: pjFromControls() })));
+$('pwLoosenOk').addEventListener('click', () => { if (pwPending) saveOutputs(pwPending, true); });
+$('pwLoosenCancel').addEventListener('click', () => { pwPending = null; $('pwLoosen').hidden = true; reloadOutputs(); });
+
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
   safety = st.safety; showSafety();
   reloadSafety();
+  reloadOutputs();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');
