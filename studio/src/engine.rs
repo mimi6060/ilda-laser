@@ -29,6 +29,13 @@ pub enum Content {
     /// One of the operator's figures (T-296, `figures.rs`): strokes drawn
     /// in the CRÉATION editor, possibly animated.
     Figure(Figure),
+    /// A file of the ILDA media library (T-011, `ilda_library.rs`),
+    /// played as it is at `fps` images per second, looping.
+    Ilda {
+        file: String,
+        #[serde(default = "crate::ilda_library::default_fps")]
+        fps: f32,
+    },
 }
 
 impl Content {
@@ -43,6 +50,7 @@ impl Content {
             | (Content::Wave, Content::Wave)
             | (Content::Evolving(_), Content::Evolving(_)) => true,
             (Content::Figure(a), Content::Figure(b)) => a.name == b.name,
+            (Content::Ilda { file: a, .. }, Content::Ilda { file: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -399,6 +407,8 @@ pub struct Animator {
     gen_time: f32,
     /// Seconds a per-second figure has been playing.
     fig_time: f64,
+    /// Seconds an ILDA file has been playing.
+    ilda_time: f64,
     flash: f32,
     last_beat: u64,
     /// Tempo-clock beat the look started at (the cue's launch); `None`
@@ -512,6 +522,9 @@ impl Animator {
         if let Content::Figure(_) = &s.content {
             self.fig_time += dt as f64;
         }
+        if let Content::Ilda { .. } = &s.content {
+            self.ilda_time += dt as f64;
+        }
 
         // size = 0 leaves the scale alone; size = 1 swings it 0.5x..1.5x.
         let scale = s.scale * (1.0 - 0.5 * react.size * (react.enabled as u8 as f32) + react.size * bass);
@@ -544,6 +557,16 @@ impl Animator {
                     (r * gain, g * gain, b * gain)
                 })
             }
+            // The file's own colours, dimmed like any look; its own dwell
+            // and blanking (see the end of this function).
+            Content::Ilda { file, fps } => match crate::ilda_library::clip(file) {
+                Some(clip) => clip
+                    .frame_at(self.ilda_time, *fps)
+                    .iter()
+                    .map(|p| Point::lit(p.x * scale, p.y * scale, p.r * gain, p.g * gain, p.b * gain))
+                    .collect(),
+                None => Vec::new(),
+            },
             Content::Generator { generator, params } => {
                 let t = if params.beat_sync { beat_time(params, beat_pos) } else { self.gen_time };
                 let ctx = GenCtx { t, beat_pos, bpm: clock.bpm as f32, level, bass, scale };
@@ -565,6 +588,10 @@ impl Animator {
                 Point { x, y, ..p }
             })
             .collect();
+        if let Content::Ilda { .. } = &s.content {
+            // Played as authored (T-011): not through the optimiser.
+            return rotated;
+        }
         densify(&rotated)
     }
 }

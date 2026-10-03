@@ -5,6 +5,8 @@ use crate::scenes::SceneStore;
 use crate::{controls, cues, layers, lfo, live, midi, presets, tempo, timeline, Shared};
 use std::time::Instant;
 
+static ILDA_DIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// A fresh `Shared` like the one `main` builds, with scenes stored in a
 /// path that is never written unless a test saves a scene.
 pub fn shared() -> Shared {
@@ -57,6 +59,12 @@ pub fn shared() -> Shared {
         figures: crate::figures::FigureStore::in_memory(),
         shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id())).join("shows")),
         media: std::sync::Arc::new(crate::audio::media::MediaStore::new(&std::env::temp_dir().join(format!("laser-studio-test-media-{}", std::process::id())))),
+        // Its own folder per call: tests import in parallel.
+        ilda: std::sync::Arc::new(crate::ilda_library::IldaLibrary::new(&std::env::temp_dir().join(format!(
+            "laser-studio-test-ilda-{}-{}",
+            std::process::id(),
+            ILDA_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )))),
         // No song-playback thread in unit tests: the timeline runs on the system clock.
         song: std::sync::Arc::new(crate::audio::playback::SongHub::new(Instant::now(), false)),
         song_sync: Default::default(),

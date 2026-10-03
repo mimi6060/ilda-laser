@@ -26,6 +26,7 @@ mod figures;
 mod font;
 mod generators;
 mod ilda;
+mod ilda_library;
 mod instance;
 mod layers;
 mod lfo;
@@ -244,6 +245,9 @@ pub struct Shared {
     pub figures: figures::FigureStore,
     /// The user's songs, `studio-data/media/audio/` (T-161).
     pub media: Arc<audio::media::MediaStore>,
+    /// The user's ILDA files, `studio-data/media/ilda/` (T-011), read on
+    /// their own thread at start-up (`ilda_library::spawn_load`).
+    pub ilda: Arc<ilda_library::IldaLibrary>,
     /// The show's song: shared with the song-playback thread and the
     /// output callback (their own short locks, never this one).
     pub song: Arc<audio::playback::SongHub>,
@@ -481,6 +485,9 @@ fn main() -> Result<()> {
     }
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
+    // The ILDA files can be big: read beside everything else, their cues
+    // appear once parsed.
+    ilda_library::spawn_load(&shared);
 
     // A panic anywhere: cut the output first (the DAC kill switch, no lock),
     // then let the default report run and every loop wind down. The engine's
@@ -711,6 +718,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
             cli.test_hooks,
             cli.test_decode_timeout_ms.map_or(audio::isolate::DECODE_TIMEOUT, Duration::from_millis),
         ))),
+        ilda: Arc::new(ilda_library::IldaLibrary::new(&cli.data_dir)),
         song: Arc::new(audio::playback::SongHub::new(epoch, !cli.no_audio)),
         song_sync: Default::default(),
         presence: presence::Presence::load(cli.data_dir.join("presence.json")),
