@@ -76,6 +76,13 @@ pub struct MidiDevice {
     pub lost: bool,
     /// « Retour LED » ticked (T-205).
     pub leds: bool,
+    /// Last message received (activity light in the UI, T-211); shown by
+    /// `/api/midi` as `activity_ms`.
+    #[serde(skip)]
+    pub last_at: Option<Instant>,
+    /// Messages received (real-time ones excepted): the UI flashes the
+    /// activity light when it changes.
+    pub messages: u64,
 }
 
 impl MidiDevice {
@@ -94,6 +101,8 @@ impl MidiDevice {
             connected_at: None,
             lost: false,
             leds: true,
+            last_at: None,
+            messages: 0,
         }
     }
 }
@@ -160,6 +169,10 @@ impl MidiState {
         if event.msg.is_realtime() {
             return;
         }
+        if let Some(d) = self.devices.iter_mut().find(|d| d.name == event.port) {
+            d.last_at = Some(event.at);
+            d.messages += 1;
+        }
         self.last = Some(event.clone());
         if self.recent.len() >= RECENT_LEN {
             self.recent.pop_front();
@@ -186,6 +199,18 @@ mod tests {
         assert_eq!(m.recent.len(), RECENT_LEN);
         assert_eq!(m.recent.front().unwrap().msg, MidiMsg::Cc { channel: 0, number: 7, value: 10 });
         assert_eq!(m.last.as_ref().unwrap().msg, MidiMsg::Cc { channel: 0, number: 7, value: 29 });
+    }
+
+    #[test]
+    fn each_device_keeps_its_last_activity() {
+        let mut m = MidiState::new(true, profile::ProfileStore::in_memory());
+        m.device_mut("APC40 mkII");
+        m.device_mut("nanoKONTROL2");
+        m.record(&ev(MidiMsg::Clock));
+        assert!(m.devices.iter().all(|d| d.last_at.is_none()), "clock is not activity");
+        m.record(&ev(MidiMsg::NoteOn { channel: 0, note: 1, velocity: 1 }));
+        assert!(m.devices[0].last_at.is_some() && m.devices[1].last_at.is_none());
+        assert_eq!((m.devices[0].messages, m.devices[1].messages), (1, 0));
     }
 
     #[test]

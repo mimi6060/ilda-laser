@@ -12,12 +12,16 @@
 //! tempo clock (T-150) and the Clip Stop row blinks while the emergency
 //! stop is latched.
 //!
+//! Any other controller (T-211) only lights the buttons whose mapping
+//! has a `led` (off / on / blink values the user picked): no driver, no
+//! metronome, no rings.
+//!
 //! Velocities and channels: Akai's public protocol documents
 //! (docs/research/midi-apc40.md §1.3, §2.3). The mkII pad colours are
 //! placeholders until T-206: white = cue present, green = playing.
 
 use super::engine::{profile_of, range};
-use super::mapping::{InputKind, MapMode, Mapping};
+use super::mapping::{InputKind, LedFeedback, MapMode, Mapping};
 use super::profile::Driver;
 use super::Model;
 use crate::controls::{self, ControlKind, GRID_COLS, GRID_ROWS};
@@ -94,6 +98,11 @@ impl LedState {
         msgs
     }
 
+    /// No update before `t` (nothing to drive on this device for now).
+    pub fn pause_until(&mut self, t: Instant) {
+        self.next_at = Some(t);
+    }
+
     /// The device lost what we sent (Introduction, goodbye): resend all.
     pub fn forget(&mut self) {
         self.last_sent = LedFrame::default();
@@ -160,6 +169,9 @@ struct View<'a> {
     playing: HashMap<&'a str, bool>,
     /// Soft blink phase (mkII flash pads), from the tempo clock.
     beat_on: bool,
+    /// APC layout: a layer's Activator (`layer.N.mute`) is lit while the
+    /// layer is heard. Elsewhere a mute button is lit while muted.
+    apc: bool,
 }
 
 impl View<'_> {
@@ -186,7 +198,7 @@ impl View<'_> {
             let n: u8 = n.parse().ok()?;
             match param {
                 // Activator: lit = the layer is heard.
-                "mute" => return Some(!s.mixer.layer(n).mute),
+                "mute" if self.apc => return Some(!s.mixer.layer(n).mute),
                 // Clip Stop: lit while the layer plays something.
                 "clear" => return Some(s.deck.active.iter().any(|a| a.layer == n)),
                 _ => {}
@@ -237,15 +249,51 @@ fn velocity(model: Model, kind: Kind, look: Look, blink_on: bool) -> u8 {
     }
 }
 
+/// Generic LED feedback (T-211): every Note or CC mapping with a `led`
+/// lights its own note / CC, on its channel (0 for "any channel"), with
+/// the values the user chose. Same rule as the APCs: the plain mapping
+/// speaks first, the Shift one only lights a button left dark.
+fn render_generic(view: &View, mappings: &[Mapping], frame: &mut LedFrame) {
+    let mut values: BTreeMap<(u8, u8), (Look, LedFeedback)> = BTreeMap::new();
+    for shift in [false, true] {
+        for mp in mappings.iter().filter(|mp| mp.shift == shift) {
+            let Some(led) = mp.led.map(LedFeedback::clamped) else { continue };
+            let kind = match mp.input.kind {
+                InputKind::Note => 0x90,
+                InputKind::Cc => 0xB0,
+                _ => continue,
+            };
+            let key = (kind | mp.input.channel.unwrap_or(0) & 0x0F, mp.input.number & 0x7F);
+            let look = view.look(mp).unwrap_or(Look::Off);
+            let entry = values.entry(key).or_insert((Look::Off, led));
+            if entry.0 == Look::Off {
+                *entry = (look, led);
+            }
+        }
+    }
+    for ((status, key), (look, led)) in values {
+        let v = match look {
+            Look::Off => led.off,
+            Look::On | Look::Playing => led.on,
+            Look::Present => led.present.unwrap_or(led.off),
+            Look::Alt => led.blink.unwrap_or(led.on),
+            // No blink value: blink by hand with the beat.
+            Look::Flashing => led.blink.unwrap_or(if view.beat_on { led.on } else { led.off }),
+        };
+        frame.set(status, key, v);
+    }
+}
+
 /// The LEDs `port` (an APC on `driver`) should show at `t` (seconds on
 /// the studio clock, `Shared::now_s`). Cheap: runs under the lock.
 pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
     let model = driver.model();
     let mut frame = LedFrame::default();
-    if !matches!(model, Model::Apc40 | Model::Apc40Mk2) {
+    let Some(profile) = profile_of(s, port) else { return frame };
+    let apc = matches!(model, Model::Apc40 | Model::Apc40Mk2);
+    if !apc && !profile.mappings.iter().any(|mp| mp.led.is_some()) {
         return frame;
     }
-    let Some(profile) = profile_of(s, port) else { return frame };
     let beat = s.tempo.beat_at(t);
     let phase = beat.rem_euclid(1.0);
     let category = CATEGORIES.get(s.cue_page).copied();
@@ -257,7 +305,12 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
             m
         }),
         beat_on: phase < 0.5,
+        apc,
     };
+    if !apc {
+        render_generic(&view, &profile.mappings, &mut frame);
+        return frame;
+    }
 
     // Buttons and pads. The plain mapping speaks first; the Shift one
     // only lights a button its plain mapping leaves dark.
@@ -586,5 +639,45 @@ mod tests {
         assert_eq!(at(&f, (0x90, 58)), Some(ON), "device button: multi on");
         assert_eq!(at(&f, (0x90, 99)), None, "Tap has no LED");
         assert!(render(Driver::Generic, &s, PORT, T).0.is_empty());
+    }
+
+    /// T-211: a generic controller lights only the mappings with a `led`,
+    /// on their own note / CC and channel, with the values chosen.
+    #[test]
+    fn generic_led_feedback_uses_the_mapping_values() {
+        let mut s = setup(Driver::Apc40);
+        let p = Profile::parse(
+            r#"{ "name": "pad", "shift_key": { "kind": "note", "number": 98 },
+                "mappings": [
+                  { "input": { "kind": "note", "channel": 3, "number": 10 }, "target": "cue.multi", "mode": "toggle", "led": { "off": 0, "on": 1, "blink": 2 } },
+                  { "input": { "kind": "cc", "number": 20 }, "target": "layer.1.mute", "mode": "toggle", "led": { "off": 0, "on": 127 } },
+                  { "input": { "kind": "note", "number": 11 }, "target": "cue.multi", "mode": "toggle" },
+                  { "input": { "kind": "note", "number": 12 }, "mode": "grid", "args": { "slot": 0 }, "led": { "off": 0, "on": 21, "present": 3 } },
+                  { "input": { "kind": "note", "number": 14 }, "target": "page.1", "mode": "trigger", "led": { "off": 5, "on": 6 } },
+                  { "input": { "kind": "note", "number": 14 }, "shift": true, "target": "page.2", "mode": "trigger", "led": { "off": 5, "on": 6, "blink": 7 } },
+                  { "input": { "kind": "note", "number": 15 }, "target": "page.3", "mode": "trigger", "led": { "off": 5, "on": 6 } },
+                  { "input": { "kind": "note", "number": 15 }, "shift": true, "target": "page.1", "mode": "trigger", "led": { "off": 5, "on": 6, "blink": 7 } },
+                  { "input": { "kind": "pitch_bend" }, "target": "master.size", "mode": "absolute", "led": {} } ] }"#,
+        )
+        .unwrap();
+        s.midi.store.save_profile(None, "pad", p).unwrap();
+        s.midi.devices[0].profile = "pad".into();
+        let f = render(Driver::Generic, &s, PORT, T);
+        assert_eq!(at(&f, (0x93, 10)), Some(0), "multi off, on channel 4");
+        assert_eq!(at(&f, (0xB0, 20)), Some(0), "layer 1 not muted");
+        assert_eq!(at(&f, (0x90, 11)), None, "no `led`: left alone");
+        assert_eq!(at(&f, (0x90, 12)), Some(3), "cue present");
+        assert_eq!(at(&f, (0x90, 14)), Some(6), "page 1 lit");
+        assert_eq!(at(&f, (0x90, 15)), Some(7), "dark plain mapping: the Shift one (page 1) blinks");
+        assert_eq!(f.0.len(), 5, "no metronome, no rings, no pitch bend LED: {f:?}");
+
+        s.deck.multi = true;
+        s.mixer.layer_mut(1).mute = true;
+        let first = page_cue(&s, 0);
+        play(&mut s, &first);
+        let f = render(Driver::Generic, &s, PORT, T);
+        assert_eq!(at(&f, (0x93, 10)), Some(1), "multi on");
+        assert_eq!(at(&f, (0xB0, 20)), Some(127), "muted = lit (not an APC Activator)");
+        assert_eq!(at(&f, (0x90, 12)), Some(21), "playing");
     }
 }

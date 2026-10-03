@@ -27,6 +27,9 @@ pub const INQUIRY_TIMEOUT: Duration = Duration::from_millis(500);
 const RECONCILE_EVERY: Duration = Duration::from_millis(250);
 /// Longest wait for an event before doing periodic work.
 const IDLE_WAIT: Duration = Duration::from_millis(20);
+/// A generic device with no LED to drive is looked at this often (a LED
+/// added to one of its mappings shows within that time).
+const GENERIC_IDLE: Duration = Duration::from_millis(250);
 
 /// Starts the MIDI thread on CoreMIDI. Returns `None` (and logs) if the
 /// thread can't be created; the studio then simply runs without MIDI.
@@ -95,7 +98,7 @@ impl<B: Backend> Worker<B> {
 
     /// How long to wait for an event: until the next LED update at most.
     fn wait(&self, now: Instant) -> Duration {
-        let next_led = self.slots.values().filter(|s| s.introduced.is_some()).filter_map(|s| s.leds.next_at()).min();
+        let next_led = self.slots.values().filter(|s| s.profile.is_some()).filter_map(|s| s.leds.next_at()).min();
         next_led.map_or(IDLE_WAIT, |t| t.saturating_duration_since(now).clamp(Duration::from_millis(1), IDLE_WAIT))
     }
 
@@ -159,11 +162,13 @@ impl<B: Backend> Worker<B> {
     /// LED feedback: one lock for every device that is due, frames rendered
     /// from `Shared`, then only the differences sent, outside the lock.
     fn update_leds(&mut self, now: Instant) {
+        // APCs once introduced; any other device once it has a profile
+        // (generic LED feedback, T-211).
         let due: Vec<(String, Driver)> = self
             .slots
             .iter()
-            .filter(|(_, slot)| slot.output.is_some() && slot.leds.due(now))
-            .filter_map(|(name, slot)| slot.introduced.map(|(driver, _)| (name.clone(), driver)))
+            .filter(|(_, slot)| slot.output.is_some() && slot.profile.is_some() && slot.leds.due(now))
+            .map(|(name, slot)| (name.clone(), slot.introduced.map_or(Driver::Generic, |(driver, _)| driver)))
             .collect();
         if due.is_empty() {
             return;
@@ -181,7 +186,12 @@ impl<B: Backend> Worker<B> {
         };
         for (name, frame) in frames {
             let Some(slot) = self.slots.get_mut(&name) else { continue };
+            // Nothing lit nor to light (most generic devices): look again later.
+            let idle = slot.introduced.is_none() && frame.0.is_empty() && slot.leds.last_sent.0.is_empty();
             let msgs = slot.leds.update(frame, now);
+            if idle {
+                slot.leds.pause_until(now + GENERIC_IDLE);
+            }
             let Some(out) = slot.output.as_mut() else { continue };
             for msg in msgs {
                 if let Err(e) = out.send(&msg) {
@@ -370,17 +380,21 @@ impl<B: Backend> Worker<B> {
     }
 }
 
-/// LEDs and knob rings off, then Introduction `0x40`: the device is as we
-/// found it.
+/// LEDs and knob rings off, then (APC) Introduction `0x40`: the device is
+/// as we found it. A generic device only gets the LEDs we lit switched off.
 fn goodbye(slot: &mut Slot) {
     let last = std::mem::take(&mut slot.leds.last_sent);
     slot.leds.forget();
-    let Some((driver, _)) = slot.introduced.take() else { return };
-    let (Some(out), Some(pid)) = (slot.output.as_mut(), driver.apc_pid()) else { return };
-    for msg in LedFrame::default().diff(&last).into_iter().chain(detect::leds_off(driver.model())) {
+    let introduced = slot.introduced.take();
+    let Some(out) = slot.output.as_mut() else { return };
+    let apc = introduced.and_then(|(driver, _)| driver.apc_pid().map(|pid| (driver, pid)));
+    let extra = apc.map(|(driver, _)| detect::leds_off(driver.model())).unwrap_or_default();
+    for msg in LedFrame::default().diff(&last).into_iter().chain(extra) {
         let _ = out.send(&msg);
     }
-    let _ = out.send(&detect::introduction(pid, MODE_GENERIC));
+    if let Some((_, pid)) = apc {
+        let _ = out.send(&detect::introduction(pid, MODE_GENERIC));
+    }
 }
 
 /// A panic elsewhere must not take MIDI down with it (and vice versa: the
@@ -555,12 +569,81 @@ pub mod tests {
     #[test]
     fn unknown_controller_gets_generic_and_no_apc_sysex() {
         let (mut w, fake, shared, t0) = setup();
-        fake.plug("nanoKONTROL2 SLIDER/KNOB", None);
+        fake.plug("USB MIDI Keyboard", None);
         w.step(t0, None);
         w.step(t0 + ms(600), None);
-        assert_eq!(fake.sent("nanoKONTROL2 SLIDER/KNOB"), vec![DEVICE_INQUIRY.to_vec()]);
-        let d = device(&shared, "nanoKONTROL2 SLIDER/KNOB");
+        assert_eq!(fake.sent("USB MIDI Keyboard"), vec![DEVICE_INQUIRY.to_vec()]);
+        let d = device(&shared, "USB MIDI Keyboard");
         assert_eq!((d.model, d.profile.as_str(), d.connected), (Model::Unknown, "generic", true));
+    }
+
+    /// T-211: a nanoKONTROL2 picks its starter template by name, gets its
+    /// mapped button LEDs as plain CCs (no SysEx) and has them switched off
+    /// when disabled.
+    #[test]
+    fn template_device_gets_generic_led_feedback() {
+        const NANO: &str = "nanoKONTROL2 SLIDER/KNOB";
+        let (mut w, fake, shared, t0) = setup();
+        fake.plug(NANO, None);
+        w.step(t0, None);
+        w.step(t0 + ms(600), None);
+        assert_eq!(device(&shared, NANO).profile, "nanokontrol2");
+        let sent = fake.sent(NANO);
+        assert_eq!(sysex(sent.clone()), vec![DEVICE_INQUIRY.to_vec()], "no APC Introduction");
+        assert!(sent.contains(&vec![0xB0, 48, 0]), "M1 dark: layer 1 not muted");
+        // M1 pressed: layer 1 muted, its LED lit within one LED period.
+        fake.push(NANO, &[0xB0, 48, 127, 0xB0, 48, 0]);
+        w.step(t0 + ms(700), None);
+        assert!(shared.lock().unwrap().mixer.layer(1).mute);
+        w.step(t0 + ms(800), None);
+        assert_eq!(fake.sent(NANO).last(), Some(&vec![0xB0, 48, 127]));
+        // Disabled: what we lit goes dark.
+        shared.lock().unwrap().midi.store.set_port_enabled(NANO, false).unwrap();
+        w.step(t0 + ms(1100), None);
+        assert_eq!(fake.sent(NANO).last(), Some(&vec![0xB0, 48, 0]));
+    }
+
+    /// T-211: two controllers at once, each through its own profile: the
+    /// same CC 1 moves a layer dimmer on one and the size on the other, and
+    /// blackout works from either.
+    #[test]
+    fn two_controllers_each_drive_their_own_controls() {
+        const NANO: &str = "nanoKONTROL2";
+        const XTM: &str = "X-TOUCH MINI";
+        let (mut w, fake, shared, t0) = setup();
+        fake.plug(NANO, None);
+        fake.plug(XTM, None);
+        w.step(t0, None);
+        w.step(t0 + ms(600), None);
+        assert_eq!((device(&shared, NANO).profile, device(&shared, XTM).profile), ("nanokontrol2".into(), "x-touch-mini".into()));
+        {
+            let mut s = shared.lock().unwrap();
+            s.mixer.layer_mut(2).dimmer = 0.5;
+            s.live.size = 1.0;
+        }
+        // Both at mid-travel (pickup catches), then moved.
+        fake.push(NANO, &[0xB0, 1, 64, 0xB0, 1, 100]);
+        fake.push(XTM, &[0xB0, 1, 64, 0xB0, 1, 20]);
+        w.step(t0 + ms(700), None);
+        {
+            let mut s = shared.lock().unwrap();
+            crate::midi::engine::frame(&mut s, t0 + ms(710));
+            assert!((s.mixer.layer(2).dimmer - 100.0 / 127.0).abs() < 1e-3, "{}", s.mixer.layer(2).dimmer);
+            assert!((s.live.size - 2.0 * 20.0 / 127.0).abs() < 1e-3, "{}", s.live.size);
+            s.request_arm(crate::interlock::ArmSource::Ui).unwrap();
+        }
+        fake.push(XTM, &[0x9A, 23, 127]); // lower button 8: blackout
+        w.step(t0 + ms(720), None);
+        assert!(!shared.lock().unwrap().gate.is_armed(), "blackout from the X-Touch Mini");
+        {
+            let mut guard = shared.lock().unwrap();
+            let s = &mut *guard;
+            s.gate.reset_estop(&s.estop);
+            s.request_arm(crate::interlock::ArmSource::Ui).unwrap();
+        }
+        fake.push(NANO, &[0xB0, 42, 127]); // Stop: blackout
+        w.step(t0 + ms(730), None);
+        assert!(!shared.lock().unwrap().gate.is_armed(), "blackout from the nanoKONTROL2");
     }
 
     #[test]

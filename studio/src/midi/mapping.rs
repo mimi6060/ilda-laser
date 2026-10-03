@@ -145,6 +145,45 @@ pub struct Mapping {
     /// Relative encoders only.
     #[serde(default)]
     pub encoding: RelEncoding,
+    /// Generic LED feedback (T-211): the button's LED, for devices without
+    /// a dedicated driver. `None` = the studio leaves it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led: Option<LedFeedback>,
+}
+
+/// Values a generic controller lights its LED with, sent back on the
+/// mapping's own message (Note On velocity, or CC value) and channel.
+/// Many controllers light a pad with the velocity of a Note On on the
+/// same note: 0 = off, 127 (or 1) = on, sometimes another value blinks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedFeedback {
+    #[serde(default)]
+    pub off: u8,
+    #[serde(default = "full")]
+    pub on: u8,
+    /// Flash cue held, or a button lit by its Shift mapping; `None` = `on`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blink: Option<u8>,
+    /// Grid pad holding a cue that isn't playing; `None` = `off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub present: Option<u8>,
+}
+
+fn full() -> u8 {
+    127
+}
+
+impl Default for LedFeedback {
+    fn default() -> Self {
+        LedFeedback { off: 0, on: 127, blink: None, present: None }
+    }
+}
+
+impl LedFeedback {
+    /// Values are 7-bit MIDI data bytes.
+    pub fn clamped(self) -> Self {
+        LedFeedback { off: self.off & 0x7F, on: self.on & 0x7F, blink: self.blink.map(|v| v & 0x7F), present: self.present.map(|v| v & 0x7F) }
+    }
 }
 
 /// An incoming channel message, reduced to what mappings look at.
@@ -269,9 +308,21 @@ mod tests {
             curve: Curve::Log,
             pickup: true,
             encoding: RelEncoding::Offset64,
+            led: Some(LedFeedback { off: 0, on: 1, blink: Some(2), present: None }),
         };
         let back: Mapping = serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
         assert_eq!(back, full);
         assert!(serde_json::from_str::<Mapping>(r#"{ "input": { "kind": "note", "number": 1 }, "mode": "wobble" }"#).is_err());
+        assert!(m.led.is_none() && !serde_json::to_string(&m).unwrap().contains("led"), "no LED unless asked");
+    }
+
+    #[test]
+    fn led_feedback_defaults() {
+        let led: LedFeedback = serde_json::from_str("{}").unwrap();
+        assert_eq!(led, LedFeedback { off: 0, on: 127, blink: None, present: None });
+        let led: LedFeedback = serde_json::from_str(r#"{ "off": 0, "on": 1, "blink": 2 }"#).unwrap();
+        assert_eq!((led.on, led.blink), (1, Some(2)));
+        let wild = LedFeedback { off: 200, on: 255, blink: Some(128), present: Some(130) };
+        assert_eq!(wild.clamped(), LedFeedback { off: 72, on: 127, blink: Some(0), present: Some(2) });
     }
 }
