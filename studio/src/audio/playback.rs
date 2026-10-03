@@ -427,7 +427,8 @@ impl<O: AudioOut> Worker<O> {
                     match self.media.decode(&file) {
                         Ok(d) => self.loaded = Some((file, Some(Arc::new(d)))),
                         Err(e) => {
-                            log::warn!("song {file}: {e:#}");
+                            // No file name: the application log keeps no audio file names (T-403).
+                            log::warn!("morceau : chargement impossible ({})", e.root_cause());
                             self.hub.set_status(|s| {
                                 s.state = SongState::Error;
                                 s.message = format!("{e:#}");

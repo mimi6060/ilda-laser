@@ -190,6 +190,7 @@ impl ArmGate {
     pub fn request_arm(&mut self, src: ArmSource) -> Result<(), Vec<String>> {
         if matches!(src, ArmSource::Midi | ArmSource::System) {
             let refused = vec![format!("L'armement depuis « {} » n'est pas autorisé", src.label_fr())];
+            log::warn!("Armement refusé ({}) : {}", src.label_fr(), refused.join(" ; "));
             self.log.record("arm_refused", Some(src.id()), json!({ "blocking": refused }));
             return Err(refused);
         }
@@ -206,6 +207,7 @@ impl ArmGate {
     fn arm_if_clear(&mut self, src: ArmSource) -> Result<(), Vec<String>> {
         let blocking = self.blocking();
         if !blocking.is_empty() {
+            log::warn!("Armement refusé ({}) : {}", src.label_fr(), blocking.join(" ; "));
             self.log.record("arm_refused", Some(src.id()), json!({ "blocking": blocking }));
             return Err(blocking);
         }
@@ -213,6 +215,7 @@ impl ArmGate {
             self.armed = true;
             self.since = Some(SystemTime::now());
             self.source = Some(src);
+            log::info!("Laser armé ({})", src.label_fr());
             self.log.record("arm", Some(src.id()), json!({}));
         }
         Ok(())
@@ -224,6 +227,10 @@ impl ArmGate {
         // Logged only when it really disarms. An e-stop, a watchdog trip
         // and a dropping interlock write their own line instead.
         let own_line = matches!(reason, DisarmReason::EStop | DisarmReason::EngineStall | DisarmReason::Interlock(_));
+        if self.armed {
+            // The application log (T-403) has every disarm with its reason.
+            log::info!("Laser désarmé ({}) : {}", src.label_fr(), reason.label_fr());
+        }
         if self.armed && !own_line {
             self.log.record("disarm", Some(src.id()), json!({ "reason": reason.id(), "reason_fr": reason.label_fr() }));
         }
@@ -272,6 +279,7 @@ impl ArmGate {
                 // Stamped with the moment it tripped (maybe on the HTTP fast
                 // path, a frame before the gate sees it).
                 let at = UNIX_EPOCH + std::time::Duration::from_millis(at_ms);
+                log::warn!("Arrêt d'urgence ({})", src.label_fr());
                 self.log.record_at(at, "estop", Some(src.id()), json!({ "was_armed": self.armed }));
                 self.disarm(DisarmReason::EStop, src);
                 self.set_interlock(ESTOP, false);
@@ -289,6 +297,7 @@ impl ArmGate {
         estop.reset();
         self.sync_estop(estop);
         if was_latched {
+            log::info!("Arrêt d'urgence réinitialisé");
             self.log.record("estop_reset", None, json!({}));
         }
     }

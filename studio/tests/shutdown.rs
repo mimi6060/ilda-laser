@@ -75,7 +75,9 @@ impl Studio {
 
     /// The kinds of the safety log's lines (T-259), all days.
     fn safety_log(&self) -> Vec<String> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.join("logs")).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.join("logs"))
+            .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("safety-"))).collect())
+            .unwrap_or_default();
         files.sort();
         let text: String = files.iter().map(|f| std::fs::read_to_string(f).unwrap_or_default()).collect();
         text.lines().map(|l| l.split("\"kind\":\"").nth(1).and_then(|k| k.split('"').next()).unwrap_or("?").to_string()).collect()
@@ -85,7 +87,21 @@ impl Studio {
         self.signal_and_wait_with_safety_log(signal).0
     }
 
-    fn signal_and_wait_with_safety_log(mut self, signal: &str) -> (Vec<String>, Vec<String>) {
+    fn signal_and_wait_with_safety_log(self, signal: &str) -> (Vec<String>, Vec<String>) {
+        let (log, safety, _) = self.signal_and_wait_with_logs(signal);
+        (log, safety)
+    }
+
+    /// The application log (T-403), all `app-*.log` files in order.
+    fn app_log(&self) -> String {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.join("logs"))
+            .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("app-"))).collect())
+            .unwrap_or_default();
+        files.sort();
+        files.iter().map(|f| std::fs::read_to_string(f).unwrap_or_default()).collect()
+    }
+
+    fn signal_and_wait_with_logs(mut self, signal: &str) -> (Vec<String>, Vec<String>, String) {
         let status = Command::new("kill").args([signal, &self.child.id().to_string()]).status().unwrap();
         assert!(status.success());
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -100,9 +116,9 @@ impl Studio {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let (log, safety) = (self.log(), self.safety_log());
+        let (log, safety, app) = (self.log(), self.safety_log(), self.app_log());
         let _ = std::fs::remove_dir_all(&self.dir);
-        (log, safety)
+        (log, safety, app)
     }
 }
 
@@ -126,4 +142,25 @@ fn ctrl_c_disarms_sends_dark_frames_and_closes_the_output() {
     let studio = Studio::start("int");
     studio.arm();
     assert_clean_shutdown(&studio.signal_and_wait("-INT"));
+}
+
+/// T-403: the application log on disk has the start and the clean stop,
+/// time-stamped, and the arming in between with its source; no path of
+/// the data directory leaks into it.
+#[test]
+fn the_application_log_has_the_start_the_arming_and_the_stop() {
+    let studio = Studio::start("applog");
+    let dir = studio.dir.to_string_lossy().into_owned();
+    studio.arm();
+    let (_, _, app) = studio.signal_and_wait_with_logs("-TERM");
+    let lines: Vec<&str> = app.lines().collect();
+    let find = |what: &str| lines.iter().position(|l| l.contains(what)).unwrap_or_else(|| panic!("no {what:?} in {app}"));
+    let (start, armed, disarmed, stop) = (find("Démarrage de Laser Studio"), find("Laser armé"), find("Laser désarmé"), find("laser_studio: Arrêt du studio"));
+    assert!(start < armed && armed < disarmed && disarmed < stop, "{app}");
+    assert!(lines[start].contains("--no-midi") && lines[start].contains("sortie : "), "{}", lines[start]);
+    // RFC 3339 with milliseconds and offset at the start of every line.
+    for i in [start, stop] {
+        assert!(lines[i].get(..29).is_some_and(|ts| ts.as_bytes()[10] == b'T' && ts.as_bytes()[19] == b'.'), "{}", lines[i]);
+    }
+    assert!(!app.contains(&dir), "no data-dir path in the log");
 }

@@ -8,6 +8,7 @@
 //! laser output. The HTTP handlers in `web.rs` only ever edit that shared
 //! state.
 
+mod applog;
 mod audio;
 mod autosave;
 mod beat;
@@ -176,6 +177,9 @@ pub struct Shared {
     /// `Output::kind` ("dac", "ponk", "test"), for the UI's output badge.
     pub output_kind: Option<&'static str>,
     pub output_error: Option<String>,
+    /// The application log on disk (T-403): its state for the UI, the
+    /// tail and the diagnostic report.
+    pub applog: Arc<applog::AppLog>,
     pub pps: u32,
     pub scenes: SceneStore,
     pub playlist: Option<Playlist>,
@@ -389,11 +393,12 @@ pub struct Playlist {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
     let cli = Cli::parse();
     if let Some(name) = &cli.decode {
         // The decoder child (audio/isolate.rs): no panic hook, no output,
-        // nothing but one file read and a reply on stdout.
+        // nothing but one file read and a reply on stdout. It never opens
+        // the application log (T-403).
+        env_logger::init();
         let want = if cli.decode_peaks { audio::isolate::Want::Peaks } else { audio::isolate::Want::Samples };
         std::process::exit(audio::isolate::child_main(&cli.data_dir, name, want, cli.test_hooks));
     }
@@ -411,8 +416,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    std::fs::create_dir_all(&cli.data_dir)
-        .with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
+    let made = std::fs::create_dir_all(&cli.data_dir);
+    // The application log (T-403): terminal as before, plus the file.
+    let app_log = applog::init(&cli.data_dir, &applog::LogSettings::load(&cli.data_dir));
+    made.with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
     // One studio per data folder (T-412), before any output is opened. Held
     // until `main` returns, after the output is closed.
     let instance_lock = match instance::acquire(&cli.data_dir, cli.port) {
@@ -431,12 +438,12 @@ fn main() -> Result<()> {
     let output: Option<Box<dyn Output>> = match (&cli.device, &cli.test_output) {
         // Exclusive with --device and --test-output (clap refuses both).
         _ if cli.ponk.is_some() => {
-            let out = ponk::PonkOutput::open(cli.ponk.expect("checked"), &cli.data_dir)?;
+            let out = ponk::PonkOutput::open(cli.ponk.expect("checked"), &cli.data_dir).inspect_err(|e| log::error!("sortie PONK : {e:#}"))?;
             println!("Laser output: {} (disarmed: empty PONK frames until armed).", out.name());
             Some(Box::new(out))
         }
         (Some(device), _) => {
-            let out = DacOutput::open(device, cli.pps)?;
+            let out = DacOutput::open(device, cli.pps).inspect_err(|e| log::error!("sortie laser : {e:#}"))?;
             println!("Laser output: {}", out.name());
             Some(Box::new(out))
         }
@@ -450,7 +457,9 @@ fn main() -> Result<()> {
         }
     };
 
-    let state = startup_state(&cli, output.as_deref());
+    let mut state = startup_state(&cli, output.as_deref());
+    state.applog = Arc::clone(&app_log);
+    log::info!("{}", startup_line(&cli, state.output_name.as_deref()));
     let safety_log = state.gate.log().clone();
     safety_log.record(
         "app_start",
@@ -479,11 +488,13 @@ fn main() -> Result<()> {
     // decoder child can't be started): its panic is an import error.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new({
-        let (estop, health, running) = (Arc::clone(&estop), Arc::clone(&health), Arc::clone(&running));
+        let (estop, health, running, app_log) = (Arc::clone(&estop), Arc::clone(&health), Arc::clone(&running), Arc::clone(&app_log));
         move |info| {
             if !audio::isolate::panic_is_contained() {
                 watchdog::on_panic(&estop, &health, &running);
             }
+            // After the output is cut; one queued line, never a wait.
+            app_log.panic(info);
             default_hook(info);
         }
     }));
@@ -572,8 +583,45 @@ fn main() -> Result<()> {
     if !safety_log.flush(Duration::from_millis(500)) {
         log::warn!("safety log: last events not written before exit");
     }
+    match &served {
+        Ok(()) => log::info!("Arrêt du studio"),
+        Err(e) => log::error!("Arrêt du studio sur erreur : {e:#}"),
+    }
+    if !app_log.flush(Duration::from_millis(500)) {
+        eprintln!("Journal de l'application : dernières lignes non écrites avant l'arrêt");
+    }
     drop(instance_lock);
     served
+}
+
+/// The startup line of the application log: version, system, output and
+/// options, without any path (the data directory is « par défaut » or
+/// « personnalisé ») nor network address.
+fn startup_line(cli: &Cli, output: Option<&str>) -> String {
+    let mut options = vec![format!("port {}", cli.port), format!("pps {}", cli.pps)];
+    for (on, name) in [
+        (cli.no_midi, "--no-midi"),
+        (cli.no_audio, "--no-audio"),
+        (cli.midi_test, "--midi-test"),
+        (cli.test_hooks, "--test-hooks"),
+        (cli.test_interlock, "--test-interlock"),
+        (cli.test_output.is_some(), "--test-output"),
+        (cli.audio_device.is_some(), "--audio-device"),
+    ] {
+        if on {
+            options.push(name.to_string());
+        }
+    }
+    let data_dir = if cli.data_dir.as_path() == std::path::Path::new("studio-data") { "par défaut" } else { "personnalisé" };
+    format!(
+        "Démarrage de Laser Studio {} ({} {}, {}) ; sortie : {} ; options : {} ; dossier de données {data_dir}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        applog::os_version(),
+        std::env::consts::ARCH,
+        output.unwrap_or("aperçu seul"),
+        options.join(", "),
+    )
 }
 
 /// How long `main` waits for the engine to close the output at shutdown.
@@ -618,6 +666,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         output_name: output.map(|o| o.name().to_string()),
         output_kind: output.map(|o| o.kind()),
         output_error: None,
+        applog: Default::default(),
         pps: cli.pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
         playlist: None,
@@ -867,6 +916,11 @@ fn run_engine(
         strobe_log.update(strobe.active, now, &safety_log, || serde_json::json!({ "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
         let mut s = shared.lock().unwrap();
         if let Some(error) = emitted.arm_change {
+            if let Some(e) = &error {
+                log::error!("sortie laser : {e}");
+            } else if s.output_error.is_some() {
+                log::info!("sortie laser : de nouveau sans erreur");
+            }
             s.output_error = error;
         }
         s.output_lit = emitted.lit;
@@ -1244,6 +1298,84 @@ mod tests {
         assert_eq!(s.test_pattern.active, None);
         assert_eq!(s.test_pattern.brightness, testpattern::DEFAULT_BRIGHTNESS);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An output that notes when each frame left.
+    struct TimedOutput(Arc<Mutex<Vec<Instant>>>);
+    impl Output for TimedOutput {
+        fn name(&self) -> &str {
+            "chronométrée"
+        }
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+        fn set_armed(&mut self, _: bool) -> Result<()> {
+            Ok(())
+        }
+        fn send(&mut self, _: &[Point]) {
+            self.0.lock().unwrap().push(Instant::now());
+        }
+    }
+
+    /// T-403: with the application log's writer stuck for good (a dead
+    /// disk), the engine keeps its cadence over 300 frames while another
+    /// thread floods the log and arms/disarms (both log under the lock):
+    /// the mean frame interval stays that of the same engine with no
+    /// logging at all (a debug build on a busy machine may not make
+    /// 60 fps on its own, so the reference is measured, not assumed).
+    #[test]
+    fn the_engine_keeps_its_cadence_when_the_app_log_is_stuck() {
+        let app = applog::testing::install_stuck_global();
+        for i in 0..2_000 {
+            log::warn!("remplissage {i}");
+        }
+        assert!(app.status()["dropped"].as_u64().unwrap() > 0, "the queue is full");
+        let (quiet, _) = engine_cadence(false);
+        let (mean, worst) = engine_cadence(true);
+        assert!(mean <= quiet + quiet / 4 + Duration::from_millis(1), "mean frame interval {mean:?}, {quiet:?} without logging");
+        assert!(worst < Duration::from_millis(watchdog::STALL_MS as u64), "a frame took {worst:?}");
+    }
+
+    /// Mean and worst interval of 300 engine frames, with or without a
+    /// thread flooding the log.
+    fn engine_cadence(flooded: bool) -> (Duration, Duration) {
+        let dir = std::env::temp_dir().join(format!("laser-studio-engine-applog-{flooded}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = Arc::new(Mutex::new(test_support::shared()));
+        let running = Arc::new(AtomicBool::new(true));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let engine = std::thread::spawn({
+            let (shared, running, out) = (Arc::clone(&shared), Arc::clone(&running), TimedOutput(Arc::clone(&sent)));
+            let (live, layers) = (dir.join("live.json"), dir.join("layers.json"));
+            move || run_engine(shared, Some(Box::new(out)), running, live, layers)
+        });
+        let flood = std::thread::spawn({
+            let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
+            move || {
+                while flooded && running.load(Ordering::SeqCst) {
+                    log::info!("bruit");
+                    {
+                        let mut s = shared.lock().unwrap();
+                        let _ = s.request_arm(ArmSource::Ui);
+                        s.gate.disarm(interlock::DisarmReason::User, ArmSource::Ui);
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while sent.lock().unwrap().len() < 301 {
+            assert!(Instant::now() < deadline, "the engine stopped: {} frames", sent.lock().unwrap().len());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        running.store(false, Ordering::SeqCst);
+        engine.join().unwrap();
+        flood.join().unwrap();
+        let times: Vec<Instant> = sent.lock().unwrap()[..301].to_vec();
+        let mean = (times[300] - times[0]) / 300;
+        let worst = times.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        (mean, worst)
     }
 
     /// T-253: no command-line option and no file in the data directory can

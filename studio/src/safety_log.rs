@@ -20,7 +20,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -49,19 +49,51 @@ pub struct SafetyEvent {
 pub trait Sink: Send + 'static {
     /// Appends one line (no newline) to the file of `day` (`AAAA-MM-JJ`).
     fn append(&mut self, day: &str, line: &str) -> std::io::Result<()>;
+    /// Bytes already in the file of `day` (the application log's daily
+    /// size cap, T-403). Test doubles start empty.
+    fn size(&mut self, _day: &str) -> u64 {
+        0
+    }
 }
 
-/// The real sink: `<dir>/safety-<day>.jsonl`, opened in append mode, kept
-/// open while the day lasts, flushed after every line.
+/// How the files of a daily log are named: `<prefix><day><ext>`.
+#[derive(Clone, Copy, Debug)]
+pub struct Naming {
+    pub prefix: &'static str,
+    pub ext: &'static str,
+}
+
+/// `safety-AAAA-MM-JJ.jsonl`.
+pub const SAFETY_FILES: Naming = Naming { prefix: "safety-", ext: ".jsonl" };
+
+impl Naming {
+    pub fn file(&self, dir: &Path, day: &str) -> PathBuf {
+        dir.join(format!("{}{day}{}", self.prefix, self.ext))
+    }
+
+    /// The day of a log file name, if it is one of ours.
+    pub fn day_of(&self, name: &str) -> Option<jiff::civil::Date> {
+        parse_day(name.strip_prefix(self.prefix)?.strip_suffix(self.ext)?)
+    }
+}
+
+/// The real sink: `<dir>/safety-<day>.jsonl` (or another `Naming`),
+/// opened in append mode, kept open while the day lasts, flushed after
+/// every line.
 pub struct DirSink {
     dir: PathBuf,
+    naming: Naming,
     day: String,
     file: Option<std::fs::File>,
 }
 
 impl DirSink {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, day: String::new(), file: None }
+        Self::named(dir, SAFETY_FILES)
+    }
+
+    pub fn named(dir: PathBuf, naming: Naming) -> Self {
+        Self { dir, naming, day: String::new(), file: None }
     }
 }
 
@@ -71,7 +103,7 @@ impl Sink for DirSink {
             // Rotation: a new day, a new file.
             self.file = None;
             std::fs::create_dir_all(&self.dir)?;
-            self.file = Some(OpenOptions::new().create(true).append(true).open(file_of(&self.dir, day))?);
+            self.file = Some(OpenOptions::new().create(true).append(true).open(self.naming.file(&self.dir, day))?);
             self.day = day.to_string();
         }
         let file = self.file.as_mut().expect("opened above");
@@ -82,10 +114,92 @@ impl Sink for DirSink {
         }
         written
     }
+
+    fn size(&mut self, day: &str) -> u64 {
+        std::fs::metadata(self.naming.file(&self.dir, day)).map(|m| m.len()).unwrap_or(0)
+    }
 }
 
 pub fn file_of(dir: &Path, day: &str) -> PathBuf {
-    dir.join(format!("safety-{day}.jsonl"))
+    SAFETY_FILES.file(dir, day)
+}
+
+/// A bounded queue drained by one writer thread: the non-blocking half of
+/// the safety log, shared with the application log (T-403). `push` never
+/// waits: when the queue is full the item is dropped and counted, and the
+/// writer is told how many were lost with the next item it gets.
+pub struct Queue<M> {
+    tx: SyncSender<Msg<M>>,
+    /// Dropped since the writer last heard of it.
+    pub(crate) dropped: Arc<AtomicU64>,
+    dropped_total: AtomicU64,
+}
+
+enum Msg<M> {
+    Item(M),
+    /// Answered once every item queued before it is handled.
+    Flush(SyncSender<()>),
+}
+
+impl<M: Send + 'static> Queue<M> {
+    /// Starts the writer thread `name`: `handle(item, lost)` gets each item
+    /// in order, with the number dropped just before it.
+    pub fn spawn(name: &str, mut handle: impl FnMut(M, u64) + Send + 'static) -> Self {
+        let (tx, rx) = sync_channel::<Msg<M>>(QUEUE);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let lost = Arc::clone(&dropped);
+        let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
+            for msg in rx {
+                match msg {
+                    Msg::Item(item) => handle(item, lost.swap(0, Ordering::Relaxed)),
+                    Msg::Flush(done) => {
+                        let _ = done.try_send(());
+                    }
+                }
+            }
+        });
+        if let Err(e) = spawned {
+            log::error!("{name}: no writer thread: {e}");
+        }
+        Self { tx, dropped, dropped_total: AtomicU64::new(0) }
+    }
+
+    /// Queues `item`. Never blocks, never touches the disk.
+    pub fn push(&self, item: M) {
+        match self.tx.try_send(Msg::Item(item)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.dropped_total.fetch_add(1, Ordering::Relaxed);
+            }
+            // The writer is gone (it only ends with the process).
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Waits up to `timeout` for everything queued so far to be handled.
+    /// For readers (the HTTP views, shutdown, tests), never the engine.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let (tx, rx) = sync_channel(1);
+        let deadline = Instant::now() + timeout;
+        let mut msg = Msg::Flush(tx);
+        loop {
+            match self.tx.try_send(msg) {
+                Ok(()) => break,
+                Err(TrySendError::Full(m)) if Instant::now() < deadline => {
+                    msg = m;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return false,
+            }
+        }
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_ok()
+    }
+
+    /// Items dropped since the start.
+    pub fn dropped_total(&self) -> u64 {
+        self.dropped_total.load(Ordering::Relaxed)
+    }
 }
 
 struct Pending {
@@ -93,12 +207,6 @@ struct Pending {
     kind: &'static str,
     source: Option<&'static str>,
     detail: Value,
-}
-
-enum Msg {
-    Event(Pending),
-    /// Answered once every event queued before it is written.
-    Flush(SyncSender<()>),
 }
 
 #[derive(Default, Serialize)]
@@ -109,11 +217,8 @@ struct Health {
 }
 
 struct Inner {
-    tx: SyncSender<Msg>,
-    /// Events dropped because the queue was full, not yet reported.
-    dropped: AtomicU64,
-    dropped_total: AtomicU64,
-    health: Mutex<Health>,
+    queue: Queue<Pending>,
+    health: Arc<Mutex<Health>>,
     session: String,
     dir: Option<PathBuf>,
 }
@@ -141,8 +246,7 @@ impl SafetyLog {
         Self::spawn(sink, None)
     }
 
-    fn spawn(sink: impl Sink, dir: Option<PathBuf>) -> Self {
-        let (tx, rx) = sync_channel(QUEUE);
+    fn spawn(mut sink: impl Sink, dir: Option<PathBuf>) -> Self {
         static STARTED: AtomicU64 = AtomicU64::new(0);
         let n = STARTED.fetch_add(1, Ordering::Relaxed);
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
@@ -151,20 +255,18 @@ impl SafetyLog {
             // Only unit tests start several logs in one process.
             session.push_str(&format!("-{n}"));
         }
-        let inner = Arc::new(Inner {
-            tx,
-            dropped: AtomicU64::new(0),
-            dropped_total: AtomicU64::new(0),
-            health: Mutex::new(Health::default()),
-            session,
-            dir,
+        let health = Arc::new(Mutex::new(Health::default()));
+        let queue = Queue::spawn("safety-log", {
+            let (health, session) = (Arc::clone(&health), session.clone());
+            move |event: Pending, lost| {
+                if lost > 0 {
+                    let note = Pending { at: event.at, kind: "log_overflow", source: Some("system"), detail: json!({ "lost": lost }) };
+                    write_one(&mut sink, &health, &session, &note);
+                }
+                write_one(&mut sink, &health, &session, &event);
+            }
         });
-        let writer = Arc::clone(&inner);
-        let spawned = std::thread::Builder::new().name("safety-log".into()).spawn(move || write_loop(rx, sink, &writer));
-        if let Err(e) = spawned {
-            log::error!("safety log: no writer thread: {e}");
-        }
-        Self { inner: Some(inner) }
+        Self { inner: Some(Arc::new(Inner { queue, health, session, dir })) }
     }
 
     /// Records an event now. Never blocks, never touches the disk.
@@ -176,35 +278,14 @@ impl SafetyLog {
     /// HTTP fast path, seen by the gate a frame later).
     pub fn record_at(&self, at: SystemTime, kind: &'static str, source: Option<&'static str>, detail: Value) {
         let Some(inner) = &self.inner else { return };
-        match inner.tx.try_send(Msg::Event(Pending { at, kind, source, detail })) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                inner.dropped.fetch_add(1, Ordering::Relaxed);
-                inner.dropped_total.fetch_add(1, Ordering::Relaxed);
-            }
-            // The writer is gone (it only ends with the process).
-            Err(TrySendError::Disconnected(_)) => {}
-        }
+        inner.queue.push(Pending { at, kind, source, detail });
     }
 
     /// Waits up to `timeout` for everything recorded so far to be written.
     /// For readers (the HTTP view, shutdown, tests), never the engine.
     pub fn flush(&self, timeout: Duration) -> bool {
         let Some(inner) = &self.inner else { return true };
-        let (tx, rx) = sync_channel(1);
-        let deadline = Instant::now() + timeout;
-        let mut msg = Msg::Flush(tx);
-        loop {
-            match inner.tx.try_send(msg) {
-                Ok(()) => break,
-                Err(TrySendError::Full(m)) if Instant::now() < deadline => {
-                    msg = m;
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return false,
-            }
-        }
-        rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_ok()
+        inner.queue.flush(timeout)
     }
 
     pub fn dir(&self) -> Option<&Path> {
@@ -222,33 +303,15 @@ impl SafetyLog {
             "written": health.written,
             "failed": health.failed,
             "last_error": health.last_error,
-            "dropped": inner.dropped_total.load(Ordering::Relaxed),
+            "dropped": inner.queue.dropped_total(),
         })
     }
 }
 
-fn write_loop(rx: Receiver<Msg>, mut sink: impl Sink, inner: &Inner) {
-    for msg in rx {
-        match msg {
-            Msg::Event(event) => {
-                let lost = inner.dropped.swap(0, Ordering::Relaxed);
-                if lost > 0 {
-                    let note = Pending { at: event.at, kind: "log_overflow", source: Some("system"), detail: json!({ "lost": lost }) };
-                    write_one(&mut sink, inner, &note);
-                }
-                write_one(&mut sink, inner, &event);
-            }
-            Msg::Flush(done) => {
-                let _ = done.try_send(());
-            }
-        }
-    }
-}
-
-fn write_one(sink: &mut impl Sink, inner: &Inner, event: &Pending) {
-    let (day, line) = format_line(event, &inner.session);
+fn write_one(sink: &mut impl Sink, health: &Mutex<Health>, session: &str, event: &Pending) {
+    let (day, line) = format_line(event, session);
     let result = sink.append(&day, &line);
-    let mut health = inner.health.lock().unwrap_or_else(|e| e.into_inner());
+    let mut health = health.lock().unwrap_or_else(|e| e.into_inner());
     match result {
         Ok(()) => {
             health.written += 1;
@@ -278,18 +341,13 @@ fn format_line(event: &Pending, session: &str) -> (String, String) {
     (zoned.strftime("%Y-%m-%d").to_string(), json)
 }
 
-fn local(at: SystemTime) -> jiff::Zoned {
+pub fn local(at: SystemTime) -> jiff::Zoned {
     let ts = jiff::Timestamp::try_from(at).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
     ts.to_zoned(jiff::tz::TimeZone::system())
 }
 
 pub fn today() -> jiff::civil::Date {
     local(SystemTime::now()).date()
-}
-
-/// The day of a log file name, if it is one of ours.
-fn day_of(name: &str) -> Option<jiff::civil::Date> {
-    parse_day(name.strip_prefix("safety-")?.strip_suffix(".jsonl")?)
 }
 
 /// `AAAA-MM-JJ` only: the date goes into a file name.
@@ -305,16 +363,21 @@ pub fn parse_day(s: &str) -> Option<jiff::civil::Date> {
 /// Deletes the log files of days more than `keep_days` before `today`.
 /// Other files are left alone. Returns how many were deleted.
 pub fn prune(dir: &Path, today: jiff::civil::Date, keep_days: i32) -> usize {
+    prune_files(dir, SAFETY_FILES, today, keep_days)
+}
+
+/// `prune` for the files of any daily log named by `naming`.
+pub fn prune_files(dir: &Path, naming: Naming, today: jiff::civil::Date, keep_days: i32) -> usize {
     let Ok(oldest) = today.checked_sub(jiff::Span::new().days(keep_days)) else { return 0 };
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let mut deleted = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(day) = name.to_str().and_then(day_of) else { continue };
+        let Some(day) = name.to_str().and_then(|n| naming.day_of(n)) else { continue };
         if day < oldest {
             match std::fs::remove_file(entry.path()) {
                 Ok(()) => deleted += 1,
-                Err(e) => log::warn!("safety log: cannot delete {}: {e}", entry.path().display()),
+                Err(e) => log::warn!("log: cannot delete {}: {e}", entry.path().display()),
             }
         }
     }
@@ -323,8 +386,13 @@ pub fn prune(dir: &Path, today: jiff::civil::Date, keep_days: i32) -> usize {
 
 /// Days that have a log file, newest first.
 pub fn days(dir: &Path) -> Vec<String> {
+    days_of(dir, SAFETY_FILES)
+}
+
+/// `days` for any daily log.
+pub fn days_of(dir: &Path, naming: Naming) -> Vec<String> {
     let mut days: Vec<jiff::civil::Date> = std::fs::read_dir(dir)
-        .map(|entries| entries.flatten().filter_map(|e| e.file_name().to_str().and_then(day_of)).collect())
+        .map(|entries| entries.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| naming.day_of(n))).collect())
         .unwrap_or_default();
     days.sort_unstable_by(|a, b| b.cmp(a));
     days.into_iter().map(|d| d.to_string()).collect()
@@ -705,7 +773,7 @@ mod tests {
     fn the_overflow_is_reported_in_the_log() {
         let (log, sink) = memory_log();
         let inner = log.inner.as_ref().unwrap();
-        inner.dropped.store(7, Ordering::Relaxed);
+        inner.queue.dropped.store(7, Ordering::Relaxed);
         log.record("arm", Some("ui"), json!({}));
         log.flush(Duration::from_secs(2));
         let events = sink.events();

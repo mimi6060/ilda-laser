@@ -356,6 +356,10 @@
   #sfLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
   #sfLoosenOk { border-color: var(--danger); color: var(--danger); }
   .sf-error { color: var(--danger); }
+  .diag-warn { color: var(--warn); font-weight: 600; }
+  #diagContents { margin: 4px 0 6px 18px; padding: 0; }
+  #diagDir { word-break: break-all; }
+  #diagTail { max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
   .sl-wrap { max-height: 360px; overflow: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; }
   #slTable { width: 100%; border-collapse: collapse; font-size: 12px; }
   #slTable th { position: sticky; top: 0; background: var(--panel-2); text-align: left; font-weight: 600; color: var(--muted); }
@@ -1327,6 +1331,29 @@
           <tbody id="slRows"></tbody>
         </table></div>
         <div class="hint" id="slInfo">Les plus récents en haut. Un fichier par jour dans le dossier de données (logs/), gardé un an.</div>
+      </details>
+    </section>
+
+    <section>
+      <details id="diagPanel">
+        <summary>Diagnostic</summary>
+        <div class="hint">Après un incident, exportez un rapport et transmettez-le vous-même à la personne qui vous aide : rien n'est envoyé sur le réseau.</div>
+        <button id="diagExport">Exporter un rapport de diagnostic</button>
+        <label class="check"><input type="checkbox" id="diagProject"> Inclure le projet (sans les médias)</label>
+        <div class="hint">Le rapport (un fichier .zip) contient :</div>
+        <ul class="hint" id="diagContents">
+          <li>le journal de l'application et le journal de sécurité des 14 derniers jours ;</li>
+          <li>about.json : version, système, architecture, durée de fonctionnement ;</li>
+          <li>devices.json : entrées audio, ports MIDI, état de la sortie laser ;</li>
+          <li>settings.json : réglages de sécurité, présence, calibration, plafonds de puissance, préférences ;</li>
+          <li>state.json : l'état courant du studio ;</li>
+          <li>le projet courant sans ses figures, seulement si la case est cochée.</li>
+        </ul>
+        <div class="hint">Jamais de fichier audio, ILDA, figure ou image. Les chemins du dossier de données et du dossier personnel sont masqués.</div>
+        <div class="hint diag-warn" id="diagWarn"></div>
+        <div class="hint">Dossier des journaux : <code id="diagDir">…</code></div>
+        <div class="hint">Journal de l'application (200 dernières lignes) :</div>
+        <pre id="diagTail"></pre>
       </details>
     </section>
 
@@ -2713,6 +2740,32 @@ $('slCsv').onclick = () => {
   document.body.append(a); a.click(); a.remove();
 };
 setInterval(() => { if (activeWs === 'settings' && $('safetyLogPanel').open && !document.hidden) loadSafetyLog(); }, 2000);
+
+// RÉGLAGES › Diagnostic (T-403): the application log's tail and state,
+// and the diagnostic report download.
+async function loadDiag() {
+  let j;
+  try {
+    const r = await fetch('/api/logs/tail?n=200');
+    if (!r.ok) return;
+    j = await r.json();
+  } catch { return; }
+  const st = j.status || {};
+  $('diagDir').textContent = st.dir || '(journal désactivé)';
+  $('diagWarn').textContent = st.write_failed ? `Journal : écriture impossible (${st.last_error || 'erreur inconnue'})`
+    : (st.dropped ? `Journal : ${st.dropped} ligne(s) perdue(s) (journal saturé)` : '');
+  const tail = $('diagTail'), atEnd = tail.scrollTop + tail.clientHeight >= tail.scrollHeight - 4;
+  tail.textContent = j.lines.length ? j.lines.join('\n') : 'Aucune ligne pour le moment.';
+  if (atEnd) tail.scrollTop = tail.scrollHeight;
+}
+$('diagPanel').addEventListener('toggle', () => { if ($('diagPanel').open) loadDiag(); });
+$('diagExport').onclick = () => {
+  const a = document.createElement('a');
+  a.href = '/api/diagnostics/report' + ($('diagProject').checked ? '?project=1' : '');
+  a.download = '';
+  document.body.append(a); a.click(); a.remove();
+};
+setInterval(() => { if (activeWs === 'settings' && $('diagPanel').open && !document.hidden) loadDiag(); }, 2000);
 
 async function reloadSafety() {
   const j = await (await fetch('/api/safety')).json();
