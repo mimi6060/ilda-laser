@@ -222,6 +222,18 @@ impl Shaper {
         self.state = State::default();
     }
 
+    /// Back to rest like `reset`, but the event counter kept (no event
+    /// is lost or invented when the envelopes are cleared, T-245).
+    pub fn rest(&mut self) {
+        self.state = State { last_count: self.state.last_count, ..State::default() };
+    }
+
+    /// Forgets the last event counter: the next `feed` only takes note of
+    /// it (another source's counters are not this one's events, T-245).
+    pub fn forget_events(&mut self) {
+        self.state.last_count = None;
+    }
+
     /// The last output of `process`.
     pub fn value(&self) -> f32 {
         self.state.out

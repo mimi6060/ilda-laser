@@ -21,9 +21,15 @@
 //! through calibration, the strobe limiter and the horizon (safety.rs) as
 //! any other. Nothing here can arm.
 //!
+//! **Audio safety (T-245, audio/safety.rs)**: routes on a brightness or
+//! visibility control share one `FlashLimiter` per control (at most
+//! `max_flash_hz` dips a second); when the audio is stale, gone, silent or
+//! switching source, every route fades to neutral over its release.
+//!
 //! The legacy per-look `AudioReact` (`settings.audio`) is untouched and
 //! still renders as before; routes are master-level and come on top.
 
+use super::safety::{darkness_sign, fade_step, FlashLimiter, Guard};
 use super::shape::{Shaper, Source, Target};
 use crate::controls::ControlRegistry;
 use crate::engine::{AudioFeatures, Settings};
@@ -141,12 +147,17 @@ struct Bound {
     enabled: bool,
     /// Last continuous input, 0..1 (events: 0), for the meter.
     input: f32,
+    /// Share of the output, 0..1: falls to 0 over the release when the
+    /// audio goes away (T-245).
+    fade: f32,
 }
 
 /// One target and this frame's sum of its routes.
 struct Group {
     target: Target,
     sum: f32,
+    /// Brightness-like targets: which sign dims, and the flash cap.
+    dark: Option<(f32, FlashLimiter)>,
 }
 
 /// What each route did on the last frame, for the UI's meters.
@@ -167,6 +178,10 @@ pub struct RouteStore {
     routing: AudioRouting,
     bound: Vec<Bound>,
     groups: Vec<Group>,
+    /// Fading out for a change of source (T-245).
+    switching: bool,
+    /// A flash was held back by the cap on the last frame.
+    limited: bool,
 }
 
 impl RouteStore {
@@ -174,7 +189,7 @@ impl RouteStore {
     /// any more (unknown source or target) are dropped.
     pub fn load_or_create(path: PathBuf, reg: &ControlRegistry) -> Self {
         let routing: AudioRouting = crate::load_json(&path);
-        let mut store = Self { path, routing: AudioRouting::default(), bound: Vec::new(), groups: Vec::new() };
+        let mut store = Self { path, routing: AudioRouting::default(), bound: Vec::new(), groups: Vec::new(), switching: false, limited: false };
         store.install(routing.sanitized(), reg);
         store
     }
@@ -220,20 +235,26 @@ impl RouteStore {
             let group = match groups.iter().position(|g| g.target.id() == target.id()) {
                 Some(g) => g,
                 None => {
-                    groups.push(Group { target, sum: 0.0 });
+                    // A brightness target keeps its flash limiter (its
+                    // timing) across edits.
+                    let dark = darkness_sign(target.id()).map(|sign| {
+                        let kept = old_groups.iter().find(|g| g.target.id() == target.id()).and_then(|g| g.dark);
+                        (sign, kept.map_or_else(FlashLimiter::default, |(_, l)| l))
+                    });
+                    groups.push(Group { target, sum: 0.0, dark });
                     groups.len() - 1
                 }
             };
             let same = old.get(i).filter(|b| b.source == source && old_groups[b.group].target.id() == r.target);
-            let shaper = match same {
+            let (shaper, fade) = match same {
                 Some(b) => {
                     let mut s = b.shaper.clone();
                     s.retune(&r.shape);
-                    s
+                    (s, b.fade)
                 }
-                None => r.shape.clone(),
+                None => (r.shape.clone(), 0.0),
             };
-            bound.push(Bound { source, group, shaper, enabled: r.enabled, input: 0.0 });
+            bound.push(Bound { source, group, shaper, enabled: r.enabled, input: 0.0, fade });
         }
         self.bound = bound;
         self.groups = groups;
@@ -243,32 +264,67 @@ impl RouteStore {
     /// One frame, on the engine's copies: every route reads `features`
     /// (`dt` = real frame time, `beat_len_s` = 60 / BPM of the one clock),
     /// then each target moves by the sum of its enabled routes × the audio
-    /// share of the crossfader. Allocates nothing. Returns true when a
+    /// share of the crossfader. `guard` (T-245): without live audio every
+    /// route fades to neutral over its release; brightness-like targets go
+    /// through the flash cap. Allocates nothing. Returns true when a
     /// colour target moved: call `lfo::recolor_live` once after.
-    pub fn apply(&mut self, features: &AudioFeatures, dt: f32, beat_len_s: f32, settings: &mut Settings, live: &mut LiveModifiers) -> bool {
+    pub fn apply(&mut self, features: &AudioFeatures, dt: f32, beat_len_s: f32, guard: &Guard, settings: &mut Settings, live: &mut LiveModifiers) -> bool {
+        if guard.source_changed {
+            // Another source's counters aren't events: note them afresh.
+            self.switching = true;
+            for b in &mut self.bound {
+                b.shaper.forget_events();
+            }
+        }
+        let on = guard.live && !self.switching;
         for g in &mut self.groups {
             g.sum = 0.0;
         }
+        let mut faded = true;
         for b in &mut self.bound {
             // Disabled routes keep running for their meter, so turning one
             // on doesn't fire on an old event.
             let v = b.shaper.feed(b.source, features, dt, beat_len_s);
+            let (attack, release) = (b.shaper.attack.seconds(beat_len_s), b.shaper.release.seconds(beat_len_s));
+            b.fade = fade_step(b.fade, on, dt, attack, release);
+            if !on && b.fade == 0.0 {
+                // At neutral: the envelopes start from rest when the audio
+                // returns (an old peak never comes back).
+                b.shaper.rest();
+            }
+            faded &= b.fade == 0.0;
             b.input = match b.source {
                 Source::Value(id) => features.value(id).unwrap_or(0.0),
                 Source::Event(_) => 0.0,
             };
             if b.enabled {
-                self.groups[b.group].sum += v;
+                self.groups[b.group].sum += v * b.fade;
             }
+        }
+        if self.switching && faded {
+            self.switching = false;
         }
         let share = self.routing.audio_share();
         let mut recolor = false;
-        for g in &self.groups {
-            if g.sum != 0.0 && share > 0.0 {
-                recolor |= g.target.apply(g.sum * share, settings, live);
+        self.limited = false;
+        for g in &mut self.groups {
+            let mut amount = g.sum * share;
+            if let Some((sign, limiter)) = &mut g.dark {
+                // Darkness ≥ 0 (a brightness can only be dimmed anyway).
+                let dark = limiter.step((amount * *sign).max(0.0), dt, guard.max_flash_hz, !on);
+                self.limited |= limiter.limited();
+                amount = if amount * *sign > 0.0 || dark > 0.0 { dark * *sign } else { amount };
+            }
+            if amount != 0.0 && share > 0.0 {
+                recolor |= g.target.apply(amount, settings, live);
             }
         }
         recolor
+    }
+
+    /// A flash was held back by the cap on the last frame.
+    pub fn flash_limited(&self) -> bool {
+        self.limited
     }
 
     /// One meter per route, in the order of `routing().routes`.
@@ -322,7 +378,7 @@ mod tests {
     /// master.size after one frame of `store` on `f`.
     fn size_after(store: &mut RouteStore, f: &AudioFeatures) -> f32 {
         let (mut settings, mut live) = (Settings::default(), LiveModifiers::default());
-        store.apply(f, FPS60, 0.5, &mut settings, &mut live);
+        store.apply(f, FPS60, 0.5, &Guard::LIVE, &mut settings, &mut live);
         live.size
     }
 
@@ -346,7 +402,7 @@ mod tests {
         // Everything else loud, no bass: nothing moves.
         let noisy = AudioFeatures { level: 1.0, bands: crate::engine::Bands::from_array([0.0, 0.0, 1.0, 1.0, 1.0]), kick: 9, snare: 3, buildup: 1.0, ..Default::default() };
         let (mut settings, mut live) = (Settings::default(), LiveModifiers::default());
-        s.apply(&noisy, FPS60, 0.5, &mut settings, &mut live);
+        s.apply(&noisy, FPS60, 0.5, &Guard::LIVE, &mut settings, &mut live);
         assert_eq!((settings, live), (Settings::default(), LiveModifiers::default()));
     }
 
@@ -433,9 +489,9 @@ mod tests {
         let mut routes = store(vec![route("bass", "master.size", fast.clone()), route("kick", "master.brightness", fast)]);
         let (mut settings, mut live) = (s.settings.clone(), s.live.clone());
         let mut f = AudioFeatures { bass: 1.0, ..Default::default() };
-        routes.apply(&f, FPS60, 0.5, &mut settings, &mut live);
+        routes.apply(&f, FPS60, 0.5, &Guard::LIVE, &mut settings, &mut live);
         f.kick += 1;
-        routes.apply(&f, FPS60, 0.5, &mut settings, &mut live);
+        routes.apply(&f, FPS60, 0.5, &Guard::LIVE, &mut settings, &mut live);
         assert_eq!(live.size, 2.0);
         assert!(live.brightness <= s.live.brightness, "brightness only dims");
         assert_eq!((s.live.size, s.gate.is_armed()), (1.0, false));
@@ -505,11 +561,195 @@ mod tests {
             for i in 0..600 {
                 f.kick += (i % 30 == 0) as u64;
                 f.bass = (i as f32 * 0.05).sin().abs();
-                s.apply(&f, FPS60, 0.5, &mut settings, &mut live);
+                s.apply(&f, FPS60, 0.5, &Guard::LIVE, &mut settings, &mut live);
                 let meters = s.meters().fold(0.0, |a, m| a + m.value);
                 assert!(meters.is_finite());
             }
         });
         assert_eq!(n, 0);
+    }
+
+    // ---------- audio safety (T-245) ----------
+
+    use crate::audio::safety::tests::count_flashes;
+    use crate::engine::{Animator, BeatClock, Calibration};
+    use crate::patterns::Point;
+    use crate::safety::{self, SafetySettings, StrobeLimiter};
+
+    /// The engine's path for one frame, as main.rs runs it: routes on
+    /// copies of the look and live modifiers, render, live stage,
+    /// calibration, then the output safety stage last.
+    struct Pipe {
+        animator: Animator,
+        limiter: StrobeLimiter,
+        t: f64,
+    }
+
+    impl Pipe {
+        fn new() -> Self {
+            Self { animator: Animator::default(), limiter: StrobeLimiter::default(), t: 0.0 }
+        }
+
+        /// (frame before the safety stage, output frame, modulated live copy).
+        fn frame(&mut self, routes: &mut RouteStore, f: &AudioFeatures, guard: &Guard, look: &Settings, base: &LiveModifiers, cfg: &SafetySettings) -> (Vec<Point>, Vec<Point>, LiveModifiers) {
+            let (mut settings, mut live) = (look.clone(), base.clone());
+            routes.apply(f, FPS60, 0.5, guard, &mut settings, &mut live);
+            let points = self.animator.render(&settings, *f, FPS60, &BeatClock::default());
+            let calibration = Calibration::default();
+            let before: Vec<Point> = crate::live::apply(&points, &live, &crate::live::LiveState::default(), &[])
+                .into_iter()
+                .map(|p| {
+                    let (x, y) = calibration.apply(p.x, p.y);
+                    Point { x, y, ..p }
+                })
+                .collect();
+            let out = safety::apply(before.clone(), self.t, cfg, &mut self.limiter);
+            self.t += FPS60 as f64;
+            (before, out, live)
+        }
+    }
+
+    /// Light levels normalised to their peak, for `count_flashes`.
+    fn normalised(levels: &[f32]) -> Vec<f32> {
+        let peak = levels.iter().cloned().fold(0.0, f32::max).max(1e-6);
+        levels.iter().map(|l| l / peak).collect()
+    }
+
+    /// A kick-driven flash on the master brightness: dark between hits,
+    /// lit on each one.
+    fn kick_flash() -> AudioRoute {
+        route("kick", "master.brightness", with(Shaper::default(), |s| { s.attack = Span::Ms(0.0); s.decay = Span::Ms(30.0); s.min = -1.0; s.max = 0.0; }))
+    }
+
+    #[test]
+    fn kicks_at_20_hz_on_the_brightness_flash_at_most_max_flash_hz() {
+        let look = Settings { brightness: 1.0, ..Default::default() };
+        for max_hz in [10.0, 6.0, 3.0] {
+            let mut s = store(vec![kick_flash()]);
+            let mut pipe = Pipe::new();
+            let guard = Guard { max_flash_hz: max_hz, ..Guard::LIVE };
+            let mut f = AudioFeatures { level: 0.8, ..Default::default() };
+            let (mut before, mut out) = (Vec::new(), Vec::new());
+            let mut limited = false;
+            for i in 0..(8 * 60) {
+                if i % 3 == 0 {
+                    f.kick += 1; // 20 kicks a second
+                }
+                let (b, o, _) = pipe.frame(&mut s, &f, &guard, &look, &LiveModifiers::default(), &SafetySettings::default());
+                before.push(safety::level(&b));
+                out.push(safety::level(&o));
+                limited |= s.flash_limited();
+            }
+            assert!(limited, "the cap held flashes back");
+            // The audio cap itself, measured before the output stage...
+            let capped = count_flashes(normalised(&before)) as f32 / 8.0;
+            assert!(capped <= max_hz + 0.15, "{max_hz} Hz cap: {capped} flashes/s");
+            assert!(capped >= max_hz * 0.7, "{max_hz} Hz cap: still flashing ({capped}/s)");
+            // ...and what really goes out: never more, and above the T-101
+            // limit (4 Hz) the strobe limiter holds it steady after its burst.
+            let sent = count_flashes(normalised(&out)) as f32 / 8.0;
+            assert!(sent <= max_hz + 0.15, "{max_hz} Hz: {sent} flashes/s out");
+            assert_eq!(pipe.limiter.status().active, max_hz > 4.0, "{max_hz} Hz: {:?}", pipe.limiter.status());
+        }
+    }
+
+    #[test]
+    fn an_audio_cut_during_a_peak_falls_to_neutral_within_the_release() {
+        let release = 0.150;
+        let size = route("bass", "master.size", with(Shaper::default(), |s| { s.gate = 0.0; s.attack = Span::Ms(0.0); s.release = Span::Ms(150.0); s.max = 0.5; }));
+        let dim = route("kick", "master.brightness", with(Shaper::default(), |s| { s.attack = Span::Ms(0.0); s.decay = Span::Ms(5000.0); s.min = -1.0; s.max = 0.0; }));
+        for routes in [vec![size.clone()], vec![dim.clone()], vec![size, dim]] {
+            let mut s = store(routes);
+            let mut f = AudioFeatures { bass: 1.0, kick: 1, ..Default::default() };
+            let mut settings: Settings;
+            let mut live = LiveModifiers::default();
+            for _ in 0..30 {
+                (settings, live) = (Settings::default(), LiveModifiers::default());
+                s.apply(&f, FPS60, 0.5, &Guard::LIVE, &mut settings, &mut live);
+            }
+            assert!(live.size > 1.0 || live.brightness < 1.0, "at a peak: {live:?}");
+            // Cut: the hub's features fall (τ 100 ms) and the guard says
+            // not live from this frame on.
+            let cut = Guard { live: false, ..Guard::LIVE };
+            let mut frames = 0;
+            loop {
+                f.bass *= (-FPS60 / 0.1f32).exp();
+                (settings, live) = (Settings::default(), LiveModifiers::default());
+                s.apply(&f, FPS60, 0.5, &cut, &mut settings, &mut live);
+                frames += 1;
+                if (settings.clone(), live.clone()) == (Settings::default(), LiveModifiers::default()) {
+                    break;
+                }
+                assert!(frames < 120, "never back to neutral: {live:?}");
+            }
+            assert!(frames as f32 <= (release / FPS60).ceil() + 1.0, "{frames} frames");
+            // And it stays there.
+            for _ in 0..60 {
+                (settings, live) = (Settings::default(), LiveModifiers::default());
+                s.apply(&f.neutral(), FPS60, 0.5, &cut, &mut settings, &mut live);
+                assert_eq!((settings, live), (Settings::default(), LiveModifiers::default()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_change_of_source_fades_out_and_ignores_the_new_counters() {
+        let pulse = route("kick", "master.size", with(Shaper::default(), |s| { s.attack = Span::Ms(0.0); s.release = Span::Ms(50.0); s.decay = Span::Ms(100.0); s.max = 0.5; }));
+        let mut s = store(vec![pulse]);
+        let mut f = AudioFeatures { kick: 3, kick_strength: 1.0, ..Default::default() };
+        size_after(&mut s, &f);
+        f.kick = 4;
+        assert!(size_after(&mut s, &f) > 1.9, "a kick of the browser");
+        // Native takes over with its own, much larger counter: no kick.
+        f.kick = 500;
+        let (mut settings, mut live) = (Settings::default(), LiveModifiers::default());
+        s.apply(&f, FPS60, 0.5, &Guard { source_changed: true, ..Guard::LIVE }, &mut settings, &mut live);
+        let mut sizes = vec![live.size];
+        for _ in 0..20 {
+            sizes.push(size_after(&mut s, &f));
+        }
+        assert!(sizes.windows(2).all(|w| w[1] <= w[0]), "only falls: {sizes:?}");
+        assert_eq!(*sizes.last().unwrap(), 1.0);
+        // The next native kick is one.
+        f.kick = 501;
+        assert!(size_after(&mut s, &f) > 1.5);
+    }
+
+    #[test]
+    fn the_worst_case_keeps_the_fader_the_zones_and_never_arms() {
+        let shared = crate::test_support::shared();
+        // Every route pushing up as hard as it can, brightness included.
+        let up = with(Shaper::default(), |s| { s.gate = 0.0; s.attack = Span::Ms(0.0); s.gain = 8.0; s.min = 1.0; s.max = 1.0; });
+        let targets = ["master.brightness", "look.brightness", "master.size", "master.size_x", "master.size_y", "audio.flash", "master.pos_x", "master.perspective"];
+        let routes: Vec<AudioRoute> = targets.iter().flat_map(|t| [route("bass", t, up.clone()), route("kick", t, up.clone())]).collect();
+        let mut s = store(routes);
+        let look = Settings { brightness: 0.7, ..Default::default() };
+        let base = LiveModifiers { brightness: 0.6, ..Default::default() };
+        // Blank zone over the right half of the output.
+        let blank = crate::zones::Zone {
+            kind: crate::zones::ZoneKind::Blank,
+            points: vec![[0.0, -1.5], [1.5, -1.5], [1.5, 1.5], [0.0, 1.5]],
+            ..Default::default()
+        };
+        let cfg = SafetySettings { zones: vec![blank], ..Default::default() };
+        let mut pipe = Pipe::new();
+        let mut f = AudioFeatures { level: 1.0, bass: 1.0, beat: 0, ..Default::default() };
+        let mut lit_left = false;
+        for i in 0..240 {
+            f.kick += 1;
+            f.beat += (i % 2) as u64;
+            let (_, out, live) = pipe.frame(&mut s, &f, &Guard::LIVE, &look, &base, &cfg);
+            assert!(live.brightness <= base.brightness, "the master fader is a ceiling");
+            for p in &out {
+                assert!((-1.0..=1.0).contains(&p.x) && (-1.0..=1.0).contains(&p.y), "calibration clamp: {p:?}");
+                assert!(p.r.max(p.g).max(p.b) <= look.brightness * base.brightness + 1e-4, "brightness: {p:?}");
+                if p.x > 0.02 {
+                    assert_eq!((p.r, p.g, p.b), (0.0, 0.0, 0.0), "lit inside the blank zone: {p:?}");
+                }
+                lit_left |= p.x < -0.02 && p.g > 0.0;
+            }
+        }
+        assert!(lit_left, "something still drawn outside the zone");
+        assert!(!shared.gate.is_armed());
     }
 }
