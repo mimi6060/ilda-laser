@@ -2,6 +2,12 @@
 
 _Généré par `python3 tasks/make_index.py` — ne pas éditer à la main._
 
+## En review (1)
+
+| id | tâche | domaine | priorité | dépend de | branche |
+|---|---|---|---|---|---|
+| [T-350](T-350-qa.md) | Test e2e du Tap tempo instable sous charge | qa | P2 | [] | fix/tap-test |
+
 ## À faire (87)
 
 | id | tâche | domaine | priorité | dépend de | branche |

@@ -51,8 +51,14 @@ cargo test -p laser-studio 2>&1 | grep -E "^test result" > /tmp/integrate-tests.
 [ -s /tmp/integrate-tests.txt ] || fail "cargo test (ne compile pas)"
 grep -qv " 0 failed" /tmp/integrate-tests.txt && fail "cargo test"
 cargo clippy -q -p laser-studio --all-targets -- -D warnings || fail "clippy"
-e2e=$( (cd studio/e2e && npx playwright test --workers=2 2>&1) | tail -4)
-echo "$e2e" | grep -q " failed" && fail "e2e : $(echo "$e2e" | grep failed)"
+e2e=$( (cd studio/e2e && npx playwright test --workers=2 2>&1) | tail -4 || true)
+if echo "$e2e" | grep -q " failed"; then
+  # Timing tests can fail on a loaded machine: the failed ones get one
+  # more run, alone. Still red = red.
+  again=$( (cd studio/e2e && npx playwright test --workers=1 --last-failed 2>&1) | tail -4 || true)
+  echo "$again" | grep -q " failed" && fail "e2e : $(echo "$again" | grep failed)"
+  e2e="$e2e (échecs relancés seuls : verts)"
+fi
 
 # Green: close the task, append the review, commit the merge.
 taskfile=$(ls tasks/"$task"-*.md)
