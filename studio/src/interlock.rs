@@ -129,6 +129,9 @@ pub const ESTOP: &str = "estop";
 pub const TEST: &str = "test";
 /// Id of the operator-presence interlock: at least one UI page beats (T-252).
 pub const UI_ALIVE: &str = "ui_alive";
+/// Id of the interlock held open while a damaged safety file's warning is
+/// not acknowledged (T-402, datafile.rs).
+pub const DATA_ACK: &str = "data_ack";
 
 pub struct ArmGate {
     armed: bool,

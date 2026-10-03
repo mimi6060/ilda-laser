@@ -185,7 +185,7 @@ pub struct RouteStore {
 }
 
 impl RouteStore {
-    /// A missing or unreadable file starts empty; routes that aren't valid
+    /// A missing or damaged file (quarantined, T-402) starts empty; routes that aren't valid
     /// any more (unknown source or target) are dropped.
     pub fn load_or_create(path: PathBuf, reg: &ControlRegistry) -> Self {
         let routing: AudioRouting = crate::load_json(&path);
@@ -213,7 +213,7 @@ impl RouteStore {
         validate(&routing, reg)?;
         let routing = routing.sanitized();
         let json = serde_json::to_string_pretty(&routing).context("failed to serialize audio routes")?;
-        std::fs::write(&self.path, json).with_context(|| format!("failed to write {}", self.path.display()))?;
+        crate::datafile::replace(&self.path, json.as_bytes()).with_context(|| format!("failed to write {}", self.path.display()))?;
         self.install(routing, reg);
         Ok(())
     }
@@ -751,5 +751,15 @@ mod tests {
         }
         assert!(lit_left, "something still drawn outside the zone");
         assert!(!shared.gate.is_armed());
+    }
+
+    #[test]
+    fn a_damaged_file_is_quarantined_and_never_overwritten() {
+        let reg = ControlRegistry::build(&crate::presets::catalog());
+        let (dir, path) = crate::datafile::tests::with_damaged("routes", "audio_routes.json");
+        let mut store = RouteStore::load_or_create(path, &reg);
+        assert_eq!(store.routing().routes.len(), 0);
+        store.set(AudioRouting::default(), &reg).unwrap();
+        crate::datafile::tests::check_kept(&dir, "audio_routes.json", false);
     }
 }

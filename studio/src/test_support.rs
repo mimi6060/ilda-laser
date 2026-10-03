@@ -54,7 +54,7 @@ pub fn shared() -> Shared {
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         figures: crate::figures::FigureStore::in_memory(),
-        shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id()))),
+        shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id())).join("shows")),
         media: std::sync::Arc::new(crate::audio::media::MediaStore::new(&std::env::temp_dir().join(format!("laser-studio-test-media-{}", std::process::id())))),
         // No song-playback thread in unit tests: the timeline runs on the system clock.
         song: std::sync::Arc::new(crate::audio::playback::SongHub::new(Instant::now(), false)),
@@ -66,6 +66,7 @@ pub fn shared() -> Shared {
         project: crate::project::ProjectState::load(&std::env::temp_dir().join("laser-studio-test-unused")),
         test_pattern: Default::default(),
         keep_awake: crate::keep_awake::KeepAwakeState::in_memory(),
+        data_warnings: Vec::new(),
         test_hooks: false,
         test_stall_ms: 0,
         // Never a real scan in unit tests.

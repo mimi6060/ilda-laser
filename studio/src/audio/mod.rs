@@ -383,7 +383,9 @@ impl AudioHub {
     /// From `<data_dir>/audio.json`, then `--audio-device` (for this run).
     pub fn load(data_dir: &Path, epoch: Instant, capture_enabled: bool, cli_device: Option<&str>) -> Self {
         let path = data_dir.join("audio.json");
-        let mut config: AudioConfig = crate::load_json(&path);
+        // It holds the audio flash cap (T-245): a damaged one is a safety
+        // file, arming waits for the operator (T-402).
+        let mut config: AudioConfig = crate::datafile::load_or_default(&path, &crate::datafile::beside(&path), true);
         if let Some(arg) = cli_device {
             config = config.with_cli_device(arg);
         }
@@ -414,7 +416,7 @@ impl AudioHub {
         let config = config.sanitized();
         if let Some(path) = &self.path {
             let text = serde_json::to_string_pretty(&config)?;
-            std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
+            crate::datafile::replace(path, text.as_bytes()).with_context(|| format!("failed to write {}", path.display()))?;
         }
         let mut c = lock(&self.config);
         let generation = if c.0.capture_part() != config.capture_part() { c.1 + 1 } else { c.1 };

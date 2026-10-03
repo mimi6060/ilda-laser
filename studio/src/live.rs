@@ -247,10 +247,17 @@ pub struct PaletteStore {
 }
 
 impl PaletteStore {
-    /// A missing, unreadable or invalid file starts an empty store.
+    /// A missing file starts an empty store; a damaged or invalid one too,
+    /// once moved to the quarantine folder (T-402).
     pub fn load_or_create(path: PathBuf) -> Self {
         let palettes: Vec<Palette> = crate::load_json(&path);
-        let palettes = if validate_palettes(&palettes).is_ok() { palettes } else { Vec::new() };
+        let palettes = match validate_palettes(&palettes) {
+            Ok(()) => palettes,
+            Err(e) => {
+                crate::datafile::set_aside(&path, &crate::datafile::beside(&path), &format!("palettes invalides : {e}"), false);
+                Vec::new()
+            }
+        };
         Self { path, palettes }
     }
 
@@ -272,7 +279,7 @@ impl PaletteStore {
     pub fn set(&mut self, palettes: Vec<Palette>) -> Result<()> {
         validate_palettes(&palettes)?;
         let json = serde_json::to_string_pretty(&palettes).context("failed to serialize palettes")?;
-        std::fs::write(&self.path, json).with_context(|| format!("failed to write {}", self.path.display()))?;
+        crate::datafile::replace(&self.path, json.as_bytes()).with_context(|| format!("failed to write {}", self.path.display()))?;
         self.palettes = palettes;
         Ok(())
     }
@@ -799,5 +806,22 @@ mod tests {
         assert_eq!(serde_json::from_str::<LiveModifiers>(&json).unwrap(), m);
         let old: LiveModifiers = serde_json::from_str(r#"{"size": 1.5}"#).unwrap();
         assert_eq!(old.color, ColorOverride::Normal);
+    }
+
+    #[test]
+    fn damaged_or_invalid_palettes_are_quarantined_and_never_overwritten() {
+        let (dir, path) = crate::datafile::tests::with_damaged("palettes", "palettes.json");
+        let mut store = PaletteStore::load_or_create(path.clone());
+        assert!(store.list().is_empty());
+        store.set(Vec::new()).unwrap();
+        crate::datafile::tests::check_kept(&dir, "palettes.json", false);
+        // Valid JSON that fails the checks is set aside too.
+        let dir = crate::datafile::tests::temp_dir("palettes-invalid");
+        let path = dir.join("palettes.json");
+        std::fs::write(&path, r#"[{"name":"","colors":[]}]"#).unwrap();
+        assert!(PaletteStore::load_or_create(path.clone()).list().is_empty());
+        assert!(!path.exists());
+        assert_eq!(crate::datafile::take_pending(&dir.join(crate::datafile::QUARANTINE)).len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

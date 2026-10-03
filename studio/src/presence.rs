@@ -126,9 +126,10 @@ impl Presence {
         }
     }
 
-    /// Enforced presence with the settings saved in `path` (defaults if missing).
+    /// Enforced presence with the settings saved in `path` (defaults if
+    /// missing; if damaged too, as a safety file: quarantined, T-402).
     pub fn load(path: PathBuf) -> Self {
-        let settings: PresenceSettings = crate::load_json(&path);
+        let settings: PresenceSettings = crate::datafile::load_or_default(&path, &crate::datafile::beside(&path), true);
         let mut p = Self::new(settings, true);
         p.path = Some(path);
         p
@@ -424,5 +425,15 @@ mod tests {
         }
         p.update(t0 + ms(200), false);
         assert_eq!(p.status().clients, MAX_CLIENTS);
+    }
+
+    #[test]
+    fn a_damaged_file_is_a_safety_file_quarantined_and_never_overwritten() {
+        let (dir, path) = crate::datafile::tests::with_damaged("presence", "presence.json");
+        let mut p = Presence::load(path.clone());
+        assert_eq!(p.settings, PresenceSettings::default());
+        p.set_settings(PresenceSettings::default());
+        assert!(path.exists());
+        crate::datafile::tests::check_kept(&dir, "presence.json", true);
     }
 }

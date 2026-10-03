@@ -15,6 +15,7 @@ mod chases;
 mod controls;
 mod cues;
 mod devices;
+mod datafile;
 mod dwell;
 mod engine;
 mod evolving;
@@ -254,6 +255,9 @@ pub struct Shared {
     pub test_pattern: testpattern::TestPatternState,
     /// Prevent sleep during a show (keep_awake.rs): setting and status.
     pub keep_awake: keep_awake::KeepAwakeState,
+    /// Damaged data files moved to `quarantine/` this run (datafile.rs,
+    /// T-402), shown until acknowledged. In memory only.
+    pub data_warnings: Vec<datafile::DataWarning>,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
     /// A pending simulated stall (ms): the engine sleeps this long while
@@ -267,6 +271,7 @@ impl Shared {
     /// Arm request, after catching up with the e-stop latch, the watchdog
     /// and the heartbeats.
     pub fn request_arm(&mut self, src: interlock::ArmSource) -> Result<(), Vec<String>> {
+        self.sync_data_warnings();
         self.sync_safety(Instant::now());
         self.gate.request_arm(src)?;
         self.health.note_armed();
@@ -280,6 +285,7 @@ impl Shared {
         if !self.midi.store.devices.safety.allow_arm {
             return Err(vec!["L'armement depuis le MIDI est désactivé".into()]);
         }
+        self.sync_data_warnings();
         self.sync_safety(Instant::now());
         self.gate.request_arm_midi_opt_in()?;
         self.health.note_armed();
@@ -318,6 +324,37 @@ impl Shared {
             self.gate.disarm(interlock::DisarmReason::HoldReleased, interlock::ArmSource::System);
         }
         v.hold_ok
+    }
+
+    /// Collects the data-file warnings recorded since the last call (shows,
+    /// figures and preferences are read at run time too) and closes the
+    /// `data_ack` interlock while a safety file's warning is unacknowledged.
+    pub fn sync_data_warnings(&mut self) {
+        let fresh = datafile::take_pending(&self.project.data_dir.join(datafile::QUARANTINE));
+        for w in &fresh {
+            self.gate.log().record("data_quarantine", Some("system"), serde_json::json!({ "file": w.file, "moved_to": w.moved_to, "safety": w.safety }));
+        }
+        self.data_warnings.extend(fresh);
+        if self.data_warnings.iter().any(|w| w.safety) {
+            let clear = self.data_warnings.iter().all(|w| !w.safety || w.acknowledged);
+            self.gate.register(interlock::DATA_ACK, "Fichier de sécurité abîmé : à valider", clear);
+        }
+    }
+
+    /// The operator has seen the warning of `file` (or of every file).
+    /// Nothing is restored. Returns how many warnings were acknowledged.
+    pub fn ack_data_warnings(&mut self, file: Option<&str>) -> usize {
+        self.sync_data_warnings();
+        let mut n = 0;
+        for w in self.data_warnings.iter_mut().filter(|w| !w.acknowledged && file.is_none_or(|f| f == w.file)) {
+            w.acknowledged = true;
+            n += 1;
+        }
+        if n > 0 {
+            self.gate.log().record("data_ack", Some("ui"), serde_json::json!({ "file": file, "count": n }));
+        }
+        self.sync_data_warnings();
+        n
     }
 
     /// Trips the emergency stop and records it in the gate.
@@ -631,6 +668,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         project: project::ProjectState::load(&cli.data_dir),
         test_pattern: Default::default(),
         keep_awake: keep_awake::KeepAwakeState::load(&cli.data_dir),
+        data_warnings: Vec::new(),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
         devices: Arc::new(match &cli.test_devices {
@@ -644,6 +682,11 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     }
     // First start: the existing data becomes a « Sans titre » project.
     project::startup(&mut state);
+    // Every show is read once, so a damaged one is set aside now (T-402).
+    state.shows.list();
+    // Damaged files found while loading: the banner, and `data_ack` closed
+    // for a safety file. The gate is disarmed whatever happens here.
+    state.sync_data_warnings();
     state
 }
 
@@ -852,20 +895,13 @@ fn run_engine(
     }
 }
 
+/// A file directly in the data directory, or its defaults; a damaged one
+/// is moved to the quarantine folder and reported (datafile.rs, T-402).
 pub fn load_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
-    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    datafile::load_or_default(path, &datafile::beside(path), false)
 }
 
-pub fn save_json<T: serde::Serialize>(path: &std::path::Path, value: &T) {
-    match serde_json::to_string_pretty(value) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(path, json) {
-                log::warn!("failed to save {}: {e}", path.display());
-            }
-        }
-        Err(e) => log::warn!("failed to serialize {}: {e}", path.display()),
-    }
-}
+pub use datafile::save_json;
 
 /// The timeline's events for this frame, with their looks. An emergency
 /// stop halts the timeline (it never resumes by itself), and so its song;
@@ -1246,6 +1282,81 @@ mod tests {
             assert!(s.request_arm(ArmSource::Keyboard).is_err(), "{args:?}");
         }
         assert!(Cli::try_parse_from(["laser-studio", "--device", "x", "--test-output", "/tmp/x"]).is_err(), "the fake output never goes with a real device");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-402: every damaged safety file starts disarmed with the strictest
+    /// settings, and arming stays refused until the operator acknowledged it.
+    #[test]
+    fn a_damaged_safety_file_blocks_arming_until_acknowledged() {
+        for rel in ["safety.json", "calibration.json", "outputs.json", "presence.json", "audio.json", "midi/devices.json"] {
+            let (dir, _) = datafile::tests::with_damaged(&format!("startup-{}", rel.replace('/', "-")), rel);
+            let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
+            let mut s = startup_state(&cli, None);
+            assert!(!s.gate.is_armed(), "{rel}");
+            assert_eq!(s.data_warnings.len(), 1, "{rel}: {:?}", s.data_warnings);
+            assert!(s.data_warnings[0].safety && s.data_warnings[0].file == rel);
+            assert!(!s.gate.interlock_ok(interlock::DATA_ACK), "{rel}");
+            s.presence.touch("page", Instant::now());
+            let refused = s.request_arm(ArmSource::Ui).unwrap_err();
+            assert!(refused.contains(&"Fichier de sécurité abîmé : à valider".to_string()), "{rel}: {refused:?}");
+            // Never looser than the defaults.
+            assert_eq!(s.safety.get(), if rel == "safety.json" { safety::SafetySettings::strictest() } else { safety::SafetySettings::default() });
+            assert_eq!(s.outputs.active_limits(), power::OutputLimits::default());
+            if rel == "midi/devices.json" {
+                assert_eq!(s.midi.store.devices.safety, midi::safety::MidiSafety::strictest());
+            }
+            assert_eq!(s.ack_data_warnings(Some("autre.json")), 0);
+            assert!(s.request_arm(ArmSource::Ui).is_err());
+            assert_eq!(s.ack_data_warnings(Some(rel)), 1);
+            assert!(s.gate.interlock_ok(interlock::DATA_ACK));
+            s.request_arm(ArmSource::Ui).unwrap();
+            s.gate.disarm(interlock::DisarmReason::User, ArmSource::Ui);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// T-402: other damaged files warn but never block arming; live and
+    /// layers (saved by the engine) keep their quarantined copy.
+    #[test]
+    fn a_damaged_working_file_warns_without_blocking() {
+        let (dir, _) = datafile::tests::with_damaged("startup-working", "live.json");
+        std::fs::write(dir.join("layers.json"), datafile::tests::DAMAGED).unwrap();
+        std::fs::write(dir.join("grid.json"), datafile::tests::DAMAGED).unwrap();
+        let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
+        let mut s = startup_state(&cli, None);
+        let mut files: Vec<&str> = s.data_warnings.iter().map(|w| w.file.as_str()).collect();
+        files.sort();
+        assert_eq!(files, ["grid.json", "layers.json", "live.json"]);
+        assert!(s.data_warnings.iter().all(|w| !w.safety && w.moved_to.is_some()));
+        assert!(s.gate.interlock_ok(interlock::DATA_ACK));
+        save_json(&dir.join("live.json"), &s.live);
+        save_json(&dir.join("layers.json"), &s.mixer);
+        for f in std::fs::read_dir(dir.join(datafile::QUARANTINE)).unwrap().flatten() {
+            assert_eq!(std::fs::read(f.path()).unwrap(), datafile::tests::DAMAGED);
+        }
+        assert_eq!(s.ack_data_warnings(None), 3);
+        assert!(s.data_warnings.iter().all(|w| w.acknowledged));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-402: a read-only data directory still starts; nothing could be
+    /// moved, the warning says so, and the store never writes the file.
+    #[test]
+    fn a_read_only_data_dir_starts_and_keeps_the_damaged_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path) = datafile::tests::with_damaged("startup-ro", "scenes.json");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
+        let mut s = startup_state(&cli, None);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!s.gate.is_armed());
+        let w = s.data_warnings.iter().find(|w| w.file == "scenes.json").expect("warned");
+        assert_eq!(w.moved_to, None);
+        assert!(w.message_fr().contains("impossible de le mettre de côté"));
+        // Writable again: still memory only for this run.
+        s.scenes.upsert(Scene { name: "x".into(), settings: Settings::default(), duration_secs: 1.0 }).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), datafile::tests::DAMAGED);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

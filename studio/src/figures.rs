@@ -217,9 +217,11 @@ pub struct FigureStore {
 }
 
 impl FigureStore {
-    /// Every valid figure in `dir` (unreadable or invalid files are
-    /// skipped with a warning).
+    /// Every valid figure in `dir`. Unreadable or invalid files are moved
+    /// to `<data-dir>/quarantine` and reported (T-402): left in place, the
+    /// next project open would delete them.
     pub fn load(dir: PathBuf) -> Self {
+        let quarantine = dir.parent().unwrap_or(Path::new(".")).join(crate::datafile::QUARANTINE);
         let mut list = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for path in entries.flatten().map(|e| e.path()) {
@@ -229,7 +231,9 @@ impl FigureStore {
                 }
                 match read(&path, stem) {
                     Ok(fig) => list.push(fig),
-                    Err(e) => log::warn!("figure {}: {e:#}", path.display()),
+                    Err(e) => {
+                        crate::datafile::set_aside(&path, &quarantine, &format!("{e:#}"), false);
+                    }
                 }
             }
         }
@@ -492,5 +496,14 @@ mod tests {
         refresh(&mut s);
         assert_eq!(s.presets.len(), builtin);
         assert!(s.controls.get(&format!("grid.{page}.1.1")).is_none());
+    }
+
+    #[test]
+    fn a_damaged_figure_is_quarantined_and_never_overwritten() {
+        let (dir, path) = crate::datafile::tests::with_damaged("figures", "figures/logo.json");
+        let mut store = FigureStore::load(path.parent().unwrap().to_path_buf());
+        assert!(store.list().is_empty());
+        store.save(test_figure("logo", 1)).unwrap();
+        crate::datafile::tests::check_kept(&dir, "figures/logo.json", false);
     }
 }

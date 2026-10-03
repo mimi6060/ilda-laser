@@ -194,7 +194,7 @@ struct SenderFile {
 /// The stable sender id, created on first use.
 fn sender_id(data_dir: &Path) -> u32 {
     let path = data_dir.join("ponk.json");
-    if let Some(f) = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<SenderFile>(&s).ok()) {
+    if let crate::datafile::Loaded::Ok(f) = crate::datafile::load::<SenderFile>(&path, &crate::datafile::beside(&path), false) {
         return f.sender_id;
     }
     use std::hash::{BuildHasher, Hasher};

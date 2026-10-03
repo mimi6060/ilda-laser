@@ -39,7 +39,6 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -244,7 +243,7 @@ pub fn startup(s: &mut Shared) {
     let current = s.project.current.clone().filter(|n| valid_name(n) && s.project.path_of(n).is_file());
     s.project.current = current.clone();
     s.project.saved = match current {
-        Some(name) => match read(&s.project.path_of(&name)) {
+        Some(name) => match read_in_data_dir(&s.project.path_of(&name), &data_dir) {
             Ok(p) => {
                 s.project.extra = p.extra.clone();
                 p.fingerprint()
@@ -315,6 +314,20 @@ pub fn read(path: &Path) -> Result<Project> {
     }
     let text = std::fs::read_to_string(path).context("projet illisible")?;
     parse(&text)
+}
+
+/// `read` for a file of the data directory (the open project at startup,
+/// an autosave): if it is not even JSON (truncated, binary), it is moved
+/// to the quarantine folder and reported (T-402). A valid JSON file that
+/// fails the checks (e.g. a newer format) stays where it is.
+pub fn read_in_data_dir(path: &Path, data_dir: &Path) -> Result<Project> {
+    read(path).inspect_err(|_| {
+        let q = data_dir.join(crate::datafile::QUARANTINE);
+        let damaged = std::fs::read(path).is_ok_and(|b| serde_json::from_slice::<serde::de::IgnoredAny>(&b).is_err());
+        if damaged {
+            crate::datafile::set_aside(path, &q, "projet illisible (JSON invalide)", false);
+        }
+    })
 }
 
 /// Parses and checks a project from JSON text.
@@ -517,7 +530,8 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for path in entries.flatten().map(|e| e.path()) {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-            let is_json = path.extension().is_some_and(|x| x == "json") && path.is_file();
+            // A damaged file that could not be moved aside is kept (T-402).
+            let is_json = path.extension().is_some_and(|x| x == "json") && path.is_file() && !crate::datafile::is_frozen(&path);
             if is_json && valid(stem) && !keep.contains(stem) {
                 if let Err(e) = std::fs::remove_file(&path) {
                     errors.push(format!("{} : {e}", path.display()));
@@ -554,41 +568,14 @@ fn write_project(path: &Path, p: &Project) -> Result<()> {
     write_atomic(path, &json)
 }
 
-/// Atomic write: a hidden `.tmp` file in the same folder, flushed to disk,
-/// then renamed over the target. A crash leaves either the old file or
-/// the new one, never half of it.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = write_tmp(path, bytes)?;
-    commit(&tmp, path)
-}
-
-fn tmp_path(path: &Path) -> PathBuf {
-    let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("fichier");
-    path.with_file_name(format!(".{file}.tmp"))
-}
-
-fn write_tmp(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
-    let dir = path.parent().context("chemin sans dossier")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("impossible de créer {}", dir.display()))?;
-    let tmp = tmp_path(path);
-    let mut f = std::fs::File::create(&tmp).with_context(|| format!("impossible d'écrire {}", tmp.display()))?;
-    f.write_all(bytes).and_then(|()| f.sync_all()).with_context(|| format!("impossible d'écrire {}", tmp.display()))?;
-    Ok(tmp)
-}
-
-fn commit(tmp: &Path, path: &Path) -> Result<()> {
-    std::fs::rename(tmp, path).with_context(|| format!("impossible d'écrire {}", path.display()))?;
-    // The rename itself reaches the disk with the folder.
-    if let Some(dir) = path.parent() {
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
-        }
-    }
-    Ok(())
-}
+/// Atomic write (`datafile::write_atomic`, which also never writes over a
+/// damaged file that could not be moved aside).
+pub use crate::datafile::write_atomic;
+#[cfg(test)]
+use crate::datafile::{commit, write_tmp};
 
 /// `YYYY-MM-DDTHH:MM:SSZ`.
-fn utc_now() -> String {
+pub fn utc_now() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (y, m, d, hh, mm, ss) = civil(secs);
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
@@ -1184,5 +1171,38 @@ mod tests {
         let d = utc_now();
         assert_eq!(d.len(), 20);
         assert!(d.starts_with("20") && d.ends_with('Z') && &d[10..11] == "T");
+    }
+
+    #[test]
+    fn a_damaged_open_project_is_quarantined_but_a_newer_one_is_kept() {
+        let (dir, path) = crate::datafile::tests::with_damaged("project", "projects/Mon show.lsproj");
+        assert!(read_in_data_dir(&path, &dir).is_err());
+        assert!(!path.exists());
+        crate::datafile::tests::check_kept(&dir, "projects/Mon show.lsproj", false);
+        // Valid JSON from a newer version: an error, but not damaged.
+        let dir = temp_dir("project-newer");
+        let path = dir.join("projects/Futur.lsproj");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, json!({ "format_version": 999 }).to_string()).unwrap();
+        assert!(read_in_data_dir(&path, &dir).is_err());
+        assert!(path.exists() && !dir.join(crate::datafile::QUARANTINE).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_damaged_open_project_at_startup_is_quarantined_and_reported() {
+        let dir = temp_dir("project-startup");
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        std::fs::write(dir.join("recent.json"), r#"{"current":"Cassé","recent":["Cassé"]}"#).unwrap();
+        std::fs::write(dir.join("projects/Cassé.lsproj"), crate::datafile::tests::DAMAGED).unwrap();
+        let shared = studio(&dir);
+        let mut s = shared.lock().unwrap();
+        s.sync_data_warnings();
+        assert_eq!(s.data_warnings.len(), 1);
+        assert_eq!(s.data_warnings[0].file, "projects/Cassé.lsproj");
+        assert!(!s.data_warnings[0].safety);
+        assert!(s.gate.interlock_ok(crate::interlock::DATA_ACK), "not a safety file");
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

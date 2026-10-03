@@ -318,6 +318,12 @@
   .merr { color: var(--warn); font-size: 12px; margin-top: 4px; }
   #midiLost { display: none; background: #b3261e; color: #fff; font-weight: 600; font-size: 13px; padding: 6px 12px; text-align: center; }
   #midiLost.on { display: block; }
+  /* Fichiers de données abîmés (T-402) */
+  #dataWarn[hidden] { display: none; }
+  #dataWarn .dw { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: center; padding: 6px 12px; font-size: 13px; font-weight: 600; background: #3a2a00; color: var(--warn); border-bottom: 1px solid var(--warn); }
+  #dataWarn .dw.safety { background: #b3261e; color: #fff; border-color: #fff; }
+  #dataWarn .dw button { font-size: 12px; padding: 2px 10px; }
+  #dataWarn ul { margin: 2px 0 0; padding-left: 18px; font-weight: 400; text-align: left; }
   .layers-head { display: flex; justify-content: space-between; align-items: baseline; margin: 12px 0 6px; font-size: 12px; color: var(--muted); }
   #layerPoints { font-variant-numeric: tabular-nums; }
   #layerPoints b { color: var(--text); font-weight: 600; }
@@ -580,6 +586,7 @@
 <div id="tpBanner" role="status" hidden>Mire affichée — cues et timeline en pause
   <button id="tpBannerExit">Quitter la mire</button></div>
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
+<div id="dataWarn" role="alert" hidden></div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
   <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
 <!-- Espaces de travail (T-295) : changer d'onglet ne change que l'affichage. -->
@@ -4544,10 +4551,54 @@ $('devScan').addEventListener('click', async () => {
     showDevices(j);
   }
 });
+// ---------- damaged data files (T-402) ----------
+// One banner per unacknowledged file (up to 2), else one summary with
+// « Détails ». A safety file's banner is red: arming waits for « J'ai compris ».
+let dataWarnOpen = false;
+function showDataWarnings(dw) {
+  const list = ((dw && dw.warnings) || []).filter(w => !w.acknowledged);
+  const box = $('dataWarn');
+  box.hidden = !list.length;
+  box.innerHTML = '';
+  if (!list.length) return;
+  const blocked = ' L\'armement est bloqué tant que vous n\'avez pas validé.';
+  const line = (text, safety, ack) => {
+    const d = document.createElement('div');
+    d.className = 'dw' + (safety ? ' safety' : '');
+    const span = document.createElement('span'); span.textContent = text + (safety ? blocked : '');
+    const b = document.createElement('button'); b.textContent = 'J\'ai compris';
+    b.onclick = () => ackDataWarning(ack);
+    d.append(span, b);
+    box.appendChild(d);
+    return d;
+  };
+  if (list.length <= 2) {
+    list.forEach(w => line(w.message, w.safety, { file: w.file }).dataset.file = w.file);
+    return;
+  }
+  const d = line(`${list.length} fichiers illisibles, valeurs par défaut utilisées.`, list.some(w => w.safety), { all: true });
+  const more = document.createElement('button'); more.textContent = dataWarnOpen ? 'Masquer' : 'Détails';
+  more.onclick = () => { dataWarnOpen = !dataWarnOpen; showDataWarnings(dw); };
+  d.insertBefore(more, d.lastChild);
+  if (dataWarnOpen) {
+    const ul = document.createElement('ul');
+    list.forEach(w => { const li = document.createElement('li'); li.textContent = w.message; ul.appendChild(li); });
+    d.appendChild(ul);
+  }
+}
+async function ackDataWarning(body) {
+  const r = await fetch('/api/data/warnings/ack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.ok) { showDataWarnings(await r.json()); reloadSafety(); }
+}
+async function dataWarnLoop() {
+  try { showDataWarnings(await (await fetch('/api/data/warnings')).json()); } catch { /* server gone */ }
+  setTimeout(dataWarnLoop, 5000);
+}
 
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
+  showDataWarnings(st.data_warnings);
   safety = st.safety; showSafety();
   reloadSafety();
   reloadOutputs();
@@ -5660,6 +5711,7 @@ showFigProps();
 setCreationTab(remembered(CTAB_KEY));
 
 loadState().then(loadTestPatterns).then(loadPresets).then(loadPalettes).then(loadLfos).then(loadRoutes).then(previewLoop);
+setTimeout(dataWarnLoop, 5000);
 midiLoop();
 loadPresence().catch(() => {});
 </script>
