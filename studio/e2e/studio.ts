@@ -124,6 +124,16 @@ export class Studio {
     clearTimeout(timer);
   }
 
+  /** SIGKILL, like a crash or a power cut: no clean shutdown (T-287). */
+  async kill() {
+    const p = this.proc;
+    this.proc = null;
+    if (!p || p.exitCode !== null) return;
+    const exited = new Promise<void>(resolve => p.once('exit', () => resolve()));
+    p.kill('SIGKILL');
+    await exited;
+  }
+
   /** Stop and start again on the same data directory (tests persistence). */
   async restart() {
     await this.stop();

@@ -9,6 +9,7 @@
 //! state.
 
 mod audio;
+mod autosave;
 mod beat;
 mod controls;
 mod cues;
@@ -406,6 +407,7 @@ fn main() -> Result<()> {
 
     let addr = format!("127.0.0.1:{}", cli.port);
     println!("Studio: open http://{addr}/ in your browser - Ctrl+C to quit");
+    let autosave_thread = autosave::spawn(Arc::clone(&shared), Arc::clone(&running));
     let served = web::run(&addr, shared, estop, cli.data_dir.join("calibration.json"), Arc::clone(&running));
 
     running.store(false, Ordering::SeqCst);
@@ -421,6 +423,12 @@ fn main() -> Result<()> {
         log::error!("engine thread did not stop in {SHUTDOWN_WAIT:?}: exiting anyway");
     }
     watchdog.join().ok();
+    // The autosave thread writes what is unsaved, then stops; a stuck disk
+    // must not hold the exit.
+    let deadline = Instant::now() + AUTOSAVE_SHUTDOWN_WAIT;
+    while !autosave_thread.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     if let Some(midi_thread) = midi_thread {
         midi_thread.join().ok(); // lets it switch the APC LEDs off
     }
@@ -436,6 +444,7 @@ fn main() -> Result<()> {
 /// How long `main` waits for the engine to close the output at shutdown.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 const AUDIO_SHUTDOWN_WAIT: Duration = Duration::from_millis(500);
+const AUTOSAVE_SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 
 /// The state the studio starts with. Whatever the command line and the
 /// files in the data directory say, it is disarmed (reason « Démarrage »):
@@ -520,6 +529,9 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         test_stall_ms: 0,
     };
     figures::refresh(&mut state);
+    if cli.test_hooks {
+        state.project.autosave.allow_test_delays();
+    }
     // First start: the existing data becomes a « Sans titre » project.
     project::startup(&mut state);
     state
@@ -673,6 +685,15 @@ fn run_engine(
     // and closes. A poisoned lock still holds the gate.
     shared.lock().unwrap_or_else(|e| e.into_inner()).gate.disarm(interlock::DisarmReason::Shutdown, interlock::ArmSource::System);
     stage.shutdown();
+    // The last second of live and layer moves joins the working copy (else
+    // the next start would see them only in the autosave, T-287).
+    let s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    if s.live_dirty {
+        save_json(&live_path, &s.live);
+    }
+    if s.mixer_dirty {
+        save_json(&layers_path, &s.mixer);
+    }
 }
 
 pub fn load_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {

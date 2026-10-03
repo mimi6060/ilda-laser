@@ -168,6 +168,8 @@ pub struct ProjectState {
     extra: Map<String, Value>,
     /// Fingerprint of the state as last opened or saved.
     saved: u64,
+    /// Autosave settings, status and recovery offer (autosave.rs, T-287).
+    pub autosave: crate::autosave::AutosaveState,
 }
 
 impl ProjectState {
@@ -175,7 +177,17 @@ impl ProjectState {
     pub fn load(data_dir: &Path) -> Self {
         let recent_path = data_dir.join("recent.json");
         let file: RecentFile = crate::load_json(&recent_path);
-        Self { data_dir: data_dir.to_path_buf(), dir: data_dir.join("projects"), recent_path, current: file.current, recent: file.recent, extra: Map::new(), saved: 0 }
+        Self { data_dir: data_dir.to_path_buf(), dir: data_dir.join("projects"), recent_path, current: file.current, recent: file.recent, extra: Map::new(), saved: 0, autosave: crate::autosave::AutosaveState::load(data_dir) }
+    }
+
+    /// Fingerprint of the project as last opened or saved.
+    pub fn saved_fingerprint(&self) -> u64 {
+        self.saved
+    }
+
+    /// Unknown fields of the open project.
+    pub fn extra(&self) -> &Map<String, Value> {
+        &self.extra
     }
 
     fn remember(&mut self, name: &str) {
@@ -192,7 +204,7 @@ impl ProjectState {
         }
     }
 
-    fn path_of(&self, name: &str) -> PathBuf {
+    pub fn path_of(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.{EXTENSION}"))
     }
 }
@@ -247,6 +259,8 @@ pub fn startup(s: &mut Shared) {
             p.fingerprint()
         }
     };
+    // Unsaved work left by a crash (T-287): offered, never applied here.
+    crate::autosave::find_offer(s);
 }
 
 /// Resolves what the user typed or picked - a bare name, `name.lsproj`,
@@ -527,6 +541,12 @@ fn stamp(p: &mut Project) {
     p.saved_at = utc_now();
 }
 
+/// Stamps the header and writes `p` atomically (autosave).
+pub fn write_project_stamped(path: &Path, p: &mut Project) -> Result<()> {
+    stamp(p);
+    write_project(path, p)
+}
+
 fn write_project(path: &Path, p: &Project) -> Result<()> {
     let mut json = serde_json::to_vec_pretty(p).context("échec de la mise en forme du projet")?;
     json.push(b'\n');
@@ -569,6 +589,12 @@ fn commit(tmp: &Path, path: &Path) -> Result<()> {
 /// `YYYY-MM-DDTHH:MM:SSZ`.
 fn utc_now() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (y, m, d, hh, mm, ss) = civil(secs);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// UTC year, month, day, hour, minute, second of `secs` since 1970.
+pub fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
     let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
     // Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
     let z = days + 719_468;
@@ -580,7 +606,7 @@ fn utc_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
+    (y, m, d, rem / 3600, rem / 60 % 60, rem % 60)
 }
 
 /// Reply of `route`: JSON, or a status and a French message.
@@ -594,13 +620,29 @@ struct PathRequest {
     path: String,
 }
 
-/// `GET /api/project`, `POST /api/project/{new,open,save,save-as}`.
+/// `GET /api/project`, `POST /api/project/{new,open,save,save-as}`, and
+/// for autosave (T-287) `POST /api/project/{autosave,recover,recover-ignore}`.
 /// Runs on the HTTP worker thread; the lock is held only to copy the
 /// state out or swap it in, never for file I/O.
 pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Option<Reply> {
     let path_req = || serde_json::from_str::<PathRequest>(body).map_err(|e| Reply::Text(400, format!("JSON invalide : {e}")));
+    if post && matches!(action, "new" | "open" | "save" | "save-as") {
+        // Another project, or a save: the recovery question is moot.
+        shared.lock().unwrap().project.autosave.offer = None;
+    }
     let reply = match (post, action) {
         (false, "") => return Some(Reply::Json(info(shared))),
+        (true, "autosave") => match serde_json::from_str::<crate::autosave::SettingsRequest>(body) {
+            Ok(req) => crate::autosave::set_settings(shared, req)
+                .map(|()| Vec::new())
+                .map_err(|e| Reply::Text(500, format!("impossible d'enregistrer les préférences : {e:#}"))),
+            Err(e) => Err(Reply::Text(400, format!("JSON invalide : {e}"))),
+        },
+        (true, "recover") => recover(shared),
+        (true, "recover-ignore") => {
+            crate::autosave::ignore(shared);
+            Ok(Vec::new())
+        }
         (true, "new") => open_project(shared, None),
         (true, "open") => match path_req() {
             Ok(req) => {
@@ -677,6 +719,28 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Vec<Strin
     Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
 }
 
+/// *Récupérer* (T-287): opens the offered autosave as the open project,
+/// modified: the project's name and saved fingerprint stay, so the
+/// recovered work shows as unsaved. Same checks and swap as opening.
+fn recover(shared: &Mutex<Shared>) -> Result<Vec<String>, Reply> {
+    let offer = shared.lock().unwrap().project.autosave.offer.clone().ok_or_else(|| Reply::Text(409, "aucune sauvegarde auto à récupérer".into()))?;
+    let mut p = read(&offer.path).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+    let w = {
+        let mut s = shared.lock().unwrap();
+        check_lfos(&p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+        apply(&mut s, &p);
+        s.project.autosave.offer = None;
+        s.project.extra = std::mem::take(&mut p.extra);
+        let data_dir = s.project.data_dir.clone();
+        working_paths(&s, &data_dir)
+    };
+    let warnings = persist(&w, &p);
+    for e in &warnings {
+        log::warn!("autosave recovery: failed to write {e}");
+    }
+    Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
+}
+
 /// Saves the current state as project `name` (in `projects/`).
 fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply> {
     let (mut p, path, shows) = {
@@ -699,10 +763,10 @@ fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply
 /// `GET /api/project`: name, file, whether it changed since it was opened
 /// or saved, the projects folder's files and the recent list.
 fn info(shared: &Mutex<Shared>) -> Value {
-    let (mut p, current, saved, dir, recent, shows) = {
+    let (mut p, current, saved, dir, recent, shows, autosave) = {
         let s = shared.lock().unwrap();
         let pr = &s.project;
-        (snapshot(&s), pr.current.clone(), pr.saved, pr.dir.clone(), pr.recent.clone(), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()))
+        (snapshot(&s), pr.current.clone(), pr.saved, pr.dir.clone(), pr.recent.clone(), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()), pr.autosave.status())
     };
     p.timelines = shows.load_all();
     let projects = list(&dir);
@@ -714,6 +778,7 @@ fn info(shared: &Mutex<Shared>) -> Value {
         "dir": dir,
         "projects": projects,
         "recent": recent,
+        "autosave": autosave,
     })
 }
 
