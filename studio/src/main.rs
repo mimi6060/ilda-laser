@@ -46,6 +46,7 @@ mod safety;
 #[cfg(test)]
 mod safety_invariants;
 mod safety_log;
+mod showmode;
 mod scenes;
 mod sheets;
 mod tempo;
@@ -271,6 +272,9 @@ pub struct Shared {
     pub test_pattern: testpattern::TestPatternState,
     /// Prevent sleep during a show (keep_awake.rs): setting and status.
     pub keep_awake: keep_awake::KeepAwakeState,
+    /// Show mode (showmode.rs, T-283): editing routes refused with 423.
+    /// Kept in `prefs.json`; never arms anything.
+    pub show_mode: showmode::ShowMode,
     /// Damaged data files moved to `quarantine/` this run (datafile.rs,
     /// T-402), shown until acknowledged. In memory only.
     pub data_warnings: Vec<datafile::DataWarning>,
@@ -745,6 +749,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         project: project::ProjectState::load(&cli.data_dir),
         test_pattern: Default::default(),
         keep_awake: keep_awake::KeepAwakeState::load(&cli.data_dir),
+        show_mode: showmode::ShowMode::load(&cli.data_dir),
         data_warnings: Vec::new(),
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
         test_hooks: cli.test_hooks,

@@ -175,6 +175,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or("").to_string();
 
+    // Show mode (T-283): only playback and safety routes run (showmode.rs).
+    if method == Method::Post && !crate::showmode::allowed(&path) && shared.lock().unwrap().show_mode.on {
+        return locked();
+    }
     match (method, path.as_str()) {
         (Method::Get, p) if static_asset(p).is_some() => {
             let (body, content_type) = static_asset(p).expect("checked by the guard");
@@ -315,6 +319,16 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 }
                 json_response(json!(s.presence.settings))
             }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/lock") => json_response(lock_view(&shared.lock().unwrap())),
+        // T-283: `{"show_mode": true|false, "source": "ui"}`. Never arms or
+        // disarms; entering and leaving go to the safety log.
+        (Method::Post, "/api/lock") => match body::<LockRequest>(request) {
+            Ok(req) => match crate::showmode::set(shared, req.show_mode, req.source.as_deref().unwrap_or("ui")) {
+                Ok(()) => json_response(lock_view(&shared.lock().unwrap())),
+                Err(e) => with_status(json_response(json!({ "error": format!("{e:#}"), "lock": lock_view(&shared.lock().unwrap()) })), 500),
+            },
             Err(e) => e,
         },
         (Method::Post, "/api/keep_awake") => match body::<KeepAwakeRequest>(request) {
@@ -520,6 +534,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                     },
                 };
                 let mut s = shared.lock().unwrap();
+                // Show mode (T-283): leaving a pattern only.
+                if s.show_mode.on && (matches!(pattern, Some(Some(_))) || brightness.is_some()) {
+                    return locked();
+                }
                 if let Some(b) = brightness {
                     s.test_pattern.brightness = b;
                 }
@@ -1352,6 +1370,23 @@ fn outputs_view(s: &Shared) -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+struct LockRequest {
+    show_mode: bool,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// `GET /api/lock`, also `lock` in `/api/state` and `/api/frame`.
+fn lock_view(s: &Shared) -> serde_json::Value {
+    json!({ "show_mode": s.show_mode.on })
+}
+
+/// 423 Locked: an edit refused in show mode (T-283).
+fn locked() -> HttpResponse {
+    text(423, crate::showmode::LOCKED_FR)
+}
+
+#[derive(Deserialize)]
 struct KeepAwakeRequest {
     enabled: bool,
 }
@@ -1408,6 +1443,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "engine_ok": s.health.engine_ok(),
         "presence": s.presence.status(),
         "keep_awake": s.keep_awake,
+        "lock": lock_view(s),
         "output": s.output_name,
         "output_kind": s.output_kind,
         "pps": s.pps,
@@ -1490,6 +1526,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "engine_ok": s.health.engine_ok(),
         "presence": s.presence.status(),
         "keep_awake": s.keep_awake,
+        "lock": lock_view(s),
         "output": s.output_name,
         "output_kind": s.output_kind,
         "output_error": s.output_error,
@@ -2155,6 +2192,75 @@ mod tests {
         let state: serde_json::Value = serde_json::from_str(&state).unwrap();
         assert_eq!((state["applog"]["enabled"].as_bool(), state["applog"]["write_failed"].as_bool()), (Some(true), Some(false)));
         drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-283: in show mode, edits get 423 and change nothing; playing,
+    /// arming, disarming and the e-stop work as before. The lock never arms.
+    #[test]
+    fn show_mode_refuses_edits_and_keeps_playback_and_safety() {
+        let t = TestServer::start(false);
+        let scene = crate::scenes::Scene { name: "Garde".into(), settings: Settings::default(), duration_secs: 8.0 };
+        let dir = crate::datafile::tests::temp_dir("show-mode-web");
+        let mut store = crate::scenes::SceneStore::load_or_create(dir.join("scenes.json"));
+        store.replace_in_memory(vec![scene]);
+        t.shared.lock().unwrap().scenes = store;
+        let lock = |on: bool| t.request("POST", "/api/lock", &format!(r#"{{"show_mode":{on}}}"#));
+        let (code, body) = lock(true);
+        assert_eq!(code, 200);
+        assert!(body.contains(r#""show_mode":true"#), "{body}");
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap(), "locking never arms");
+        let state: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/state", "").1).unwrap();
+        assert_eq!(state["lock"]["show_mode"], true);
+
+        for (path, body) in [
+            ("/api/scenes/delete", r#"{"name":"Garde"}"#),
+            ("/api/scenes/save", r#"{"name":"Autre"}"#),
+            ("/api/settings", "{}"),
+            ("/api/calibration", r#"{"offset_x":0.5}"#),
+            ("/api/safety", r#"{"strobe_max_hz":3}"#),
+            ("/api/outputs/limits", r#"{"limits":{"max_power":0.3}}"#),
+            ("/api/presence", "{}"),
+            ("/api/checklist/config", r#"{"defaults":true}"#),
+            ("/api/testpattern", r#"{"pattern":"grid"}"#),
+            ("/api/testpattern", r#"{"brightness":0.5}"#),
+            ("/api/project/new", "{}"),
+            ("/api/project/open", r#"{"path":"x"}"#),
+            ("/api/midi/learn", r#"{"target":"master.size"}"#),
+            ("/api/cues/slot", r#"{"id":"tunnels-001"}"#),
+            ("/api/timeline/edit", "{}"),
+        ] {
+            let (code, text) = t.request("POST", path, body);
+            assert_eq!((code, text.as_str()), (423, crate::showmode::LOCKED_FR), "{path} {body}");
+        }
+        assert_eq!(t.shared.lock().unwrap().scenes.list().len(), 1, "the scene is still there");
+        assert_eq!(t.shared.lock().unwrap().calibration.offset_x, 0.0);
+        assert_eq!(t.shared.lock().unwrap().test_pattern.active, None);
+
+        // Reading is never locked.
+        assert_eq!(t.request("GET", "/api/safety", "").0, 200);
+        // Playing and safety still work.
+        assert_eq!(t.request("POST", "/api/scenes/play", r#"{"name":"Garde"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/cue", r#"{"id":"tunnels-001"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"master.brightness","value":0.2}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"tempo.tap"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/testpattern", r#"{"pattern":null}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false,"source":"keyboard"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/estop?source=keyboard", "").0, 200);
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap());
+        assert_eq!(t.request("POST", "/api/estop/reset", "").0, 200);
+        assert_eq!(t.request("POST", "/api/heartbeat", r#"{"client_id":"p1"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":"oui"}"#).0, 400);
+
+        // Unlocked: edits work again, and unlocking doesn't arm.
+        assert_eq!(lock(false).0, 200);
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap());
+        assert_eq!(t.request("POST", "/api/scenes/delete", r#"{"name":"Garde"}"#).0, 200);
+        assert!(t.shared.lock().unwrap().scenes.list().is_empty());
+        let (code, body) = t.request("GET", "/api/lock", "");
+        assert_eq!((code, body.as_str()), (200, r#"{"show_mode":false}"#));
         let _ = std::fs::remove_dir_all(dir);
     }
 

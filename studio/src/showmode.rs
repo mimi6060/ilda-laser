@@ -1,0 +1,182 @@
+//! Show mode (T-283): a lock against accidental clicks during a show.
+//!
+//! While it is on, the studio plays but doesn't edit: cues, pages, the
+//! playlist, masters, tempo, timeline transport, blackout, arming and the
+//! emergency stop keep working; settings, safety, calibration, power caps,
+//! scenes, cue properties, figures, shows, MIDI mappings, test patterns
+//! and opening another project are refused with `423 Locked`.
+//!
+//! The policy is an allow-list (`allowed`): a POST route that isn't known
+//! to be playback is refused, so a new editing route is locked by default.
+//! GET requests are never refused. The lock never arms anything, never
+//! blocks the e-stop (it has its own fast path before routing anyway), a
+//! disarm or a brightness cut. MIDI only drives controls (controls.rs),
+//! which are all playback; MIDI learn is cancelled and can't bind while
+//! the lock is on.
+//!
+//! The state is a machine preference (`prefs.json` → `show_mode`), like
+//! `keep_awake`: the studio comes back locked after a restart if it was
+//! locked. Entering and leaving are written to the safety log.
+
+use crate::Shared;
+use anyhow::Result;
+use serde::Serialize;
+use serde_json::{json, Map, Value};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// The 423 body, also the UI's label.
+pub const LOCKED_FR: &str = "Verrouillé en mode spectacle";
+
+#[derive(Debug, Serialize)]
+pub struct ShowMode {
+    pub on: bool,
+    #[serde(skip)]
+    prefs_path: Option<PathBuf>,
+}
+
+impl ShowMode {
+    /// The last state from `<data-dir>/prefs.json` (off when absent).
+    pub fn load(data_dir: &Path) -> Self {
+        let prefs_path = data_dir.join("prefs.json");
+        let prefs: Map<String, Value> = crate::load_json(&prefs_path);
+        let on = prefs.get("show_mode").and_then(Value::as_bool).unwrap_or(false);
+        Self { on, prefs_path: Some(prefs_path) }
+    }
+
+    #[cfg(test)]
+    pub fn in_memory() -> Self {
+        Self { on: false, prefs_path: None }
+    }
+}
+
+/// Whether a POST to `path` (no query) may run while show mode is on.
+/// Playback and safety only: everything else is an edit.
+pub fn allowed(path: &str) -> bool {
+    const PLAY: &[&str] = &[
+        // Safety: never locked.
+        "/api/estop",
+        "/api/estop/reset",
+        "/api/arm",
+        "/api/heartbeat",
+        "/api/lock",
+        // Leaving a pattern is allowed; the handler refuses showing one.
+        "/api/testpattern",
+        "/api/data/warnings/ack",
+        "/api/keep_awake",
+        "/api/devices/scan",
+        // Playing.
+        "/api/cue",
+        "/api/control",
+        "/api/live",
+        "/api/scenes/play",
+        "/api/playlist/start",
+        "/api/playlist/stop",
+        "/api/presets/play",
+        "/api/audio",
+        "/api/audio/tempo/new_track",
+        "/api/timeline/load",
+        "/api/timeline/play",
+        "/api/timeline/pause",
+        "/api/timeline/stop",
+        "/api/timeline/seek",
+        "/api/timeline/loop",
+        "/api/midi/learn/cancel",
+        // Writing the open project to its own file loses nothing.
+        "/api/project/save",
+        "/api/project/recover-ignore",
+        // Ticking the pre-show checklist is not editing it.
+        "/api/checklist/operator",
+        "/api/checklist/check",
+        "/api/checklist/complete",
+        "/api/checklist/restart",
+    ];
+    PLAY.contains(&path) || path.starts_with("/api/test/")
+}
+
+/// Turns show mode on or off. Entering cancels a MIDI learn. Logged in
+/// the safety log; `prefs.json` is written with the lock released (other
+/// keys kept). Never arms or disarms. `source`: "ui", "keyboard", else
+/// logged as "api".
+pub fn set(shared: &Mutex<Shared>, on: bool, source: &str) -> Result<()> {
+    let path = {
+        let mut s = shared.lock().unwrap();
+        if s.show_mode.on == on {
+            return Ok(());
+        }
+        s.show_mode.on = on;
+        if on {
+            crate::midi::learn::cancel(&mut s);
+        }
+        let source = match source {
+            "ui" => "ui",
+            "keyboard" => "keyboard",
+            _ => "api",
+        };
+        s.gate.log().record("show_mode", Some(source), json!({ "on": on }));
+        log::info!("mode spectacle {}", if on { "activé" } else { "désactivé" });
+        s.show_mode.prefs_path.clone()
+    };
+    let Some(path) = path else { return Ok(()) };
+    let mut prefs: Map<String, Value> = crate::load_json(&path);
+    prefs.insert("show_mode".into(), Value::Bool(on));
+    crate::project::write_atomic(&path, &serde_json::to_vec_pretty(&prefs)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support;
+
+    #[test]
+    fn playback_and_safety_are_allowed_edits_are_not() {
+        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/lock", "/api/test/stall"] {
+            assert!(allowed(p), "{p}");
+        }
+        for p in [
+            "/api/settings",
+            "/api/safety",
+            "/api/calibration",
+            "/api/outputs/limits",
+            "/api/presence",
+            "/api/scenes/save",
+            "/api/scenes/delete",
+            "/api/cues/slot",
+            "/api/checklist/config",
+            "/api/project/open",
+            "/api/project/new",
+            "/api/project/save-as",
+            "/api/midi/learn",
+            "/api/midi/safety",
+            "/api/timeline/edit",
+            "/api/figures/delete",
+            "/api/some/future/route",
+        ] {
+            assert!(!allowed(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn the_state_survives_a_restart_and_is_logged() {
+        let dir = crate::datafile::tests::temp_dir("showmode");
+        std::fs::write(dir.join("prefs.json"), r#"{"keep_awake":false}"#).unwrap();
+        assert!(!ShowMode::load(&dir).on, "off by default");
+        let (log, sink) = crate::safety_log::testing::memory_log();
+        let mut s = test_support::shared();
+        s.show_mode = ShowMode::load(&dir);
+        s.gate.set_log(log);
+        let shared = Mutex::new(s);
+        set(&shared, true, "ui").unwrap();
+        set(&shared, true, "ui").unwrap(); // no change: not logged twice
+        assert!(ShowMode::load(&dir).on);
+        let prefs: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("prefs.json")).unwrap()).unwrap();
+        assert_eq!(prefs["keep_awake"], false, "other keys kept");
+        set(&shared, false, "api").unwrap();
+        assert!(!ShowMode::load(&dir).on);
+        assert!(!shared.lock().unwrap().gate.is_armed(), "never arms");
+        shared.lock().unwrap().gate.log().flush(std::time::Duration::from_secs(2));
+        let kinds: Vec<(String, Value)> = sink.events().iter().map(|e| (e.kind.clone(), e.detail.clone())).collect();
+        assert_eq!(kinds, vec![("show_mode".to_string(), json!({ "on": true })), ("show_mode".to_string(), json!({ "on": false }))]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

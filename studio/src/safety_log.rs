@@ -496,6 +496,13 @@ pub fn describe(e: &SafetyEvent) -> String {
             let n = d.get("items").and_then(Value::as_array).map_or(0, |a| a.len());
             format!("Liste de contrôle avant show terminée par {} ({n} élément(s))", str_of(d, "operator"))
         }
+        "show_mode" => {
+            if d.get("on").and_then(Value::as_bool).unwrap_or(false) {
+                "Mode spectacle activé (édition verrouillée)".into()
+            } else {
+                "Mode spectacle désactivé".into()
+            }
+        }
         "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
         "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),
         "power_caps" => format!("Plafonds de puissance modifiés ({}){}", str_of(d, "output"), changed()),
