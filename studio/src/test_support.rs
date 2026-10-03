@@ -50,6 +50,7 @@ pub fn shared() -> Shared {
         strobe: Default::default(),
         outputs: crate::power::OutputStore::in_memory(),
         audio_guard: Default::default(),
+        dwell: Default::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         figures: crate::figures::FigureStore::in_memory(),
