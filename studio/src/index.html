@@ -458,6 +458,12 @@
   .layer .t { color: #fff; }
   .layer button.mute.active { background: var(--danger); box-shadow: 0 0 10px #ff4d5e88; }
   .layer button.solo.active { background: var(--warn); box-shadow: 0 0 10px #ffb02088; }
+  /* Active output (T-300): a small pill before the text. */
+  #output[data-kind]::before { display: inline-block; margin-right: 6px; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: .06em; vertical-align: 1px; border: 1px solid var(--line); color: var(--muted); content: 'APERÇU'; }
+  #output[data-kind=ponk]::before { content: 'PONK'; color: var(--violet); border-color: var(--violet); box-shadow: 0 0 8px #8b5cf655; }
+  #output[data-kind=dac]::before { content: 'DAC'; color: var(--accent); border-color: var(--accent); box-shadow: 0 0 8px #22e3ff55; }
+  #output[data-kind=test]::before { content: 'TEST'; color: var(--warn); border-color: var(--warn); }
+  #output[data-kind=error]::before { content: 'ERREUR'; color: var(--danger); border-color: var(--danger); }
   /* Cue pages: a coloured pill per page. */
   .ws-cues { --cat: #22e3ff; }
   .cue-tabs button { border-radius: 999px; padding: 6px 14px 6px 10px; display: inline-flex; align-items: center; gap: 7px; }
@@ -1683,6 +1689,20 @@ function draw(points) {
   }
 }
 
+// Which output the frames go to (T-300), as a coloured pill in the header.
+const OUTPUT_TITLES = {
+  ponk: 'Sortie PONK : les tracés partent vers MadMapper/MadLaser, qui pilote le ShowNET. Laser désarmé = trames vides envoyées en continu.',
+  dac: 'Sortie directe vers un DAC laser (IDN / Ether Dream).',
+  test: 'Sortie de test (fichier journal, aucun laser).',
+  preview: 'Aperçu seulement : rien ne part vers un laser.',
+};
+function showOutputKind(f) {
+  const el = $('output'), kind = f.output_error ? 'error' : f.output_kind || 'preview';
+  if (el.dataset.kind === kind) return;
+  el.dataset.kind = kind;
+  el.title = f.output_error ? 'Erreur de sortie' : OUTPUT_TITLES[kind] || '';
+}
+
 async function previewLoop() {
   try {
     const fetchedAt = performance.now();
@@ -1695,6 +1715,7 @@ async function previewLoop() {
     arm = f.arm; pps = f.pps; showArmed(); showPresence(f);
     $('output').textContent = f.output_error ? '⚠ ' + f.output_error
       : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement (lancez avec --device pour piloter un laser)';
+    showOutputKind(f);
     const n = f.points.length, fps = n ? pps / n : 0;
     $('stPoints').textContent = n;
     $('stFps').textContent = n ? fps.toFixed(1) : '–';

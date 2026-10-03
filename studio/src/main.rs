@@ -26,6 +26,7 @@ mod live;
 mod midi;
 mod output;
 mod patterns;
+mod ponk;
 mod presence;
 mod presets;
 mod project;
@@ -63,6 +64,13 @@ struct Cli {
     /// mode.
     #[arg(long)]
     device: Option<String>,
+    /// Send the frames over PONK (UDP) to MadMapper/MadLaser, which drives
+    /// the ShowNET (T-300). Alone: MadMapper on this Mac (127.0.0.1:5583);
+    /// or `ip:port` / `host:port`. Off by default; the laser still starts
+    /// disarmed and only empty frames go out until it is armed.
+    #[arg(long, value_name = "HOST:PORT", num_args = 0..=1, default_missing_value = ponk::DEFAULT_TARGET,
+          value_parser = ponk::parse_target, conflicts_with_all = ["device", "test_output", "midi_test"])]
+    ponk: Option<std::net::SocketAddr>,
     /// Points per second sent to the laser.
     #[arg(long, default_value_t = 30_000)]
     pps: u32,
@@ -142,6 +150,8 @@ pub struct Shared {
     /// Lit points in the frame actually sent to the output (0 when disarmed).
     pub output_lit: usize,
     pub output_name: Option<String>,
+    /// `Output::kind` ("dac", "ponk", "test"), for the UI's output badge.
+    pub output_kind: Option<&'static str>,
     pub output_error: Option<String>,
     pub pps: u32,
     pub scenes: SceneStore,
@@ -324,6 +334,12 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
 
     let output: Option<Box<dyn Output>> = match (&cli.device, &cli.test_output) {
+        // Exclusive with --device and --test-output (clap refuses both).
+        _ if cli.ponk.is_some() => {
+            let out = ponk::PonkOutput::open(cli.ponk.expect("checked"), &cli.data_dir)?;
+            println!("Laser output: {} (disarmed: empty PONK frames until armed).", out.name());
+            Some(Box::new(out))
+        }
         (Some(device), _) => {
             let out = DacOutput::open(device, cli.pps)?;
             println!("Laser output: {}", out.name());
@@ -470,6 +486,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         frame: Vec::new(),
         output_lit: 0,
         output_name: output.map(|o| o.name().to_string()),
+        output_kind: output.map(|o| o.kind()),
         output_error: None,
         pps: cli.pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
@@ -742,6 +759,20 @@ mod tests {
         assert!(cli.midi_test && cli.no_midi);
         assert!(!parse(&[]).unwrap().midi_test, "off by default");
     }
+
+    /// T-300: PONK only on request, never next to a DAC or the fake output.
+    #[test]
+    fn ponk_is_opt_in_and_exclusive() {
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("laser-studio").chain(args.iter().copied()));
+        assert!(parse(&[]).unwrap().ponk.is_none(), "off by default");
+        assert_eq!(parse(&["--ponk"]).unwrap().ponk, Some("127.0.0.1:5583".parse().unwrap()), "alone: MadMapper on this Mac");
+        assert_eq!(parse(&["--ponk", "127.0.0.1:6001", "--port", "0"]).unwrap().ponk, Some("127.0.0.1:6001".parse().unwrap()));
+        assert_eq!(parse(&["--ponk", "--port", "0"]).unwrap().port, 0, "the next flag isn't taken as the address");
+        assert!(parse(&["--ponk", "not an address"]).is_err());
+        assert!(parse(&["--ponk", "--device", "auto"]).is_err(), "one output at a time");
+        assert!(parse(&["--ponk", "127.0.0.1:6001", "--test-output", "/tmp/x"]).is_err());
+        assert!(parse(&["--no-midi", "--midi-test", "--ponk"]).is_err(), "MIDI tests stay preview only");
+    }
     use crate::test_support;
     use std::time::Duration;
 
@@ -940,11 +971,12 @@ mod tests {
             std::fs::write(dir.join(name), r#"{"armed": true, "arm": true, "on": true, "hold_to_run": false}"#).unwrap();
         }
         let data_dir = dir.to_str().unwrap();
-        let variants: [&[&str]; 4] = [
+        let variants: [&[&str]; 5] = [
             &[],
             &["--test-interlock"],
             &["--test-hooks", "--pps", "12000"],
             &["--test-hooks", "--test-interlock", "--port", "0"],
+            &["--ponk", "127.0.0.1:9"],
         ];
         for extra in variants {
             let args = [&["laser-studio", "--no-midi", "--data-dir", data_dir][..], extra].concat();

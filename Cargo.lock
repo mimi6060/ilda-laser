@@ -790,6 +790,7 @@ dependencies = [
  "log",
  "midir",
  "nanomp3",
+ "ponk-protocol",
  "realfft",
  "roxmltree",
  "rtrb",
@@ -1169,6 +1170,12 @@ name = "point"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c0f96044f2d29fd00c4c28ebfc55016e552ffe88c55812099994c326e47e611"
+
+[[package]]
+name = "ponk-protocol"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "597833cf65a7a6dd1c4249a2947cd4ba8bc1b2da7ce36720616ae8f4c5bdc3a2"
 
 [[package]]
 name = "portable-atomic"

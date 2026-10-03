@@ -23,6 +23,7 @@ pub fn shared() -> Shared {
         frame: Vec::new(),
         output_lit: 0,
         output_name: None,
+        output_kind: None,
         output_error: None,
         pps: 30_000,
         scenes: SceneStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scenes.json")),
