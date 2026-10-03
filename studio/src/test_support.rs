@@ -49,6 +49,7 @@ pub fn shared() -> Shared {
         safety: crate::safety::SafetyStore::in_memory(),
         strobe: Default::default(),
         outputs: crate::power::OutputStore::in_memory(),
+        dwell: Default::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         figures: crate::figures::FigureStore::in_memory(),
