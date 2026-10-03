@@ -18,6 +18,7 @@ use crate::live::{
 use crate::tempo;
 use crate::Shared;
 use serde::Serialize;
+use serde_json::json;
 use std::collections::HashMap;
 
 /// Size of one cue-grid page: 5 rows x 8 columns, the APC40 clip grid.
@@ -409,7 +410,7 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
                 s.cue_page = n - 1;
             } else if let Some(cell) = other.strip_prefix("grid.") {
                 let preset_id = grid_cell_preset(&s.presets, cell).ok_or_else(|| ControlError::Unknown(id.to_string()))?;
-                press_cue(s, &preset_id, None, truthy(input));
+                press_cue_from(s, &preset_id, None, truthy(input), Some(if from_external { "midi" } else { "ui" }));
             } else {
                 return Err(ControlError::Unknown(id.to_string()));
             }
@@ -472,7 +473,6 @@ fn choice_index(kind: &ControlKind, input: ControlInput) -> usize {
 /// Current value of a control, for LED feedback and UI sync. Triggers have
 /// none.
 pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
-    use serde_json::json;
     Some(match desc.id.as_str() {
         "look.size" => json!(s.settings.scale),
         "look.brightness" => json!(s.settings.brightness),
@@ -569,7 +569,7 @@ fn cue_settings(s: &Shared, id: &str) -> Option<Settings> {
 /// Play a cue from the start, whatever its click mode (the old « play »
 /// action, kept for `/api/presets/play`).
 pub fn play_preset(s: &mut Shared, id: &str) -> bool {
-    press_cue(s, id, Some(ClickMode::Restart), true)
+    press_cue_from(s, id, Some(ClickMode::Restart), true, Some("ui"))
 }
 
 /// Start the loaded show. Like a latched cue, it takes over from the
@@ -585,6 +585,10 @@ pub fn timeline_play(s: &mut Shared) -> Result<(), &'static str> {
     }
     s.playlist = None;
     s.look_on = false;
+    if s.gate.is_armed() {
+        let name = s.timeline.show.as_ref().map(|sh| sh.name.clone()).unwrap_or_default();
+        s.gate.log().record("show", None, json!({ "name": name }));
+    }
     Ok(())
 }
 
@@ -613,9 +617,16 @@ fn press_show_cue(s: &mut Shared, cue: &str, show: &str) {
     }
 }
 
+#[cfg(test)]
+pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) -> bool {
+    press_cue_from(s, id, mode, down, None)
+}
+
 /// A cue's key, pad or button went down (`down`) or up. `mode` overrides
 /// the cue's click mode (Shift + letter flashes). False if no such cue.
-pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) -> bool {
+/// `src` (`ui`, `midi`) is for the safety log: a cue started while armed
+/// is logged (T-259).
+pub fn press_cue_from(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>) -> bool {
     if !s.presets.iter().any(|p| p.id == id) {
         return false;
     }
@@ -639,6 +650,10 @@ pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) 
         // always did. A flash doesn't: the look comes back on release.
         s.playlist = None;
         s.look_on = false;
+    }
+    if s.gate.is_armed() && s.deck.active.iter().any(|a| a.id >= first_new) {
+        let name = s.presets.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
+        s.gate.log().record("cue", src, json!({ "id": id, "name": name, "mode": mode }));
     }
     true
 }

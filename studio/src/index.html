@@ -340,6 +340,13 @@
   #sfLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
   #sfLoosenOk { border-color: var(--danger); color: var(--danger); }
   .sf-error { color: var(--danger); }
+  .sl-wrap { max-height: 360px; overflow: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; }
+  #slTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  #slTable th { position: sticky; top: 0; background: var(--panel-2); text-align: left; font-weight: 600; color: var(--muted); }
+  #slTable th, #slTable td { padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  #slTable td.t { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
+  #slTable tr.k-estop td, #slTable tr.k-watchdog td, #slTable tr.k-log_overflow td { color: var(--danger); }
+  #slTable tr.k-arm td.e { color: var(--accent); }
   .sf-sub { margin-top: 12px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
   .sfzone { margin-top: 8px; padding: 6px 8px; border: 1px solid #ff4d4f55; border-radius: 6px; }
   .sfzone .row { margin-top: 4px; }
@@ -1186,6 +1193,32 @@
         <div class="row"><span>Touche de maintien : <b id="holdKeyLabel"></b></span>
           <button id="holdKeyPick" style="flex:0;white-space:nowrap">Changer…</button></div>
         <div class="hint">Mode maintien : le laser n'émet que tant que la touche est maintenue (une pédale USB qui envoie une touche fonctionne aussi ; pad MIDI : contrôle safety.hold). Relâcher = sortie noire ; relâché plus de 10 s = désarmé.</div>
+      </details>
+    </section>
+
+    <section>
+      <details id="safetyLogPanel">
+        <summary>Journal de sécurité</summary>
+        <div class="row">
+          <select id="slDay" title="Jour"></select>
+          <select id="slKind" title="Type d'événement">
+            <option value="">Tous les événements</option>
+            <option value="arm">Armement et désarmement</option>
+            <option value="estop">Arrêt d'urgence</option>
+            <option value="locks">Verrous, présence, chien de garde</option>
+            <option value="limiter">Limiteurs</option>
+            <option value="play">Cues, scènes et shows</option>
+            <option value="settings">Réglages de sécurité</option>
+            <option value="studio">Studio et projets</option>
+          </select>
+        </div>
+        <div class="row"><button id="slRefresh">Actualiser</button><button id="slCsv">Exporter CSV</button></div>
+        <div class="hint sf-error" id="slError"></div>
+        <div class="sl-wrap"><table id="slTable">
+          <thead><tr><th>Heure</th><th>Événement</th><th>Source</th></tr></thead>
+          <tbody id="slRows"></tbody>
+        </table></div>
+        <div class="hint" id="slInfo">Les plus récents en haut. Un fichier par jour dans le dossier de données (logs/), gardé un an.</div>
       </details>
     </section>
 
@@ -2283,6 +2316,75 @@ function sfFromControls() {
   });
   return next;
 }
+// RÉGLAGES › Journal de sécurité (T-259): one day of the log, filtered by
+// type, newest first; refreshed every 2 s while the panel is open.
+const SL_GROUPS = {
+  arm: ['arm', 'arm_refused', 'disarm'],
+  estop: ['estop', 'estop_reset'],
+  locks: ['interlock', 'presence', 'watchdog'],
+  limiter: ['limiter'],
+  play: ['cue', 'scene', 'show'],
+  settings: ['safety_settings', 'presence_settings', 'midi_safety'],
+  studio: ['app_start', 'app_stop', 'project_open', 'log_overflow'],
+};
+let slLog = null;
+async function loadSafetyLog() {
+  const day = $('slDay').value;
+  let j;
+  try {
+    const r = await fetch('/api/safety/log' + (day ? '?date=' + encodeURIComponent(day) : ''));
+    if (!r.ok) { $('slError').textContent = await r.text(); return; }
+    j = await r.json();
+  } catch { return; }
+  slLog = j;
+  const days = j.days.includes(j.today) ? j.days : [j.today, ...j.days];
+  if ($('slDay').dataset.days !== days.join()) {
+    $('slDay').dataset.days = days.join();
+    $('slDay').replaceChildren(...days.map(d => {
+      const o = document.createElement('option');
+      o.value = d; o.textContent = d === j.today ? `Aujourd'hui (${d})` : d;
+      return o;
+    }));
+  }
+  $('slDay').value = j.date;
+  const st = j.status || {};
+  $('slError').textContent = st.last_error ? `Écriture du journal impossible : ${st.last_error}` : (st.dropped ? `${st.dropped} événement(s) perdu(s) (journal saturé).` : '');
+  showSafetyLog();
+}
+function showSafetyLog() {
+  if (!slLog) return;
+  const group = SL_GROUPS[$('slKind').value];
+  const rows = slLog.events.filter(e => !group || group.includes(e.kind)).reverse();
+  $('slRows').replaceChildren(...rows.map(e => {
+    const tr = document.createElement('tr');
+    tr.className = 'k-' + e.kind;
+    tr.dataset.kind = e.kind;
+    tr.title = JSON.stringify(e.detail);
+    for (const [cls, text] of [['t', e.ts.slice(11, 19)], ['e', e.text], ['s', e.source_fr]]) {
+      const td = document.createElement('td');
+      td.className = cls; td.textContent = text;
+      tr.append(td);
+    }
+    return tr;
+  }));
+  if (!rows.length) {
+    const tr = document.createElement('tr'), td = document.createElement('td');
+    td.colSpan = 3; td.className = 't'; td.textContent = 'Aucun événement.';
+    tr.append(td); $('slRows').replaceChildren(tr);
+  }
+}
+$('safetyLogPanel').addEventListener('toggle', () => { if ($('safetyLogPanel').open) loadSafetyLog(); });
+$('slDay').onchange = loadSafetyLog;
+$('slKind').onchange = showSafetyLog;
+$('slRefresh').onclick = loadSafetyLog;
+$('slCsv').onclick = () => {
+  const a = document.createElement('a');
+  a.href = '/api/safety/log.csv?date=' + encodeURIComponent($('slDay').value || (slLog && slLog.date) || '');
+  a.download = '';
+  document.body.append(a); a.click(); a.remove();
+};
+setInterval(() => { if (activeWs === 'settings' && $('safetyLogPanel').open && !document.hidden) loadSafetyLog(); }, 2000);
+
 async function reloadSafety() {
   const j = await (await fetch('/api/safety')).json();
   safety = j.settings; sfLoadError = j.load_error;

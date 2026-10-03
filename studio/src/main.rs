@@ -30,6 +30,7 @@ mod presence;
 mod presets;
 mod project;
 mod safety;
+mod safety_log;
 mod scenes;
 mod sheets;
 mod tempo;
@@ -247,7 +248,7 @@ impl Shared {
     pub fn sync_safety(&mut self, now: Instant) -> bool {
         self.gate.sync_estop(&self.estop);
         if self.health.take_trip() {
-            self.gate.disarm(interlock::DisarmReason::EngineStall, interlock::ArmSource::System);
+            self.gate.watchdog_trip();
         }
         self.sync_presence(now)
     }
@@ -340,6 +341,12 @@ fn main() -> Result<()> {
     };
 
     let state = startup_state(&cli, output.as_deref());
+    let safety_log = state.gate.log().clone();
+    safety_log.record(
+        "app_start",
+        Some("system"),
+        serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "output": state.output_name.clone().unwrap_or_else(|| "aperçu seul".into()) }),
+    );
     let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
     let sim = state.midi.sim.clone();
     let audio_hub = Arc::clone(&state.audio_in);
@@ -430,6 +437,10 @@ fn main() -> Result<()> {
     while audio_threads.iter().any(|t| !t.is_finished()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
+    safety_log.record("app_stop", Some("system"), serde_json::json!({}));
+    if !safety_log.flush(Duration::from_millis(500)) {
+        log::warn!("safety log: last events not written before exit");
+    }
     served
 }
 
@@ -447,6 +458,8 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     }
     // No page has beaten yet: arming waits for the UI (T-252).
     gate.register(interlock::UI_ALIVE, "Aucune interface ouverte (battement perdu)", false);
+    // The safety log (T-259), after the interlocks' starting states.
+    gate.set_log(safety_log::SafetyLog::start(cli.data_dir.join("logs")));
 
     let sim = cli.midi_test.then(|| {
         let sim = midi::testing::SimMidi::default();
@@ -543,6 +556,10 @@ fn run_engine(
     // If this thread panics, unwinding drops the stage: dark frame + disarm.
     let mut stage = OutputStage::new(output);
     let mut limiter = safety::StrobeLimiter::default();
+    // Strobe limiter engagements go to the safety log, at most one line a
+    // second (T-259); nothing is allocated on the frames that write none.
+    let safety_log = shared.lock().unwrap().gate.log().clone();
+    let mut strobe_log = safety_log::LimiterTracker::new("strobe");
 
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
@@ -655,6 +672,8 @@ fn run_engine(
         // of the frame; the e-stop latch and a watchdog trip (this frame
         // stalled) are re-read here, lock-free.
         let emitted = stage.emit(&frame, armed && !health.is_tripped(), hold_ok, &estop);
+        let strobe = limiter.status();
+        strobe_log.update(strobe.active, now, &safety_log, || serde_json::json!({ "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
         let mut s = shared.lock().unwrap();
         if let Some(error) = emitted.arm_change {
             s.output_error = error;
@@ -662,7 +681,7 @@ fn run_engine(
         s.output_lit = emitted.lit;
         s.frame = frame;
         s.mix = mix;
-        s.strobe = limiter.status();
+        s.strobe = strobe;
         s.evolving = evolving;
         drop(s);
 
@@ -905,6 +924,42 @@ mod tests {
         assert!(!s.health.is_tripped(), "recorded once");
         s.request_arm(ArmSource::Ui).unwrap();
         assert!(s.gate.is_armed(), "the operator can re-arm");
+    }
+
+    /// T-259 acceptance: arm, launch a cue, Escape → three lines in that
+    /// order, with their sources; a cue while disarmed is not logged.
+    #[test]
+    fn arm_cue_and_escape_are_logged_in_order() {
+        let (log, sink) = safety_log::testing::memory_log();
+        let mut s = test_support::shared();
+        s.gate.set_log(log.clone());
+        assert!(controls::press_cue_from(&mut s, "tunnels-001", None, true, Some("ui")));
+        s.request_arm(ArmSource::Keyboard).unwrap();
+        assert!(controls::press_cue_from(&mut s, "tunnels-002", Some(ClickMode::Toggle), true, Some("midi")));
+        s.emergency_stop(ArmSource::Keyboard);
+        log.flush(Duration::from_secs(2));
+        let events = sink.events();
+        let lines: Vec<(&str, Option<&str>)> = events.iter().map(|e| (e.kind.as_str(), e.source.as_deref())).collect();
+        assert_eq!(lines, [("arm", Some("keyboard")), ("cue", Some("midi")), ("estop", Some("keyboard"))]);
+        assert_eq!(events[1].detail["id"], "tunnels-002");
+        assert!(!events[1].detail["name"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_watchdog_trip_and_a_lost_page_are_logged() {
+        let (log, sink) = safety_log::testing::memory_log();
+        let t0 = Instant::now();
+        let mut s = with_presence(PresenceSettings::default());
+        s.gate.set_log(log.clone());
+        s.presence.beat("page", t0, true, false);
+        s.request_arm(ArmSource::Ui).unwrap();
+        s.health.trip();
+        s.sync_safety(t0 + ms(100));
+        s.request_arm(ArmSource::Ui).unwrap();
+        s.sync_safety(t0 + ms(2_500));
+        log.flush(Duration::from_secs(2));
+        assert_eq!(sink.kinds(), ["presence", "arm", "watchdog", "arm", "disarm", "presence"]);
+        assert_eq!(sink.events()[4].detail["reason"], "ui_lost");
     }
 
     #[test]

@@ -135,11 +135,18 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
         },
         (true, "/api/midi/safety") => match parse::<SafetyRequest>(body) {
             Ok(req) => {
-                let mut safety = s.midi.store.devices.safety;
+                let before = s.midi.store.devices.safety;
+                let mut safety = before;
                 safety.allow_arm = req.allow_arm.unwrap_or(safety.allow_arm);
                 safety.blackout_on_disconnect = req.blackout_on_disconnect.unwrap_or(safety.blackout_on_disconnect);
                 match s.midi.store.set_safety(safety) {
-                    Ok(()) => ok(),
+                    Ok(()) => {
+                        // The MIDI arming opt-in and blackout option, before/after (T-259).
+                        if let Some(change) = crate::safety_log::settings_change(&before, &safety) {
+                            s.gate.log().record("midi_safety", Some("ui"), change);
+                        }
+                        ok()
+                    }
                     Err(e) => Reply::Text(500, e),
                 }
             }

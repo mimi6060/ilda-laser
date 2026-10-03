@@ -11,7 +11,9 @@
 //! stays latched until an explicit reset (which never re-arms).
 
 use crate::patterns::Point;
+use crate::safety_log::SafetyLog;
 use serde::Serialize;
+use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +30,17 @@ pub enum ArmSource {
 }
 
 impl ArmSource {
+    /// The id written in the safety log (same as the JSON).
+    pub fn id(self) -> &'static str {
+        match self {
+            ArmSource::Ui => "ui",
+            ArmSource::Keyboard => "keyboard",
+            ArmSource::Midi => "midi",
+            ArmSource::Api => "api",
+            ArmSource::System => "system",
+        }
+    }
+
     pub fn label_fr(self) -> &'static str {
         match self {
             ArmSource::Ui => "interface",
@@ -123,12 +136,15 @@ pub struct ArmGate {
     source: Option<ArmSource>,
     last_disarm: Option<(DisarmReason, ArmSource, SystemTime)>,
     interlocks: Vec<Interlock>,
+    /// Every arm, disarm, e-stop and interlock change goes to the safety
+    /// log (T-259), after it took effect. Recording never blocks.
+    log: SafetyLog,
 }
 
 impl Default for ArmGate {
     /// Always disarmed, reason « Démarrage ».
     fn default() -> Self {
-        let mut gate = Self { armed: false, since: None, source: None, last_disarm: Some((DisarmReason::Startup, ArmSource::System, SystemTime::now())), interlocks: Vec::new() };
+        let mut gate = Self { armed: false, since: None, source: None, last_disarm: Some((DisarmReason::Startup, ArmSource::System, SystemTime::now())), interlocks: Vec::new(), log: SafetyLog::default() };
         gate.register(ESTOP, "Arrêt d'urgence enclenché", true);
         gate
     }
@@ -137,6 +153,15 @@ impl Default for ArmGate {
 impl ArmGate {
     pub fn is_armed(&self) -> bool {
         self.armed
+    }
+
+    /// Starts logging to `log` (the studio's safety log).
+    pub fn set_log(&mut self, log: SafetyLog) {
+        self.log = log;
+    }
+
+    pub fn log(&self) -> &SafetyLog {
+        &self.log
     }
 
     /// Adds an interlock (or updates its label and state).
@@ -161,7 +186,9 @@ impl ArmGate {
     /// the system can never arm: only a person at the UI, keyboard or API.
     pub fn request_arm(&mut self, src: ArmSource) -> Result<(), Vec<String>> {
         if matches!(src, ArmSource::Midi | ArmSource::System) {
-            return Err(vec![format!("L'armement depuis « {} » n'est pas autorisé", src.label_fr())]);
+            let refused = vec![format!("L'armement depuis « {} » n'est pas autorisé", src.label_fr())];
+            self.log.record("arm_refused", Some(src.id()), json!({ "blocking": refused }));
+            return Err(refused);
         }
         self.arm_if_clear(src)
     }
@@ -176,12 +203,14 @@ impl ArmGate {
     fn arm_if_clear(&mut self, src: ArmSource) -> Result<(), Vec<String>> {
         let blocking = self.blocking();
         if !blocking.is_empty() {
+            self.log.record("arm_refused", Some(src.id()), json!({ "blocking": blocking }));
             return Err(blocking);
         }
         if !self.armed {
             self.armed = true;
             self.since = Some(SystemTime::now());
             self.source = Some(src);
+            self.log.record("arm", Some(src.id()), json!({}));
         }
         Ok(())
     }
@@ -189,6 +218,12 @@ impl ArmGate {
     /// Always accepted. Records the reason even when already disarmed, so
     /// the UI shows the latest cause (e.g. an e-stop over a disarm).
     pub fn disarm(&mut self, reason: DisarmReason, src: ArmSource) {
+        // Logged only when it really disarms. An e-stop, a watchdog trip
+        // and a dropping interlock write their own line instead.
+        let own_line = matches!(reason, DisarmReason::EStop | DisarmReason::EngineStall | DisarmReason::Interlock(_));
+        if self.armed && !own_line {
+            self.log.record("disarm", Some(src.id()), json!({ "reason": reason.id(), "reason_fr": reason.label_fr() }));
+        }
         self.armed = false;
         self.since = None;
         self.source = None;
@@ -206,10 +241,16 @@ impl ArmGate {
             }
         };
         let lock = &mut self.interlocks[index];
-        let dropped = lock.ok && !ok;
+        let (changed, dropped) = (lock.ok != ok, lock.ok && !ok);
         lock.ok = ok;
+        let label = lock.label_fr.clone();
+        // The e-stop's interlock has its own lines (`estop`, `estop_reset`).
+        if changed && id != ESTOP {
+            let detail = json!({ "id": id, "label": label, "ok": ok, "was_armed": self.armed });
+            let kind = if id == UI_ALIVE { "presence" } else { "interlock" };
+            self.log.record(kind, Some("system"), detail);
+        }
         if dropped && self.armed {
-            let label = lock.label_fr.clone();
             self.disarm(DisarmReason::Interlock(label), ArmSource::System);
         }
     }
@@ -224,7 +265,11 @@ impl ArmGate {
     /// closes it again (without arming).
     pub fn sync_estop(&mut self, estop: &EStop) {
         match estop.state() {
-            Some((src, _)) if self.interlock_ok(ESTOP) => {
+            Some((src, at_ms)) if self.interlock_ok(ESTOP) => {
+                // Stamped with the moment it tripped (maybe on the HTTP fast
+                // path, a frame before the gate sees it).
+                let at = UNIX_EPOCH + std::time::Duration::from_millis(at_ms);
+                self.log.record_at(at, "estop", Some(src.id()), json!({ "was_armed": self.armed }));
                 self.disarm(DisarmReason::EStop, src);
                 self.set_interlock(ESTOP, false);
             }
@@ -237,8 +282,19 @@ impl ArmGate {
     /// then releases the latch. Never arms.
     pub fn reset_estop(&mut self, estop: &EStop) {
         self.sync_estop(estop);
+        let was_latched = estop.is_latched();
         estop.reset();
         self.sync_estop(estop);
+        if was_latched {
+            self.log.record("estop_reset", None, json!({}));
+        }
+    }
+
+    /// A watchdog trip (T-253), seen at the next sync: logged, then the
+    /// gate disarms with reason « Moteur bloqué ».
+    pub fn watchdog_trip(&mut self) {
+        self.log.record("watchdog", Some("system"), json!({ "was_armed": self.armed }));
+        self.disarm(DisarmReason::EngineStall, ArmSource::System);
     }
 
     pub fn status(&self, estop: &EStop) -> ArmStatus {
@@ -548,6 +604,123 @@ mod tests {
         assert!(!estop.is_latched());
     }
 
+    use crate::safety_log::testing::memory_log;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_gate_logs_arms_disarms_and_refusals_with_their_sources() {
+        let (log, sink) = memory_log();
+        let mut gate = ArmGate::default();
+        gate.set_log(log.clone());
+        gate.disarm(DisarmReason::User, ArmSource::Ui); // already disarmed: no line
+        gate.request_arm(ArmSource::Keyboard).unwrap();
+        gate.request_arm(ArmSource::Keyboard).unwrap(); // already armed: no line
+        gate.disarm(DisarmReason::User, ArmSource::Ui);
+        assert!(gate.request_arm(ArmSource::Midi).is_err());
+        gate.register("door", "Porte ouverte", false);
+        assert!(gate.request_arm(ArmSource::Ui).is_err());
+        log.flush(Duration::from_secs(2));
+        let events = sink.events();
+        let lines: Vec<(&str, Option<&str>)> = events.iter().map(|e| (e.kind.as_str(), e.source.as_deref())).collect();
+        assert_eq!(
+            lines,
+            [
+                ("arm", Some("keyboard")),
+                ("disarm", Some("ui")),
+                ("arm_refused", Some("midi")),
+                ("interlock", Some("system")),
+                ("arm_refused", Some("ui")),
+            ]
+        );
+        assert_eq!(events[1].detail["reason"], "user");
+        assert_eq!(events[3].detail["label"], "Porte ouverte");
+        assert_eq!(events[4].detail["blocking"][0], "Porte ouverte");
+    }
+
+    #[test]
+    fn an_estop_is_one_line_stamped_when_it_tripped_and_the_reset_another() {
+        let (log, sink) = memory_log();
+        let mut gate = ArmGate::default();
+        gate.set_log(log.clone());
+        gate.request_arm(ArmSource::Ui).unwrap();
+        let estop = EStop::default();
+        estop.trip(ArmSource::Keyboard);
+        let (_, at) = estop.state().unwrap();
+        std::thread::sleep(Duration::from_millis(20)); // the engine sees it a frame later
+        gate.sync_estop(&estop);
+        gate.sync_estop(&estop);
+        estop.trip(ArmSource::Midi); // still latched: nothing new
+        gate.sync_estop(&estop);
+        gate.reset_estop(&estop);
+        gate.reset_estop(&estop); // nothing latched: no line
+        log.flush(Duration::from_secs(2));
+        let events = sink.events();
+        assert_eq!(sink.kinds(), ["arm", "estop", "estop_reset"]);
+        assert_eq!(events[1].source.as_deref(), Some("keyboard"));
+        assert_eq!(events[1].detail["was_armed"], true);
+        let ts: jiff::Timestamp = events[1].ts.parse().unwrap();
+        assert_eq!(ts.as_millisecond() as u64, at);
+    }
+
+    #[test]
+    fn interlock_changes_and_the_watchdog_are_logged_once() {
+        let (log, sink) = memory_log();
+        let mut gate = ArmGate::default();
+        gate.register(UI_ALIVE, "Aucune interface", false);
+        gate.set_log(log.clone());
+        gate.set_interlock(UI_ALIVE, true);
+        gate.set_interlock(UI_ALIVE, true); // unchanged: no line
+        gate.register("door", "Porte ouverte", true);
+        gate.request_arm(ArmSource::Ui).unwrap();
+        gate.set_interlock("door", false); // disarms: one line, not two
+        gate.set_interlock("door", true);
+        gate.request_arm(ArmSource::Ui).unwrap();
+        gate.watchdog_trip();
+        gate.set_interlock(UI_ALIVE, false);
+        log.flush(Duration::from_secs(2));
+        let events = sink.events();
+        assert_eq!(sink.kinds(), ["presence", "arm", "interlock", "interlock", "arm", "watchdog", "presence"]);
+        assert_eq!((events[2].detail["ok"].as_bool(), events[2].detail["was_armed"].as_bool()), (Some(false), Some(true)));
+        assert_eq!(events[5].detail["was_armed"], true);
+        assert!(!gate.is_armed());
+        assert_eq!(gate.status(&EStop::default()).last_disarm.unwrap().reason, "engine_stall");
+    }
+
+    /// A disk that never answers: the writer is stuck on its first line.
+    struct StuckSink(Arc<Mutex<()>>);
+    impl crate::safety_log::Sink for StuckSink {
+        fn append(&mut self, _: &str, _: &str) -> std::io::Result<()> {
+            let _stuck = self.0.lock().unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_stuck_log_never_delays_a_disarm_or_an_estop() {
+        let disk = Arc::new(Mutex::new(()));
+        let _held = disk.lock().unwrap();
+        let mut gate = ArmGate::default();
+        gate.set_log(crate::safety_log::SafetyLog::with_sink(StuckSink(Arc::clone(&disk))));
+        let estop = EStop::default();
+        let mut worst = Duration::ZERO;
+        // Far more events than the log's queue holds.
+        for _ in 0..3_000 {
+            gate.request_arm(ArmSource::Ui).unwrap();
+            let t = Instant::now();
+            gate.disarm(DisarmReason::User, ArmSource::Ui);
+            worst = worst.max(t.elapsed());
+            assert!(!gate.is_armed());
+        }
+        gate.request_arm(ArmSource::Ui).unwrap();
+        let t = Instant::now();
+        estop.trip(ArmSource::Keyboard);
+        gate.sync_estop(&estop);
+        worst = worst.max(t.elapsed());
+        assert!(!gate.is_armed() && estop.is_latched());
+        assert!(worst < Duration::from_millis(5), "a disarm took {worst:?}");
+        assert!(gate.log().status()["dropped"].as_u64().unwrap() > 0);
+    }
+
     #[test]
     fn sources_parse_leniently() {
         assert_eq!(ArmSource::parse("keyboard"), ArmSource::Keyboard);
@@ -555,6 +728,7 @@ mod tests {
         assert_eq!(ArmSource::parse("whatever"), ArmSource::Api);
         for s in [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System] {
             assert_eq!(ArmSource::from_u8(s.to_u8()), s);
+            assert_eq!(serde_json::to_value(s).unwrap(), s.id(), "the log uses the JSON ids");
         }
     }
 }

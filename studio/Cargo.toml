@@ -12,6 +12,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 log = "0.4"
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }  # local time with offset for the safety log (already pulled in by env_logger)
 env_logger = "0.11"
 ctrlc = { version = "3", features = ["termination"] }  # SIGINT + SIGTERM
 midir = "0.11"
