@@ -186,6 +186,8 @@ pub struct Shared {
     pub safety: safety::SafetyStore,
     /// What the strobe limiter and horizon did on the last frame.
     pub strobe: safety::StrobeStatus,
+    /// What the audio guard did on the last frame (T-245).
+    pub audio_guard: audio::safety::GuardStatus,
     /// Evolving cues on show in the last frame: (animator id, where it is).
     /// Id 0 is the manual look.
     pub evolving: Vec<(u64, evolving::Progress)>,
@@ -502,6 +504,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         mix: layers::MixReport::default(),
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
+        audio_guard: audio::safety::GuardStatus::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
@@ -543,6 +546,7 @@ fn run_engine(
     // If this thread panics, unwinding drops the stage: dark frame + disarm.
     let mut stage = OutputStage::new(output);
     let mut limiter = safety::StrobeLimiter::default();
+    let mut audio_guard = audio::safety::AudioGuard::default();
 
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
@@ -577,7 +581,11 @@ fn run_engine(
             midi::engine::frame(&mut s, now);
             // Native capture, else the browser's features, else silence
             // (falling, not jumping): one snapshot for the whole frame.
-            let (audio, _) = s.audio_in.frame(s.audio, s.audio_at, now);
+            let (audio, active) = s.audio_in.frame(s.audio, s.audio_at, now);
+            // Audio safety (T-245): freshness, silence, source changes and
+            // the flash cap. It only shapes copies; arming is never touched.
+            let (source_on, audio_safety) = s.audio_in.reaction_config();
+            let reaction = audio_guard.frame(&audio, active, source_on, &audio_safety, dt);
             let t = s.now_s();
             // Tempo auto (T-234): the clock follows the detection's proposal
             // on its own terms. Only the one clock; arming untouched.
@@ -589,13 +597,26 @@ fn run_engine(
             live_state.set_clock(t, clock.beat);
             // LFOs, then audio routes, move copies: the stored values stay
             // the operator's base. The Temps ↔ Audio crossfader shares them.
-            let (mut settings, mut live) = (s.settings.clone(), s.live.clone());
+            // Silence with *Look calme*: that scene stands in for the manual
+            // look (a copy; a missing scene keeps the look).
+            let calm = match (&audio_safety.silence_action, reaction.silent) {
+                (audio::safety::SilenceAction::CalmLook(name), true) => s.scenes.get(name).map(|sc| sc.settings.clone()),
+                _ => None,
+            };
+            let (mut settings, mut live) = (calm.unwrap_or_else(|| s.settings.clone()), s.live.clone());
             let time_share = s.routes.routing().time_share();
             lfo::modulate_scaled(s.lfos.list(), &s.controls, &mut settings, &mut live, t, clock.beat, time_share);
             let beat_len_s = (60.0 / clock.bpm.max(1.0)) as f32;
-            if s.routes.apply(&audio, dt, beat_len_s, &mut settings, &mut live) {
+            if s.routes.apply(&audio, dt, beat_len_s, &reaction.guard, &mut settings, &mut live) {
                 lfo::recolor_live(&mut live);
             }
+            // Silence with *Noir*: the master copy fades to black. Not the
+            // transport blackout: nothing to release, arming untouched.
+            live.brightness = live.brightness.clamp(0.0, 1.0) * reaction.gain;
+            audio_guard.set_flash_limited(s.routes.flash_limited());
+            s.audio_guard = audio_guard.status();
+            // The looks' own reaction sees the beat counter capped too.
+            let audio = reaction.visual;
             let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
             let show_cues = timeline_cues(&mut s, t, &clock);
             let mixer = s.mixer.clone();

@@ -218,6 +218,8 @@
   #beatDot.hit { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
   /* Musique v2 (T-243) */
   #musSrc { margin-top: 4px; }
+  #musSilAct { margin-top: 4px; }
+  #musCalm { width: 100%; margin-top: 6px; }
   .mus-info { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--panel-2); font-size: 12px; color: var(--muted); }
   .mus-info b { color: var(--text); font-weight: 600; }
   .mus-warn { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: #3a2a00; color: var(--warn); font-size: 12px; border: 1px solid var(--warn); }
@@ -759,6 +761,21 @@
           <label>Gain du navigateur <span class="v" id="gainV"></span></label>
           <input type="range" id="gain" min="0.5" max="8" step="0.1" value="2">
         </div>
+      </details>
+
+      <!-- T-245 : sécurité de la réactivité audio (gardée dans audio.json) -->
+      <details id="musSafety" open>
+        <summary>Sécurité audio</summary>
+        <label for="musFlash">Flashs max / s <span class="v" id="musFlashV"></span></label>
+        <input type="range" id="musFlash" min="0.5" max="10" step="0.5" value="10" title="Les liens audio vers la luminosité ne font jamais plus de flashs par seconde (10 au plus) ; le limiteur de stroboscope s'applique ensuite">
+        <label>En cas de silence</label>
+        <div class="seg" id="musSilAct" role="radiogroup" aria-label="En cas de silence">
+          <button data-act="keep" role="radio" title="Le look reste, sans modulation audio">Garder</button>
+          <button data-act="calm_look" role="radio" title="Une scène sauvée remplace le look pendant le silence">Look calme</button>
+          <button data-act="blackout" role="radio" title="La sortie s'éteint en fondu pendant le silence (le laser reste armé ou désarmé comme avant)">Noir</button>
+        </div>
+        <select id="musCalm" title="Scène jouée pendant le silence" hidden></select>
+        <div class="hint" id="musGuard" aria-live="polite"></div>
       </details>
 
       <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
@@ -1705,6 +1722,7 @@ async function previewLoop() {
     showLfos(f.lfos);
     showRoutes(f.audio_routes);
     showStrobe(f.strobe);
+    showAudioGuard(f.audio_guard);
     // Follow page changes made elsewhere (MIDI controller, API) - only
     // when the server's value changes, so a tab click that the server
     // hasn't processed yet isn't undone by an older frame.
@@ -1985,7 +2003,43 @@ async function loadMusConfig() {
   if (focus !== $('musGain')) $('musGain').value = an.manual_gain_db ?? 0;
   if (focus !== $('musSilence')) $('musSilence').value = an.silence_db ?? -60;
   if (focus !== $('musSens')) $('musSens').value = musSens(an.onsets?.delta ?? 0.1);
+  showMusSafety();
   showMusic();
+}
+
+// ---------- audio safety (T-245) ----------
+function musSilenceAction() {
+  const a = musConfig?.safety?.silence_action ?? 'keep';
+  return typeof a === 'string' ? { act: a, scene: '' } : { act: 'calm_look', scene: a.calm_look ?? '' };
+}
+function showMusSafety() {
+  const sf = musConfig?.safety ?? {}, { act, scene } = musSilenceAction();
+  if (document.activeElement !== $('musFlash')) $('musFlash').value = sf.max_flash_hz ?? 10;
+  $('musFlashV').textContent = (+$('musFlash').value).toLocaleString('fr-FR') + ' / s';
+  document.querySelectorAll('#musSilAct button').forEach(b => {
+    b.classList.toggle('active', b.dataset.act === act);
+    b.setAttribute('aria-checked', String(b.dataset.act === act));
+  });
+  const sel = $('musCalm');
+  const names = scenes.map(sc => sc.name);
+  if (scene && !names.includes(scene)) names.push(scene);
+  const want = ['', ...names].join('\n');
+  if (sel.dataset.names !== want) {
+    sel.dataset.names = want;
+    sel.innerHTML = '<option value="">Choisir une scène…</option>';
+    for (const n of names) { const o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o); }
+  }
+  sel.value = scene;
+  sel.hidden = act !== 'calm_look';
+}
+const musSafetyPatch = patch => post('/api/audio/config', { safety: patch }).then(loadMusConfig);
+function showAudioGuard(g) {
+  if (!g) return;
+  const action = { keep: 'look gardé sans modulation', calm_look: 'look calme', blackout: 'sortie éteinte en fondu' }[g.action] ?? g.action;
+  $('musGuard').dataset.silent = String(g.silent);
+  $('musGuard').textContent = g.silent ? `Silence : ${action}.`
+    : g.flash_limited ? `Flashs audio limités à ${g.max_flash_hz} / s.`
+    : g.live ? 'Audio actif.' : 'Pas d\'audio : liens audio au neutre.';
 }
 
 async function loadDevices() {
@@ -2166,6 +2220,20 @@ $('musSilence').addEventListener('input', showMusic);
 $('musSilence').addEventListener('change', () => musAnalysisPatch({ silence_db: +$('musSilence').value }));
 $('musSens').addEventListener('input', showMusic);
 $('musSens').addEventListener('change', () => musAnalysisPatch({ onsets: { delta: musDelta(+$('musSens').value) } }));
+$('musFlash').addEventListener('input', showMusSafety);
+$('musFlash').addEventListener('change', () => musSafetyPatch({ max_flash_hz: +$('musFlash').value }));
+document.querySelectorAll('#musSilAct button').forEach(b => b.addEventListener('click', () => {
+  if (b.dataset.act !== 'calm_look') return musSafetyPatch({ silence_action: b.dataset.act });
+  // A calm look needs a scene: the current one, else the first saved one.
+  const scene = musSilenceAction().scene || scenes[0]?.name;
+  if (scene) return musSafetyPatch({ silence_action: { calm_look: scene } });
+  $('musCalm').hidden = false;
+  $('musGuard').textContent = 'Sauvez d\'abord une scène (onglet Scènes) pour l\'utiliser comme look calme.';
+}));
+$('musCalm').addEventListener('change', () => {
+  const v = $('musCalm').value;
+  musSafetyPatch({ silence_action: v ? { calm_look: v } : 'keep' });
+});
 loadMusConfig();
 musicLoop();
 
@@ -3998,7 +4066,7 @@ async function loadState() {
       $('shapes').appendChild(b);
     });
   }
-  takeLook(st); showCalibration(); showArmed(); renderScenes();
+  takeLook(st); showCalibration(); showArmed(); renderScenes(); showMusSafety();
 }
 
 // Tooltips show each control's stable id, to help with MIDI mapping.

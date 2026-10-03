@@ -1154,6 +1154,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "lfos": lfo_positions(s),
         "audio_routes": s.routes.meters().collect::<Vec<_>>(),
         "strobe": s.strobe,
+        "audio_guard": s.audio_guard,
         "evolving": evolving_status(s),
     }))
 }

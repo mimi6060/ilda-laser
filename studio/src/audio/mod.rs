@@ -33,6 +33,7 @@ pub mod sections;
 pub mod shape;
 pub mod playback;
 pub mod routes;
+pub mod safety;
 pub mod spectrum;
 pub mod worker;
 
@@ -158,6 +159,8 @@ pub struct AudioConfig {
     /// Bands: auto-gain, manual gain, silence threshold (T-231). Changing
     /// it never reopens the input.
     pub analysis: AnalysisConfig,
+    /// Flash cap and silence action of the audio reactivity (T-245).
+    pub safety: safety::AudioSafety,
 }
 
 #[cfg(test)]
@@ -170,7 +173,7 @@ impl AudioConfig {
 
 impl Default for AudioConfig {
     fn default() -> Self {
-        Self { source: AudioInputSource::Browser, device: None, buffer_frames: 256, analysis: AnalysisConfig::default() }
+        Self { source: AudioInputSource::Browser, device: None, buffer_frames: 256, analysis: AnalysisConfig::default(), safety: safety::AudioSafety::default() }
     }
 }
 
@@ -179,6 +182,7 @@ impl AudioConfig {
         self.buffer_frames = self.buffer_frames.clamp(MIN_BUFFER_FRAMES, MAX_BUFFER_FRAMES);
         self.device = self.device.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
         self.analysis = self.analysis.sanitized();
+        self.safety = self.safety.sanitized();
         self
     }
 
@@ -228,6 +232,18 @@ impl AudioConfig {
             merge_fields(&mut merged, v, "analysis")?;
             c.analysis = serde_json::from_value(merged)
                 .context("analysis : auto_gain (booléen), manual_gain_db, silence_db (nombres), onsets { delta, lookahead_hops (0..2), kick_refractory_ms }")?;
+        }
+        if let Some(v) = obj.get("safety") {
+            // Field by field, each replaced whole (`silence_action` is
+            // "keep", "blackout" or {"calm_look": "scène"}).
+            let fields = v.as_object().context("safety : objet attendu")?;
+            let mut merged = serde_json::to_value(&c.safety)?;
+            for (k, v) in fields {
+                let Some(slot) = merged.get_mut(k) else { anyhow::bail!("safety : champ inconnu « {k} »") };
+                *slot = v.clone();
+            }
+            c.safety = serde_json::from_value(merged)
+                .context("safety : max_flash_hz (nombre), silence_action (keep, blackout ou { calm_look: scène })")?;
         }
         Ok(c.sanitized())
     }
@@ -404,6 +420,13 @@ impl AudioHub {
         let generation = if c.0.capture_part() != config.capture_part() { c.1 + 1 } else { c.1 };
         *c = (config.clone(), generation);
         Ok(config)
+    }
+
+    /// For the engine (T-245): whether an audio source is chosen, and the
+    /// reactivity's safety settings.
+    pub fn reaction_config(&self) -> (bool, safety::AudioSafety) {
+        let c = lock(&self.config);
+        (c.0.source != AudioInputSource::None, c.0.safety.clone())
     }
 
     /// For the analysis thread: a copy, no allocation.
@@ -648,7 +671,7 @@ mod tests {
     #[test]
     fn config_defaults_and_old_files_load() {
         let c: AudioConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(c, AudioConfig { source: AudioInputSource::Browser, device: None, buffer_frames: 256, analysis: AnalysisConfig::default() });
+        assert_eq!(c, AudioConfig { source: AudioInputSource::Browser, device: None, buffer_frames: 256, analysis: AnalysisConfig::default(), safety: Default::default() });
         let c: AudioConfig = serde_json::from_str(r#"{"source":"browser","device":"Scarlett 2i2","extra":1}"#).unwrap();
         assert_eq!((c.source, c.device.as_deref(), c.buffer_frames), (AudioInputSource::Browser, Some("Scarlett 2i2"), 256));
         assert_eq!(AudioConfig { buffer_frames: 16, ..Default::default() }.sanitized().buffer_frames, 128, "never under 128 frames");
@@ -675,6 +698,30 @@ mod tests {
         assert!(base.patched(&json!({ "source": "spotify" })).is_err());
         assert!(base.patched(&json!({ "device": 3 })).is_err());
         assert!(base.patched(&json!([1])).is_err());
+    }
+
+    #[test]
+    fn the_audio_safety_is_patched_and_kept_in_range() {
+        use safety::{AudioSafety, SilenceAction};
+        let base = AudioConfig::default();
+        assert_eq!(base.safety, AudioSafety { max_flash_hz: 10.0, silence_action: SilenceAction::Keep });
+        let c = base.patched(&json!({ "safety": { "max_flash_hz": 3 } })).unwrap();
+        assert_eq!(c.safety, AudioSafety { max_flash_hz: 3.0, silence_action: SilenceAction::Keep });
+        let c = c.patched(&json!({ "safety": { "silence_action": { "calm_look": "Doux" } } })).unwrap();
+        assert_eq!(c.safety, AudioSafety { max_flash_hz: 3.0, silence_action: SilenceAction::CalmLook("Doux".into()) });
+        let c = c.patched(&json!({ "safety": { "silence_action": "blackout", "max_flash_hz": 50 } })).unwrap();
+        assert_eq!(c.safety, AudioSafety { max_flash_hz: 10.0, silence_action: SilenceAction::Blackout }, "never above 10 Hz");
+        for bad in [json!({ "safety": { "silence_action": "panic" } }), json!({ "safety": { "arm": true } }), json!({ "safety": 3 })] {
+            assert!(base.patched(&bad).is_err(), "{bad}");
+        }
+        // Saved with the machine's audio settings, old files load.
+        let old: AudioConfig = serde_json::from_str(r#"{"source":"browser"}"#).unwrap();
+        assert_eq!(old.safety, AudioSafety::default());
+        let hub = AudioHub::in_memory(false);
+        hub.set_config(c).unwrap();
+        assert_eq!(hub.reaction_config(), (true, AudioSafety { max_flash_hz: 10.0, silence_action: SilenceAction::Blackout }));
+        hub.set_config(AudioConfig { source: AudioInputSource::None, ..hub.config().0 }).unwrap();
+        assert!(!hub.reaction_config().0);
     }
 
     #[test]
