@@ -36,6 +36,11 @@
   #holdBanner { padding: 10px 16px; text-align: center; font-size: 20px; font-weight: 800; letter-spacing: .06em; background: #3a2a00; color: var(--warn); border-bottom: 2px solid var(--warn); }
   #holdBanner.emitting { background: var(--accent-ink); color: var(--accent); border-color: var(--accent); }
   #holdBanner[hidden] { display: none; }
+  /* Test pattern mode (T-404): the settings workspace's colour. */
+  #tpBanner { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 6px 16px; background: var(--panel-2); color: var(--ws-settings); border-bottom: 2px solid var(--ws-settings); font-weight: 700; letter-spacing: .03em; }
+  #tpBanner[hidden] { display: none; }
+  #tpBanner button { border-color: var(--ws-settings); color: var(--ws-settings); }
+  .tp-sub { margin: 14px 0 2px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
   #output { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #armBtn { padding: 10px 18px; border-radius: 8px; border: 2px solid var(--danger); background: transparent; color: var(--danger); font-weight: 700; cursor: pointer; letter-spacing: .04em; }
@@ -566,6 +571,8 @@
 <div id="estopBanner" hidden>ARRÊT D'URGENCE — réinitialiser pour réarmer
   <button id="estopReset">Réinitialiser l'arrêt d'urgence</button></div>
 <div id="holdBanner" hidden></div>
+<div id="tpBanner" role="status" hidden>Mire affichée — cues et timeline en pause
+  <button id="tpBannerExit">Quitter la mire</button></div>
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
   <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
@@ -1319,6 +1326,12 @@
         <label>Échelle Y <span class="v" id="cSyV"></span></label><input type="range" id="cSy" min="10" max="200">
         <label>Rotation <span class="v" id="cRotV"></span></label><input type="range" id="cRot" min="-180" max="180">
         <div class="hint">S'applique à tout ce qui sort, et reste enregistrée.</div>
+        <div class="tp-sub">Mires</div>
+        <label for="tpSelect">Mire</label>
+        <select id="tpSelect"><option value="">Aucune</option></select>
+        <label>Luminosité de la mire <span class="v" id="tpBrightV"></span></label><input type="range" id="tpBright" min="0" max="100" step="1" value="20">
+        <div class="row"><button id="tpExit" disabled>Quitter la mire</button></div>
+        <div class="hint">Une mire remplace la sortie jusqu'à « Quitter la mire » : les cues restent actifs et la timeline est en pause. Elle passe par la calibration ci-dessus et par toute la sécurité (zones, horizon, plafonds de puissance) ; elle n'arme jamais le laser.</div>
       </details>
     </section>
 
@@ -1925,6 +1938,7 @@ async function previewLoop() {
     showStrobe(f.strobe);
     showAudioGuard(f.audio_guard);
     showDwell(f.dwell);
+    showTestPattern(f.test_pattern);
     // Follow page changes made elsewhere (MIDI controller, API) - only
     // when the server's value changes, so a tab click that the server
     // hasn't processed yet isn't undone by an older frame.
@@ -2481,6 +2495,39 @@ Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
   showCalibration();
   clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
 }));
+
+// ---------- test patterns (T-404) ----------
+// The server owns the mode; the frame poll reports it (`f.test_pattern`).
+let testPattern = null, tpTimer = null;
+async function loadTestPatterns() {
+  try {
+    const r = await (await fetch('/api/testpattern')).json();
+    const sel = $('tpSelect');
+    for (const p of r.patterns) sel.add(new Option(p.label, p.id));
+    showTestPattern(r.state);
+  } catch (e) { console.warn('/api/testpattern', e); }
+}
+function showTestPattern(tp) {
+  if (!tp) return;
+  testPattern = tp;
+  const on = !!tp.active;
+  $('tpBanner').hidden = !on;
+  $('tpExit').disabled = !on;
+  if (document.activeElement !== $('tpSelect')) $('tpSelect').value = tp.active || '';
+  if (document.activeElement !== $('tpBright')) $('tpBright').value = Math.round(tp.brightness * 100);
+  $('tpBrightV').textContent = $('tpBright').value + ' %';
+}
+async function postTestPattern(body) {
+  const r = await fetch('/api/testpattern', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.ok) showTestPattern((await r.json()).state); else console.warn('/api/testpattern', await r.text());
+}
+$('tpSelect').addEventListener('change', () => postTestPattern({ pattern: $('tpSelect').value || null }));
+$('tpBright').addEventListener('input', () => {
+  $('tpBrightV').textContent = $('tpBright').value + ' %';
+  clearTimeout(tpTimer); tpTimer = setTimeout(() => postTestPattern({ brightness: $('tpBright').value / 100 }), 60);
+});
+$('tpExit').addEventListener('click', () => postTestPattern({ pattern: null }));
+$('tpBannerExit').addEventListener('click', () => postTestPattern({ pattern: null }));
 
 // ---------- safety (T-101, T-003) ----------
 // `safety` is what the server applies (the overlay draws it); the controls
@@ -5541,7 +5588,7 @@ setFigTool('line');
 showFigProps();
 setCreationTab(remembered(CTAB_KEY));
 
-loadState().then(loadPresets).then(loadPalettes).then(loadLfos).then(loadRoutes).then(previewLoop);
+loadState().then(loadTestPatterns).then(loadPresets).then(loadPalettes).then(loadLfos).then(loadRoutes).then(previewLoop);
 midiLoop();
 loadPresence().catch(() => {});
 </script>

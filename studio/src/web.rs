@@ -449,6 +449,43 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/testpattern") => json_response(test_pattern_view(&shared.lock().unwrap())),
+        // T-404: `{"pattern": "grid" | null, "brightness": 0.2}`, both
+        // optional (a missing key keeps the current value). Shows or leaves
+        // a test pattern; never arms, never touches the cue deck.
+        (Method::Post, "/api/testpattern") => match body::<serde_json::Value>(request) {
+            Ok(v) => {
+                let pattern = match v.get("pattern") {
+                    None => None,
+                    Some(serde_json::Value::Null) => Some(None),
+                    Some(serde_json::Value::String(name)) => match crate::testpattern::parse(name) {
+                        Some(p) => Some(Some(p)),
+                        None => return text(400, &format!("mire inconnue : {name}")),
+                    },
+                    Some(_) => return text(400, "pattern: nom de mire ou null"),
+                };
+                let brightness = match v.get("brightness") {
+                    None => None,
+                    Some(b) => match b.as_f64().filter(|b| b.is_finite()) {
+                        Some(b) => Some((b as f32).clamp(0.0, 1.0)),
+                        None => return text(400, "brightness: nombre entre 0 et 1"),
+                    },
+                };
+                let mut s = shared.lock().unwrap();
+                if let Some(b) = brightness {
+                    s.test_pattern.brightness = b;
+                }
+                if let Some(p) = pattern {
+                    if p != s.test_pattern.active {
+                        let label = p.and_then(|p| crate::testpattern::LABELS_FR.iter().find(|(q, _)| *q == p)).map(|(_, l)| *l);
+                        s.gate.log().record("test_pattern", Some("ui"), json!({ "pattern": p, "label": label }));
+                    }
+                    crate::testpattern::select(&mut s, p);
+                }
+                json_response(test_pattern_view(&s))
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/safety/log") | (Method::Get, "/api/safety/log.csv") => safety_log_view(request.url(), shared, path.ends_with(".csv")),
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
@@ -1246,7 +1283,19 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "audio_guard": s.audio_guard,
         "dwell": s.dwell,
         "evolving": evolving_status(s),
+        "test_pattern": s.test_pattern,
     }))
+}
+
+/// `GET /api/testpattern`: the patterns (id and French name) and the mode.
+fn test_pattern_view(s: &Shared) -> serde_json::Value {
+    let list: Vec<_> = crate::testpattern::LABELS_FR.iter().map(|(p, label)| json!({ "id": p, "label": label })).collect();
+    json!({
+        "patterns": list,
+        "state": s.test_pattern,
+        "default_brightness": crate::testpattern::DEFAULT_BRIGHTNESS,
+        "max_brightness_effective": s.outputs.max_brightness_effective(),
+    })
 }
 
 /// Evolving cues on show (last frame), oldest first: the cue (`null` for
@@ -1629,6 +1678,31 @@ mod tests {
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
         let st = arm_status(&t);
         assert_eq!((st["armed"].clone(), st["source"].clone()), (json!(true), json!("keyboard")));
+    }
+
+    /// T-404: the pattern API shows and leaves a pattern, never arms, and
+    /// refuses unknown names and bad brightness values.
+    #[test]
+    fn test_pattern_api_selects_and_leaves_without_arming() {
+        let t = TestServer::start(false);
+        let (status, body) = t.request("GET", "/api/testpattern", "");
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["patterns"].as_array().unwrap().len(), 7);
+        assert_eq!((v["state"]["active"].clone(), v["state"]["brightness"].as_f64()), (json!(null), Some(0.2f32 as f64)));
+        let (status, body) = t.request("POST", "/api/testpattern", r#"{"pattern":"grid","brightness":0.3}"#);
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["state"]["active"], "grid");
+        assert!(!t.shared.lock().unwrap().gate.is_armed(), "a pattern never arms");
+        assert_eq!(t.request("POST", "/api/testpattern", r#"{"pattern":"ilda"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/testpattern", r#"{"brightness":"x"}"#).0, 400);
+        assert_eq!(t.shared.lock().unwrap().test_pattern.active, Some(crate::testpattern::TestPattern::Grid), "a refused body changes nothing");
+        // Brightness alone keeps the pattern; it is clamped to 0..1.
+        t.request("POST", "/api/testpattern", r#"{"brightness":5}"#);
+        assert_eq!(t.shared.lock().unwrap().test_pattern.brightness, 1.0);
+        assert_eq!(t.request("POST", "/api/testpattern", r#"{"pattern":null}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().test_pattern.active, None);
     }
 
     #[test]

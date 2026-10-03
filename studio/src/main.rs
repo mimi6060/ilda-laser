@@ -39,6 +39,7 @@ mod safety_log;
 mod scenes;
 mod sheets;
 mod tempo;
+mod testpattern;
 mod timeline;
 mod tunnels;
 mod watchdog;
@@ -233,6 +234,8 @@ pub struct Shared {
     /// The open project (project.rs, T-286). Never holds calibration,
     /// safety or arming.
     pub project: project::ProjectState,
+    /// Test pattern mode (testpattern.rs, T-404): memory only, off at start.
+    pub test_pattern: testpattern::TestPatternState,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
     /// A pending simulated stall (ms): the engine sleeps this long while
@@ -568,6 +571,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         presence: presence::Presence::load(cli.data_dir.join("presence.json")),
         health: Arc::new(watchdog::EngineHealth::default()),
         project: project::ProjectState::load(&cli.data_dir),
+        test_pattern: Default::default(),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
     };
@@ -610,7 +614,7 @@ fn run_engine(
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
 
-        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps) = {
+        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, pattern) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run.
             let hold_ok = s.sync_safety(now);
@@ -675,55 +679,67 @@ fn run_engine(
             // The looks' own reaction sees the beat counter capped too.
             let audio = reaction.visual;
             let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
+            // A test pattern (T-404) holds the timeline paused and stands
+            // in for the whole look; the cues wait in the deck.
+            let pattern = testpattern::hold_timeline(&mut s);
             let show_cues = timeline_cues(&mut s, t, &clock);
             let mixer = s.mixer.clone();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
             let armed = s.gate.is_armed();
-            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits())
+            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits(), pattern)
         };
 
         live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
-        let anim_dt = dt * live.speed.clamp(0.0, 4.0);
-        animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id));
-        event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
-        // Timeline events first (under the cues played by hand on the same
-        // layer), each on its own content clock; paused or held ones freeze.
-        let mut rendered: Vec<(u8, Vec<Point>)> = show_cues
-            .iter()
-            .map(|(cue, settings)| {
-                let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
-                let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
-                let event_dt = if cue.frozen { 0.0 } else { anim_dt };
-                let mut points = animator.render(settings, audio, event_dt, &content_clock);
-                if cue.modifiers != live::LiveModifiers::default() {
-                    let st = event_live.entry(cue.instance).or_default();
-                    st.set_clock(t, clock.beat);
-                    st.advance(&cue.modifiers, if cue.frozen { 0.0 } else { dt }, clock.bpm, clock.beats_per_bar);
-                    points = live::apply(&points, &cue.modifiers, st, &user_palettes);
-                }
-                (cue.layer, points)
-            })
-            .collect();
-        // Muted layers keep animating, so they come back in motion.
-        rendered.extend(looks.iter().map(|(layer, id, settings)| {
-            let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
-                Some(&beat) => Animator::starting_at(beat),
-                None => Animator::default(),
-            });
-            (*layer, animator.render(settings, audio, anim_dt, &clock))
-        }));
-        let evolving: Vec<(u64, evolving::Progress)> =
-            looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();
-        // Layers 1 → 4 with their dimmers, within the point budget.
-        let (look, mix) = layers::mix(rendered, &mixer);
-        let frame: Vec<Point> = live::apply(&look, &live, &live_state, &user_palettes)
-            .into_iter()
-            .map(|p| {
-                let (x, y) = calibration.apply(p.x, p.y);
-                Point { x, y, ..p }
-            })
-            .collect();
+        let (frame, mix, evolving) = match pattern {
+            // The pattern alone, densified and calibrated, without live
+            // modifiers (exact geometry). The cue animators are left as
+            // they are, so the cues carry on where they were afterwards.
+            Some((p, brightness)) => (testpattern::output_frame(p, brightness, &calibration), layers::MixReport::default(), Vec::new()),
+            None => {
+                let anim_dt = dt * live.speed.clamp(0.0, 4.0);
+                animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id));
+                event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
+                // Timeline events first (under the cues played by hand on the same
+                // layer), each on its own content clock; paused or held ones freeze.
+                let mut rendered: Vec<(u8, Vec<Point>)> = show_cues
+                    .iter()
+                    .map(|(cue, settings)| {
+                        let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
+                        let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
+                        let event_dt = if cue.frozen { 0.0 } else { anim_dt };
+                        let mut points = animator.render(settings, audio, event_dt, &content_clock);
+                        if cue.modifiers != live::LiveModifiers::default() {
+                            let st = event_live.entry(cue.instance).or_default();
+                            st.set_clock(t, clock.beat);
+                            st.advance(&cue.modifiers, if cue.frozen { 0.0 } else { dt }, clock.bpm, clock.beats_per_bar);
+                            points = live::apply(&points, &cue.modifiers, st, &user_palettes);
+                        }
+                        (cue.layer, points)
+                    })
+                    .collect();
+                // Muted layers keep animating, so they come back in motion.
+                rendered.extend(looks.iter().map(|(layer, id, settings)| {
+                    let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
+                        Some(&beat) => Animator::starting_at(beat),
+                        None => Animator::default(),
+                    });
+                    (*layer, animator.render(settings, audio, anim_dt, &clock))
+                }));
+                let evolving: Vec<(u64, evolving::Progress)> =
+                    looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();
+                // Layers 1 → 4 with their dimmers, within the point budget.
+                let (look, mix) = layers::mix(rendered, &mixer);
+                let frame: Vec<Point> = live::apply(&look, &live, &live_state, &user_palettes)
+                    .into_iter()
+                    .map(|p| {
+                        let (x, y) = calibration.apply(p.x, p.y);
+                        Point { x, y, ..p }
+                    })
+                    .collect();
+                (frame, mix, evolving)
+            }
+        };
         // Strobe limiter and beam horizon (T-101): on the finished,
         // calibrated frame, so no layer, live move, LFO, gate or flash can
         // get past it; the preview shows the limited frame too.
@@ -1070,6 +1086,65 @@ mod tests {
                 assert!(!s.gate.is_armed());
             }
         }
+    }
+
+    /// T-404: a pattern pauses the timeline and leaves the deck alone;
+    /// leaving it gives back the same cues and the same timeline position.
+    #[test]
+    fn a_test_pattern_pauses_the_timeline_and_keeps_the_cues() {
+        use testpattern::TestPattern;
+        let mut s = test_support::shared();
+        assert!(controls::press_cue(&mut s, "tunnels-001", Some(ClickMode::Toggle), true));
+        let cues_before: Vec<String> = s.deck.active.iter().map(|a| a.cue.clone()).collect();
+        let cue = s.presets[0].id.clone();
+        s.timeline.load(one_event_show(&cue));
+        controls::timeline_play(&mut s).unwrap();
+        testpattern::select(&mut s, Some(TestPattern::Grid));
+        assert!(!s.timeline.is_playing(), "paused under the pattern");
+        let pos = s.timeline.position_at(&s.timeline_clock());
+        std::thread::sleep(Duration::from_millis(30));
+        // Played again from elsewhere: the engine holds it paused.
+        controls::timeline_play(&mut s).unwrap();
+        assert_eq!(testpattern::hold_timeline(&mut s), Some((TestPattern::Grid, 0.2)));
+        assert!(!s.timeline.is_playing());
+        assert!((s.timeline.position_at(&s.timeline_clock()) - pos).abs() < 0.02, "the position doesn't run");
+        testpattern::select(&mut s, Some(TestPattern::ColorBars));
+        testpattern::select(&mut s, None);
+        assert!(s.timeline.is_playing(), "resumes with the look");
+        assert!((s.timeline.position_at(&s.timeline_clock()) - pos).abs() < 0.02, "from where it was");
+        assert_eq!(s.deck.active.iter().map(|a| a.cue.clone()).collect::<Vec<_>>(), cues_before);
+        assert!(!s.gate.is_armed());
+        assert_eq!(testpattern::hold_timeline(&mut s), None);
+    }
+
+    /// An e-stop under a pattern halts the timeline; leaving the pattern
+    /// doesn't restart it, and nothing arms.
+    #[test]
+    fn leaving_a_pattern_after_an_estop_does_not_resume() {
+        let mut s = test_support::shared();
+        let cue = s.presets[0].id.clone();
+        s.timeline.load(one_event_show(&cue));
+        controls::timeline_play(&mut s).unwrap();
+        testpattern::select(&mut s, Some(testpattern::TestPattern::CrossFrame));
+        s.emergency_stop(ArmSource::Keyboard);
+        let t = s.now_s();
+        timeline_cues(&mut s, t, &engine::BeatClock { beat: 0.0, bpm: 120.0, beats_per_bar: 4 });
+        testpattern::select(&mut s, None);
+        assert!(!s.timeline.is_playing());
+        assert!(!s.gate.is_armed());
+    }
+
+    /// The pattern mode is never part of the start-up state.
+    #[test]
+    fn no_pattern_at_startup() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-tp-startup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("prefs.json"), r#"{"test_pattern":{"active":"grid"}}"#).unwrap();
+        let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--data-dir", dir.to_str().unwrap()]).unwrap();
+        let s = startup_state(&cli, None);
+        assert_eq!(s.test_pattern.active, None);
+        assert_eq!(s.test_pattern.brightness, testpattern::DEFAULT_BRIGHTNESS);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// T-253: no command-line option and no file in the data directory can
