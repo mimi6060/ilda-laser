@@ -73,7 +73,19 @@ impl Studio {
         self.wait_for_log("lit");
     }
 
-    fn signal_and_wait(mut self, signal: &str) -> Vec<String> {
+    /// The kinds of the safety log's lines (T-259), all days.
+    fn safety_log(&self) -> Vec<String> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.join("logs")).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        files.sort();
+        let text: String = files.iter().map(|f| std::fs::read_to_string(f).unwrap_or_default()).collect();
+        text.lines().map(|l| l.split("\"kind\":\"").nth(1).and_then(|k| k.split('"').next()).unwrap_or("?").to_string()).collect()
+    }
+
+    fn signal_and_wait(self, signal: &str) -> Vec<String> {
+        self.signal_and_wait_with_safety_log(signal).0
+    }
+
+    fn signal_and_wait_with_safety_log(mut self, signal: &str) -> (Vec<String>, Vec<String>) {
         let status = Command::new("kill").args([signal, &self.child.id().to_string()]).status().unwrap();
         assert!(status.success());
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -88,9 +100,9 @@ impl Studio {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let log = self.log();
+        let (log, safety) = (self.log(), self.safety_log());
         let _ = std::fs::remove_dir_all(&self.dir);
-        log
+        (log, safety)
     }
 }
 
@@ -103,7 +115,10 @@ fn assert_clean_shutdown(log: &[String]) {
 fn sigterm_disarms_sends_dark_frames_and_closes_the_output() {
     let studio = Studio::start("term");
     studio.arm();
-    assert_clean_shutdown(&studio.signal_and_wait("-TERM"));
+    let (log, safety) = studio.signal_and_wait_with_safety_log("-TERM");
+    assert_clean_shutdown(&log);
+    // The safety log (T-259) has the whole run, the shutdown disarm included.
+    assert_eq!(safety, ["app_start", "presence", "arm", "disarm", "app_stop"]);
 }
 
 #[test]

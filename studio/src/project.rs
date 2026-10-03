@@ -717,6 +717,8 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Vec<Strin
         None => s.project.current = None,
     }
     s.project.save_recent();
+    let shown = name.clone().unwrap_or_else(|| UNTITLED.into());
+    s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": shown, "new": name.is_none(), "armed": s.gate.is_armed() }));
     Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
 }
 
@@ -731,6 +733,8 @@ fn recover(shared: &Mutex<Shared>) -> Result<Vec<String>, Reply> {
         check_lfos(&p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
         apply(&mut s, &p);
         s.project.autosave.offer = None;
+        let file = offer.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        s.gate.log().record("autosave_recovered", Some("ui"), serde_json::json!({ "file": file, "armed": s.gate.is_armed() }));
         s.project.extra = std::mem::take(&mut p.extra);
         let data_dir = s.project.data_dir.clone();
         working_paths(&s, &data_dir)
