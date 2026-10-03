@@ -61,13 +61,21 @@ test('Enter and Backspace are ignored while typing in the BPM field', async ({ p
 
 test('the Tap button taps and Sync 1 resyncs', async ({ page }) => {
   const tap = page.locator('button[data-ctl="tempo.tap"]');
+  // Each click's time is noted in the page: on a loaded machine a click
+  // takes longer than the 500 ms between them, so the tempo is checked
+  // against the taps as they really happened.
+  await page.evaluate(() => { (window as any).taps = []; document.querySelector('button[data-ctl="tempo.tap"]')!
+    .addEventListener('click', () => (window as any).taps.push(performance.now())); });
   for (let i = 0; i < 4; i++) {
     if (i) await page.waitForTimeout(500);
     await tap.click();
   }
   await expect.poll(async () => (await tempo()).source).toBe('tap');
+  const taps: number[] = await page.evaluate(() => (window as any).taps);
+  const expected = 60_000 / ((taps[taps.length - 1] - taps[0]) / (taps.length - 1));
   const bpm = (await tempo()).bpm;
-  expect(bpm).toBeGreaterThan(110);
+  expect(Math.abs(bpm - expected) / expected).toBeLessThan(0.08);
+  expect(bpm).toBeGreaterThan(80);
   expect(bpm).toBeLessThan(130);
 
   await page.locator('button[data-ctl="tempo.resync"]').click();
