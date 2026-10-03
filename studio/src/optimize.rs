@@ -101,6 +101,13 @@ const REORDER_GAIN: f32 = 0.2;
 /// How far `max_points` may stretch the lit step.
 const MAX_STEP_STRETCH: f32 = 2.0;
 
+/// Most points of one blanked travel (whatever the settings say).
+const MAX_TRAVEL_STEPS: usize = 600;
+
+/// Most points between two anchors (a guard; lit_step ≥ 0.005 keeps
+/// a full-range diagonal under 600).
+const MAX_RESAMPLE: usize = 4096;
+
 /// Points closer than this are the same point (a hold, not a segment).
 const SAME: f32 = 1e-6;
 
@@ -108,14 +115,23 @@ const SAME: f32 = 1e-6;
 /// last frame. One per animator, so every look keeps its own order.
 #[derive(Clone, Debug, Default)]
 pub struct Optimizer {
-    pub params: OptimizeParams,
+    params: OptimizeParams,
     /// Last frame's order: (path index, drawn backwards).
     order: Vec<(usize, bool)>,
 }
 
 impl Optimizer {
+    /// The settings are sanitised here: whatever reaches the optimiser
+    /// (an API client, a saved file, a fuzzer) can't make it loop.
     pub fn new(params: OptimizeParams) -> Self {
-        Self { params, order: Vec::new() }
+        let mut o = Self { params: OptimizeParams::default(), order: Vec::new() };
+        o.set_params(&params);
+        o
+    }
+
+    pub fn set_params(&mut self, params: &OptimizeParams) {
+        self.params = params.clone();
+        self.params.sanitize();
     }
 
     /// One look's raw points → the points the galvos draw. A look with
@@ -134,7 +150,7 @@ impl Optimizer {
         // few tries, as dwell and travel don't shrink with it).
         let max_step = p.lit_step * MAX_STEP_STRETCH;
         while out.len() > p.max_points && step < max_step {
-            step = (step * out.len() as f32 / p.max_points as f32).clamp(step * 1.05, max_step);
+            step = (step * out.len() as f32 / p.max_points as f32).max(step * 1.05).min(max_step);
             out = draw(points, &paths, &order, p, step);
         }
         self.order = order;
@@ -163,7 +179,9 @@ pub fn travel(out: &mut Vec<Point>, from: Point, to: Point, blank_step: f32) {
     // ...moves with smoothstep (peak speed 1.5x the mean, so 1.5x the
     // steps keeps the middle step within `blank_step`)...
     let d = dist(from, to);
-    let n = ((1.5 * d / blank_step.max(1e-3)).ceil() as usize).max(1);
+    let step = if blank_step.is_finite() { blank_step.max(0.005) } else { OptimizeParams::default().blank_step };
+    // Capped: a full-range jump needs ~30 steps at the default.
+    let n = ((1.5 * d / step).ceil() as usize).clamp(1, MAX_TRAVEL_STEPS);
     for k in 1..=n {
         let u = k as f32 / n as f32;
         let e = u * u * (3.0 - 2.0 * u);
@@ -333,7 +351,10 @@ fn draw_path(out: &mut Vec<Point>, path: &[Point], rev: bool, p: &OptimizeParams
 /// colour of the vertex that ends its segment.
 fn resample(out: &mut Vec<Point>, verts: &[(Point, usize)], step: f32) {
     let length: f32 = verts.windows(2).map(|w| dist(w[0].0, w[1].0)).sum();
-    let n = (length / step).ceil() as usize;
+    if !length.is_finite() {
+        return;
+    }
+    let n = ((length / step).ceil() as usize).min(MAX_RESAMPLE);
     let mut seg = 1;
     let mut seg_start = 0.0; // arc length at verts[seg - 1]
     for k in 1..n {
@@ -559,6 +580,19 @@ mod tests {
         assert!(out.iter().all(|p| (-1.0..=1.0).contains(&p.x) && (-1.0..=1.0).contains(&p.y)));
         let colours = |v: &[Point]| v.iter().filter(|p| p.is_lit()).map(|p| (p.r.to_bits(), p.g.to_bits(), p.b.to_bits())).collect::<std::collections::HashSet<_>>().len();
         assert_eq!(colours(&out), colours(&pts));
+    }
+
+    #[test]
+    fn unsanitised_settings_cannot_hang_or_flood_the_frame() {
+        let pts = strokes(&[patterns::square(0.8, 1.0, 1.0, 1.0), line(-1.0, 1.0, 1.0, -1.0)]);
+        for (lit_step, blank_step) in [(0.0, 0.0), (-1.0, -1.0), (f32::NAN, f32::INFINITY), (1e-9, 1e-9)] {
+            let p = OptimizeParams { lit_step, blank_step, corner_rad_per_point: 0.0, max_points: 0, ..on() };
+            let out = Optimizer::new(p.clone()).optimize(&pts);
+            assert!(!out.is_empty() && out.len() < 5000, "{lit_step}/{blank_step}: {}", out.len());
+            let mut joined = Vec::new();
+            travel(&mut joined, pts[0], Point::lit(-1.0, -1.0, 1.0, 1.0, 1.0), blank_step);
+            assert!(joined.len() <= MAX_TRAVEL_STEPS + 1);
+        }
     }
 
     #[test]

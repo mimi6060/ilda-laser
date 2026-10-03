@@ -422,7 +422,7 @@ impl Animator {
     pub fn set_optimizer(&mut self, params: &OptimizeParams) {
         match (&mut self.optimizer, params.enabled) {
             (_, false) => self.optimizer = None,
-            (Some(o), true) => o.params = params.clone(),
+            (Some(o), true) => o.set_params(params),
             (None, true) => self.optimizer = Some(Optimizer::new(params.clone())),
         }
     }
