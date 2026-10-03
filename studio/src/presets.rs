@@ -4,7 +4,7 @@
 //! taken from another product's library. The catalogue is built in code,
 //! so ids stay stable as long as the lists below only grow at the end.
 
-use crate::engine::{AudioReact, Content, Settings};
+use crate::engine::{Animator, AudioFeatures, AudioReact, BeatClock, Content, Settings};
 use crate::generators::{ColorMode, GenParams};
 use serde::Serialize;
 
@@ -237,11 +237,51 @@ fn slug(category: &str) -> String {
         .join("-")
 }
 
+/// Most points in a cue thumbnail: enough for the shape, small enough
+/// that the whole grid's thumbnails stay a light request.
+const THUMB_POINTS: usize = 160;
+
+/// A small still of what a look draws, for the cue grid's buttons: the
+/// look rendered half a second in (so rotations and generators have
+/// moved), with some music so audio-reactive cues show something, then
+/// thinned to at most `THUMB_POINTS` points. Packed as one hex string,
+/// 5 bytes per point (x, y as 0..=255 for -1..1, then r, g, b), so the
+/// whole grid's pictures stay a light request. Display only: it never
+/// reaches the output.
+pub fn thumbnail(settings: &Settings) -> String {
+    let audio = AudioFeatures { level: 0.6, bass: 0.6, ..AudioFeatures::default() };
+    let mut animator = Animator::starting_at(0.0);
+    let mut points = Vec::new();
+    for i in 1..=30 {
+        let clock = BeatClock { beat: i as f64 / 30.0, ..BeatClock::default() };
+        points = animator.render(settings, audio, 1.0 / 60.0, &clock);
+    }
+    let step = points.len().div_ceil(THUMB_POINTS).max(1);
+    let pos = |v: f32| ((v.clamp(-1.0, 1.0) + 1.0) * 127.5).round() as u8;
+    let col = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    points
+        .iter()
+        .step_by(step)
+        .flat_map(|p| [pos(p.x), pos(p.y), col(p.r), col(p.g), col(p.b)])
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::{Animator, AudioFeatures, BeatClock};
     use std::collections::HashSet;
+
+    #[test]
+    fn every_cue_has_a_small_visible_thumbnail() {
+        for p in catalog() {
+            let t = thumbnail(&p.settings);
+            assert!(!t.is_empty() && t.len().is_multiple_of(10) && t.len() <= THUMB_POINTS * 10, "{}: {} chars", p.id, t.len());
+            let bytes: Vec<u8> = (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).unwrap()).collect();
+            assert!(bytes.chunks(5).any(|q| q[2..].iter().any(|&c| c > 0)), "{} has a dark thumbnail", p.id);
+        }
+    }
 
     #[test]
     fn catalogue_is_large_and_ids_are_unique() {

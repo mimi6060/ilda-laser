@@ -53,6 +53,10 @@ pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibratio
 
 fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) {
     let (queue, pending) = std::sync::mpsc::channel::<Request>();
+    // Draw the cue pictures now, beside the worker, so the first page
+    // doesn't hold the heartbeat queue while they render.
+    let catalogue: Vec<_> = shared.lock().unwrap().presets.iter().map(|p| (p.id.clone(), p.settings.clone())).collect();
+    std::thread::spawn(move || cue_thumbnails(&catalogue));
     let worker = std::thread::spawn({
         let shared = Arc::clone(&shared);
         let decoding = Arc::new(AtomicUsize::new(0));
@@ -461,6 +465,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             let list: Vec<_> = s.presets.iter().map(|p| json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p) })).collect();
             json_response(json!({ "categories": CATEGORIES, "presets": list }))
         }
+        (Method::Get, "/api/presets/thumbs") => {
+            let presets: Vec<_> = shared.lock().unwrap().presets.iter().map(|p| (p.id.clone(), p.settings.clone())).collect();
+            json_response(json!(cue_thumbnails(&presets)))
+        }
         (Method::Post, "/api/presets/play") => match body::<IdRequest>(request) {
             Ok(req) => {
                 if controls::play_preset(&mut shared.lock().unwrap(), &req.id) {
@@ -701,6 +709,31 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
 /// decoded first (a damaged file is refused with a clear message and
 /// nothing is written), then stored in `media/audio/` under a safe name.
 /// The lock is not held while reading, decoding or writing.
+/// Cue pictures already drawn, by cue id, with the look they were drawn
+/// from: each is rendered once (a figure edited under the same name is
+/// drawn again), so the request stays instant for every page.
+static THUMBS: Mutex<Option<std::collections::HashMap<String, (String, String)>>> = Mutex::new(None);
+
+fn cue_thumbnails(presets: &[(String, Settings)]) -> serde_json::Map<String, serde_json::Value> {
+    let mut cache = THUMBS.lock().unwrap();
+    let cache = cache.get_or_insert_with(Default::default);
+    presets
+        .iter()
+        .map(|(id, settings)| {
+            let key = serde_json::to_string(settings).unwrap_or_default();
+            let hex = match cache.get(id) {
+                Some((k, hex)) if *k == key => hex.clone(),
+                _ => {
+                    let hex = crate::presets::thumbnail(settings);
+                    cache.insert(id.clone(), (key, hex.clone()));
+                    hex
+                }
+            };
+            (id.clone(), json!(hex))
+        })
+        .collect()
+}
+
 fn import_song(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     use crate::audio::media::MAX_IMPORT_BYTES;
     use std::io::Read;
