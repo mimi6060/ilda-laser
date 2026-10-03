@@ -225,6 +225,17 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             // The capture thread's last scan: this handler never calls CoreAudio.
             json_response(json!({ "capture": hub.capture_enabled(), "devices": hub.devices() }))
         }
+        (Method::Get, "/api/devices") => {
+            // The last scan (devices.rs): this handler never scans or opens a DAC.
+            let list = Arc::clone(&shared.lock().unwrap().devices);
+            json_response(list.view())
+        }
+        (Method::Post, "/api/devices/scan") => {
+            // On its own thread (~1.5 s): poll GET /api/devices for the result.
+            let list = Arc::clone(&shared.lock().unwrap().devices);
+            list.refresh();
+            json_response(list.view())
+        }
         (Method::Get, "/api/audio/config") => {
             let hub = Arc::clone(&shared.lock().unwrap().audio_in);
             json_response(json!(hub.config().0))
@@ -1560,6 +1571,7 @@ impl SimNative {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::devices::{DeviceInfo, DeviceList};
     use crate::interlock::TEST;
     use crate::test_support;
     use std::io::{Read, Write};
@@ -1925,6 +1937,33 @@ mod tests {
         assert_eq!(query_u64("/api/settings?x=1&rev=3", "rev"), Some(3));
         assert_eq!(query_u64("/api/settings?revision=3", "rev"), None);
         assert_eq!(query_u64("/api/settings", "rev"), None);
+    }
+
+    /// T-303: the DAC list is read-only. Nothing is scanned until asked, a
+    /// scan reports what it found, and none of it touches the arm state.
+    #[test]
+    fn device_list_scans_only_on_request_and_never_arms() {
+        let t = TestServer::start(false);
+        let fake = DeviceInfo { kind: "helios".into(), id: "helios:left".into(), name: "Helios DAC Left (1:2.3)".into() };
+        t.shared.lock().unwrap().devices = Arc::new(DeviceList::fixed(vec![fake]));
+        let get = || -> serde_json::Value { serde_json::from_str(&t.request("GET", "/api/devices", "").1).unwrap() };
+        let v = get();
+        assert_eq!((v["devices"].as_array().map(Vec::len), v["scanned"].as_bool()), (Some(0), Some(false)), "{v}");
+        assert_eq!(t.request("POST", "/api/devices/scan", "").0, 200);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let v = loop {
+            let v = get();
+            if v["scanned"] == true {
+                break v;
+            }
+            assert!(Instant::now() < deadline, "scan never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(v["devices"][0], json!({ "kind": "helios", "id": "helios:left", "name": "Helios DAC Left (1:2.3)" }));
+        assert_eq!(v["scanning"], false);
+        assert_eq!(arm_status(&t)["armed"], false);
+        let s = t.shared.lock().unwrap();
+        assert_eq!((s.output_name.as_deref(), s.output_kind), (None, None), "still preview only");
     }
 
     #[test]

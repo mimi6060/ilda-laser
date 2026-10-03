@@ -66,5 +66,7 @@ pub fn shared() -> Shared {
         project: crate::project::ProjectState::load(&std::env::temp_dir().join("laser-studio-test-unused")),
         test_hooks: false,
         test_stall_ms: 0,
+        // Never a real scan in unit tests.
+        devices: std::sync::Arc::new(crate::devices::DeviceList::fixed(Vec::new())),
     }
 }
