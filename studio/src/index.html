@@ -927,6 +927,14 @@
         <label>Forme A <span class="v" id="gAV"></span></label>
         <input type="range" id="gA" min="0" max="10" step="0.01">
         <div class="hint" id="gAH" hidden></div>
+        <div id="gChaseRow" hidden>
+          <label>Forme du chaser</label>
+          <select id="gChase">
+            <option value="0">→ Avant</option><option value="1">← Arrière</option><option value="2">↔ Aller-retour</option>
+            <option value="3">Centre → bords</option><option value="4">Bords → centre</option><option value="5">Pair / impair</option>
+            <option value="6">Aléatoire</option><option value="7">Remplissage puis vidage</option>
+          </select>
+        </div>
         <div id="gTurnsRow" hidden>
           <label>Vitesse (tours par temps)</label>
           <select id="gTurns">
@@ -1002,6 +1010,25 @@
       <input type="range" id="rot" min="-360" max="360" step="5">
       <label>Luminosité du look <span class="v" id="brightV"></span></label>
       <input type="range" id="bright" min="0" max="100">
+    </section>
+
+    <section data-cpanel="look" id="rhythmPanel">
+      <h2>Rythme</h2>
+      <label>Gate</label>
+      <select id="rGate">
+        <option value="off">Aucun</option><option value="beat">Temps</option><option value="beat_and_offbeat">Temps + contretemps</option>
+      </select>
+      <label>Durée gate (temps) <span class="v" id="rGateLenV"></span></label>
+      <input type="range" id="rGateLen" min="0.05" max="0.5" step="0.05" title="Le look s'allume sur le temps et reste allumé ce temps-là">
+      <div class="check"><input type="checkbox" id="rDecay"><span>Décroissance (s'éteint en fondu au lieu d'être coupé)</span></div>
+      <label>Strobe</label>
+      <select id="rStrobe">
+        <option value="0">Aucun</option><option value="2">1/2 temps</option><option value="4">1/4 temps</option><option value="8">1/8 temps</option>
+      </select>
+      <label>Rapport cyclique <span class="v" id="rDutyV"></span></label>
+      <input type="range" id="rDuty" min="30" max="50" step="5">
+      <div class="hint">Calé sur le tempo, pour tous les looks. Maintenir <b>S</b> (Alt+S en LIVE) : strobe 1/4 tant que la touche est enfoncée.
+        Un strobe plus rapide que 4 éclairs/s est coupé par le limiteur de sécurité après 5 s.</div>
     </section>
     <div class="hint soon" data-cpanel="look">À venir ici : éditeur de cues évolutifs, médiathèque ILDA. (Import SVG / image : onglet Figures, « Importer… ».)</div>
 
@@ -1318,6 +1345,7 @@ function showSettings() {
     setCheck('gSnap', !!p.snap);
     setVal('gTurns', TURNS.includes(+p.a) ? String(+p.a) : '');
     setVal('gLoop', p.loop_mode ?? 'ping_pong');
+    setVal('gChase', String(Math.min(7, Math.max(0, Math.round(p.a)))));
     showGenHelp(s.content.generator);
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
@@ -1326,6 +1354,13 @@ function showSettings() {
   setVal('scale', Math.round(s.scale * 100));
   setVal('rot', s.rotation_speed);
   setVal('bright', Math.round(s.brightness * 100));
+  setVal('rGate', s.gate ?? 'off');
+  setVal('rGateLen', s.gate_beats ?? 0.2);
+  setCheck('rDecay', !!s.gate_decay);
+  setVal('rStrobe', String(s.strobe_div ?? 0));
+  setVal('rDuty', Math.round((s.strobe_duty ?? 0.4) * 100));
+  $('rGateLen').disabled = (s.gate ?? 'off') === 'off' || !!s.gate_decay;
+  $('rDuty').disabled = !(s.strobe_div > 0);
   setCheck('aOn', s.audio.enabled);
   setVal('aSize', Math.round(s.audio.size * 100));
   setVal('aRot', Math.round(s.audio.rotate * 100));
@@ -1348,6 +1383,8 @@ function showValues() {
   $('gBV').textContent = (+$('gB').value).toFixed(2);
   $('gSpeedV').textContent = '×' + (+$('gSpeed').value).toFixed(2);
   $('gGateV').textContent = +$('gGate').value ? (+$('gGate').value).toFixed(2) : 'off';
+  $('rGateLenV').textContent = (+$('rGateLen').value).toFixed(2);
+  $('rDutyV').textContent = $('rDuty').value + ' %';
 }
 
 // One edit per control: the value it had when moved, written to one field.
@@ -1363,6 +1400,11 @@ const LOOK_EDITS = {
   aFlash: v => s => { s.audio.flash = v / 100; },
   aColor: v => s => { s.audio.color_on_beat = v; },
   text: v => s => { if (s.content.kind === 'text') s.content.text = v; },
+  rGate: v => s => { s.gate = v; },
+  rGateLen: v => s => { s.gate_beats = +v; },
+  rDecay: v => s => { s.gate_decay = v; },
+  rStrobe: v => s => { s.strobe_div = +v; },
+  rDuty: v => s => { s.strobe_duty = v / 100; },
   // Picking a festival fan or sheet starts it from its own starting values, in tempo.
   gen: v => genEdit(c => {
     c.generator = v;
@@ -1387,6 +1429,7 @@ const LOOK_EDITS = {
   gSnap: v => genEdit(c => { c.params.snap = v; }),
   gTurns: v => genEdit(c => { if (v !== '') c.params.a = +v; }),
   gLoop: v => genEdit(c => { c.params.loop_mode = v; }),
+  gChase: v => genEdit(c => { c.params.a = +v; }),
 };
 for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   $(id).addEventListener('input', () => {
@@ -1398,7 +1441,7 @@ for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   $(id).addEventListener('blur', () => setTimeout(showSettings));
   // A new generator may bring its own values and help, and a « Vitesse »
   // preset moves Forme A: show them now.
-  if (id === 'gen' || id === 'gTurns') $(id).addEventListener('input', () => showSettings());
+  if (id === 'gen' || id === 'gTurns' || id === 'gChase' || id === 'rGate' || id === 'rDecay' || id === 'rStrobe') $(id).addEventListener('input', () => showSettings());
 }
 
 function editLook(fn) {
@@ -1533,6 +1576,10 @@ document.addEventListener('keydown', e => {
   if (e.code === 'Space' && !typing) {
     e.preventDefault(); if (!e.repeat) toggleArmed('keyboard'); return;
   }
+  // Hold S (T-103): strobe 1/4 while held. In LIVE, S is a cue letter, so Alt+S.
+  if (!typing && e.code === 'KeyS' && !e.metaKey && !e.ctrlKey && !e.shiftKey && (e.altKey || activeWs !== 'live')) {
+    e.preventDefault(); holdStrobe(true); return;
+  }
   // Projet (T-286): Cmd+S enregistrer, Cmd+O ouvrir (Ctrl on other systems).
   if ((e.metaKey || e.ctrlKey) && !e.altKey && ['s', 'o'].includes(e.key.toLowerCase())) {
     e.preventDefault(); if (!e.repeat) projAction(e.key.toLowerCase() === 's' ? 'save' : 'open'); return;
@@ -1552,6 +1599,7 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => {
   downCodes.delete(e.code);
+  if (e.code === 'KeyS') holdStrobe(false);
   if (e.code === presence.hold_key) setHold(false);
   const id = heldKeys.get(e.code);
   if (id === undefined) return;
@@ -1566,7 +1614,23 @@ window.addEventListener('blur', () => {
   if (pointerCue) { cueUp(pointerCue); pointerCue = null; }
   downCodes.clear();
   setHold(false);
+  holdStrobe(false);
 });
+// The look's strobe before S was held (null = not held). Released, the
+// look gets its own strobe back.
+let strobeHeldFrom = null;
+function holdStrobe(on) {
+  if (!settings || on === (strobeHeldFrom !== null)) return;
+  if (on) {
+    strobeHeldFrom = settings.strobe_div ?? 0;
+    editLook(s => { s.strobe_div = 4; });
+  } else {
+    const was = strobeHeldFrom;
+    strobeHeldFrom = null;
+    editLook(s => { s.strobe_div = was; });
+  }
+  showSettings();
+}
 
 // ---------- operator presence (T-252) ----------
 // Every page beats POST /api/heartbeat every 500 ms. With no beat from any
@@ -3726,12 +3790,14 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   positions: 'Positions au temps', finger_tunnel: 'Tunnel de faisceaux', tunnel_pump: 'Tunnel qui pompe',
   twin_tunnel: 'Double tunnel', sunburst: 'Soleil levant',
   ceiling: 'Plafond liquide', blade: 'Lame', curtain: 'Rideaux', waterfall: 'Cascade', scanner: 'Scanner',
-  slats: 'Lamelles', aurora: 'Aurore', grid: 'Grille' };
+  slats: 'Lamelles', aurora: 'Aurore', grid: 'Grille', chase_fan: 'Chaser' };
 
 // Festival fans (T-102) and sheets (T-106): what Nombre / A / B mean for
 // each, plus how the tempo settings drive it. Old generators keep the
 // generic labels. Sheets stay above the audience (never scan it).
 const GEN_HELP = {
+  chase_fan: ['Faisceaux (8 conseillé).', 'Forme du chaser (voir la liste ci-dessous).', 'Traîne : 0 à 3 faisceaux derrière la tête (40 %, 15 %, 6 %).',
+    'Un pas par Pas par temps (2 = 1/2 temps) ; seuls les faisceaux allumés changent, l’éventail reste fixe. Alterné : traîne en deuxième couleur.'],
   fan: ['Faisceaux (6 à 16).', 'Pompage : 0 = fixe, 1 = s’ouvre sur chaque temps puis se referme.', 'Hauteur au-dessus du public.',
     'Taille = demi-largeur de l’éventail.'],
   fan_sweep: ['Faisceaux (6 à 16).', 'Amplitude du balayage (0,25 à 0,45).', 'Hauteur au-dessus du public.',
@@ -3770,6 +3836,7 @@ const GEN_HELP = {
     'La grille défile d’une ligne par temps ; ← : dans l’autre sens.'],
 };
 const GEN_DEFAULTS = {
+  chase_fan: { count: 8, a: 0, b: 2, period: 4, steps: 2 },
   fan: { count: 8, a: 0, b: 0.3, period: 4, steps: 1 },
   fan_sweep: { count: 8, a: 0.35, b: 0.3, period: 4, steps: 1 },
   fan_tilt: { count: 8, a: 0, b: 0, period: 8, steps: 1 },
@@ -3793,6 +3860,7 @@ function showGenHelp(name) {
   ['gCountH', 'gAH', 'gBH', 'gSyncH'].forEach((id, i) => { $(id).textContent = h[i] || ''; $(id).hidden = !h[i]; });
   $('gTurnsRow').hidden = !ROTATING.has(name);
   $('gSnapRow').hidden = name !== 'polygon_tunnel';
+  $('gChaseRow').hidden = name !== 'chase_fan';
   // Slow rotations (1/64 turn per beat) need any value; the ceiling's
   // ripple (0.01 to 0.03) needs hundredths.
   $('gA').step = ROTATING.has(name) ? 'any' : '0.01';

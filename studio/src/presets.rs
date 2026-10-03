@@ -4,7 +4,7 @@
 //! taken from another product's library. The catalogue is built in code,
 //! so ids stay stable as long as the lists below only grow at the end.
 
-use crate::engine::{Animator, AudioFeatures, AudioReact, BeatClock, Content, Settings};
+use crate::engine::{Animator, AudioFeatures, AudioReact, BeatClock, Content, GateMode, Settings};
 use crate::generators::{ColorMode, GenParams};
 use serde::Serialize;
 
@@ -45,6 +45,9 @@ const CYAN_MAGENTA: Look = Look("cyan → magenta", CYAN, ColorMode::Gradient, M
 const GREEN_RED: Look = Look("vert → rouge", GREEN, ColorMode::Gradient, RED);
 const RED_BLUE: Look = Look("rouge / bleu", RED, ColorMode::Alternate, BLUE);
 const GREEN_YELLOW: Look = Look("vert / jaune", GREEN, ColorMode::Alternate, YELLOW);
+const SOLID_MAGENTA: Look = Look("magenta", MAGENTA, ColorMode::Solid, MAGENTA);
+/// Chasers in « Alterné »: a white head with a blue tail.
+const WHITE_BLUE: Look = Look("blanc / bleu", WHITE, ColorMode::Alternate, BLUE);
 
 struct Builder {
     presets: Vec<Preset>,
@@ -67,6 +70,22 @@ impl Builder {
             ..Settings::default()
         };
         self.add(category, format!("{label} · {color_name}"), settings);
+    }
+
+    /// A beat-synced beam cue (T-103) on the « Faisceaux » page: `rhythm`
+    /// sets the look's gate or strobe.
+    #[allow(clippy::too_many_arguments)]
+    fn synced(&mut self, label: &str, generator: &str, count: u32, a: f32, b: f32, steps: f32, look: Look, rhythm: impl FnOnce(&mut Settings)) {
+        let Look(color_name, color, color_mode, color2) = look;
+        let params = GenParams { count, a, b, color_mode, color2, beat_sync: true, steps_per_beat: steps, ..GenParams::default() };
+        let mut settings = Settings {
+            content: Content::Generator { generator: generator.to_string(), params },
+            color,
+            scale: 0.7,
+            ..Settings::default()
+        };
+        rhythm(&mut settings);
+        self.add("Faisceaux", format!("{label} · {color_name}"), settings);
     }
 }
 
@@ -217,6 +236,25 @@ pub fn catalog() -> Vec<Preset> {
         }
     }
 
+    // Chasers, kick stabs and beam strobes (T-103), appended so every
+    // earlier id stays the same. Chase steps and gates from the research
+    // (§4.4, §4.5): 1/2-beat chases with a 2-beam tail, 0.2-beat stabs.
+    let none = |_: &mut Settings| ();
+    b.synced("Chaser →", "chase_fan", 8, 0.0, 2.0, 2.0, SOLID_GREEN, none);
+    b.synced("Chaser aller-retour", "chase_fan", 8, 2.0, 2.0, 2.0, WHITE_BLUE, none);
+    b.synced("Chaser centre → bords", "chase_fan", 8, 3.0, 1.0, 1.0, SOLID_CYAN, none);
+    b.synced("Chaser bords → centre", "chase_fan", 8, 4.0, 1.0, 1.0, SOLID_RED, none);
+    b.synced("Chaser pair / impair", "chase_fan", 8, 5.0, 0.0, 1.0, GREEN_YELLOW, none);
+    b.synced("Chaser aléatoire", "chase_fan", 12, 6.0, 0.0, 2.0, RAINBOW, none);
+    b.synced("Chaser remplissage", "chase_fan", 8, 7.0, 0.0, 1.0, SOLID_BLUE, none);
+    b.synced("Coups sur le kick", "fan", 8, 0.0, 0.3, 1.0, SOLID_WHITE, |s| s.gate = GateMode::Beat);
+    b.synced("Coups qui s'éteignent", "fan", 8, 0.0, 0.3, 1.0, SOLID_RED, |s| {
+        s.gate = GateMode::Beat;
+        s.gate_decay = true;
+    });
+    b.synced("Positions temps + contretemps", "positions", 8, 0.0, 0.3, 2.0, SOLID_MAGENTA, |s| s.gate = GateMode::BeatAndOffbeat);
+    b.synced("Strobe 1/2 temps", "fan", 12, 0.0, 0.4, 1.0, SOLID_WHITE, |s| s.strobe_div = 2.0);
+
     b.presets
 }
 
@@ -324,7 +362,7 @@ mod tests {
         // Golden digest of every cue's 30th frame (clock cues excluded: they
         // show the system time), taken before the beat-synced generator work.
         let mut values = Vec::new();
-        for p in catalog() {
+        for p in catalog().into_iter().take(LEGACY_CUES) {
             if matches!(&p.settings.content, Content::Generator { generator, .. } if generator == "clock") {
                 continue;
             }
@@ -340,8 +378,35 @@ mod tests {
 
     #[test]
     fn cue_ids_are_unchanged() {
-        let ids: String = catalog().iter().map(|p| format!("{}|", p.id)).collect();
+        let ids: String = catalog().iter().take(LEGACY_CUES).map(|p| format!("{}|", p.id)).collect();
         assert_eq!(digest(ids.bytes().map(|b| b as f32)), GOLDEN_IDS);
+    }
+
+    /// Cues that existed before the festival cues (T-103 on): the golden
+    /// digests cover them; later cues are only ever appended.
+    const LEGACY_CUES: usize = 202;
+
+    #[test]
+    fn rhythm_cues_are_appended_on_the_beams_page() {
+        let all = catalog();
+        let new = &all[LEGACY_CUES..];
+        assert!(new.len() >= 11);
+        assert!(new.iter().all(|p| p.category == "Faisceaux"));
+        // Numbered after the page's 31 older cues.
+        assert_eq!(new[0].id, "faisceaux-032");
+        let gen = |p: &Preset| match &p.settings.content {
+            Content::Generator { generator, params } => (generator.clone(), params.beat_sync),
+            _ => (String::new(), false),
+        };
+        assert!(new.iter().all(|p| gen(p).1), "every rhythm cue follows the tempo");
+        assert_eq!(new.iter().filter(|p| gen(p).0 == "chase_fan").count(), 7, "one per chase shape but the reversed one");
+        assert!(new.iter().any(|p| p.settings.gate == GateMode::Beat && !p.settings.gate_decay));
+        assert!(new.iter().any(|p| p.settings.gate_decay));
+        assert!(new.iter().any(|p| p.settings.gate == GateMode::BeatAndOffbeat));
+        // The only strobe cue stays at the sustained-safe rate (1/2 beat).
+        assert!(new.iter().all(|p| p.settings.strobe_div <= 2.0) && new.iter().any(|p| p.settings.strobe_div > 0.0));
+        // Older cues have no rhythm.
+        assert!(all[..LEGACY_CUES].iter().all(|p| p.settings.gate == GateMode::Off && p.settings.strobe_div == 0.0));
     }
 
     const GOLDEN_FRAMES: u64 = 5_542_766_730_402_865_477;

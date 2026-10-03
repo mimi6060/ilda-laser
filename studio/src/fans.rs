@@ -77,7 +77,7 @@ fn frac(i: usize, n: usize) -> f32 {
 }
 
 /// A line of `n` beams from `x0` to `x1` at height `y`.
-fn line(n: usize, x0: f32, x1: f32, y: f32) -> Vec<(f32, f32)> {
+pub(crate) fn line(n: usize, x0: f32, x1: f32, y: f32) -> Vec<(f32, f32)> {
     (0..n).map(|i| (lerp(x0, x1, frac(i, n)), y)).collect()
 }
 

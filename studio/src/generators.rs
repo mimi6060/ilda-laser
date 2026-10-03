@@ -153,6 +153,8 @@ pub const GENERATOR_NAMES: &[&str] = &[
     "finger_tunnel", "tunnel_pump", "twin_tunnel", "sunburst",
     // Sheets (T-106), see `sheets.rs`.
     "ceiling", "blade", "curtain", "waterfall", "scanner", "slats", "aurora", "grid",
+    // Chasers (T-103), see `chases.rs`.
+    "chase_fan",
 ];
 
 pub struct Geometry {
@@ -454,7 +456,8 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
 
         _ => crate::fans::generate(name, p, ctx)
             .or_else(|| crate::tunnels::generate(name, p, ctx))
-            .or_else(|| crate::sheets::generate(name, p, ctx)),
+            .or_else(|| crate::sheets::generate(name, p, ctx))
+            .or_else(|| crate::chases::generate(name, p, ctx)),
     }
 }
 

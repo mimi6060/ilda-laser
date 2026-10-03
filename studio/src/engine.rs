@@ -82,6 +82,63 @@ pub struct Settings {
     /// Master brightness, 0.0..=1.0.
     pub brightness: f32,
     pub audio: AudioReact,
+    /// « Rythme » (T-103), for any look: a beat gate (stabs on the kick)...
+    pub gate: GateMode,
+    /// ...lit for this many beats after each beat (or off-beat)...
+    pub gate_beats: f32,
+    /// ...or, instead of the hard cut, an instant flash fading with
+    /// `STAB_DECAY_BEATS`.
+    pub gate_decay: bool,
+    /// Beam strobe: flashes per beat (2 = every 1/2 beat, 4 = 1/4, 8 =
+    /// 1/8), 0 = off. The output's strobe limiter (`safety.rs`) still cuts
+    /// fast strobes after a burst.
+    pub strobe_div: f32,
+    /// Fraction of each strobe slot that is lit (`STROBE_DUTY` range).
+    pub strobe_duty: f32,
+}
+
+/// When a look's beat gate opens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateMode {
+    #[default]
+    Off,
+    /// On every beat.
+    Beat,
+    /// On every beat and every off-beat (half-way).
+    BeatAndOffbeat,
+}
+
+/// Time constant of the decaying stab, in beats (research §4.4: 0.1-0.15).
+pub const STAB_DECAY_BEATS: f32 = 0.12;
+/// Strobe duty cycle range (research §4.4: 30-50 % for a strobe).
+pub const STROBE_DUTY: std::ops::RangeInclusive<f32> = 0.3..=0.5;
+/// Fastest look strobe, flashes per beat.
+pub const MAX_STROBE_DIV: f32 = 8.0;
+
+impl Settings {
+    /// The « Rythme » gain at `beat_pos` (beats from the look's bar): the
+    /// beat gate times the strobe, 1 when both are off.
+    pub fn rhythm_gain(&self, beat_pos: f64) -> f32 {
+        let slot = match self.gate {
+            GateMode::Off => None,
+            GateMode::Beat => Some(1.0),
+            GateMode::BeatAndOffbeat => Some(0.5),
+        };
+        let gate = slot.map_or(1.0, |slot| {
+            // A hair of tolerance so the gate opens exactly on its beat.
+            let x = ((beat_pos + 1e-9).rem_euclid(slot)) as f32;
+            if self.gate_decay {
+                beat::env_stab(x, 0.0, STAB_DECAY_BEATS)
+            } else {
+                let len = if self.gate_beats.is_finite() { self.gate_beats.clamp(0.02, slot as f32) } else { 0.2 };
+                if x < len { 1.0 } else { 0.0 }
+            }
+        });
+        let div = if self.strobe_div.is_finite() { self.strobe_div.clamp(0.0, MAX_STROBE_DIV) } else { 0.0 };
+        let duty = if self.strobe_duty.is_finite() { self.strobe_duty.clamp(*STROBE_DUTY.start(), *STROBE_DUTY.end()) } else { 0.4 };
+        gate * beat::strobe_gate(beat_pos, div, duty)
+    }
 }
 
 impl Default for Settings {
@@ -93,6 +150,11 @@ impl Default for Settings {
             rotation_speed: 0.0,
             brightness: 0.5,
             audio: AudioReact::default(),
+            gate: GateMode::Off,
+            gate_beats: 0.2,
+            gate_decay: false,
+            strobe_div: 0.0,
+            strobe_duty: 0.4,
         }
     }
 }
@@ -416,6 +478,8 @@ impl Animator {
             rotation_speed: s.rotation_speed,
             brightness: s.brightness.clamp(0.0, 1.0) * k.brightness * evolving::strobe(b, k.strobe_div),
             audio: s.audio.clone(),
+            // The look's « Rythme » applies on top of the keys.
+            ..s.clone()
         };
         self.render_look(&look, audio, dt, clock, b)
     }
@@ -454,7 +518,7 @@ impl Animator {
         let hue_shift = if react.enabled { self.hue_shift } else { 0.0 };
         let (r, g, b) = shift_hue(s.color, hue_shift);
         let flash_gain = 1.0 - react.flash * (react.enabled as u8 as f32) * (1.0 - self.flash);
-        let mut gain = s.brightness.clamp(0.0, 1.0) * flash_gain;
+        let mut gain = s.brightness.clamp(0.0, 1.0) * flash_gain * s.rhythm_gain(beat_pos);
         let synced = match &s.content {
             Content::Generator { params, .. } if params.beat_sync => Some(params),
             _ => None,
@@ -799,6 +863,96 @@ mod tests {
         // Without beat_sync the gate does nothing.
         let free = Settings { content: Content::Generator { generator: "beam_fan".into(), params: GenParams { gate_beats: 0.25, ..Default::default() } }, ..Default::default() };
         assert!(frame_at(&free, 0.0, 3.9, 128.0).iter().any(|p| p.is_lit()));
+    }
+
+    /// Any look (a plain circle here) with a « Rythme » setting.
+    fn rhythm(edit: impl FnOnce(&mut Settings)) -> Settings {
+        let mut s = Settings { brightness: 1.0, ..Default::default() };
+        edit(&mut s);
+        s
+    }
+
+    fn lit_at(s: &Settings, beat: f64, bpm: f64) -> bool {
+        frame_at(s, 0.0, beat, bpm).iter().any(|p| p.is_lit())
+    }
+
+    #[test]
+    fn look_gate_of_0_2_beat_at_128_bpm_lights_about_94_ms_after_each_beat() {
+        let s = rhythm(|s| s.gate = GateMode::Beat);
+        assert_eq!(s.gate_beats, 0.2, "default gate length");
+        // A plain shape: the gate is the look's own, no beat_sync needed.
+        assert!(matches!(s.content, Content::Shape { .. }));
+        let bpm = 128.0;
+        let beat_at_ms = |ms: f64| ms / 1000.0 * bpm / 60.0;
+        for k in [0.0, 1.0, 7.0, 30.0] {
+            let start = k * 60_000.0 / bpm;
+            assert!(lit_at(&s, beat_at_ms(start), bpm), "on the beat {k}");
+            assert!(lit_at(&s, beat_at_ms(start + 90.0), bpm), "90 ms after beat {k}");
+            assert!(!lit_at(&s, beat_at_ms(start + 98.0), bpm), "98 ms after beat {k}");
+            assert!(!lit_at(&s, beat_at_ms(start + 400.0), bpm), "dark until the next beat");
+        }
+        // Off: always lit.
+        assert!(lit_at(&rhythm(|_| ()), 3.5, bpm));
+    }
+
+    #[test]
+    fn look_gate_on_beat_and_offbeat_and_decay() {
+        let both = rhythm(|s| s.gate = GateMode::BeatAndOffbeat);
+        assert!(lit_at(&both, 2.1, 128.0) && !lit_at(&both, 2.3, 128.0));
+        assert!(lit_at(&both, 2.6, 128.0) && !lit_at(&both, 2.8, 128.0), "the off-beat flashes too");
+        // Decay: instant on the beat, e^-1 one time constant later, faint after.
+        let decay = rhythm(|s| {
+            s.gate = GateMode::Beat;
+            s.gate_decay = true;
+        });
+        assert!((decay.rhythm_gain(5.0) - 1.0).abs() < 1e-6);
+        assert!((decay.rhythm_gain(5.0 + STAB_DECAY_BEATS as f64) - (-1.0f32).exp()).abs() < 1e-3);
+        assert!(decay.rhythm_gain(5.9) < 0.001);
+        let peak = |beat| frame_at(&decay, 0.0, beat, 128.0).iter().map(|p| p.g).fold(0.0, f32::max);
+        assert!(peak(4.0) > peak(4.06) && peak(4.06) > peak(4.2) && peak(4.2) > 0.0);
+        // A broken length falls back to the default instead of going dark.
+        let bad = rhythm(|s| {
+            s.gate = GateMode::Beat;
+            s.gate_beats = f32::NAN;
+        });
+        assert!(lit_at(&bad, 1.1, 120.0) && !lit_at(&bad, 1.5, 120.0));
+    }
+
+    #[test]
+    fn look_strobe_flashes_on_the_beat_grid_with_its_duty() {
+        let s = rhythm(|s| s.strobe_div = 4.0);
+        // 1/4 beat at 40 %: lit for the first 0.1 beat of each quarter.
+        assert!(lit_at(&s, 3.0, 128.0) && lit_at(&s, 3.09, 128.0) && !lit_at(&s, 3.12, 128.0) && lit_at(&s, 3.25, 128.0));
+        // Duty is clamped to 30-50 %, the rate to 8 per beat.
+        let duty = |d: f32| rhythm(|s| {
+            s.strobe_div = 1.0;
+            s.strobe_duty = d;
+        });
+        assert_eq!(duty(0.9).rhythm_gain(0.6), 0.0);
+        assert_eq!(duty(0.0).rhythm_gain(0.25), 1.0);
+        assert_eq!(rhythm(|s| s.strobe_div = 1e9).rhythm_gain(0.06), 0.0, "at most 8 flashes per beat");
+        // Gate and strobe multiply.
+        let both = rhythm(|s| {
+            s.gate = GateMode::Beat;
+            s.strobe_div = 8.0;
+        });
+        assert_eq!((both.rhythm_gain(1.0), both.rhythm_gain(1.1), both.rhythm_gain(1.13)), (1.0, 0.0, 1.0));
+        assert_eq!(both.rhythm_gain(1.5), 0.0);
+    }
+
+    #[test]
+    fn look_rhythm_applies_to_evolving_cues_too() {
+        let s = Settings { gate: GateMode::Beat, ..evolving(crate::evolving::test_cue(true)) };
+        assert!(lit_at(&s, 4.1, 128.0) && !lit_at(&s, 4.5, 128.0));
+    }
+
+    #[test]
+    fn old_looks_load_without_rhythm() {
+        let s: Settings = serde_json::from_str(r#"{"content":{"kind":"wave"},"brightness":0.7}"#).unwrap();
+        assert_eq!((s.gate, s.gate_beats, s.gate_decay, s.strobe_div, s.strobe_duty), (GateMode::Off, 0.2, false, 0.0, 0.4));
+        assert_eq!(s.rhythm_gain(0.73), 1.0);
+        let json = serde_json::to_string(&Settings { gate: GateMode::BeatAndOffbeat, ..s }).unwrap();
+        assert!(json.contains(r#""gate":"beat_and_offbeat""#), "{json}");
     }
 
     #[test]

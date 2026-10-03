@@ -998,6 +998,40 @@ mod tests {
         assert!(lim.status().active);
     }
 
+    #[test]
+    fn a_1_8_beat_look_strobe_at_128_bpm_is_cut_after_5_s() {
+        // T-103: the look's « Rythme » strobe at 1/8 beat (17 Hz) on a
+        // chaser, rendered by the real Animator: it flashes for the burst,
+        // then the limiter holds the output steady.
+        let params = GenParams { count: 8, a: 0.0, b: 2.0, ..Default::default() };
+        let settings = Settings {
+            content: Content::Generator { generator: "chase_fan".into(), params },
+            brightness: 1.0,
+            strobe_div: 8.0,
+            ..Default::default()
+        };
+        let mut a = Animator::default();
+        let mut lim = StrobeLimiter::default();
+        let cfg = floor(-1.0);
+        let (mut dark_before, mut dark_after) = (0, 0);
+        for i in 0..(8.0 * FPS) as usize {
+            let t = i as f64 / FPS;
+            let clock = BeatClock { beat: t * 128.0 / 60.0, bpm: 128.0, beats_per_bar: 4 };
+            let frame = a.render(&settings, Default::default(), 1.0 / FPS as f32, &clock);
+            let out = apply(frame, t, &cfg, &mut lim);
+            let lit = out.iter().any(|p| p.is_lit());
+            if t < 4.8 && !lit {
+                dark_before += 1;
+            }
+            if t > 5.2 && !lit {
+                dark_after += 1;
+            }
+        }
+        assert!(dark_before > 100, "the strobe goes through during the burst ({dark_before} dark frames)");
+        assert_eq!(dark_after, 0, "held steady after 5 s");
+        assert!(lim.status().active && lim.status().rate_hz > 10.0);
+    }
+
     // ---------- zones and full horizon (T-003) ----------
 
     /// Random zones for `seed`: one or two Blank polygons and a Dim one.
