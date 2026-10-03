@@ -139,6 +139,18 @@
   #impCanvas { max-width: 520px; margin: 0 auto; }
   #impStats.bad { color: var(--warn); }
   #impMsg.err { color: var(--danger); font-weight: 600; }
+  /* CRÉATION › Médiathèque (T-011): ILDA files, like the figure library. */
+  #ildaDrop { border: 2px dashed var(--line); border-radius: 8px; padding: 12px; text-align: center; margin-top: 8px; }
+  #ildaDrop.over { border-color: var(--ws-creation); background: var(--panel-2); }
+  #ildaDrop input[type=file] { max-width: 100%; margin-top: 6px; }
+  #ildaLib { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto; margin-top: 6px; }
+  #ildaLib .ildaitem { display: flex; gap: 4px; align-items: center; }
+  #ildaLib .ildaitem .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #ildaLib .ildaitem .n small { color: var(--muted); }
+  #ildaLib .ildaitem button { flex: none; padding: 4px 8px; }
+  #ildaLib .ildaitem .del { color: var(--muted); }
+  #ildaMsg.err, #ildaExpMsg.err { color: var(--danger); font-weight: 600; }
+  .ilda-rights { margin: 6px 0 4px; padding: 8px 10px; border-left: 3px solid var(--warn); border-radius: 6px; background: var(--panel-2); color: var(--warn); font-size: 12px; }
   .stage { grid-area: stage; position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   .ws-panel { grid-area: panel; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; padding-right: 2px; }
   .ws-panel > section { flex: none; }
@@ -1000,6 +1012,7 @@
     <div class="ptabs" id="creationTabs" role="tablist" aria-label="Panneau CRÉATION">
       <button role="tab" data-ctab="look">Look</button>
       <button role="tab" data-ctab="figures">Figures</button>
+      <button role="tab" data-ctab="media">Médiathèque</button>
     </div>
     <section data-cpanel="look">
       <h2>Contenu</h2>
@@ -1014,6 +1027,11 @@
       <div id="wavePanel" class="hint">Une onde qui défile ; avec la musique, son amplitude suit le volume.</div>
       <div id="evoPanel" class="hint" hidden></div>
       <div id="figNote" class="hint" hidden></div>
+      <div id="ildaPanel" hidden>
+        <div id="ildaNote" class="hint"></div>
+        <label for="ildaFps">Cadence (images par seconde)</label>
+        <input type="number" id="ildaFps" min="1" max="100" step="1" value="25">
+      </div>
       <div id="genPanel">
         <label>Effet</label>
         <select id="gen"></select>
@@ -1126,7 +1144,42 @@
       <div class="hint">Calé sur le tempo, pour tous les looks. Maintenir <b>S</b> (Alt+S en LIVE) : strobe 1/4 tant que la touche est enfoncée.
         Un strobe plus rapide que 4 éclairs/s est coupé par le limiteur de sécurité après 5 s.</div>
     </section>
-    <div class="hint soon" data-cpanel="look">À venir ici : éditeur de cues évolutifs, médiathèque ILDA. (Import SVG / image : onglet Figures, « Importer… ».)</div>
+    <div class="hint soon" data-cpanel="look">À venir ici : éditeur de cues évolutifs. (Import SVG / image : onglet Figures, « Importer… » ; fichiers ILDA : onglet Médiathèque.)</div>
+
+    <!-- Médiathèque (T-011) : fichiers ILDA importés, export pour la carte SD du ShowNET -->
+    <section data-cpanel="media" id="ildaMedia" hidden>
+      <h2>Médiathèque ILDA</h2>
+      <div class="ilda-rights" id="ildaRights" role="note"><b>N'importez que des fichiers dont vous avez les droits</b> :
+        vos propres créations, ou du contenu acheté avec une licence qui l'autorise. Les fichiers restent sur ce Mac
+        (dossier <code>media/ilda</code> des données) et ne sont jamais copiés dans un projet.</div>
+      <div id="ildaDrop" tabindex="0">
+        <div>Glissez un fichier <b>.ild</b> ici, ou choisissez-le :</div>
+        <input type="file" id="ildaFile" accept=".ild">
+      </div>
+      <div id="ildaMsg" class="hint" role="status"></div>
+      <label>Fichiers</label>
+      <div id="ildaLib"><div class="hint">Aucun fichier ILDA importé.</div></div>
+      <div class="hint">Chaque fichier est aussi un cue de la page « ILDA » de la grille. Il est joué tel quel (sans optimiseur),
+        puis passe par toute la chaîne de sécurité : calibration, zones, limiteur de strobe, garde faisceau fixe, plafonds de puissance.
+        Jouer un fichier n'arme jamais le laser.</div>
+
+      <h2 style="margin-top:14px">Exporter pour la carte SD du ShowNET</h2>
+      <div class="hint">Le look en cours, en ILDA format 5, nommé pour la carte SD : <b>001.ild</b> à <b>229.ild</b>
+        (000 et 230 à 255 sont réservés), 8 Mo au plus.</div>
+      <div class="row">
+        <label for="ildaNum">Numéro</label><label for="ildaFrames">Images</label><label for="ildaExpFps">Images/s</label>
+      </div>
+      <div class="row" style="margin-top:2px">
+        <input type="number" id="ildaNum" min="1" max="229" step="1" value="1">
+        <input type="number" id="ildaFrames" min="1" max="3600" step="1" value="60">
+        <input type="number" id="ildaExpFps" min="1" max="100" step="1" value="30">
+      </div>
+      <div class="row"><button id="ildaExport" class="primary">Exporter 001.ild</button></div>
+      <div id="ildaExpMsg" class="hint" role="status"></div>
+      <div class="ilda-rights">Le fichier exporté sort de la chaîne de sécurité du studio : le ShowNET le joue tel quel, sans les zones,
+        le limiteur de strobe ni les plafonds de puissance. Essayez-le d'abord à faible puissance, et gardez l'arrêt d'urgence matériel
+        (clé, interlock) à portée de main.</div>
+    </section>
 
     <!-- Figures (T-296) : propriétés, bibliothèque, animation -->
     <section data-cpanel="figures" id="figProps" hidden>
@@ -1571,6 +1624,12 @@ function showSettings() {
     $('figNote').textContent = `Figure « ${c.name} » : ${c.frames.length} image${c.frames.length > 1 ? 's' : ''}. `
       + 'Ses couleurs viennent de ses tracés ; elle se modifie dans l\'onglet Figures. Taille, rotation et luminosité s\'appliquent par-dessus.';
   }
+  $('ildaPanel').hidden = kind !== 'ilda';
+  if (kind === 'ilda') {
+    $('ildaNote').textContent = `Fichier ILDA « ${s.content.file} », joué tel quel : ses points et ses couleurs. `
+      + 'Il se gère dans l\'onglet Médiathèque. Taille, rotation et luminosité s\'appliquent par-dessus.';
+    setVal('ildaFps', s.content.fps);
+  }
   if (kind === 'evolving') {
     const c = s.content;
     $('evoPanel').textContent = `Cue évolutif : ${c.keys.length} clé${c.keys.length > 1 ? 's' : ''} sur ${c.length_beats} temps`
@@ -1646,6 +1705,7 @@ const LOOK_EDITS = {
   aFlash: v => s => { s.audio.flash = v / 100; },
   aColor: v => s => { s.audio.color_on_beat = v; },
   text: v => s => { if (s.content.kind === 'text') s.content.text = v; },
+  ildaFps: v => s => { if (s.content.kind === 'ilda' && +v > 0) s.content.fps = Math.min(100, Math.max(1, +v)); },
   rGate: v => s => { s.gate = v; },
   rGateLen: v => s => { s.gate_beats = +v; },
   rDecay: v => s => { s.gate_decay = v; },
@@ -5300,7 +5360,7 @@ const figFrame = () => fe.fig.frames[fe.frame];
 const figStrokes = () => figFrame().strokes;
 
 function setCreationTab(name) {
-  if (name !== 'figures') name = 'look';
+  if (name !== 'figures' && name !== 'media') name = 'look';
   document.querySelectorAll('#creationTabs [data-ctab]').forEach(b => {
     b.classList.toggle('active', b.dataset.ctab === name);
     b.setAttribute('aria-selected', String(b.dataset.ctab === name));
@@ -5314,6 +5374,7 @@ function syncFigView() {
   const on = activeWs === 'creation' && $('workspace').dataset.ctab === 'figures';
   $('figEditor').hidden = !on;
   if (on) { loadFigLib(); figRender(true); }
+  if (activeWs === 'creation' && $('workspace').dataset.ctab === 'media') loadIldaLib();
 }
 document.querySelectorAll('#creationTabs [data-ctab]').forEach(b => b.onclick = () => setCreationTab(b.dataset.ctab));
 
@@ -5925,6 +5986,91 @@ document.addEventListener('keydown', e => {
   else if (mod && !e.altKey && k === 'y') { e.preventDefault(); figRedo(); }
   else if (!mod && e.key === 'Delete') { e.preventDefault(); deleteSelected(); }
 });
+
+// ---------- CRÉATION › Médiathèque: ILDA files (T-011) ----------
+// The user's own .ild files: imported (parsed by the studio first, a
+// damaged file is refused), listed, played as cues of the « ILDA » page
+// through the normal look path, deleted. And the look on show exported as
+// ILDA format 5 for the ShowNET SD card. Nothing here arms the laser.
+const ilda = { files: [], maxBytes: 64 * 1024 * 1024, timer: null };
+function ildaMsg(text, err = false) { $('ildaMsg').textContent = text; $('ildaMsg').classList.toggle('err', err); }
+function ildaExpMsg(text, err = false) { $('ildaExpMsg').textContent = text; $('ildaExpMsg').classList.toggle('err', err); }
+const kib = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} Ko` : `${(n / 1024 / 1024).toFixed(1)} Mo`;
+async function loadIldaLib() {
+  let r;
+  try { r = await (await fetch('/api/media/ilda', { cache: 'no-store' })).json(); } catch { return; }
+  ilda.files = r.files; ilda.maxBytes = r.max_bytes;
+  clearTimeout(ilda.timer);
+  // Read on its own thread at start-up: look again until it is done.
+  if (r.loading) ilda.timer = setTimeout(loadIldaLib, 1000);
+  const box = $('ildaLib');
+  box.innerHTML = '';
+  if (!r.files.length) {
+    box.innerHTML = `<div class="hint">${r.loading ? 'Chargement de la médiathèque…' : 'Aucun fichier ILDA importé.'}</div>`;
+    return;
+  }
+  for (const f of r.files) {
+    const row = document.createElement('div'); row.className = 'ildaitem'; row.dataset.file = f.file;
+    const n = document.createElement('span'); n.className = 'n';
+    n.textContent = f.file + ' ';
+    const meta = document.createElement('small');
+    meta.textContent = `· ${f.frames} image${f.frames > 1 ? 's' : ''} · ${f.points} points · ${kib(f.size)}`;
+    n.appendChild(meta); n.title = f.file;
+    const play = document.createElement('button'); play.className = 'play'; play.textContent = 'Jouer';
+    play.title = 'Jouer comme un cue (page ILDA) ; n\'arme pas le laser';
+    play.onclick = async () => {
+      if (await post('/api/presets/play', { id: f.id })) { ildaMsg(`« ${f.file} » joué (cue de la page ILDA).`); refreshLook(); }
+      else ildaMsg(`Impossible de jouer « ${f.file} ».`, true);
+    };
+    const del = document.createElement('button'); del.className = 'del'; del.textContent = '×';
+    del.title = `Supprimer « ${f.file} » de la médiathèque`;
+    del.onclick = async () => {
+      if (!confirm(`Supprimer le fichier « ${f.file} » de la médiathèque ?`)) return;
+      if (await post('/api/media/ilda/delete', { name: f.file })) { ildaMsg(`« ${f.file} » supprimé.`); await loadIldaLib(); await loadPresets(); }
+    };
+    row.append(n, play, del); box.appendChild(row);
+  }
+}
+async function ildaImport(file) {
+  if (!file) return;
+  if (!/\.ild$/i.test(file.name)) { ildaMsg('Fichier .ild attendu.', true); return; }
+  if (file.size > ilda.maxBytes) { ildaMsg(`Fichier trop gros : ${ilda.maxBytes / 1024 / 1024} Mo au plus.`, true); return; }
+  ildaMsg(`Lecture de « ${file.name} »…`);
+  let r, body;
+  try {
+    r = await fetch('/api/media/ilda?name=' + encodeURIComponent(file.name), { method: 'POST', body: file });
+    body = r.ok ? await r.json() : await r.text();
+  } catch { ildaMsg('Le studio ne répond pas.', true); return; }
+  if (!r.ok) { ildaMsg('Import impossible : ' + (body || r.status), true); return; }
+  ildaMsg(body.existing ? `« ${body.file} » est déjà dans la médiathèque.`
+    : `« ${body.file} » importé : ${body.frames} image${body.frames > 1 ? 's' : ''}, ${body.points} points (cue de la page ILDA).`);
+  $('ildaFile').value = '';
+  await loadIldaLib(); await loadPresets();
+}
+$('ildaFile').onchange = () => ildaImport($('ildaFile').files[0]);
+{
+  const drop = $('ildaDrop');
+  ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); ildaImport(e.dataTransfer?.files?.[0]); });
+}
+const ildaSdName = () => String(Math.trunc(+$('ildaNum').value) || 0).padStart(3, '0') + '.ild';
+function showIldaSdName() { $('ildaExport').textContent = `Exporter ${ildaSdName()}`; }
+$('ildaNum').addEventListener('input', showIldaSdName);
+$('ildaExport').onclick = async () => {
+  const p = new URLSearchParams({ number: $('ildaNum').value, frames: $('ildaFrames').value, fps: $('ildaExpFps').value });
+  ildaExpMsg('Export en cours…');
+  let r;
+  try { r = await fetch('/api/media/ilda/export?' + p, { cache: 'no-store' }); } catch { ildaExpMsg('Le studio ne répond pas.', true); return; }
+  if (!r.ok) { ildaExpMsg('Export impossible : ' + await r.text(), true); return; }
+  const blob = await r.blob(), name = ildaSdName();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  ildaExpMsg(`${name} exporté (${kib(blob.size)}). À copier sur la carte SD du ShowNET.`);
+};
+showIldaSdName();
 
 setFigTool('line');
 showFigProps();

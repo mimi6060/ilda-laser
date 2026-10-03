@@ -106,6 +106,10 @@ fn may_decode(method: &Method, url: &str) -> bool {
             | (Method::Get, "/api/timeline/waveform")
             | (Method::Post, "/api/timeline/audio")
             | (Method::Post, "/api/figures/import")
+            // ILDA import parses up to 64 MB; an export renders and encodes
+            // up to `MAX_EXPORT_FRAMES` images (T-011).
+            | (Method::Post, "/api/media/ilda")
+            | (Method::Get, "/api/media/ilda/export")
     )
 }
 
@@ -836,6 +840,34 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             json_response(json!({ "files": media.list(), "extensions": crate::audio::media::EXTENSIONS }))
         }
         (Method::Post, "/api/media/audio") => import_song(request, shared),
+        // ILDA media library (T-011): list, import (raw file in the body),
+        // delete, and export of a look as format 5 for the ShowNET SD card.
+        (Method::Get, "/api/media/ilda") => {
+            let ilda = Arc::clone(&shared.lock().unwrap().ilda);
+            json_response(json!({
+                "files": ilda.list(),
+                "loading": ilda.loading(),
+                "max_bytes": crate::ilda::MAX_READ_BYTES,
+                "default_fps": crate::ilda_library::DEFAULT_FPS,
+                "max_export_frames": crate::ilda_library::MAX_EXPORT_FRAMES,
+                "shownet_max_bytes": crate::ilda::SHOWNET_MAX_FILE_BYTES,
+            }))
+        }
+        (Method::Post, "/api/media/ilda") => import_ilda(request, shared),
+        (Method::Post, "/api/media/ilda/delete") => match body::<NameRequest>(request) {
+            Ok(req) => {
+                let ilda = Arc::clone(&shared.lock().unwrap().ilda);
+                match ilda.remove(&req.name) {
+                    Ok(()) => {
+                        crate::ilda_library::refresh(&mut shared.lock().unwrap());
+                        ok()
+                    }
+                    Err(e) => text(404, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/media/ilda/export") => export_ilda(request.url(), shared),
         (Method::Get, "/api/timeline/waveform") => waveform(request.url(), shared),
         (Method::Post, "/api/timeline/audio") => match body::<SongPatch>(request) {
             Ok(patch) => attach_song(patch, shared),
@@ -863,7 +895,11 @@ fn cue_thumbnails(presets: &[(String, Settings)]) -> serde_json::Map<String, ser
     presets
         .iter()
         .map(|(id, settings)| {
-            let key = serde_json::to_string(settings).unwrap_or_default();
+            let mut key = serde_json::to_string(settings).unwrap_or_default();
+            // An ILDA cue is drawn again once its file is (re)loaded.
+            if let crate::engine::Content::Ilda { file, .. } = &settings.content {
+                key += &crate::ilda_library::clip(file).map_or(0, |c| c.stamp).to_string();
+            }
             let hex = match cache.get(id) {
                 Some((k, hex)) if *k == key => hex.clone(),
                 _ => {
@@ -895,6 +931,73 @@ fn import_song(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpRespon
     let media = Arc::clone(&shared.lock().unwrap().media);
     match media.import(&name, &bytes) {
         Ok(imported) => json_response(json!(imported)),
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
+/// `POST /api/media/ilda?name=<file name>`, the file's bytes as the body:
+/// parsed first (a damaged file is refused with a clear message and
+/// nothing is written), then stored in `media/ilda/` under a safe name and
+/// shown as a cue of the « ILDA » page. Runs beside the HTTP worker; the
+/// lock is not held while reading, parsing or writing. Never arms.
+fn import_ilda(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    use crate::ilda::MAX_READ_BYTES;
+    use std::io::Read;
+    let too_big = || text(413, &format!("fichier trop gros ({} Mo au plus)", MAX_READ_BYTES >> 20));
+    let Some(name) = query_str(request.url(), "name") else { return text(400, "expected ?name=<nom du fichier>") };
+    if request.body_length().is_some_and(|n| n as u64 > MAX_READ_BYTES) {
+        return too_big();
+    }
+    let mut bytes = Vec::new();
+    if let Err(e) = request.as_reader().take(MAX_READ_BYTES + 1).read_to_end(&mut bytes) {
+        return text(400, &format!("unreadable body: {e}"));
+    }
+    if bytes.len() as u64 > MAX_READ_BYTES {
+        return too_big();
+    }
+    let ilda = Arc::clone(&shared.lock().unwrap().ilda);
+    match ilda.import(&name, &bytes) {
+        Ok(imported) => {
+            crate::ilda_library::refresh(&mut shared.lock().unwrap());
+            json_response(json!(imported))
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
+/// `GET /api/media/ilda/export?number=1..229&frames=&fps=[&id=<cue>]`:
+/// the look on show (or that cue) as an ILDA format 5 download named for
+/// the ShowNET SD card (`001.ild`-`229.ild`). The file leaves the studio's
+/// safety stage behind: the page says so.
+fn export_ilda(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    // Missing: the default; present but not a number: refused (NaN).
+    let num = |k: &str, default: f64| query_str(url, k).map_or(default, |v| v.trim().parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(f64::NAN));
+    let number = num("number", 1.0);
+    let name = match crate::ilda::shownet_sd_name(if number >= 0.0 && number.fract() == 0.0 { number as u32 } else { u32::MAX }) {
+        Ok(n) => n,
+        Err(e) => return text(400, &format!("{e:#}")),
+    };
+    let frames = num("frames", 60.0);
+    let fps = num("fps", 30.0) as f32;
+    let (settings, bpm) = {
+        let s = shared.lock().unwrap();
+        let look = match query_str(url, "id").filter(|id| !id.is_empty()) {
+            Some(id) => match s.presets.iter().find(|p| p.id == id) {
+                Some(p) => p.settings.clone(),
+                None => return text(404, "cue introuvable"),
+            },
+            None => s.settings.clone(),
+        };
+        (look, s.tempo.bpm)
+    };
+    let frames = if frames >= 1.0 && frames.fract() == 0.0 { frames as usize } else { 0 };
+    match crate::ilda_library::export_look(&settings, frames, fps, bpm) {
+        Ok(bytes) => {
+            log::info!("Look exporté en ILDA format 5 : {name} ({frames} images, {} Ko)", bytes.len().div_ceil(1024));
+            let disposition = format!("attachment; filename=\"{name}\"");
+            let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+            with_type(Response::from_data(bytes), "application/octet-stream").with_header(header)
+        }
         Err(e) => text(400, &format!("{e:#}")),
     }
 }
@@ -2297,6 +2400,10 @@ mod tests {
         assert!(may_decode(&Method::Post, "/api/media/audio?name=a.mp3"));
         assert!(may_decode(&Method::Get, "/api/timeline/waveform?from=0&to=1"));
         assert!(may_decode(&Method::Post, "/api/timeline/audio"));
+        assert!(may_decode(&Method::Post, "/api/media/ilda?name=a.ild"));
+        assert!(may_decode(&Method::Get, "/api/media/ilda/export?number=1"));
+        assert!(!may_decode(&Method::Get, "/api/media/ilda"));
+        assert!(!may_decode(&Method::Post, "/api/media/ilda/delete"));
         for (m, p) in [(Method::Get, "/api/media/audio"), (Method::Post, "/api/heartbeat"), (Method::Post, "/api/arm"), (Method::Get, "/api/state"), (Method::Post, "/api/timeline/play")] {
             assert!(!may_decode(&m, p), "{p}");
         }
@@ -2438,6 +2545,73 @@ mod tests {
         stream.read_to_string(&mut raw).unwrap();
         let status = raw.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
         (status, raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    /// T-011: an ILDA file generated by our own writer is imported, shows
+    /// up as a cue, plays through the look path without arming, exports
+    /// back as a valid format 5 file and is deleted.
+    #[test]
+    fn ilda_files_are_imported_played_exported_and_deleted_without_arming() {
+        use crate::ilda::{self, IldaFrame};
+        use crate::patterns::Point;
+        let t = TestServer::start(false);
+        let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        let dir = t.shared.lock().unwrap().ilda.dir().to_path_buf();
+        let frames: Vec<IldaFrame> = (0..3)
+            .map(|i| IldaFrame::new("t", vec![Point::blanked(0.0, 0.0), Point::lit(0.1 * i as f32, 0.5, 0.0, 1.0, 0.0)]))
+            .collect();
+        let file = ilda::write_format5(&frames).unwrap();
+
+        // Damaged, empty, wrong extension, no name: refused, nothing stored.
+        let (status, body) = http_bytes(t.addr, "/api/media/ilda?name=webtest%20abime.ild", b"ILDA\0\0\0\x05abc");
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("ILDA"), "{body}");
+        assert_eq!(http_bytes(t.addr, "/api/media/ilda?name=webtest.ild", b"").0, 400);
+        assert_eq!(http_bytes(t.addr, "/api/media/ilda?name=webtest.txt", &file).0, 400);
+        assert_eq!(http_bytes(t.addr, "/api/media/ilda", &file).0, 400);
+        assert!(json(&t.request("GET", "/api/media/ilda", "").1)["files"].as_array().unwrap().is_empty());
+
+        // A path in the name: only the file name is kept, inside media/ilda/.
+        let (status, body) = http_bytes(t.addr, "/api/media/ilda?name=..%2F..%2Fwebtest%20logo.ild", &file);
+        assert_eq!(status, 200, "{body}");
+        let got = json(&body);
+        assert_eq!((got["file"].as_str(), got["frames"].as_u64(), got["existing"].as_bool()), (Some("webtest logo.ild"), Some(3), Some(false)));
+        assert!(dir.join("webtest logo.ild").is_file());
+        let list = json(&t.request("GET", "/api/media/ilda", "").1);
+        assert_eq!(list["files"][0]["id"], "ilda:webtest logo.ild");
+        let presets = json(&t.request("GET", "/api/presets", "").1);
+        assert!(presets["categories"].as_array().unwrap().iter().any(|c| c == "ILDA"));
+        let cue = presets["presets"].as_array().unwrap().iter().find(|p| p["id"] == "ilda:webtest logo.ild").cloned().unwrap();
+        assert_eq!((cue["name"].as_str(), cue["category"].as_str()), (Some("webtest logo"), Some("ILDA")));
+
+        // Played as a cue: the look path, never armed.
+        assert_eq!(t.request("POST", "/api/presets/play", r#"{"id":"ilda:webtest logo.ild"}"#).0, 200);
+        let state = json(&t.request("GET", "/api/state", "").1);
+        assert_eq!(state["settings"]["content"], json!({ "kind": "ilda", "file": "webtest logo.ild", "fps": 25.0 }));
+        assert_eq!(arm_status(&t)["armed"], false);
+
+        // Export: the look on show, named for the SD card, read back by T-001.
+        let (head, bytes) = get_bytes(t.addr, "/api/media/ilda/export?number=7&frames=5&fps=25");
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("filename=\"007.ild\""), "{head}");
+        let back = ilda::read(&bytes).unwrap();
+        assert_eq!(back.len(), 5);
+        assert!(back.iter().all(|f| f.points.iter().any(|p| p.is_lit())));
+        let (_, bytes) = get_bytes(t.addr, "/api/media/ilda/export?number=229&frames=2&fps=10&id=tunnels-001");
+        assert_eq!(ilda::read(&bytes).unwrap().len(), 2);
+        for bad in ["number=0", "number=230", "number=1.5", "number=x", "frames=0", "frames=99999", "fps=0", "id=nope"] {
+            let (head, _) = get_bytes(t.addr, &format!("/api/media/ilda/export?{bad}"));
+            assert!(head.starts_with("HTTP/1.1 400") || head.starts_with("HTTP/1.1 404"), "{bad}: {head}");
+        }
+
+        // Deleted: gone from the folder, the list and the cue page.
+        assert_eq!(t.request("POST", "/api/media/ilda/delete", r#"{"name":"../x.ild"}"#).0, 404);
+        assert_eq!(t.request("POST", "/api/media/ilda/delete", r#"{"name":"webtest logo.ild"}"#).0, 200);
+        assert!(!dir.join("webtest logo.ild").exists());
+        let presets = json(&t.request("GET", "/api/presets", "").1);
+        assert!(!presets["presets"].as_array().unwrap().iter().any(|p| p["id"] == "ilda:webtest logo.ild"));
+        assert_eq!(arm_status(&t)["armed"], false);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
     }
 
     #[test]

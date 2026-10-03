@@ -17,10 +17,8 @@
 //! hook. Z is dropped on import: the studio draws in 2D.
 //!
 //! Nothing here touches the engine or an HTTP worker: big files are parsed
-//! on their own thread with `spawn_read` (wired to the UI by T-011).
-
-// Not wired to the UI yet (T-011): only the tests call most of this.
-#![cfg_attr(not(test), allow(dead_code))]
+//! on their own thread - the import request's (`web.rs`), the library
+//! loader's (`ilda_library.rs`, T-011), or one from `spawn_read`.
 
 use crate::patterns::Point;
 use anyhow::{anyhow, bail, Context, Result};
@@ -225,7 +223,9 @@ pub fn read_file(path: &Path) -> Result<Vec<IldaFrame>> {
 }
 
 /// Parse on a background thread so a big file never blocks an HTTP worker
-/// or the engine; the result arrives on the returned channel.
+/// or the engine; the result arrives on the returned channel. (The
+/// library's callers already run on their own thread; kept for others.)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn spawn_read(data: Vec<u8>) -> Result<mpsc::Receiver<Result<Vec<IldaFrame>>>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
