@@ -281,7 +281,7 @@ pub struct LfoStore {
 }
 
 impl LfoStore {
-    /// A missing or unreadable file starts empty; entries that aren't valid
+    /// A missing or damaged file (quarantined, T-402) starts empty; entries that aren't valid
     /// any more (unknown target) are dropped.
     pub fn load_or_create(path: PathBuf, reg: &ControlRegistry) -> Self {
         let list: Vec<Modulator> = crate::load_json(&path);
@@ -313,7 +313,7 @@ impl LfoStore {
         validate(&list, reg)?;
         let list: Vec<Modulator> = list.into_iter().map(Modulator::sanitized).collect();
         let json = serde_json::to_string_pretty(&list).context("failed to serialize modulators")?;
-        std::fs::write(&self.path, json).with_context(|| format!("failed to write {}", self.path.display()))?;
+        crate::datafile::replace(&self.path, json.as_bytes()).with_context(|| format!("failed to write {}", self.path.display()))?;
         self.list = list;
         Ok(())
     }
@@ -538,5 +538,15 @@ mod tests {
         let json = serde_json::to_value(Modulator::default()).unwrap();
         assert_eq!(json["rate"], serde_json::json!({ "beats": 4.0 }));
         assert_eq!(json["wave"], "sine");
+    }
+
+    #[test]
+    fn a_damaged_file_is_quarantined_and_never_overwritten() {
+        let reg = ControlRegistry::build(&crate::presets::catalog());
+        let (dir, path) = crate::datafile::tests::with_damaged("lfos", "lfos.json");
+        let mut store = LfoStore::load_or_create(path, &reg);
+        assert!(store.list().is_empty());
+        store.set(Vec::new(), &reg).unwrap();
+        crate::datafile::tests::check_kept(&dir, "lfos.json", false);
     }
 }

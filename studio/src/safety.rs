@@ -91,6 +91,15 @@ impl Default for SafetySettings {
     }
 }
 
+impl SafetySettings {
+    /// What a damaged `safety.json` falls back to (T-402): the defaults
+    /// with the static beam guard on its strict profile everywhere. Never
+    /// looser than the defaults in any field.
+    pub fn strictest() -> Self {
+        Self { dwell: DwellGuard { profile: crate::dwell::DwellProfile::Strict, ..DwellGuard::default() }, ..Self::default() }
+    }
+}
+
 /// What `safety.json` and `POST /api/safety` may contain: the settings,
 /// plus T-101's `beam_floor_y` (the horizon height) from older files.
 #[derive(Deserialize)]
@@ -312,21 +321,16 @@ pub struct SafetyStore {
 }
 
 impl SafetyStore {
-    /// A missing file gives the safe defaults. An unreadable one also does,
-    /// but it is kept aside as `safety.json.bad` and the error is reported,
-    /// so the operator sees that their zones were not loaded.
+    /// A missing file gives the safe defaults. A damaged one is moved to
+    /// the quarantine folder (T-402), the *strictest* settings are used
+    /// (`SafetySettings::strictest`) and the error is reported, so the
+    /// operator sees that their zones were not loaded; arming waits for
+    /// their acknowledgement (`data_ack`).
     pub fn load_or_create(path: PathBuf) -> Self {
-        let (settings, load_error) = match std::fs::read_to_string(&path) {
-            Err(_) => (SafetySettings::default(), None),
-            Ok(text) => match serde_json::from_str::<SafetySettings>(&text) {
-                Ok(s) => (s.sanitized(), None),
-                Err(e) => {
-                    let bad = path.with_extension("json.bad");
-                    std::fs::copy(&path, &bad).ok();
-                    log::warn!("unreadable {} ({e}), kept as {}; using safe defaults", path.display(), bad.display());
-                    (SafetySettings::default(), Some(format!("safety.json illisible ({e}) : copie dans {}, réglages par défaut", bad.display())))
-                }
-            },
+        let (settings, load_error) = match crate::datafile::load::<SafetySettings>(&path, &crate::datafile::beside(&path), true) {
+            crate::datafile::Loaded::Missing => (SafetySettings::default(), None),
+            crate::datafile::Loaded::Ok(s) => (s.sanitized(), None),
+            crate::datafile::Loaded::Quarantined(w) => (SafetySettings::strictest(), Some(format!("{} Réglages de sécurité les plus stricts appliqués.", w.message_fr()))),
         };
         Self { path: Some(path), settings, load_error }
     }
@@ -363,7 +367,7 @@ impl SafetyStore {
         }
         if let Some(path) = &self.path {
             let json = serde_json::to_string_pretty(&settings).map_err(|e| SetError::Invalid(e.to_string()))?;
-            std::fs::write(path, json).map_err(|e| SetError::Invalid(format!("enregistrement impossible de {} : {e}", path.display())))?;
+            crate::datafile::replace(path, json.as_bytes()).map_err(|e| SetError::Invalid(format!("enregistrement impossible de {} : {e:#}", path.display())))?;
         }
         if !loosens.is_empty() {
             log::warn!("safety settings loosened by the operator: {}", loosens.join("; "));
@@ -889,12 +893,21 @@ mod tests {
         assert_eq!(back.get().zones.len(), 1);
         assert_eq!(back.get(), store.get());
         assert!(back.load_error().is_none());
-        // A broken file: safe defaults, kept aside, and reported.
+        std::fs::remove_dir_all(dir.join(crate::datafile::QUARANTINE)).ok();
+        // A broken file: the strictest settings, moved to the quarantine
+        // folder (T-402), reported, and never written over.
         std::fs::write(&path, "{ not json").unwrap();
-        let broken = SafetyStore::load_or_create(path.clone());
-        assert_eq!(broken.get(), SafetySettings::default());
-        assert!(broken.load_error().unwrap().contains("illisible"));
-        assert_eq!(std::fs::read_to_string(dir.join("safety.json.bad")).unwrap(), "{ not json");
+        let mut broken = SafetyStore::load_or_create(path.clone());
+        assert_eq!(broken.get(), SafetySettings::strictest());
+        assert!(broken.get().loosenings(&SafetySettings::default()).len() == 1, "strictest is stricter than the defaults");
+        assert!(SafetySettings::default().loosenings(&broken.get()).is_empty(), "and never looser");
+        assert!(broken.load_error().unwrap().contains("Fichier illisible : safety.json"));
+        let moved = crate::datafile::tests::quarantined(&dir);
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{ not json");
+        broken.set(SafetySettings { strobe_max_hz: 3.0, ..SafetySettings::strictest() }, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{ not json");
+        let w = crate::datafile::take_pending(&dir.join(crate::datafile::QUARANTINE));
+        assert!(w.len() == 1 && w[0].safety && w[0].file == "safety.json");
         std::fs::remove_dir_all(dir).ok();
     }
 

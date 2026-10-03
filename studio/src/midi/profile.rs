@@ -200,17 +200,21 @@ impl ProfileStore {
         ProfileStore { dir: None, builtin, user: BTreeMap::new(), devices: DevicesFile::default(), errors: Vec::new() }
     }
 
-    /// Loads user profiles and `devices.json` from `<data-dir>/midi`.
+    /// Loads user profiles and `devices.json` from `<data-dir>/midi`. A
+    /// damaged file is moved to `<data-dir>/quarantine` (T-402): for
+    /// `devices.json`, which holds the MIDI safety options, the strictest
+    /// options are used (no MIDI arming, blackout on disconnect).
     pub fn load(dir: PathBuf) -> Self {
+        use crate::datafile::{load, set_aside, Loaded};
         let mut store = ProfileStore::in_memory();
-        let devices_path = dir.join("devices.json");
-        match std::fs::read_to_string(&devices_path) {
-            Ok(json) => match serde_json::from_str(&json) {
-                Ok(devices) => store.devices = devices,
-                Err(e) => store.errors.push(format!("devices.json illisible ({e}) : réglages MIDI par défaut")),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => store.errors.push(format!("devices.json illisible : {e}")),
+        let quarantine = dir.parent().unwrap_or(Path::new(".")).join(crate::datafile::QUARANTINE);
+        match load::<DevicesFile>(&dir.join("devices.json"), &quarantine, true) {
+            Loaded::Ok(devices) => store.devices = devices,
+            Loaded::Missing => {}
+            Loaded::Quarantined(w) => {
+                store.devices.safety = MidiSafety::strictest();
+                store.errors.push(format!("{} Options de sécurité MIDI les plus strictes.", w.message_fr()));
+            }
         }
         if let Ok(entries) = std::fs::read_dir(dir.join("profiles")) {
             let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
@@ -222,11 +226,20 @@ impl ProfileStore {
                 } else if store.is_builtin(&slug) {
                     store.errors.push(format!("profil « {slug} » ignoré : nom réservé à un profil intégré"));
                 } else {
-                    match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|j| Profile::parse(&j)) {
-                        Ok(p) => {
-                            store.user.insert(slug, p);
-                        }
-                        Err(e) => store.errors.push(format!("profil « {slug} » illisible : {e}")),
+                    // Unusable profiles are moved aside: a project open
+                    // would otherwise delete the file (it is not in the store).
+                    match load::<serde_json::Value>(&path, &quarantine, false) {
+                        Loaded::Ok(v) => match Profile::parse(&v.to_string()) {
+                            Ok(p) => {
+                                store.user.insert(slug, p);
+                            }
+                            Err(e) => {
+                                let w = set_aside(&path, &quarantine, &format!("profil invalide : {e}"), false);
+                                store.errors.push(format!("profil « {slug} » illisible : {e} — {}", w.message_fr()));
+                            }
+                        },
+                        Loaded::Missing => {}
+                        Loaded::Quarantined(w) => store.errors.push(format!("profil « {slug} » illisible : {}", w.message_fr())),
                     }
                 }
             }
@@ -395,7 +408,7 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("impossible de créer {} : {e}", parent.display()))?;
     }
-    std::fs::write(path, content).map_err(|e| format!("impossible d'écrire {} : {e}", path.display()))
+    crate::datafile::replace(path, content.as_bytes()).map_err(|e| format!("impossible d'écrire {} : {e:#}", path.display()))
 }
 
 /// A slug from a free name: « Mon nanoKONTROL 2 » → `mon-nanokontrol-2`.
@@ -552,7 +565,7 @@ mod tests {
 
     #[test]
     fn corrupt_files_give_readable_errors() {
-        let dir = temp_dir("corrupt");
+        let dir = temp_dir("corrupt").join("midi");
         std::fs::create_dir_all(dir.join("profiles")).unwrap();
         std::fs::write(dir.join("profiles/cassé.json"), "{}").unwrap();
         std::fs::write(dir.join("profiles/bad.json"), "{ oops").unwrap();
@@ -566,10 +579,24 @@ mod tests {
         assert!(choice.error.is_some());
         assert_eq!(store.get(GENERIC).unwrap().driver, Driver::Generic, "built-in not shadowed");
 
-        std::fs::write(dir.join("devices.json"), "[1,2").unwrap();
+        // The unreadable profile was moved aside (T-402), not left to be
+        // deleted by a project open.
+        assert!(!dir.join("profiles/bad.json").exists());
+
+        std::fs::write(dir.join("devices.json"), r#"{"safety":{"allow_arm":true}"#).unwrap();
         let store = ProfileStore::load(dir.clone());
-        assert!(store.errors.iter().any(|e| e.starts_with("devices.json")));
+        assert!(store.errors.iter().any(|e| e.contains("midi/devices.json")), "{:?}", store.errors);
+        assert_eq!(store.devices.safety, MidiSafety::strictest(), "strictest, never looser");
+        assert!(!dir.join("devices.json").exists());
+        let q = dir.parent().unwrap().join(crate::datafile::QUARANTINE);
+        let moved: Vec<String> = std::fs::read_dir(&q).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(moved.iter().any(|f| f.starts_with("midi-devices-")), "{moved:?}");
+        assert!(moved.iter().any(|f| f.starts_with("midi-profiles-bad-")), "{moved:?}");
+        let warnings = crate::datafile::take_pending(&q);
+        assert!(warnings.iter().any(|w| w.file == "midi/devices.json" && w.safety));
+        assert!(warnings.iter().any(|w| w.file == "midi/profiles/bad.json" && !w.safety));
         let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(q.parent().unwrap());
     }
 
     #[test]

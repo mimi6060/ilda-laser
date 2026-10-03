@@ -563,4 +563,14 @@ mod tests {
         let old: CueDeck = serde_json::from_str("{}").unwrap();
         assert_eq!((old.click_mode, old.multi, old.max_active), (ClickMode::Toggle, false, 4));
     }
+
+    #[test]
+    fn a_damaged_grid_is_quarantined_and_never_overwritten() {
+        let (dir, path) = crate::datafile::tests::with_damaged("grid", "grid.json");
+        let deck = CueDeck::load(path.clone());
+        assert_eq!(deck.max_active, CueDeck::default().max_active);
+        deck.save();
+        assert!(path.exists());
+        crate::datafile::tests::check_kept(&dir, "grid.json", false);
+    }
 }

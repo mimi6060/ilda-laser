@@ -5,7 +5,6 @@
 use crate::engine::Settings;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -21,13 +20,11 @@ pub struct SceneStore {
 }
 
 impl SceneStore {
-    /// A missing or unreadable file starts an empty store; it's overwritten
-    /// on the next save.
+    /// A missing file starts an empty store. A damaged one also does, but
+    /// it is moved to the quarantine folder first and reported, so the next
+    /// save can't destroy it (datafile.rs, T-402).
     pub fn load_or_create(path: PathBuf) -> Self {
-        let scenes = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let scenes = crate::load_json(&path);
         Self { path, scenes }
     }
 
@@ -65,13 +62,14 @@ impl SceneStore {
 
     fn save(&self) -> Result<()> {
         let json = serde_json::to_string_pretty(&self.scenes).context("failed to serialize scenes")?;
-        fs::write(&self.path, json).with_context(|| format!("failed to write {}", self.path.display()))
+        crate::datafile::replace(&self.path, json.as_bytes()).with_context(|| format!("failed to write {}", self.path.display()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn temp_path(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("laser-studio-{tag}-{}", std::process::id()));
@@ -121,5 +119,15 @@ mod tests {
         store.remove("Intro").unwrap();
         assert!(store.list().is_empty());
         fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_damaged_file_is_quarantined_and_never_overwritten() {
+        let (dir, path) = crate::datafile::tests::with_damaged("scenes", "scenes.json");
+        let mut store = SceneStore::load_or_create(path.clone());
+        assert!(store.list().is_empty());
+        store.upsert(Scene { name: "Nouvelle".into(), settings: Settings::default(), duration_secs: 5.0 }).unwrap();
+        assert_eq!(SceneStore::load_or_create(path).list().len(), 1);
+        crate::datafile::tests::check_kept(&dir, "scenes.json", false);
     }
 }

@@ -1008,10 +1008,17 @@ impl ShowStore {
         self.list().into_iter().filter_map(|info| self.load(&info.name).ok()).collect()
     }
 
+    /// A damaged file is moved to `<data-dir>/quarantine` (T-402): it
+    /// would otherwise be left out of a saved project and deleted by the
+    /// next project open.
     pub fn load(&self, name: &str) -> Result<Show> {
         let path = self.path(name)?;
-        let json = std::fs::read_to_string(&path).with_context(|| format!("show introuvable : {}", name.trim()))?;
-        let mut show: Show = serde_json::from_str(&json).with_context(|| format!("show illisible : {}", path.display()))?;
+        let quarantine = self.dir.parent().unwrap_or(std::path::Path::new(".")).join(crate::datafile::QUARANTINE);
+        let mut show: Show = match crate::datafile::load(&path, &quarantine, false) {
+            crate::datafile::Loaded::Ok(show) => show,
+            crate::datafile::Loaded::Missing => bail!("show introuvable : {}", name.trim()),
+            crate::datafile::Loaded::Quarantined(w) => bail!("show illisible : {}", w.message_fr()),
+        };
         show.name = name.trim().to_string();
         show.sanitize();
         Ok(show)
@@ -1023,7 +1030,7 @@ impl ShowStore {
         let mut show = show.clone();
         show.name = show.name.trim().to_string();
         show.sanitize();
-        std::fs::write(&path, serde_json::to_string_pretty(&show)?).with_context(|| format!("failed to write {}", path.display()))
+        crate::datafile::replace(&path, serde_json::to_string_pretty(&show)?.as_bytes()).with_context(|| format!("failed to write {}", path.display()))
     }
 
     pub fn list(&self) -> Vec<ShowInfo> {
@@ -1519,5 +1526,15 @@ mod tests {
         assert_eq!(s.tracks.iter().map(|t| t.layer).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(s.tempo_map, vec![TempoPoint::default()]);
         assert!(Show::new_empty("P", TimeBase::Beats).tempo_map.is_empty());
+    }
+
+    #[test]
+    fn a_damaged_show_is_quarantined_and_never_overwritten() {
+        let (dir, path) = crate::datafile::tests::with_damaged("shows", "shows/Mon show.json");
+        let store = ShowStore::new(path.parent().unwrap().to_path_buf());
+        assert!(store.list().is_empty(), "left out, and moved aside");
+        assert!(store.load("Mon show").is_err());
+        store.save(&Show { name: "Mon show".into(), ..Default::default() }).unwrap();
+        crate::datafile::tests::check_kept(&dir, "shows/Mon show.json", false);
     }
 }

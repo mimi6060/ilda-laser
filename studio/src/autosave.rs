@@ -348,7 +348,7 @@ pub fn find_offer(s: &mut Shared) {
             return;
         }
     }
-    let p = match project::read(&newest) {
+    let p = match project::read_in_data_dir(&newest, &s.project.data_dir.clone()) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("autosave {}: {e:#}", newest.display());

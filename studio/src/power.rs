@@ -257,22 +257,16 @@ pub struct OutputStore {
 }
 
 impl OutputStore {
-    /// A missing file (older installs) gives the defaults. An unreadable
-    /// one also does, and is kept aside as `outputs.json.bad` with the
-    /// error reported, so the operator notices their caps were not loaded.
-    /// The defaults are the cautious ones (50 %), never looser.
+    /// A missing file (older installs) gives the defaults. A damaged one
+    /// also does, once moved to the quarantine folder (T-402), with the
+    /// error reported so the operator notices their caps were not loaded;
+    /// arming waits for their acknowledgement (`data_ack`). The defaults
+    /// are the cautious ones (50 %), never looser.
     pub fn load_or_create(path: PathBuf) -> Self {
-        let (file, load_error) = match std::fs::read_to_string(&path) {
-            Err(_) => (OutputsFile::default(), None),
-            Ok(text) => match serde_json::from_str::<OutputsFile>(&text) {
-                Ok(f) => (f, None),
-                Err(e) => {
-                    let bad = path.with_extension("json.bad");
-                    std::fs::copy(&path, &bad).ok();
-                    log::warn!("unreadable {} ({e}), kept as {}; using the default power caps", path.display(), bad.display());
-                    (OutputsFile::default(), Some(format!("outputs.json illisible ({e}) : copie dans {}, plafonds par défaut", bad.display())))
-                }
-            },
+        let (file, load_error) = match crate::datafile::load::<OutputsFile>(&path, &crate::datafile::beside(&path), true) {
+            crate::datafile::Loaded::Missing => (OutputsFile::default(), None),
+            crate::datafile::Loaded::Ok(f) => (f, None),
+            crate::datafile::Loaded::Quarantined(w) => (OutputsFile::default(), Some(format!("{} Plafonds par défaut.", w.message_fr()))),
         };
         let mut store = Self { path: Some(path), file, load_error };
         store.normalise();
@@ -365,7 +359,7 @@ impl OutputStore {
         }
         if let Some(path) = &self.path {
             let json = serde_json::to_string_pretty(&file).map_err(|e| SetError::Invalid(e.to_string()))?;
-            std::fs::write(path, json).map_err(|e| SetError::Invalid(format!("enregistrement impossible de {} : {e}", path.display())))?;
+            crate::datafile::replace(path, json.as_bytes()).map_err(|e| SetError::Invalid(format!("enregistrement impossible de {} : {e:#}", path.display())))?;
         }
         // Every change of a safety limit is logged (T-259 will move this
         // to the safety journal): old and new values.
@@ -535,11 +529,17 @@ mod tests {
         let st = OutputStore::load_or_create(path.clone());
         assert_eq!(st.active_limits(), OutputLimits { max_power: 1.0, max_color: [1.0; 3] });
         assert_eq!(st.active().projector, ProjectorInfo::default());
+        std::fs::remove_dir_all(dir.join(crate::datafile::QUARANTINE)).ok();
         std::fs::write(&path, "{ not json").unwrap();
-        let st = OutputStore::load_or_create(path.clone());
+        let mut st = OutputStore::load_or_create(path.clone());
         assert_eq!(st.active_limits(), OutputLimits::default(), "cautious defaults");
-        assert!(st.load_error().unwrap().contains("outputs.json illisible"));
-        assert!(dir.join("outputs.json.bad").exists());
+        assert!(st.load_error().unwrap().contains("Fichier illisible : outputs.json"));
+        // Moved to the quarantine folder (T-402); a save can't destroy it.
+        let moved = crate::datafile::tests::quarantined(&dir);
+        st.set(MAIN_OUTPUT, Some(OutputLimits { max_power: 0.2, max_color: [1.0; 3] }), None, false, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{ not json");
+        let w = crate::datafile::take_pending(&dir.join(crate::datafile::QUARANTINE));
+        assert!(w.len() == 1 && w[0].safety && w[0].file == "outputs.json");
         std::fs::remove_dir_all(&dir).ok();
     }
 

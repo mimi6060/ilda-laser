@@ -21,6 +21,14 @@ pub struct MidiSafety {
     pub blackout_on_disconnect: bool,
 }
 
+impl MidiSafety {
+    /// What a damaged `devices.json` falls back to (T-402): no arming from
+    /// the controller, blackout if it disconnects.
+    pub fn strictest() -> Self {
+        Self { allow_arm: false, blackout_on_disconnect: true }
+    }
+}
+
 /// How long Shift + the arm button must be held.
 pub const ARM_HOLD: Duration = Duration::from_secs(1);
 /// No arming this long after a controller is plugged in.

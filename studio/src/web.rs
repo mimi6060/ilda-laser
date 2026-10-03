@@ -178,6 +178,25 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         }
         (Method::Get, "/api/state") => state(shared),
         (Method::Get, "/api/frame") => frame(shared),
+        (Method::Get, "/api/data/warnings") => {
+            let mut s = shared.lock().unwrap();
+            s.sync_data_warnings();
+            json_response(data_warnings_view(&s))
+        }
+        // The operator has seen a damaged-file warning (T-402): `{file}` or
+        // `{all: true}`. It restores nothing; it reopens `data_ack` once
+        // every safety file's warning is acknowledged. Never arms.
+        (Method::Post, "/api/data/warnings/ack") => match body::<DataAck>(request) {
+            Ok(DataAck { file, all }) if all || file.is_some() => {
+                let mut s = shared.lock().unwrap();
+                let n = s.ack_data_warnings(if all { None } else { file.as_deref() });
+                let mut v = data_warnings_view(&s);
+                v["acknowledged"] = json!(n);
+                json_response(v)
+            }
+            Ok(_) => text(400, "expected \"file\" or \"all\": true"),
+            Err(e) => e,
+        },
         (Method::Post, "/api/settings") => match body::<Settings>(request) {
             Ok(settings) => {
                 let mut s = shared.lock().unwrap();
@@ -1171,9 +1190,33 @@ struct SaveScene {
     duration_secs: f32,
 }
 
+/// `POST /api/data/warnings/ack`.
+#[derive(Deserialize)]
+struct DataAck {
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    all: bool,
+}
+
+/// Damaged data files (T-402), with their French banner text.
+fn data_warnings_view(s: &Shared) -> serde_json::Value {
+    let list: Vec<serde_json::Value> = s
+        .data_warnings
+        .iter()
+        .map(|w| {
+            let mut v = json!(w);
+            v["message"] = json!(w.message_fr());
+            v
+        })
+        .collect();
+    json!({ "warnings": list, "arm_blocked": !s.gate.interlock_ok(crate::interlock::DATA_ACK) })
+}
+
 fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     let mut s = shared.lock().unwrap();
     let s = &mut *s;
+    s.sync_data_warnings();
     s.gate.sync_estop(&s.estop);
     let arm = s.gate.status(&s.estop);
     json_response(json!({
@@ -1200,6 +1243,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "timeline": s.timeline.state(&s.timeline_clock()),
         "timeline_audio": song_view(s),
         "audio": s.audio_in.view(s.audio, s.audio_at, Instant::now()),
+        "data_warnings": data_warnings_view(s),
     }))
 }
 
@@ -1278,19 +1322,15 @@ fn body<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T, Http
     serde_json::from_str(&raw).map_err(|e| text(400, &format!("invalid JSON: {e}")))
 }
 
+/// `calibration.json`, or the identity. A damaged file is a safety file
+/// (T-402): quarantined, the identity used, and arming waits until the
+/// operator has acknowledged it.
 pub fn load_calibration(path: &Path) -> Calibration {
-    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    crate::datafile::load_or_default(path, &crate::datafile::beside(path), true)
 }
 
 fn save_calibration(path: &Path, cal: &Calibration) {
-    match serde_json::to_string_pretty(cal) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(path, json) {
-                log::warn!("failed to save calibration to {}: {e}", path.display());
-            }
-        }
-        Err(e) => log::warn!("failed to serialize calibration: {e}"),
-    }
+    crate::datafile::save_json(path, cal);
 }
 
 /// Stack of the import thread.
@@ -2186,5 +2226,45 @@ mod tests {
         let (code, _) = t.request("POST", "/api/safety", r#"{"confirm_loosen":true}"#);
         assert_eq!(code, 200);
         assert_eq!(get(&t)["settings"], serde_json::to_value(crate::safety::SafetySettings::default()).unwrap());
+    }
+
+    #[test]
+    fn data_warnings_api_lists_and_acknowledges() {
+        let t = TestServer::start(false);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.data_warnings.push(crate::datafile::DataWarning {
+                file: "calibration.json".into(),
+                moved_to: Some("quarantine/calibration-20261003-141502.json".into()),
+                error: "JSON invalide".into(),
+                at: "2026-10-03T14:15:02Z".into(),
+                safety: true,
+                acknowledged: false,
+            });
+            s.sync_data_warnings();
+        }
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let v = js(&t.request("GET", "/api/data/warnings", "").1);
+        assert_eq!(v["arm_blocked"], true);
+        assert!(v["warnings"][0]["message"].as_str().unwrap().contains("calibration.json"));
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["data_warnings"]["warnings"][0]["file"], "calibration.json");
+        let (code, body) = t.request("POST", "/api/arm", r#"{"on":true,"source":"ui","client_id":"p"}"#);
+        assert_eq!(code, 409);
+        assert!(body.contains("Fichier de sécurité abîmé"), "{body}");
+        assert_eq!(t.request("POST", "/api/data/warnings/ack", "{}").0, 400);
+        let v = js(&t.request("POST", "/api/data/warnings/ack", r#"{"file":"calibration.json"}"#).1);
+        assert_eq!((v["acknowledged"].as_u64(), v["arm_blocked"].as_bool()), (Some(1), Some(false)));
+        assert_eq!(v["warnings"][0]["acknowledged"], true, "still listed");
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui","client_id":"p"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false,"source":"ui"}"#).0, 200);
+    }
+
+    #[test]
+    fn a_damaged_calibration_is_quarantined_and_never_overwritten() {
+        let (dir, path) = crate::datafile::tests::with_damaged("calibration", "calibration.json");
+        assert_eq!(load_calibration(&path), Calibration::default());
+        save_calibration(&path, &Calibration::default());
+        assert!(path.exists());
+        crate::datafile::tests::check_kept(&dir, "calibration.json", true);
     }
 }
