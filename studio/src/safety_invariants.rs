@@ -714,6 +714,14 @@ fn strobe_never_exceeds_the_burst_limit() {
     run_property("strobe_never_exceeds_the_burst_limit", 2, 40, run_strobe_case);
 }
 
+/// T-354: a burst limit (0.52 s) shorter than two allowed periods
+/// (1.13 Hz); the limiter used to wait for a third fast flash before
+/// starting the burst clock, so 0.63 s of fast flashing went out.
+#[test]
+fn strobe_seed_2002967_is_cut_within_the_burst() {
+    run_strobe_case(2002967).unwrap();
+}
+
 // ---------- arming: MIDI and controls ----------
 
 const PORT: &str = "APC40 mkII";

@@ -571,17 +571,20 @@ impl StrobeLimiter {
     /// When the input is flashing faster than one flash per `period`, the
     /// time of the first onset of the longest recent run that is too fast.
     /// A run of k onsets is too fast if it spans less than (k-1) periods,
-    /// minus a little slack for frame timing.
+    /// minus a little slack for frame timing. Two onsets already make a
+    /// run (T-354): the burst clock starts at the first of two flashes too
+    /// close together, so with a burst shorter than about two periods the
+    /// hold fills the dark gap before a third fast flash can go out.
     fn fast_since(&self, t: f64, period: f64) -> Option<f64> {
         let last = *self.onsets.back()?;
         if t - last > period + SLACK_S {
             return None; // stopped (or slowed) since the last flash
         }
         let n = self.onsets.len();
-        (3..=n)
+        (2..=n)
             .rev()
             .map(|k| self.onsets[n - k])
-            .zip((3..=n).rev())
+            .zip((2..=n).rev())
             .find(|&(first, k)| last - first < (k - 1) as f64 * period - SLACK_S)
             .map(|(first, _)| first)
     }
@@ -763,6 +766,32 @@ mod tests {
         let (out, _) = run(strobe(3.0, 0.5), 5.0, &cfg);
         let steady = steady_from(&out, 5.0).expect("held");
         assert!(steady < 2.0, "3 Hz is over a 2 Hz limit, cut after ~1 s: {steady}");
+    }
+
+    #[test]
+    fn a_burst_shorter_than_two_periods_is_cut_before_the_third_flash() {
+        // T-354 (SAFETY_SEED=2002967): limit 1.13 Hz, burst 0.52 s, a gate
+        // flashing every 0.3 s. Two flashes (0 s, 0.3 s) are already a fast
+        // run; the third, at 0.6 s, would make it 0.6 s long, so the dark
+        // gap before it must be filled once the burst reaches 0.52 s (the
+        // held frame lighting up then is the run's last onset, at the limit).
+        let cfg = SafetySettings { strobe_max_hz: 1.13, strobe_burst_s: 0.52, ..Default::default() };
+        let (out, lim) = run(strobe(1.0 / 0.3, 0.25), 9.0, &cfg);
+        let onsets: Vec<f64> = out.windows(2).filter(|p| !p[0].1 && p[1].1).map(|p| p[1].0).collect();
+        assert!(onsets.iter().all(|&t| t <= 0.52 + 1.0 / FPS), "no flash after the burst limit: {onsets:?}");
+        let steady = steady_from(&out, 9.0).expect("held steady");
+        assert!(steady <= 0.52 + 1.0 / FPS, "held from the burst limit on, got {steady}");
+        assert!(lim.status().active);
+    }
+
+    #[test]
+    fn a_single_double_flash_never_engages_the_default_hold() {
+        // Two quick flashes are a (short) fast run, but far from 5 s.
+        let input = |t: f64| t < 0.2 && strobe(10.0, 0.5)(t);
+        let (out, lim) = run(input, 4.0, &SafetySettings::default());
+        assert_eq!(edges(&out, 0.0, 4.0), 1);
+        assert!(out.iter().filter(|(t, _)| *t > 0.2).all(|(_, lit)| !lit));
+        assert!(!lim.status().active && !lim.status().fast);
     }
 
     #[test]
