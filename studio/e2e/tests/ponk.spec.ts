@@ -47,6 +47,9 @@ async function listen(ms: number) {
 const armed = async () => (await studio.state()).armed as boolean;
 
 test.beforeEach(async ({ page }) => {
+  // PONK is a real output (MadMapper drives the ShowNET): arming waits for
+  // the pre-show checklist (T-258), done once for the session.
+  await studio.completeChecklist();
   await studio.post('/api/estop/reset', {});
   await studio.post('/api/arm', { on: false });
   await openUi(page, studio);

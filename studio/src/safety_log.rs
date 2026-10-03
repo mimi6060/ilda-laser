@@ -492,6 +492,12 @@ pub fn describe(e: &SafetyEvent) -> String {
             Some(label) => format!("Mire affichée : {label}"),
             None => "Mire quittée".into(),
         },
+        "checklist" => {
+            let n = d.get("items").and_then(Value::as_array).map_or(0, |a| a.len());
+            format!("Liste de contrôle avant show terminée par {} ({n} élément(s))", str_of(d, "operator"))
+        }
+        "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
+        "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),
         "power_caps" => format!("Plafonds de puissance modifiés ({}){}", str_of(d, "output"), changed()),
         "log_overflow" => format!("{} événement(s) perdu(s) : journal saturé", d.get("lost").and_then(Value::as_u64).unwrap_or(0)),
         other => other.to_string(),

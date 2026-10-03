@@ -58,6 +58,12 @@ export interface StudioOptions {
    * 5583 (a MadMapper on this Mac listens there), never multicast.
    */
   ponkPort?: () => number;
+  /**
+   * T-258: pass the hidden --test-checklist flag: the pre-show checklist
+   * gates arming as with a real output, while the studio stays preview
+   * only. Without it (and without ponkPort) there is no checklist interlock.
+   */
+  testChecklist?: boolean;
   /** T-303: what a DAC scan "finds" (--test-devices; default: nothing). */
   devices?: { kind: string; id: string; name: string }[];
 }
@@ -93,6 +99,7 @@ export class Studio {
     args.push('--test-devices', JSON.stringify(this.opts.devices ?? []));
     if (this.opts.midiTest) args.push('--midi-test');
     if (this.opts.testHooks) args.push('--test-hooks');
+    if (this.opts.testChecklist) args.push('--test-checklist');
     if (this.opts.testHooks && this.opts.decodeTimeoutMs) args.push('--test-decode-timeout-ms', String(this.opts.decodeTimeoutMs));
     const ponkPort = this.opts.ponkPort?.();
     if (ponkPort !== undefined) {
@@ -172,6 +179,20 @@ export class Studio {
   async post(p: string, body: unknown = {}) {
     const r = await fetch(this.url + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return r.status;
+  }
+  /**
+   * T-258: fill in and complete the pre-show checklist through the API, as
+   * an operator would (for specs whose output gates arming on it: PONK,
+   * --test-checklist). Never arms.
+   */
+  async completeChecklist(operator = 'Test e2e') {
+    const c = await this.get<{ complete: boolean; items: { id: string; visible: boolean; done: boolean; needs_value: boolean }[] }>('/api/checklist');
+    if (c.complete) return;
+    if (await this.post('/api/checklist/operator', { name: operator }) !== 200) throw new Error('checklist operator refused');
+    for (const it of c.items.filter(i => i.visible && !i.done)) {
+      if (await this.post('/api/checklist/check', { id: it.id, on: true, value: it.needs_value ? 'E2E' : null }) !== 200) throw new Error(`checklist item ${it.id} refused`);
+    }
+    if (await this.post('/api/checklist/complete') !== 200) throw new Error('checklist not completed');
   }
   state() { return this.get('/api/state'); }
   frame() { return this.get<Frame>('/api/frame'); }

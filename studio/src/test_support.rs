@@ -68,6 +68,8 @@ pub fn shared() -> Shared {
         test_pattern: Default::default(),
         keep_awake: crate::keep_awake::KeepAwakeState::in_memory(),
         data_warnings: Vec::new(),
+        // Pure preview: the checklist never blocks unit tests.
+        checklist: crate::checklist::Checklist::in_memory(false),
         test_hooks: false,
         test_stall_ms: 0,
         // Never a real scan in unit tests.
