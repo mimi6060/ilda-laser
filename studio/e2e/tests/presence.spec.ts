@@ -81,7 +81,10 @@ test('two pages open, one closed: stays armed', async ({ browser }) => {
   expect(await armed()).toBe(true);
   expect((await studio.state()).presence.clients).toBe(1);
   await context.close();
-  await expect.poll(armed, { timeout: 2_500 }).toBe(false);
+  // Headless Chromium doesn't always deliver the « gone » beacon on close,
+  // so this is the 2 s heartbeat timeout plus the worker's check: polled
+  // every 100 ms (the default back-off skipped from 1.85 s to 2.85 s).
+  await expect.poll(armed, { timeout: 3_000, intervals: [100] }).toBe(false);
 });
 
 test('a flash held in a page that dies is released', async ({ browser }) => {

@@ -22,15 +22,22 @@ test('the tempo bar shows the clock\'s BPM and pulses its beat dots', async ({ p
 
 test('Enter taps the tempo', async ({ page }) => {
   await focusPage(page);
-  // Five taps 400 ms apart = 150 BPM. The spacing is the point of the test,
-  // so these waits are intentional.
+  // Five taps 400 ms apart ≈ 150 BPM. The spacing is the point of the test,
+  // so these waits are intentional. Each key's time is noted in the page:
+  // on a loaded machine the keys land later than asked, so the tempo is
+  // checked against the taps as they really happened.
+  await page.evaluate(() => { (window as any).taps = [];
+    window.addEventListener('keydown', e => { if (e.key === 'Enter') (window as any).taps.push(performance.now()); }, true); });
   for (let i = 0; i < 5; i++) {
     if (i) await page.waitForTimeout(400);
     await page.keyboard.press('Enter');
   }
   await expect.poll(async () => (await tempo()).source).toBe('tap');
+  const taps: number[] = await page.evaluate(() => (window as any).taps);
+  const expected = 60_000 / ((taps[taps.length - 1] - taps[0]) / (taps.length - 1));
   const t = await tempo();
-  expect(t.bpm).toBeGreaterThan(140);
+  expect(Math.abs(t.bpm - expected) / expected).toBeLessThan(0.08);
+  expect(t.bpm).toBeGreaterThan(100);
   expect(t.bpm).toBeLessThan(160);
   await expect.poll(async () => +(await page.locator('#bpm').inputValue())).toBeCloseTo(t.bpm, 0);
 });
