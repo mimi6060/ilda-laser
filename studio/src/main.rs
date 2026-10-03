@@ -22,9 +22,11 @@ mod figure_import;
 mod figures;
 mod font;
 mod generators;
+mod instance;
 mod layers;
 mod lfo;
 mod interlock;
+mod keep_awake;
 mod live;
 mod midi;
 mod output;
@@ -119,6 +121,11 @@ struct Cli {
     /// for the watchdog e2e test).
     #[arg(long, hide = true)]
     test_hooks: bool,
+    /// Testing only: a fake sleep blocker, so a test that arms or plays
+    /// never touches the Mac's power settings (T-412). Implied by
+    /// --test-hooks and --test-output.
+    #[arg(long, hide = true)]
+    test_keep_awake: bool,
     /// Internal (T-298): decode this song of `<data-dir>/media/audio/` and
     /// write the result on stdout, then exit. The studio runs itself this
     /// way so a decoder crash can't stop it (audio/isolate.rs).
@@ -233,6 +240,8 @@ pub struct Shared {
     /// The open project (project.rs, T-286). Never holds calibration,
     /// safety or arming.
     pub project: project::ProjectState,
+    /// Prevent sleep during a show (keep_awake.rs): setting and status.
+    pub keep_awake: keep_awake::KeepAwakeState,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
     /// A pending simulated stall (ms): the engine sleeps this long while
@@ -344,6 +353,20 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(&cli.data_dir)
         .with_context(|| format!("failed to create {}", cli.data_dir.display()))?;
+    // One studio per data folder (T-412), before any output is opened. Held
+    // until `main` returns, after the output is closed.
+    let instance_lock = match instance::acquire(&cli.data_dir, cli.port) {
+        Ok(lock) => Some(lock),
+        Err(e @ instance::LockError::Held(_)) => {
+            eprintln!("{}", e.message(&cli.data_dir));
+            std::process::exit(2);
+        }
+        Err(e) => {
+            // Some network volumes have no advisory locks: warn, don't refuse.
+            log::warn!("{} : démarrage sans verrou d'instance", e.message(&cli.data_dir));
+            None
+        }
+    };
 
     let output: Option<Box<dyn Output>> = match (&cli.device, &cli.test_output) {
         // Exclusive with --device and --test-output (clap refuses both).
@@ -372,7 +395,12 @@ fn main() -> Result<()> {
     safety_log.record(
         "app_start",
         Some("system"),
-        serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "output": state.output_name.clone().unwrap_or_else(|| "aperçu seul".into()) }),
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "output": state.output_name.clone().unwrap_or_else(|| "aperçu seul".into()),
+            // A lock left by a run that did not end cleanly (T-412).
+            "previous_pid": instance_lock.as_ref().and_then(|l| l.previous.as_ref()).map(|i| i.pid),
+        }),
     );
     let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
     let sim = state.midi.sim.clone();
@@ -441,6 +469,14 @@ fn main() -> Result<()> {
     let addr = format!("127.0.0.1:{}", cli.port);
     println!("Studio: open http://{addr}/ in your browser - Ctrl+C to quit");
     let autosave_thread = autosave::spawn(Arc::clone(&shared), Arc::clone(&running));
+    // Keep the Mac awake while armed or playing (T-412); never the real
+    // assertion in tests.
+    let blocker: Box<dyn keep_awake::SleepBlocker> = if cli.test_keep_awake || cli.test_hooks || cli.test_output.is_some() {
+        Box::new(keep_awake::FakeBlocker::default())
+    } else {
+        keep_awake::system_blocker()
+    };
+    let keep_awake_thread = keep_awake::spawn(Arc::clone(&shared), Arc::clone(&running), blocker);
     let served = web::run(&addr, shared, estop, cli.data_dir.join("calibration.json"), Arc::clone(&running));
 
     running.store(false, Ordering::SeqCst);
@@ -456,6 +492,7 @@ fn main() -> Result<()> {
         log::error!("engine thread did not stop in {SHUTDOWN_WAIT:?}: exiting anyway");
     }
     watchdog.join().ok();
+    keep_awake_thread.join().ok(); // lets go of the sleep assertion
     // The autosave thread writes what is unsaved, then stops; a stuck disk
     // must not hold the exit.
     let deadline = Instant::now() + AUTOSAVE_SHUTDOWN_WAIT;
@@ -475,6 +512,7 @@ fn main() -> Result<()> {
     if !safety_log.flush(Duration::from_millis(500)) {
         log::warn!("safety log: last events not written before exit");
     }
+    drop(instance_lock);
     served
 }
 
@@ -568,6 +606,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         presence: presence::Presence::load(cli.data_dir.join("presence.json")),
         health: Arc::new(watchdog::EngineHealth::default()),
         project: project::ProjectState::load(&cli.data_dir),
+        keep_awake: keep_awake::KeepAwakeState::load(&cli.data_dir),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
     };
