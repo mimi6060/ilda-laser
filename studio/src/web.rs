@@ -893,6 +893,25 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         },
         (Method::Post, p) if p.starts_with("/api/timeline/") => timeline_route(request, shared, &p["/api/timeline/".len()..]),
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
+        (Method::Get, "/api/netin") => json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now())),
+        (Method::Post, "/api/netin") => match body::<serde_json::Value>(request) {
+            Ok(patch) => {
+                let (result, hub) = {
+                    let mut s = shared.lock().unwrap();
+                    (crate::netin::update(&mut s, &patch), Arc::clone(&s.netin.hub))
+                };
+                match result {
+                    Ok(changed) => {
+                        if !changed.is_empty() {
+                            hub.save();
+                        }
+                        json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now()))
+                    }
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         _ => text(404, "not found"),
     }
@@ -2416,6 +2435,24 @@ mod tests {
         assert_eq!(state["presence"]["hold_key"], "ShiftRight");
         // Changing presence settings never arms.
         assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    #[test]
+    fn network_inputs_route_reads_validates_and_never_arms() {
+        let t = TestServer::start(false);
+        let view: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/netin", "").1).unwrap();
+        assert_eq!((view["effective"]["osc"]["enabled"].as_bool(), view["effective"]["artnet"]["enabled"].as_bool()), (Some(false), Some(false)));
+        assert_eq!(view["artnet"]["signal"], "off");
+        assert_eq!(view["artnet"]["channels"].as_array().unwrap().len(), crate::netin::artnet::CHART.len());
+        let (status, body) = t.request("POST", "/api/netin", r#"{"artnet":{"universe":2,"address":20},"loss":{"policy":"hold"}}"#);
+        assert_eq!(status, 200, "{body}");
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((view["config"]["artnet"]["universe"].as_u64(), view["artnet"]["channels"][0]["channel"].as_u64()), (Some(2), Some(20)));
+        let (status, body) = t.request("POST", "/api/netin", r#"{"osc":{"bind":"console.local"}}"#);
+        assert_eq!(status, 400);
+        assert!(body.contains("adresse d'écoute invalide"), "{body}");
+        assert_eq!(t.request("POST", "/api/netin", "[]").0, 400);
+        assert_eq!(arm_status(&t)["armed"], false, "never arms");
     }
 
     #[test]

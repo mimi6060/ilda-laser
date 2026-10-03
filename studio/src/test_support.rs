@@ -14,6 +14,8 @@ pub fn shared() -> Shared {
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/lfos.json"), &controls);
     let routes = crate::audio::routes::RouteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/audio_routes.json"), &controls);
+    // One latch for the gate and the network listeners' blackout path.
+    let estop: std::sync::Arc<crate::interlock::EStop> = Default::default();
     Shared {
         settings: Settings::default(),
         calibration: Calibration::default(),
@@ -21,7 +23,7 @@ pub fn shared() -> Shared {
         audio_at: Instant::now(),
         audio_in: std::sync::Arc::new(crate::audio::AudioHub::in_memory(false)),
         gate: Default::default(),
-        estop: Default::default(),
+        estop: std::sync::Arc::clone(&estop),
         frame: Vec::new(),
         output_lit: 0,
         output_name: None,
@@ -44,6 +46,7 @@ pub fn shared() -> Shared {
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
         midi: midi::MidiState::new(false, midi::profile::ProfileStore::in_memory()),
+        netin: crate::netin::NetInState::new(crate::netin::NetHub::in_memory(estop)),
         lfos,
         routes,
         mixer: layers::Mixer::default(),

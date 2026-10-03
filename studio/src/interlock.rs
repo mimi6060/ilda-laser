@@ -27,6 +27,8 @@ pub enum ArmSource {
     Midi,
     Api,
     System,
+    /// OSC or Art-Net (netin/, T-013): may stop, never arms.
+    Network,
 }
 
 impl ArmSource {
@@ -38,6 +40,7 @@ impl ArmSource {
             ArmSource::Midi => "midi",
             ArmSource::Api => "api",
             ArmSource::System => "system",
+            ArmSource::Network => "network",
         }
     }
 
@@ -48,6 +51,7 @@ impl ArmSource {
             ArmSource::Midi => "MIDI",
             ArmSource::Api => "API",
             ArmSource::System => "système",
+            ArmSource::Network => "réseau (OSC/Art-Net)",
         }
     }
 
@@ -59,6 +63,7 @@ impl ArmSource {
             "keyboard" => ArmSource::Keyboard,
             "midi" => ArmSource::Midi,
             "system" => ArmSource::System,
+            "network" => ArmSource::Network,
             _ => ArmSource::Api,
         }
     }
@@ -68,7 +73,7 @@ impl ArmSource {
     }
 
     fn from_u8(v: u8) -> Self {
-        [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System].get(v as usize).copied().unwrap_or(ArmSource::System)
+        [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System, ArmSource::Network].get(v as usize).copied().unwrap_or(ArmSource::System)
     }
 }
 
@@ -188,10 +193,11 @@ impl ArmGate {
         self.interlocks.iter().find(|i| i.id == id).is_none_or(|i| i.ok)
     }
 
-    /// Arms only if every interlock is satisfied. A controller (MIDI) or
-    /// the system can never arm: only a person at the UI, keyboard or API.
+    /// Arms only if every interlock is satisfied. A controller (MIDI), the
+    /// network (OSC, Art-Net) or the system can never arm: only a person at
+    /// the UI, keyboard or API.
     pub fn request_arm(&mut self, src: ArmSource) -> Result<(), Vec<String>> {
-        if matches!(src, ArmSource::Midi | ArmSource::System) {
+        if matches!(src, ArmSource::Midi | ArmSource::System | ArmSource::Network) {
             let refused = vec![format!("L'armement depuis « {} » n'est pas autorisé", src.label_fr())];
             log::warn!("Armement refusé ({}) : {}", src.label_fr(), refused.join(" ; "));
             self.log.record("arm_refused", Some(src.id()), json!({ "blocking": refused }));
@@ -462,6 +468,7 @@ mod tests {
     fn midi_opt_in_still_obeys_the_estop_and_interlocks() {
         let mut gate = ArmGate::default();
         assert!(gate.request_arm(ArmSource::Midi).is_err(), "plain MIDI arming is always refused");
+        assert!(gate.request_arm(ArmSource::Network).is_err(), "OSC / Art-Net never arm");
         let estop = EStop::default();
         estop.trip(ArmSource::Midi);
         gate.sync_estop(&estop);
@@ -741,7 +748,8 @@ mod tests {
         assert_eq!(ArmSource::parse("keyboard"), ArmSource::Keyboard);
         assert_eq!(ArmSource::parse("ui"), ArmSource::Ui);
         assert_eq!(ArmSource::parse("whatever"), ArmSource::Api);
-        for s in [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System] {
+        assert_eq!(ArmSource::parse("network"), ArmSource::Network);
+        for s in [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System, ArmSource::Network] {
             assert_eq!(ArmSource::from_u8(s.to_u8()), s);
             assert_eq!(serde_json::to_value(s).unwrap(), s.id(), "the log uses the JSON ids");
         }

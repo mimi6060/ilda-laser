@@ -35,6 +35,7 @@ mod interlock;
 mod keep_awake;
 mod live;
 mod midi;
+mod netin;
 mod output;
 mod patterns;
 mod ponk;
@@ -112,6 +113,17 @@ struct Cli {
     /// must not grab the controller).
     #[arg(long)]
     no_midi: bool,
+    /// Listen for OSC (T-013) for this run, whatever RÉGLAGES says:
+    /// `ip:port`, an IP or a port. Alone: 127.0.0.1:8000. Nothing received
+    /// over the network can arm the laser.
+    #[arg(long, value_name = "IP:PORT", num_args = 0..=1, default_missing_value = "127.0.0.1:8000",
+          value_parser = |s: &str| netin::parse_cli_addr(s, netin::DEFAULT_OSC_PORT))]
+    osc: Option<std::net::SocketAddr>,
+    /// Listen for Art-Net (T-013) for this run, like --osc. Alone:
+    /// 127.0.0.1:6454. Receive only: the studio never sends Art-Net.
+    #[arg(long, value_name = "IP:PORT", num_args = 0..=1, default_missing_value = "127.0.0.1:6454",
+          value_parser = |s: &str| netin::parse_cli_addr(s, netin::artnet::PORT))]
+    artnet: Option<std::net::SocketAddr>,
     /// Audio input the studio listens to: a name from
     /// `GET /api/audio/devices`, "default" (the Mac's input) or "none" (no
     /// capture). Overrides audio.json for this run.
@@ -217,6 +229,8 @@ pub struct Shared {
     pub palettes: live::PaletteStore,
     /// MIDI controllers (midi/mod.rs); not part of any saved look.
     pub midi: midi::MidiState,
+    /// OSC and Art-Net inputs (netin/, netin.json); never in a look or a project.
+    pub netin: netin::NetInState,
     /// Master LFO modulators (lfo.rs, lfos.json), applied every frame on
     /// top of the stored values.
     pub lfos: lfo::LfoStore,
@@ -500,6 +514,7 @@ fn main() -> Result<()> {
     );
     let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
     let sim = state.midi.sim.clone();
+    let (netin_hub, netin_tx) = (Arc::clone(&state.netin.hub), state.netin.sender());
     let audio_hub = Arc::clone(&state.audio_in);
     let (song_hub, media) = (Arc::clone(&state.song), Arc::clone(&state.media));
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
@@ -558,6 +573,9 @@ fn main() -> Result<()> {
         midi::worker::spawn(Arc::clone(&shared), Arc::clone(&running))
     };
 
+    // OSC / Art-Net listeners: idle (no socket) until switched on.
+    let netin_threads = netin::listener::spawn(netin_hub, netin_tx, Arc::clone(&running));
+
     let audio_threads = if cli.no_audio {
         println!("--no-audio: no audio input opened (the browser source still works), no song played (the timeline runs on the system clock).");
         Vec::new()
@@ -603,6 +621,9 @@ fn main() -> Result<()> {
     if let Some(midi_thread) = midi_thread {
         midi_thread.join().ok(); // lets it switch the APC LEDs off
     }
+    for t in netin_threads {
+        t.join().ok(); // within one receive timeout (100 ms)
+    }
     // The audio threads close the input within ~50 ms; a device stuck in
     // CoreAudio must not hold the exit.
     let deadline = Instant::now() + AUDIO_SHUTDOWN_WAIT;
@@ -638,6 +659,8 @@ fn startup_line(cli: &Cli, output: Option<&str>) -> String {
         (cli.test_checklist, "--test-checklist"),
         (cli.test_output.is_some(), "--test-output"),
         (cli.audio_device.is_some(), "--audio-device"),
+        (cli.osc.is_some(), "--osc"),
+        (cli.artnet.is_some(), "--artnet"),
     ] {
         if on {
             options.push(name.to_string());
@@ -684,6 +707,8 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
     let routes = audio::routes::RouteStore::load_or_create(cli.data_dir.join("audio_routes.json"), &controls);
     let epoch = Instant::now();
+    let estop = Arc::new(EStop::default());
+    let netin_cli = netin::CliOverride { osc: cli.osc, artnet: cli.artnet };
     let mut state = Shared {
         settings: Settings::default(),
         calibration: web::load_calibration(&cli.data_dir.join("calibration.json")),
@@ -691,7 +716,8 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         audio_at: Instant::now(),
         audio_in: Arc::new(audio::AudioHub::load(&cli.data_dir, epoch, !cli.no_audio, cli.audio_device.as_deref())),
         gate,
-        estop: Arc::new(EStop::default()),
+        netin: netin::NetInState::new(netin::NetHub::load(cli.data_dir.join("netin.json"), netin_cli, Arc::clone(&estop))),
+        estop,
         frame: Vec::new(),
         output_lit: 0,
         output_name: output.map(|o| o.name().to_string()),
@@ -875,6 +901,8 @@ impl Engine {
             advance_playlist(&mut s);
             // MIDI faders/encoders: at most one write per control per frame.
             midi::engine::frame(&mut s, now);
+            // OSC and Art-Net: what the listeners queued, then signal loss.
+            netin::frame(&mut s, now);
             // Native capture, else the browser's features, else silence
             // (falling, not jumping): one snapshot for the whole frame.
             let (audio, active) = s.audio_in.frame(s.audio, s.audio_at, now);
@@ -1137,6 +1165,30 @@ mod tests {
         let cli = parse(&["--no-midi", "--midi-test"]).unwrap();
         assert!(cli.midi_test && cli.no_midi);
         assert!(!parse(&[]).unwrap().midi_test, "off by default");
+    }
+
+    /// T-013: OSC and Art-Net only on request, on localhost unless told.
+    #[test]
+    fn network_inputs_are_off_unless_asked_and_default_to_localhost() {
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("laser-studio").chain(args.iter().copied()));
+        let none = parse(&[]).unwrap();
+        assert!(none.osc.is_none() && none.artnet.is_none());
+        let both = parse(&["--osc", "--artnet"]).unwrap();
+        assert_eq!(both.osc, Some("127.0.0.1:8000".parse().unwrap()));
+        assert_eq!(both.artnet, Some("127.0.0.1:6454".parse().unwrap()));
+        assert_eq!(parse(&["--osc", "9000"]).unwrap().osc, Some("127.0.0.1:9000".parse().unwrap()));
+        assert_eq!(parse(&["--artnet=10.0.0.5"]).unwrap().artnet, Some("10.0.0.5:6454".parse().unwrap()));
+        assert!(parse(&["--osc", "224.0.0.1:9000"]).is_err(), "never a multicast group");
+        assert!(parse(&["--artnet", "255.255.255.255"]).is_err(), "never broadcast");
+
+        let dir = std::env::temp_dir().join(format!("laser-studio-netin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = startup_state(&parse(&["--no-midi", "--osc", "--data-dir", dir.to_str().unwrap()]).unwrap(), None);
+        assert!(s.netin.hub.effective().osc.enabled && !s.netin.hub.effective().artnet.enabled);
+        assert!(!s.netin.hub.file().osc.enabled, "not saved");
+        assert!(!s.gate.is_armed());
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// T-300: PONK only on request, never next to a DAC or the fake output.
