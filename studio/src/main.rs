@@ -965,6 +965,14 @@ impl Engine {
                 (frame, mix, evolving)
             }
         };
+        // Frame size limit of the output (Helios USB, T-303): thinned here,
+        // before the safety stage (T-353), so zones, horizon, strobe
+        // limiter, static beam guard and caps all apply to the frame that
+        // really goes out. Nothing after the safety stage adds light.
+        let frame = match self.stage.max_points().map(output::content_budget) {
+            Some(budget) if frame.len() > budget => output::fit_frame(&frame, budget).into_owned(),
+            _ => frame,
+        };
         // Strobe limiter and beam horizon (T-101): on the finished,
         // calibrated frame, so no layer, live move, LFO, gate or flash can
         // get past it; the preview shows the limited frame too.

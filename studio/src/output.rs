@@ -31,6 +31,13 @@ pub trait Output: Send {
     fn kill_switch(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
         None
     }
+    /// Most points one frame may have (frame-swap DACs: Helios USB), or
+    /// `None` for no limit. The engine thins the frame to fit *before*
+    /// the safety stage (T-353), so zones, horizon and caps see the frame
+    /// that really goes out.
+    fn max_points(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// The last pipeline stage: what actually leaves for the laser. The arm
@@ -55,12 +62,25 @@ impl OutputStage {
         Self { output, output_armed: false }
     }
 
+    /// The active output's frame size limit (`Output::max_points`).
+    pub fn max_points(&self) -> Option<usize> {
+        self.output.as_ref().and_then(|o| o.max_points())
+    }
+
     /// `hold_ok` false (hold-to-run released) sends a dark frame but keeps
     /// the output armed, so pressing again resumes at once.
     pub fn emit(&mut self, frame: &[Point], gate_armed: bool, hold_ok: bool, estop: &EStop) -> Emitted {
         let armed = gate_armed && !estop.is_latched();
         let mut sent = frame.to_vec();
         blank_unless(armed && hold_ok, &mut sent);
+        // Last resort: the engine already fitted the frame before the
+        // safety stage, but the zone mask may have added a few points.
+        // This thinning only ever removes light (T-353).
+        if let Some(max) = self.max_points() {
+            if sent.len() > max {
+                sent = fit_frame_dark(&sent, max).into_owned();
+            }
+        }
         let mut arm_change = None;
         if let Some(out) = self.output.as_mut() {
             if armed != self.output_armed {
@@ -191,11 +211,20 @@ fn loop_back_points(pps: u32) -> usize {
     (500.0 * pps as f64 / 1_000_000.0).ceil() as usize + 64 + 4
 }
 
+/// Room left for the points the safety stage adds (the zone mask inserts
+/// up to four samples per edge crossing) when the engine fits a frame to
+/// an output's `max_points` before that stage.
+pub fn content_budget(max: usize) -> usize {
+    (max - max / 8).max(2)
+}
+
 /// Thins a frame down to `max` points for a DAC with a frame size limit
 /// (`laser-dac` would cut the tail, leaving a lit end point to jump back
 /// from). Evenly spaced points are kept, first and last included, and a
 /// kept point goes dark whenever a dark point was skipped just before
-/// it: thinning only removes light, it never lights a blanked travel.
+/// it: thinning never lights a blanked travel. A lit chord replaces the
+/// skipped points, though, so this runs on content, *before* the safety
+/// stage (T-353); after it, only `fit_frame_dark` may thin.
 pub fn fit_frame(points: &[Point], max: usize) -> Cow<'_, [Point]> {
     let n = points.len();
     if n <= max || max < 2 {
@@ -215,6 +244,55 @@ pub fn fit_frame(points: &[Point], max: usize) -> Cow<'_, [Point]> {
     Cow::Owned(out)
 }
 
+/// How far (normalized units) a skipped point may lie from the chord that
+/// replaces it in `fit_frame_dark`: below one 16-bit DAC step (2 / 65536),
+/// well above the float noise of a densified straight line.
+const CHORD_TOLERANCE: f32 = 1e-5;
+
+/// Distance from `q` to the segment a-b.
+fn distance_to_segment(q: &Point, a: &Point, b: &Point) -> f32 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 { (((q.x - a.x) * dx + (q.y - a.y) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    ((q.x - a.x - t * dx).powi(2) + (q.y - a.y - t * dy).powi(2)).sqrt()
+}
+
+/// Thins a frame that already went through the safety stage down to `max`
+/// points, removing light only (T-353): the last-resort guard of the
+/// output stage. Evenly spaced points are kept, first and last included.
+/// The chord between two kept points stays lit only if every point it
+/// skips was lit and lies on it (`CHORD_TOLERANCE`), so it draws exactly
+/// the path the safety stage approved, at the darkest colour of that
+/// stretch. Otherwise both ends of the chord go dark: it can't be a lit
+/// shortcut through a Blank zone or below the horizon.
+pub fn fit_frame_dark(points: &[Point], max: usize) -> Cow<'_, [Point]> {
+    let n = points.len();
+    if n <= max || max < 2 {
+        return Cow::Borrowed(points);
+    }
+    let mut out: Vec<Point> = Vec::with_capacity(max);
+    let mut prev = 0;
+    for k in 0..max {
+        let i = k * (n - 1) / (max - 1);
+        let mut p = points[i];
+        if k > 0 && i > prev + 1 {
+            let (a, skipped) = (&points[prev], &points[prev + 1..i]);
+            if skipped.iter().all(|q| q.is_lit() && distance_to_segment(q, a, &p) <= CHORD_TOLERANCE) {
+                for q in skipped {
+                    (p.r, p.g, p.b) = (p.r.min(q.r), p.g.min(q.g), p.b.min(q.b));
+                }
+            } else {
+                p = Point::blanked(p.x, p.y);
+                let last = out.last_mut().expect("k > 0");
+                *last = Point::blanked(last.x, last.y);
+            }
+        }
+        out.push(p);
+        prev = i;
+    }
+    Cow::Owned(out)
+}
+
 impl Output for DacOutput {
     fn name(&self) -> &str {
         &self.name
@@ -226,9 +304,15 @@ impl Output for DacOutput {
         result.map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    fn max_points(&self) -> Option<usize> {
+        self.max_points
+    }
+
     fn send(&mut self, points: &[Point]) {
+        // The output stage already fitted the frame; this only guards a
+        // caller that bypassed it, and only ever removes light.
         let points = match self.max_points {
-            Some(max) => fit_frame(points, max),
+            Some(max) => fit_frame_dark(points, max),
             None => Cow::Borrowed(points),
         };
         self.session.send_frame(Frame::new(points.iter().map(to_laser_point).collect()));
@@ -465,6 +549,78 @@ mod tests {
             assert!(!out[first_right].is_lit(), "max {max}: the jump to the second shape is dark");
             assert!(out.iter().filter(|p| p.is_lit()).count() <= f.iter().filter(|p| p.is_lit()).count());
         }
+    }
+
+    /// An L-shaped lit path that goes around a Blank zone in its corner:
+    /// `fit_frame` would cut the corner with a lit chord through the zone,
+    /// `fit_frame_dark` never does (T-353).
+    #[test]
+    fn dark_thinning_never_cuts_a_corner_lit() {
+        use crate::zones::{blank_violations, Zone, ZoneKind};
+        let zone = Zone { points: vec![[0.3, -0.9], [0.9, -0.9], [0.9, -0.3], [0.3, -0.3]], kind: ZoneKind::Blank, ..Default::default() };
+        let mut f: Vec<Point> = (0..=100).map(|i| Point::lit(-1.0 + i as f32 / 50.0, -1.0, 1.0, 0.0, 0.0)).collect();
+        f.extend((1..=100).map(|i| Point::lit(1.0, -1.0 + i as f32 / 50.0, 1.0, 0.0, 0.0)));
+        assert_eq!(blank_violations(&f, std::slice::from_ref(&zone)), 0);
+        assert!(blank_violations(&fit_frame(&f, 6), std::slice::from_ref(&zone)) > 0, "the content thinning does cut it");
+        for max in 2..f.len() {
+            let out = fit_frame_dark(&f, max);
+            assert_eq!(out.len(), max);
+            assert_eq!(blank_violations(&out, std::slice::from_ref(&zone)), 0, "max {max}");
+            assert!(out.iter().filter(|p| p.is_lit()).count() <= f.iter().filter(|p| p.is_lit()).count());
+        }
+    }
+
+    /// Straight lit lines survive the dark thinning lit, at the darkest
+    /// colour of what each chord replaced.
+    #[test]
+    fn dark_thinning_keeps_straight_lines_lit_and_never_brighter() {
+        let f: Vec<Point> = (0..1000).map(|i| Point::lit(-1.0 + i as f32 / 500.0, 0.25, if i == 500 { 0.2 } else { 1.0 }, 0.5, 0.0)).collect();
+        let out = fit_frame_dark(&f, 100);
+        assert_eq!(out.len(), 100);
+        assert!(out.iter().all(|p| p.is_lit()));
+        assert!(out.iter().all(|p| p.r <= 1.0 && p.g <= 0.5 && p.b == 0.0));
+        assert_eq!(out.iter().filter(|p| p.r < 1.0).count(), 1, "the dim point darkens the chord over it");
+        assert!(matches!(fit_frame_dark(&f, 1000), Cow::Borrowed(_)));
+    }
+
+    /// An output with a frame size limit: the stage's last-resort thinning
+    /// sends at most that many points and only removes light.
+    #[test]
+    fn stage_fits_frames_to_the_output_limit_without_adding_light() {
+        struct Small(Arc<Mutex<Vec<Vec<Point>>>>);
+        impl Output for Small {
+            fn name(&self) -> &str {
+                "small"
+            }
+            fn set_armed(&mut self, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn send(&mut self, points: &[Point]) {
+                self.0.lock().unwrap().push(points.to_vec());
+            }
+            fn max_points(&self) -> Option<usize> {
+                Some(50)
+            }
+        }
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut stage = OutputStage::new(Some(Box::new(Small(Arc::clone(&sent)))));
+        assert_eq!(stage.max_points(), Some(50));
+        assert_eq!(OutputStage::default().max_points(), None);
+        let f: Vec<Point> = (0..400).map(|i| Point::lit((i as f32 * 0.1).sin(), (i as f32 * 0.13).cos(), 1.0, 1.0, 1.0)).collect();
+        let e = stage.emit(&f, true, true, &EStop::default());
+        let out = sent.lock().unwrap().last().unwrap().clone();
+        assert_eq!(out.len(), 50);
+        assert_eq!(e.lit, out.iter().filter(|p| p.is_lit()).count());
+        // A curve: no chord lies on it, so nothing stays lit.
+        assert_eq!(e.lit, 0);
+        assert_eq!(stage.emit(&f[..30], true, true, &EStop::default()).lit, 30, "frames that fit pass as is");
+    }
+
+    #[test]
+    fn the_content_budget_leaves_room_for_the_safety_stage() {
+        assert_eq!(content_budget(4000), 3500);
+        assert_eq!(content_budget(2), 2);
+        assert!((2..10_000).all(|m| content_budget(m) <= m && content_budget(m) >= 2));
     }
 
     #[test]
