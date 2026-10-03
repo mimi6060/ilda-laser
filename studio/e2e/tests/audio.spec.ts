@@ -9,6 +9,8 @@ const audio = async () => (await studio.state()).audio;
 const setSource = (source: string) => studio.post('/api/audio/config', { source });
 const ONSETS = { delta: 0.1, lookahead_hops: 1, kick_refractory_ms: 100 };
 const ANALYSIS = { auto_gain: true, manual_gain_db: 0, silence_db: -60, onsets: ONSETS };
+// Audio reactivity safety (T-245), saved with the input settings.
+const SAFETY = { max_flash_hz: 10, silence_action: 'keep' };
 
 /** Posts browser features until the frame has picked them up (they go stale after 500 ms). */
 async function extentWith(bass: number) {
@@ -34,7 +36,7 @@ test('--no-audio: no capture, no device, nothing fails', async () => {
   // Break / build-up / drop detection (T-236): native only.
   expect(a.sections).toBeNull();
   // Default source is the browser: the studio never opens the Mac's mic by itself.
-  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: null, buffer_frames: 256, analysis: ANALYSIS });
+  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: null, buffer_frames: 256, analysis: ANALYSIS, safety: SAFETY });
 });
 
 test('Native without a capture: the browser features stand in', async () => {
@@ -70,9 +72,9 @@ test('source « Navigateur » works as before T-230', async () => {
 test('the config is validated, patched field by field and kept across a restart', async () => {
   expect(await studio.post('/api/audio/config', { source: 'spotify' })).toBe(400);
   expect(await studio.post('/api/audio/config', { buffer_frames: 64, device: 'Scarlett 2i2 USB' })).toBe(200);
-  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128, analysis: ANALYSIS });
+  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128, analysis: ANALYSIS, safety: SAFETY });
   await studio.restart();
-  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128, analysis: ANALYSIS });
+  expect(await studio.get('/api/audio/config')).toEqual({ source: 'browser', device: 'Scarlett 2i2 USB', buffer_frames: 128, analysis: ANALYSIS, safety: SAFETY });
   expect((await audio()).state).toBe('disabled');
   expect(await studio.post('/api/audio/config', { device: null, buffer_frames: 256 })).toBe(200);
 });
