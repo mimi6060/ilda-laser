@@ -25,6 +25,7 @@ mod figure_import;
 mod figures;
 mod font;
 mod generators;
+mod ilda;
 mod instance;
 mod layers;
 mod lfo;
