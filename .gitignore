@@ -9,3 +9,8 @@ studio-data/
 *.aiff
 *.flac
 test-results/
+CLAUDE.md
+tasks/
+docs/
+scripts/
+.claude/
