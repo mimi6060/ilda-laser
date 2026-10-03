@@ -420,6 +420,10 @@ pub fn describe(e: &SafetyEvent) -> String {
         }
         "project_open" => format!("Projet ouvert : {}", str_of(d, "name")),
         "autosave_recovered" => format!("Sauvegarde auto récupérée : {}", str_of(d, "file")),
+        "test_pattern" => match d.get("label").and_then(Value::as_str) {
+            Some(label) => format!("Mire affichée : {label}"),
+            None => "Mire quittée".into(),
+        },
         "power_caps" => format!("Plafonds de puissance modifiés ({}){}", str_of(d, "output"), changed()),
         "log_overflow" => format!("{} événement(s) perdu(s) : journal saturé", d.get("lost").and_then(Value::as_u64).unwrap_or(0)),
         other => other.to_string(),
