@@ -288,6 +288,14 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Post, "/api/keep_awake") => match body::<KeepAwakeRequest>(request) {
+            // RÉGLAGES › Général (T-412): the setting only; never arms.
+            Ok(req) => match crate::keep_awake::set_enabled(shared, req.enabled) {
+                Ok(()) => json_response(json!(shared.lock().unwrap().keep_awake)),
+                Err(e) => text(500, &format!("{e:#}")),
+            },
+            Err(e) => e,
+        },
         (Method::Post, "/api/test/stall") => {
             let ms = query_u64(request.url(), "ms").unwrap_or(200).min(2_000);
             let mut s = shared.lock().unwrap();
@@ -1214,6 +1222,11 @@ fn outputs_view(s: &Shared) -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+struct KeepAwakeRequest {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
 struct SaveScene {
     name: String,
     duration_secs: f32,
@@ -1236,6 +1249,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "arm": arm,
         "engine_ok": s.health.engine_ok(),
         "presence": s.presence.status(),
+        "keep_awake": s.keep_awake,
         "output": s.output_name,
         "output_kind": s.output_kind,
         "pps": s.pps,
@@ -1268,6 +1282,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "arm": arm,
         "engine_ok": s.health.engine_ok(),
         "presence": s.presence.status(),
+        "keep_awake": s.keep_awake,
         "output": s.output_name,
         "output_kind": s.output_kind,
         "output_error": s.output_error,
@@ -1924,6 +1939,20 @@ mod tests {
         assert_eq!(state["presence"]["hold_key"], "ShiftRight");
         // Changing presence settings never arms.
         assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    #[test]
+    fn keep_awake_setting_and_status_are_reported() {
+        let t = TestServer::start(false);
+        let state: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/state", "").1).unwrap();
+        assert_eq!(state["keep_awake"], json!({ "enabled": true, "held": false, "error": null }));
+        let (status, body) = t.request("POST", "/api/keep_awake", r#"{"enabled":false}"#);
+        assert_eq!(status, 200);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["enabled"], false);
+        let frame: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
+        assert_eq!(frame["keep_awake"]["enabled"], false);
+        assert_eq!(t.request("POST", "/api/keep_awake", r#"{}"#).0, 400);
+        assert_eq!(arm_status(&t)["armed"], false, "never arms");
     }
 
     #[test]

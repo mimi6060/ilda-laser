@@ -65,6 +65,7 @@ pub fn shared() -> Shared {
         health: Default::default(),
         project: crate::project::ProjectState::load(&std::env::temp_dir().join("laser-studio-test-unused")),
         test_pattern: Default::default(),
+        keep_awake: crate::keep_awake::KeepAwakeState::in_memory(),
         test_hooks: false,
         test_stall_ms: 0,
         // Never a real scan in unit tests.

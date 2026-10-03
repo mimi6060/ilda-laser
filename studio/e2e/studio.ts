@@ -87,7 +87,9 @@ export class Studio {
     // Deliberately no --device: preview only, no laser output. --no-midi so
     // a test never opens the user's MIDI controller (--midi-test only adds
     // a simulated one); --no-audio so it never opens an audio input.
-    const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio'];
+    // --test-keep-awake: a fake sleep blocker, so arming or playing in a
+    // test never holds a power assertion on this Mac (T-412).
+    const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio', '--test-keep-awake'];
     args.push('--test-devices', JSON.stringify(this.opts.devices ?? []));
     if (this.opts.midiTest) args.push('--midi-test');
     if (this.opts.testHooks) args.push('--test-hooks');

@@ -1342,6 +1342,15 @@
     </section>
 
     <section>
+      <details id="generalPanel">
+        <summary>Général</summary>
+        <label class="check"><input type="checkbox" id="kaEnabled"> Empêcher la mise en veille pendant un show</label>
+        <div class="hint" id="kaStatus" role="status"></div>
+        <div class="hint">Tant que le laser est armé ou qu'une timeline joue, le Mac et son écran ne se mettent pas en veille ; la veille redevient possible 5 s après. Réglage de cette machine (pas du projet).</div>
+      </details>
+    </section>
+
+    <section>
       <details id="autosavePanel">
         <summary>Sauvegarde auto</summary>
         <label class="check"><input type="checkbox" id="asEnabled"> Sauvegarde auto</label>
@@ -1857,6 +1866,19 @@ function showPresence(f) {
   banner.textContent = p.hold_ok ? 'ÉMISSION — maintien actif' : `MAINTENIR « ${keyName(p.hold_key)} » POUR ÉMETTRE`;
   if (!pickingHoldKey) $('holdKeyLabel').textContent = keyName(p.hold_key);
 }
+// RÉGLAGES › Général: keep the Mac awake during a show (T-412).
+function showKeepAwake(k) {
+  if (!k) return;
+  if (document.activeElement !== $('kaEnabled')) $('kaEnabled').checked = k.enabled;
+  const st = $('kaStatus');
+  st.classList.toggle('sf-warn', !!k.error);
+  st.textContent = k.error ? 'Blocage de la veille impossible' : k.held ? 'Veille bloquée' : 'Veille autorisée';
+  st.title = k.error || '';
+}
+$('kaEnabled').onchange = async e => {
+  const r = await fetch('/api/keep_awake', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: e.target.checked }) });
+  if (r.ok) showKeepAwake(await r.json()); else alert(await r.text());
+};
 async function loadPresence() {
   const { settings } = await (await fetch('/api/presence')).json();
   showPresenceSettings(settings);
@@ -1932,7 +1954,7 @@ async function previewLoop() {
     dwellStatus = f.dwell;
     if (show2d) draw(f.points);
     if (fetchedAt > armAnsweredAt) armed = f.armed;
-    arm = f.arm; pps = f.pps; showArmed(); showPresence(f);
+    arm = f.arm; pps = f.pps; showArmed(); showPresence(f); showKeepAwake(f.keep_awake);
     $('output').textContent = f.output_error ? '⚠ ' + f.output_error
       : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement (lancez avec --device pour piloter un laser)';
     showOutputKind(f);
