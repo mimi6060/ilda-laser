@@ -148,7 +148,9 @@ struct Wire {
     frames: u64,
 }
 
-struct Recorder(Arc<Mutex<Wire>>);
+/// The recording output, with an optional frame size limit (like a Helios
+/// USB DAC) so the fuzz drives the thinning path too (T-353).
+struct Recorder(Arc<Mutex<Wire>>, Option<usize>);
 
 impl Output for Recorder {
     fn name(&self) -> &str {
@@ -166,6 +168,9 @@ impl Output for Recorder {
         w.last = points.to_vec();
         w.frames += 1;
     }
+    fn max_points(&self) -> Option<usize> {
+        self.1
+    }
 }
 
 struct Rig {
@@ -178,10 +183,15 @@ struct Rig {
 
 impl Rig {
     fn new(s: Shared, tag: &str, seed: u64) -> Self {
+        Self::with_max_points(s, tag, seed, None)
+    }
+
+    /// A rig whose output takes at most `max_points` points per frame.
+    fn with_max_points(s: Shared, tag: &str, seed: u64, max_points: Option<usize>) -> Self {
         let dir = std::env::temp_dir().join(format!("laser-studio-invariants-{tag}-{seed}-{}", std::process::id()));
         let shared = Mutex::new(s);
         let wire = Arc::new(Mutex::new(Wire::default()));
-        let engine = Engine::new(&shared, Some(Box::new(Recorder(Arc::clone(&wire)))), dir.join("live.json"), dir.join("layers.json"));
+        let engine = Engine::new(&shared, Some(Box::new(Recorder(Arc::clone(&wire), max_points))), dir.join("live.json"), dir.join("layers.json"));
         Rig { shared, engine: Some(engine), wire, now: Instant::now(), dir }
     }
 
@@ -513,7 +523,10 @@ struct Coverage {
 fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let (s, hold_to_run) = random_case(&mut rng);
-    let mut rig = Rig::new(s, "pipeline", seed);
+    // One case in three on an output with a small frame size limit, taken
+    // from the seed so the case's own random stream is unchanged.
+    let max_points = seed.is_multiple_of(3).then(|| 16 + (seed as usize).wrapping_mul(7919) % 600);
+    let mut rig = Rig::with_max_points(s, "pipeline", seed, max_points);
     let mut beats = 0;
     for frame in 0..frames {
         for _ in 0..rng.below(3) {
@@ -547,6 +560,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             return Err(format!("frame {frame}: {lit} lit points with hold-to-run not held"));
         }
         check_points(&w.last, &caps, &cfg, &format!("frame {frame}, sent"))?;
+        if let Some(max) = max_points.filter(|&m| w.last.len() > m) {
+            return Err(format!("frame {frame}: {} points sent to an output that takes {max}", w.last.len()));
+        }
         drop(w);
         let s = rig.s();
         check_points(&s.frame, &caps, &cfg, &format!("frame {frame}, preview"))?;
@@ -849,10 +865,15 @@ fn the_gate_refuses_controllers_the_system_and_a_latched_estop() {
 
 // ---------- DAC thinning ----------
 
-/// `fit_frame` (DACs with a small frame buffer) must not undo the safety
-/// stage: a thinned frame may only lose light, never light a straight
-/// shortcut through a Blank zone.
+/// DACs with a small frame buffer (T-303, T-353): the engine thins the
+/// content *before* the safety stage, then the output stage's last-resort
+/// `fit_frame_dark` may only remove light. Neither may light a straight
+/// shortcut through a Blank zone. `fit_frame_dark` is also checked
+/// directly on an already shaped frame (the case `fit_frame` failed at
+/// seed 5000020: a lit path that went around a zone became a lit chord
+/// through it).
 fn run_thinning_case(seed: u64) -> Result<(), String> {
+    use crate::output::{content_budget, fit_frame, fit_frame_dark};
     let mut rng = Rng::new(seed);
     let cfg = SafetySettings { zones: random_safety(&mut rng).zones, horizon: Horizon { y: -1.0, ..Default::default() }, ..Default::default() };
     if cfg.zones.iter().all(|z| z.kind != ZoneKind::Blank) {
@@ -866,24 +887,37 @@ fn run_thinning_case(seed: u64) -> Result<(), String> {
         y = (y + rng.range(-0.05, 0.05)).clamp(-1.0, 1.0);
         raw.push(if rng.chance(0.95) { Point::lit(x, y, 1.0, 1.0, 1.0) } else { Point::blanked(x, y) });
     }
-    let shaped = safety::apply(raw, 0.0, &cfg, &mut safety::StrobeLimiter::default());
+    let lit = |f: &[Point]| f.iter().filter(|p| p.is_lit()).count();
+    let shaped = safety::apply(raw.clone(), 0.0, &cfg, &mut safety::StrobeLimiter::default());
     if zones::blank_violations(&shaped, &cfg.zones) > 0 {
         return Err("the safety stage itself left light in a Blank zone".into());
     }
     let max = 2 + rng.below(shaped.len());
-    let thin = crate::output::fit_frame(&shaped, max);
+    // The output's guard alone, on a frame that already passed the stage.
+    let thin = fit_frame_dark(&shaped, max);
     let v = zones::blank_violations(&thin, &cfg.zones);
     if v > 0 {
-        return Err(format!("thinning {} → {max} points lit {v} segments through a Blank zone", shaped.len()));
+        return Err(format!("dark thinning {} → {max} points lit {v} segments through a Blank zone", shaped.len()));
+    }
+    if thin.len() > max || lit(&thin) > lit(&shaped) {
+        return Err(format!("dark thinning to {max} sent {} points, {} lit (from {})", thin.len(), lit(&thin), lit(&shaped)));
+    }
+    // The engine's order: fit the content, safety stage, output guard.
+    let budget = content_budget(max);
+    let fitted = if raw.len() > budget { fit_frame(&raw, budget).into_owned() } else { raw };
+    let shaped = safety::apply(fitted, 0.0, &cfg, &mut safety::StrobeLimiter::default());
+    let sent = fit_frame_dark(&shaped, max);
+    let v = zones::blank_violations(&sent, &cfg.zones);
+    if v > 0 {
+        return Err(format!("pipeline to {max} points lit {v} segments through a Blank zone"));
+    }
+    if sent.len() > max {
+        return Err(format!("pipeline sent {} points to an output that takes {max}", sent.len()));
     }
     Ok(())
 }
 
-/// Known gap, see the PR note: `fit_frame` keeps a kept point lit when
-/// every skipped point was lit, but a lit polyline that went *around* a
-/// Blank zone becomes a straight chord that can cut *through* it.
 #[test]
-#[ignore = "bug: DAC frame thinning (output::fit_frame) can draw a lit chord through a Blank zone"]
 fn dac_thinning_never_lights_a_blank_zone() {
     run_property("dac_thinning_never_lights_a_blank_zone", 5, 1000, run_thinning_case);
 }
