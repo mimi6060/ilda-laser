@@ -384,6 +384,10 @@
   .modal[hidden] { display: none; }
   .modal .box { width: min(440px, 92vw); padding: 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
   .modal h3 { margin: 0 0 8px; font-size: 15px; }
+  /* Autosave (T-287): a quiet status next to the project name, orange on failure. */
+  #autosaveStatus { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  #autosaveStatus.err { color: var(--warn); font-weight: 600; }
+  #recoverWhen { margin-bottom: 10px; }
   #projFiles { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 200px; overflow: auto; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
   /* ---------- Theme (T-299): a lighting-desk look ----------
@@ -505,6 +509,7 @@
   <div class="proj">
     <button id="projBtn" title="Projet : Cmd+S enregistrer, Cmd+O ouvrir">Projet ▾</button>
     <span id="projName" title="Projet ouvert (• = modifications non enregistrées)">Sans titre</span>
+    <span id="autosaveStatus" role="status" hidden></span>
     <div id="projMenu" hidden>
       <button data-proj="new">Nouveau</button>
       <button data-proj="open">Ouvrir…</button>
@@ -573,6 +578,14 @@
     <div id="projFiles"></div>
     <div id="projError" class="merr" role="alert"></div>
     <div class="row"><button id="projOk">Ouvrir</button><button id="projCancel">Annuler</button></div>
+  </div>
+</div>
+<div id="recoverAsk" class="modal" hidden>
+  <div class="box">
+    <h3>Récupérer le travail non enregistré ?</h3>
+    <div class="hint" id="recoverWhen"></div>
+    <div id="recoverError" class="merr" role="alert"></div>
+    <div class="row"><button id="recoverOk" class="primary">Récupérer</button><button id="recoverIgnore">Ignorer</button></div>
   </div>
 </div>
 <div id="projAsk" class="modal" hidden>
@@ -1235,6 +1248,17 @@
         <label>Échelle Y <span class="v" id="cSyV"></span></label><input type="range" id="cSy" min="10" max="200">
         <label>Rotation <span class="v" id="cRotV"></span></label><input type="range" id="cRot" min="-180" max="180">
         <div class="hint">S'applique à tout ce qui sort, et reste enregistrée.</div>
+      </details>
+    </section>
+
+    <section>
+      <details id="autosavePanel">
+        <summary>Sauvegarde auto</summary>
+        <label class="check"><input type="checkbox" id="asEnabled"> Sauvegarde auto</label>
+        <label for="asDelay">Délai après la dernière modification (s)</label>
+        <input type="number" id="asDelay" min="10" max="300" step="5">
+        <div class="hint" id="asInfo"></div>
+        <div class="hint">Une copie du projet non enregistré est écrite à part (les 20 plus récentes par projet), sans jamais ralentir la sortie laser. Après un plantage, le studio propose de la récupérer ; il redémarre toujours laser désarmé.</div>
       </details>
     </section>
 
@@ -4514,6 +4538,7 @@ let projDialogMode = 'open';
 function showProject() {
   $('projName').textContent = project.name + (project.modified ? ' •' : '');
   $('projName').classList.toggle('modified', project.modified);
+  showAutosave(project.autosave);
   $('projRecent').innerHTML = project.recent.length
     ? project.recent.map(n => `<button data-recent="${esc(n)}">${esc(n)}</button>`).join('') : '<div class="hint">Aucun</div>';
   $('projRecent').querySelectorAll('[data-recent]').forEach(b => b.onclick = () => { $('projMenu').hidden = true; projOpen(b.dataset.recent); });
@@ -4521,6 +4546,42 @@ function showProject() {
 async function loadProject() {
   try { project = await (await fetch('/api/project')).json(); showProject(); } catch { /* studio restarting */ }
 }
+// ---------- autosave and recovery (T-287) ----------
+// The studio writes autosaves on its own thread; the page only shows the
+// status, the settings and, after a crash, the recovery question.
+// Recovering never arms the laser.
+const hhmm = ms => new Date(ms).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+function showAutosave(a) {
+  if (!a) return;
+  const st = $('autosaveStatus');
+  st.classList.toggle('err', !!a.error);
+  if (a.error) { st.textContent = '⚠ Échec de la sauvegarde auto'; st.title = a.error; }
+  else if (!a.enabled) { st.textContent = ''; st.title = ''; }
+  else if (a.last_ok_ms) { st.textContent = 'Sauvegarde auto ' + hhmm(a.last_ok_ms); st.title = 'Dernière sauvegarde auto, dans ' + a.dir; }
+  else { st.textContent = ''; st.title = ''; }
+  st.hidden = !st.textContent;
+  if (document.activeElement !== $('asEnabled')) $('asEnabled').checked = a.enabled;
+  if (document.activeElement !== $('asDelay')) { $('asDelay').min = a.min_delay_s; $('asDelay').max = a.max_delay_s; $('asDelay').value = a.delay_s; }
+  $('asDelay').disabled = !a.enabled;
+  $('asInfo').textContent = a.enabled ? `Sauvegarde ${a.delay_s} s après la dernière modification, dans ${a.dir}` : 'Désactivée';
+  const offer = a.offer;
+  if (offer && $('recoverAsk').hidden) {
+    const when = new Date(offer.saved_at_ms).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
+    $('recoverWhen').textContent = `Projet « ${offer.project} » : sauvegarde auto du ${when}, plus récente que le projet enregistré.`;
+    $('recoverError').textContent = '';
+    $('recoverAsk').hidden = false;
+  } else if (!offer) $('recoverAsk').hidden = true;
+}
+$('recoverOk').onclick = async () => {
+  try { await projPost('recover'); $('recoverAsk').hidden = true; await afterOpen(); }
+  catch (e) { $('recoverError').textContent = e.message; }
+};
+$('recoverIgnore').onclick = async () => {
+  try { await projPost('recover-ignore'); $('recoverAsk').hidden = true; }
+  catch (e) { $('recoverError').textContent = e.message; }
+};
+$('asEnabled').onchange = e => projPost('autosave', { enabled: e.target.checked }).catch(err => alert(err.message));
+$('asDelay').addEventListener('change', e => projPost('autosave', { delay_s: Math.round(+e.target.value) || 30 }).catch(err => alert(err.message)));
 async function projPost(action, body) {
   const r = await fetch('/api/project/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
   if (!r.ok) throw new Error(await r.text());
