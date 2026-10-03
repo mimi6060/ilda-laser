@@ -392,6 +392,38 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/outputs/limits") => {
+            let s = shared.lock().unwrap();
+            json_response(outputs_view(&s))
+        }
+        // Power caps and projector sheet of one output (T-254). Body:
+        // `{id?, limits?, projector?, confirm_loosen?}` (a missing part is
+        // kept). Lowering applies at once. Raising a cap is 409 `{error,
+        // loosen}` without `"confirm_loosen": true` (sent only by the
+        // operator's confirmation in the UI), and 409 `{error, loosen,
+        // armed: true}` while the laser is armed, confirmed or not.
+        (Method::Post, "/api/outputs/limits") => match body::<OutputsBody>(request) {
+            Ok(b) => {
+                let mut s = shared.lock().unwrap();
+                let s = &mut *s;
+                s.gate.sync_estop(&s.estop);
+                let armed = s.gate.is_armed();
+                let id = b.id.as_deref().unwrap_or(crate::power::MAIN_OUTPUT);
+                match s.outputs.set(id, b.limits, b.projector, armed, b.confirm_loosen) {
+                    Ok(out) => json_response(json!({ "output": out, "max_brightness_effective": s.outputs.max_brightness_effective() })),
+                    Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
+                    Err(crate::power::SetError::Raises(list)) => with_status(
+                        json_response(json!({ "error": "Relever un plafond de puissance : confirmation requise", "loosen": list })),
+                        409,
+                    ),
+                    Err(crate::power::SetError::Armed(list)) => with_status(
+                        json_response(json!({ "error": "Désarmez le laser pour relever un plafond de puissance", "loosen": list, "armed": true })),
+                        409,
+                    ),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
                 let cal = Calibration {
@@ -1080,6 +1112,31 @@ fn default_text_size() -> f32 {
     0.3
 }
 
+/// `POST /api/outputs/limits`.
+#[derive(Deserialize)]
+struct OutputsBody {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    limits: Option<crate::power::OutputLimits>,
+    #[serde(default)]
+    projector: Option<crate::power::ProjectorInfo>,
+    #[serde(default, alias = "confirm_raise")]
+    confirm_loosen: bool,
+}
+
+/// `GET /api/outputs/limits`: every output's caps and projector sheet.
+fn outputs_view(s: &Shared) -> serde_json::Value {
+    json!({
+        "active": crate::power::MAIN_OUTPUT,
+        "outputs": s.outputs.list(),
+        "defaults": { "limits": crate::power::OutputLimits::default(), "projector": crate::power::ProjectorInfo::default() },
+        "classes": crate::power::LASER_CLASSES,
+        "max_brightness_effective": s.outputs.max_brightness_effective(),
+        "load_error": s.outputs.load_error(),
+    })
+}
+
 #[derive(Deserialize)]
 struct SaveScene {
     name: String,
@@ -1096,6 +1153,8 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "settings_rev": s.settings_rev,
         "calibration": s.calibration,
         "safety": s.safety.get(),
+        "output_limits": s.outputs.active_limits(),
+        "max_brightness_effective": s.outputs.max_brightness_effective(),
         "armed": arm.armed,
         "estop": arm.estop.is_some(),
         "arm": arm,
@@ -1939,6 +1998,44 @@ mod tests {
         for forbidden in ["fetch(", "XMLHttpRequest", "WebSocket", "/api/", "sendBeacon", "import("] {
             assert!(!module.contains(forbidden), "beam3d.js must not use {forbidden}");
         }
+    }
+
+    #[test]
+    fn power_caps_lower_at_once_and_rise_only_confirmed_and_disarmed() {
+        let t = TestServer::start(false);
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let get = |t: &TestServer| js(&t.request("GET", "/api/outputs/limits", "").1);
+        let g = get(&t);
+        assert_eq!(g["active"], "main");
+        assert_eq!(g["outputs"][0]["limits"]["max_power"], 0.5);
+        assert_eq!(g["outputs"][0]["projector"]["class"], "4");
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["max_brightness_effective"], 0.5);
+        // Armed: lowering is applied, raising refused even confirmed.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (code, reply) = t.request("POST", "/api/outputs/limits", r#"{"limits":{"max_power":0.3,"max_color":[1,0.2,1]}}"#);
+        assert_eq!(code, 200, "{reply}");
+        assert_eq!(t.shared.lock().unwrap().outputs.active_limits().max_color[1], 0.2);
+        let (code, reply) = t.request("POST", "/api/outputs/limits", r#"{"limits":{"max_power":0.6,"max_color":[1,0.2,1]},"confirm_loosen":true}"#);
+        assert_eq!(code, 409);
+        assert_eq!(js(&reply)["armed"], true);
+        // Disarmed: asks, then applies on confirmation.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        let (code, reply) = t.request("POST", "/api/outputs/limits", r#"{"limits":{"max_power":0.6,"max_color":[1,0.2,1]}}"#);
+        assert_eq!(code, 409);
+        assert!(reply.contains("30 % → 60 %"), "{reply}");
+        assert_eq!(get(&t)["outputs"][0]["limits"]["max_power"].as_f64().unwrap() as f32, 0.3);
+        let (code, _) = t.request("POST", "/api/outputs/limits", r#"{"limits":{"max_power":0.6,"max_color":[1,0.2,1]},"confirm_loosen":true}"#);
+        assert_eq!(code, 200);
+        assert_eq!(get(&t)["max_brightness_effective"].as_f64().unwrap() as f32, 0.6);
+        // The sheet alone: no confirmation; bad values: 400.
+        let (code, _) = t.request("POST", "/api/outputs/limits", r#"{"projector":{"name":"Proj","class":"3B","power_mw":[100,50,200]}}"#);
+        assert_eq!(code, 200);
+        assert_eq!(get(&t)["outputs"][0]["projector"]["name"], "Proj");
+        assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"projector":{"class":"7"}}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"limits":{"max_power":1.5}}"#).0, 400);
+        // A look carrying a cap-looking field changes nothing.
+        t.request("POST", "/api/settings", r#"{"brightness":1.0,"max_power":1.0}"#);
+        assert_eq!(get(&t)["max_brightness_effective"].as_f64().unwrap() as f32, 0.6);
     }
 
     #[test]

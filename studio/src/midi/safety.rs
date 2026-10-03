@@ -25,8 +25,12 @@ pub struct MidiSafety {
 pub const ARM_HOLD: Duration = Duration::from_secs(1);
 /// No arming this long after a controller is plugged in.
 pub const PLUG_GUARD: Duration = Duration::from_secs(5);
-/// Highest brightness a controller may set. The global safety maximum
-/// (T-003) doesn't exist yet; until then it is full brightness.
+/// Highest brightness *fader value* a controller may set. The safety
+/// maximum is the output's power cap (T-254, `power::cap`), a multiplier
+/// applied to the finished frame after every source, MIDI included: the
+/// fader at 1.0 already reaches the laser as `max_power`
+/// (`max_brightness_effective`). Capping the fader to `max_power` as well
+/// would apply the cap twice, so the fader keeps its full travel.
 pub const BRIGHTNESS_MAX: f32 = 1.0;
 
 pub const ARM: &str = "transport.arm";
