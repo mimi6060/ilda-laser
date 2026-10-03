@@ -1231,11 +1231,14 @@ mod tests {
         assert!(!s.timeline.is_playing(), "second press stops it");
     }
 
-    /// Keeps docs/controls.md in sync with the registry.
+    /// Keeps docs/controls.md in sync with the registry, where the local
+    /// docs/ folder exists (it isn't part of the repository).
     #[test]
     fn write_controls_doc() {
         let md = markdown(&ControlRegistry::build(&catalog()));
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/controls.md");
-        std::fs::write(path, md).unwrap();
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs");
+        if docs.is_dir() {
+            std::fs::write(docs.join("controls.md"), md).unwrap();
+        }
     }
 }

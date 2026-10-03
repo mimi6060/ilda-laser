@@ -14,6 +14,7 @@ mod beat;
 mod chases;
 mod controls;
 mod cues;
+mod devices;
 mod dwell;
 mod engine;
 mod evolving;
@@ -64,9 +65,9 @@ use std::time::{Duration, Instant};
 #[derive(Parser)]
 #[command(name = "laser-studio", version)]
 struct Cli {
-    /// Laser DAC to drive: an id from `ilda-laser discover`, or "auto" for
-    /// the first one found. Without it, the studio runs in preview-only
-    /// mode.
+    /// Laser DAC to drive: an id from `--list-devices` (Helios USB, Ether
+    /// Dream, IDN/HeliosPRO), or "auto" for the first one found. Without
+    /// it, the studio runs in preview-only mode. The laser starts disarmed.
     #[arg(long)]
     device: Option<String>,
     /// Send the frames over PONK (UDP) to MadMapper/MadLaser, which drives
@@ -85,6 +86,14 @@ struct Cli {
     /// Where scenes and calibration are saved.
     #[arg(long, default_value = "studio-data")]
     data_dir: PathBuf,
+    /// Scan for laser DACs (Helios on USB, Ether Dream and IDN on the
+    /// network), print their ids for --device and exit. Opens no output.
+    #[arg(long, conflicts_with_all = ["device", "ponk", "test_output"])]
+    list_devices: bool,
+    /// Testing only (T-303): the DACs a scan "finds", as a JSON list of
+    /// `{kind, id, name}`. No scan ever touches the network or USB then.
+    #[arg(long, hide = true, value_name = "JSON", value_parser = devices::parse_test_devices, conflicts_with = "device")]
+    test_devices: Option<devices::TestDevices>,
     /// Print every control id (for MIDI/OSC mapping) as Markdown and exit.
     #[arg(long)]
     list_controls: bool,
@@ -238,6 +247,8 @@ pub struct Shared {
     /// A pending simulated stall (ms): the engine sleeps this long while
     /// holding the lock, the worst case for the watchdog.
     pub test_stall_ms: u64,
+    /// The DACs the last scan found (devices.rs): read-only, never opened.
+    pub devices: Arc<devices::DeviceList>,
 }
 
 impl Shared {
@@ -336,6 +347,15 @@ fn main() -> Result<()> {
         // nothing but one file read and a reply on stdout.
         let want = if cli.decode_peaks { audio::isolate::Want::Peaks } else { audio::isolate::Want::Samples };
         std::process::exit(audio::isolate::child_main(&cli.data_dir, name, want, cli.test_hooks));
+    }
+    if cli.list_devices {
+        // A scan only: nothing is connected, armed or sent.
+        let found = match &cli.test_devices {
+            Some(fake) => fake.0.clone(),
+            None => devices::scan_dacs(devices::Scope { usb: true })?,
+        };
+        print!("{}", devices::print_list(&found));
+        return Ok(());
     }
     if cli.list_controls {
         print!("{}", controls::markdown(&controls::ControlRegistry::build(&presets::catalog())));
@@ -570,6 +590,10 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         project: project::ProjectState::load(&cli.data_dir),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
+        devices: Arc::new(match &cli.test_devices {
+            Some(fake) => devices::DeviceList::fixed(fake.0.clone()),
+            None => devices::DeviceList::real(output.is_some_and(|o| o.kind() == "dac")),
+        }),
     };
     figures::refresh(&mut state);
     if cli.test_hooks {

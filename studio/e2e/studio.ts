@@ -7,6 +7,8 @@
 // Each spec file gets a fresh temporary --data-dir, deleted afterwards.
 // MIDI specs add --midi-test (T-209): a simulated APC40 mkII fed by
 // POST /api/midi/inject; still --no-midi, so no real port is ever opened.
+// Always --test-devices (T-303): a DAC scan returns a fixed list and never
+// touches the network (no IDN/Ether Dream discovery) or the USB bus.
 
 import { test as base, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -56,6 +58,8 @@ export interface StudioOptions {
    * 5583 (a MadMapper on this Mac listens there), never multicast.
    */
   ponkPort?: () => number;
+  /** T-303: what a DAC scan "finds" (--test-devices; default: nothing). */
+  devices?: { kind: string; id: string; name: string }[];
 }
 
 export class Studio {
@@ -84,6 +88,7 @@ export class Studio {
     // a test never opens the user's MIDI controller (--midi-test only adds
     // a simulated one); --no-audio so it never opens an audio input.
     const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio'];
+    args.push('--test-devices', JSON.stringify(this.opts.devices ?? []));
     if (this.opts.midiTest) args.push('--midi-test');
     if (this.opts.testHooks) args.push('--test-hooks');
     if (this.opts.testHooks && this.opts.decodeTimeoutMs) args.push('--test-decode-timeout-ms', String(this.opts.decodeTimeoutMs));
@@ -92,7 +97,7 @@ export class Studio {
       if (!ponkPort || ponkPort === 5583) throw new Error(`refusing PONK port ${ponkPort}`);
       args.push('--ponk', `127.0.0.1:${ponkPort}`);
     }
-    if (args.includes('--device') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
+    if (args.includes('--device') || !args.includes('--test-devices') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc.stdout!.on('data', d => { this.log += d; });
     this.proc.stderr!.on('data', d => { this.log += d; });

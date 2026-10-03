@@ -352,6 +352,12 @@
   #slTable td.t { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
   #slTable tr.k-estop td, #slTable tr.k-watchdog td, #slTable tr.k-log_overflow td { color: var(--danger); }
   #slTable tr.k-arm td.e { color: var(--accent); }
+  #devList { list-style: none; margin: 6px 0 0; padding: 0; }
+  #devList li { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); margin-top: 4px; font-size: 12px; }
+  #devList li.empty { color: var(--muted); background: none; border-style: dashed; }
+  #devList .dev-kind { flex: none; padding: 0 5px; border-radius: 4px; border: 1px solid var(--ws-settings); color: var(--ws-settings); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+  #devList .dev-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #devList code, #outputsPanel .hint code { font-family: ui-monospace, monospace; font-size: 11px; color: var(--accent); }
   .sf-sub { margin-top: 12px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
   .sfzone { margin-top: 8px; padding: 6px 8px; border: 1px solid #ff4d4f55; border-radius: 6px; }
   .sfzone .row { margin-top: 4px; }
@@ -1360,6 +1366,10 @@
     <section id="outputsPanel">
       <h2>Sorties et projecteurs</h2>
       <div class="hint">La sortie en cours est indiquée dans la barre du haut.</div>
+      <div class="sf-sub">DAC détectés</div>
+      <div class="row"><button id="devScan" title="Chercher les DAC (Helios USB, Ether Dream, IDN/HeliosPRO). N'ouvre ni n'arme aucun DAC.">Rafraîchir</button><span class="hint" id="devStatus"></span></div>
+      <ul id="devList"></ul>
+      <div class="hint">Relancez le studio avec <code>--device &lt;id&gt;</code> pour sortir sur ce DAC (Helios USB, HeliosPRO en IDN, Ether Dream). Le laser démarre toujours désarmé. Liste en lecture seule : la recherche n'ouvre ni n'arme aucun DAC.</div>
       <div class="sf-sub">Limites de sécurité</div>
       <div id="pwLoosen" hidden>
         <div id="pwLoosenText"></div>
@@ -1888,7 +1898,7 @@ function draw(points) {
 // Which output the frames go to (T-300), as a coloured pill in the header.
 const OUTPUT_TITLES = {
   ponk: 'Sortie PONK : les tracés partent vers MadMapper/MadLaser, qui pilote le ShowNET. Laser désarmé = trames vides envoyées en continu.',
-  dac: 'Sortie directe vers un DAC laser (IDN / Ether Dream).',
+  dac: 'Sortie directe vers un DAC laser (Helios USB / IDN / Ether Dream).',
   test: 'Sortie de test (fichier journal, aucun laser).',
   preview: 'Aperçu seulement : rien ne part vers un laser.',
 };
@@ -4428,12 +4438,51 @@ Object.keys(pwFields).forEach(id => $(id).addEventListener('input', () => {
 $('pwLoosenOk').addEventListener('click', () => { if (pwPending) saveOutputs(pwPending, true); });
 $('pwLoosenCancel').addEventListener('click', () => { pwPending = null; $('pwLoosen').hidden = true; reloadOutputs(); });
 
+// DAC détectés (T-303): read-only. The studio scans only on « Rafraîchir »
+// (about 1.5 s, on its own thread); the list says what to pass to --device.
+const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN' };
+function showDevices(j) {
+  const list = $('devList');
+  list.replaceChildren();
+  for (const d of j.devices) {
+    const li = document.createElement('li');
+    const kind = document.createElement('span'); kind.className = 'dev-kind'; kind.textContent = DEV_KINDS[d.kind] || d.kind;
+    const name = document.createElement('span'); name.className = 'dev-name'; name.textContent = d.name; name.title = d.name;
+    const id = document.createElement('code'); id.textContent = d.id; id.title = '--device ' + d.id;
+    li.append(kind, name, id);
+    list.append(li);
+  }
+  if (!j.devices.length) {
+    const li = document.createElement('li'); li.className = 'empty';
+    li.textContent = j.scanning ? 'Recherche…' : j.scanned ? 'Aucun DAC trouvé.' : 'Pas encore cherché : cliquez sur Rafraîchir.';
+    list.append(li);
+  }
+  $('devStatus').textContent = j.scanning ? 'Recherche en cours…'
+    : j.error ? 'Erreur : ' + j.error
+    : !j.usb ? 'USB non scanné pendant la sortie sur un DAC.' : '';
+  $('devStatus').classList.toggle('sf-error', !!j.error);
+  $('devScan').disabled = !!j.scanning;
+}
+async function reloadDevices() {
+  try { showDevices(await (await fetch('/api/devices')).json()); } catch { /* next try */ }
+}
+$('devScan').addEventListener('click', async () => {
+  let j = await (await fetch('/api/devices/scan', { method: 'POST' })).json();
+  showDevices(j);
+  for (let i = 0; j.scanning && i < 40; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    j = await (await fetch('/api/devices')).json();
+    showDevices(j);
+  }
+});
+
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
   safety = st.safety; showSafety();
   reloadSafety();
   reloadOutputs();
+  reloadDevices();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');

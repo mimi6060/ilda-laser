@@ -221,7 +221,7 @@ applies to everything and is saved.
 
 ```sh
 cargo run --release -p laser-studio                      # preview only
-cargo run --release -p laser-studio -- --device auto     # first IDN/Ether Dream DAC found
+cargo run --release -p laser-studio -- --device auto     # first Helios/IDN/Ether Dream DAC found
 ```
 
 Then open http://127.0.0.1:8080/ (bound to localhost only, since the UI
@@ -238,6 +238,36 @@ under "Entrée audio".
 Laserworld ShowNET output is not there yet: the ShowNET's streaming
 protocol is encrypted and needs Laserworld's API (requested under NDA).
 It will plug in as another `Output` in `studio/src/output.rs`.
+
+### Open DACs instead of the ShowNET (Helios, HeliosPRO, Ether Dream)
+
+The ShowNET reaches the lasers through an ILDA DB25 cable; any ILDA DAC can
+take its place on that cable, with nothing changed on the lasers:
+
+- **Helios** (USB): plug it into the Mac, no driver needed. libusb is
+  built from source into the studio (`libusb1-sys` `vendored`), so there
+  is nothing to install with Homebrew; a C compiler (Xcode command line
+  tools) is enough to build.
+- **HeliosPRO** (IDN over Ethernet) and **Ether Dream** (Ethernet): on the
+  same network as the Mac.
+
+```sh
+cargo run --release -p laser-studio -- --list-devices            # scan, print the ids, exit
+cargo run --release -p laser-studio -- --device helios:<name>    # drive that DAC
+cargo run --release -p laser-studio -- --device auto --pps 30000 # first DAC found
+```
+
+The same list is in *Réglages › Sorties et projecteurs › DAC détectés*
+(*Rafraîchir*). Scanning is read-only: it never connects, arms or sends a
+frame. Choosing a DAC is a restart with `--device <id>`, and the laser
+always starts disarmed whatever the output. While the studio drives a DAC,
+a rescan leaves USB out so the running Helios is never touched.
+
+Points per second: `--pps` (default 30 000; Helios accepts 7 to 65 535).
+A Helios USB frame holds at most 4095 points: a bigger frame (point budget
+above ~4000) is thinned evenly before it is sent, and a thinned point goes
+dark wherever a blanked travel was skipped, so thinning never draws a lit
+jump. Keep the point budget under 4000 for the full detail.
 
 Scenes and calibration are saved in `studio-data/` (`--data-dir` to change).
 

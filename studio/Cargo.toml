@@ -5,7 +5,8 @@ edition = "2021"
 description = "Live laser show studio for the Mac: shapes, text, animation and music-reactive effects, with a browser UI and live preview."
 
 [dependencies]
-laser-dac = { version = "0.13.1", default-features = false, features = ["ether-dream", "idn"] }
+laser-dac = { version = "0.13.1", default-features = false, features = ["ether-dream", "idn", "helios"] }
+libusb1-sys = { version = "0.7", features = ["vendored"] }  # Helios USB (T-303): libusb built from source and linked in, never a Homebrew dylib
 tiny_http = { version = "0.12", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

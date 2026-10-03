@@ -1,12 +1,13 @@
-//! Sends rendered frames to a real laser DAC through `laser-dac` (IDN or
-//! Ether Dream today), or to MadMapper over PONK (`ponk.rs`, T-300). The
+//! Sends rendered frames to a real laser DAC through `laser-dac` (IDN,
+//! Ether Dream or Helios USB), or to MadMapper over PONK (`ponk.rs`, T-300). The
 //! ShowNET will plug in here as another `Output` once Laserworld's API is
 //! available - the engine and UI don't change.
 
 use crate::interlock::{blank_unless, EStop};
 use crate::patterns::Point;
 use anyhow::{Context, Result};
-use laser_dac::{list_devices, open_device, Frame, FrameSession, FrameSessionConfig, LaserPoint};
+use laser_dac::{list_devices, open_device, Frame, FrameSession, FrameSessionConfig, LaserPoint, OutputModel};
+use std::borrow::Cow;
 
 pub trait Output: Send {
     fn name(&self) -> &str;
@@ -156,6 +157,9 @@ impl Drop for FileLogOutput {
 pub struct DacOutput {
     name: String,
     session: FrameSession,
+    /// Most points per frame this DAC takes, for frame-swap DACs (Helios
+    /// USB: 4095), less room for the blanked loop-back `laser-dac` adds.
+    max_points: Option<usize>,
 }
 
 impl DacOutput {
@@ -173,8 +177,42 @@ impl DacOutput {
             .start_frame_session(FrameSessionConfig::new(pps))
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("failed to start frame session")?;
-        Ok(Self { name: format!("{} ({id})", info.name), session })
+        let max_points = (info.caps.output_model == OutputModel::UsbFrameSwap)
+            .then(|| info.caps.max_points_per_chunk.saturating_sub(loop_back_points(pps)).max(2));
+        Ok(Self { name: format!("{} ({id})", info.name), session, max_points })
     }
+}
+
+/// Points `laser-dac` adds to loop a frame-swap frame back to its start
+/// (blanked dwell, travel, dwell: 100 us + up to 64 points + 400 us),
+/// plus a small margin. Leaving room for them means the DAC never has to
+/// drop them, which would draw the jump back to the start lit.
+fn loop_back_points(pps: u32) -> usize {
+    (500.0 * pps as f64 / 1_000_000.0).ceil() as usize + 64 + 4
+}
+
+/// Thins a frame down to `max` points for a DAC with a frame size limit
+/// (`laser-dac` would cut the tail, leaving a lit end point to jump back
+/// from). Evenly spaced points are kept, first and last included, and a
+/// kept point goes dark whenever a dark point was skipped just before
+/// it: thinning only removes light, it never lights a blanked travel.
+pub fn fit_frame(points: &[Point], max: usize) -> Cow<'_, [Point]> {
+    let n = points.len();
+    if n <= max || max < 2 {
+        return Cow::Borrowed(points);
+    }
+    let mut out = Vec::with_capacity(max);
+    let mut prev = 0;
+    for k in 0..max {
+        let i = k * (n - 1) / (max - 1);
+        let mut p = points[i];
+        if k > 0 && points[prev + 1..i].iter().any(|q| !q.is_lit()) {
+            p = Point::blanked(p.x, p.y);
+        }
+        out.push(p);
+        prev = i;
+    }
+    Cow::Owned(out)
 }
 
 impl Output for DacOutput {
@@ -189,6 +227,10 @@ impl Output for DacOutput {
     }
 
     fn send(&mut self, points: &[Point]) {
+        let points = match self.max_points {
+            Some(max) => fit_frame(points, max),
+            None => Cow::Borrowed(points),
+        };
         self.session.send_frame(Frame::new(points.iter().map(to_laser_point).collect()));
     }
 
@@ -383,6 +425,55 @@ mod tests {
         let lp = to_laser_point(&Point::lit(0.5, -0.5, 1.0, 0.0, 0.5));
         assert_eq!((lp.r, lp.g), (u16::MAX, 0));
         assert!((lp.b as i32 - 32768).abs() <= 1);
+    }
+
+    #[test]
+    fn frames_that_fit_are_sent_as_is() {
+        let f = lit();
+        assert!(matches!(fit_frame(&f, 4095), Cow::Borrowed(_)));
+        assert!(matches!(fit_frame(&f, 2), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn big_frames_are_thinned_to_the_limit_keeping_both_ends() {
+        let f: Vec<Point> = (0..10_000).map(|i| Point::lit(i as f32 / 10_000.0, 0.0, 1.0, 0.0, 0.0)).collect();
+        let out = fit_frame(&f, 4000);
+        assert_eq!(out.len(), 4000);
+        assert_eq!(out[0], f[0]);
+        assert_eq!(out[3999], f[9999]);
+        assert!(out.iter().all(|p| p.is_lit()), "an all-lit path stays lit");
+        assert!(out.windows(2).all(|w| w[1].x > w[0].x), "in order");
+    }
+
+    /// Two lit shapes joined by a blanked travel: however the points fall,
+    /// the thinned frame never draws a lit line across the gap.
+    #[test]
+    fn thinning_never_lights_a_blanked_travel() {
+        let mut f = Vec::new();
+        for i in 0..3000 {
+            f.push(Point::lit(-1.0 + i as f32 / 3000.0, 0.0, 0.0, 1.0, 0.0));
+        }
+        f.push(Point::blanked(0.0, 0.5));
+        f.push(Point::blanked(0.5, 0.5));
+        for i in 0..3000 {
+            f.push(Point::lit(0.5, 0.5 - i as f32 / 3000.0, 0.0, 1.0, 0.0));
+        }
+        for max in [100, 1000, 2047, 4000, 5999] {
+            let out = fit_frame(&f, max);
+            assert_eq!(out.len(), max);
+            let first_right = out.iter().position(|p| p.x >= 0.0).unwrap();
+            assert!(!out[first_right].is_lit(), "max {max}: the jump to the second shape is dark");
+            assert!(out.iter().filter(|p| p.is_lit()).count() <= f.iter().filter(|p| p.is_lit()).count());
+        }
+    }
+
+    #[test]
+    fn the_helios_limit_leaves_room_for_the_loop_back() {
+        // 4095 points per frame on Helios USB; laser-dac's loop-back is at
+        // most 7 + 64 + 26 points at its fastest rate.
+        let room = 4095 - loop_back_points(65_535);
+        assert!(room > 3900 && room <= 4095 - 97, "{room}");
+        assert!(loop_back_points(30_000) >= 3 + 64 + 12);
     }
 
     #[test]
