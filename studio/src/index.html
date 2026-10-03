@@ -419,6 +419,20 @@
   .mact.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   #midiMonitor { font: 11px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); max-height: 160px; overflow-y: auto; margin-top: 4px; }
   #midiMonitor .new { color: var(--text); }
+  /* RÉGLAGES › Entrées réseau (T-013): OSC and Art-Net, Theme (T-299) tokens. */
+  .ni-addr { display: grid; grid-template-columns: 1fr 90px; gap: 4px 8px; align-items: end; }
+  .ni-addr label { margin: 4px 0 0; }
+  .ni-addr input { width: 100%; box-sizing: border-box; }
+  .ni-state { font-size: 12px; color: var(--muted); }
+  .ni-state.ok { color: var(--ok); }
+  .ni-state.warn { color: var(--warn); }
+  .ni-state.bad { color: var(--danger); font-weight: 700; }
+  #oscMonitor { font: 11px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); max-height: 140px; overflow-y: auto; margin-top: 4px; }
+  #oscMonitor .err { color: var(--warn); }
+  #dmxChart { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  #dmxChart td { padding: 2px 4px; border-top: 1px solid var(--line); }
+  #dmxChart td:first-child, #dmxChart td:last-child { width: 44px; color: var(--muted); }
+  #dmxChart td:last-child { text-align: right; color: var(--accent); }
   .mmap button { padding: 2px 8px; font-size: 11px; }
   .mmap .h { color: var(--muted); }
   .proj { position: relative; display: flex; align-items: center; gap: 8px; }
@@ -615,7 +629,7 @@
   <button role="tab" data-ws-tab="live" title="Jouer en direct (F1)">LIVE <kbd>F1</kbd></button>
   <button role="tab" data-ws-tab="timeline" title="Shows et timeline (F2)">TIMELINE <kbd>F2</kbd></button>
   <button role="tab" data-ws-tab="creation" title="Créer du contenu (F3)">CRÉATION <kbd>F3</kbd></button>
-  <button role="tab" data-ws-tab="settings" title="Calibration, sécurité, MIDI (F4)">RÉGLAGES <kbd>F4</kbd></button>
+  <button role="tab" data-ws-tab="settings" title="Calibration, sécurité, MIDI, OSC/Art-Net (F4)">RÉGLAGES <kbd>F4</kbd></button>
   <span class="hint" id="wsHint"><kbd>Espace</kbd> laser · <kbd>Échap</kbd> arrêt, dans tous les onglets · lettres = cues (LIVE)</span>
 </nav>
 </div>
@@ -1273,7 +1287,7 @@
     </div>
   </dialog>
 
-  <!-- RÉGLAGES : sécurité, calibration, contrôleurs MIDI (le projet est dans la barre du haut) -->
+  <!-- RÉGLAGES : sécurité, calibration, contrôleurs MIDI, entrées réseau (le projet est dans la barre du haut) -->
   <div class="ws-panel ws-grid" data-ws="settings" id="settingsPanel" hidden>
     <section>
       <details id="checklistPanel">
@@ -1458,6 +1472,45 @@
           <label class="check"><input type="checkbox" id="midiBlackoutLost"> Blackout si le contrôleur se déconnecte</label>
         </div>
         <div class="hint" id="midiHint"></div>
+      </details>
+    </section>
+
+    <section>
+      <details id="netinPanel">
+        <summary>Entrées réseau (OSC, Art-Net)</summary>
+        <div class="hint">Pilotage depuis une console lumière ou une autre application. Rien de ce qui arrive par le réseau ne peut armer le laser ; le blackout et l'arrêt d'urgence sont toujours acceptés. Écoute seule : le studio n'envoie rien. Réglage de cette machine (pas du projet).</div>
+        <div class="mdev">
+          <div class="n">OSC</div>
+          <label class="check"><input type="checkbox" id="oscEnabled"> Recevoir l'OSC (UDP)</label>
+          <div class="ni-addr">
+            <label for="oscBind">Adresse d'écoute</label><label for="oscPort">Port</label>
+            <input type="text" id="oscBind" autocomplete="off" spellcheck="false"><input type="number" id="oscPort" min="0" max="65535">
+          </div>
+          <div class="ni-state" id="oscState" role="status"></div>
+          <div class="hint">Adresses : <code>/ls/control/&lt;id&gt; valeur</code>, <code>/ls/norm/&lt;id&gt; 0..1</code>, <code>/ls/cue/play "id du cue"</code>, <code>/ls/cue/stop</code>, <code>/ls/blackout</code>. Les id sont ceux de <code>--list-controls</code>.</div>
+          <div id="oscMonitor"><div class="hint">Aucun message reçu.</div></div>
+        </div>
+        <div class="mdev">
+          <div class="n">Art-Net</div>
+          <label class="check"><input type="checkbox" id="artnetEnabled"> Recevoir l'Art-Net (DMX)</label>
+          <div class="ni-addr">
+            <label for="artnetBind">Adresse d'écoute</label><label for="artnetPort">Port</label>
+            <input type="text" id="artnetBind" autocomplete="off" spellcheck="false"><input type="number" id="artnetPort" min="0" max="65535">
+            <label for="artnetUniverse">Univers</label><label for="artnetAddress">Adresse DMX</label>
+            <input type="number" id="artnetUniverse" min="0" max="32767"><input type="number" id="artnetAddress" min="1" max="502">
+          </div>
+          <div class="ni-state" id="artnetState" role="status"></div>
+          <table id="dmxChart"></table>
+        </div>
+        <div class="mdev">
+          <div class="n">Perte du signal Art-Net</div>
+          <label for="netinPolicy">Si plus rien n'arrive</label>
+          <select id="netinPolicy"></select>
+          <label for="netinTimeout">Après (s)</label>
+          <input type="number" id="netinTimeout" min="0.5" max="30" step="0.5">
+          <div class="hint">Le retour du signal reprend la main sur tous les canaux, sans jamais armer. Un arrêt logiciel ne remplace pas l'arrêt matériel du projecteur.</div>
+        </div>
+        <div class="hint sf-error" id="netinError" role="alert"></div>
       </details>
     </section>
 
@@ -2729,10 +2782,10 @@ function sfFromControls() {
 const SL_GROUPS = {
   arm: ['arm', 'arm_refused', 'disarm'],
   estop: ['estop', 'estop_reset'],
-  locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_reset', 'checklist_edit'],
+  locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_reset', 'checklist_edit', 'input_lost', 'input_back'],
   limiter: ['limiter'],
   play: ['cue', 'scene', 'show'],
-  settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps'],
+  settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings'],
   studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow'],
 };
 let slLog = null;
@@ -5150,6 +5203,72 @@ $('learnNo').onclick = () => post('/api/midi/learn/confirm', { replace: false })
 $('midiAllowArm').onchange = e => post('/api/midi/safety', { allow_arm: e.target.checked });
 // Opening « Contrôleur » switches to the fast refresh at once (activity lights, monitor).
 $('midiPanel').addEventListener('toggle', () => { if ($('midiPanel').open) midiNow(); });
+
+// RÉGLAGES › Entrées réseau (T-013): OSC and Art-Net settings, listener
+// state, the OSC monitor and the chart's live DMX values. Polled while open.
+const NI_SIGNAL = { off: ['Coupé', ''], waiting: ['En attente de données', 'warn'], ok: ['Signal reçu', 'ok'], lost: ['Signal perdu', 'bad'] };
+let netin = null;
+function niListen(st, on, cli) {
+  if (!on) return ['Coupé', ''];
+  if (st.error) return [st.error, 'bad'];
+  const where = st.local ? `Écoute sur ${st.local}` : 'Ouverture…';
+  return [where + (cli ? ' (imposé par la ligne de commande)' : '') + ` — ${st.packets} paquet(s)` + (st.rejected ? `, ${st.rejected} rejeté(s)` : '') + (st.dropped ? `, ${st.dropped} perdu(s)` : ''), st.local ? 'ok' : 'warn'];
+}
+function setField(id, v) { if (document.activeElement !== $(id)) $(id).value = v; }
+function showNetin(n) {
+  netin = n;
+  const c = n.config, e = n.effective;
+  $('oscEnabled').checked = e.osc.enabled; $('oscEnabled').disabled = n.cli.osc;
+  setField('oscBind', c.osc.bind); setField('oscPort', c.osc.port);
+  $('artnetEnabled').checked = e.artnet.enabled; $('artnetEnabled').disabled = n.cli.artnet;
+  setField('artnetBind', c.artnet.bind); setField('artnetPort', c.artnet.port);
+  setField('artnetUniverse', c.artnet.universe); setField('artnetAddress', c.artnet.address);
+  if ($('netinPolicy').options.length !== n.policies.length) {
+    $('netinPolicy').replaceChildren(...n.policies.map(p => { const o = document.createElement('option'); o.value = p.id; o.textContent = p.label; return o; }));
+  }
+  setField('netinPolicy', c.loss.policy); setField('netinTimeout', c.loss.timeout_ms / 1000);
+  const [ot, oc] = niListen(n.osc.status, e.osc.enabled, n.cli.osc);
+  $('oscState').textContent = ot; $('oscState').className = 'ni-state ' + oc;
+  let [at, ac] = niListen(n.artnet.status, e.artnet.enabled, n.cli.artnet);
+  if (e.artnet.enabled && !n.artnet.status.error) {
+    const [sig, cls] = NI_SIGNAL[n.artnet.signal] || NI_SIGNAL.off;
+    at = `${sig}${n.artnet.source ? ' de ' + n.artnet.source : ''} — ${at}`; ac = cls;
+  }
+  $('artnetState').textContent = at; $('artnetState').className = 'ni-state ' + ac;
+  $('dmxChart').replaceChildren(...n.artnet.channels.map(ch => {
+    const tr = document.createElement('tr');
+    for (const t of [ch.channel, ch.label, ch.value ?? '—']) { const td = document.createElement('td'); td.textContent = t; tr.append(td); }
+    return tr;
+  }));
+  const mon = $('oscMonitor');
+  if (!n.osc.recent.length) mon.innerHTML = '<div class="hint">Aucun message reçu.</div>';
+  else mon.replaceChildren(...n.osc.recent.map(m => {
+    const d = document.createElement('div');
+    d.textContent = `${m.address} ${m.args.map(a => JSON.stringify(a)).join(' ')}` + (m.error ? ` — ${m.error}` : '');
+    if (m.error) d.className = 'err';
+    return d;
+  }));
+}
+async function loadNetin() {
+  try { const r = await fetch('/api/netin'); if (r.ok) showNetin(await r.json()); } catch {}
+}
+async function saveNetin(patch) {
+  const r = await fetch('/api/netin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+  $('netinError').textContent = r.ok ? '' : await r.text();
+  if (r.ok) showNetin(await r.json()); else loadNetin();
+}
+$('oscEnabled').onchange = e => saveNetin({ osc: { enabled: e.target.checked } });
+$('oscBind').onchange = e => saveNetin({ osc: { bind: e.target.value.trim() } });
+$('oscPort').onchange = e => saveNetin({ osc: { port: Math.round(+e.target.value) } });
+$('artnetEnabled').onchange = e => saveNetin({ artnet: { enabled: e.target.checked } });
+$('artnetBind').onchange = e => saveNetin({ artnet: { bind: e.target.value.trim() } });
+$('artnetPort').onchange = e => saveNetin({ artnet: { port: Math.round(+e.target.value) } });
+$('artnetUniverse').onchange = e => saveNetin({ artnet: { universe: Math.round(+e.target.value) } });
+$('artnetAddress').onchange = e => saveNetin({ artnet: { address: Math.round(+e.target.value) } });
+$('netinPolicy').onchange = e => saveNetin({ loss: { policy: e.target.value } });
+$('netinTimeout').onchange = e => saveNetin({ loss: { timeout_ms: Math.round(+e.target.value * 1000) } });
+$('netinPanel').addEventListener('toggle', () => { if ($('netinPanel').open) loadNetin(); });
+setInterval(() => { if (activeWs === 'settings' && $('netinPanel').open && !document.hidden) loadNetin(); }, 500);
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
 // ---------- project (T-286) ----------
 // One .lsproj file per show, in the studio's projects folder only (no

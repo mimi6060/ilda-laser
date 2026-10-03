@@ -413,6 +413,7 @@ fn source_fr(source: Option<&str>) -> &'static str {
         Some("midi") => "MIDI",
         Some("api") => "API",
         Some("system") => "système",
+        Some("network") => "réseau",
         _ => "",
     }
 }
@@ -499,6 +500,9 @@ pub fn describe(e: &SafetyEvent) -> String {
         "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
         "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),
         "power_caps" => format!("Plafonds de puissance modifiés ({}){}", str_of(d, "output"), changed()),
+        "input_lost" => format!("Signal {} perdu — {}", str_of(d, "protocol_fr"), str_of(d, "policy_fr")),
+        "input_back" => format!("Signal {} retrouvé", str_of(d, "protocol_fr")),
+        "netin_settings" => format!("Entrées réseau modifiées{}", changed()),
         "log_overflow" => format!("{} événement(s) perdu(s) : journal saturé", d.get("lost").and_then(Value::as_u64).unwrap_or(0)),
         other => other.to_string(),
     }

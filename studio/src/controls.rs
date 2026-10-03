@@ -63,7 +63,7 @@ pub struct ControlDesc {
 
 /// How a caller expresses a value: native units, or normalised 0..1 (what
 /// a MIDI fader naturally gives).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlInput {
     Value(f32),
     Norm(f32),
@@ -236,8 +236,16 @@ fn truthy(input: ControlInput) -> bool {
 }
 
 /// Apply one control change to the shared state. `from_external` is true
-/// for MIDI/OSC, false for the on-screen UI.
+/// for MIDI, false for the on-screen UI.
 pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool) -> Result<(), ControlError> {
+    apply_as(s, id, input, if from_external { ArmSource::Midi } else { ArmSource::Ui })
+}
+
+/// `apply` for a given source. Everything but the UI, keyboard and API is
+/// external (MIDI, OSC/Art-Net): only controls marked `external`, and the
+/// source is what the safety log records for a stop or a cue.
+pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -> Result<(), ControlError> {
+    let from_external = !matches!(src, ArmSource::Ui | ArmSource::Keyboard | ArmSource::Api);
     let desc = s.controls.get(id).cloned().ok_or_else(|| ControlError::Unknown(id.to_string()))?;
     if from_external && !desc.external {
         return Err(ControlError::Refused("ce contrôle ne peut pas être piloté depuis un contrôleur externe"));
@@ -314,7 +322,7 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
         "audio.rotate" => s.settings.audio.rotate = value(input),
         "audio.flash" => s.settings.audio.flash = value(input),
         "audio.color_on_beat" => s.settings.audio.color_on_beat = truthy(input),
-        "transport.blackout" | "safety.estop" => s.emergency_stop(if from_external { ArmSource::Midi } else { ArmSource::Ui }),
+        "transport.blackout" | "safety.estop" => s.emergency_stop(src),
         "safety.hold" => s.presence.set_midi_hold(truthy(input)),
         // Only reachable from the UI (external is false): arming goes
         // through the gate, like the laser button.
@@ -410,7 +418,7 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
                 s.cue_page = n - 1;
             } else if let Some(cell) = other.strip_prefix("grid.") {
                 let preset_id = grid_cell_preset(&s.presets, cell).ok_or_else(|| ControlError::Unknown(id.to_string()))?;
-                press_cue_from(s, &preset_id, None, truthy(input), Some(if from_external { "midi" } else { "ui" }));
+                press_cue_from(s, &preset_id, None, truthy(input), Some(src.id()));
             } else {
                 return Err(ControlError::Unknown(id.to_string()));
             }
@@ -540,7 +548,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
 }
 
 /// "<page>.<row>.<col>" → the preset in that grid cell.
-fn grid_cell_preset(presets: &[Preset], cell: &str) -> Option<String> {
+pub(crate) fn grid_cell_preset(presets: &[Preset], cell: &str) -> Option<String> {
     let parts: Vec<usize> = cell.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
     let [page, row, col] = parts[..] else { return None };
     if !(1..=GRID_ROWS).contains(&row) || !(1..=GRID_COLS).contains(&col) {
