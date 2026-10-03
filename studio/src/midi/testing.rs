@@ -5,7 +5,9 @@
 //! « is pad (0,0) lit? ». `SimMidi` is a `Backend` that hosts fake devices
 //! instead of CoreMIDI: unit tests use it, and `--midi-test` runs the real
 //! worker on it so e2e tests can inject bytes over HTTP
-//! (`/api/midi/inject`, `/api/midi/sent`).
+//! (`/api/midi/inject`, `/api/midi/sent`). `FakeApc::generic()` plays any
+//! other controller (T-211): it answers nothing, records what it gets, and
+//! `--midi-test` plugs more of them through `/api/midi/plug`.
 //!
 //! Nothing here touches CoreMIDI. Injected bytes take the same path as a
 //! real controller's (decoder → worker → mapping engine → T-208 rules), so
@@ -47,6 +49,21 @@ impl FakeApc {
     pub fn new(model: Model) -> Self {
         assert!(matches!(model, Model::Apc40 | Model::Apc40Mk2), "FakeApc plays an APC40 or APC40 mkII");
         FakeApc { model, received: VecDeque::new(), faders: [0; 9] }
+    }
+
+    /// Any other controller (T-211): answers nothing (not even the Device
+    /// Inquiry), just records what the studio sends it.
+    pub fn generic() -> Self {
+        FakeApc { model: Model::Unknown, received: VecDeque::new(), faders: [0; 9] }
+    }
+
+    /// Last value sent with `status` (e.g. `0x90` = Note On, channel 1) to
+    /// `number`: what that LED shows. `None` if never addressed.
+    pub fn last_value(&self, status: u8, number: u8) -> Option<u8> {
+        self.received.iter().rev().find_map(|b| match b[..] {
+            [st, n, v] if st == status && n == number => Some(v),
+            _ => None,
+        })
     }
 
     fn pid(&self) -> u8 {
@@ -132,6 +149,9 @@ impl FakeApc {
             self.received.pop_front();
         }
         self.received.push_back(bytes.to_vec());
+        if self.model == Model::Unknown {
+            return Vec::new();
+        }
         if bytes == DEVICE_INQUIRY {
             return vec![self.identity_reply()];
         }

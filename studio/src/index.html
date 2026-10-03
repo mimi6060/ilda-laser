@@ -360,7 +360,13 @@
   #midiMenu[hidden] { display: none; }
   #midiMenu h3 { margin: 0 0 2px; font-size: 12px; font-weight: 600; }
   #midiMenu button, #cueMenu .midi button { display: block; width: 100%; text-align: left; margin-top: 4px; }
-  .mmap { display: grid; grid-template-columns: auto 1fr auto auto; gap: 4px 8px; align-items: center; font-size: 12px; margin-top: 6px; }
+  .mmap { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 4px 8px; align-items: center; font-size: 12px; margin-top: 6px; }
+  .mmap select, .mmap input { font-size: 11px; padding: 1px 4px; max-width: 120px; }
+  /* Generic MIDI (T-211): activity light, monitor */
+  .mact { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--line); margin-right: 6px; vertical-align: middle; transition: background .15s; }
+  .mact.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  #midiMonitor { font: 11px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); max-height: 160px; overflow-y: auto; margin-top: 4px; }
+  #midiMonitor .new { color: var(--text); }
   .mmap button { padding: 2px 8px; font-size: 11px; }
   .mmap .h { color: var(--muted); }
   .proj { position: relative; display: flex; align-items: center; gap: 8px; }
@@ -1206,9 +1212,15 @@
         <summary>Contrôleur</summary>
         <div class="row"><button id="midiLearnMode" title="Puis cliquez un contrôle et touchez le contrôleur (ou clic droit sur un contrôle, à tout moment)">Apprendre MIDI</button></div>
         <div id="midiDevices"></div>
+        <input type="file" id="midiImportFile" accept=".json,application/json" hidden>
         <div class="mdev">
           <div class="n">Affectations</div>
           <div id="midiMappings"></div>
+          <div class="hint">LED : valeurs envoyées au bouton (éteint allumé clignotant), ex. « 0 127 » ou « 0 1 2 » ; vide = pas de retour LED.</div>
+        </div>
+        <div class="mdev">
+          <div class="n">Moniteur MIDI</div>
+          <div id="midiMonitor"><div class="hint">Aucun message reçu.</div></div>
         </div>
         <div class="mdev">
           <div class="n">Sécurité</div>
@@ -4016,7 +4028,11 @@ async function midiLoop() {
   clearTimeout(midiTimer);
   try {
     const m = await (await fetch('/api/midi')).json();
-    if (!midiProfiles.length) midiProfiles = await (await fetch('/api/midi/profiles')).json();
+    // Again when a device uses a profile we don't know yet (a learn made a « -perso » copy).
+    if (!midiProfiles.length || m.devices.some(d => !midiProfiles.some(p => p.slug === d.profile))) {
+      midiProfiles = await (await fetch('/api/midi/profiles')).json();
+      midiKey = '';
+    }
     const live = m.devices.filter(d => d.connected);
     const st = $('midiStatus');
     st.textContent = !m.enabled ? 'MIDI : désactivé' : live.length
@@ -4033,21 +4049,93 @@ async function midiLoop() {
     showLearn(m);
     const mk = JSON.stringify(midiMaps);
     if (mk !== mapsKey) { mapsKey = mk; renderMappings(); }
+    showActivity(m);
   } catch (e) { /* studio restarting */ }
-  // Every 250 ms while learning, so the banner follows the controller.
-  midiTimer = setTimeout(midiLoop, learnBusy || learnMode ? 250 : 2000);
+  // Every 250 ms while learning, so the banner follows the controller;
+  // 400 ms with the controller panel open (activity lights, monitor).
+  midiTimer = setTimeout(midiLoop, learnBusy || learnMode ? 250 : $('midiPanel').open ? 400 : 2000);
 }
+// T-211: a light per device that flashes on each message, and the monitor.
+const MIDI_KIND_FR = { note_on: 'Note On', note_off: 'Note Off', cc: 'CC', pitch_bend: 'Pitch bend', program_change: 'Programme', sys_ex: 'SysEx' };
+function midiMsgLabel(msg) {
+  const ch = msg.channel != null ? ` · can. ${msg.channel + 1}` : '';
+  switch (msg.kind) {
+    case 'note_on': return `Note On ${msg.note} · vél. ${msg.velocity}${ch}`;
+    case 'note_off': return `Note Off ${msg.note}${ch}`;
+    case 'cc': return `CC ${msg.number} = ${msg.value}${ch}`;
+    case 'pitch_bend': return `Pitch bend ${msg.value}${ch}`;
+    case 'program_change': return `Programme ${msg.program}${ch}`;
+    case 'sys_ex': return `SysEx (${(msg.bytes || []).length} octets)`;
+    default: return MIDI_KIND_FR[msg.kind] || msg.kind;
+  }
+}
+// Messages seen per device: a new one lights its dot for half a second,
+// however long the poll took.
+const midiSeen = {};
+function showActivity(m) {
+  m.devices.forEach((d, i) => {
+    const prev = midiSeen[d.name];
+    midiSeen[d.name] = d.messages;
+    if (prev != null ? d.messages === prev : !(d.activity_ms < 1500)) return; // nothing new
+    const dot = document.querySelector(`[data-mact="${i}"]`);
+    if (!dot) return;
+    dot.classList.add('on');
+    clearTimeout(dot.offTimer);
+    dot.offTimer = setTimeout(() => dot.classList.remove('on'), 500);
+  });
+  if (!$('midiPanel').open) return;
+  const recent = (m.recent || []).slice(-12).reverse();
+  const html = recent.length
+    ? recent.map(e => `<div class="${e.age_ms < 600 ? 'new' : ''}">${esc(e.port)} · ${esc(midiMsgLabel(e.msg))}</div>`).join('')
+    : '<div class="hint">Aucun message reçu.</div>';
+  if ($('midiMonitor').innerHTML !== html) $('midiMonitor').innerHTML = html;
+}
+async function exportProfile(port) {
+  const r = await fetch('/api/midi/profile/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port }) });
+  if (!r.ok) { showBanner(await r.text(), 5000); return; }
+  const { slug, profile } = await r.json();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' }));
+  a.download = `${slug}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+let importPort = null;
+$('midiImportFile').onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  let profile;
+  try { profile = JSON.parse(await file.text()); } catch (err) { showBanner(`Profil illisible : ${file.name} n'est pas un fichier JSON`, 5000); return; }
+  const slug = file.name.replace(/\.json$/i, '');
+  const r = await fetch('/api/midi/profile/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile, slug, port: importPort }) });
+  if (!r.ok) { showBanner(await r.text(), 6000); return; }
+  const out = await r.json();
+  showBanner(`Profil importé : ${out.slug}` + (importPort ? ` (utilisé par ${importPort})` : ''), 4000);
+  midiProfiles = [];
+  midiKey = '';
+  midiNow();
+};
 function renderMidi(m) {
-  const opts = midiProfiles.map(p => `<option value="${esc(p.slug)}">${esc(p.name || p.slug)}${p.builtin ? ' (intégré)' : ' (perso)'}</option>`).join('');
+  // Grouped: générique, modèles de départ (T-211), APC, profils perso.
+  const opt = p => `<option value="${esc(p.slug)}">${esc(p.name || p.slug)}${p.template ? ' (modèle)' : p.builtin ? ' (intégré)' : ' (perso)'}</option>`;
+  const group = (label, list) => list.length ? `<optgroup label="${label}">${list.map(opt).join('')}</optgroup>` : '';
+  const opts = group('Générique', midiProfiles.filter(p => p.builtin && p.slug === m.default_profile))
+    + group('Modèles de départ', midiProfiles.filter(p => p.template))
+    + group('Akai APC40', midiProfiles.filter(p => p.builtin && !p.template && p.slug !== m.default_profile))
+    + group('Profils perso', midiProfiles.filter(p => !p.builtin));
   $('midiDevices').innerHTML = m.devices.map((d, i) => `
-    <div class="mdev ${d.connected ? '' : 'off'}">
-      <div class="n">${esc(d.name)} <span class="hint">${d.connected ? 'connecté' : 'déconnecté'}</span></div>
+    <div class="mdev ${d.connected ? '' : 'off'}" data-mport="${esc(d.name)}">
+      <div class="n"><span class="mact" data-mact="${i}" title="Activité : s'allume à chaque message reçu"></span>${esc(d.name)} <span class="hint">${d.connected ? 'connecté' : 'déconnecté'}</span></div>
       <div class="hint">Modèle détecté : ${esc(d.model_label)}</div>
       <label class="check"><input type="checkbox" data-mdev="${i}" ${d.enabled ? 'checked' : ''}> Activé</label>
       <label class="check"><input type="checkbox" data-mled="${i}" ${d.leds ? 'checked' : ''}> Retour LED</label>
       <label>Profil</label>
       <div class="row" style="margin-top:0"><select data-mprof="${i}">${opts}</select>
         <button data-mreset="${i}" style="flex:0;white-space:nowrap">Réinitialiser le profil</button></div>
+      <div class="row"><button data-mexport="${i}">Exporter le profil</button><button data-mimport="${i}">Importer un profil</button></div>
       ${d.profile_error ? `<div class="merr">${esc(d.profile_error)}</div>` : ''}
     </div>`).join('') || '<div class="hint">Aucun appareil MIDI.</div>';
   m.devices.forEach((d, i) => { const sel = document.querySelector(`[data-mprof="${i}"]`); if (sel) sel.value = d.profile; });
@@ -4057,6 +4145,8 @@ function renderMidi(m) {
   document.querySelectorAll('[data-mled]').forEach(el => el.onchange = () => post('/api/midi/device', { port: portOf(el), leds: el.checked }));
   document.querySelectorAll('[data-mprof]').forEach(el => el.onchange = () => post('/api/midi/profile', { port: portOf(el), profile: el.value }));
   document.querySelectorAll('[data-mreset]').forEach(el => el.onclick = () => post('/api/midi/profile', { port: portOf(el), profile: null }));
+  document.querySelectorAll('[data-mexport]').forEach(el => el.onclick = () => exportProfile(portOf(el)));
+  document.querySelectorAll('[data-mimport]').forEach(el => el.onclick = () => { importPort = portOf(el); $('midiImportFile').click(); });
 }
 
 // ---------- MIDI learn (T-203) ----------
@@ -4145,16 +4235,49 @@ function paintPills() {
   });
 }
 function renderMappings() {
+  // T-211: a CC on a fader-like control can be absolute or relative (three
+  // encoder encodings); a note or CC can light its LED.
+  const ENC = [['absolute', '', 'Absolu'], ['relative', 'twos_complement', 'Relatif (complément à 2)'], ['relative', 'sign_bit', 'Relatif (bit de signe)'], ['relative', 'offset64', 'Relatif (offset 64)']];
+  const modeCell = (mp, i) => mp.kind === 'cc' && (mp.mode === 'absolute' || mp.mode === 'relative')
+    ? `<select data-menc="${i}" data-port="${esc(mp.port)}" title="Potard / fader (absolu) ou encodeur sans fin (relatif)">${ENC.map(([m, e, l]) =>
+        `<option value="${m}:${e}" ${mp.mode === m && (m === 'absolute' || mp.encoding === e) ? 'selected' : ''}>${l}</option>`).join('')}</select>`
+    : `<span class="hint" style="margin:0">${esc(MODE_FR[mp.mode] || mp.mode)}</span>`;
+  const ledText = led => led ? [led.off, led.on].concat(led.blink != null ? [led.blink] : []).join(' ') : '';
+  // The APC40 drivers light their own LEDs: no generic LED field there.
+  const generic = mp => (midiProfiles.find(p => p.slug === mp.profile)?.driver ?? 'generic') === 'generic';
+  const ledCell = (mp, i) => (mp.kind === 'note' || mp.kind === 'cc') && generic(mp)
+    ? `<input data-mledv="${i}" data-port="${esc(mp.port)}" value="${ledText(mp.led)}" placeholder="LED" size="7" title="Retour LED : éteint allumé (clignotant), ex. 0 127 ; vide = aucun">`
+    : '<span></span>';
   const rows = midiMaps.map((mp, i) => `
-    <span>${esc(mapLabel(mp))}</span><span>${esc(mp.target_label)}</span><span class="hint" style="margin:0">${esc(MODE_FR[mp.mode] || mp.mode)}</span>
+    <span>${esc(mapLabel(mp))}</span><span>${esc(mp.target_label)}</span>${modeCell(mp, i)}${ledCell(mp, i)}
     <button data-mdel="${i}" title="${esc(mp.port)} · profil ${esc(mp.profile)}">Supprimer</button>`).join('');
   $('midiMappings').innerHTML = rows
-    ? `<div class="mmap"><span class="h">Message</span><span class="h">Cible</span><span class="h">Mode</span><span></span>${rows}</div>`
+    ? `<div class="mmap"><span class="h">Message</span><span class="h">Cible</span><span class="h">Mode</span><span class="h">LED</span><span></span>${rows}</div>`
     : '<div class="hint">Aucune affectation. Clic droit sur un contrôle → « Apprendre MIDI ».</div>';
+  const update = async (mp, patch) => {
+    const r = await fetch('/api/midi/mapping/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port: mp.port, index: mp.index, ...patch }) });
+    if (!r.ok) showBanner(await r.text(), 5000);
+    midiNow();
+  };
   document.querySelectorAll('[data-mdel]').forEach(el => el.onclick = async () => {
     const mp = midiMaps[+el.dataset.mdel];
     await post('/api/midi/mapping/delete', { port: mp.port, index: mp.index });
     midiNow();
+  });
+  document.querySelectorAll('[data-menc]').forEach(el => el.onchange = () => {
+    const [mode, encoding] = el.value.split(':');
+    update(midiMaps[+el.dataset.menc], encoding ? { mode, encoding } : { mode });
+  });
+  document.querySelectorAll('[data-mledv]').forEach(el => el.onchange = () => {
+    const v = el.value.trim().split(/[\s,/;]+/).filter(Boolean).map(Number);
+    if (v.some(n => !Number.isInteger(n) || n < 0 || n > 127) || v.length === 1 || v.length > 3) {
+      showBanner('LED : 2 ou 3 nombres de 0 à 127 (éteint allumé clignotant), ou vide', 5000);
+      return;
+    }
+    const mp = midiMaps[+el.dataset.mledv];
+    // « Cue présent » (templates' grid pads) has no field here: kept as is.
+    const present = mp.led?.present != null ? { present: mp.led.present } : {};
+    update(mp, { led: v.length ? { off: v[0], on: v[1], ...(v.length > 2 ? { blink: v[2] } : {}), ...present } : null });
   });
 }
 function openMidiMenu(id, x, y) {
@@ -4199,6 +4322,8 @@ $('learnYes').onclick = () => post('/api/midi/learn/confirm', { replace: true })
 $('learnNo').onclick = () => post('/api/midi/learn/confirm', { replace: false }).then(midiNow);
 
 $('midiAllowArm').onchange = e => post('/api/midi/safety', { allow_arm: e.target.checked });
+// Opening « Contrôleur » switches to the fast refresh at once (activity lights, monitor).
+$('midiPanel').addEventListener('toggle', () => { if ($('midiPanel').open) midiNow(); });
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
 // ---------- project (T-286) ----------
 // One .lsproj file per show, in the studio's projects folder only (no

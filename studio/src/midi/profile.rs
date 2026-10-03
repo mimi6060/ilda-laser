@@ -17,11 +17,18 @@ use std::path::{Path, PathBuf};
 
 pub const GENERIC: &str = "generic";
 
-/// Built-in profiles: our own layout (T-204 fills the mappings).
-const BUILTIN: [(&str, &str); 3] = [
+/// Built-in profiles: our own layouts (T-204 fills the APC mappings).
+/// After `generic`, starter templates for common controllers (T-211),
+/// written by us from the makers' public MIDI charts; none is needed for
+/// a device to work (MIDI learn on `generic` is enough).
+const BUILTIN: [(&str, &str); 7] = [
     ("apc40-mk2", include_str!("../../profiles/apc40-mk2.json")),
     ("apc40", include_str!("../../profiles/apc40.json")),
     (GENERIC, include_str!("../../profiles/generic.json")),
+    ("apc-mini", include_str!("../../profiles/apc-mini.json")),
+    ("launchpad", include_str!("../../profiles/launchpad.json")),
+    ("nanokontrol2", include_str!("../../profiles/nanokontrol2.json")),
+    ("x-touch-mini", include_str!("../../profiles/x-touch-mini.json")),
 ];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +170,8 @@ pub struct ProfileInfo {
     pub name: String,
     pub driver: Driver,
     pub builtin: bool,
+    /// A built-in starter template for a generic controller (T-211).
+    pub template: bool,
 }
 
 /// Result of picking a profile for a port.
@@ -253,7 +262,13 @@ impl ProfileStore {
 
     /// Built-ins first, then user profiles by slug.
     pub fn list(&self) -> Vec<ProfileInfo> {
-        let info = |slug: &str, p: &Profile, builtin| ProfileInfo { slug: slug.to_string(), name: p.name.clone(), driver: p.driver, builtin };
+        let info = |slug: &str, p: &Profile, builtin: bool| ProfileInfo {
+            slug: slug.to_string(),
+            name: p.name.clone(),
+            driver: p.driver,
+            builtin,
+            template: builtin && p.driver == Driver::Generic && slug != GENERIC,
+        };
         self.builtin.iter().map(|(s, p)| info(s, p, true)).chain(self.user.iter().map(|(s, p)| info(s, p, false))).collect()
     }
 
@@ -344,6 +359,19 @@ impl ProfileStore {
         Ok(slug)
     }
 
+    /// Imports a profile (« Importer un profil », T-211) under a new slug
+    /// made from `hint` (else its name): an existing profile is never
+    /// overwritten (`-2`, `-3`… if taken). With a port, it becomes the
+    /// port's profile. Returns the slug written.
+    pub fn import(&mut self, port: Option<&str>, hint: Option<&str>, profile: Profile) -> Result<String, String> {
+        let base = slugify(hint.filter(|h| !h.trim().is_empty()).unwrap_or(&profile.name));
+        let slug = (1..1000)
+            .map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") })
+            .find(|s| self.get(s).is_none() && valid_slug(s))
+            .ok_or_else(|| format!("nom de profil indisponible : {base}"))?;
+        self.save_profile(port, &slug, profile)
+    }
+
     /// Where edits of profile `slug` go (MIDI learn, deleting a mapping):
     /// the profile itself if it is a user one; for a built-in one, a new
     /// `<slug>-perso` copy (`-perso-2`… if taken: an older copy is never
@@ -370,6 +398,35 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
     std::fs::write(path, content).map_err(|e| format!("impossible d'écrire {} : {e}", path.display()))
 }
 
+/// A slug from a free name: « Mon nanoKONTROL 2 » → `mon-nanokontrol-2`.
+/// Accented letters lose their accent; anything else becomes `-`.
+pub fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    for c in name.chars().flat_map(|c| c.to_lowercase()) {
+        let c = match c {
+            'à' | 'â' | 'ä' | 'á' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'î' | 'ï' | 'í' => 'i',
+            'ô' | 'ö' | 'ó' => 'o',
+            'ù' | 'û' | 'ü' | 'ú' => 'u',
+            'ç' => 'c',
+            c => c,
+        };
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+            slug.push(c);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug: String = slug.trim_end_matches('-').chars().take(48).collect();
+    let slug = slug.trim_end_matches('-').to_string();
+    if slug.is_empty() {
+        "profil".into()
+    } else {
+        slug
+    }
+}
+
 /// Slugs become file names: lowercase ASCII, digits, `-` and `_` only.
 pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty() && slug.len() <= 64 && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
@@ -392,7 +449,11 @@ mod tests {
         assert_eq!(store.get("apc40-mk2").unwrap().driver, Driver::Apc40Mk2);
         assert_eq!(store.get("apc40-mk2").unwrap().host_mode, 0x41);
         assert_eq!(store.get(GENERIC).unwrap().driver, Driver::Generic);
-        assert_eq!(store.list().len(), 3);
+        let list = store.list();
+        assert_eq!(list.len(), 7);
+        let templates: Vec<&str> = list.iter().filter(|p| p.template).map(|p| p.slug.as_str()).collect();
+        assert_eq!(templates, ["apc-mini", "launchpad", "nanokontrol2", "x-touch-mini"]);
+        assert!(list.iter().all(|p| p.builtin));
     }
 
     #[test]
@@ -431,8 +492,12 @@ mod tests {
         assert_eq!(store.choose("Some Port", Model::Apc40).slug, "apc40", "the inquiry wins over the name");
         assert_eq!(store.choose("APC40 mkII", Model::Unknown).slug, "apc40-mk2", "longest name match");
         assert_eq!(store.choose("Akai APC40", Model::Unknown).slug, "apc40");
-        assert_eq!(store.choose("APC MINI", Model::ApcMini).slug, GENERIC, "no APC mini profile yet");
-        assert_eq!(store.choose("nanoKONTROL2", Model::Unknown).slug, GENERIC);
+        assert_eq!(store.choose("APC MINI", Model::ApcMini).slug, "apc-mini", "by product id");
+        assert_eq!(store.choose("APC mini mk2", Model::Unknown).slug, GENERIC, "the mk2 has another layout");
+        assert_eq!(store.choose("nanoKONTROL2 SLIDER/KNOB", Model::Unknown).slug, "nanokontrol2");
+        assert_eq!(store.choose("X-TOUCH MINI", Model::Unknown).slug, "x-touch-mini");
+        assert_eq!(store.choose("Launchpad X LPX MIDI", Model::Unknown).slug, "launchpad");
+        assert_eq!(store.choose("USB Keyboard", Model::Unknown).slug, GENERIC, "unknown device: generic");
 
         store.set_port_profile("APC40 mkII", Some("generic")).unwrap();
         assert_eq!(store.choose("APC40 mkII", Model::Apc40Mk2).slug, GENERIC);
@@ -456,7 +521,11 @@ mod tests {
         let mut p = Profile::parse(r#"{ "name": "nano", "match": { "port_contains": ["nanokontrol"] } }"#).unwrap();
         p.name = "nanoKONTROL2".into();
         store.save_profile(None, "nano", p).unwrap();
-        assert_eq!(store.choose("nanoKONTROL2 SLIDER/KNOB", Model::Unknown).slug, "nano");
+        assert_eq!(store.choose("nanoKONTROL2 SLIDER/KNOB", Model::Unknown).slug, "nanokontrol2", "longest match wins");
+        let mut p = store.get("nano").unwrap().clone();
+        p.matches.port_contains = vec!["nanoKONTROL2".into()];
+        store.save_profile(None, "nano", p).unwrap();
+        assert_eq!(store.choose("nanoKONTROL2 SLIDER/KNOB", Model::Unknown).slug, "nano", "a user profile wins ties");
     }
 
     #[test]
@@ -501,6 +570,34 @@ mod tests {
         let store = ProfileStore::load(dir.clone());
         assert!(store.errors.iter().any(|e| e.starts_with("devices.json")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn import_never_overwrites_and_round_trips() {
+        let dir = temp_dir("import");
+        let mut store = ProfileStore::load(dir.clone());
+        let original = store.get("x-touch-mini").unwrap().clone();
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let slug = store.import(Some("X-TOUCH MINI"), None, Profile::parse(&json).unwrap()).unwrap();
+        assert!(slug.starts_with("behringer-x-touch-mini"), "{slug}");
+        assert_eq!(store.get(&slug).unwrap(), &original, "same mappings");
+        assert_eq!(store.choose("X-TOUCH MINI", Model::Unknown).slug, slug, "assigned to the port");
+        let again = store.import(None, Some("x-touch-mini"), original.clone()).unwrap();
+        assert_eq!(again, "x-touch-mini-2", "a built-in name is never taken");
+        let third = store.import(None, Some("x-touch-mini"), original.clone()).unwrap();
+        assert_eq!(third, "x-touch-mini-3");
+        let reloaded = ProfileStore::load(dir.clone());
+        assert_eq!(reloaded.get(&slug).unwrap(), &original, "written to disk");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slugify_makes_valid_slugs() {
+        assert_eq!(slugify("Mon nanoKONTROL 2"), "mon-nanokontrol-2");
+        assert_eq!(slugify("Équipe — scène"), "equipe-scene");
+        assert_eq!(slugify("../../etc"), "etc");
+        assert_eq!(slugify("***"), "profil");
+        assert!(valid_slug(&slugify(&"x".repeat(200))));
     }
 
     #[test]

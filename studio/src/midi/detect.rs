@@ -51,7 +51,8 @@ impl Model {
             Model::Apc40Mk2
         } else if compact.contains("apc40") {
             Model::Apc40
-        } else if compact.contains("apcmini") {
+        } else if compact.contains("apcmini") && !compact.contains("mk2") {
+            // The APC mini mk2 has another layout: generic for now.
             Model::ApcMini
         } else {
             Model::Unknown
@@ -203,6 +204,7 @@ mod tests {
         assert_eq!(Model::from_port_name("APC40"), Model::Apc40);
         assert_eq!(Model::from_port_name("Akai APC40"), Model::Apc40);
         assert_eq!(Model::from_port_name("APC MINI"), Model::ApcMini);
+        assert_eq!(Model::from_port_name("APC mini mk2"), Model::Unknown, "another layout");
         assert_eq!(Model::from_port_name("nanoKONTROL2 SLIDER/KNOB"), Model::Unknown);
         assert_eq!(Model::from_port_name("IAC Driver Bus 1"), Model::Unknown);
     }

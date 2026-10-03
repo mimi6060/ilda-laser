@@ -490,6 +490,7 @@ mod tests {
             curve: Curve::Linear,
             pickup: false,
             encoding: RelEncoding::TwosComplement,
+            led: None,
         }
     }
 

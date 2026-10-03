@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "name": "Behringer X-Touch Mini (mode Standard, couche A) — modèle Laser Studio",
+  "driver": "generic",
+  "match": {"port_contains": ["X-TOUCH MINI"]},
+  "mappings": [
+    {"input": {"kind": "cc", "channel": null, "number": 1}, "target": "master.size", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 2}, "target": "master.speed", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 3}, "target": "master.pos_x", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 4}, "target": "master.pos_y", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 5}, "target": "master.rot_z.angle", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 6}, "target": "master.color.hue", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 7}, "target": "master.color.spread", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 8}, "target": "master.perspective", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "cc", "channel": null, "number": 9}, "target": "master.brightness", "mode": "absolute", "pickup": true},
+    {"input": {"kind": "note", "channel": 10, "number": 8}, "target": "page.1", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 9}, "target": "page.2", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 10}, "target": "page.3", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 11}, "target": "page.4", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 12}, "target": "page.5", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 13}, "target": "page.6", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 14}, "target": "page.7", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 15}, "target": "page.8", "mode": "trigger", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 16}, "target": "layer.1.mute", "mode": "toggle", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 17}, "target": "layer.2.mute", "mode": "toggle", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 18}, "target": "layer.3.mute", "mode": "toggle", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 19}, "target": "layer.4.mute", "mode": "toggle", "led": {"off": 0, "on": 1, "blink": 2}},
+    {"input": {"kind": "note", "channel": 10, "number": 20}, "target": "tempo.tap", "mode": "trigger"},
+    {"input": {"kind": "note", "channel": 10, "number": 21}, "target": "page.prev", "mode": "trigger"},
+    {"input": {"kind": "note", "channel": 10, "number": 22}, "target": "page.next", "mode": "trigger"},
+    {"input": {"kind": "note", "channel": 10, "number": 23}, "target": "transport.blackout", "mode": "trigger"}
+  ]
+}

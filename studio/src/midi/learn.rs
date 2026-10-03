@@ -15,7 +15,7 @@
 //! Runs under the `Shared` lock from the worker batch, like the engine.
 
 use super::engine;
-use super::mapping::{Curve, Incoming, InputKind, MapMode, Mapping, MidiInput, RelEncoding};
+use super::mapping::{Curve, Incoming, InputKind, LedFeedback, MapMode, Mapping, MidiInput, RelEncoding};
 use super::profile::GENERIC;
 use super::safety::ARM;
 use super::MidiEvent;
@@ -83,6 +83,9 @@ pub struct LearnState {
     /// Last value of every CC seen, per (port, channel, number): a CC that
     /// repeats its value isn't a fader being moved.
     cc_last: HashMap<(String, u8, u8), u8>,
+    /// Encoder-step values seen per CC (`step_class` bits): tells the
+    /// three relative encodings apart once both directions were turned.
+    cc_steps: HashMap<(String, u8, u8), u8>,
 }
 
 pub type LearnError = (u16, String);
@@ -135,7 +138,9 @@ pub fn expire(s: &mut Shared, now: Instant) {
 /// Remembers CC values (see `LearnState::cc_last`). After `capture`.
 pub fn observe(s: &mut Shared, ev: &MidiEvent) {
     if let super::MidiMsg::Cc { channel, number, value } = ev.msg {
-        s.midi.learn.cc_last.insert((ev.port.clone(), channel & 0x0F, number), value);
+        let key = (ev.port.clone(), channel & 0x0F, number);
+        *s.midi.learn.cc_steps.entry(key.clone()).or_default() |= step_class(value);
+        s.midi.learn.cc_last.insert(key, value);
     }
 }
 
@@ -161,8 +166,10 @@ pub fn capture(s: &mut Shared, ev: &MidiEvent) -> bool {
         InputKind::Note if m.pressed != Some(true) => return false,
         InputKind::Cc => {
             let known = profile.encoders.iter().find(|e| e.input.kind == InputKind::Cc && e.input.matches(&m)).map(|e| e.encoding);
-            let still = s.midi.learn.cc_last.get(&(ev.port.clone(), m.channel, m.number)) == Some(&m.raw);
-            encoding = known.or_else(|| if still { encoder_step(m.raw) } else { None });
+            let key = (ev.port.clone(), m.channel, m.number);
+            let still = s.midi.learn.cc_last.get(&key) == Some(&m.raw);
+            let seen = s.midi.learn.cc_steps.get(&key).copied().unwrap_or(0) | step_class(m.raw);
+            encoding = known.or_else(|| if still { encoder_step(m.raw).map(|guess| refine_encoding(seen, guess)) } else { None });
             if still && encoding.is_none() {
                 return false;
             }
@@ -220,6 +227,7 @@ pub fn capture(s: &mut Shared, ev: &MidiEvent) -> bool {
         // Absolute: the control's own range, soft takeover.
         pickup: mode == MapMode::Absolute,
         encoding: encoding.unwrap_or_default(),
+        led: None,
     };
     let pos = (mode == MapMode::Absolute).then_some(m.norm);
     match find_conflict(&profile.mappings, &mapping) {
@@ -258,6 +266,45 @@ pub fn delete(s: &mut Shared, port: &str, index: usize) -> Result<(), LearnError
         return Err((404, format!("pas d'affectation n° {index}")));
     }
     profile.mappings.remove(index);
+    save(s, port, &slug, profile).map(|_| ()).map_err(|e| (500, e))
+}
+
+/// Changes asked for one mapping (`POST /api/midi/mapping/update`, T-211).
+#[derive(Clone, Debug, Default)]
+pub struct MappingPatch {
+    /// `absolute` or `relative`, for a CC on a fader-like control.
+    pub mode: Option<MapMode>,
+    pub encoding: Option<RelEncoding>,
+    /// `Some(None)` removes the LED feedback.
+    pub led: Option<Option<LedFeedback>>,
+}
+
+/// Edits mapping `index` of `port`'s profile (a built-in one goes to its
+/// `-perso` copy, like a learn): CC absolute / relative and its encoding,
+/// LED feedback. The target and the message stay as learned.
+pub fn update(s: &mut Shared, port: &str, index: usize, patch: MappingPatch) -> Result<(), LearnError> {
+    if !s.midi.devices.iter().any(|d| d.name == port) {
+        return Err((404, format!("appareil MIDI inconnu : {port}")));
+    }
+    let Some((slug, mut profile)) = profile_for(s, port) else { return Err((404, format!("profil introuvable pour {port}"))) };
+    let Some(mp) = profile.mappings.get_mut(index) else { return Err((404, format!("pas d'affectation n° {index}"))) };
+    if let Some(mode) = patch.mode.or(patch.encoding.map(|_| MapMode::Relative)) {
+        let fader_like = matches!(mp.mode, MapMode::Absolute | MapMode::Relative);
+        if !fader_like || !matches!(mode, MapMode::Absolute | MapMode::Relative) || (mode == MapMode::Relative && mp.input.kind != InputKind::Cc) {
+            return Err((400, "seul un CC sur un potard / fader passe d'absolu à relatif".into()));
+        }
+        mp.mode = mode;
+        mp.pickup = mode == MapMode::Absolute;
+    }
+    if let Some(encoding) = patch.encoding {
+        mp.encoding = encoding;
+    }
+    if let Some(led) = patch.led {
+        if led.is_some() && !matches!(mp.input.kind, InputKind::Note | InputKind::Cc) {
+            return Err((400, "retour LED : seulement pour une note ou un CC".into()));
+        }
+        mp.led = led.map(LedFeedback::clamped);
+    }
     save(s, port, &slug, profile).map(|_| ()).map_err(|e| (500, e))
 }
 
@@ -314,6 +361,9 @@ pub fn state(s: &Shared, now: Instant) -> Vec<(&'static str, Value)> {
                 "target_label": target_label(s, mp),
                 "mode": mp.mode,
                 "shift": mp.shift,
+                "kind": mp.input.kind,
+                "encoding": mp.encoding,
+                "led": mp.led,
             }));
         }
     }
@@ -348,6 +398,42 @@ fn encoder_step(v: u8) -> Option<RelEncoding> {
         1..=3 | 125..=127 => Some(RelEncoding::TwosComplement),
         61..=63 | 65..=67 => Some(RelEncoding::Offset64),
         _ => None,
+    }
+}
+
+const STEP_PLUS_LOW: u8 = 1; // 1–3: +n (two's complement, sign bit)
+const STEP_MINUS_TC: u8 = 2; // 125–127: −n in two's complement
+const STEP_BELOW_64: u8 = 4; // 61–63: −n in offset 64
+const STEP_ABOVE_64: u8 = 8; // 65–67: +n in offset 64, −n with a sign bit
+
+fn step_class(v: u8) -> u8 {
+    match v {
+        1..=3 => STEP_PLUS_LOW,
+        125..=127 => STEP_MINUS_TC,
+        61..=63 => STEP_BELOW_64,
+        65..=67 => STEP_ABOVE_64,
+        _ => 0,
+    }
+}
+
+/// The only encoding whose small steps explain every step value seen on
+/// this CC, when there is one (an encoder turned both ways: 1–3 and 65–67
+/// = sign bit). Otherwise the first guess: values of a single direction
+/// fit two encodings, and a fader swept through them fits none. The user
+/// can still change it in the mappings list.
+fn refine_encoding(seen: u8, guess: RelEncoding) -> RelEncoding {
+    let explains = |e: RelEncoding| {
+        let ok = match e {
+            RelEncoding::TwosComplement => STEP_PLUS_LOW | STEP_MINUS_TC,
+            RelEncoding::SignBit => STEP_PLUS_LOW | STEP_ABOVE_64,
+            RelEncoding::Offset64 => STEP_BELOW_64 | STEP_ABOVE_64,
+        };
+        seen & !ok == 0
+    };
+    let fits: Vec<RelEncoding> = [RelEncoding::TwosComplement, RelEncoding::SignBit, RelEncoding::Offset64].into_iter().filter(|&e| explains(e)).collect();
+    match fits[..] {
+        [only] => only,
+        _ => guess,
     }
 }
 
@@ -415,10 +501,13 @@ fn commit(s: &mut Shared, port: &str, mapping: Mapping, replace: Option<usize>, 
     let mut replaced = None;
     let index = match replace.filter(|&i| i < profile.mappings.len()) {
         Some(i) => {
-            if !same_target(&profile.mappings[i], &mapping) {
-                replaced = Some(target_label(s, &profile.mappings[i]));
+            let old = &profile.mappings[i];
+            if !same_target(old, &mapping) {
+                replaced = Some(target_label(s, old));
             }
-            profile.mappings[i] = mapping.clone();
+            // Same button learned again: its LED settings stay.
+            let led = if old.input == mapping.input { old.led } else { None };
+            profile.mappings[i] = Mapping { led, ..mapping.clone() };
             i
         }
         None => {
@@ -630,6 +719,77 @@ mod tests {
         learn(&mut s, "tempo.tap");
         play(&mut s, &[cc(0x54, 127)]);
         assert_eq!(profile(&s).mappings[4].mode, MapMode::Trigger);
+    }
+
+    /// T-211: the three relative encodings of unknown encoders, on any
+    /// channel. One direction is ambiguous (first guess); both directions
+    /// tell, and the mappings list can still change it.
+    #[test]
+    fn relative_encodings_are_told_apart() {
+        let mut s = setup();
+        let ch = |channel: u8, n: u8, value: u8| MidiMsg::Cc { channel, number: n, value };
+        let learned = |s: &Shared| {
+            let p = profile(s);
+            let mp = p.mappings.last().unwrap().clone();
+            (mp.input.channel, mp.input.number, mp.mode, mp.encoding)
+        };
+        // Sign bit: turned right (1) earlier, then left (65, 65) while learning.
+        play(&mut s, &[ch(9, 0x20, 1), ch(9, 0x20, 1)]);
+        learn(&mut s, "master.pos_x");
+        play(&mut s, &[ch(9, 0x20, 65), ch(9, 0x20, 65)]);
+        assert_eq!(learned(&s), (Some(9), 0x20, MapMode::Relative, RelEncoding::SignBit));
+        // Offset 64, turned left: 63 only exists there.
+        learn(&mut s, "master.pos_y");
+        play(&mut s, &[ch(15, 0x21, 63), ch(15, 0x21, 63)]);
+        assert_eq!(learned(&s), (Some(15), 0x21, MapMode::Relative, RelEncoding::Offset64));
+        // Two's complement, turned left: 127.
+        learn(&mut s, "master.size");
+        play(&mut s, &[ch(0, 0x22, 127), ch(0, 0x22, 127)]);
+        assert_eq!(learned(&s), (Some(0), 0x22, MapMode::Relative, RelEncoding::TwosComplement));
+        // A fader swept through every step value doesn't confuse it.
+        let sweep: Vec<MidiMsg> = (0..=127).map(|v| ch(1, 0x23, v)).collect();
+        play(&mut s, &sweep);
+        learn(&mut s, "master.speed");
+        play(&mut s, &[ch(1, 0x23, 2), ch(1, 0x23, 2)]);
+        assert_eq!(learned(&s).3, RelEncoding::TwosComplement);
+
+        // Changed by hand afterwards (mappings list), in the same profile.
+        let n = profile(&s).mappings.len() - 1;
+        let patch = |mode, encoding| MappingPatch { mode, encoding, led: None };
+        update(&mut s, PORT, n, patch(None, Some(RelEncoding::SignBit))).unwrap();
+        assert_eq!(profile(&s).mappings[n].encoding, RelEncoding::SignBit);
+        update(&mut s, PORT, n, patch(Some(MapMode::Absolute), None)).unwrap();
+        assert_eq!((profile(&s).mappings[n].mode, profile(&s).mappings[n].pickup), (MapMode::Absolute, true));
+        // The engine follows: sign bit 65 = one step down.
+        update(&mut s, PORT, 0, patch(None, Some(RelEncoding::SignBit))).unwrap();
+        let before = s.live.pos_x;
+        play(&mut s, &[ch(9, 0x20, 65)]);
+        assert!(s.live.pos_x < before, "{} → {}", before, s.live.pos_x);
+    }
+
+    #[test]
+    fn mapping_updates_are_checked() {
+        let mut s = setup();
+        learn(&mut s, "audio.enabled");
+        play(&mut s, &[on(0x30)]);
+        learn(&mut s, "live.pos_x");
+        play(&mut s, &[MidiMsg::PitchBend { channel: 0, value: 9000 }]);
+        let led = LedFeedback { off: 0, on: 1, blink: Some(2), present: None };
+        let patch = |mode, encoding, led| MappingPatch { mode, encoding, led };
+        update(&mut s, PORT, 0, patch(None, None, Some(Some(led)))).unwrap();
+        assert_eq!(profile(&s).mappings[0].led, Some(led));
+        // Learning the same button again keeps its LED.
+        learn(&mut s, "audio.enabled");
+        play(&mut s, &[on(0x30)]);
+        assert_eq!(profile(&s).mappings[0].led, Some(led));
+        update(&mut s, PORT, 0, patch(None, None, Some(None))).unwrap();
+        assert_eq!(profile(&s).mappings[0].led, None);
+        assert_eq!(update(&mut s, PORT, 0, patch(Some(MapMode::Relative), None, None)).unwrap_err().0, 400, "a toggle stays a toggle");
+        assert_eq!(update(&mut s, PORT, 1, patch(None, Some(RelEncoding::Offset64), None)).unwrap_err().0, 400, "pitch bend is never relative");
+        assert_eq!(update(&mut s, PORT, 1, patch(None, None, Some(Some(led)))).unwrap_err().0, 400, "no LED on pitch bend");
+        assert_eq!(update(&mut s, PORT, 9, MappingPatch::default()).unwrap_err().0, 404);
+        assert_eq!(update(&mut s, "nope", 0, MappingPatch::default()).unwrap_err().0, 404);
+        assert!(s.midi.store.get("generic").unwrap().mappings.is_empty(), "built-in untouched");
     }
 
     #[test]
