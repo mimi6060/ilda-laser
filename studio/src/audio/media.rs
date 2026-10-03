@@ -211,7 +211,7 @@ impl MediaStore {
     fn remember(&self, name: &str, path: &Path, peaks: Arc<WaveformPeaks>) {
         let Ok(stamp) = Self::stamp(path) else { return };
         if let Err(e) = self.save_peaks(name, stamp, &peaks) {
-            log::warn!("waveform cache not written for {name}: {e:#}");
+            log::warn!("waveform cache not written: {}", e.root_cause()); // no file name in the log (T-403)
         }
         self.peaks.lock().unwrap().insert(name.to_string(), (stamp, peaks));
     }

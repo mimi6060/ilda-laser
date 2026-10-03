@@ -718,6 +718,7 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Vec<Strin
     }
     s.project.save_recent();
     let shown = name.clone().unwrap_or_else(|| UNTITLED.into());
+    log::info!("Projet ouvert : « {shown} »{}", if warnings.is_empty() { "" } else { " (avec des erreurs d'écriture)" });
     s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": shown, "new": name.is_none(), "armed": s.gate.is_armed() }));
     Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
 }
@@ -734,6 +735,7 @@ fn recover(shared: &Mutex<Shared>) -> Result<Vec<String>, Reply> {
         apply(&mut s, &p);
         s.project.autosave.offer = None;
         let file = offer.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        log::info!("Sauvegarde auto récupérée : {file}");
         s.gate.log().record("autosave_recovered", Some("ui"), serde_json::json!({ "file": file, "armed": s.gate.is_armed() }));
         s.project.extra = std::mem::take(&mut p.extra);
         let data_dir = s.project.data_dir.clone();
@@ -757,12 +759,36 @@ fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply
     p.timelines = shows.load_all();
     p.name = name.to_string();
     stamp(&mut p);
-    write_project(&path, &p).map_err(|e| Reply::Text(500, format!("échec de l'enregistrement : {e:#}")))?;
+    write_project(&path, &p).map_err(|e| {
+        log::error!("Projet « {name} » : échec de l'enregistrement : {e:#}");
+        Reply::Text(500, format!("échec de l'enregistrement : {e:#}"))
+    })?;
+    log::info!("Projet enregistré : « {name} »");
     let mut s = shared.lock().unwrap();
     s.project.saved = p.fingerprint();
     s.project.remember(name);
     s.project.save_recent();
     Ok(Vec::new())
+}
+
+/// The current project for a diagnostic report (T-403), without its
+/// media: the figure library is left out (only how many there were).
+/// Read under the lock, the timelines from disk after it is released.
+pub fn diagnostic_snapshot(shared: &Mutex<Shared>) -> Value {
+    let (mut p, shows) = {
+        let s = shared.lock().unwrap();
+        let mut p = snapshot(&s);
+        p.name = s.project.current.clone().unwrap_or_else(|| UNTITLED.into());
+        (p, crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()))
+    };
+    p.timelines = shows.load_all();
+    let figures = std::mem::take(&mut p.figures).len();
+    let mut v = json!(p);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("figures");
+        o.insert("figures_omitted".into(), json!(figures));
+    }
+    v
 }
 
 /// `GET /api/project`: name, file, whether it changed since it was opened

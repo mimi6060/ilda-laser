@@ -177,6 +177,12 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             with_type(Response::from_string(body), content_type)
         }
         (Method::Get, "/api/state") => state(shared),
+        (Method::Get, "/api/diagnostics/report") => diagnostic_report(request.url(), shared),
+        (Method::Get, "/api/logs/tail") => {
+            let n = query_u64(request.url(), "n").unwrap_or(200).clamp(1, 1000) as usize;
+            let app = Arc::clone(&shared.lock().unwrap().applog);
+            json_response(json!({ "lines": app.tail(n), "status": app.status() }))
+        }
         (Method::Get, "/api/frame") => frame(shared),
         (Method::Post, "/api/settings") => match body::<Settings>(request) {
             Ok(settings) => {
@@ -1173,10 +1179,14 @@ struct SaveScene {
 
 fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     let mut s = shared.lock().unwrap();
-    let s = &mut *s;
+    json_response(state_json(&mut s))
+}
+
+/// `GET /api/state`'s body (also `state.json` in the diagnostic report).
+fn state_json(s: &mut Shared) -> serde_json::Value {
     s.gate.sync_estop(&s.estop);
     let arm = s.gate.status(&s.estop);
-    json_response(json!({
+    json!({
         "settings": s.settings,
         "settings_rev": s.settings_rev,
         "calibration": s.calibration,
@@ -1200,7 +1210,54 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "timeline": s.timeline.state(&s.timeline_clock()),
         "timeline_audio": song_view(s),
         "audio": s.audio_in.view(s.audio, s.audio_at, Instant::now()),
-    }))
+        "applog": s.applog.status(),
+    })
+}
+
+/// `GET /api/diagnostics/report[?project=1]` (T-403): a zip to send to
+/// whoever helps after an incident. A snapshot is taken under the lock,
+/// then the logs are read and the zip is built with the lock released.
+/// The project (without its figures) only with `project=1`.
+fn diagnostic_report(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let with_project = query_str(url, "project").is_some_and(|v| v == "1" || v == "true");
+    let (app, state, devices, mut settings, data_dir) = {
+        let mut s = shared.lock().unwrap();
+        let s = &mut *s;
+        let state = state_json(s);
+        let devices = json!({
+            "audio": {
+                "capture": s.audio_in.capture_enabled(),
+                "inputs": s.audio_in.devices(),
+                "config": s.audio_in.config().0,
+                "status": state["audio"].clone(),
+            },
+            "midi": { "enabled": s.midi.enabled, "devices": s.midi.devices, "test": s.midi.sim.is_some() },
+            "output": {
+                "name": s.output_name,
+                "kind": s.output_kind,
+                "error": s.output_error,
+                "pps": s.pps,
+                "armed": s.gate.is_armed(),
+                "engine_ok": s.health.engine_ok(),
+            },
+        });
+        let settings = json!({
+            "safety": s.safety.get(),
+            "presence": s.presence.settings,
+            "calibration": s.calibration,
+            "outputs": s.outputs.list(),
+            "midi_safety": s.midi.store.devices.safety,
+        });
+        (Arc::clone(&s.applog), state, devices, settings, s.project.data_dir.clone())
+    };
+    settings["prefs"] = crate::load_json::<serde_json::Value>(&data_dir.join("prefs.json"));
+    let project = with_project.then(|| crate::project::diagnostic_snapshot(shared));
+    let zip = crate::applog::report(&app, crate::applog::ReportParts { devices, settings, state, project });
+    let date = crate::safety_log::today();
+    log::info!("Rapport de diagnostic exporté ({} Ko, projet {})", zip.len() / 1024, if with_project { "inclus" } else { "non inclus" });
+    let disposition = format!("attachment; filename=\"laser-studio-diagnostic-{date}.zip\"");
+    let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+    with_type(Response::from_data(zip), "application/zip").with_header(header)
 }
 
 /// The current frame for the preview, as `[x, y, r, g, b]` rows rounded
@@ -1684,6 +1741,61 @@ mod tests {
         let t = TestServer::start(false);
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"midi"}"#).0, 409);
         assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    fn get_bytes(addr: SocketAddr, path: &str) -> (String, Vec<u8>) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        (String::from_utf8_lossy(&raw[..split]).into_owned(), raw[split + 4..].to_vec())
+    }
+
+    /// T-403: the diagnostic report is a zip download with the logs and
+    /// the snapshots, the project only on request; the tail shows the log.
+    #[test]
+    fn the_diagnostic_report_downloads_a_zip_and_the_tail_shows_the_log() {
+        use crate::applog::{testing::read_zip, AppLog, LogSettings};
+        let dir = std::env::temp_dir().join(format!("laser-studio-web-applog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = TestServer::start(false);
+        let app = Arc::new(AppLog::start(dir.join("logs"), &LogSettings::default(), Vec::new()));
+        app.push(log::Level::Info, "laser_studio", "Démarrage de Laser Studio".into());
+        t.shared.lock().unwrap().applog = Arc::clone(&app);
+
+        let (head, zip) = get_bytes(t.addr, "/api/diagnostics/report");
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("application/zip") && head.contains("filename=\"laser-studio-diagnostic-"), "{head}");
+        assert_eq!(&zip[..2], b"PK");
+        let entries = read_zip(&zip);
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        for name in ["about.json", "devices.json", "settings.json", "state.json"] {
+            assert!(names.contains(&name), "{names:?}");
+        }
+        assert!(names.iter().any(|n| n.starts_with("logs/app-")), "{names:?}");
+        assert!(!names.contains(&"project.json"), "not without the box ticked");
+        let state: serde_json::Value = serde_json::from_slice(&entries.iter().find(|(n, _)| n == "state.json").unwrap().1).unwrap();
+        assert_eq!(state["armed"], false);
+        let settings: serde_json::Value = serde_json::from_slice(&entries.iter().find(|(n, _)| n == "settings.json").unwrap().1).unwrap();
+        assert!(settings["safety"].is_object() && settings["calibration"].is_object(), "{settings}");
+
+        let (_, zip) = get_bytes(t.addr, "/api/diagnostics/report?project=1");
+        let entries = read_zip(&zip);
+        let project: serde_json::Value = serde_json::from_slice(&entries.iter().find(|(n, _)| n == "project.json").unwrap().1).unwrap();
+        assert!(project.get("figures").is_none() && project["figures_omitted"] == 0, "no media in the project");
+
+        let (code, body) = t.request("GET", "/api/logs/tail?n=5", "");
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let lines = v["lines"].as_array().unwrap();
+        assert!(lines.len() <= 5 && lines.iter().any(|l| l.as_str().unwrap().contains("Démarrage")), "{v}");
+        let (_, state) = t.request("GET", "/api/state", "");
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        assert_eq!((state["applog"]["enabled"].as_bool(), state["applog"]["write_failed"].as_bool()), (Some(true), Some(false)));
+        drop(t);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// T-259: the log API reads back what the gate and the handlers logged.

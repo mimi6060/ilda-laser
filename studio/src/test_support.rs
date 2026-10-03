@@ -25,6 +25,7 @@ pub fn shared() -> Shared {
         output_name: None,
         output_kind: None,
         output_error: None,
+        applog: Default::default(),
         pps: 30_000,
         scenes: SceneStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scenes.json")),
         playlist: None,
