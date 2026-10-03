@@ -30,8 +30,11 @@ const TOP_BAR = ['#projBtn', '#bpm', '#beats', '#midiStatus', '#armBtn', '#estop
 /** The part of /api/state a display change must not touch (tempo phase and presence tick on their own). */
 async function steadyState() {
   const st = await studio.state();
-  const { tempo, presence, ...rest } = st;
-  return { ...rest, bpm: tempo.bpm };
+  // Fields that move on their own, whatever the page does: the tempo
+  // clock, the heartbeat, the app log's line counter (T-403), the sleep
+  // blocker catching up with an arm (T-412) and browser audio going stale.
+  const { tempo, presence, applog, audio, keep_awake, ...rest } = st;
+  return { ...rest, bpm: tempo.bpm, keep_awake: keep_awake && keep_awake.enabled };
 }
 async function steadyFrame() {
   const f = await studio.frame();
