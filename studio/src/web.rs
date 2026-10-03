@@ -268,7 +268,11 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 let mut s = shared.lock().unwrap();
                 // Out-of-range values are clamped (ui_timeout_ms ≤ 10 000);
                 // the reply is what was kept.
+                let before = s.presence.settings.clone();
                 s.presence.set_settings(settings);
+                if let Some(change) = crate::safety_log::settings_change(&before, &s.presence.settings) {
+                    s.gate.log().record("presence_settings", Some("ui"), change);
+                }
                 json_response(json!(s.presence.settings))
             }
             Err(e) => e,
@@ -380,14 +384,25 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 }
                 match serde_json::from_value::<crate::safety::SafetySettings>(v) {
                     Err(e) => text(400, &format!("invalid JSON: {e}")),
-                    Ok(cfg) => match shared.lock().unwrap().safety.set(cfg, confirm) {
-                        Ok(stored) => json_response(json!({ "settings": stored })),
-                        Err(crate::safety::SetError::Invalid(msg)) => text(400, &msg),
-                        Err(crate::safety::SetError::Loosens(list)) => with_status(
-                            json_response(json!({ "error": "Ces changements assouplissent la sécurité : confirmation requise", "loosen": list })),
-                            409,
-                        ),
-                    },
+                    Ok(cfg) => {
+                        let mut s = shared.lock().unwrap();
+                        let before = s.safety.get();
+                        match s.safety.set(cfg, confirm) {
+                            Ok(stored) => {
+                                // Before and after, and whether a loosening was confirmed (T-259).
+                                if let Some(mut change) = crate::safety_log::settings_change(&before, &stored) {
+                                    change["confirmed_loosen"] = json!(confirm);
+                                    s.gate.log().record("safety_settings", Some("ui"), change);
+                                }
+                                json_response(json!({ "settings": stored }))
+                            }
+                            Err(crate::safety::SetError::Invalid(msg)) => text(400, &msg),
+                            Err(crate::safety::SetError::Loosens(list)) => with_status(
+                                json_response(json!({ "error": "Ces changements assouplissent la sécurité : confirmation requise", "loosen": list })),
+                                409,
+                            ),
+                        }
+                    }
                 }
             }
             Err(e) => e,
@@ -409,8 +424,17 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 s.gate.sync_estop(&s.estop);
                 let armed = s.gate.is_armed();
                 let id = b.id.as_deref().unwrap_or(crate::power::MAIN_OUTPUT);
+                let before = s.outputs.get(id).cloned();
                 match s.outputs.set(id, b.limits, b.projector, armed, b.confirm_loosen) {
-                    Ok(out) => json_response(json!({ "output": out, "max_brightness_effective": s.outputs.max_brightness_effective() })),
+                    Ok(out) => {
+                        // Power caps and projector sheet, before/after (T-259).
+                        if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out)) {
+                            change["output"] = json!(id);
+                            change["confirmed_loosen"] = json!(b.confirm_loosen);
+                            s.gate.log().record("power_caps", Some("ui"), change);
+                        }
+                        json_response(json!({ "output": out, "max_brightness_effective": s.outputs.max_brightness_effective() }))
+                    }
                     Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
                     Err(crate::power::SetError::Raises(list)) => with_status(
                         json_response(json!({ "error": "Relever un plafond de puissance : confirmation requise", "loosen": list })),
@@ -424,6 +448,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/safety/log") | (Method::Get, "/api/safety/log.csv") => safety_log_view(request.url(), shared, path.ends_with(".csv")),
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
                 let cal = Calibration {
@@ -469,6 +494,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                     Some(scene) => {
                         controls::show_look(&mut s, scene.settings);
                         s.playlist = None;
+                        log_scene(&s, &scene.name);
                         ok()
                     }
                     None => text(404, "no such scene"),
@@ -482,6 +508,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 Some(first) => {
                     controls::show_look(&mut s, first.settings);
                     s.playlist = Some(Playlist { index: 0, started: Instant::now() });
+                    log_scene(&s, &first.name);
                     ok()
                 }
                 None => text(400, "no saved scenes"),
@@ -513,7 +540,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         },
         (Method::Post, "/api/cue") => match body::<CueRequest>(request) {
             Ok(req) => {
-                if controls::press_cue(&mut shared.lock().unwrap(), &req.id, req.mode, req.down) {
+                if controls::press_cue_from(&mut shared.lock().unwrap(), &req.id, req.mode, req.down, Some("ui")) {
                     ok()
                 } else {
                     text(404, "no such preset")
@@ -1353,6 +1380,43 @@ fn query_str(url: &str, key: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// A scene or the playlist started while armed goes to the safety log.
+fn log_scene(s: &Shared, name: &str) {
+    if s.gate.is_armed() {
+        s.gate.log().record("scene", Some("ui"), json!({ "name": name }));
+    }
+}
+
+/// `GET /api/safety/log?date=AAAA-MM-JJ` (default today): `{date, days,
+/// events, status}`; `GET /api/safety/log.csv?date=…`: the same day as a
+/// CSV download (T-259). Waits briefly for the writer so the latest events
+/// are in; never holds the lock while reading the file.
+fn safety_log_view(url: &str, shared: &Arc<Mutex<Shared>>, csv: bool) -> HttpResponse {
+    let log = shared.lock().unwrap().gate.log().clone();
+    let Some(dir) = log.dir().map(Path::to_path_buf) else { return text(404, "journal de sécurité désactivé") };
+    let date = match query_str(url, "date").filter(|d| !d.is_empty()) {
+        Some(d) => match crate::safety_log::parse_day(&d) {
+            Some(day) => day.to_string(),
+            None => return text(400, "date attendue au format AAAA-MM-JJ"),
+        },
+        None => crate::safety_log::today().to_string(),
+    };
+    log.flush(Duration::from_millis(200));
+    let events = crate::safety_log::read_day(&dir, &date);
+    if csv {
+        let disposition = format!("attachment; filename=\"journal-securite-{date}.csv\"");
+        let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+        return with_type(Response::from_string(crate::safety_log::to_csv(&events)), "text/csv; charset=utf-8").with_header(header);
+    }
+    json_response(json!({
+        "date": date,
+        "today": crate::safety_log::today().to_string(),
+        "days": crate::safety_log::days(&dir),
+        "events": crate::safety_log::view(&events),
+        "status": log.status(),
+    }))
+}
+
 fn ok() -> HttpResponse {
     text(200, "ok")
 }
@@ -1615,6 +1679,52 @@ mod tests {
         let t = TestServer::start(false);
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"midi"}"#).0, 409);
         assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    /// T-259: the log API reads back what the gate and the handlers logged.
+    #[test]
+    fn the_safety_log_api_shows_the_day_in_order_and_exports_csv() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-web-safety-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = TestServer::start(false);
+        t.shared.lock().unwrap().gate.set_log(crate::safety_log::SafetyLog::start(dir.clone()));
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/cue", r#"{"id":"tunnels-001"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false,"source":"keyboard"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/estop?source=keyboard", "").0, 200);
+        assert_eq!(t.request("POST", "/api/estop/reset", "").0, 200);
+        assert_eq!(t.request("POST", "/api/safety", r#"{"strobe_max_hz":3}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/midi/safety", r#"{"allow_arm":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"limits":{"max_power":0.3}}"#).0, 200);
+        let (code, body) = t.request("GET", "/api/safety/log", "");
+        assert_eq!(code, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let kinds: Vec<&str> = v["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["arm", "cue", "disarm", "arm", "estop", "estop_reset", "safety_settings", "midi_safety", "power_caps"]);
+        let events = v["events"].as_array().unwrap();
+        assert_eq!((events[2]["source"].as_str(), events[2]["source_fr"].as_str()), (Some("keyboard"), Some("clavier")));
+        assert_eq!(events[4]["text"], "Arrêt d'urgence (laser désarmé)");
+        assert_eq!(events[6]["detail"]["changed"], json!(["strobe_max_hz"]));
+        assert_eq!((events[6]["detail"]["before"]["strobe_max_hz"].as_f64(), events[6]["detail"]["after"]["strobe_max_hz"].as_f64()), (Some(4.0), Some(3.0)));
+        assert_eq!(events[7]["text"], "Armement MIDI autorisé");
+        assert_eq!(events[8]["detail"]["changed"], json!(["limits"]));
+        assert_eq!((events[8]["detail"]["before"]["limits"]["max_power"].as_f64(), events[8]["detail"]["after"]["limits"]["max_power"].as_f64()), (Some(0.5), Some(0.3f32 as f64)));
+        assert_eq!(events[8]["text"], "Plafonds de puissance modifiés (main) : limits");
+        assert_eq!(v["date"], v["today"]);
+        assert_eq!(v["days"], json!([v["today"]]));
+        assert_eq!(v["status"]["failed"], 0);
+
+        let date = v["date"].as_str().unwrap();
+        let (code, csv) = t.request("GET", &format!("/api/safety/log.csv?date={date}"), "");
+        assert_eq!(code, 200);
+        assert_eq!(csv.lines().count(), 10, "header + 9 events");
+        assert!(csv.contains(",estop,clavier,"), "{csv}");
+        assert_eq!(t.request("GET", "/api/safety/log?date=..%2F..%2Fetc", "").0, 400);
+        let (code, body) = t.request("GET", "/api/safety/log?date=2001-01-01", "");
+        assert_eq!(code, 200);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["events"], json!([]));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
