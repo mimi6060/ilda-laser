@@ -136,6 +136,7 @@ export class Studio {
   /** Back to the start-up look and neutral live modifiers, disarmed. */
   async reset() {
     await this.post('/api/arm', { on: false });
+    await this.post('/api/lock', { show_mode: false }); // T-283: edits below would get 423
     await this.post('/api/playlist/stop');
     await this.post('/api/settings', this.initialSettings);
     await this.post('/api/control', { id: 'master.reset' });

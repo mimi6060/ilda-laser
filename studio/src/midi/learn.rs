@@ -149,6 +149,11 @@ pub fn observe(s: &mut Shared, ev: &MidiEvent) {
 /// Shift key and CCs that don't move go on to the engine.
 pub fn capture(s: &mut Shared, ev: &MidiEvent) -> bool {
     let Some(req) = s.midi.learn.pending.clone() else { return false };
+    // Show mode (T-283): no mapping is made while locked.
+    if s.show_mode.on {
+        s.midi.learn.pending = None;
+        return false;
+    }
     if ev.at >= req.until {
         expire(s, ev.at);
         return false;
@@ -629,6 +634,18 @@ mod tests {
         // Another channel is another fader.
         play(&mut s, &[MidiMsg::Cc { channel: 3, number: 7, value: 0 }]);
         assert!((s.live.size - 2.0 * 70.0 / 127.0).abs() < 1e-4);
+    }
+
+    /// T-283: show mode on during a learn: the message binds nothing (MIDI
+    /// follows the same rule as the HTTP API).
+    #[test]
+    fn show_mode_drops_a_pending_learn() {
+        let mut s = setup();
+        learn(&mut s, "master.size");
+        s.show_mode.on = true;
+        play(&mut s, &[MidiMsg::Cc { channel: 2, number: 7, value: 40 }]);
+        assert!(s.midi.learn.pending.is_none());
+        assert!(s.midi.store.get("generic-perso").is_none_or(|p| p.mappings.is_empty()), "nothing learned");
     }
 
     #[test]

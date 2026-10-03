@@ -50,8 +50,15 @@ test('save, play, then delete a scene', async ({ page }) => {
   await expect.poll(shape).toBe('square');
   await expect(page.locator('#shapes button[data-shape="square"]')).toHaveClass(/active/);
 
-  await row(page, 'Carré vert').getByTitle('Supprimer').click();
+  // T-283: a single click doesn't delete; holding (800 ms) does.
+  const del = row(page, 'Carré vert').getByTitle(/^Supprimer/);
+  await del.click();
+  await expect(page.locator('#lockToast')).toHaveText('Maintenir pour confirmer');
+  expect(await scenes()).toHaveLength(1);
+  await del.hover();
+  await page.mouse.down();
   await expect(page.locator('#sceneList .scene')).toHaveCount(0);
+  await page.mouse.up();
   expect(await scenes()).toEqual([]);
 });
 
