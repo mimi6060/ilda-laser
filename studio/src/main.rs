@@ -10,6 +10,7 @@
 
 mod audio;
 mod beat;
+mod chases;
 mod controls;
 mod cues;
 mod engine;

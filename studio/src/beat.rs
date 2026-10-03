@@ -35,6 +35,17 @@ pub fn env_stab(phase_in_beat: f32, gate_beats: f32, decay_beats: f32) -> f32 {
     (-(x - gate) / decay_beats).exp()
 }
 
+/// A strobe over the beat grid: `div` flashes per beat (2 = every 1/2
+/// beat), each lit for the first `duty` (0..1) of its slot, from the beat.
+/// `div` 0 or less = no strobe (always 1).
+pub fn strobe_gate(beat_pos: f64, div: f32, duty: f32) -> f32 {
+    if div <= 0.0 || !div.is_finite() {
+        return 1.0;
+    }
+    // A hair of tolerance so a flash starts exactly on its beat.
+    if ((beat_pos * div as f64 + 1e-9).rem_euclid(1.0) as f32) < duty { 1.0 } else { 0.0 }
+}
+
 /// Sine ease-in-out on 0..1 (clamped).
 pub fn ease_sine(x: f32) -> f32 {
     0.5 - 0.5 * (std::f32::consts::PI * x.clamp(0.0, 1.0)).cos()
@@ -223,6 +234,18 @@ mod tests {
             let beat = beat_at(bpm, 10.5 * 60.0 / bpm);
             assert_eq!(env_stab(beat.fract() as f32, 0.2, 0.0), 0.0);
         }
+    }
+
+    #[test]
+    fn strobe_gate_flashes_div_times_per_beat_with_its_duty() {
+        assert_eq!(strobe_gate(3.3, 0.0, 0.4), 1.0);
+        // 1/4 beat at 40 %: on for 0.1 beat from each quarter.
+        let on: Vec<bool> = (0..20).map(|k| strobe_gate(5.0 + k as f64 * 0.05, 4.0, 0.4) > 0.0).collect();
+        assert_eq!(on.iter().filter(|&&l| l).count(), 8);
+        assert!(on[0] && on[1] && !on[2] && !on[4] && on[5] && on[6] && !on[7]);
+        // Lit exactly on the beat despite clock noise.
+        assert_eq!(strobe_gate(7.0 - 1e-12, 2.0, 0.3), 1.0);
+        assert_eq!(strobe_gate(1.0, f32::NAN, 0.4), 1.0);
     }
 
     #[test]
