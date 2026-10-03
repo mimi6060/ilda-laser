@@ -359,6 +359,92 @@ mod tests {
         }
     }
 
+    /// One second (60 frames, the tempo clock and the music moving) of
+    /// every cue with the point optimiser on or off: the frames.
+    fn second_of(p: &Preset, optimizer: &crate::optimize::OptimizeParams) -> Vec<Vec<crate::patterns::Point>> {
+        let mut a = Animator::starting_at(0.0);
+        a.set_optimizer(optimizer);
+        (0..60u64)
+            .map(|i| {
+                let clock = BeatClock { beat: i as f64 / 30.0, ..BeatClock::default() };
+                let audio = AudioFeatures { level: 0.5, bass: 0.5, beat: i / 15, ..Default::default() };
+                a.render(&p.settings, audio, 1.0 / 60.0, &clock)
+            })
+            .collect()
+    }
+
+    /// T-002: with the optimiser on, every cue still draws at 30 frames/s
+    /// or more at 30 kpps (≤ 1000 points), stays in range, and its lit
+    /// points never jump more than a lit step (stretched at most 2x by the
+    /// frame cap).
+    #[test]
+    fn every_cue_fits_30_fps_with_the_optimizer() {
+        let on = crate::optimize::OptimizeParams { enabled: true, ..Default::default() };
+        for p in catalog() {
+            let mut lit = false;
+            for frame in second_of(&p, &on) {
+                assert!(frame.len() <= 1000, "cue '{}' makes {} points", p.id, frame.len());
+                assert!(frame.iter().all(|q| (-1.0..=1.0).contains(&q.x) && (-1.0..=1.0).contains(&q.y)), "{}", p.id);
+                for w in frame.windows(2).filter(|w| w[0].is_lit() && w[1].is_lit()) {
+                    let d = ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt();
+                    assert!(d <= 2.0 * on.lit_step + 1e-4, "cue '{}': lit step {d}", p.id);
+                }
+                lit |= frame.iter().any(|q| q.is_lit());
+            }
+            assert!(lit, "cue '{}' is dark", p.id);
+        }
+    }
+
+    /// Measurement for the PR note (T-002), not a check:
+    /// `cargo test --release -p laser-studio optimizer_measurement -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn optimizer_measurement() {
+        let off = crate::optimize::OptimizeParams::default();
+        let on = crate::optimize::OptimizeParams { enabled: true, ..Default::default() };
+        for (name, params) in [("densify", &off), ("optimiser", &on)] {
+            let (mut total, mut frames, mut worst, mut worst_id, mut over_750) = (0usize, 0usize, 0usize, String::new(), 0usize);
+            let started = std::time::Instant::now();
+            for p in catalog() {
+                let most = second_of(&p, params).iter().map(|f| f.len()).inspect(|&n| {
+                    total += n;
+                    frames += 1;
+                }).max().unwrap_or(0);
+                if most > worst {
+                    (worst, worst_id) = (most, p.id.clone());
+                }
+                over_750 += (most > 750) as usize;
+            }
+            let per_frame = started.elapsed().as_secs_f64() * 1e6 / frames as f64;
+            println!(
+                "{name}: {} cues, mean {:.0} points/frame, worst {worst} ({worst_id}, {:.1} fps at 30 kpps), {over_750} cues over 750, {per_frame:.1} µs per rendered frame",
+                catalog().len(),
+                total as f64 / frames as f64,
+                30_000.0 / worst as f64,
+            );
+        }
+        // Stress: the optimiser alone on 64 rings of 61 points (3904 raw
+        // points, 64 paths to order), far heavier than any cue.
+        let rings: Vec<crate::patterns::Point> = (0..64)
+            .flat_map(|i| {
+                let (cx, cy, r) = ((i % 8) as f32 * 0.25 - 0.875, (i / 8) as f32 * 0.25 - 0.875, 0.1);
+                let mut ring: Vec<_> = (0..=60).map(|k| {
+                    let a = k as f32 / 60.0 * std::f32::consts::TAU;
+                    crate::patterns::Point::lit(cx + r * a.cos(), cy + r * a.sin(), 1.0, 1.0, 1.0)
+                }).collect();
+                ring.insert(0, crate::patterns::Point::blanked(cx + r, cy));
+                ring
+            })
+            .collect();
+        let mut o = crate::optimize::Optimizer::new(on.clone());
+        let started = std::time::Instant::now();
+        let mut n = 0;
+        for _ in 0..1000 {
+            n = o.optimize(&rings).len();
+        }
+        println!("stress: {} raw points → {n}, {:.1} µs per frame", rings.len(), started.elapsed().as_secs_f64() * 1e3);
+    }
+
     /// FNV-1a over values rounded to 1e-3, so libm last-bit differences
     /// between platforms don't matter but any real change does.
     fn digest(values: impl Iterator<Item = f32>) -> u64 {
