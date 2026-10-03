@@ -6,9 +6,13 @@
 <title>Laser Studio</title>
 <style>
   :root {
-    --bg: #0b0d10; --panel: #14171c; --panel-2: #1b1f26; --line: #262b33;
-    --text: #e8eaed; --muted: #8b929c; --accent: #3ddc84; --accent-ink: #062b15;
-    --danger: #ff4d4f; --warn: #ffb020;
+    --bg: #07080e; --panel: #11131d; --panel-2: #191c29; --line: #262a3b;
+    --text: #eef0f8; --muted: #8a90a8; --accent: #22e3ff; --accent-ink: #00222b;
+    --accent-2: #ff3dc8; --violet: #8b5cf6; --ok: #3ddc84;
+    --laser: linear-gradient(90deg, #22e3ff, #8b5cf6 55%, #ff3dc8);
+    --danger: #ff4d5e; --warn: #ffb020;
+    /* Workspace colours, like a lighting desk's coloured views. */
+    --ws-live: #ff3d7f; --ws-timeline: #3d9bff; --ws-creation: #b45cff; --ws-settings: #ffb020;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
@@ -373,12 +377,122 @@
   .modal h3 { margin: 0 0 8px; font-size: 15px; }
   #projFiles { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 200px; overflow: auto; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
+  /* ---------- Theme (T-299): a lighting-desk look ----------
+     Inspired by the feel of lighting consoles (coloured views, executor
+     tiles with a picture of what they play, glowing state) - our own
+     design, no artwork copied. Overrides only: ids and classes the JS
+     and the e2e tests use are unchanged. */
+  html, body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; }
+  body { background:
+    radial-gradient(1200px 500px at 85% -10%, #8b5cf622, transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, #22e3ff14, transparent 60%), var(--bg); background-attachment: fixed; }
+  ::selection { background: #8b5cf666; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2c3146; border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background-color: #3a4060; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  header { gap: 12px; background: linear-gradient(180deg, #151826, #10121b); border-bottom: 0; position: relative; }
+  header::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--laser); opacity: .85; }
+  header h1 { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 800; letter-spacing: .01em; white-space: nowrap; }
+  header h1 .logo { width: 26px; height: 26px; flex: none; filter: drop-shadow(0 0 6px #22e3ff88); }
+  header h1 .name { background: var(--laser); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  /* Buttons: soft, rounded, a hover you can feel. */
+  button { border-radius: 8px; border-color: #2a2f44; background: linear-gradient(180deg, #1e2232, #181b28); transition: background .12s, border-color .12s, box-shadow .12s, transform .06s; }
+  button:hover { border-color: #3d4463; background: linear-gradient(180deg, #252a3d, #1d2131); }
+  button:active { transform: translateY(1px); }
+  button.active, button.primary { background: linear-gradient(180deg, #4ff0ff, #18c6e6); color: var(--accent-ink); border-color: #4ff0ff; box-shadow: 0 0 14px #22e3ff55; }
+  input[type=text], input[type=number], select { border-radius: 8px; background: #0d0f18; border-color: #2a2f44; }
+  input[type=text]:focus, input[type=number]:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px #22e3ff26; }
+  /* Sliders: a lit track and a glowing knob. */
+  input[type=range] { -webkit-appearance: none; appearance: none; height: 22px; background: transparent; cursor: pointer; }
+  input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: linear-gradient(90deg, #22e3ff, #8b5cf6) 0 / var(--fill, 50%) 100% no-repeat, #262a3b; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: -5px; border-radius: 50%; background: #fff; border: 0; box-shadow: 0 0 0 3px #22e3ff55, 0 0 10px #22e3ffaa; }
+  .layer input[type=range]::-webkit-slider-runnable-track { width: 8px; height: auto; background: linear-gradient(0deg, #22e3ff, #ff3dc8) 0 100% / 100% var(--fill, 50%) no-repeat, #262a3b; }
+  .layer input[type=range]::-webkit-slider-thumb { width: 26px; height: 14px; margin-top: 0; margin-left: -9px; border-radius: 4px; background: linear-gradient(180deg, #fff, #c9cbe0); box-shadow: 0 2px 6px #000a, 0 0 0 1px #0006; }
+  /* Panels: glassy cards with a soft edge. */
+  section { background: linear-gradient(180deg, #141725ee, #10121cee); border-color: #242840; border-radius: 14px; box-shadow: 0 10px 30px #0006, inset 0 1px 0 #ffffff08; }
+  section h2 { color: #aeb4cf; font-weight: 700; }
+  details summary { color: #aeb4cf; font-weight: 700; list-style: none; display: flex; align-items: center; gap: 8px; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '›'; display: inline-block; width: 12px; font-size: 16px; color: var(--accent); transition: transform .15s; }
+  details[open] > summary::before { transform: rotate(90deg); }
+  /* Workspace tabs: one colour each, like the views of a desk. */
+  #wsTabs { background: #0b0d15cc; border-bottom-color: #1d2133; padding: 6px 16px 0; gap: 4px; }
+  #wsTabs button { position: relative; display: flex; align-items: center; gap: 8px; padding: 9px 18px 8px; border-radius: 10px 10px 0 0; background: transparent; box-shadow: none; transform: none; color: #8a90a8; }
+  #wsTabs button::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: var(--wc); opacity: .55; }
+  #wsTabs button[data-ws-tab="live"] { --wc: var(--ws-live); }
+  #wsTabs button[data-ws-tab="timeline"] { --wc: var(--ws-timeline); }
+  #wsTabs button[data-ws-tab="creation"] { --wc: var(--ws-creation); }
+  #wsTabs button[data-ws-tab="settings"] { --wc: var(--ws-settings); }
+  #wsTabs button:hover { background: #ffffff08; color: var(--text); }
+  #wsTabs button.active { color: #fff; background: linear-gradient(180deg, color-mix(in srgb, var(--wc) 22%, transparent), transparent); border-bottom-color: var(--wc); }
+  #wsTabs button.active::before { opacity: 1; box-shadow: 0 0 10px var(--wc); }
+  kbd { border-color: #2f3550; background: #0d0f18; color: #aeb4cf; font-family: ui-monospace, "SF Mono", monospace; }
+  /* Tempo: an LCD readout and beat lamps. */
+  .tempo { gap: 3px; padding: 3px 5px; border-radius: 12px; background: #0b0d15; border: 1px solid #22263a; }
+  .tempo input { font-family: ui-monospace, "SF Mono", monospace; font-size: 18px; color: var(--accent); background: transparent; border-color: transparent; text-shadow: 0 0 10px #22e3ff88; }
+  .tempo button { padding: 6px 7px; background: transparent; border-color: transparent; color: #aeb4cf; }
+  .tempo button:hover { background: #ffffff0d; color: #fff; }
+  .tempo button.active { background: linear-gradient(180deg, #4ff0ff, #18c6e6); color: var(--accent-ink); }
+  .beats span { width: 11px; height: 11px; background: #1a1d2b; border-color: #2a2f44; transition: background .05s; }
+  .beats span.on { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .beats span.one.on { background: var(--accent-2); border-color: var(--accent-2); box-shadow: 0 0 12px var(--accent-2); }
+  /* The laser button: a big lamp, alive when it emits. */
+  #armBtn { border-radius: 12px; padding: 11px 22px; background: #1a0d12; }
+  #armBtn.on { background: linear-gradient(180deg, #ff5d6e, #e0203a); border-color: #ff8a96; animation: emit 1.2s ease-in-out infinite; }
+  @keyframes emit { 50% { box-shadow: 0 0 30px #ff4d5ecc, 0 0 60px #ff3dc855; } }
+  #estopBtn { background: radial-gradient(circle at 35% 30%, #ff4a5c, #c3001c 70%); box-shadow: 0 0 0 3px #d0021b44, 0 6px 18px #d0021b55; }
+  .led.ok::before { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  #midiStatus.on, #musStatus.ok { color: var(--ok); }
+  /* The stage: a black screen with a soft halo, lit while the laser emits. */
+  canvas { border-color: #22263a; border-radius: 14px; }
+  .view > canvas#preview, .view > canvas#beams { box-shadow: 0 0 0 1px #22263a, 0 20px 50px #000a, 0 0 80px #8b5cf614; }
+  body.emitting .view > canvas#preview, body.emitting .view > canvas#beams { box-shadow: 0 0 0 2px #ff4d5e88, 0 0 60px #ff4d5e33; }
+  #offBadge { border-radius: 999px; padding: 4px 12px; backdrop-filter: blur(6px); }
+  .viewbar .seg { padding: 3px; gap: 2px; border-radius: 10px; background: #0b0d15; border: 1px solid #22263a; }
+  .viewbar .seg button, .ptabs button { border-color: transparent; background: transparent; box-shadow: none; }
+  .viewbar .seg button.active, .ptabs button.active { background: #22e3ff22; color: var(--accent); border-color: #22e3ff55; box-shadow: none; }
+  .ptabs { padding: 3px; gap: 2px; border-radius: 12px; background: #0b0d15; border: 1px solid #22263a; }
+  /* Layers: console fader strips. */
+  .layer { border-radius: 12px; background: linear-gradient(180deg, #181b29, #11131d); border-color: #262a3b; }
+  .layer .t { color: #fff; }
+  .layer button.mute.active { background: var(--danger); box-shadow: 0 0 10px #ff4d5e88; }
+  .layer button.solo.active { background: var(--warn); box-shadow: 0 0 10px #ffb02088; }
+  /* Cue pages: a coloured pill per page. */
+  .ws-cues { --cat: #22e3ff; }
+  .cue-tabs button { border-radius: 999px; padding: 6px 14px 6px 10px; display: inline-flex; align-items: center; gap: 7px; }
+  .cue-tabs button::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--c); box-shadow: 0 0 6px var(--c); }
+  .cue-tabs button.active { background: color-mix(in srgb, var(--c) 22%, #11131d); color: #fff; border-color: var(--c); box-shadow: 0 0 14px color-mix(in srgb, var(--c) 40%, transparent); }
+  /* Cues: executor tiles with a picture of the look. */
+  .cues { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .cue { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 4px 8px 4px 4px; border-radius: 10px; background: linear-gradient(180deg, #171a28, #11131d);
+    border-color: #262a3b; border-left: 3px solid var(--cat); overflow: hidden; }
+  .cue:hover { border-color: color-mix(in srgb, var(--cat) 60%, #262a3b); border-left-color: var(--cat); box-shadow: 0 0 16px color-mix(in srgb, var(--cat) 25%, transparent); }
+  .cue canvas.th { width: 46px; height: 46px; aspect-ratio: 1; border: 0; border-radius: 7px; background: #000; flex: none; }
+  .cue .n { flex: 1; min-width: 0; padding-right: 10px; font-weight: 600; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .cue .key { top: 3px; right: 5px; font-family: ui-monospace, "SF Mono", monospace; }
+  .cue .tag { bottom: 3px; right: 6px; }
+  .cue.active { background: linear-gradient(90deg, color-mix(in srgb, var(--cat) 35%, #11131d), #11131d); color: #fff; border-color: var(--cat);
+    box-shadow: 0 0 0 1px var(--cat), 0 0 22px color-mix(in srgb, var(--cat) 55%, transparent); }
+  .cue.active .key, .cue.active .tag { color: #fff; }
+  .cue.active::after { content: ''; position: absolute; left: 10px; right: 10px; bottom: 3px; height: 2px; border-radius: 2px; background: var(--laser); background-size: 200% 100%; animation: playing 1.5s linear infinite; }
+  @keyframes playing { to { background-position: -200% 0; } }
+  .cue.flash { background: linear-gradient(180deg, #ffb02055, #11131d); color: #fff; border-color: var(--warn); box-shadow: 0 0 22px #ffb02088; }
+  .cue.flash .key { color: #fff; }
+  .cue-bar .seg { padding: 3px; gap: 2px; border-radius: 10px; background: #0b0d15; border: 1px solid #22263a; }
+  .cue-bar .seg button { border-color: transparent; background: transparent; box-shadow: none; }
+  .cue-bar .seg button.active { background: #22e3ff22; color: var(--accent); border-color: #22e3ff55; }
+  .meter > div, #musDbFill, .mus-bands .bar > div { background: linear-gradient(90deg, #22e3ff, #8b5cf6, #ff3dc8); background-size: 100vw 100%; }
+  .mus-bands .bar > div { background: linear-gradient(0deg, #22e3ff, #8b5cf6, #ff3dc8); }
+  .modal .box, #cueMenu, #midiMenu, #projMenu, #figImportDlg { border-radius: 14px; border-color: #2a2f44; background: #141725; box-shadow: 0 20px 60px #000c; }
+  .modal { backdrop-filter: blur(4px); }
 </style>
 </head>
 <body>
 <div id="top">
 <header>
-  <h1>Laser Studio</h1>
+  <h1><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lsLogo" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#22e3ff"/><stop offset=".55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#ff3dc8"/></linearGradient></defs>
+  <g stroke="url(#lsLogo)" stroke-width="2.2" stroke-linecap="round" fill="none"><path d="M5 27 L13 4"/><path d="M5 27 L21 6"/><path d="M5 27 L27 13"/><path d="M5 27 L29 22"/></g><circle cx="5" cy="27" r="3.2" fill="#fff"/></svg><span class="name">Laser Studio</span></h1>
   <div class="proj">
     <button id="projBtn" title="Projet : Cmd+S enregistrer, Cmd+O ouvrir">Projet ▾</button>
     <span id="projName" title="Projet ouvert (• = modifications non enregistrées)">Sans titre</span>
@@ -1379,6 +1493,7 @@ function since(ms) {
 }
 function showArmed() {
   $('armBtn').classList.toggle('on', armed);
+  document.body.classList.toggle('emitting', armed);
   $('armBtn').textContent = armed ? 'LASER ON' : 'LASER OFF';
   $('offBadge').classList.toggle('hidden', armed);
   if (!arm) return;
@@ -1388,6 +1503,11 @@ function showArmed() {
     : d ? `Désarmé — raison : ${d.reason_fr} (${d.source_fr}), ${clock(d.at)}` : 'Désarmé';
 }
 $('armBtn').addEventListener('click', () => toggleArmed('ui'));
+// Lit slider tracks (T-299): the filled part follows the value, also when
+// the server or MIDI moves it.
+function syncFill(r) { const lo = +r.min || 0, hi = r.max === '' ? 100 : +r.max; r.style.setProperty('--fill', `${hi > lo ? (r.value - lo) / (hi - lo) * 100 : 0}%`); }
+document.addEventListener('input', e => { if (e.target.type === 'range') syncFill(e.target); });
+setInterval(() => document.querySelectorAll('input[type=range]').forEach(syncFill), 200);
 $('estopBtn').addEventListener('click', () => emergencyStop('ui'));
 $('estopReset').addEventListener('click', async () => { if (await post('/api/estop/reset')) { $('estopBanner').hidden = true; } });
 document.addEventListener('keydown', e => {
@@ -2443,11 +2563,49 @@ const heldKeys = new Map(); // key code -> cue id, for keyup
 let pointerCue = null;      // cue id under a held mouse button / finger
 const MODE_TAGS = { toggle: 'B', flash: 'F', solo: 'S', restart: 'R' };
 
+// Theme (T-299): a colour per cue page and a small picture per cue, like
+// a desk's coloured pools. The pictures come once per catalogue load.
+const PAGE_COLORS = ['#22e3ff', '#8b5cf6', '#ff3dc8', '#3d9bff', '#2ee6a6', '#ffb020', '#ff5d6e', '#c4f03d', '#ff8a3d'];
+const pageColor = c => PAGE_COLORS[Math.max(0, cueCategories.indexOf(c)) % PAGE_COLORS.length];
+let thumbs = {};
 async function loadPresets() {
   const r = await (await fetch('/api/presets')).json();
   presets = r.presets; cueCategories = r.categories;
   cuePage = cuePage || cueCategories[0];
   await loadSlots();
+  loadThumbs(); // not awaited: the grid works before its pictures arrive
+}
+async function loadThumbs() {
+  try { thumbs = await (await fetch('/api/presets/thumbs', { cache: 'no-store' })).json(); } catch { return; }
+  document.querySelectorAll('#cues .cue').forEach(b => drawThumb(b.querySelector('canvas.th'), thumbs[b.dataset.id]));
+}
+// A thumbnail is one hex string, 5 bytes per point: x, y (0..255 = -1..1), r, g, b.
+function thumbPoints(hex) {
+  const out = [];
+  for (let i = 0; i + 10 <= hex.length; i += 10) {
+    const v = [0, 2, 4, 6, 8].map(k => parseInt(hex.substr(i + k, 2), 16));
+    out.push([v[0] / 127.5 - 1, v[1] / 127.5 - 1, v[2] / 255, v[3] / 255, v[4] / 255]);
+  }
+  return out;
+}
+function drawThumb(c, hex) {
+  if (!c) return;
+  const pts = hex ? thumbPoints(hex) : null;
+  const g = c.getContext('2d'), W = c.width, H = c.height, S = H * 0.92;
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  if (!pts || !pts.length) return;
+  const px = p => [W / 2 + p[0] * S / 2, H / 2 - p[1] * S / 2];
+  const col = (p, a) => `rgba(${[2, 3, 4].map(i => Math.round(255 * Math.sqrt(p[i]))).join(',')},${a})`;
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  for (const [w, a] of [[5, 0.22], [1.6, 1]]) {
+    g.lineWidth = w;
+    for (let i = 1; i < pts.length; i++) {
+      const a0 = pts[i - 1], b0 = pts[i];
+      if (a0[2] + a0[3] + a0[4] === 0 || b0[2] + b0[3] + b0[4] === 0) continue;
+      const [x1, y1] = px(a0), [x2, y2] = px(b0);
+      g.strokeStyle = col(b0, a); g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2 + 0.01, y2); g.stroke();
+    }
+  }
 }
 async function loadSlots() {
   slots = (await (await fetch('/api/cues')).json()).slots || {};
@@ -2459,10 +2617,12 @@ function renderCues() {
     const b = document.createElement('button');
     const n = presets.filter(p => p.category === c).length;
     b.textContent = `${c} (${n})`; b.classList.toggle('active', c === cuePage);
+    b.style.setProperty('--c', pageColor(c));
     b.onclick = () => { cuePage = c; renderCues(); post('/api/control', { id: 'page.' + (cueCategories.indexOf(c) + 1) }); };
     $('cueTabs').appendChild(b);
   }
   $('cues').innerHTML = '';
+  $('cueRegion').style.setProperty('--cat', pageColor(cuePage));
   presets.filter(p => p.category === cuePage).forEach((p, i) => {
     const b = document.createElement('button');
     b.className = 'cue';
@@ -2471,8 +2631,9 @@ function renderCues() {
     const slot = slots[p.id] || {};
     const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '']
       .filter(Boolean).join(' ');
-    b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><span class="n"></span><span class="tag">${tag}</span>`;
+    b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`;
     b.querySelector('.n').textContent = p.name;
+    drawThumb(b.querySelector('canvas.th'), thumbs[p.id]);
     b.addEventListener('pointerdown', e => {
       if (e.button !== 0) return;
       e.preventDefault();
