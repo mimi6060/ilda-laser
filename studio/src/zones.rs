@@ -27,6 +27,13 @@
 //! its end sample. Every emitted sample is also scaled by the attenuation
 //! at its own position, so no lit sample is ever inside a Blank zone.
 //!
+//! **Edges** (T-351). A zone is a closed set: a point on an edge (within
+//! `ON_EDGE`) is inside. Besides proper crossings, a segment is cut where
+//! it enters or leaves that thin band along an edge and at an end lying on
+//! an edge, and a crossing whose own point is darker than both sides (a
+//! touched corner) is hopped over dark. So a sample on an edge is dark, a
+//! line along an edge is dark, and nothing lit starts or stops on one.
+//!
 //! **Colour calibration.** A per-colour gain (0..1, can only dim) and a
 //! minimum diode level: analogue diodes emit nothing below a threshold, so
 //! a lit channel `v` is sent as `min + v·(1 − min)`; a dark channel stays 0.
@@ -39,6 +46,8 @@ pub const MAX_VERTICES: usize = 24;
 /// Inserted samples sit this far (normalised units) along the segment on
 /// each side of an edge (0.05 % of the field width).
 const EDGE_GAP: f32 = 1e-3;
+/// A point this close (normalised units) to a zone edge is on it.
+const ON_EDGE: f32 = 1e-6;
 /// Below this a channel counts as dark for the minimum diode level.
 const DARK: f32 = 1e-3;
 
@@ -159,16 +168,50 @@ impl Poly {
         inside
     }
 
+    /// True when (x, y) is on an edge, within `ON_EDGE`.
+    fn on_edge(&self, x: f32, y: f32) -> bool {
+        if x < self.min.0 - ON_EDGE || x > self.max.0 + ON_EDGE || y < self.min.1 - ON_EDGE || y > self.max.1 + ON_EDGE {
+            return false;
+        }
+        let mut j = self.v.len() - 1;
+        for i in 0..self.v.len() {
+            let (p, q) = (self.v[j], self.v[i]);
+            let e = (q.0 - p.0, q.1 - p.1);
+            let w = (x - p.0, y - p.1);
+            let len2 = e.0 * e.0 + e.1 * e.1;
+            let s = if len2 > 0.0 { ((w.0 * e.0 + w.1 * e.1) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let (dx, dy) = (w.0 - s * e.0, w.1 - s * e.1);
+            if dx * dx + dy * dy <= ON_EDGE * ON_EDGE {
+                return true;
+            }
+            j = i;
+        }
+        false
+    }
+
+    /// Inside or on an edge: the zone as a closed set. `contains` alone
+    /// puts a point on an edge in or out depending on the edge's side.
+    fn covers(&self, x: f32, y: f32) -> bool {
+        self.contains(x, y) || self.on_edge(x, y)
+    }
+
     /// Pushes the parameters t in (0, 1) where a→b crosses an edge.
     fn crossings(&self, a: (f32, f32), b: (f32, f32), out: &mut Vec<f32>) {
-        if a.0.max(b.0) < self.min.0 || a.0.min(b.0) > self.max.0 || a.1.max(b.1) < self.min.1 || a.1.min(b.1) > self.max.1 {
+        let (min, max) = ((self.min.0 - ON_EDGE, self.min.1 - ON_EDGE), (self.max.0 + ON_EDGE, self.max.1 + ON_EDGE));
+        if a.0.max(b.0) < min.0 || a.0.min(b.0) > max.0 || a.1.max(b.1) < min.1 || a.1.min(b.1) > max.1 {
             return;
         }
         let d = (b.0 - a.0, b.1 - a.1);
         let mut j = self.v.len() - 1;
+        let (lo, hi) = ((a.0.min(b.0) - ON_EDGE, a.1.min(b.1) - ON_EDGE), (a.0.max(b.0) + ON_EDGE, a.1.max(b.1) + ON_EDGE));
         for i in 0..self.v.len() {
-            let p = self.v[j];
-            let e = (self.v[i].0 - p.0, self.v[i].1 - p.1);
+            let (p, q) = (self.v[j], self.v[i]);
+            // No crossing nor band unless the boxes overlap.
+            if p.0.max(q.0) < lo.0 || p.0.min(q.0) > hi.0 || p.1.max(q.1) < lo.1 || p.1.min(q.1) > hi.1 {
+                j = i;
+                continue;
+            }
+            let e = (q.0 - p.0, q.1 - p.1);
             let denom = d.0 * e.1 - d.1 * e.0;
             if denom.abs() > 1e-12 {
                 let w = (p.0 - a.0, p.1 - a.1);
@@ -178,7 +221,64 @@ impl Poly {
                     out.push(t);
                 }
             }
+            Self::band(a, b, p, self.v[i], out);
             j = i;
+        }
+    }
+
+    /// Pushes the parameters t in (0, 1) where a→b enters or leaves the
+    /// band of points `on_edge` of p→q (a stadium of radius `ON_EDGE`), so
+    /// that a segment running along an edge, or touching a corner, gets
+    /// breakpoints too (T-351). The stadium is convex: its intersection
+    /// with the line is one interval, the hull of the line's intersections
+    /// with the rectangle and the two end discs. In f64: ON_EDGE² is tiny.
+    fn band(a: (f32, f32), b: (f32, f32), p: (f32, f32), q: (f32, f32), out: &mut Vec<f32>) {
+        let eps = ON_EDGE as f64;
+        let (ax, ay, px, py) = (a.0 as f64, a.1 as f64, p.0 as f64, p.1 as f64);
+        let d = (b.0 as f64 - ax, b.1 as f64 - ay);
+        let e = (q.0 as f64 - px, q.1 as f64 - py);
+        let len = e.0.hypot(e.1);
+        if len == 0.0 {
+            return;
+        }
+        let (u, n) = ((e.0 / len, e.1 / len), (-e.1 / len, e.0 / len));
+        let w = (ax - px, ay - py);
+        let dot = |x: (f64, f64), y: (f64, f64)| x.0 * y.0 + x.1 * y.1;
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        // The rectangle: |n·(P - p)| <= eps and 0 <= u·(P - p) <= len.
+        let mut range = Some((f64::NEG_INFINITY, f64::INFINITY));
+        for (c0, c1, min, max) in [(dot(n, w), dot(n, d), -eps, eps), (dot(u, w), dot(u, d), 0.0, len)] {
+            range = range.and_then(|(r0, r1)| {
+                if c1 == 0.0 {
+                    (min..=max).contains(&c0).then_some((r0, r1))
+                } else {
+                    let (t0, t1) = ((min - c0) / c1, (max - c0) / c1);
+                    let (t0, t1) = (r0.max(t0.min(t1)), r1.min(t0.max(t1)));
+                    (t0 <= t1).then_some((t0, t1))
+                }
+            });
+        }
+        if let Some((t0, t1)) = range {
+            (lo, hi) = (t0, t1);
+        }
+        // The discs at both ends: |w + t·d|² = eps².
+        let dd = dot(d, d);
+        for v in [(px, py), (q.0 as f64, q.1 as f64)] {
+            let w = (ax - v.0, ay - v.1);
+            let (bh, c) = (dot(w, d), dot(w, w) - eps * eps);
+            let disc = bh * bh - dd * c;
+            if dd > 0.0 && disc >= 0.0 {
+                let s = disc.sqrt();
+                lo = lo.min((-bh - s) / dd);
+                hi = hi.max((-bh + s) / dd);
+            }
+        }
+        if lo <= hi {
+            for t in [lo, hi] {
+                if t > 0.0 && t < 1.0 {
+                    out.push(t as f32);
+                }
+            }
         }
     }
 }
@@ -215,13 +315,14 @@ impl Mask {
     }
 
     /// Brightness factor at (x, y): horizon × every zone containing it.
+    /// A point on a zone's edge counts as inside (T-351).
     pub fn factor(&self, x: f32, y: f32) -> f32 {
         let mut f = self.horizon.factor(y);
         for p in &self.polys {
             if f == 0.0 {
                 break;
             }
-            if p.contains(x, y) {
+            if p.covers(x, y) {
                 f *= p.factor;
             }
         }
@@ -285,6 +386,14 @@ impl Mask {
         for p in &self.polys {
             p.crossings((a.x, a.y), (b.x, b.y), ts);
         }
+        // An end on an edge is a crossing too (at t = 0 or 1): the segment
+        // must not start or stop lit on the edge.
+        if self.polys.iter().any(|p| p.on_edge(a.x, a.y)) {
+            ts.push(0.0);
+        }
+        if self.polys.iter().any(|p| p.on_edge(b.x, b.y)) {
+            ts.push(1.0);
+        }
         let h = self.horizon;
         if h.lines && (a.y - h.y) * (b.y - h.y) < 0.0 {
             ts.push((h.y - a.y) / (b.y - a.y));
@@ -300,7 +409,9 @@ impl Mask {
         let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
         let gap = if len > 0.0 { EDGE_GAP / len } else { 0.0 };
         // Interval k runs from bounds[k] to bounds[k+1]; its level is taken
-        // at its middle (no edge inside an interval, so it is constant).
+        // at its middle (no edge inside an interval, so it is constant). A
+        // crossing may be at t = 0 or 1, making an empty first/last interval
+        // whose level is the end's own.
         let bound = |k: usize| if k == 0 { 0.0 } else if k > ts.len() { 1.0 } else { ts[k - 1] };
         let level = |k: usize| {
             let (x, y) = at((bound(k) + bound(k + 1)) / 2.0);
@@ -309,10 +420,13 @@ impl Mask {
         let mut before = level(0);
         for (k, &t) in ts.iter().enumerate() {
             let after = level(k + 1);
-            if before != after {
+            // The edge itself can be darker than both sides: a segment that
+            // only touches a zone (a corner, or a vertex of a concave one).
+            let (x, y) = at(t);
+            let low = before.min(after).min(self.factor(x, y));
+            if before > low || after > low {
                 let lo = at(t - gap.min((t - bound(k)) / 2.0));
                 let hi = at(t + gap.min((bound(k + 2) - t) / 2.0));
-                let low = before.min(after);
                 let mut emit = |(x, y): (f32, f32), f: f32| out.push(self.sample(x, y, b, f.min(self.factor(x, y))));
                 emit(lo, before);
                 if before > low {
@@ -328,13 +442,13 @@ impl Mask {
     }
 }
 
-/// Test helper: lit samples inside a Blank zone, plus lit segments that
-/// pass through one (a segment counts as lit if either end is, whichever
+/// Test helper: lit samples inside or on the edge of a Blank zone, plus
+/// lit segments that pass through or touch one (a segment counts as lit if either end is, whichever
 /// end the DAC takes its colour from), checked at 19 points each.
 #[cfg(test)]
 pub fn blank_violations(frame: &[Point], zones: &[Zone]) -> usize {
     let polys: Vec<Poly> = zones.iter().filter(|z| z.kind == ZoneKind::Blank).filter_map(Poly::new).collect();
-    let inside = |x: f32, y: f32| polys.iter().any(|z| z.contains(x, y));
+    let inside = |x: f32, y: f32| polys.iter().any(|z| z.covers(x, y));
     let samples = frame.iter().filter(|p| p.is_lit() && inside(p.x, p.y)).count();
     let segments = frame
         .windows(2)
@@ -363,10 +477,10 @@ mod tests {
         Point::lit(x, y, 1.0, 1.0, 1.0)
     }
 
-    /// Lit samples strictly inside any Blank zone.
+    /// Lit samples inside or on the edge of any Blank zone.
     fn lit_inside(frame: &[Point], zones: &[Zone]) -> Vec<Point> {
         let polys: Vec<Poly> = zones.iter().filter(|z| z.kind == ZoneKind::Blank).filter_map(Poly::new).collect();
-        frame.iter().copied().filter(|p| p.is_lit() && polys.iter().any(|z| z.contains(p.x, p.y))).collect()
+        frame.iter().copied().filter(|p| p.is_lit() && polys.iter().any(|z| z.covers(p.x, p.y))).collect()
     }
 
     /// The parts of lit segments (under either colouring convention) that
@@ -386,7 +500,7 @@ mod tests {
                 for s in 1..20 {
                     let t = s as f32 / 20.0;
                     let (x, y) = (w[0].x + (w[1].x - w[0].x) * t, w[0].y + (w[1].y - w[0].y) * t);
-                    if polys.iter().any(|z| z.contains(x, y)) {
+                    if polys.iter().any(|z| z.covers(x, y)) {
                         bad += 1;
                         break;
                     }
@@ -432,6 +546,66 @@ mod tests {
         let frame = vec![white(-0.1, 0.0005), white(0.0005, 0.1)];
         let (out, _) = mask(&zones).apply(&frame);
         assert_eq!(lit_segments_inside(&out, &zones), 0, "{out:?}");
+    }
+
+    /// T-351: a lit sample exactly on a Blank edge used to stay lit (the
+    /// even-odd test puts right and top edges outside) and the segment from
+    /// it into the zone was not cut (a crossing at t = 0 is not one).
+    #[test]
+    fn a_lit_sample_on_a_blank_edge_does_not_leak_in() {
+        let zones = [rect(-0.25, -0.25, 0.25, 0.25, ZoneKind::Blank)];
+        let m = mask(&zones);
+        // Lines with a step of 0.05 that land exactly on each edge and each
+        // corner, then go on into the zone; and the same lines leaving it.
+        let dirs = [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)];
+        for (dx, dy) in dirs {
+            let line: Vec<Point> = (0..10).map(|k| white(-dx * (0.5 - 0.05 * k as f32), -dy * (0.5 - 0.05 * k as f32))).collect();
+            assert!(line.iter().any(|p| m.polys[0].on_edge(p.x, p.y)), "a sample is on the edge");
+            for frame in [line.clone(), line.iter().rev().copied().collect()] {
+                let (out, _) = m.apply(&frame);
+                assert!(lit_inside(&out, &zones).is_empty(), "({dx}, {dy}): {out:?}");
+                assert_eq!(lit_segments_inside(&out, &zones), 0, "({dx}, {dy}): {out:?}");
+                assert_eq!(blank_violations(&out, &zones), 0, "({dx}, {dy})");
+                // Still lit up to about the edge, not cut early.
+                let off = |p: &Point| (p.x.abs().max(p.y.abs()) - 0.25).abs();
+                assert!(out.iter().any(|p| p.is_lit() && off(p) < 2e-3), "({dx}, {dy}): {out:?}");
+            }
+        }
+    }
+
+    /// A lit segment that only touches a Blank zone - at a corner or along
+    /// an edge - is dark where it touches.
+    #[test]
+    fn a_segment_touching_a_blank_zone_is_dark_where_it_touches() {
+        let zones = [rect(0.0, 0.0, 0.5, 0.5, ZoneKind::Blank)];
+        let m = mask(&zones);
+        // Is (x, y) on a lit drawn segment (under either colouring)?
+        let lit_through = |out: &[Point], x: f32, y: f32| {
+            out.windows(2).any(|w| {
+                let (ex, ey) = (w[1].x - w[0].x, w[1].y - w[0].y);
+                let (px, py) = (x - w[0].x, y - w[0].y);
+                let len2 = ex * ex + ey * ey;
+                let s = if len2 > 0.0 { ((px * ex + py * ey) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                (w[0].is_lit() || w[1].is_lit()) && (px - s * ex).hypot(py - s * ey) < 1e-6
+            })
+        };
+        // Through the corner (0.5, 0.5) only.
+        let (out, _) = m.apply(&[white(0.0, 1.0), white(1.0, 0.0)]);
+        assert!(!lit_through(&out, 0.5, 0.5), "{out:?}");
+        assert!(lit_inside(&out, &zones).is_empty(), "{out:?}");
+        assert!(lit_through(&out, 0.25, 0.75), "lit away from the corner: {out:?}");
+        // Along the top edge, from outside to outside.
+        let (out, _) = m.apply(&[white(-0.5, 0.5), white(1.0, 0.5)]);
+        assert!(!lit_through(&out, 0.25, 0.5), "{out:?}");
+        assert!(lit_through(&out, -0.25, 0.5) && lit_through(&out, 0.75, 0.5), "lit outside: {out:?}");
+        // A vertical line one f32 ulp right of the right edge (what a
+        // calibrated x = 0.5 can turn into), coming down past the corner.
+        let x = 0.500_000_06;
+        let frame: Vec<Point> = (0..30).map(|k| white(x, 0.8 - 0.03 * k as f32)).collect();
+        let (out, _) = m.apply(&frame);
+        assert!(lit_inside(&out, &zones).is_empty(), "{out:?}");
+        assert_eq!(lit_segments_inside(&out, &zones), 0, "{out:?}");
+        assert!(lit_through(&out, x, 0.6), "lit above the corner: {out:?}");
     }
 
     #[test]

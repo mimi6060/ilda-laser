@@ -401,19 +401,23 @@ mod tests {
         assert_eq!((st.active, st.brightness), (None, 0.2));
     }
 
-    /// A pattern is cut by a blanking zone like any look, after calibration.
-    /// (The zone's edges avoid the pattern's sample grid: a sample lying
-    /// exactly on a zone edge is a separate zones.rs matter.)
+    /// A pattern is cut by a blanking zone like any look, after calibration:
+    /// one zone off the pattern's sample grid, and grid-aligned ones whose
+    /// edges carry samples and whole lines (T-351).
     #[test]
     fn a_blank_zone_cuts_the_pattern() {
-        let zone = Zone { kind: ZoneKind::Blank, points: vec![[-0.951, -0.613], [0.013, -0.613], [0.013, 0.587], [-0.951, 0.587]], ..Default::default() };
-        let cfg = SafetySettings { zones: vec![zone.clone()], ..Default::default() };
-        let cal = Calibration { offset_x: 0.1, ..Default::default() };
-        for p in ALL {
-            let frame = output_frame(p, 0.2, &cal);
-            let out = safety::apply(frame, 0.0, &cfg, &mut StrobeLimiter::default());
-            assert_eq!(crate::zones::blank_violations(&out, std::slice::from_ref(&zone)), 0, "{p:?}");
-            assert!(out.iter().all(|q| (-1.0..=1.0).contains(&q.x)));
+        let rect = |x0: f32, y0: f32, x1: f32, y1: f32| Zone { kind: ZoneKind::Blank, points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]], ..Default::default() };
+        let zones = [rect(-0.951, -0.613, 0.013, 0.587), rect(0.0, 0.0, 0.5, 0.5), rect(-0.5, -0.5, 0.0, 0.0), rect(-1.0, -0.25, 1.0, 0.25)];
+        for zone in zones {
+            let cfg = SafetySettings { zones: vec![zone.clone()], ..Default::default() };
+            for cal in [Calibration { offset_x: 0.1, ..Default::default() }, Calibration::default()] {
+                for p in ALL {
+                    let frame = output_frame(p, 0.2, &cal);
+                    let out = safety::apply(frame, 0.0, &cfg, &mut StrobeLimiter::default());
+                    assert_eq!(crate::zones::blank_violations(&out, std::slice::from_ref(&zone)), 0, "{p:?} {:?}", zone.points);
+                    assert!(out.iter().all(|q| (-1.0..=1.0).contains(&q.x)));
+                }
+            }
         }
     }
 }
