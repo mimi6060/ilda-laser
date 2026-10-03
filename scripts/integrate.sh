@@ -17,7 +17,7 @@ export PATH=/opt/homebrew/opt/rustup/bin:$PATH
 
 git checkout -q develop
 git pull -q --ff-only origin develop
-git push -q -u origin "$branch"
+git push -q --force-with-lease -u origin "$branch"  # task branches get rebased
 pr=$(gh pr list --head "$branch" --state open --json number -q '.[0].number')
 if [ -z "$pr" ]; then
   body=$(git show "$branch:$note" 2>/dev/null || echo "Tâche $task")
