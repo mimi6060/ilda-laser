@@ -59,6 +59,27 @@ Failures keep a screenshot and a trace in `test-results/`
 - `tests/` — one file per area: `content`, `laser`, `cues`, `live`,
   `tempo`, `scenes`, `persistence`, `midi`, …
 
+## Safety invariants (T-264)
+
+The output safety rules are also checked as property tests in Rust, run
+by every `cargo test`: `studio/src/safety_invariants.rs` drives the real
+engine frame (`Engine::tick`) on a simulated clock with random cues,
+looks, LFOs, audio, MIDI, timeline, patterns, zones, caps and
+arm/e-stop actions, and checks every frame sent (never lit while disarmed
+or e-stopped, never above the caps, nothing in a Blank zone or below a
+full horizon, coordinates in -1..1, nothing arms but an explicit
+request); the API side is `no_api_request_arms_except_an_explicit_arm_request`
+in `web.rs`. A failure prints its seed: replay it with
+`SAFETY_SEED=<n> cargo test -p laser-studio <test name>`, or run more
+cases with `SAFETY_CASES=<n>`.
+
+When a new protection lands, add its invariant there (see the module
+docs: randomise its settings in `random_case`, exercise its controls in
+`random_action`, assert it in `check_points` or a dedicated test), check
+that removing the protection makes the test fail, and add an e2e spec
+here only for what the user sees (messages, buttons), like
+`arm-refused.spec.ts`.
+
 ## Writing tests
 
 - Tests in one file share one studio and run in order; start each test

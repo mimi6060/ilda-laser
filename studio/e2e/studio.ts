@@ -48,6 +48,8 @@ export interface StudioOptions {
   midiTest?: boolean;
   /** Files written into the fresh data dir before the first start (path → content). */
   files?: Record<string, string>;
+  /** Pass the hidden --test-interlock flag: an interlock that is never satisfied, so arming is always refused (T-264). */
+  testInterlock?: boolean;
   /** Pass the hidden --test-hooks flag (simulated engine stall, T-253; crashing decoder files, T-298). */
   testHooks?: boolean;
   /** With testHooks: the audio decoding time limit in ms (T-298; default 120 s). */
@@ -93,6 +95,7 @@ export class Studio {
     args.push('--test-devices', JSON.stringify(this.opts.devices ?? []));
     if (this.opts.midiTest) args.push('--midi-test');
     if (this.opts.testHooks) args.push('--test-hooks');
+    if (this.opts.testInterlock) args.push('--test-interlock');
     if (this.opts.testHooks && this.opts.decodeTimeoutMs) args.push('--test-decode-timeout-ms', String(this.opts.decodeTimeoutMs));
     const ponkPort = this.opts.ponkPort?.();
     if (ponkPort !== undefined) {
