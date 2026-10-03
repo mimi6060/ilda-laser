@@ -100,16 +100,22 @@ Roles:
    on a branch `feat/<short-name>` created from `develop`. Implement, add
    unit tests, run build + test + clippy, commit. The "pull request" is the
    branch plus a PR note file `docs/prs/<short-name>.md` (what/why, how it
-   was tested, risks). No GitHub remote: PRs are local branches.
+   was tested, risks). Developers never push: the integrator publishes
+   the branch to GitHub (`origin` = github.com/mimi6060/ilda-laser,
+   **public**) and opens the pull request with `gh pr create --base
+   develop`, the PR note as its body.
 4. **Reviewer agents**: review one branch against `develop` (correctness,
    safety rules, IP rules, style, tests) in their own worktree, and append
    a "Review" section to the PR note ending in `Verdict: APPROVED` or
    `Verdict: CHANGES REQUESTED` (with a numbered list of required fixes).
+   The review is also posted on the GitHub PR (`gh pr review --comment`).
    Reviews can run in parallel. Merges are serialised: one integrator (the
    architect, or a single merge agent) merges approved branches into
-   `develop` one at a time with `git merge --no-ff feat/<name>`, re-runs
-   the full suite on the merged result, and reverts the merge if it goes
-   red. Never merge red builds.
+   `develop` one at a time: merge locally with `git merge --no-ff`, re-run
+   the full suite on the merged result, and only if green merge the PR on
+   GitHub (`gh pr merge --merge --delete-branch`) and pull `develop`.
+   Never merge red builds. Every finished task goes through this
+   automatically; `main` is never merged without the user.
 5. **QA agents**: after merges, run the full suite plus e2e click tests on
    `develop`, write findings to `docs/qa/<date>.md`, file bugs as new
    roadmap items.
