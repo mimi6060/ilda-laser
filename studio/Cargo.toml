@@ -22,4 +22,5 @@ hound = "3.5.1"
 claxon = "0.4.3"
 nanomp3 = "0.1.1"
 roxmltree = "0.21"
+ponk-protocol = "0.1"  # MIT, zero dependencies: PONK wire format (T-300)
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }

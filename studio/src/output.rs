@@ -1,6 +1,7 @@
 //! Sends rendered frames to a real laser DAC through `laser-dac` (IDN or
-//! Ether Dream today). The ShowNET will plug in here as another `Output`
-//! once Laserworld's API is available - the engine and UI don't change.
+//! Ether Dream today), or to MadMapper over PONK (`ponk.rs`, T-300). The
+//! ShowNET will plug in here as another `Output` once Laserworld's API is
+//! available - the engine and UI don't change.
 
 use crate::interlock::{blank_unless, EStop};
 use crate::patterns::Point;
@@ -9,6 +10,10 @@ use laser_dac::{list_devices, open_device, Frame, FrameSession, FrameSessionConf
 
 pub trait Output: Send {
     fn name(&self) -> &str;
+    /// What kind of output this is, for the UI: "dac", "ponk" or "test".
+    fn kind(&self) -> &'static str {
+        "dac"
+    }
     /// Laser emission on/off. Frames keep flowing while disarmed, so
     /// re-arming shows the current look immediately.
     fn set_armed(&mut self, armed: bool) -> Result<()>;
@@ -120,6 +125,9 @@ impl FileLogOutput {
 impl Output for FileLogOutput {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn kind(&self) -> &'static str {
+        "test"
     }
     fn set_armed(&mut self, armed: bool) -> Result<()> {
         self.log(if armed { "arm" } else { "disarm" });

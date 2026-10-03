@@ -50,6 +50,12 @@ export interface StudioOptions {
   testHooks?: boolean;
   /** With testHooks: the audio decoding time limit in ms (T-298; default 120 s). */
   decodeTimeoutMs?: number;
+  /**
+   * T-300: start with --ponk 127.0.0.1:<port>, the port of the spec's own
+   * local UDP receiver (asked at start: it is bound in a beforeAll). Never
+   * 5583 (a MadMapper on this Mac listens there), never multicast.
+   */
+  ponkPort?: () => number;
 }
 
 export class Studio {
@@ -81,6 +87,11 @@ export class Studio {
     if (this.opts.midiTest) args.push('--midi-test');
     if (this.opts.testHooks) args.push('--test-hooks');
     if (this.opts.testHooks && this.opts.decodeTimeoutMs) args.push('--test-decode-timeout-ms', String(this.opts.decodeTimeoutMs));
+    const ponkPort = this.opts.ponkPort?.();
+    if (ponkPort !== undefined) {
+      if (!ponkPort || ponkPort === 5583) throw new Error(`refusing PONK port ${ponkPort}`);
+      args.push('--ponk', `127.0.0.1:${ponkPort}`);
+    }
     if (args.includes('--device') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc.stdout!.on('data', d => { this.log += d; });
@@ -97,7 +108,8 @@ export class Studio {
     }
     const st = await this.state();
     // Guard rails: a test studio is preview-only and starts disarmed.
-    if (st.output !== null) throw new Error(`test studio has a laser output: ${st.output}`);
+    const expectedOutput = ponkPort === undefined ? null : `PONK → MadMapper (127.0.0.1:${ponkPort})`;
+    if (st.output !== expectedOutput) throw new Error(`test studio has a laser output: ${st.output}`);
     if (st.armed !== false) throw new Error('test studio did not start disarmed');
     this.initialSettings ??= st.settings;
   }
