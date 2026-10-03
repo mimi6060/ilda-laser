@@ -34,6 +34,7 @@ mod interlock;
 mod keep_awake;
 mod live;
 mod midi;
+mod optimize;
 mod output;
 mod patterns;
 mod ponk;
@@ -933,6 +934,7 @@ impl Engine {
                         let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
                         let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
                         let event_dt = if cue.frozen { 0.0 } else { anim_dt };
+                        animator.set_optimizer(&mixer.optimizer);
                         let mut points = animator.render(settings, audio, event_dt, &content_clock);
                         if cue.modifiers != live::LiveModifiers::default() {
                             let st = event_live.entry(cue.instance).or_default();
@@ -949,6 +951,7 @@ impl Engine {
                         Some(&beat) => Animator::starting_at(beat),
                         None => Animator::default(),
                     });
+                    animator.set_optimizer(&mixer.optimizer);
                     (*layer, animator.render(settings, audio, anim_dt, &clock))
                 }));
                 let evolving: Vec<(u64, evolving::Progress)> =

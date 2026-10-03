@@ -8,6 +8,7 @@
 //! highest-numbered layers are cut.
 
 use crate::engine::join_looks;
+use crate::optimize::OptimizeParams;
 use crate::patterns::Point;
 use serde::{Deserialize, Serialize};
 
@@ -43,17 +44,21 @@ pub struct Mixer {
     pub layers: [Layer; LAYER_COUNT],
     /// Most points in one frame (travel included).
     pub point_budget: usize,
+    /// The point optimiser (T-002), off by default: every look then goes
+    /// through the classic `densify`.
+    pub optimizer: OptimizeParams,
 }
 
 impl Default for Mixer {
     fn default() -> Self {
-        Self { layers: Default::default(), point_budget: DEFAULT_POINT_BUDGET }
+        Self { layers: Default::default(), point_budget: DEFAULT_POINT_BUDGET, optimizer: OptimizeParams::default() }
     }
 }
 
 impl Mixer {
     pub fn sanitize(&mut self) {
         self.point_budget = self.point_budget.clamp(MIN_POINT_BUDGET, MAX_POINT_BUDGET);
+        self.optimizer.sanitize();
         for l in &mut self.layers {
             l.dimmer = if l.dimmer.is_finite() { l.dimmer.clamp(0.0, 1.0) } else { 1.0 };
         }
@@ -127,14 +132,15 @@ pub fn mix(rendered: Vec<(u8, Vec<Point>)>, mixer: &Mixer) -> (Vec<Point>, MixRe
     }
     looks.sort_by_key(|(n, _)| *n); // stable: a layer's cues keep their order
 
-    let joined = join(&looks);
+    let opt = Some(&mixer.optimizer);
+    let joined = join(&looks, opt);
     report.demand = joined.len();
     if joined.len() <= budget {
         report.points = joined.len();
         return (joined, report);
     }
     loop {
-        let (frame, fits) = thinned(&looks, budget);
+        let (frame, fits) = thinned(&looks, budget, opt);
         let layers_left = looks.last().map(|l| l.0) != looks.first().map(|l| l.0);
         if fits || !layers_left {
             // Fits, or a single layer is left: that one always plays
@@ -146,7 +152,7 @@ pub fn mix(rendered: Vec<(u8, Vec<Point>)>, mixer: &Mixer) -> (Vec<Point>, MixRe
         let top = looks.last().map_or(1, |l| l.0);
         looks.retain(|l| l.0 != top);
         report.dropped.push(top);
-        let joined = join(&looks);
+        let joined = join(&looks, opt);
         if joined.len() <= budget {
             report.points = joined.len();
             return (joined, report);
@@ -154,17 +160,17 @@ pub fn mix(rendered: Vec<(u8, Vec<Point>)>, mixer: &Mixer) -> (Vec<Point>, MixRe
     }
 }
 
-fn join(looks: &[(u8, Vec<Point>)]) -> Vec<Point> {
-    join_looks(looks.iter().map(|(_, p)| p.clone()).collect())
+fn join(looks: &[(u8, Vec<Point>)], optimizer: Option<&OptimizeParams>) -> Vec<Point> {
+    join_looks(looks.iter().map(|(_, p)| p.clone()).collect(), optimizer)
 }
 
 /// Space the lit points of every look out as little as possible (down to
 /// `MIN_KEEP`) to fit the budget. Returns the thinnest try if none fits.
-fn thinned(looks: &[(u8, Vec<Point>)], budget: usize) -> (Vec<Point>, bool) {
+fn thinned(looks: &[(u8, Vec<Point>)], budget: usize, optimizer: Option<&OptimizeParams>) -> (Vec<Point>, bool) {
     let mut keep = 1.0f32;
     loop {
         keep = (keep - 0.05).max(MIN_KEEP);
-        let frame = join_looks(looks.iter().map(|(_, p)| decimate(p, keep)).collect());
+        let frame = join_looks(looks.iter().map(|(_, p)| decimate(p, keep)).collect(), optimizer);
         if frame.len() <= budget || keep <= MIN_KEEP {
             let fits = frame.len() <= budget;
             return (frame, fits);
@@ -315,5 +321,20 @@ mod tests {
         assert_eq!(m.point_budget, MIN_POINT_BUDGET);
         assert_eq!(m.layers[0].dimmer, 1.0);
         assert!(m.layers[2].mute && !m.audible(3));
+        // Saved before T-002: the optimiser is off.
+        assert!(!old.optimizer.enabled);
+    }
+
+    #[test]
+    fn with_the_optimizer_on_layers_join_with_eased_dark_travel() {
+        let m = Mixer { optimizer: OptimizeParams { enabled: true, ..Default::default() }, ..Mixer::default() };
+        let (frame, _) = mix(vec![(1, stroke(10, -0.5, 0.4)), (2, stroke(10, 0.5, 0.8))], &m);
+        let (classic, _) = mix(vec![(1, stroke(10, -0.5, 0.4)), (2, stroke(10, 0.5, 0.8))], &Mixer::default());
+        assert_eq!(lit(&frame).len(), 20);
+        let travel = &frame[10..frame.len() - 10];
+        assert!(travel.iter().all(|p| !p.is_lit()));
+        assert!(travel.len() < classic.len() - 20, "fewer travel points than the classic 0.03 steps");
+        let steps: Vec<f32> = travel.windows(2).map(|w| (w[1].y - w[0].y).abs()).collect();
+        assert!(steps[0] < steps[steps.len() / 2] && steps[steps.len() - 1] < steps[steps.len() / 2]);
     }
 }

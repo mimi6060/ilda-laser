@@ -9,6 +9,7 @@ use crate::evolving::{self, EvolvingCue};
 use crate::figures::Figure;
 use crate::font;
 use crate::generators::{self, GenCtx, GenParams};
+use crate::optimize::{OptimizeParams, Optimizer};
 use crate::patterns::{self, Point};
 use serde::{Deserialize, Serialize};
 
@@ -410,9 +411,22 @@ pub struct Animator {
     /// quantized launch). A different evolving cue starts over.
     evolving: Option<(EvolvingCue, f64)>,
     progress: Option<evolving::Progress>,
+    /// The point optimiser (T-002) when the output has it on; `None` =
+    /// the classic `densify`.
+    optimizer: Option<Optimizer>,
 }
 
 impl Animator {
+    /// Follow the output's optimiser settings (call before `render`). The
+    /// optimiser keeps its path order across frames while it stays on.
+    pub fn set_optimizer(&mut self, params: &OptimizeParams) {
+        match (&mut self.optimizer, params.enabled) {
+            (_, false) => self.optimizer = None,
+            (Some(o), true) => o.params = params.clone(),
+            (None, true) => self.optimizer = Some(Optimizer::new(params.clone())),
+        }
+    }
+
     /// An animator for a cue launched at tempo-clock beat `beat`.
     pub fn starting_at(beat: f64) -> Self {
         Self { start_beat: Some(beat), ..Default::default() }
@@ -565,7 +579,10 @@ impl Animator {
                 Point { x, y, ..p }
             })
             .collect();
-        densify(&rotated)
+        match &mut self.optimizer {
+            Some(o) => o.optimize(&rotated),
+            None => densify(&rotated),
+        }
     }
 }
 
@@ -610,13 +627,16 @@ pub fn densify(points: &[Point]) -> Vec<Point> {
 /// Chain several rendered looks into one frame, with blanked travel
 /// between them so the beam never draws a line from one look to the next.
 /// (The jump from the frame's end back to its start is blanked by the
-/// output, as for a single look.)
-pub fn join_looks(looks: Vec<Vec<Point>>) -> Vec<Point> {
+/// output, as for a single look.) With the optimiser on, the travel is
+/// its eased one.
+pub fn join_looks(looks: Vec<Vec<Point>>, optimizer: Option<&OptimizeParams>) -> Vec<Point> {
     let mut out: Vec<Point> = Vec::new();
     for look in looks.into_iter().filter(|l| !l.is_empty()) {
         if let (Some(&last), Some(&first)) = (out.last(), look.first()) {
-            let travel = densify(&[Point::blanked(last.x, last.y), Point::blanked(first.x, first.y)]);
-            out.extend(travel);
+            match optimizer.filter(|o| o.enabled) {
+                Some(o) => crate::optimize::travel(&mut out, last, first, o.blank_step),
+                None => out.extend(densify(&[Point::blanked(last.x, last.y), Point::blanked(first.x, first.y)])),
+            }
         }
         out.extend(look);
     }
@@ -785,17 +805,34 @@ mod tests {
     }
 
     #[test]
+    fn the_optimizer_is_opt_in_and_switches_back_to_densify() {
+        let s = Settings { content: Content::Shape { shape: "square".into() }, ..Settings::default() };
+        let classic = Animator::default().render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default());
+        let mut a = Animator::default();
+        a.set_optimizer(&OptimizeParams::default());
+        assert_eq!(a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default()), classic, "off by default");
+        let on = OptimizeParams { enabled: true, ..Default::default() };
+        let mut a = Animator::default();
+        a.set_optimizer(&on);
+        let optimized = a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default());
+        assert_ne!(optimized, classic);
+        assert_eq!(optimized, crate::optimize::Optimizer::new(on).optimize(&patterns::square(0.5, 0.0, 0.5, 0.0)));
+        a.set_optimizer(&OptimizeParams::default());
+        assert_eq!(a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default()), classic);
+    }
+
+    #[test]
     fn joined_looks_travel_blanked_between_them() {
         let a = vec![Point::lit(-0.5, 0.0, 1.0, 0.0, 0.0), Point::lit(-0.4, 0.0, 1.0, 0.0, 0.0)];
         let b = vec![Point::lit(0.5, 0.0, 0.0, 1.0, 0.0), Point::lit(0.6, 0.0, 0.0, 1.0, 0.0)];
-        let joined = join_looks(vec![a.clone(), Vec::new(), b.clone()]);
+        let joined = join_looks(vec![a.clone(), Vec::new(), b.clone()], None);
         assert_eq!(&joined[..2], &a[..]);
         assert_eq!(&joined[joined.len() - 2..], &b[..]);
         let travel = &joined[2..joined.len() - 2];
         assert!(travel.len() > 10 && travel.iter().all(|p| !p.is_lit()));
         assert!(max_step(&joined[1..joined.len() - 1]) <= MAX_STEP + 1e-4);
-        assert_eq!(join_looks(vec![a.clone()]), a);
-        assert!(join_looks(Vec::new()).is_empty());
+        assert_eq!(join_looks(vec![a.clone()], None), a);
+        assert!(join_looks(Vec::new(), None).is_empty());
     }
 
     fn synced(generator: &str, params: GenParams) -> Settings {
