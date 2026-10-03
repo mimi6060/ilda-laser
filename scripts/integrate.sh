@@ -22,7 +22,7 @@ pr=$(gh pr list --head "$branch" --state open --json number -q '.[0].number')
 if [ -z "$pr" ]; then
   body=$(git show "$branch:$note" 2>/dev/null || echo "Tâche $task")
   title=$(git log -1 --format=%s "$branch")
-  gh pr create -q --base develop --head "$branch" --title "$title" \
+  gh pr create --base develop --head "$branch" --title "$title" \
     --body "$body"$'\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)' >/dev/null
   pr=$(gh pr list --head "$branch" --state open --json number -q '.[0].number')
 fi
