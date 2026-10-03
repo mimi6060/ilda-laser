@@ -83,6 +83,10 @@ pub enum DisarmReason {
     HoldReleased,
     Interlock(String),
     ProfileChange,
+    /// The operator connected, switched or disconnected the output (T-401).
+    OutputChanged,
+    /// The output stopped answering (T-401). Reconnecting never re-arms.
+    OutputLost,
     Shutdown,
 }
 
@@ -97,6 +101,8 @@ impl DisarmReason {
             DisarmReason::HoldReleased => "hold_released".into(),
             DisarmReason::Interlock(id) => format!("interlock:{id}"),
             DisarmReason::ProfileChange => "profile_change".into(),
+            DisarmReason::OutputChanged => "output_changed".into(),
+            DisarmReason::OutputLost => "output_lost".into(),
             DisarmReason::Shutdown => "shutdown".into(),
         }
     }
@@ -111,6 +117,8 @@ impl DisarmReason {
             DisarmReason::HoldReleased => "Maintien relâché trop longtemps".into(),
             DisarmReason::Interlock(label) => format!("Verrou : {label}"),
             DisarmReason::ProfileChange => "Changement de profil".into(),
+            DisarmReason::OutputChanged => "Changement de sortie".into(),
+            DisarmReason::OutputLost => "Sortie perdue".into(),
             DisarmReason::Shutdown => "Arrêt du studio".into(),
         }
     }
@@ -135,6 +143,11 @@ pub const DATA_ACK: &str = "data_ack";
 /// Id of the interlock held open until the pre-show checklist is completed,
 /// only when a real output is configured (T-258, checklist.rs).
 pub const CHECKLIST: &str = "checklist";
+/// Id of the interlock held open while no output is connected (T-401):
+/// arming a studio that drives nothing is refused.
+pub const OUTPUT: &str = "output";
+/// Its label, also the refusal message.
+pub const OUTPUT_LABEL: &str = "Aucune sortie connectée";
 
 pub struct ArmGate {
     armed: bool,
@@ -177,6 +190,12 @@ impl ArmGate {
             None => self.interlocks.push(Interlock { id, label_fr: label_fr.to_string(), ok: true }),
         }
         self.set_interlock(id, ok);
+    }
+
+    /// The `output` interlock (T-401): closed while an output is connected.
+    /// Dropping it while armed disarms, like any interlock.
+    pub fn set_output_ready(&mut self, ok: bool) {
+        self.register(OUTPUT, OUTPUT_LABEL, ok);
     }
 
     /// Labels of the interlocks that currently block arming.
@@ -387,6 +406,17 @@ pub struct EStop {
 impl EStop {
     pub fn set_kill_switch(&self, kill: KillSwitch) {
         *self.kill.lock().unwrap() = Some(kill);
+    }
+
+    /// Installs the kill switch of a newly connected output, or none when
+    /// the studio goes back to preview (T-401). A poisoned lock is reused.
+    pub fn replace_kill_switch(&self, kill: Option<KillSwitch>) {
+        *self.kill.lock().unwrap_or_else(|e| e.into_inner()) = kill;
+    }
+
+    /// Whether an output kill switch is installed.
+    pub fn has_kill_switch(&self) -> bool {
+        self.kill.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     pub fn trip(&self, src: ArmSource) {
@@ -734,6 +764,26 @@ mod tests {
         assert!(!gate.is_armed() && estop.is_latched());
         assert!(worst < Duration::from_millis(5), "a disarm took {worst:?}");
         assert!(gate.log().status()["dropped"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn output_changes_disarm_with_their_reasons() {
+        let mut gate = ArmGate::default();
+        gate.set_output_ready(false);
+        assert_eq!(gate.request_arm(ArmSource::Ui).unwrap_err(), ["Aucune sortie connectée"]);
+        gate.set_output_ready(true);
+        gate.request_arm(ArmSource::Ui).unwrap();
+        gate.disarm(DisarmReason::OutputChanged, ArmSource::Ui);
+        let last = gate.status(&EStop::default()).last_disarm.unwrap();
+        assert_eq!((last.reason.as_str(), last.reason_fr.as_str()), ("output_changed", "Changement de sortie"));
+        gate.request_arm(ArmSource::Ui).unwrap();
+        gate.disarm(DisarmReason::OutputLost, ArmSource::System);
+        let last = gate.status(&EStop::default()).last_disarm.unwrap();
+        assert_eq!((last.reason.as_str(), last.reason_fr.as_str(), last.source), ("output_lost", "Sortie perdue", ArmSource::System));
+        // A dropping `output` interlock disarms on its own too.
+        gate.request_arm(ArmSource::Ui).unwrap();
+        gate.set_output_ready(false);
+        assert!(!gate.is_armed());
     }
 
     #[test]

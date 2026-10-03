@@ -10,6 +10,12 @@ static ILDA_DIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 /// A fresh `Shared` like the one `main` builds, with scenes stored in a
 /// path that is never written unless a test saves a scene.
 pub fn shared() -> Shared {
+    let output_mgr = std::sync::Arc::new(crate::output_manager::OutputManager::new(
+        std::sync::Arc::new(crate::output_manager::FakeBackend::new(Vec::new(), None, None, std::env::temp_dir().join("laser-studio-test-unused"))),
+        std::sync::Arc::new(crate::devices::DeviceList::fixed(Vec::new())),
+        &Default::default(),
+        30_000,
+    ));
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/lfos.json"), &controls);
@@ -80,7 +86,8 @@ pub fn shared() -> Shared {
         checklist: crate::checklist::Checklist::in_memory(false),
         test_hooks: false,
         test_stall_ms: 0,
-        // Never a real scan in unit tests.
-        devices: std::sync::Arc::new(crate::devices::DeviceList::fixed(Vec::new())),
+        // Never a real scan in unit tests, never a real output.
+        devices: std::sync::Arc::clone(output_mgr.devices()),
+        output_mgr,
     }
 }

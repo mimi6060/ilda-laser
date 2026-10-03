@@ -9,6 +9,9 @@
 // POST /api/midi/inject; still --no-midi, so no real port is ever opened.
 // Always --test-devices (T-303): a DAC scan returns a fixed list and never
 // touches the network (no IDN/Ether Dream discovery) or the USB bus.
+// T-401: arming needs a connected output, so a spec starts with the fake
+// one (--test-output, a log file, never a laser) unless it asks for none;
+// --test-devices also makes every « Connecter » open a fake output only.
 
 import { test as base, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -20,6 +23,8 @@ import path from 'node:path';
 export const REPO_ROOT = path.resolve(__dirname, '..', '..');
 export const STUDIO_BIN = process.env.LASER_STUDIO_BIN ?? path.join(REPO_ROOT, 'target', 'debug', 'laser-studio');
 const USER_PORT = 8080;
+/** The name of the fake output (`--test-output`): never a laser. */
+export const FAKE_OUTPUT = 'Sortie de test';
 
 /** A free TCP port on localhost, never the user's 8080. */
 async function freePort(): Promise<number> {
@@ -68,6 +73,13 @@ export interface StudioOptions {
   testChecklist?: boolean;
   /** T-303: what a DAC scan "finds" (--test-devices; default: nothing). */
   devices?: { kind: string; id: string; name: string }[];
+  /**
+   * T-401: arming needs a connected output. By default the studio starts
+   * with the fake one (--test-output, a log file next to the data dir,
+   * never a laser) connected, so specs can arm; 'none' starts in preview
+   * only (arming refused until an output is connected). Ignored with PONK.
+   */
+  output?: 'test' | 'none';
 }
 
 export class Studio {
@@ -100,6 +112,9 @@ export class Studio {
     const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio', '--test-keep-awake'];
     args.push('--test-devices', JSON.stringify(this.opts.devices ?? []));
     if (this.opts.midiTest) args.push('--midi-test');
+    // The fake output (T-401), unless PONK is the output or the spec wants none.
+    const fakeOutput = this.opts.ponkPort === undefined && this.opts.output !== 'none';
+    if (fakeOutput) args.push('--test-output', this.outputLog);
     if (this.opts.testHooks) args.push('--test-hooks');
     if (this.opts.testChecklist) args.push('--test-checklist');
     if (this.opts.testInterlock) args.push('--test-interlock');
@@ -124,9 +139,12 @@ export class Studio {
       await new Promise(r => setTimeout(r, 50));
     }
     const st = await this.state();
-    // Guard rails: a test studio is preview-only and starts disarmed.
-    const expectedOutput = ponkPort === undefined ? null : `PONK → MadMapper (127.0.0.1:${ponkPort})`;
-    if (st.output !== expectedOutput) throw new Error(`test studio has a laser output: ${st.output}`);
+    // Guard rails: a test studio drives no laser (the fake output, PONK to
+    // the spec's own receiver, or nothing) and starts disarmed.
+    const expectedOutput = ponkPort !== undefined ? `PONK → MadMapper (127.0.0.1:${ponkPort})` : fakeOutput ? FAKE_OUTPUT : null;
+    // A remembered choice among the --test-devices may connect (a fake output) in the background.
+    const fakeDevices = (this.opts.devices ?? []).map(d => d.name);
+    if (st.output !== expectedOutput && !fakeDevices.includes(st.output)) throw new Error(`test studio has a laser output: ${st.output}`);
     if (st.armed !== false) throw new Error('test studio did not start disarmed');
     this.initialSettings ??= st.settings;
   }
@@ -169,7 +187,11 @@ export class Studio {
     await this.start();
   }
 
+  /** The fake output's call log (arm, disarm, lit, dark, blank, close). */
+  get outputLog() { return this.dataDir + '.output.log'; }
+
   cleanup() {
+    if (this.dataDir) rmSync(this.outputLog, { force: true });
     if (this.dataDir) rmSync(this.dataDir, { recursive: true, force: true });
     this.dataDir = '';
   }

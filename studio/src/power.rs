@@ -114,6 +114,8 @@ impl Default for OutputConfig {
 #[serde(default)]
 pub struct OutputsFile {
     pub outputs: Vec<OutputConfig>,
+    /// Which output to connect and how (T-401, `output_manager.rs`).
+    pub connection: crate::output_manager::OutputPrefs,
 }
 
 const UNIT: (f32, f32) = (0.0, 1.0);
@@ -323,6 +325,30 @@ impl OutputStore {
         self.load_error.as_deref()
     }
 
+    /// The remembered connection (T-401). A file without it (older
+    /// installs) or a damaged one gives preview only. The points per
+    /// second are kept within what DACs take.
+    pub fn connection(&self) -> crate::output_manager::OutputPrefs {
+        let mut prefs = self.file.connection.clone();
+        prefs.pps = prefs.pps.clamp(1_000, 100_000);
+        prefs
+    }
+
+    /// Saves the connection part of `outputs.json`, keeping the caps.
+    pub fn set_connection(&mut self, prefs: crate::output_manager::OutputPrefs) -> Result<()> {
+        if self.file.connection == prefs {
+            return Ok(());
+        }
+        let mut file = self.file.clone();
+        file.connection = prefs;
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&file)?;
+            crate::datafile::replace(path, json.as_bytes()).map_err(|e| anyhow::anyhow!("enregistrement impossible de {} : {e:#}", path.display()))?;
+        }
+        self.file = file;
+        Ok(())
+    }
+
     /// Changes an output's caps and/or projector sheet (None = keep).
     /// Lowering a cap is applied at once. Raising one is refused while
     /// `armed` (whatever `confirm_raise` says), and otherwise needs
@@ -507,6 +533,30 @@ mod tests {
         // Invalid values and unknown outputs.
         assert!(matches!(st.set(MAIN_OUTPUT, Some(OutputLimits { max_power: 2.0, ..high }), None, false, true), Err(SetError::Invalid(_))));
         assert!(matches!(st.set("other", None, None, false, false), Err(SetError::Invalid(_))));
+    }
+
+    /// T-401: the connection and the caps share `outputs.json`; saving one
+    /// keeps the other, and a file without `connection` is preview only.
+    #[test]
+    fn the_connection_and_the_caps_share_the_file() {
+        use crate::output_manager::OutputPrefs;
+        let dir = std::env::temp_dir().join(format!("laser-studio-power-conn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("outputs.json");
+        std::fs::write(&path, r#"{"outputs":[{"id":"main","limits":{"max_power":0.3}}]}"#).unwrap();
+        let mut st = OutputStore::load_or_create(path.clone());
+        assert_eq!(st.connection(), OutputPrefs::default());
+        assert_eq!(st.connection().selected, None, "older file: preview only");
+        let prefs = OutputPrefs { selected: Some("idn:heliospro.local".into()), auto_reconnect: false, pps: 40_000 };
+        st.set_connection(prefs.clone()).unwrap();
+        let low = OutputLimits { max_power: 0.2, ..st.active_limits() };
+        st.set(MAIN_OUTPUT, Some(low), None, false, false).unwrap();
+        let st = OutputStore::load_or_create(path.clone());
+        assert_eq!(st.connection(), prefs);
+        assert_eq!(st.active_limits().max_power, 0.2);
+        std::fs::write(&path, r#"{"connection":{"pps":5}}"#).unwrap();
+        assert_eq!(OutputStore::load_or_create(path.clone()).connection().pps, 1_000, "clamped");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

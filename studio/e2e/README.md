@@ -8,7 +8,12 @@ check what the user sees plus the studio's API (`/api/state`,
 
 The harness (`studio.ts`) only ever starts a **preview-only** studio:
 
-- never with `--device` (no laser output; it also checks `output` is null),
+- never with `--device` (no laser output). Arming needs a connected output
+  (T-401), so by default it starts with the fake one, `--test-output` (a
+  call log next to the data dir, never a laser), and checks that this is
+  the output; `useStudio({ output: 'none' })` starts with none,
+- always with `--test-devices` (a scan returns a fixed list, never the
+  network or USB, and « Connecter » can only open fake outputs),
 - always with `--no-midi` (never opens the user's MIDI controller); MIDI
   specs add `--midi-test`, which plugs in a *simulated* APC40 mkII
   (« Test APC40 mkII ») fed by `POST /api/midi/inject` — still no real port,

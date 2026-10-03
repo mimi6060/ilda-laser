@@ -265,6 +265,59 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             list.refresh();
             json_response(list.view())
         }
+        (Method::Get, "/api/outputs") => {
+            // The manager's own state and the last scan: never scans or opens.
+            let mgr = Arc::clone(&shared.lock().unwrap().output_mgr);
+            json_response(mgr.view(Instant::now()))
+        }
+        (Method::Post, "/api/outputs/scan") => {
+            // Same scan as /api/devices/scan, on its own thread.
+            let mgr = Arc::clone(&shared.lock().unwrap().output_mgr);
+            mgr.devices().refresh();
+            json_response(mgr.view(Instant::now()))
+        }
+        (Method::Post, "/api/outputs/select") => match body::<serde_json::Value>(request) {
+            Ok(req) => select_output(&req, shared),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/outputs/config") => match body::<OutputConfigBody>(request) {
+            Ok(b) => {
+                let mut s = shared.lock().unwrap();
+                let mgr = Arc::clone(&s.output_mgr);
+                if let Some(on) = b.auto_reconnect {
+                    mgr.set_auto_reconnect(on, Instant::now());
+                    log::info!("Reconnexion automatique de la sortie : {}", if on { "activée" } else { "désactivée" });
+                }
+                if let Err(e) = s.outputs.set_connection(mgr.prefs()) {
+                    log::warn!("{e:#}");
+                }
+                json_response(mgr.view(Instant::now()))
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/test/output") => {
+            // `--test-hooks` only (e2e of T-401): unplugs or plugs back the
+            // fake outputs. A real output has no such switch.
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            match body::<serde_json::Value>(request) {
+                Ok(req) => {
+                    let dropped = match req.get("action").and_then(|v| v.as_str()) {
+                        Some("drop") => true,
+                        Some("restore") => false,
+                        _ => return text(400, "expected \"action\": \"drop\" or \"restore\""),
+                    };
+                    let mgr = Arc::clone(&shared.lock().unwrap().output_mgr);
+                    if mgr.simulate_drop(dropped) {
+                        ok()
+                    } else {
+                        text(404, "no fake output")
+                    }
+                }
+                Err(e) => e,
+            }
+        }
         (Method::Get, "/api/audio/config") => {
             let hub = Arc::clone(&shared.lock().unwrap().audio_in);
             json_response(json!(hub.config().0))
@@ -1339,6 +1392,42 @@ struct OutputsBody {
     confirm_loosen: bool,
 }
 
+/// `POST /api/outputs/config` (T-401).
+#[derive(Deserialize)]
+struct OutputConfigBody {
+    #[serde(default)]
+    auto_reconnect: Option<bool>,
+}
+
+/// `POST /api/outputs/select` `{ "id": "<id>" }` connects, `{ "id": null }`
+/// goes back to preview only. Whatever the choice, the gate is disarmed
+/// first (« Changement de sortie ») and arming stays refused until the new
+/// output is connected; the open itself runs on the output manager's
+/// thread, never here. The choice is remembered in `outputs.json`.
+fn select_output(req: &serde_json::Value, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let id = match req.get("id") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) if !id.is_empty() => Some(id.clone()),
+        _ => return text(400, "expected \"id\": a device id or null"),
+    };
+    let source = ArmSource::parse(req.get("source").and_then(|v| v.as_str()).unwrap_or("ui"));
+    let mut s = shared.lock().unwrap();
+    let mgr = Arc::clone(&s.output_mgr);
+    if let Some(id) = &id {
+        if !mgr.knows(id) {
+            return text(400, &format!("Sortie inconnue : « {id} » (lancez une recherche)"));
+        }
+    }
+    s.gate.disarm(DisarmReason::OutputChanged, source);
+    s.gate.set_output_ready(false);
+    s.gate.log().record("output_select", Some(source.id()), json!({ "id": id }));
+    mgr.select(id, source);
+    if let Err(e) = s.outputs.set_connection(mgr.prefs()) {
+        log::warn!("{e:#}");
+    }
+    json_response(mgr.view(Instant::now()))
+}
+
 /// `GET /api/outputs/limits`: every output's caps and projector sheet.
 fn outputs_view(s: &Shared) -> serde_json::Value {
     json!({
@@ -1410,6 +1499,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "keep_awake": s.keep_awake,
         "output": s.output_name,
         "output_kind": s.output_kind,
+        "output_state": s.output_mgr.state(),
         "pps": s.pps,
         "shapes": SHAPE_NAMES,
         "generators": GENERATOR_NAMES,
@@ -1449,6 +1539,7 @@ fn diagnostic_report(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
                 "kind": s.output_kind,
                 "error": s.output_error,
                 "pps": s.pps,
+                "link": s.output_mgr.view(Instant::now()),
                 "armed": s.gate.is_armed(),
                 "engine_ok": s.health.engine_ok(),
             },
@@ -1493,6 +1584,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "output": s.output_name,
         "output_kind": s.output_kind,
         "output_error": s.output_error,
+        "output_state": s.output_mgr.state(),
         "pps": s.pps,
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "cue_page": s.cue_page,
@@ -2442,6 +2534,107 @@ mod tests {
         assert_eq!(arm_status(&t)["armed"], false);
         let s = t.shared.lock().unwrap();
         assert_eq!((s.output_name.as_deref(), s.output_kind), (None, None), "still preview only");
+    }
+
+    /// A test server whose output manager knows one fake device, scanned.
+    /// No manager thread and no engine: a selection stays « connecting ».
+    fn with_fake_outputs(t: &TestServer) -> Arc<crate::output_manager::OutputManager> {
+        use crate::output_manager::{FakeBackend, OutputManager};
+        let dev = DeviceInfo { kind: "etherdream".into(), id: "etherdream:a".into(), name: "Ether Dream a".into() };
+        let backend = FakeBackend::new(vec![dev.clone()], None, None, std::env::temp_dir());
+        let list = Arc::new(DeviceList::fixed(vec![dev]));
+        let mgr = Arc::new(OutputManager::new(Arc::new(backend), Arc::clone(&list), &Default::default(), 30_000));
+        let mut s = t.shared.lock().unwrap();
+        s.devices = list;
+        s.output_mgr = Arc::clone(&mgr);
+        mgr
+    }
+
+    fn outputs(t: &TestServer) -> serde_json::Value {
+        serde_json::from_str(&t.request("GET", "/api/outputs", "").1).unwrap()
+    }
+
+    /// T-401: listing, scanning, choosing and disconnecting an output over
+    /// the API; every choice disarms with « Changement de sortie ».
+    #[test]
+    fn output_routes_list_select_and_disarm() {
+        let t = TestServer::start(false);
+        let mgr = with_fake_outputs(&t);
+        let v = outputs(&t);
+        assert_eq!((v["devices"].as_array().map(Vec::len), v["state"].as_str(), v["selected"].clone()), (Some(0), Some("available"), json!(null)), "{v}");
+        assert_eq!(v["auto_reconnect"], true);
+        assert_eq!(t.request("POST", "/api/outputs/scan", "").0, 200);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while outputs(&t)["scanned"] != true {
+            assert!(Instant::now() < deadline, "scan never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(outputs(&t)["devices"][0], json!({ "id": "etherdream:a", "name": "Ether Dream a", "kind": "etherdream", "state": "available", "error": null }));
+
+        assert_eq!(t.request("POST", "/api/outputs/select", r#"{"id":"helios:left"}"#).0, 400, "unknown id");
+        assert_eq!(t.request("POST", "/api/outputs/select", "{}").0, 400, "the id is required");
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (code, body) = t.request("POST", "/api/outputs/select", r#"{"id":"etherdream:a"}"#);
+        assert_eq!(code, 200, "{body}");
+        let st = arm_status(&t);
+        assert_eq!((st["armed"].as_bool(), st["last_disarm"]["reason"].as_str()), (Some(false), Some("output_changed")));
+        assert_eq!(st["last_disarm"]["reason_fr"], "Changement de sortie");
+        assert_eq!(st["last_disarm"]["source"], "ui");
+        let v = outputs(&t);
+        assert_eq!((v["selected"].as_str(), v["state"].as_str()), (Some("etherdream:a"), Some("connecting")));
+        assert_eq!(v["devices"][0]["state"], "connecting");
+        // Until the engine installs it, arming waits.
+        let (code, body) = t.request("POST", "/api/arm", r#"{"on":true}"#);
+        assert_eq!(code, 409);
+        assert!(body.contains("Aucune sortie connectée"), "{body}");
+        assert_eq!(mgr.prefs().selected.as_deref(), Some("etherdream:a"), "remembered");
+
+        assert_eq!(t.request("POST", "/api/outputs/select", r#"{"id":null}"#).0, 200);
+        let v = outputs(&t);
+        assert_eq!((v["selected"].clone(), v["state"].as_str()), (json!(null), Some("available")));
+        assert_eq!(mgr.prefs().selected, None);
+
+        assert_eq!(t.request("POST", "/api/outputs/config", r#"{"auto_reconnect":false}"#).0, 200);
+        assert_eq!(outputs(&t)["auto_reconnect"], false);
+        assert!(!mgr.prefs().auto_reconnect);
+        // The frame says where the output is.
+        let f: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
+        assert_eq!(f["output_state"], "available");
+    }
+
+    /// T-401: with the `output` interlock open (nothing connected), arming
+    /// is refused with « Aucune sortie connectée ».
+    #[test]
+    fn arming_without_an_output_is_refused() {
+        let t = TestServer::start(false);
+        t.shared.lock().unwrap().gate.register(crate::interlock::OUTPUT, crate::interlock::OUTPUT_LABEL, false);
+        let (code, body) = t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#);
+        assert_eq!(code, 409);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["blocking"], json!(["Aucune sortie connectée"]));
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    /// The unplug hook exists only with `--test-hooks` and a fake backend.
+    #[test]
+    fn the_output_test_hook_needs_test_hooks() {
+        let t = TestServer::start(false);
+        with_fake_outputs(&t);
+        assert_eq!(t.request("POST", "/api/test/output", r#"{"action":"drop"}"#).0, 404);
+        t.shared.lock().unwrap().test_hooks = true;
+        assert_eq!(t.request("POST", "/api/test/output", r#"{"action":"drop"}"#).0, 404, "no fake switch");
+        let dropped = Arc::new(AtomicBool::new(false));
+        {
+            let mut s = t.shared.lock().unwrap();
+            let backend = crate::output_manager::FakeBackend::new(Vec::new(), None, None, std::env::temp_dir());
+            let mgr = crate::output_manager::OutputManager::new(Arc::new(backend), Arc::new(DeviceList::fixed(vec![])), &Default::default(), 30_000);
+            s.output_mgr = Arc::new(mgr.with_test_drop(Arc::clone(&dropped)));
+        }
+        assert_eq!(t.request("POST", "/api/test/output", r#"{"action":"nope"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/test/output", r#"{"action":"drop"}"#).0, 200);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(t.request("POST", "/api/test/output", r#"{"action":"restore"}"#).0, 200);
+        assert!(!dropped.load(Ordering::SeqCst));
     }
 
     #[test]
