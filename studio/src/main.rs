@@ -42,6 +42,8 @@ mod presence;
 mod presets;
 mod project;
 mod safety;
+#[cfg(test)]
+mod safety_invariants;
 mod safety_log;
 mod scenes;
 mod sheets;
@@ -774,28 +776,65 @@ fn run_engine(
     live_path: PathBuf,
     layers_path: PathBuf,
 ) {
-    // One animator per playing cue instance (0 = the manual look), so
-    // every cue keeps its own motion and a restart starts it over.
-    let mut animators: HashMap<u64, Animator> = HashMap::new();
-    let mut live_state = live::LiveState::default();
-    // Rotation state of timeline events with their own modifiers.
-    let mut event_live: HashMap<u64, live::LiveState> = HashMap::new();
-    let mut frames_since_save = 0u32;
-    let mut last = Instant::now();
-    // If this thread panics, unwinding drops the stage: dark frame + disarm.
-    let mut stage = OutputStage::new(output);
-    let mut limiter = safety::StrobeLimiter::default();
-    // Strobe limiter engagements go to the safety log, at most one line a
-    // second (T-259); nothing is allocated on the frames that write none.
-    let safety_log = shared.lock().unwrap().gate.log().clone();
-    let mut strobe_log = safety_log::LimiterTracker::new("strobe");
-    let mut audio_guard = audio::safety::AudioGuard::default();
-    let mut dwell_guard = dwell::DwellState::default();
-
+    let mut engine = Engine::new(&shared, output, live_path, layers_path);
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
-        let dt = (now - last).as_secs_f32().min(0.1);
-        last = now;
+        engine.tick(&shared, now);
+        std::thread::sleep(FRAME_INTERVAL.saturating_sub(now.elapsed()));
+    }
+    engine.shutdown(&shared);
+}
+
+/// The engine thread's own state between frames. One `tick` is one frame;
+/// `run_engine` calls it at 60 fps, and the safety invariant tests
+/// (safety_invariants.rs) call it on a simulated clock, so they drive the
+/// very same pipeline.
+struct Engine {
+    /// One animator per playing cue instance (0 = the manual look), so
+    /// every cue keeps its own motion and a restart starts it over.
+    animators: HashMap<u64, Animator>,
+    live_state: live::LiveState,
+    /// Rotation state of timeline events with their own modifiers.
+    event_live: HashMap<u64, live::LiveState>,
+    frames_since_save: u32,
+    last: Instant,
+    /// If this thread panics, unwinding drops the stage: dark frame + disarm.
+    stage: OutputStage,
+    limiter: safety::StrobeLimiter,
+    /// Strobe limiter engagements go to the safety log, at most one line a
+    /// second (T-259); nothing is allocated on the frames that write none.
+    safety_log: safety_log::SafetyLog,
+    strobe_log: safety_log::LimiterTracker,
+    audio_guard: audio::safety::AudioGuard,
+    dwell_guard: dwell::DwellState,
+    live_path: PathBuf,
+    layers_path: PathBuf,
+}
+
+impl Engine {
+    fn new(shared: &Mutex<Shared>, output: Option<Box<dyn Output>>, live_path: PathBuf, layers_path: PathBuf) -> Self {
+        let safety_log = shared.lock().unwrap().gate.log().clone();
+        Self {
+            animators: HashMap::new(),
+            live_state: live::LiveState::default(),
+            event_live: HashMap::new(),
+            frames_since_save: 0,
+            last: Instant::now(),
+            stage: OutputStage::new(output),
+            limiter: safety::StrobeLimiter::default(),
+            safety_log,
+            strobe_log: safety_log::LimiterTracker::new("strobe"),
+            audio_guard: audio::safety::AudioGuard::default(),
+            dwell_guard: dwell::DwellState::default(),
+            live_path,
+            layers_path,
+        }
+    }
+
+    /// One frame at `now`: render, safety stage, gate, output.
+    fn tick(&mut self, shared: &Mutex<Shared>, now: Instant) {
+        let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
+        self.last = now;
 
         let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, pattern) = {
             let mut s = shared.lock().unwrap();
@@ -807,18 +846,18 @@ fn run_engine(
                 let stall = Duration::from_millis(std::mem::take(&mut s.test_stall_ms));
                 std::thread::sleep(stall);
             }
-            frames_since_save += 1;
-            if (s.live_dirty || s.mixer_dirty) && frames_since_save >= 60 {
+            self.frames_since_save += 1;
+            if (s.live_dirty || s.mixer_dirty) && self.frames_since_save >= 60 {
                 // At most once a second, so MIDI faders don't hammer the disk.
                 if s.live_dirty {
-                    save_json(&live_path, &s.live);
+                    save_json(&self.live_path, &s.live);
                 }
                 if s.mixer_dirty {
-                    save_json(&layers_path, &s.mixer);
+                    save_json(&self.layers_path, &s.mixer);
                 }
                 s.live_dirty = false;
                 s.mixer_dirty = false;
-                frames_since_save = 0;
+                self.frames_since_save = 0;
             }
             advance_playlist(&mut s);
             // MIDI faders/encoders: at most one write per control per frame.
@@ -829,8 +868,10 @@ fn run_engine(
             // Audio safety (T-245): freshness, silence, source changes and
             // the flash cap. It only shapes copies; arming is never touched.
             let (source_on, audio_safety) = s.audio_in.reaction_config();
-            let reaction = audio_guard.frame(&audio, active, source_on, &audio_safety, dt);
-            let t = s.now_s();
+            let reaction = self.audio_guard.frame(&audio, active, source_on, &audio_safety, dt);
+            // `Shared::now_s` taken at `now`, so a simulated clock (tests)
+            // drives everything.
+            let t = now.saturating_duration_since(s.epoch).as_secs_f64();
             // Tempo auto (T-234): the clock follows the detection's proposal
             // on its own terms. Only the one clock; arming untouched.
             if s.tempo.source == tempo::TempoSource::Audio {
@@ -838,7 +879,7 @@ fn run_engine(
                 s.tempo.apply_detection(&est, t);
             }
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
-            live_state.set_clock(t, clock.beat);
+            self.live_state.set_clock(t, clock.beat);
             // LFOs, then audio routes, move copies: the stored values stay
             // the operator's base. The Temps ↔ Audio crossfader shares them.
             // Silence with *Look calme*: that scene stands in for the manual
@@ -857,8 +898,8 @@ fn run_engine(
             // Silence with *Noir*: the master copy fades to black. Not the
             // transport blackout: nothing to release, arming untouched.
             live.brightness = live.brightness.clamp(0.0, 1.0) * reaction.gain;
-            audio_guard.set_flash_limited(s.routes.flash_limited());
-            s.audio_guard = audio_guard.status();
+            self.audio_guard.set_flash_limited(s.routes.flash_limited());
+            s.audio_guard = self.audio_guard.status();
             // The looks' own reaction sees the beat counter capped too.
             let audio = reaction.visual;
             let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
@@ -873,7 +914,7 @@ fn run_engine(
             (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits(), pattern)
         };
 
-        live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
+        self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
         let (frame, mix, evolving) = match pattern {
             // The pattern alone, densified and calibrated, without live
             // modifiers (exact geometry). The cue animators are left as
@@ -881,6 +922,7 @@ fn run_engine(
             Some((p, brightness)) => (testpattern::output_frame(p, brightness, &calibration), layers::MixReport::default(), Vec::new()),
             None => {
                 let anim_dt = dt * live.speed.clamp(0.0, 4.0);
+                let (animators, event_live) = (&mut self.animators, &mut self.event_live);
                 animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id));
                 event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
                 // Timeline events first (under the cues played by hand on the same
@@ -913,7 +955,7 @@ fn run_engine(
                     looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();
                 // Layers 1 → 4 with their dimmers, within the point budget.
                 let (look, mix) = layers::mix(rendered, &mixer);
-                let frame: Vec<Point> = live::apply(&look, &live, &live_state, &user_palettes)
+                let frame: Vec<Point> = live::apply(&look, &live, &self.live_state, &user_palettes)
                     .into_iter()
                     .map(|p| {
                         let (x, y) = calibration.apply(p.x, p.y);
@@ -926,11 +968,11 @@ fn run_engine(
         // Strobe limiter and beam horizon (T-101): on the finished,
         // calibrated frame, so no layer, live move, LFO, gate or flash can
         // get past it; the preview shows the limited frame too.
-        let frame = safety::apply(frame, t, &safety_cfg, &mut limiter);
+        let frame = safety::apply(frame, t, &safety_cfg, &mut self.limiter);
         // Static beam guard (T-256): on the frame that really goes out
         // (after zones and the limiter), so a figure shrunk to a point, a
         // frozen frame or a held beam is dimmed whatever made it.
-        let mut frame = dwell_guard.apply(frame, t, &safety_cfg.dwell, safety_cfg.horizon.y, armed);
+        let mut frame = self.dwell_guard.apply(frame, t, &safety_cfg.dwell, safety_cfg.horizon.y, armed);
         // Power caps of the output (T-254), after everything else in the
         // safety stage: they can only reduce, and a lowered cap applies
         // from this tick. The preview shows the capped frame too.
@@ -939,9 +981,9 @@ fn run_engine(
         // Last stage: the gate. `armed` was read under the lock at the top
         // of the frame; the e-stop latch and a watchdog trip (this frame
         // stalled) are re-read here, lock-free.
-        let emitted = stage.emit(&frame, armed && !health.is_tripped(), hold_ok, &estop);
-        let strobe = limiter.status();
-        strobe_log.update(strobe.active, now, &safety_log, || serde_json::json!({ "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
+        let emitted = self.stage.emit(&frame, armed && !health.is_tripped(), hold_ok, &estop);
+        let strobe = self.limiter.status();
+        self.strobe_log.update(strobe.active, now, &self.safety_log, || serde_json::json!({ "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
         let mut s = shared.lock().unwrap();
         if let Some(error) = emitted.arm_change {
             if let Some(e) = &error {
@@ -955,25 +997,24 @@ fn run_engine(
         s.frame = frame;
         s.mix = mix;
         s.strobe = strobe;
-        s.dwell = dwell_guard.status().clone();
+        s.dwell = self.dwell_guard.status().clone();
         s.evolving = evolving;
-        drop(s);
-
-        std::thread::sleep(FRAME_INTERVAL.saturating_sub(now.elapsed()));
     }
 
-    // Clean shutdown: disarm the gate (recorded), then the output goes dark
-    // and closes. A poisoned lock still holds the gate.
-    shared.lock().unwrap_or_else(|e| e.into_inner()).gate.disarm(interlock::DisarmReason::Shutdown, interlock::ArmSource::System);
-    stage.shutdown();
-    // The last second of live and layer moves joins the working copy (else
-    // the next start would see them only in the autosave, T-287).
-    let s = shared.lock().unwrap_or_else(|e| e.into_inner());
-    if s.live_dirty {
-        save_json(&live_path, &s.live);
-    }
-    if s.mixer_dirty {
-        save_json(&layers_path, &s.mixer);
+    /// Clean shutdown: disarm the gate (recorded), then the output goes
+    /// dark and closes. A poisoned lock still holds the gate.
+    fn shutdown(mut self, shared: &Mutex<Shared>) {
+        shared.lock().unwrap_or_else(|e| e.into_inner()).gate.disarm(interlock::DisarmReason::Shutdown, interlock::ArmSource::System);
+        self.stage.shutdown();
+        // The last second of live and layer moves joins the working copy (else
+        // the next start would see them only in the autosave, T-287).
+        let s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if s.live_dirty {
+            save_json(&self.live_path, &s.live);
+        }
+        if s.mixer_dirty {
+            save_json(&self.layers_path, &s.mixer);
+        }
     }
 }
 

@@ -2637,4 +2637,69 @@ mod tests {
         assert!(path.exists());
         crate::datafile::tests::check_kept(&dir, "calibration.json", true);
     }
+
+    /// T-264, invariant 6 for the HTTP API: random sequences of requests
+    /// to every route that changes state in memory (controls, cues, looks,
+    /// live, audio, heartbeats, presence, e-stop and its reset, layers,
+    /// caps, safety, playlist, scenes, presets, test patterns, timeline,
+    /// warnings, arm requests claiming a controller or the system) never
+    /// arm the laser. Routes that write files or decode media are left out
+    /// (their tests are elsewhere); the only arming route, `POST /api/arm`
+    /// from the UI, keyboard or API, is sent only with sources that must
+    /// be refused.
+    #[test]
+    fn no_api_request_arms_except_an_explicit_arm_request() {
+        use crate::safety_invariants::{mutated, seeds, Rng};
+        let t = TestServer::start(false);
+        let (controls, presets): (Vec<String>, Vec<(String, Settings)>) = {
+            let s = t.shared.lock().unwrap();
+            (s.controls.list().iter().map(|d| d.id.clone()).collect(), s.presets.iter().map(|p| (p.id.clone(), p.settings.clone())).collect())
+        };
+        // Fewer requests than the engine properties: each is a real
+        // localhost round trip.
+        for seed in seeds(6, 25) {
+            let mut rng = Rng::new(seed);
+            for i in 0..60 {
+                let (preset, look) = rng.pick(&presets).clone();
+                let (path, body): (&str, String) = match rng.below(22) {
+                    0 => ("/api/arm", json!({ "on": true, "source": rng.pick(&["midi", "system"]) }).to_string()),
+                    1 => ("/api/arm", json!({ "toggle": true, "source": rng.pick(&["midi", "system"]) }).to_string()),
+                    2 => ("/api/arm", json!({ "on": false }).to_string()),
+                    3 | 4 => {
+                        let value = if rng.chance(0.3) { json!(rng.chance(0.5)) } else { json!(rng.range(-3.0, 3.0)) };
+                        ("/api/control", json!({ "id": rng.pick(&controls), "value": value }).to_string())
+                    }
+                    5 => ("/api/control", json!({ "id": "transport.arm", "norm": 1.0 }).to_string()),
+                    6 => ("/api/cue", json!({ "id": preset, "down": rng.chance(0.6), "mode": rng.pick(&["toggle", "flash", "solo", "restart"]) }).to_string()),
+                    7 => ("/api/settings", serde_json::to_string(&mutated(&look, &mut rng, 0.15)).unwrap()),
+                    8 => ("/api/live", serde_json::to_string(&mutated(&crate::live::LiveModifiers::default(), &mut rng, 0.2)).unwrap()),
+                    9 => ("/api/audio", json!({ "level": rng.range(0.0, 6.0), "bass": rng.f(), "beat": i }).to_string()),
+                    10 => ("/api/heartbeat", json!({ "client_id": "fuzz", "hold": rng.chance(0.5), "gone": rng.chance(0.1) }).to_string()),
+                    11 => ("/api/presence", json!({ "hold_to_run": rng.chance(0.5), "ui_timeout_ms": rng.below(20_000) }).to_string()),
+                    12 if rng.chance(0.3) => ("/api/estop", String::new()),
+                    13 => ("/api/estop/reset", String::new()),
+                    14 => ("/api/layers", serde_json::to_string(&mutated(&crate::layers::Mixer::default(), &mut rng, 0.2)).unwrap()),
+                    15 => ("/api/outputs/limits", json!({ "id": "main", "limits": { "max_power": rng.f() }, "confirm_raise": rng.chance(0.5) }).to_string()),
+                    16 => ("/api/safety", json!({ "strobe_max_hz": rng.range(0.0, 10.0), "confirm_loosen": rng.chance(0.5) }).to_string()),
+                    17 => (*rng.pick(&["/api/playlist/start", "/api/playlist/stop", "/api/timeline/play", "/api/timeline/pause", "/api/timeline/stop", "/api/audio/tempo/new_track"]), "{}".into()),
+                    18 => ("/api/presets/play", json!({ "id": preset }).to_string()),
+                    19 => ("/api/scenes/play", json!({ "name": "inconnue" }).to_string()),
+                    20 => ("/api/testpattern", json!({ "pattern": rng.pick(&[json!("grid"), json!("color_bars"), json!(null)]), "brightness": rng.f() }).to_string()),
+                    _ => ("/api/data/warnings/ack", json!({ "all": true }).to_string()),
+                };
+                let (status, reply) = t.request("POST", path, &body);
+                assert!(!t.shared.lock().unwrap().gate.is_armed(), "seed {seed}, request {i}: POST {path} {body} armed the laser ({status} {reply})");
+                if path == "/api/arm" && body.contains("\"on\":true") {
+                    assert_eq!(status, 409, "seed {seed}: an arm request from a controller or the system is refused");
+                }
+                if path == "/api/control" && body.contains("transport.arm") {
+                    assert_eq!(status, 403, "seed {seed}: the control endpoint never arms");
+                }
+            }
+        }
+        // The explicit path still works: the property isn't vacuous.
+        t.request("POST", "/api/estop/reset", "");
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+    }
 }
