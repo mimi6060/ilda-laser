@@ -132,6 +132,9 @@ pub const UI_ALIVE: &str = "ui_alive";
 /// Id of the interlock held open while a damaged safety file's warning is
 /// not acknowledged (T-402, datafile.rs).
 pub const DATA_ACK: &str = "data_ack";
+/// Id of the interlock held open until the pre-show checklist is completed,
+/// only when a real output is configured (T-258, checklist.rs).
+pub const CHECKLIST: &str = "checklist";
 
 pub struct ArmGate {
     armed: bool,

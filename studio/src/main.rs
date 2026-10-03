@@ -13,6 +13,7 @@ mod audio;
 mod autosave;
 mod beat;
 mod chases;
+mod checklist;
 mod controls;
 mod cues;
 mod devices;
@@ -119,6 +120,10 @@ struct Cli {
     /// is always refused (e2e tests of the refusal message).
     #[arg(long, hide = true)]
     test_interlock: bool,
+    /// Testing only (T-258): enforce the pre-show checklist as if a real
+    /// output were configured (never needs one: preview or --test-output).
+    #[arg(long, hide = true)]
+    test_checklist: bool,
     /// Testing only (e2e, T-209): plug in a simulated APC40 mkII
     /// (« Test APC40 mkII ») and enable `POST /api/midi/inject` and
     /// `GET /api/midi/sent`. Needs --no-midi (no real MIDI port is ever
@@ -262,6 +267,9 @@ pub struct Shared {
     /// Damaged data files moved to `quarantine/` this run (datafile.rs,
     /// T-402), shown until acknowledged. In memory only.
     pub data_warnings: Vec<datafile::DataWarning>,
+    /// The pre-show checklist (checklist.rs, T-258): the list is saved,
+    /// what was ticked lives for this run only.
+    pub checklist: checklist::Checklist,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
     /// A pending simulated stall (ms): the engine sleeps this long while
@@ -359,6 +367,14 @@ impl Shared {
         }
         self.sync_data_warnings();
         n
+    }
+
+    /// Brings the `checklist` interlock in line with the checklist. Only
+    /// registered when a real output is configured; never arms.
+    pub fn sync_checklist(&mut self) {
+        if self.checklist.enforced() {
+            self.gate.register(interlock::CHECKLIST, checklist::LABEL_FR, self.checklist.satisfied());
+        }
     }
 
     /// Trips the emergency stop and records it in the gate.
@@ -605,6 +621,7 @@ fn startup_line(cli: &Cli, output: Option<&str>) -> String {
         (cli.midi_test, "--midi-test"),
         (cli.test_hooks, "--test-hooks"),
         (cli.test_interlock, "--test-interlock"),
+        (cli.test_checklist, "--test-checklist"),
         (cli.test_output.is_some(), "--test-output"),
         (cli.audio_device.is_some(), "--audio-device"),
     ] {
@@ -718,6 +735,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         test_pattern: Default::default(),
         keep_awake: keep_awake::KeepAwakeState::load(&cli.data_dir),
         data_warnings: Vec::new(),
+        checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
         devices: Arc::new(match &cli.test_devices {
@@ -736,7 +754,16 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     // Damaged files found while loading: the banner, and `data_ack` closed
     // for a safety file. The gate is disarmed whatever happens here.
     state.sync_data_warnings();
+    // A real output: arming waits for the pre-show checklist (T-258).
+    state.sync_checklist();
     state
+}
+
+/// The pre-show checklist gates arming when a real output is configured
+/// (a DAC, or PONK towards MadMapper and the ShowNET), or in tests with
+/// `--test-checklist`. Pure preview and the fake `--test-output` don't.
+fn checklist_enforced(cli: &Cli) -> bool {
+    cli.device.is_some() || cli.ponk.is_some() || cli.test_checklist
 }
 
 fn run_engine(
@@ -999,6 +1026,45 @@ fn advance_playlist(s: &mut Shared) {
 mod tests {
     use super::*;
     use crate::scenes::Scene;
+
+    /// T-258: the checklist gates arming with a real output (DAC, PONK) or
+    /// its simulation, never in pure preview nor with the fake output; the
+    /// edited list is kept across restarts, the ticks are not.
+    #[test]
+    fn the_checklist_is_enforced_only_with_a_real_output() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["laser-studio"][..], args].concat()).unwrap();
+        assert!(!checklist_enforced(&parse(&[])));
+        assert!(!checklist_enforced(&parse(&["--test-output", "/tmp/x"])));
+        assert!(checklist_enforced(&parse(&["--device", "auto"])));
+        assert!(checklist_enforced(&parse(&["--ponk", "127.0.0.1:9"])));
+        assert!(checklist_enforced(&parse(&["--test-checklist"])));
+        assert!(checklist_enforced(&parse(&["--test-checklist", "--test-output", "/tmp/x"])));
+
+        let dir = std::env::temp_dir().join(format!("laser-studio-checklist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data_dir = dir.to_str().unwrap();
+        let preview = startup_state(&parse(&["--no-midi", "--data-dir", data_dir]), None);
+        assert!(preview.gate.interlock_ok(interlock::CHECKLIST));
+        drop(preview);
+        let mut s = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]), None);
+        assert!(!s.gate.interlock_ok(interlock::CHECKLIST));
+        let mut cfg = s.checklist.config().clone();
+        cfg.items.truncate(1);
+        s.checklist.set_config(cfg, false).unwrap();
+        s.checklist.set_operator("Op").unwrap();
+        let id = s.checklist.config().items[0].id.clone();
+        s.checklist.check(&id, true, None).unwrap();
+        s.checklist.complete().unwrap();
+        s.sync_checklist();
+        assert!(s.gate.interlock_ok(interlock::CHECKLIST));
+        assert!(!s.gate.is_armed(), "completing never arms");
+        drop(s);
+        let again = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]), None);
+        assert_eq!(again.checklist.config().items.len(), 1, "the edited list is kept");
+        assert!(!again.gate.interlock_ok(interlock::CHECKLIST), "the ticks are not");
+        drop(again);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn midi_test_needs_no_midi_and_refuses_a_device() {

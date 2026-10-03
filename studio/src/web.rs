@@ -530,6 +530,8 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/checklist") => json_response(shared.lock().unwrap().checklist.view()),
+        (Method::Post, p) if p.starts_with("/api/checklist/") => checklist_route(request, shared, &p["/api/checklist/".len()..]),
         (Method::Get, "/api/safety/log") | (Method::Get, "/api/safety/log.csv") => safety_log_view(request.url(), shared, path.ends_with(".csv")),
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
@@ -1316,6 +1318,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "timeline_audio": song_view(s),
         "audio": s.audio_in.view(s.audio, s.audio_at, Instant::now()),
         "data_warnings": data_warnings_view(s),
+        "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
         "applog": s.applog.status(),
     })
 }
@@ -1411,6 +1414,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "dwell": s.dwell,
         "evolving": evolving_status(s),
         "test_pattern": s.test_pattern,
+        "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
     }))
 }
 
@@ -1592,6 +1596,79 @@ fn safety_log_view(url: &str, shared: &Arc<Mutex<Shared>>, csv: bool) -> HttpRes
         "events": crate::safety_log::view(&events),
         "status": log.status(),
     }))
+}
+
+/// The pre-show checklist (T-258). `operator {name}`, `check {id, on,
+/// value?}`, `complete`, `restart`, `config {items, outdoor,
+/// audience_scan}` or `config {defaults: true}`. Each answers the
+/// checklist's view (400 with the French reason when refused; `complete`
+/// answers 409 `{error, missing}`). Completing only lets the operator
+/// arm: nothing here ever arms. Restarting or editing the list closes
+/// the `checklist` interlock again, which disarms if armed.
+fn checklist_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &str) -> HttpResponse {
+    let mut raw = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut raw) {
+        return text(400, &format!("unreadable body: {e}"));
+    }
+    // `complete` and `restart` need no body.
+    let v: serde_json::Value = match raw.trim() {
+        "" => json!({}),
+        raw => match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return text(400, &format!("invalid JSON: {e}")),
+        },
+    };
+    let mut s = shared.lock().unwrap();
+    let s = &mut *s;
+    let result: anyhow::Result<()> = match action {
+        "operator" => s.checklist.set_operator(v.get("name").and_then(|n| n.as_str()).unwrap_or("")),
+        "check" => match (v.get("id").and_then(|i| i.as_str()), v.get("on").and_then(|o| o.as_bool())) {
+            (Some(id), Some(on)) => s.checklist.check(id, on, v.get("value").and_then(|x| x.as_str())),
+            _ => return text(400, "expected \"id\" and \"on\""),
+        },
+        "complete" => match s.checklist.complete() {
+            Ok(detail) => {
+                s.gate.log().record("checklist", Some("ui"), detail);
+                Ok(())
+            }
+            Err(missing) => {
+                return with_status(json_response(json!({ "error": "Liste de contrôle incomplète", "missing": missing, "checklist": s.checklist.view() })), 409);
+            }
+        },
+        "restart" => {
+            if s.checklist.restart() {
+                s.gate.log().record("checklist_reset", Some("ui"), json!({}));
+            }
+            Ok(())
+        }
+        "config" => {
+            let config = if v.get("defaults").and_then(|d| d.as_bool()).unwrap_or(false) {
+                Ok(crate::checklist::ChecklistConfig::default())
+            } else {
+                serde_json::from_value::<crate::checklist::ChecklistConfig>(v)
+            };
+            match config {
+                Err(e) => return text(400, &format!("invalid JSON: {e}")),
+                Ok(config) => {
+                    s.gate.sync_estop(&s.estop);
+                    let before = s.checklist.config().clone();
+                    let r = s.checklist.set_config(config, s.gate.is_armed());
+                    if r.is_ok() {
+                        if let Some(change) = crate::safety_log::settings_change(&before, s.checklist.config()) {
+                            s.gate.log().record("checklist_edit", Some("ui"), change);
+                        }
+                    }
+                    r
+                }
+            }
+        }
+        _ => return text(404, "not found"),
+    };
+    s.sync_checklist();
+    match result {
+        Ok(()) => json_response(s.checklist.view()),
+        Err(e) => text(400, &e.to_string()),
+    }
 }
 
 fn ok() -> HttpResponse {
@@ -1791,6 +1868,45 @@ mod tests {
 
     fn arm_status(t: &TestServer) -> serde_json::Value {
         serde_json::from_str(&t.request("GET", "/api/arm", "").1).unwrap()
+    }
+
+    /// T-258: with a (simulated) real output, arming waits for the
+    /// checklist; completing it never arms; restarting it disarms.
+    #[test]
+    fn the_checklist_gates_arming_only_when_enforced() {
+        let t = TestServer::start(false);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200, "preview: no checklist interlock");
+        t.request("POST", "/api/arm", r#"{"on":false}"#);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.checklist = crate::checklist::Checklist::in_memory(true);
+            s.sync_checklist();
+        }
+        let (status, body) = t.request("POST", "/api/arm", r#"{"on":true}"#);
+        assert_eq!(status, 409);
+        assert!(body.contains(crate::checklist::LABEL_FR), "{body}");
+        let (status, body) = t.request("POST", "/api/checklist/complete", "");
+        assert_eq!(status, 409);
+        assert!(body.contains("Nom de l'opérateur"), "{body}");
+        assert_eq!(t.request("POST", "/api/checklist/operator", r#"{"name":"Michel"}"#).0, 200);
+        let view: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/checklist", "").1).unwrap();
+        for item in view["items"].as_array().unwrap().iter().filter(|i| i["visible"] == true) {
+            let body = json!({ "id": item["id"], "on": true }).to_string();
+            assert_eq!(t.request("POST", "/api/checklist/check", &body).0, 200);
+        }
+        assert_eq!(t.request("POST", "/api/checklist/check", r#"{"id":"nope","on":true}"#).0, 400);
+        let (status, body) = t.request("POST", "/api/checklist/complete", "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(arm_status(&t)["armed"], false, "completing never arms");
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        // Editing the list while armed is refused; restarting it disarms.
+        let cfg = json!(t.shared.lock().unwrap().checklist.config()).to_string();
+        assert_eq!(t.request("POST", "/api/checklist/config", &cfg).0, 400);
+        assert_eq!(t.request("POST", "/api/checklist/restart", "").0, 200);
+        let st = arm_status(&t);
+        assert_eq!(st["armed"], false);
+        assert_eq!(st["last_disarm"]["reason_fr"], format!("Verrou : {}", crate::checklist::LABEL_FR));
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 409);
     }
 
     #[test]
