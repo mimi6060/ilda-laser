@@ -1107,6 +1107,50 @@ mod tests {
         assert!(checked > 1000, "{checked} frames");
     }
 
+    /// T-351: zones whose edges sit on the values the content is drawn on
+    /// (0, ±0.25, ±0.5, the diagonal...), so that many lit samples - and
+    /// whole lines - fall exactly on an edge. Nothing lit may end up inside
+    /// a Blank zone or on its edge, corners included.
+    #[test]
+    fn no_catalogue_cue_lights_a_grid_aligned_blank_zone() {
+        use crate::engine::AudioFeatures;
+        let tri = |id: u32, pts: [[f32; 2]; 3]| Zone { id, points: pts.to_vec(), ..Default::default() };
+        let sets = [
+            vec![zone(1, 0.0, 0.0, 0.5, 0.5), zone(2, -0.3, -0.9, 0.3, -0.3), zone(3, -1.0, 0.0, 1.0, 0.03)],
+            vec![zone(1, -0.5, -0.25, 0.0, 0.25), zone(2, 0.25, -0.75, 0.75, 0.0), tri(3, [[0.0, 0.0], [0.6, 0.6], [0.6, 0.0]])],
+            vec![zone(1, -0.25, -0.25, 0.25, 0.25), zone(2, -0.75, 0.5, -0.25, 1.0), tri(3, [[0.0, 0.0], [-0.6, -0.6], [0.0, -0.6]])],
+        ];
+        // How many lit input samples sit exactly on an edge: the test must
+        // really exercise the case.
+        let on_edge = |q: &Point, z: &Zone| {
+            (0..z.points.len()).any(|i| {
+                let (p0, p1) = (z.points[i], z.points[(i + 1) % z.points.len()]);
+                let (ex, ey) = (p1[0] - p0[0], p1[1] - p0[1]);
+                let (wx, wy) = (q.x - p0[0], q.y - p0[1]);
+                let t = (wx * ex + wy * ey) / (ex * ex + ey * ey);
+                wx * ey == wy * ex && (0.0..=1.0).contains(&t)
+            })
+        };
+        let (mut checked, mut on_edges) = (0, 0);
+        for (n, p) in crate::presets::catalog().iter().enumerate() {
+            let zones = &sets[n % sets.len()];
+            let cfg = SafetySettings { zones: zones.clone(), ..Default::default() };
+            let mut a = Animator::default();
+            let mut lim = StrobeLimiter::default();
+            for i in 0..8u64 {
+                let audio = AudioFeatures { level: 0.5, bass: 0.5, beat: i / 4, ..Default::default() };
+                let clock = BeatClock { beat: i as f64 * 0.37, ..BeatClock::default() };
+                let frame = a.render(&p.settings, audio, 1.0 / 20.0, &clock);
+                on_edges += frame.iter().filter(|q| q.is_lit() && zones.iter().any(|z| on_edge(q, z))).count();
+                let out = apply(frame, i as f64 / 60.0, &cfg, &mut lim);
+                assert_eq!(crate::zones::blank_violations(&out, zones), 0, "cue {} ({}) frame {i}", p.name, p.id);
+                checked += 1;
+            }
+        }
+        assert!(checked > 500, "{checked} frames");
+        assert!(on_edges > 1000, "only {on_edges} lit samples on an edge");
+    }
+
     #[test]
     fn a_sheet_rotated_below_the_horizon_is_cut_when_lines_are_covered() {
         // A horizontal line through the whole field at y = -0.5 (as a sheet
