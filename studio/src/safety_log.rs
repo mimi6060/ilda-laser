@@ -506,6 +506,17 @@ pub fn describe(e: &SafetyEvent) -> String {
         }
         "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
         "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),
+        "output_select" => match d.get("id").and_then(Value::as_str) {
+            Some(id) => format!("Sortie choisie : {id} (laser désarmé)"),
+            None => "Sortie déconnectée : aperçu seulement (laser désarmé)".into(),
+        },
+        "output" => match str_of(d, "action") {
+            "connect" => format!("Sortie connectée : {}", str_of(d, "name")),
+            "disconnect" => "Sortie fermée".into(),
+            "reconnect" => format!("Sortie retrouvée (reste désarmée) : {}", str_of(d, "name")),
+            "lost" => format!("Sortie perdue : {}", str_of(d, "error")),
+            other => format!("Sortie : {other}"),
+        },
         "power_caps" => format!("Plafonds de puissance modifiés ({}){}", str_of(d, "output"), changed()),
         "input_lost" => format!("Signal {} perdu — {}", str_of(d, "protocol_fr"), str_of(d, "policy_fr")),
         "input_back" => format!("Signal {} retrouvé", str_of(d, "protocol_fr")),

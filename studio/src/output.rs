@@ -38,6 +38,13 @@ pub trait Output: Send {
     fn max_points(&self) -> Option<usize> {
         None
     }
+    /// `Some(why)` once the device is gone (unplugged, session ended): the
+    /// engine then disarms with « Sortie perdue », closes it and lets the
+    /// output manager try to reconnect (T-401). Checked every frame, so it
+    /// must be cheap and never block.
+    fn fault(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The last pipeline stage: what actually leaves for the laser. The arm
@@ -95,17 +102,45 @@ impl OutputStage {
     /// Clean shutdown (Ctrl+C, SIGTERM): disarm, three dark frames, then
     /// close the output (drop it).
     pub fn shutdown(&mut self) {
-        if let Some(mut out) = self.output.take() {
+        drop(self.replace(None));
+    }
+
+    /// Swaps the output (T-401): the old one, if any, is disarmed and gets
+    /// three dark frames before the new one is installed, then is handed
+    /// back to be closed (dropping a DAC session waits for its thread, so
+    /// the engine does that aside). The new one starts disarmed: only the
+    /// gate arms it, on a later frame.
+    #[must_use = "the old output closes when dropped"]
+    pub fn replace(&mut self, next: Option<Box<dyn Output>>) -> Option<Box<dyn Output>> {
+        let old = self.output.take().map(|mut out| {
             if let Err(e) = out.set_armed(false) {
-                log::warn!("disarm at shutdown failed: {e}");
+                log::warn!("disarm before closing the output failed: {e}");
             }
             for _ in 0..3 {
                 if let Err(e) = out.blank_now() {
-                    log::warn!("blank frame at shutdown failed: {e}");
+                    log::warn!("dark frame before closing the output failed: {e}");
                 }
             }
-        }
+            out
+        });
+        self.output = next;
         self.output_armed = false;
+        old
+    }
+
+    /// The installed output's fault, if it has one (see `Output::fault`).
+    pub fn fault(&self) -> Option<String> {
+        self.output.as_ref()?.fault()
+    }
+
+    /// The installed output's kill switch, for `EStop` (None in preview).
+    pub fn kill_switch(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
+        self.output.as_ref()?.kill_switch()
+    }
+
+    /// Name and kind of the installed output.
+    pub fn describe(&self) -> Option<(String, &'static str)> {
+        self.output.as_ref().map(|o| (o.name().to_string(), o.kind()))
     }
 }
 
@@ -120,6 +155,9 @@ impl Drop for OutputStage {
     }
 }
 
+/// What the fake outputs are called in the UI (never a laser).
+pub const TEST_OUTPUT_NAME: &str = "Sortie de test";
+
 /// Testing only (`--test-output <file>`): no laser at all. Appends what the
 /// studio asks of an output to a text file, one call per line (`arm`,
 /// `disarm`, `blank`, `close`, and `lit`/`dark` when frames change between
@@ -131,9 +169,11 @@ pub struct FileLogOutput {
 }
 
 impl FileLogOutput {
-    pub fn create(path: &std::path::Path) -> Result<Self> {
-        let file = std::fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-        Ok(Self { name: format!("fichier de test ({})", path.display()), file, lit: None })
+    /// Opens the log, keeping what it holds (a reconnection, T-401, goes on
+    /// in the same file).
+    pub fn append(path: &std::path::Path) -> Result<Self> {
+        let file = std::fs::OpenOptions::new().append(true).create(true).open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        Ok(Self { name: TEST_OUTPUT_NAME.into(), file, lit: None })
     }
 
     fn log(&mut self, line: &str) {
@@ -332,6 +372,13 @@ impl Output for DacOutput {
             }
         }))
     }
+
+    /// The session runs without `laser-dac`'s own reconnection, so its
+    /// thread ends when the DAC goes away: the studio's output manager
+    /// reconnects instead, always disarmed (T-401).
+    fn fault(&self) -> Option<String> {
+        (self.session.is_finished() || !self.session.metrics().connected()).then(|| format!("{} ne répond plus", self.name))
+    }
 }
 
 fn to_laser_point(p: &Point) -> LaserPoint {
@@ -485,8 +532,9 @@ mod tests {
     #[test]
     fn file_log_output_records_the_calls() {
         let path = std::env::temp_dir().join(format!("laser-studio-filelog-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
         {
-            let mut stage = OutputStage::new(Some(Box::new(FileLogOutput::create(&path).unwrap())));
+            let mut stage = OutputStage::new(Some(Box::new(FileLogOutput::append(&path).unwrap())));
             stage.emit(&lit(), false, true, &EStop::default());
             stage.emit(&lit(), true, true, &EStop::default());
             stage.emit(&lit(), true, true, &EStop::default());

@@ -149,6 +149,12 @@ impl Checklist {
         self.enforced
     }
 
+    /// A real output was connected from RÉGLAGES › Sorties (T-401): the
+    /// list gates arming from now on, for the rest of this run.
+    pub fn enforce(&mut self) {
+        self.enforced = true;
+    }
+
     pub fn config(&self) -> &ChecklistConfig {
         &self.config
     }

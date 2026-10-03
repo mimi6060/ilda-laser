@@ -408,6 +408,19 @@
   #devList li.empty { color: var(--muted); background: none; border-style: dashed; }
   #devList .dev-kind { flex: none; padding: 0 5px; border-radius: 4px; border: 1px solid var(--ws-settings); color: var(--ws-settings); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
   #devList .dev-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #devList .dev-state { flex: none; font-size: 11px; color: var(--muted); }
+  #devList li[data-state=connected] { border-color: var(--ok); }
+  #devList li[data-state=connected] .dev-state { color: var(--ok); }
+  #devList li[data-state=connecting] .dev-state { color: var(--warn); }
+  #devList li[data-state=lost] { border-color: var(--danger); }
+  #devList li[data-state=lost] .dev-state { color: var(--danger); }
+  #devList .dev-connect { flex: none; padding: 2px 10px; font-size: 11px; }
+  #outState { margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); font-size: 12px; color: var(--muted); }
+  #outState[data-state=connected] { border-color: var(--ok); color: var(--ok); }
+  #outState[data-state=connecting] { border-color: var(--warn); color: var(--warn); }
+  #outState[data-state=lost] { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #output { cursor: pointer; }
+  #output[data-state=lost] { color: var(--danger); font-weight: 700; }
   #devList code, #outputsPanel .hint code { font-family: ui-monospace, monospace; font-size: 11px; color: var(--accent); }
   /* Avant le show (T-258) */
   #clLed { margin-left: 8px; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; border: 1px solid var(--line); color: var(--muted); }
@@ -1598,11 +1611,17 @@
 
     <section id="outputsPanel">
       <h2>Sorties et projecteurs</h2>
-      <div class="hint">La sortie en cours est indiquée dans la barre du haut.</div>
-      <div class="sf-sub">DAC détectés</div>
-      <div class="row"><button id="devScan" title="Chercher les DAC (Helios USB, Ether Dream, IDN/HeliosPRO). N'ouvre ni n'arme aucun DAC.">Rafraîchir</button><span class="hint" id="devStatus"></span></div>
+      <div class="hint">La sortie en cours est aussi indiquée dans la barre du haut.</div>
+      <div class="sf-sub">Sortie laser</div>
+      <div id="outState" role="status" data-state="available">Aucune sortie : aperçu seulement</div>
+      <div class="row">
+        <button id="devScan" title="Chercher les DAC (Helios USB, Ether Dream, IDN/HeliosPRO). N'ouvre ni n'arme aucun DAC.">Rechercher</button>
+        <button id="outDisconnect" title="Envoie des trames noires, ferme la sortie et revient à l'aperçu seul. Désarme le laser." disabled>Déconnecter</button>
+        <span class="hint" id="devStatus"></span>
+      </div>
       <ul id="devList"></ul>
-      <div class="hint">Relancez le studio avec <code>--device &lt;id&gt;</code> pour sortir sur ce DAC (Helios USB, HeliosPRO en IDN, Ether Dream). Le laser démarre toujours désarmé. Liste en lecture seule : la recherche n'ouvre ni n'arme aucun DAC.</div>
+      <label class="check" title="Une sortie perdue est retentée après 1 s, 2 s, 4 s, 8 s puis toutes les 15 s. Elle revient toujours désarmée."><input type="checkbox" id="outAuto" checked> Reconnexion automatique</label>
+      <div class="hint">Connecter, changer, déconnecter ou perdre la sortie désarme le laser ; une sortie retrouvée reste désarmée : seul l'opérateur réarme. Ce désarmement est logiciel : l'arrêt d'urgence matériel du projecteur reste votre vraie sécurité. Préférez un réseau filaire. La sortie choisie est retenue pour le prochain lancement ; <code>--device &lt;id&gt;</code> en impose une pour un seul lancement.</div>
       <div class="sf-sub">Limites de sécurité</div>
       <div id="pwLoosen" hidden>
         <div id="pwLoosenText"></div>
@@ -2167,10 +2186,15 @@ const OUTPUT_TITLES = {
   preview: 'Aperçu seulement : rien ne part vers un laser.',
 };
 function showOutputKind(f) {
-  const el = $('output'), kind = f.output_error ? 'error' : f.output_kind || 'preview';
-  if (el.dataset.kind === kind) return;
+  const el = $('output'), state = f.output_state || 'available';
+  const lost = state === 'lost';
+  const kind = lost || f.output_error ? 'error' : state === 'connecting' ? 'preview' : f.output_kind || 'preview';
+  el.dataset.state = state;
+  const title = (lost ? 'Sortie perdue : laser désarmé, reconnexion en cours si elle est activée. ' + (f.output_error || '')
+    : f.output_error ? 'Erreur de sortie' : OUTPUT_TITLES[kind] || '') + ' — clic : RÉGLAGES › Sorties et projecteurs';
+  if (el.dataset.kind === kind && el.title === title) return;
   el.dataset.kind = kind;
-  el.title = f.output_error ? 'Erreur de sortie' : OUTPUT_TITLES[kind] || '';
+  el.title = title;
 }
 
 async function previewLoop() {
@@ -2187,8 +2211,10 @@ async function previewLoop() {
     // Ticked or restarted from another page: refresh the list.
     if (checklist && f.checklist && f.checklist.complete !== checklist.complete) reloadChecklist();
     showArmed(); showPresence(f); showKeepAwake(f.keep_awake);
-    $('output').textContent = f.output_error ? '⚠ ' + f.output_error
-      : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement (lancez avec --device pour piloter un laser)';
+    $('output').textContent = f.output_state === 'lost' ? 'Sortie perdue'
+      : f.output_state === 'connecting' ? 'Connexion de la sortie…'
+      : f.output_error ? '⚠ ' + f.output_error
+      : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement';
     showOutputKind(f);
     const n = f.points.length, fps = n ? pps / n : 0;
     $('stPoints').textContent = n;
@@ -2951,7 +2977,7 @@ const SL_GROUPS = {
   limiter: ['limiter'],
   play: ['cue', 'scene', 'show'],
   settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings'],
-  studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow'],
+  studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow', 'output_select', 'output'],
 };
 let slLog = null;
 async function loadSafetyLog() {
@@ -4838,42 +4864,94 @@ Object.keys(pwFields).forEach(id => $(id).addEventListener('input', () => {
 $('pwLoosenOk').addEventListener('click', () => { if (pwPending) saveOutputs(pwPending, true); });
 $('pwLoosenCancel').addEventListener('click', () => { pwPending = null; $('pwLoosen').hidden = true; reloadOutputs(); });
 
-// DAC détectés (T-303): read-only. The studio scans only on « Rafraîchir »
-// (about 1.5 s, on its own thread); the list says what to pass to --device.
-const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN' };
+// Sorties (T-401, after T-303's read-only list): the studio scans only on
+// « Rechercher » (about 1.5 s, on its own thread). « Connecter » opens the
+// output on the server's own thread; every change disarms the laser and a
+// lost output comes back disarmed. No shortcut and no MIDI/OSC/DMX control.
+const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN', ponk: 'PONK', test: 'Test' };
+const LINK_STATES = { connected: 'Connectée', connecting: 'Connexion…', lost: 'Perdue' };
+function outStateText(j) {
+  const name = j.name || j.selected;
+  if (j.state === 'connected') return 'Connectée : ' + name;
+  if (j.state === 'connecting') return 'Connexion… ' + (name || '');
+  if (j.state === 'lost') {
+    const retry = j.retry_in_ms == null ? (j.auto_reconnect ? 'nouvelle tentative…' : 'reconnexion automatique désactivée')
+      : 'nouvelle tentative dans ' + Math.max(1, Math.ceil(j.retry_in_ms / 1000)) + ' s';
+    return 'Sortie perdue — ' + retry + (j.error ? ' (' + j.error + ')' : '');
+  }
+  return 'Aucune sortie : aperçu seulement';
+}
 function showDevices(j) {
   const list = $('devList');
+  // Rebuilt only when it changes, so a click never lands on a replaced button.
+  const key = JSON.stringify([j.devices, j.scanning, j.scanned]);
+  if (list.dataset.key !== key) {
+    list.dataset.key = key;
+    renderDeviceList(list, j);
+  }
+  $('devStatus').textContent = j.scanning ? 'Recherche en cours…'
+    : j.scan_error ? 'Erreur : ' + j.scan_error
+    : !j.scanned ? 'DAC pas encore cherchés.'
+    : !j.usb ? 'USB non scanné pendant la sortie sur un DAC.' : '';
+  $('devStatus').classList.toggle('sf-error', !!j.scan_error);
+  $('devScan').disabled = !!j.scanning;
+  $('outState').dataset.state = j.state;
+  $('outState').textContent = outStateText(j);
+  $('outDisconnect').disabled = !j.selected;
+  if (document.activeElement !== $('outAuto')) $('outAuto').checked = j.auto_reconnect;
+}
+function renderDeviceList(list, j) {
   list.replaceChildren();
   for (const d of j.devices) {
     const li = document.createElement('li');
+    li.dataset.id = d.id; li.dataset.state = d.state;
     const kind = document.createElement('span'); kind.className = 'dev-kind'; kind.textContent = DEV_KINDS[d.kind] || d.kind;
     const name = document.createElement('span'); name.className = 'dev-name'; name.textContent = d.name; name.title = d.name;
     const id = document.createElement('code'); id.textContent = d.id; id.title = '--device ' + d.id;
-    li.append(kind, name, id);
+    const state = document.createElement('span'); state.className = 'dev-state'; state.textContent = LINK_STATES[d.state] || '';
+    const connect = document.createElement('button'); connect.className = 'dev-connect'; connect.textContent = 'Connecter';
+    connect.title = 'Connecter cette sortie (désarme le laser ; il reste désarmé une fois connecté)';
+    connect.hidden = d.state === 'connected' || d.state === 'connecting';
+    connect.onclick = () => selectOutput(d.id);
+    li.append(kind, name, id, state, connect);
     list.append(li);
   }
   if (!j.devices.length) {
     const li = document.createElement('li'); li.className = 'empty';
-    li.textContent = j.scanning ? 'Recherche…' : j.scanned ? 'Aucun DAC trouvé.' : 'Pas encore cherché : cliquez sur Rafraîchir.';
+    li.textContent = j.scanning ? 'Recherche…' : j.scanned ? 'Aucune sortie trouvée.' : 'Pas encore cherché : cliquez sur Rechercher.';
     list.append(li);
   }
-  $('devStatus').textContent = j.scanning ? 'Recherche en cours…'
-    : j.error ? 'Erreur : ' + j.error
-    : !j.usb ? 'USB non scanné pendant la sortie sur un DAC.' : '';
-  $('devStatus').classList.toggle('sf-error', !!j.error);
-  $('devScan').disabled = !!j.scanning;
 }
 async function reloadDevices() {
-  try { showDevices(await (await fetch('/api/devices')).json()); } catch { /* next try */ }
+  try { showDevices(await (await fetch('/api/outputs')).json()); } catch { /* next try */ }
+}
+async function selectOutput(id) {
+  const r = await fetch('/api/outputs/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, source: 'ui' }) });
+  if (r.ok) showDevices(await r.json());
+  else { $('devStatus').textContent = await r.text(); $('devStatus').classList.add('sf-error'); }
 }
 $('devScan').addEventListener('click', async () => {
-  let j = await (await fetch('/api/devices/scan', { method: 'POST' })).json();
+  let j = await (await fetch('/api/outputs/scan', { method: 'POST' })).json();
   showDevices(j);
   for (let i = 0; j.scanning && i < 40; i++) {
     await new Promise(r => setTimeout(r, 250));
-    j = await (await fetch('/api/devices')).json();
+    j = await (await fetch('/api/outputs')).json();
     showDevices(j);
   }
+});
+$('outDisconnect').addEventListener('click', () => selectOutput(null));
+$('outAuto').addEventListener('change', async () => {
+  const r = await fetch('/api/outputs/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_reconnect: $('outAuto').checked }) });
+  if (r.ok) showDevices(await r.json());
+});
+// While RÉGLAGES is shown, the state line follows connections, losses and
+// the retry countdown.
+setInterval(() => { if (activeWs === 'settings') reloadDevices(); }, 500);
+// The output in the top bar leads to this section.
+$('output').addEventListener('click', () => {
+  setWorkspace('settings');
+  reloadDevices();
+  $('outputsPanel').scrollIntoView({ block: 'start' });
 });
 // ---------- damaged data files (T-402) ----------
 // One banner per unacknowledged file (up to 2), else one summary with

@@ -1,7 +1,7 @@
 // Laser on/off: the LASER button, Space, and Escape (always a blackout,
 // latched as an emergency stop since T-251).
-// Preview only: "armed" is just a flag in a studio that has no output.
-import { test, expect, useStudio, openUi, reveal, focusPage } from '../studio';
+// No laser: the studio drives the fake output (--test-output, T-401).
+import { test, expect, useStudio, openUi, reveal, focusPage, FAKE_OUTPUT } from '../studio';
 
 const studio = useStudio();
 const armed = async () => (await studio.state()).armed as boolean;
@@ -17,7 +17,8 @@ test('starts disarmed, with the button and the badge saying so', async ({ page }
   expect(await armed()).toBe(false);
   await expect(page.locator('#armBtn')).toHaveText('LASER OFF');
   await expect(page.locator('#offBadge')).toBeVisible();
-  await expect(page.locator('#output')).toContainText('Aperçu seulement');
+  await expect(page.locator('#output')).toHaveText(`Sortie : ${FAKE_OUTPUT}`);
+  await expect(page.locator('#output')).toHaveAttribute('data-kind', 'test');
 });
 
 test('the LASER button toggles armed', async ({ page }) => {

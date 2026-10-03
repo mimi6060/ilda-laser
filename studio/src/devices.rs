@@ -5,8 +5,8 @@
 //! `laser-dac` discovers (Ether Dream broadcasts, IDN scan replies, Helios
 //! USB descriptors). The Helios scan briefly opens the USB device to read
 //! its name, so USB is left out of a rescan while the studio already drives
-//! a DAC: the running output is never touched. Picking a DAC stays a
-//! restart with `--device <id>` (no hot switch).
+//! a DAC: the running output is never touched. Connecting one is the
+//! output manager's job (`output_manager.rs`, T-401).
 //!
 //! A scan takes about 1.5 s (the Ether Dream listens for broadcasts), so
 //! it runs on its own thread and only when asked (the *Rafraîchir* button),
@@ -17,6 +17,7 @@
 use anyhow::Result;
 use laser_dac::{list_devices_filtered, DacType, EnabledDacTypes};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One DAC found by a scan.
@@ -87,13 +88,14 @@ struct ListState {
 /// The last scan's result, shared by the HTTP handlers and the scan thread.
 pub struct DeviceList {
     scanner: Scanner,
-    scope: Scope,
+    /// USB in the next scan: follows the connected output (T-401).
+    usb: AtomicBool,
     state: Mutex<ListState>,
 }
 
 impl DeviceList {
     pub fn new(scanner: Scanner, scope: Scope) -> Self {
-        Self { scanner, scope, state: Mutex::default() }
+        Self { scanner, usb: AtomicBool::new(scope.usb), state: Mutex::default() }
     }
 
     /// The real scanner. `driving_dac`: the studio already outputs to a DAC,
@@ -107,6 +109,22 @@ impl DeviceList {
         Self::new(Arc::new(move |_| Ok(devices.clone())), Scope { usb: true })
     }
 
+    /// What the next scan may look at.
+    pub fn scope(&self) -> Scope {
+        Scope { usb: self.usb.load(Ordering::SeqCst) }
+    }
+
+    /// The studio started or stopped driving a DAC (T-401): USB is left
+    /// out of the scans while it does (see the module doc).
+    pub fn set_driving_dac(&self, driving: bool) {
+        self.usb.store(!driving, Ordering::SeqCst);
+    }
+
+    /// The devices of the last scan.
+    pub fn devices(&self) -> Vec<DeviceInfo> {
+        self.state.lock().unwrap().devices.clone()
+    }
+
     /// The JSON for `GET /api/devices`.
     pub fn view(&self) -> serde_json::Value {
         let s = self.state.lock().unwrap();
@@ -115,7 +133,7 @@ impl DeviceList {
             "scanning": s.scanning,
             "scanned": s.scanned,
             "error": s.error,
-            "usb": self.scope.usb,
+            "usb": self.scope().usb,
         })
     }
 
@@ -142,7 +160,7 @@ impl DeviceList {
     /// Runs one scan on this thread and stores the result.
     fn scan_now(&self) {
         // The lock is not held during the scan: views stay instant.
-        let result = (self.scanner)(self.scope);
+        let result = (self.scanner)(self.scope());
         let mut s = self.state.lock().unwrap();
         match result {
             Ok(devices) => {
@@ -264,8 +282,8 @@ mod tests {
 
     #[test]
     fn usb_is_left_out_while_driving_a_dac() {
-        assert!(DeviceList::real(false).scope.usb);
-        assert!(!DeviceList::real(true).scope.usb, "the running Helios is never reopened by a scan");
+        assert!(DeviceList::real(false).scope().usb);
+        assert!(!DeviceList::real(true).scope().usb, "the running Helios is never reopened by a scan");
         assert_eq!(DeviceList::real(true).view()["usb"], false);
         // The scanner receives the scope.
         let seen = Arc::new(Mutex::new(None));

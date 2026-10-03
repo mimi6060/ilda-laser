@@ -38,6 +38,7 @@ mod midi;
 mod netin;
 mod optimize;
 mod output;
+mod output_manager;
 mod patterns;
 mod ponk;
 mod power;
@@ -66,7 +67,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use engine::{Animator, AudioFeatures, Calibration, Settings};
 use interlock::{ArmGate, EStop};
-use output::{DacOutput, FileLogOutput, Output, OutputStage};
+use output::{Output, OutputStage};
 use patterns::Point;
 use scenes::SceneStore;
 use std::collections::HashMap;
@@ -80,7 +81,9 @@ use std::time::{Duration, Instant};
 struct Cli {
     /// Laser DAC to drive: an id from `--list-devices` (Helios USB, Ether
     /// Dream, IDN/HeliosPRO), or "auto" for the first one found. Without
-    /// it, the studio runs in preview-only mode. The laser starts disarmed.
+    /// it, the output remembered in RÉGLAGES › Sorties is reconnected, or
+    /// the studio runs in preview only. For this run only: it never
+    /// replaces the remembered output. The laser starts disarmed.
     #[arg(long)]
     device: Option<String>,
     /// Send the frames over PONK (UDP) to MadMapper/MadLaser, which drives
@@ -90,9 +93,10 @@ struct Cli {
     #[arg(long, value_name = "HOST:PORT", num_args = 0..=1, default_missing_value = ponk::DEFAULT_TARGET,
           value_parser = ponk::parse_target, conflicts_with_all = ["device", "test_output", "midi_test"])]
     ponk: Option<std::net::SocketAddr>,
-    /// Points per second sent to the laser.
-    #[arg(long, default_value_t = 30_000)]
-    pps: u32,
+    /// Points per second sent to the laser (default: the one in
+    /// outputs.json, else 30000).
+    #[arg(long)]
+    pps: Option<u32>,
     /// Port for the browser UI.
     #[arg(long, default_value_t = 8080)]
     port: u16,
@@ -301,8 +305,11 @@ pub struct Shared {
     /// A pending simulated stall (ms): the engine sleeps this long while
     /// holding the lock, the worst case for the watchdog.
     pub test_stall_ms: u64,
-    /// The DACs the last scan found (devices.rs): read-only, never opened.
+    /// The DACs the last scan found (devices.rs). The scan never opens one.
     pub devices: Arc<devices::DeviceList>,
+    /// Choosing, connecting and reconnecting the output (T-401). Its own
+    /// lock: taken under this one, never the other way round.
+    pub output_mgr: Arc<output_manager::OutputManager>,
 }
 
 impl Shared {
@@ -477,29 +484,29 @@ fn main() -> Result<()> {
         }
     };
 
-    let output: Option<Box<dyn Output>> = match (&cli.device, &cli.test_output) {
-        // Exclusive with --device and --test-output (clap refuses both).
-        _ if cli.ponk.is_some() => {
-            let out = ponk::PonkOutput::open(cli.ponk.expect("checked"), &cli.data_dir).inspect_err(|e| log::error!("sortie PONK : {e:#}"))?;
-            println!("Laser output: {} (disarmed: empty PONK frames until armed).", out.name());
-            Some(Box::new(out))
+    let mut state = startup_state(&cli);
+    // The output named on the command line opens now, as before (a failure
+    // stops the studio); otherwise the remembered one is connected by the
+    // output manager once it runs (T-401). Either way: disarmed.
+    let output: Option<Box<dyn Output>> = match startup_output_id(&cli) {
+        Some(id) => {
+            let out = state.output_mgr.open_at_start(&id).inspect_err(|e| log::error!("sortie laser : {e:#}"))?;
+            match out.kind() {
+                "ponk" => println!("Laser output: {} (disarmed: empty PONK frames until armed).", out.name()),
+                "test" => println!("--test-output: fake output logged to {} (no laser).", cli.test_output.as_ref().map(|p| p.display().to_string()).unwrap_or_default()),
+                _ => println!("Laser output: {}", out.name()),
+            }
+            Some(out)
         }
-        (Some(device), _) => {
-            let out = DacOutput::open(device, cli.pps).inspect_err(|e| log::error!("sortie laser : {e:#}"))?;
-            println!("Laser output: {}", out.name());
-            Some(Box::new(out))
-        }
-        (None, Some(path)) => {
-            println!("--test-output: fake output logged to {} (no laser).", path.display());
-            Some(Box::new(FileLogOutput::create(path)?))
-        }
-        (None, None) => {
-            println!("No --device given: preview only (no laser output).");
+        None => {
+            match &state.outputs.connection().selected {
+                Some(id) => println!("Remembered output {id}: connecting in the background (disarmed)."),
+                None => println!("No output chosen: preview only (pick one in RÉGLAGES › Sorties, or start with --device)."),
+            }
             None
         }
     };
-
-    let mut state = startup_state(&cli, output.as_deref());
+    note_output(&mut state, output.as_deref());
     state.applog = Arc::clone(&app_log);
     log::info!("{}", startup_line(&cli, state.output_name.as_deref()));
     let safety_log = state.gate.log().clone();
@@ -521,11 +528,18 @@ fn main() -> Result<()> {
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
         estop.set_kill_switch(kill);
     }
+    let output_mgr = Arc::clone(&state.output_mgr);
+    let remembered = state.outputs.connection().selected.filter(|_| output.is_none());
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
     // The ILDA files can be big: read beside everything else, their cues
     // appear once parsed.
     ilda_library::spawn_load(&shared);
+    // Opens, switches and reconnects outputs off the engine thread (T-401).
+    let output_thread = output_mgr.spawn(Arc::clone(&running));
+    if let Some(id) = remembered {
+        output_mgr.select(Some(id), interlock::ArmSource::System);
+    }
 
     // A panic anywhere: cut the output first (the DAC kill switch, no lock),
     // then let the default report run and every loop wind down. The engine's
@@ -612,6 +626,12 @@ fn main() -> Result<()> {
         log::error!("engine thread did not stop in {SHUTDOWN_WAIT:?}: exiting anyway");
     }
     watchdog.join().ok();
+    // The output manager stops within 100 ms, unless an open is under way
+    // (a DAC lookup takes ~1.5 s): never wait for that.
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while output_thread.as_ref().is_some_and(|t| !t.is_finished()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     keep_awake_thread.join().ok(); // lets go of the sleep assertion
     // The autosave thread writes what is unsaved, then stops; a stuck disk
     // must not hold the exit.
@@ -650,7 +670,7 @@ fn main() -> Result<()> {
 /// options, without any path (the data directory is « par défaut » or
 /// « personnalisé ») nor network address.
 fn startup_line(cli: &Cli, output: Option<&str>) -> String {
-    let mut options = vec![format!("port {}", cli.port), format!("pps {}", cli.pps)];
+    let mut options = vec![format!("port {}", cli.port), format!("pps {}", cli.pps.map_or_else(|| "par défaut".to_string(), |p| p.to_string()))];
     for (on, name) in [
         (cli.no_midi, "--no-midi"),
         (cli.no_audio, "--no-audio"),
@@ -687,8 +707,13 @@ const AUTOSAVE_SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 /// The state the studio starts with. Whatever the command line and the
 /// files in the data directory say, it is disarmed (reason « Démarrage »):
 /// arming is not part of any saved state, and there is no option for it.
-fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
+fn startup_state(cli: &Cli) -> Shared {
     let mut gate = ArmGate::default();
+    // Arming needs a connected output (T-401). The one the command line
+    // names is opened by `main` right after (or the studio stops), so it
+    // counts already: the safety log then starts without a stray line.
+    // The engine keeps the interlock in line with the stage afterwards.
+    gate.register(interlock::OUTPUT, interlock::OUTPUT_LABEL, startup_output_id(cli).is_some());
     if cli.test_interlock {
         gate.register(interlock::TEST, "Verrou de test (--test-interlock)", false);
     }
@@ -707,6 +732,13 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
     let routes = audio::routes::RouteStore::load_or_create(cli.data_dir.join("audio_routes.json"), &controls);
+    // Caps and the remembered connection (outputs.json), then the output
+    // manager. Its thread is started by `main` only: building the state
+    // never opens, scans or connects anything.
+    let outputs = power::OutputStore::load_or_create(cli.data_dir.join("outputs.json"));
+    let prefs = outputs.connection();
+    let pps = cli.pps.unwrap_or(prefs.pps);
+    let output_mgr = Arc::new(output_backend(cli, &prefs, pps));
     let epoch = Instant::now();
     let estop = Arc::new(EStop::default());
     let netin_cli = netin::CliOverride { osc: cli.osc, artnet: cli.artnet };
@@ -721,11 +753,11 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         estop,
         frame: Vec::new(),
         output_lit: 0,
-        output_name: output.map(|o| o.name().to_string()),
-        output_kind: output.map(|o| o.kind()),
+        output_name: None,
+        output_kind: None,
         output_error: None,
         applog: Default::default(),
-        pps: cli.pps,
+        pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
         playlist: None,
         controls,
@@ -756,7 +788,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         mix: layers::MixReport::default(),
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
-        outputs: power::OutputStore::load_or_create(cli.data_dir.join("outputs.json")),
+        outputs,
         audio_guard: audio::safety::GuardStatus::default(),
         dwell: dwell::DwellStatus::default(),
         evolving: Vec::new(),
@@ -781,10 +813,8 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
-        devices: Arc::new(match &cli.test_devices {
-            Some(fake) => devices::DeviceList::fixed(fake.0.clone()),
-            None => devices::DeviceList::real(output.is_some_and(|o| o.kind() == "dac")),
-        }),
+        devices: Arc::clone(output_mgr.devices()),
+        output_mgr,
     };
     figures::refresh(&mut state);
     if cli.test_hooks {
@@ -807,6 +837,119 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
 /// `--test-checklist`. Pure preview and the fake `--test-output` don't.
 fn checklist_enforced(cli: &Cli) -> bool {
     cli.device.is_some() || cli.ponk.is_some() || cli.test_checklist
+}
+
+/// The output manager and what it can open: the fake backend whenever a
+/// test flag is given (`--test-devices`, `--test-output`), so a test can
+/// never open a real DAC; the real one (laser-dac, PONK) otherwise.
+fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32) -> output_manager::OutputManager {
+    use output_manager::{FakeBackend, OutputManager, RealBackend};
+    if cli.test_devices.is_some() || cli.test_output.is_some() {
+        let fake = cli.test_devices.as_ref().map(|d| d.0.clone()).unwrap_or_default();
+        let backend = FakeBackend::new(fake.clone(), cli.test_output.clone(), cli.ponk, cli.data_dir.clone());
+        let dropped = Arc::clone(&backend.dropped);
+        let list = Arc::new(devices::DeviceList::fixed(fake));
+        return OutputManager::new(Arc::new(backend), list, prefs, pps).with_test_drop(dropped);
+    }
+    let backend = Arc::new(RealBackend {
+        ponk: cli.ponk.unwrap_or_else(|| ponk::DEFAULT_TARGET.parse().expect("valid default PONK target")),
+        data_dir: cli.data_dir.clone(),
+    });
+    let scanner: devices::Scanner = {
+        let backend = Arc::clone(&backend);
+        Arc::new(move |scope| output_manager::OutputBackend::scan(&*backend, scope))
+    };
+    let list = Arc::new(devices::DeviceList::new(scanner, devices::Scope { usb: true }));
+    OutputManager::new(backend, list, prefs, pps)
+}
+
+/// The output the command line names, as an output manager id.
+fn startup_output_id(cli: &Cli) -> Option<String> {
+    if let Some(target) = cli.ponk {
+        return Some(format!("ponk:{target}"));
+    }
+    if let Some(device) = &cli.device {
+        return Some(device.clone());
+    }
+    cli.test_output.as_ref().map(|_| output_manager::TEST_ID.to_string())
+}
+
+/// The output opened at start-up, before the engine takes it: its name in
+/// the header, the `output` interlock closed, USB left out of the scans
+/// while a DAC is driven.
+fn note_output(state: &mut Shared, output: Option<&dyn Output>) {
+    state.output_name = output.map(|o| o.name().to_string());
+    state.output_kind = output.map(|o| o.kind());
+    state.devices.set_driving_dac(output.is_some_and(|o| o.kind() == "dac"));
+    state.gate.set_output_ready(output.is_some());
+}
+
+/// Installs the output the manager hands over (T-401), on the engine
+/// thread between two frames. The gate is disarmed first when it was
+/// armed (a switch or a reconnection never keeps the laser armed), then
+/// the old output gets its dark frames and closes, then the new one is
+/// installed disarmed with its kill switch in the e-stop.
+fn apply_output_change(shared: &Mutex<Shared>, stage: &mut OutputStage, estop: &EStop, mgr: &output_manager::OutputManager, change: output_manager::StageChange) {
+    use output_manager::ChangeKind;
+    let source = if change.kind == ChangeKind::Reconnected { interlock::ArmSource::System } else { change.source };
+    {
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if s.gate.is_armed() {
+            s.gate.disarm(interlock::DisarmReason::OutputChanged, source);
+        }
+        s.gate.set_output_ready(false);
+    }
+    estop.replace_kill_switch(None);
+    close_aside(stage.replace(change.output));
+    estop.replace_kill_switch(stage.kill_switch());
+    let described = stage.describe();
+    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let action = match change.kind {
+        ChangeKind::Connected => "connect",
+        ChangeKind::Disconnected => "disconnect",
+        ChangeKind::Reconnected => "reconnect",
+    };
+    s.gate.log().record("output", Some(source.id()), serde_json::json!({ "action": action, "id": change.id, "name": described.as_ref().map(|d| d.0.clone()) }));
+    s.output_name = described.as_ref().map(|d| d.0.clone());
+    s.output_kind = described.as_ref().map(|d| d.1);
+    s.output_error = None;
+    s.devices.set_driving_dac(described.as_ref().is_some_and(|d| d.1 == "dac"));
+    // A real output (a DAC, or PONK to MadMapper): the pre-show checklist
+    // gates arming from now on, as with --device or --ponk (T-258).
+    if described.as_ref().is_some_and(|d| matches!(d.1, "dac" | "ponk")) && !s.checklist.enforced() {
+        s.checklist.enforce();
+        s.sync_checklist();
+    }
+    // Arming waits until this is the output the operator wants.
+    let ok = described.is_some() && mgr.is_current(change.gen);
+    s.gate.set_output_ready(ok);
+}
+
+/// The installed output stopped answering: disarm (« Sortie perdue »),
+/// open the `output` interlock, close it, and let the manager retry.
+fn output_lost(shared: &Mutex<Shared>, stage: &mut OutputStage, estop: &EStop, mgr: &output_manager::OutputManager, gen: u64, error: String) {
+    {
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        s.gate.disarm(interlock::DisarmReason::OutputLost, interlock::ArmSource::System);
+        s.gate.set_output_ready(false);
+        s.gate.log().record("output", Some("system"), serde_json::json!({ "action": "lost", "name": s.output_name, "error": error }));
+        s.output_error = Some(error.clone());
+    }
+    estop.replace_kill_switch(None);
+    close_aside(stage.replace(None));
+    mgr.report_lost(gen, error);
+}
+
+/// Closes an output the stage has disarmed and blanked, on a thread of
+/// its own: dropping a DAC session waits for its worker, which must never
+/// hold up the next frame.
+fn close_aside(old: Option<Box<dyn Output>>) {
+    if let Some(old) = old {
+        let spawned = std::thread::Builder::new().name("output-close".into()).spawn(move || drop(old));
+        if let Err(e) = spawned {
+            log::warn!("closing the old output aside failed: {e}");
+        }
+    }
 }
 
 fn run_engine(
@@ -849,11 +992,19 @@ struct Engine {
     dwell_guard: dwell::DwellState,
     live_path: PathBuf,
     layers_path: PathBuf,
+    /// Outputs connected, switched or found again from the UI (T-401).
+    output_mgr: Arc<output_manager::OutputManager>,
+    /// The hand-over of the installed output, for loss reports.
+    output_gen: u64,
 }
 
 impl Engine {
     fn new(shared: &Mutex<Shared>, output: Option<Box<dyn Output>>, live_path: PathBuf, layers_path: PathBuf) -> Self {
-        let safety_log = shared.lock().unwrap().gate.log().clone();
+        let (safety_log, output_mgr) = {
+            let s = shared.lock().unwrap();
+            (s.gate.log().clone(), Arc::clone(&s.output_mgr))
+        };
+        let output_gen = output_mgr.current_gen();
         Self {
             animators: HashMap::new(),
             live_state: live::LiveState::default(),
@@ -868,11 +1019,20 @@ impl Engine {
             dwell_guard: dwell::DwellState::default(),
             live_path,
             layers_path,
+            output_mgr,
+            output_gen,
         }
     }
 
     /// One frame at `now`: render, safety stage, gate, output.
     fn tick(&mut self, shared: &Mutex<Shared>, now: Instant) {
+        // A new output from the manager's thread: installed between two
+        // frames, never opened here.
+        while let Some(change) = self.output_mgr.engine_take() {
+            self.output_gen = change.gen;
+            let estop = Arc::clone(&shared.lock().unwrap_or_else(|e| e.into_inner()).estop);
+            apply_output_change(shared, &mut self.stage, &estop, &self.output_mgr, change);
+        }
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
@@ -1034,6 +1194,10 @@ impl Engine {
         // of the frame; the e-stop latch and a watchdog trip (this frame
         // stalled) are re-read here, lock-free.
         let emitted = self.stage.emit(&frame, armed && !health.is_tripped(), hold_ok, &estop);
+        // An output that stopped answering (T-401): disarm, close, retry.
+        if let Some(error) = self.stage.fault() {
+            output_lost(shared, &mut self.stage, &estop, &self.output_mgr, self.output_gen, error);
+        }
         let strobe = self.limiter.status();
         self.strobe_log.update(strobe.active, now, &self.safety_log, || serde_json::json!({ "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
         let mut s = shared.lock().unwrap();
@@ -1137,10 +1301,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("laser-studio-checklist-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let data_dir = dir.to_str().unwrap();
-        let preview = startup_state(&parse(&["--no-midi", "--data-dir", data_dir]), None);
+        let preview = startup_state(&parse(&["--no-midi", "--data-dir", data_dir]));
         assert!(preview.gate.interlock_ok(interlock::CHECKLIST));
         drop(preview);
-        let mut s = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]), None);
+        let mut s = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
         assert!(!s.gate.interlock_ok(interlock::CHECKLIST));
         let mut cfg = s.checklist.config().clone();
         cfg.items.truncate(1);
@@ -1153,7 +1317,7 @@ mod tests {
         assert!(s.gate.interlock_ok(interlock::CHECKLIST));
         assert!(!s.gate.is_armed(), "completing never arms");
         drop(s);
-        let again = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]), None);
+        let again = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
         assert_eq!(again.checklist.config().items.len(), 1, "the edited list is kept");
         assert!(!again.gate.interlock_ok(interlock::CHECKLIST), "the ticks are not");
         drop(again);
@@ -1186,7 +1350,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("laser-studio-netin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let s = startup_state(&parse(&["--no-midi", "--osc", "--data-dir", dir.to_str().unwrap()]).unwrap(), None);
+        let s = startup_state(&parse(&["--no-midi", "--osc", "--data-dir", dir.to_str().unwrap()]).unwrap());
         assert!(s.netin.hub.effective().osc.enabled && !s.netin.hub.effective().artnet.enabled);
         assert!(!s.netin.hub.file().osc.enabled, "not saved");
         assert!(!s.gate.is_armed());
@@ -1478,7 +1642,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("prefs.json"), r#"{"test_pattern":{"active":"grid"}}"#).unwrap();
         let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--data-dir", dir.to_str().unwrap()]).unwrap();
-        let s = startup_state(&cli, None);
+        let s = startup_state(&cli);
         assert_eq!(s.test_pattern.active, None);
         assert_eq!(s.test_pattern.brightness, testpattern::DEFAULT_BRIGHTNESS);
         let _ = std::fs::remove_dir_all(dir);
@@ -1562,6 +1726,177 @@ mod tests {
         (mean, worst)
     }
 
+    /// An output that records what it is asked, and its kill switch.
+    #[derive(Clone, Default)]
+    struct Recorder {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        kills: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Output for Recorder {
+        fn name(&self) -> &str {
+            "enregistreuse"
+        }
+        fn set_armed(&mut self, armed: bool) -> Result<()> {
+            self.calls.lock().unwrap().push(if armed { "arm" } else { "disarm" });
+            Ok(())
+        }
+        fn send(&mut self, points: &[Point]) {
+            self.calls.lock().unwrap().push(if points.iter().any(|p| p.is_lit()) { "lit" } else { "dark" });
+        }
+        fn blank_now(&mut self) -> Result<()> {
+            self.calls.lock().unwrap().push("blank");
+            Ok(())
+        }
+        fn kill_switch(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
+            let kills = Arc::clone(&self.kills);
+            Some(Box::new(move || {
+                kills.fetch_add(1, Ordering::SeqCst);
+            }))
+        }
+    }
+    impl Drop for Recorder {
+        fn drop(&mut self) {
+            self.calls.lock().unwrap().push("close");
+        }
+    }
+
+    /// T-401: a switch while armed disarms the gate, gives the old output
+    /// its dark frames and closes it before the new one is installed
+    /// (disarmed), and the e-stop now cuts the new output.
+    #[test]
+    fn replacing_an_armed_output_blanks_and_closes_the_old_one_first() {
+        let (old, new) = (Recorder::default(), Recorder::default());
+        let shared = Mutex::new(test_support::shared());
+        let (estop, mgr) = {
+            let s = shared.lock().unwrap();
+            (Arc::clone(&s.estop), Arc::clone(&s.output_mgr))
+        };
+        let mut stage = OutputStage::new(Some(Box::new(old.clone())));
+        estop.set_kill_switch(old.kill_switch().unwrap());
+        shared.lock().unwrap().request_arm(ArmSource::Ui).unwrap();
+        stage.emit(&[Point::lit(0.0, 0.0, 1.0, 1.0, 1.0)], true, true, &estop);
+        let change = output_manager::StageChange {
+            output: Some(Box::new(new.clone())),
+            kind: output_manager::ChangeKind::Connected,
+            source: ArmSource::Ui,
+            gen: 1,
+            id: Some("b".into()),
+        };
+        apply_output_change(&shared, &mut stage, &estop, &mgr, change);
+        // Closed on a thread of its own, after the dark frames.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while old.calls.lock().unwrap().last() != Some(&"close") {
+            assert!(Instant::now() < deadline, "never closed: {:?}", old.calls.lock().unwrap());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*old.calls.lock().unwrap(), ["arm", "lit", "disarm", "blank", "blank", "blank", "close"]);
+        let s = shared.lock().unwrap();
+        assert!(!s.gate.is_armed());
+        assert_eq!(reason(&s), "output_changed");
+        assert_eq!(s.output_name.as_deref(), Some("enregistreuse"));
+        // A real output (a DAC) connected from the UI: the pre-show
+        // checklist now gates arming, as with --device (T-258).
+        assert!(s.checklist.enforced());
+        assert!(!s.gate.interlock_ok(interlock::CHECKLIST));
+        drop(s);
+        assert!(new.calls.lock().unwrap().is_empty(), "installed, not armed, nothing sent yet");
+        assert!(estop.has_kill_switch());
+        estop.trip(ArmSource::Keyboard);
+        assert_eq!((old.kills.load(Ordering::SeqCst), new.kills.load(Ordering::SeqCst)), (0, 1), "the e-stop cuts the new output");
+        // Back to preview: no kill switch left.
+        let none = output_manager::StageChange { output: None, kind: output_manager::ChangeKind::Disconnected, source: ArmSource::Ui, gen: 2, id: None };
+        apply_output_change(&shared, &mut stage, &estop, &mgr, none);
+        assert!(!estop.has_kill_switch());
+        let calls = new.calls.lock().unwrap().clone();
+        assert_eq!(calls[..4], ["disarm", "blank", "blank", "blank"], "dark before it closes: {calls:?}");
+        let s = shared.lock().unwrap();
+        assert_eq!(s.output_name, None);
+        assert!(!s.gate.interlock_ok(interlock::OUTPUT));
+    }
+
+    /// T-401 end to end on the engine: connect a fake device, arm, lose it,
+    /// get it back. The loss disarms (« Sortie perdue ») and blocks arming;
+    /// the reconnection never re-arms.
+    #[test]
+    fn a_lost_output_disarms_and_comes_back_disarmed() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-output-loss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let devices = r#"[{"kind":"etherdream","id":"etherdream:test","name":"Ether Dream test"}]"#;
+        let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--test-devices", devices, "--data-dir", dir.to_str().unwrap()]).unwrap();
+        let mut state = startup_state(&cli);
+        // No page in a unit test: presence not enforced.
+        state.presence = presence::Presence::default();
+        state.gate.set_interlock(UI_ALIVE, true);
+        let mgr = Arc::clone(&state.output_mgr);
+        mgr.devices().refresh();
+        let shared = Arc::new(Mutex::new(state));
+        let running = Arc::new(AtomicBool::new(true));
+        let manager = mgr.spawn(Arc::clone(&running)).unwrap();
+        let engine = std::thread::spawn({
+            let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
+            let (live, layers) = (dir.join("live.json"), dir.join("layers.json"));
+            move || run_engine(shared, None, running, live, layers)
+        });
+        let wait = |what: &str, ok: &dyn Fn(&Shared) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ok(&shared.lock().unwrap()) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert_eq!(shared.lock().unwrap().request_arm(ArmSource::Ui).unwrap_err(), [interlock::OUTPUT_LABEL]);
+        wait("the scan", &|s| s.output_mgr.knows("etherdream:test"));
+        mgr.select(Some("etherdream:test".into()), ArmSource::Ui);
+        wait("the connection", &|s| s.gate.interlock_ok(interlock::OUTPUT));
+        assert_eq!(shared.lock().unwrap().output_name.as_deref(), Some("Ether Dream test"));
+        shared.lock().unwrap().request_arm(ArmSource::Ui).unwrap();
+
+        assert!(mgr.simulate_drop(true));
+        wait("the loss", &|s| !s.gate.is_armed());
+        {
+            let mut s = shared.lock().unwrap();
+            assert_eq!(reason(&s), "output_lost");
+            assert_eq!(s.gate.status(&s.estop).last_disarm.unwrap().reason_fr, "Sortie perdue");
+            assert_eq!(s.request_arm(ArmSource::Ui).unwrap_err(), [interlock::OUTPUT_LABEL]);
+        }
+        wait("the manager", &|s| s.output_mgr.state() == output_manager::LinkState::Lost);
+
+        assert!(mgr.simulate_drop(false));
+        wait("the reconnection", &|s| s.gate.interlock_ok(interlock::OUTPUT));
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.output_mgr.state(), output_manager::LinkState::Connected);
+            assert!(!s.gate.is_armed(), "never re-armed by itself");
+            assert_eq!(reason(&s), "output_lost", "the reason stays the loss");
+        }
+        running.store(false, Ordering::SeqCst);
+        engine.join().unwrap();
+        manager.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-401: an install without `outputs.json` starts in preview only,
+    /// and arming says why it is refused.
+    #[test]
+    fn no_output_no_arming() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-no-output-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--test-devices", "[]", "--data-dir", dir.to_str().unwrap()]).unwrap();
+        let mut s = startup_state(&cli);
+        s.presence.touch("page", Instant::now());
+        assert_eq!(s.output_mgr.prefs(), output_manager::OutputPrefs::default());
+        assert_eq!(s.output_mgr.state(), output_manager::LinkState::Available);
+        assert_eq!(s.request_arm(ArmSource::Ui).unwrap_err(), [interlock::OUTPUT_LABEL]);
+        assert_eq!(s.pps, 30_000);
+        assert!(!dir.join("outputs.json").exists(), "nothing written at start");
+        let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--pps", "45000", "--data-dir", dir.to_str().unwrap()]).unwrap();
+        assert_eq!(startup_state(&cli).pps, 45_000);
+        assert_eq!(startup_output_id(&cli), None);
+        let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--ponk", "127.0.0.1:9", "--data-dir", dir.to_str().unwrap()]).unwrap();
+        assert_eq!(startup_output_id(&cli).as_deref(), Some("ponk:127.0.0.1:9"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// T-253: no command-line option and no file in the data directory can
     /// make the studio start armed.
     #[test]
@@ -1588,7 +1923,7 @@ mod tests {
         for extra in variants {
             let args = [&["laser-studio", "--no-midi", "--data-dir", data_dir][..], extra].concat();
             let cli = Cli::try_parse_from(&args).unwrap();
-            let mut s = startup_state(&cli, None);
+            let mut s = startup_state(&cli);
             assert!(!s.gate.is_armed(), "{args:?}");
             let status = s.gate.status(&s.estop);
             assert!(!status.armed);
@@ -1608,7 +1943,7 @@ mod tests {
         for rel in ["safety.json", "calibration.json", "outputs.json", "presence.json", "audio.json", "midi/devices.json"] {
             let (dir, _) = datafile::tests::with_damaged(&format!("startup-{}", rel.replace('/', "-")), rel);
             let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
-            let mut s = startup_state(&cli, None);
+            let mut s = startup_state(&cli);
             assert!(!s.gate.is_armed(), "{rel}");
             assert_eq!(s.data_warnings.len(), 1, "{rel}: {:?}", s.data_warnings);
             assert!(s.data_warnings[0].safety && s.data_warnings[0].file == rel);
@@ -1626,6 +1961,9 @@ mod tests {
             assert!(s.request_arm(ArmSource::Ui).is_err());
             assert_eq!(s.ack_data_warnings(Some(rel)), 1);
             assert!(s.gate.interlock_ok(interlock::DATA_ACK));
+            // Nothing connected in this test: arming waits for an output too.
+            assert_eq!(s.request_arm(ArmSource::Ui).unwrap_err(), [interlock::OUTPUT_LABEL]);
+            note_output(&mut s, Some(&output::FileLogOutput::append(&dir.join("out.log")).unwrap()));
             s.request_arm(ArmSource::Ui).unwrap();
             s.gate.disarm(interlock::DisarmReason::User, ArmSource::Ui);
             let _ = std::fs::remove_dir_all(dir);
@@ -1640,7 +1978,7 @@ mod tests {
         std::fs::write(dir.join("layers.json"), datafile::tests::DAMAGED).unwrap();
         std::fs::write(dir.join("grid.json"), datafile::tests::DAMAGED).unwrap();
         let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
-        let mut s = startup_state(&cli, None);
+        let mut s = startup_state(&cli);
         let mut files: Vec<&str> = s.data_warnings.iter().map(|w| w.file.as_str()).collect();
         files.sort();
         assert_eq!(files, ["grid.json", "layers.json", "live.json"]);
@@ -1664,7 +2002,7 @@ mod tests {
         let (dir, path) = datafile::tests::with_damaged("startup-ro", "scenes.json");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
-        let mut s = startup_state(&cli, None);
+        let mut s = startup_state(&cli);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!s.gate.is_armed());
         let w = s.data_warnings.iter().find(|w| w.file == "scenes.json").expect("warned");
