@@ -47,6 +47,7 @@ pub fn shared() -> Shared {
         mix: layers::MixReport::default(),
         safety: crate::safety::SafetyStore::in_memory(),
         strobe: Default::default(),
+        dwell: Default::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         figures: crate::figures::FigureStore::in_memory(),

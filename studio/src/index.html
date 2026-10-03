@@ -336,7 +336,7 @@
   #beamsMsg { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
   .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
   .render3d .check { margin-top: 6px; }
-  #strobeLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
+  #strobeLed, #dwellLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
   #sfLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
   #sfLoosenOk { border-color: var(--danger); color: var(--danger); }
   .sf-error { color: var(--danger); }
@@ -348,6 +348,8 @@
   .sfzone .zlevel { width: 64px; }
   .sfzone select { width: auto; }
   .sfzone button { flex: 0; white-space: nowrap; }
+  #dwellLed.on { opacity: 1; background: #ff9628; border-color: #ff9628; color: #2b1400; box-shadow: 0 0 8px #ff9628; }
+  .sf-warn { color: var(--warn); }
   #strobeLed.on { opacity: 1; background: var(--warn); border-color: var(--warn); color: #2b1d00; box-shadow: 0 0 8px var(--warn); }
   /* MIDI learn (T-203) */
   #learnBanner { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; padding: 6px 12px; background: #0f3d24; color: #fff; font-size: 13px; }
@@ -1154,7 +1156,7 @@
   <div class="ws-panel ws-grid" data-ws="settings" id="settingsPanel" hidden>
     <section>
       <details id="safetyPanel">
-        <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span></summary>
+        <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span><span id="dwellLed" title="Garde anti-point fixe">Garde active</span></summary>
         <div id="sfLoosen" hidden>
           <div id="sfLoosenText"></div>
           <div class="row"><button id="sfLoosenOk">Confirmer l'assouplissement</button><button id="sfLoosenCancel">Annuler</button></div>
@@ -1178,6 +1180,19 @@
         <label>Gain vert <span class="v" id="sfGainGV"></span></label><input type="range" id="sfGainG" min="0" max="1" step="0.01">
         <label>Gain bleu <span class="v" id="sfGainBV"></span></label><input type="range" id="sfGainB" min="0" max="1" step="0.01">
         <label>Niveau minimum des diodes <span class="v" id="sfMinV"></span></label><input type="range" id="sfMin" min="0" max="0.5" step="0.01">
+        <div class="sf-sub">Garde anti-point fixe</div>
+        <label for="sfDwellProfile">Garde anti-point fixe</label>
+        <select id="sfDwellProfile">
+          <option value="strict">Stricte (partout)</option>
+          <option value="beams">Faisceaux (faisceaux fixes permis au-dessus de l'horizon)</option>
+          <option value="off">Désactivée (aperçu seulement : laser armé = Faisceaux)</option>
+        </select>
+        <label>Taille minimum (%) <span class="v" id="sfDwellMinV"></span></label><input type="range" id="sfDwellMin" min="2" max="50" step="1">
+        <label>Plafond par case, strict (%) <span class="v" id="sfDwellCapV"></span></label><input type="range" id="sfDwellCap" min="5" max="50" step="1">
+        <label>Plafond par case, faisceaux (%) <span class="v" id="sfDwellBeamsV"></span></label><input type="range" id="sfDwellBeams" min="10" max="80" step="1">
+        <div class="hint">Atténue puis éteint ce qui concentre trop de lumière au même endroit : une figure plus petite que la taille minimum (taille 0, zoom, effet figé), ou une case de la grille (32 × 32) qui reste allumée trop longtemps sur 250 ms (point fixe, balayage trop lent, coins). En Faisceaux, les règles strictes s'appliquent sous l'horizon. Les cases concernées sont en orange sur l'aperçu.</div>
+        <div class="hint sf-warn" id="sfDwellWarn">⚠ Cette garde ne protège pas contre une panne de scanner : si un miroir se bloque, le logiciel ne le voit pas (aucun retour de position depuis l'interface). Seul un circuit « scan-fail » matériel dans le projecteur peut couper le faisceau à temps.</div>
+        <div class="hint" id="dwellInfo"></div>
         <div class="hint">Ces réglages appartiennent à cette machine (pas au projet). Resserrer s'applique tout de suite ; assouplir (zone supprimée ou déplacée, horizon abaissé, gain augmenté…) demande une confirmation.</div>
         <div class="hint" id="strobeInfo"></div>
         <label for="uiTimeout">Couper si l'interface ne répond plus (ms)</label>
@@ -1690,6 +1705,7 @@ async function previewLoop() {
     lastPoints = f.points;
     // One fetch feeds whichever view is shown; the 3D view only reads it.
     if (view3d && show3d) view3d.setFrame(f.points);
+    dwellStatus = f.dwell;
     if (show2d) draw(f.points);
     if (fetchedAt > armAnsweredAt) armed = f.armed;
     arm = f.arm; pps = f.pps; showArmed(); showPresence(f);
@@ -1705,6 +1721,7 @@ async function previewLoop() {
     showLfos(f.lfos);
     showRoutes(f.audio_routes);
     showStrobe(f.strobe);
+    showDwell(f.dwell);
     // Follow page changes made elsewhere (MIDI controller, API) - only
     // when the server's value changes, so a tab click that the server
     // hasn't processed yet isn't undone by an older frame.
@@ -2227,6 +2244,10 @@ const sfFields = {
   sfGainG: [s => s.color_gain[1], (s, v) => { s.color_gain[1] = v; }, pct],
   sfGainB: [s => s.color_gain[2], (s, v) => { s.color_gain[2] = v; }, pct],
   sfMin: [s => s.min_diode_level, (s, v) => { s.min_diode_level = v; }, pct],
+  // Static beam guard (T-256): the sliders are in percent.
+  sfDwellMin: [s => Math.round(s.dwell.min_extent * 100), (s, v) => { s.dwell.min_extent = v / 100; }, v => v + ' %'],
+  sfDwellCap: [s => Math.round(s.dwell.max_cell_dose * 100), (s, v) => { s.dwell.max_cell_dose = v / 100; }, v => v + ' %'],
+  sfDwellBeams: [s => Math.round(s.dwell.max_cell_dose_beams * 100), (s, v) => { s.dwell.max_cell_dose_beams = v / 100; }, v => v + ' %'],
 };
 const fmtPts = pts => pts.map(p => `${+p[0].toFixed(3)} ${+p[1].toFixed(3)}`).join(' ; ');
 function parsePts(text) {
@@ -2240,6 +2261,7 @@ function showSafety(force = false) {
     $(id + 'V').textContent = fmt(get(safety));
   }
   $('sfLines').checked = safety.horizon.lines;
+  if (force || document.activeElement !== $('sfDwellProfile')) $('sfDwellProfile').value = safety.dwell.profile;
   $('sfError').textContent = sfLoadError || '';
   $('sfZoneAdd').disabled = safety.zones.length >= 8;
   if (force || !$('sfZones').contains(document.activeElement)) renderZones();
@@ -2273,6 +2295,7 @@ function sfFromControls() {
   const next = structuredClone(safety);
   for (const [id, [, set]] of Object.entries(sfFields)) set(next, +$(id).value);
   next.horizon.lines = $('sfLines').checked;
+  next.dwell.profile = $('sfDwellProfile').value;
   $('sfZones').querySelectorAll('.sfzone').forEach(row => {
     const z = next.zones[+row.dataset.zi];
     z.name = row.querySelector('.zname').value;
@@ -2317,6 +2340,7 @@ Object.keys(sfFields).forEach(id => $(id).addEventListener('input', () => {
   sfChanged();
 }));
 $('sfLines').addEventListener('change', sfChanged);
+$('sfDwellProfile').addEventListener('change', sfChanged);
 $('sfZones').addEventListener('change', e => { if (e.target.matches('input, select')) saveSafety(sfFromControls()); });
 $('sfZones').addEventListener('click', e => {
   const row = e.target.closest('.sfzone');
@@ -2379,11 +2403,29 @@ function drawSafetyOverlay(W, H, px) {
     g.strokeStyle = stroke; g.lineWidth = 2; g.stroke();
   };
   for (const z of safety.zones) poly(z.points, z.kind === 'dim' ? 'rgba(255,120,60,0.16)' : 'rgba(255,40,40,0.28)', 'rgba(255,77,79,0.9)');
+  // Cells the static beam guard is dimming (orange, stronger = darker).
+  if (dwellStatus && dwellStatus.cells.length) {
+    const step = 2 / dwellStatus.grid;
+    for (const [cx, cy, k] of dwellStatus.cells) {
+      const [x0, y0] = px([-1 + cx * step, -1 + (cy + 1) * step]), [x1, y1] = px([-1 + (cx + 1) * step, -1 + cy * step]);
+      g.fillStyle = `rgba(255,150,40,${(0.25 + 0.5 * (1 - k)).toFixed(2)})`;
+      g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+  }
   if (sfDrawing) {
     poly(sfDrawing.points, null, '#ffb020');
     g.fillStyle = '#ffb020';
     for (const p of sfDrawing.points) { const [x, y] = px(p); g.fillRect(x - 4, y - 4, 8, 8); }
   }
+}
+/** The static beam guard (T-256) on the last frame (the overlay draws its cells). */
+let dwellStatus = null;
+function showDwell(d) {
+  if (!d) return;
+  $('dwellLed').classList.toggle('on', d.active);
+  $('dwellInfo').textContent = !d.active ? ''
+    : `Garde active : ${d.points_dimmed} point(s) atténué(s)` + (d.extent_factor < 1 ? ` · figure trop petite (${(d.extent * 100).toFixed(1)} %)` : '')
+      + (d.cells.length ? ` · ${d.cells.length} case(s) trop exposée(s)` : '');
 }
 function showStrobe(st) {
   if (!st) return;

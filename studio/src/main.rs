@@ -12,6 +12,7 @@ mod audio;
 mod beat;
 mod controls;
 mod cues;
+mod dwell;
 mod engine;
 mod evolving;
 mod fans;
@@ -186,6 +187,8 @@ pub struct Shared {
     pub safety: safety::SafetyStore,
     /// What the strobe limiter and horizon did on the last frame.
     pub strobe: safety::StrobeStatus,
+    /// What the static beam guard (dwell.rs) did on the last frame.
+    pub dwell: dwell::DwellStatus,
     /// Evolving cues on show in the last frame: (animator id, where it is).
     /// Id 0 is the manual look.
     pub evolving: Vec<(u64, evolving::Progress)>,
@@ -502,6 +505,7 @@ fn startup_state(cli: &Cli, output: Option<&dyn Output>) -> Shared {
         mix: layers::MixReport::default(),
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
+        dwell: dwell::DwellStatus::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
@@ -543,6 +547,7 @@ fn run_engine(
     // If this thread panics, unwinding drops the stage: dark frame + disarm.
     let mut stage = OutputStage::new(output);
     let mut limiter = safety::StrobeLimiter::default();
+    let mut dwell_guard = dwell::DwellState::default();
 
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
@@ -650,6 +655,10 @@ fn run_engine(
         // calibrated frame, so no layer, live move, LFO, gate or flash can
         // get past it; the preview shows the limited frame too.
         let frame = safety::apply(frame, t, &safety_cfg, &mut limiter);
+        // Static beam guard (T-256): on the frame that really goes out
+        // (after zones and the limiter), so a figure shrunk to a point, a
+        // frozen frame or a held beam is dimmed whatever made it.
+        let frame = dwell_guard.apply(frame, t, &safety_cfg.dwell, safety_cfg.horizon.y, armed);
 
         // Last stage: the gate. `armed` was read under the lock at the top
         // of the frame; the e-stop latch and a watchdog trip (this frame
@@ -663,6 +672,7 @@ fn run_engine(
         s.frame = frame;
         s.mix = mix;
         s.strobe = limiter.status();
+        s.dwell = dwell_guard.status().clone();
         s.evolving = evolving;
         drop(s);
 

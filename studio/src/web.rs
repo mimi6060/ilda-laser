@@ -362,6 +362,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 "settings": s.safety.get(),
                 "defaults": crate::safety::SafetySettings::default(),
                 "status": s.strobe,
+                "dwell": s.dwell,
                 "load_error": s.safety.load_error(),
                 "limits": { "max_zones": crate::zones::MAX_ZONES, "max_vertices": crate::zones::MAX_VERTICES },
             }))
@@ -1154,6 +1155,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "lfos": lfo_positions(s),
         "audio_routes": s.routes.meters().collect::<Vec<_>>(),
         "strobe": s.strobe,
+        "dwell": s.dwell,
         "evolving": evolving_status(s),
     }))
 }

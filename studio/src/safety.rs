@@ -39,6 +39,7 @@
 //! or moved, the horizon lowered, a gain raised...) without the operator's
 //! explicit confirmation (`SafetyStore::set(.., confirm_loosen)`).
 
+use crate::dwell::DwellGuard;
 use crate::patterns::Point;
 use crate::zones::{Horizon, Mask, Zone, ZoneKind, MAX_VERTICES, MAX_ZONES};
 use anyhow::{bail, Result};
@@ -71,6 +72,8 @@ pub struct SafetySettings {
     pub color_gain: [f32; 3],
     /// Lowest drive of a lit channel (diode threshold), 0..0.5.
     pub min_diode_level: f32,
+    /// Static beam guard (T-256, `dwell.rs`).
+    pub dwell: DwellGuard,
 }
 
 impl Default for SafetySettings {
@@ -83,6 +86,7 @@ impl Default for SafetySettings {
             horizon: Horizon::default(),
             color_gain: [1.0; 3],
             min_diode_level: 0.0,
+            dwell: DwellGuard::default(),
         }
     }
 }
@@ -100,6 +104,7 @@ struct SafetyWire {
     beam_floor_y: Option<f32>,
     color_gain: [f32; 3],
     min_diode_level: f32,
+    dwell: DwellGuard,
 }
 
 impl Default for SafetyWire {
@@ -114,6 +119,7 @@ impl Default for SafetyWire {
             beam_floor_y: None,
             color_gain: d.color_gain,
             min_diode_level: d.min_diode_level,
+            dwell: d.dwell,
         }
     }
 }
@@ -129,6 +135,7 @@ impl From<SafetyWire> for SafetySettings {
             horizon,
             color_gain: w.color_gain,
             min_diode_level: w.min_diode_level,
+            dwell: w.dwell,
         }
     }
 }
@@ -170,6 +177,7 @@ impl SafetySettings {
             check(*c, UNIT_RANGE, &format!("Gain {name}"))?;
         }
         check(self.min_diode_level, MIN_DIODE_RANGE, "Niveau minimum des diodes")?;
+        self.dwell.validate()?;
         if self.zones.len() > MAX_ZONES {
             bail!("{} zones : {MAX_ZONES} au maximum", self.zones.len());
         }
@@ -229,6 +237,7 @@ impl SafetySettings {
             },
             color_gain: self.color_gain.map(|c| fix(c, UNIT_RANGE, 0.0)),
             min_diode_level: fix(self.min_diode_level, MIN_DIODE_RANGE, 0.0),
+            dwell: self.dwell.sanitized(),
         }
     }
 
@@ -279,6 +288,7 @@ impl SafetySettings {
                 }
             }
         }
+        out.extend(self.dwell.loosenings(&new.dwell));
         out
     }
 }
@@ -1112,5 +1122,66 @@ mod tests {
         let right_in: Vec<&Point> = frame.iter().filter(|p| p.x > 0.01).collect();
         let right_out: Vec<&Point> = out.iter().filter(|p| p.x > 0.01).collect();
         assert_eq!(right_in, right_out);
+    }
+
+    // ---------- static beam guard (T-256) ----------
+
+    #[test]
+    fn the_dwell_guard_loosens_only_with_confirmation_and_old_files_load() {
+        use crate::dwell::DwellProfile;
+        let mut store = SafetyStore::in_memory();
+        let strict = SafetySettings { dwell: DwellGuard { profile: DwellProfile::Strict, min_extent: 0.1, ..Default::default() }, ..Default::default() };
+        assert!(store.set(strict.clone(), false).is_ok(), "tightening applies at once");
+        for looser in [DwellProfile::Beams, DwellProfile::Off] {
+            let next = SafetySettings { dwell: DwellGuard { profile: looser, ..strict.dwell }, ..strict.clone() };
+            match store.set(next, false) {
+                Err(SetError::Loosens(l)) => assert!(l.iter().any(|m| m.contains("Garde anti-point fixe")), "{l:?}"),
+                other => panic!("{looser:?}: {other:?}"),
+            }
+        }
+        let smaller = SafetySettings { dwell: DwellGuard { min_extent: 0.05, ..strict.dwell }, ..strict.clone() };
+        assert!(matches!(store.set(smaller.clone(), false), Err(SetError::Loosens(_))));
+        assert_eq!(store.get(), strict, "unchanged");
+        assert!(store.set(smaller.clone(), true).is_ok());
+        assert_eq!(store.get(), smaller);
+        // Out of range: 400, even confirmed.
+        let bad = SafetySettings { dwell: DwellGuard { max_cell_dose: 0.9, ..Default::default() }, ..Default::default() };
+        assert!(matches!(store.set(bad, true), Err(SetError::Invalid(_))));
+        // A safety.json from before T-256 gets the default guard.
+        let old: SafetySettings = serde_json::from_str(r#"{"strobe_max_hz":3,"horizon":{"y":0.2}}"#).unwrap();
+        assert_eq!(old.dwell, DwellGuard::default());
+    }
+
+    #[test]
+    fn a_look_shrunk_to_a_point_goes_dark_through_the_whole_stage() {
+        // The real Animator at size 0 (what the live master size does),
+        // through horizon, zones, limiter and then the guard, as the engine.
+        use crate::dwell::{DwellProfile, DwellState};
+        let point = Settings { content: Content::Shape { shape: "star".into() }, scale: 0.0, brightness: 1.0, ..Default::default() };
+        let full = Settings { scale: 0.5, ..point.clone() };
+        for profile in [DwellProfile::Strict, DwellProfile::Beams] {
+            let cfg = SafetySettings { dwell: DwellGuard { profile, ..Default::default() }, ..Default::default() };
+            let (mut a, mut lim, mut guard) = (Animator::default(), StrobeLimiter::default(), DwellState::default());
+            let mut last = Vec::new();
+            for i in 0..90 {
+                let t = i as f64 / FPS;
+                let look = if i < 60 { &point } else { &full };
+                let frame = apply(a.render(look, Default::default(), 1.0 / 60.0, &BeatClock::default()), t, &cfg, &mut lim);
+                let out = guard.apply(frame, t, &cfg.dwell, cfg.horizon.y, true);
+                if i == 59 {
+                    let peak = level_max(&out);
+                    match profile {
+                        DwellProfile::Strict => assert_eq!(peak, 0.0, "strict: dark"),
+                        _ => assert!(peak > 0.0 && peak <= 0.6, "beams, above the horizon: capped, got {peak}"),
+                    }
+                }
+                last = out;
+            }
+            assert!(level_max(&last) > 0.99, "{profile:?}: back at full size once restored");
+        }
+    }
+
+    fn level_max(frame: &[Point]) -> f32 {
+        frame.iter().map(|p| p.r.max(p.g).max(p.b)).fold(0.0, f32::max)
     }
 }
