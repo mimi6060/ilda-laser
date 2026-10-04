@@ -2359,6 +2359,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     let s = &mut *s;
     s.gate.sync_estop(&s.estop);
     let arm = s.gate.status(&s.estop);
+    let now = s.now_s();
     let round = |v: f32| (v * 1000.0).round() / 1000.0;
     let points: Vec<[f32; 5]> = s.frame.iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect();
     json_response(json!({
@@ -2383,11 +2384,18 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "active_cue": s.active_cue,
         "settings_rev": s.settings_rev,
         "cues": {
-            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer })).collect::<Vec<_>>(),
+            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer, "phase": s.deck.phase(a.id, now) })).collect::<Vec<_>>(),
             "shown": s.deck.visible().iter().map(|a| a.cue.as_str()).collect::<Vec<_>>(),
+            // T-158: stopped cues still fading out (*Fin*).
+            "ending": s.deck.ending.iter().map(|e| json!({ "cue": e.cue.cue, "layer": e.cue.layer, "phase": s.deck.phase(e.cue.id, now) })).collect::<Vec<_>>(),
+            // T-159: cues waiting for their quantised start (« en attente »).
+            "pending": s.deck.pending.iter().map(|p| json!({ "cue": p.cue, "at_beat": p.at_beat })).collect::<Vec<_>>(),
             "click_mode": s.deck.click_mode,
             "multi": s.deck.multi,
             "max_active": s.deck.max_active,
+            "transition": s.deck.transition,
+            "quantize": s.deck.quantize,
+            "beat_every": s.deck.beat_every,
         },
         "layers": { "mixer": s.mixer, "mix": s.mix },
         "tempo": s.tempo.state(s.now_s()),
@@ -2435,7 +2443,7 @@ fn evolving_status(s: &Shared) -> Vec<serde_json::Value> {
     s.evolving
         .iter()
         .map(|(id, progress)| {
-            let cue = s.deck.active.iter().find(|a| a.id == *id);
+            let cue = s.deck.find(*id);
             let mut v = json!(progress);
             v["cue"] = json!(cue.map(|a| a.cue.as_str()));
             v["layer"] = json!(cue.map_or(1, |a| a.layer));

@@ -6,7 +6,8 @@
 //! Ids are lowercase, dot-separated and **never renamed** once shipped -
 //! saved MIDI mappings refer to them. Add an alias instead of renaming.
 
-use crate::cues::{self, ClickMode, CueDeck, CLICK_MODES, CLICK_MODE_LABELS};
+use crate::cues::{self, ClickMode, CueDeck, BEAT_EVERY, BEAT_EVERY_LABELS, CLICK_MODES, CLICK_MODE_LABELS, QUANTIZE_LABELS, QUANTIZE_MODES};
+use crate::transition::{LENGTHS, LENGTH_LABELS, TRANSITION_KINDS, TRANSITION_LABELS};
 use crate::engine::Settings;
 use crate::grid::CueGrid;
 use crate::interlock::{ArmSource, DisarmReason};
@@ -199,6 +200,12 @@ impl ControlRegistry {
         let max = CueDeck::default().max_active as f32;
         add("cue.max_active".into(), "Cues simultanés max".into(), "cue", cont(1.0, cues::MAX_ACTIVE_LIMIT as f32, max, Unit::None), true);
         add("cue.stop_all".into(), "Arrêter tous les cues".into(), "cue", ControlKind::Trigger, true);
+        // Transitions (T-158) and quantised launch (T-159), from the grid bar.
+        let choice = |labels: &[&'static str], default: usize| ControlKind::Choice { options: labels.to_vec(), default };
+        add("cue.transition".into(), "Transition entre cues".into(), "cue", choice(&TRANSITION_LABELS, 0), true);
+        add("cue.transition_length".into(), "Durée de transition".into(), "cue", choice(&LENGTH_LABELS, 2), true);
+        add("cue.quantize".into(), "Quantification du lancement".into(), "cue", choice(&QUANTIZE_LABELS, 0), true);
+        add("cue.beat_mode".into(), "Mode beat (change de cue tous les N temps)".into(), "cue", choice(&BEAT_EVERY_LABELS, 0), true);
 
         for n in 1..=LAYER_COUNT {
             add(format!("layer.{n}.dimmer"), format!("Gradateur calque {n}"), "layer", cont(0.0, 1.0, 1.0, Unit::Percent), true);
@@ -404,6 +411,30 @@ pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -
             s.deck.save();
         }
         "cue.stop_all" => with_deck(s, |d, _| d.stop_all()),
+        "cue.transition" => {
+            s.deck.transition.kind = TRANSITION_KINDS[choice_index(&desc.kind, input)];
+            s.deck.save();
+        }
+        "cue.transition_length" => {
+            s.deck.transition.length = LENGTHS[choice_index(&desc.kind, input)];
+            s.deck.save();
+        }
+        "cue.quantize" => {
+            s.deck.quantize = QUANTIZE_MODES[choice_index(&desc.kind, input)];
+            if s.deck.quantize == cues::Quantize::Off {
+                // Nothing waits for a boundary any more: what waited starts now.
+                let now = s.now_s();
+                let at = deck_clock(s, now);
+                for p in &mut s.deck.pending {
+                    p.at_beat = at.beat;
+                }
+            }
+            s.deck.save();
+        }
+        "cue.beat_mode" => {
+            s.deck.beat_every = BEAT_EVERY[choice_index(&desc.kind, input)];
+            s.deck.save();
+        }
         "page.next" => s.cue_page = (s.cue_page + 1) % s.grid.page_count(),
         "page.prev" => s.cue_page = (s.cue_page + s.grid.page_count() - 1) % s.grid.page_count(),
         other => {
@@ -547,6 +578,10 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
         "cue.multi" => json!(s.deck.multi),
         "cue.max_active" => json!(s.deck.max_active),
+        "cue.transition" => json!(TRANSITION_KINDS.iter().position(|&k| k == s.deck.transition.kind).unwrap_or(0)),
+        "cue.transition_length" => json!(LENGTHS.iter().position(|&l| l == s.deck.transition.length)),
+        "cue.quantize" => json!(QUANTIZE_MODES.iter().position(|&q| q == s.deck.quantize).unwrap_or(0)),
+        "cue.beat_mode" => json!(BEAT_EVERY.iter().position(|&n| n == s.deck.beat_every).unwrap_or(0)),
         id if id.starts_with("master.rot_") => {
             // master.rot_<axis>.angle / .speed, read back for the « Direct » panel.
             let rest = &id["master.rot_".len()..];
@@ -679,19 +714,10 @@ pub fn press_cue_from(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: b
         if down {
             deck.press(id, mode, at, || settings);
         } else {
-            deck.release(id);
+            deck.release(id, at);
         }
     });
-    if s.deck.active.iter().any(|a| !a.held && a.id >= first_new) {
-        // A latched cue takes over from the scene/playlist, as a cue click
-        // always did. A flash doesn't: the look comes back on release.
-        s.playlist = None;
-        s.look_on = false;
-    }
-    if s.gate.is_armed() && s.deck.active.iter().any(|a| a.id >= first_new) {
-        let name = s.presets.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
-        s.gate.log().record("cue", src, json!({ "id": id, "name": name, "mode": mode }));
-    }
+    started(s, first_new, mode, src);
     true
 }
 
@@ -699,7 +725,9 @@ pub fn press_cue_from(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: b
 /// keeping the live look in step like any other deck change.
 pub fn stop_cue(s: &mut Shared, id: &str) {
     if s.deck.active.iter().any(|a| a.cue == id) {
-        with_deck(s, |deck, _| deck.active.retain(|a| a.cue != id));
+        with_deck(s, |deck, _| deck.forget(id));
+    } else {
+        s.deck.forget(id);
     }
 }
 
@@ -707,13 +735,23 @@ pub fn stop_cue(s: &mut Shared, id: &str) {
 /// the newest cue (see cues.rs), and parking the manual look while cues
 /// play.
 fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
+    let now = s.now_s();
+    with_deck_at(s, deck_clock(s, now), f);
+}
+
+/// The deck's clock at `t` (seconds on the studio clock).
+fn deck_clock(s: &Shared, t: f64) -> cues::At {
+    cues::At { s: t, beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar }
+}
+
+/// `with_deck` at a given time (the engine's frame clock).
+fn with_deck_at(s: &mut Shared, at: cues::At, f: impl FnOnce(&mut CueDeck, cues::At)) {
     let was_empty = s.deck.active.is_empty();
     let before = s.settings.clone();
     if let Some(top) = s.deck.active.last_mut() {
         top.settings = s.settings.clone();
     }
-    let now = s.now_s();
-    f(&mut s.deck, cues::At { s: now, beat: s.tempo.beat_at(now) });
+    f(&mut s.deck, at);
     match s.deck.active.last() {
         Some(top) => {
             if was_empty {
@@ -740,6 +778,43 @@ fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
 pub fn release_held(s: &mut Shared) {
     if s.deck.active.iter().any(|a| a.held) {
         with_deck(s, |deck, _| deck.release_all_held());
+    }
+}
+
+/// Once per engine frame, at `t` (T-158 / T-159): with the e-stop latched,
+/// every transition ends and nothing waits any more (the e-stop always
+/// cuts at once); otherwise the waiting cues whose boundary has come
+/// start, like a press would, and finished transitions end.
+pub fn deck_frame(s: &mut Shared, t: f64) {
+    let at = deck_clock(s, t);
+    if s.estop.is_latched() {
+        s.deck.cut_transitions();
+    } else if s.deck.pending.iter().any(|p| p.at_beat <= at.beat) {
+        let first_new = s.deck.next_id();
+        with_deck_at(s, at, |deck, at| {
+            deck.fire_due(at);
+        });
+        started(s, first_new, None, Some("quantize"));
+    }
+    s.deck.tick(at);
+}
+
+/// After a deck change: latched cues started from instance `first_new`
+/// on take over from the scene/playlist; a cue started while armed is
+/// logged (T-259).
+fn started(s: &mut Shared, first_new: u64, mode: Option<ClickMode>, src: Option<&'static str>) {
+    if s.deck.active.iter().any(|a| !a.held && a.id >= first_new) {
+        // A latched cue takes over from the scene/playlist, as a cue click
+        // always did. A flash doesn't: the look comes back on release.
+        s.playlist = None;
+        s.look_on = false;
+    }
+    if s.gate.is_armed() {
+        let new: Vec<String> = s.deck.active.iter().filter(|a| a.id >= first_new).map(|a| a.cue.clone()).collect();
+        for id in new {
+            let name = s.presets.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
+            s.gate.log().record("cue", src, json!({ "id": id, "name": name, "mode": mode }));
+        }
     }
 }
 

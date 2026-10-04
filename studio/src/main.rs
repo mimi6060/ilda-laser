@@ -68,6 +68,7 @@ mod tempo;
 mod testpattern;
 mod textures;
 mod timeline;
+mod transition;
 mod tunnels;
 mod usercues;
 mod watchdog;
@@ -561,6 +562,8 @@ impl Shared {
     /// scanning ends with it (T-255).
     pub fn emergency_stop(&mut self, src: interlock::ArmSource) {
         self.estop.trip(src);
+        // Fades end and waiting cues are dropped at once (T-158 / T-159).
+        self.deck.cut_transitions();
         self.gate.sync_estop(&self.estop);
         // External inputs lose the hand until the operator reopens them.
         external::sync(self);
@@ -1250,7 +1253,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal) = {
+        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1296,6 +1299,9 @@ impl Engine {
                 let est = s.audio_in.fresh_tempo(now).unwrap_or_default();
                 s.tempo.apply_detection(&est, t);
             }
+            // Quantised launches due now start, finished transitions end;
+            // with the e-stop latched, every transition is cut (T-158/159).
+            controls::deck_frame(&mut s, t);
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             self.live_state.set_clock(t, clock.beat);
             // LFOs, then audio routes, move copies: the stored values stay
@@ -1324,6 +1330,9 @@ impl Engine {
             // The looks' own reaction sees the beat counter capped too.
             let audio = reaction.visual;
             let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
+            // Fades and morphs between cues (T-158): applied to the
+            // rendered looks, before the mixer and the safety chain.
+            let transition_fx = s.deck.transition_fx(t);
             // A test pattern (T-404) holds the timeline paused and stands
             // in for the whole look; the cues wait in the deck.
             let pattern = testpattern::hold_timeline(&mut s);
@@ -1332,8 +1341,13 @@ impl Engine {
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
             // User cues stored with master modifiers (T-405): theirs, per cue.
-            let cue_masters: HashMap<u64, live::LiveModifiers> =
-                s.deck.active.iter().filter_map(|a| Some((a.id, usercues::master_of(&s, &a.cue)?))).collect();
+            let cue_masters: HashMap<u64, live::LiveModifiers> = s
+                .deck
+                .active
+                .iter()
+                .chain(s.deck.ending.iter().map(|e| &e.cue))
+                .filter_map(|a| Some((a.id, usercues::master_of(&s, &a.cue)?)))
+                .collect();
             let armed = s.gate.is_armed();
             let routing = Routing::read(&s, &looks, &show_cues);
             let caps = s.outputs.active_limits();
@@ -1344,9 +1358,11 @@ impl Engine {
                     timeline::EventSource::Cue { id } => Some(id.as_str()),
                     timeline::EventSource::Look { .. } => None,
                 });
-                artnet::cue_signal(&s, &live, timeline_cue, pattern.is_some(), &caps)
+                // The cue on show after transitions (T-158) and the beat
+                // mode; a launch still waiting (T-159) is not on show.
+                artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some(), &caps)
             });
-            (looks, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal)
+            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1383,7 +1399,7 @@ impl Engine {
                     })
                     .collect();
                 // Muted layers keep animating, so they come back in motion.
-                rendered.extend(looks.iter().zip(&routing.look_zones).map(|((layer, id, settings), zones)| {
+                let mut cue_looks: Vec<transition::Rendered<(u8, Vec<u8>)>> = looks.iter().zip(&routing.look_zones).map(|((layer, id, settings), zones)| {
                     let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
                         Some(&beat) => Animator::starting_at(beat),
                         None => Animator::default(),
@@ -1398,8 +1414,14 @@ impl Engine {
                         st.advance(m, dt, clock.bpm, clock.beats_per_bar);
                         points = live::apply(&points, m, st, &user_palettes);
                     }
-                    (*layer, points, zones.clone())
-                }));
+                    (*id, points, (*layer, zones.clone()))
+                }).collect();
+                // Transitions between cues (T-158): fades scale colours by
+                // at most 1, a morph never lights travel (transition.rs);
+                // the mixer, live stage, zones, calibration and the whole
+                // safety stage still come after.
+                transition::apply(&mut cue_looks, &transition_fx);
+                rendered.extend(cue_looks.into_iter().map(|(_, points, (layer, zones))| (layer, points, zones)));
                 let evolving: Vec<(u64, evolving::Progress)> =
                     looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();
                 // Per projection zone (T-012): layers 1 → 4 with their
@@ -1527,7 +1549,7 @@ impl Routing {
         let of_cue = |cue: &str| s.deck.slot(cue).zones;
         let look_zones = looks
             .iter()
-            .map(|(_, id, _)| s.deck.active.iter().find(|a| a.id == *id).map(|a| of_cue(&a.cue)).unwrap_or_default())
+            .map(|(_, id, _)| s.deck.find(*id).map(|a| of_cue(&a.cue)).unwrap_or_default())
             .collect();
         let show_zones = show_cues
             .iter()

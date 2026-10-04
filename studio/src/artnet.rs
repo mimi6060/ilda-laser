@@ -327,13 +327,15 @@ pub fn universe(cfg: &ShowNetDmxConfig, look: DmxLook) -> [u8; UNIVERSE_LEN] {
 }
 
 /// This frame's signal for the Art-Net output, read under the engine's
-/// lock: the newest cue played by hand, else the newest timeline cue;
-/// none during a test pattern (the box can't show it). `live` is the
-/// frame's master copy (after the audio and DMX-loss gains).
-pub fn cue_signal(s: &crate::Shared, live: &crate::live::LiveModifiers, timeline_cue: Option<&str>, test_pattern: bool, caps: &crate::power::OutputLimits) -> CueSignal {
+/// lock: `hand_cue`, the cue played by hand that is on show (after
+/// transitions and the beat mode, `CueDeck::on_show`; never one still
+/// waiting for its quantised start), else the newest timeline cue; none
+/// during a test pattern (the box can't show it). `live` is the frame's
+/// master copy (after the audio and DMX-loss gains).
+pub fn cue_signal(s: &crate::Shared, hand_cue: Option<&str>, live: &crate::live::LiveModifiers, timeline_cue: Option<&str>, test_pattern: bool, caps: &crate::power::OutputLimits) -> CueSignal {
     let l = caps.sanitized();
     let cap = l.max_power * l.max_color.iter().copied().fold(1.0f32, f32::min);
-    let cue = if test_pattern { None } else { s.active_cue.as_deref().or(timeline_cue) };
+    let cue = if test_pattern { None } else { hand_cue.or(timeline_cue) };
     CueSignal {
         cue: cue.map(|id| s.presets.iter().find(|p| p.id == id).map_or_else(|| id.to_string(), |p| p.name.clone())),
         pattern: cue.and_then(|id| s.sdbank.get().slots.iter().find(|slot| slot.cue_id == id)).map(|slot| slot.number),
@@ -864,14 +866,14 @@ pub mod tests {
         s.sdbank.set(sdbank::SdBank { slots: vec![sdbank::SdSlot { number: 7, cue_id: a.id.clone(), seconds: 1.0 }] }).unwrap();
         let live = crate::live::LiveModifiers { brightness: 0.8, size: 0.5, ..Default::default() };
         let caps = crate::power::OutputLimits { max_power: 0.5, max_color: [1.0, 0.4, 0.9] };
-        assert_eq!(cue_signal(&s, &live, None, false, &caps), CueSignal { cue: None, pattern: None, master: 0.8, cap: 0.2, size: 0.5 });
+        assert_eq!(cue_signal(&s, s.active_cue.as_deref(), &live, None, false, &caps), CueSignal { cue: None, pattern: None, master: 0.8, cap: 0.2, size: 0.5 });
         s.active_cue = Some(a.id.clone());
-        let sig = cue_signal(&s, &live, Some(&b.id), false, &caps);
+        let sig = cue_signal(&s, s.active_cue.as_deref(), &live, Some(&b.id), false, &caps);
         assert_eq!((sig.cue.as_deref(), sig.pattern), (Some(a.name.as_str()), Some(7)));
         assert_eq!(intensity_for(&sig), 40, "0.8 × 0.2 × 255, rounded down");
-        assert_eq!(cue_signal(&s, &live, Some(&b.id), true, &caps).pattern, None, "a test pattern plays nothing from the card");
+        assert_eq!(cue_signal(&s, s.active_cue.as_deref(), &live, Some(&b.id), true, &caps).pattern, None, "a test pattern plays nothing from the card");
         s.active_cue = None;
-        let sig = cue_signal(&s, &live, Some(&b.id), false, &caps);
+        let sig = cue_signal(&s, s.active_cue.as_deref(), &live, Some(&b.id), false, &caps);
         assert_eq!((sig.cue.as_deref(), sig.pattern), (Some(b.name.as_str()), None), "the timeline's cue, not in the bank");
     }
 

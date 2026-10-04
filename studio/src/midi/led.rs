@@ -20,12 +20,14 @@
 //! (docs/research/midi-apc40.md §1.3, §2.3). The mkII pads are RGB
 //! (T-206, `palette.rs`): a cue present shows its colour dimmed, a playing
 //! cue its full colour pulsing (1/4) to the dim one, a held flash blinks
-//! (1/8); the pad's own LED modes follow the MIDI clock the worker sends.
+//! (1/8), a cue waiting for its quantised start (T-159) blinks its dim
+//! colour to dark (1/4); the pad's own LED modes follow the MIDI clock
+//! the worker sends.
 //! Scene Launch: current page white, other pages grey, pages 6–10 pulsing.
 
 use super::engine::{profile_of, range};
 use super::mapping::{InputKind, LedFeedback, MapMode, Mapping};
-use super::palette::{self, PadColors, CH_BLINK_EIGHTH, CH_PULSE_QUARTER};
+use super::palette::{self, PadColors, CH_BLINK_EIGHTH, CH_BLINK_QUARTER, CH_PULSE_QUARTER};
 pub use super::palette::{MK2_DIM_GREEN, MK2_GREEN, MK2_GREY, MK2_WHITE, MK2_YELLOW};
 use super::profile::Driver;
 use super::Model;
@@ -46,6 +48,7 @@ pub const NOTE_CLIP_STOP: u8 = 0x34;
 const MK1_GREEN: u8 = 1;
 const MK1_GREEN_BLINK: u8 = 2;
 const MK1_YELLOW: u8 = 5;
+const MK1_YELLOW_BLINK: u8 = 6;
 /// Scene launch / clip stop: 1 on, 2 blinking (the device's own rate).
 const ON: u8 = 1;
 const BLINK: u8 = 2;
@@ -187,6 +190,8 @@ enum Look {
     Playing,
     /// Playing while the pad is held (flash / solo).
     Flashing,
+    /// Waiting for its quantised start (T-159): blinks with the beat.
+    Queued,
 }
 
 /// Everything `render` looks at, gathered once per frame.
@@ -196,6 +201,8 @@ struct View<'a> {
     page: Vec<Option<&'a str>>,
     /// Playing cues: id → held (flash / solo).
     playing: HashMap<&'a str, bool>,
+    /// Cues waiting for their quantised start (T-159).
+    queued: Vec<&'a str>,
     /// Soft blink phase (generic flash LEDs), from the tempo clock.
     beat_on: bool,
     /// Tempo clock, in beats (pulses made by the studio, T-206).
@@ -217,6 +224,7 @@ impl View<'_> {
             Some(true) => Look::Flashing,
             Some(false) => Look::Playing,
             None if controls::show_cue_playing(self.s, cue) => Look::Playing,
+            None if self.queued.contains(cue) => Look::Queued,
             None => Look::Present,
         }
     }
@@ -279,6 +287,7 @@ fn velocity(kind: Kind, look: Look) -> u8 {
         (_, Look::Off) => 0,
         (Kind::Grid, look) => match look {
             Look::Present => MK1_YELLOW,
+            Look::Queued => MK1_YELLOW_BLINK,
             Look::Flashing | Look::Alt => MK1_GREEN_BLINK,
             _ => MK1_GREEN,
         },
@@ -314,6 +323,8 @@ impl View<'_> {
             Look::On => (full, None),
             Look::Playing | Look::Alt => self.animate(full, secondary, CH_PULSE_QUARTER),
             Look::Flashing => self.animate(full, secondary, CH_BLINK_EIGHTH),
+            // « En attente » (T-159): its cell colour blinks to dark on the beat.
+            Look::Queued => self.animate(present, 0, CH_BLINK_QUARTER),
         }
     }
 
@@ -325,7 +336,7 @@ impl View<'_> {
         if !self.pulse_by_studio {
             return (full, Some((channel, secondary)));
         }
-        let per_beat = if channel == CH_PULSE_QUARTER { 1.0 } else { 2.0 };
+        let per_beat = if channel == CH_BLINK_EIGHTH { 2.0 } else { 1.0 };
         ((if (self.beat * per_beat).rem_euclid(1.0) < 0.5 { full } else { secondary }), None)
     }
 }
@@ -360,6 +371,8 @@ fn render_generic(view: &View, mappings: &[Mapping], frame: &mut LedFrame) {
             Look::Alt => led.blink.unwrap_or(led.on),
             // No blink value: blink by hand with the beat.
             Look::Flashing => led.blink.unwrap_or(if view.beat_on { led.on } else { led.off }),
+            // Waiting for its start: blinks with the beat, from « present ».
+            Look::Queued => if view.beat_on { led.on } else { led.present.unwrap_or(led.off) },
         };
         frame.set(status, key, v);
     }
@@ -388,6 +401,7 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
         }),
         beat_on: phase < 0.5,
         beat,
+        queued: s.deck.pending.iter().map(|p| p.cue.as_str()).collect(),
         apc,
         mk2: model == Model::Apc40Mk2,
         pad_colors: prefs.pad_colors,
@@ -530,6 +544,30 @@ mod tests {
 
     fn play(s: &mut Shared, cue: &str) {
         assert!(controls::press_cue(s, cue, None, true));
+    }
+
+    #[test]
+    fn a_cue_waiting_for_its_quantised_start_blinks() {
+        let mut s = setup(Driver::Apc40);
+        s.deck.quantize = crate::cues::Quantize::Bar;
+        let first = page_cue(&s, 0);
+        // Mid-bar: the press waits for the next « one ».
+        let now = s.now_s();
+        s.tempo.set_bpm_manual(120.0, now);
+        s.tempo.nudge(1.5 - s.tempo.beat_at(now).rem_euclid(4.0));
+        play(&mut s, &first);
+        assert_eq!(s.deck.pending.len(), 1, "waiting");
+        let f = render(Driver::Apc40, &s, PORT, T);
+        assert_eq!(at(&f, pad(Model::Apc40, 0, 0)), Some(MK1_YELLOW_BLINK));
+        // mkII (T-206): the cell's present colour blinks to dark at 1/4,
+        // by the pad's own LED mode.
+        let mut s2 = setup(Driver::Apc40Mk2);
+        let key = pad(Model::Apc40Mk2, 0, 0);
+        let present = at(&render(Driver::Apc40Mk2, &s2, PORT, T), key);
+        assert_eq!(mode(&render(Driver::Apc40Mk2, &s2, PORT, T), key), None);
+        s2.deck.pending = s.deck.pending.clone();
+        let f = render(Driver::Apc40Mk2, &s2, PORT, T);
+        assert_eq!((at(&f, key), mode(&f, key)), (present, Some((CH_BLINK_QUARTER, 0))));
     }
 
     #[test]

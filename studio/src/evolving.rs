@@ -66,8 +66,7 @@ impl Launch {
             Launch::Beat => 1.0,
             Launch::Bar => beats_per_bar.max(1) as f64,
         };
-        let before = (beat / grid).floor() * grid;
-        if beat - before < ON_THE_BEAT { before } else { before + grid }
+        crate::tempo::quantize(beat, grid, ON_THE_BEAT)
     }
 }
 

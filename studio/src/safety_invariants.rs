@@ -33,6 +33,13 @@
 //! 10. audience scanning starts only from the explicit unlock (never from
 //!     an action, a frame or a refused unlock), an unlock never arms, and
 //!     no frame runs it with the e-stop latched.
+//! 11. transitions between cues (T-158): a morph never lights blanked
+//!     travel, whatever the two frames' point counts (every lit step of a
+//!     morph is a blend of a lit piece of stroke of each frame), keeps a
+//!     stable point count and never gets brighter than the brighter
+//!     frame; fades and quantised launches (T-159) run before the safety
+//!     stage (the session fuzz sets them at random), and the e-stop cuts
+//!     every transition and drops every waiting launch at once.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst; and the ShowNET SD card over Art-Net
@@ -51,7 +58,7 @@
 
 use crate::colorcal::{ChannelCurve, ColorCalibration};
 use crate::controls::{self, ControlInput};
-use crate::cues::{ClickMode, CueSlot};
+use crate::cues::{ClickMode, CueSlot, Quantize, BEAT_EVERY, QUANTIZE_MODES};
 use crate::engine::{Calibration, Settings};
 use crate::interlock::ArmSource;
 use crate::midi::{self, decode::MidiMsg, MidiEvent};
@@ -62,6 +69,7 @@ use crate::presence::{Presence, PresenceSettings};
 use crate::projection::{Geometry, ProjectionConfig, ProjectionZone, Warp, MAX_ZONES, SQUARE};
 use crate::safety::{self, SafetySettings};
 use crate::zones::{self, Horizon, Zone, ZoneKind};
+use crate::transition::{self, Transition, TransitionKind, TransitionLength, LENGTHS, TRANSITION_KINDS};
 use crate::{audience, dwell, interlock, lfo, live, program, test_support, testpattern, timeline, Engine, Shared, FRAME_INTERVAL};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -764,6 +772,8 @@ struct Coverage {
     /// Frames with a lit preview and a Public zone, scanning off / on.
     lit_with_public_above: usize,
     lit_with_public_scanning: usize,
+    /// Frames with a lit preview while a transition between cues ran (T-158).
+    lit_with_transition: usize,
 }
 
 /// One DMX fixture instance per zone (T-407), random personalities and
@@ -810,6 +820,25 @@ fn random_universe(s: &mut Shared, rng: &mut Rng, frame: usize) {
 }
 
 /// Runs one fuzz case; `Err` describes the first broken invariant.
+/// Transitions, quantised launch and beat mode (T-158 / T-159) as the
+/// operator could set them, with a cell's own transition sometimes.
+fn random_transitions(s: &mut Shared, rng: &mut Rng) {
+    let random = |rng: &mut Rng| Transition {
+        kind: *rng.pick(&TRANSITION_KINDS),
+        length: if rng.chance(0.7) { *rng.pick(&LENGTHS) } else { TransitionLength::Seconds(rng.range(0.0, 0.6)) },
+        in_flash: rng.chance(0.5),
+    };
+    s.deck.transition = random(rng);
+    s.deck.quantize = *rng.pick(&QUANTIZE_MODES);
+    s.deck.beat_every = if rng.chance(0.3) { *rng.pick(&BEAT_EVERY) } else { 0 };
+    s.deck.multi = rng.chance(0.5);
+    if rng.chance(0.4) {
+        let (id, _) = random_preset(s, rng);
+        let slot = CueSlot { transition: Some(random(rng)), ..s.deck.slot(&id) };
+        s.deck.set_slot(&id, slot);
+    }
+}
+
 fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let (s, hold_to_run) = random_case(&mut rng);
@@ -847,8 +876,16 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if fixtures {
         setup_fixtures(&mut rig.s(), &mut drng);
     }
+    // Transitions and quantised launches (T-158 / T-159), from their own stream.
+    let mut trng = Rng::new(seed ^ 0x0158_0158);
+    if trng.chance(0.6) {
+        random_transitions(&mut rig.s(), &mut trng);
+    }
     let mut beats = 0;
     for frame in 0..frames {
+        if trng.chance(0.05) {
+            random_transitions(&mut rig.s(), &mut trng);
+        }
         if zrng.chance(0.15) {
             random_routing(&mut rig.s(), &mut zrng);
         }
@@ -939,6 +976,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             return Err(format!("frame {frame}: {} points sent to an output that takes {max}", w.last.len()));
         }
         drop(w);
+        let t = rig.t();
         let s = rig.s();
         check_points(&s.frame, &caps, &cfg, &format!("frame {frame}, preview"))?;
         check_public(&s.frame, &caps, &cfg, scanning, &format!("frame {frame}, preview"))?;
@@ -952,6 +990,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         cov.lit_with_horizon += (preview_lit && cfg.horizon.lines && cfg.horizon.level == 0.0) as usize;
         cov.lit_with_projection += (preview_lit && s.projection.get().zones.iter().any(|z| !z.geometry.is_identity())) as usize;
         cov.lit_with_remote += (preview_lit && !s.netin.fixtures.remotes.is_empty()) as usize;
+        cov.lit_with_transition += (preview_lit && !s.deck.transition_fx(t).is_empty()) as usize;
+        if s.estop.is_latched() && (!s.deck.ending.is_empty() || !s.deck.pending.is_empty()) {
+            return Err(format!("frame {frame}: a transition or a waiting launch survived the e-stop"));
+        }
     }
     Ok(())
 }
@@ -988,7 +1030,7 @@ fn random_sessions_keep_every_output_invariant() {
     }
     if seeds.len() > 100 {
         let share = |n: usize| n as f64 / cov.frames as f64;
-        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning));
+        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition));
         assert!(share(cov.sent_lit) > 0.1, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
@@ -996,6 +1038,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_remote) > 0.02, "only {} of {} lit frames went through a DMX fixture instance", cov.lit_with_remote, cov.frames);
         assert!(share(cov.lit_with_public_above) > 0.1, "only {} of {} lit frames had a Public zone, scanning off", cov.lit_with_public_above, cov.frames);
         assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
+        assert!(share(cov.lit_with_transition) > 0.01, "only {} of {} lit frames ran a transition", cov.lit_with_transition, cov.frames);
     }
 }
 
@@ -1596,3 +1639,172 @@ fn a_user_cues_own_master_applies_before_the_safety_stage() {
     assert!(lit(&low).iter().all(|p| p.y >= -1e-3), "a lit point below the horizon");
 }
 
+
+// ---------- transitions between cues (T-158) ----------
+
+/// Segments `i` (from point `i` to `i + 1`) of `src` that pass within a
+/// hair of `q`.
+fn segments_near(src: &[Point], q: &Point) -> Vec<usize> {
+    let near = |a: &Point, b: &Point| {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        let u = if len2 > 0.0 { (((q.x - a.x) * dx + (q.y - a.y) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let (px, py) = (a.x + u * dx, a.y + u * dy);
+        ((q.x - px).powi(2) + (q.y - py).powi(2)).sqrt() < 1e-4
+    };
+    (0..src.len().saturating_sub(1)).filter(|&i| near(&src[i], &src[i + 1])).collect()
+}
+
+/// Every lit step of `out` (to a lit point) runs along `src`'s lit path:
+/// both its ends lie on segments of `src` with only lit segments (both
+/// ends lit) from the first to the second. A step across blanked travel
+/// fails.
+fn check_on_strokes(src: &[Point], out: &[Point], what: &str) -> Result<(), String> {
+    let lit_seg: Vec<bool> = (0..src.len().saturating_sub(1)).map(|i| src[i].is_lit() && src[i + 1].is_lit()).collect();
+    for k in 1..out.len() {
+        if !out[k].is_lit() {
+            continue;
+        }
+        if src.len() == 1 {
+            let on = src[0].is_lit() && (out[k].x - src[0].x).abs() < 1e-4 && (out[k].y - src[0].y).abs() < 1e-4;
+            if !on {
+                return Err(format!("{what}: lit point {k} off a one-point frame"));
+            }
+            continue;
+        }
+        let (from, to) = (segments_near(src, &out[k - 1]), segments_near(src, &out[k]));
+        let ok = from.iter().any(|&i| to.iter().any(|&j| i <= j && (i..=j).all(|s| lit_seg[s])));
+        if !ok {
+            return Err(format!("{what}: lit step {} → {k} ({:?} → {:?}) leaves the lit strokes", k - 1, out[k - 1], out[k]));
+        }
+    }
+    Ok(())
+}
+
+/// Invariant 11 on one morph: `out` is `morph(a, b, p)`.
+fn check_morph(a: &[Point], b: &[Point], p: f32, out: &[Point]) -> Result<(), String> {
+    let n = a.len().max(b.len()).max(2);
+    if out.len() != n {
+        return Err(format!("{} and {} points morphed into {}", a.len(), b.len(), out.len()));
+    }
+    let brightest = |f: &[Point], c: usize| f.iter().filter(|q| q.is_lit()).map(|q| [q.r, q.g, q.b][c]).filter(|v| v.is_finite()).fold(0.0f32, |m, v| m.max(v.min(1.0)));
+    for (k, q) in out.iter().enumerate() {
+        if !(q.x.is_finite() && q.y.is_finite()) {
+            return Err(format!("point {k} not finite: {q:?}"));
+        }
+        for (c, v) in [q.r, q.g, q.b].into_iter().enumerate() {
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) || v > brightest(a, c).max(brightest(b, c)) + 1e-5 {
+                return Err(format!("point {k} channel {c} = {v}: brighter than both frames"));
+            }
+        }
+    }
+    // Lit steps are blends of the two ends, which run along each frame's
+    // lit strokes: the lit points are the same at every p, and each point
+    // moves in a straight line between its two ends.
+    let (start, end) = (transition::morph(a, b, 0.0), transition::morph(a, b, 1.0));
+    for k in 0..n {
+        if out[k].is_lit() != start[k].is_lit() || out[k].is_lit() != end[k].is_lit() {
+            return Err(format!("point {k}: lit at p = {p} but not at both ends"));
+        }
+        let (x, y) = (start[k].x + (end[k].x - start[k].x) * p, start[k].y + (end[k].y - start[k].y) * p);
+        if (out[k].x - x).abs() > 1e-4 || (out[k].y - y).abs() > 1e-4 {
+            return Err(format!("point {k} at ({}, {}) off its straight path ({x}, {y})", out[k].x, out[k].y));
+        }
+    }
+    check_on_strokes(a, &start, "p = 0")?;
+    check_on_strokes(b, &end, "p = 1")
+}
+
+fn run_morph_case(seed: u64) -> Result<(), String> {
+    let mut rng = Rng::new(seed);
+    let (a, b) = (random_strokes(&mut rng), random_strokes(&mut rng));
+    let p = match rng.below(6) {
+        0 => 0.0,
+        1 => 1.0,
+        _ => rng.f(),
+    };
+    let out = transition::morph(&a, &b, p);
+    check_morph(&a, &b, p, &out).map_err(|e| format!("{e} ({} → {} points, p {p})", a.len(), b.len()))?;
+    // Then through the safety stage and caps, like the engine does after the mixer.
+    let cfg = random_safety(&mut rng);
+    let caps = random_limits(&mut rng);
+    let mut frame = safety::apply(out.clone(), 0.0, &cfg, &mut safety::StrobeLimiter::default());
+    crate::power::cap(&mut frame, &caps);
+    check_points(&frame, &caps, &cfg, "morph then safety then caps")
+}
+
+#[test]
+fn a_morph_never_lights_blanked_travel() {
+    run_property("a_morph_never_lights_blanked_travel", 11, 2000, run_morph_case);
+}
+
+/// The checker must catch a morph that lights every sample lit in both
+/// frames without asking for the same stroke: with strokes longer than
+/// the sample spacing and a short jump, it lights the jump.
+#[test]
+fn the_morph_check_catches_a_step_across_travel() {
+    let stroke = |y: f32, rev: bool| -> Vec<Point> {
+        (0..10).map(|i| i as f32 / 9.0).map(|u| if rev { 1.0 - u } else { u }).map(|u| Point::lit(-0.5 + u, y, 1.0, 1.0, 1.0)).collect()
+    };
+    let mut a = stroke(-0.02, false);
+    a.push(Point::blanked(0.5, -0.02));
+    a.push(Point::blanked(0.5, 0.02));
+    a.extend(stroke(0.02, true));
+    let b: Vec<Point> = (0..22).map(|i| Point::lit(-0.5 + i as f32 / 21.0, 0.5, 1.0, 0.0, 0.0)).collect();
+    let n = a.len().max(b.len());
+    let (ra, rb) = (transition::resample(&a, n), transition::resample(&b, n));
+    let naive: Vec<Point> = ra.iter().zip(&rb).map(|(sa, sb)| if sa.stroke.is_some() && sb.stroke.is_some() { sa.point } else { Point::blanked(sa.point.x, sa.point.y) }).collect();
+    assert!(check_on_strokes(&a, &naive, "naive").is_err(), "the naive morph lights a's jump");
+    let ours = transition::morph(&a, &b, 0.0);
+    assert!(check_on_strokes(&a, &ours, "ours").is_ok());
+    assert!(check_morph(&a, &b, 0.5, &transition::morph(&a, &b, 0.5)).is_ok());
+}
+
+/// Through the real engine: with a long fade and a bar quantisation, an
+/// e-stop drops the fading cue and the waiting launch at once, nothing lit
+/// leaves, and the waiting cue doesn't start after the reset.
+#[test]
+fn the_estop_cuts_every_transition_and_waiting_launch() {
+    let mut s = test_support::shared();
+    s.deck.transition = Transition { kind: TransitionKind::Fade, length: TransitionLength::Seconds(30.0), in_flash: true };
+    s.safety.set(SafetySettings { horizon: Horizon { y: -1.0, ..Default::default() }, ..Default::default() }, true).unwrap();
+    let ids: Vec<String> = s.presets.iter().filter(|p| p.settings.gate == crate::engine::GateMode::Off).take(3).map(|p| p.id.clone()).collect();
+    assert!(controls::press_cue(&mut s, &ids[0], None, true));
+    s.request_arm(ArmSource::Ui).expect("arms in the test studio");
+    let mut rig = Rig::new(s, "transition-estop", 0);
+    for _ in 0..3 {
+        rig.tick();
+    }
+    {
+        let mut s = rig.s();
+        assert!(controls::press_cue(&mut s, &ids[1], None, true));
+        assert_eq!(s.deck.ending.len(), 1, "the first cue fades out");
+        s.deck.quantize = Quantize::Bar;
+        let t = s.now_s();
+        let shift = 1.5 - s.tempo.beat_at(t).rem_euclid(4.0);
+        s.tempo.nudge(shift);
+        assert!(controls::press_cue(&mut s, &ids[2], None, true));
+        assert_eq!(s.deck.pending.len(), 1, "the third waits for the bar");
+    }
+    rig.tick();
+    assert!(rig.wire.lock().unwrap().last.iter().any(|p| p.is_lit()), "the fade is on the output");
+    rig.s().emergency_stop(ArmSource::Keyboard);
+    {
+        let s = rig.s();
+        assert!(s.deck.ending.is_empty() && s.deck.pending.is_empty(), "cut at once");
+        assert!(s.deck.active.iter().all(|a| a.fade.is_none()));
+    }
+    rig.tick();
+    assert!(!rig.wire.lock().unwrap().last.iter().any(|p| p.is_lit()), "nothing lit after the e-stop");
+    {
+        let mut s = rig.s();
+        let estop = Arc::clone(&s.estop);
+        s.gate.reset_estop(&estop);
+    }
+    for _ in 0..(5 * 60) {
+        rig.tick();
+    }
+    let s = rig.s();
+    assert!(!s.deck.active.iter().any(|a| a.cue == ids[2]), "the dropped launch never starts");
+    assert!(!s.gate.is_armed(), "the reset doesn't re-arm");
+}
