@@ -104,6 +104,7 @@ pub fn shared() -> Shared {
         project: crate::project::ProjectState::load(&std::env::temp_dir().join("laser-studio-test-unused")),
         test_pattern: Default::default(),
         keep_awake: crate::keep_awake::KeepAwakeState::in_memory(),
+        onboarding: crate::onboarding::OnboardingStore::in_memory(),
         show_mode: crate::showmode::ShowMode::in_memory(),
         data_warnings: Vec::new(),
         // Pure preview: the checklist never blocks unit tests.

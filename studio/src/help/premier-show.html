@@ -1,0 +1,17 @@
+<p>Le chemin le plus court entre Laser Studio et vos lasers, tant que le protocole du ShowNET reste fermé : le studio envoie ses tracés à MadMapper (extension MadLaser) par <b>PONK</b>, un protocole réseau ouvert, et MadMapper pilote le ShowNET avec sa propre licence.</p>
+<svg class="help-fig" viewBox="0 0 520 64" role="img" aria-label="Laser Studio envoie à MadMapper par PONK, MadMapper au ShowNET, le ShowNET aux lasers">
+  <g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="18" width="110" height="34" rx="8"/><rect x="154" y="18" width="120" height="34" rx="8"/><rect x="314" y="18" width="90" height="34" rx="8"/><rect x="444" y="18" width="72" height="34" rx="8"/>
+  <path d="M114 35h36M274 35h36M404 35h36"/><path d="M144 30l6 5-6 5M304 30l6 5-6 5M434 30l6 5-6 5"/></g>
+  <g fill="currentColor" font-size="12" text-anchor="middle"><text x="59" y="40">Laser Studio</text><text x="214" y="40">MadMapper</text><text x="359" y="40">ShowNET</text><text x="480" y="40">Lasers</text>
+  <text x="132" y="12" font-size="10">PONK</text></g>
+</svg>
+<ol>
+<li><b>Avant tout</b> : l'arrêt d'urgence matériel du projecteur (clé, interlock, bouton) est branché et à portée de main. C'est lui la vraie sécurité ; le logiciel ne le remplace pas.</li>
+<li><b>Dans MadMapper</b> : le ShowNET est visible comme d'habitude ; laissez la sortie laser de MadLaser <b>coupée</b> pendant la mise en place.</li>
+<li><b>Dans Laser Studio</b> : RÉGLAGES › « Sorties et projecteurs ». La ligne PONK (MadMapper sur ce Mac) est déjà dans la liste : « Connecter ». La pastille PONK apparaît dans la barre du haut. Le laser reste désarmé : le studio envoie des images vides en continu.</li>
+<li><b>Dans MadMapper</b> : une source en direct nommée Laser Studio apparaît parmi les médias. Donnez-la à la surface laser reliée au ShowNET.</li>
+<li><b>Les verrous</b> (voir <a href="#aide/securite-laser">Sécurité laser</a>) : RÉGLAGES › « Avant le show » : nom de l'opérateur, chaque élément vérifié puis coché (dont « Arrêt matériel testé (interlock ou arrêt d'urgence du projecteur) »), puis « Liste terminée ». Ensuite RÉGLAGES › « Sécurité » : dites où est le public (une zone cochée « Public », ou l'horizon complet).</li>
+<li><b>Un premier cue</b> : LIVE, cliquez une case de la grille (aperçu seulement tant que le laser est éteint). Puis « LASER OFF » ou <kbd>Espace</kbd> pour armer : le dessin apparaît dans l'aperçu de MadMapper. Vérifiez la taille, le sens et les couleurs.</li>
+<li>Seulement ensuite, activez la sortie laser de MadLaser.</li>
+</ol>
+<p>Pour arrêter : <kbd>Échap</kbd> (« ARRÊT », verrouillé) ou « Noir ». Si rien n'arrive dans MadMapper, voir <a href="#aide/depannage">Dépannage</a>. Ensuite : <a href="#aide/timeline-shows">Shows</a> (exemples prêts à jouer et show auto).</p>

@@ -666,6 +666,28 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             },
             Err(e) => e,
         },
+        // First launch (T-437): whether the guided tour was seen. A view
+        // preference: never arms, never touches an output.
+        (Method::Get, "/api/onboarding") => json_response(onboarding_view(&shared.lock().unwrap())),
+        (Method::Post, "/api/onboarding") => match body::<OnboardingRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match s.onboarding.set_tour_done(req.tour_done) {
+                    Ok(()) => json_response(onboarding_view(&s)),
+                    Err(e) => text(500, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        // Built-in help (T-438): pages compiled into the binary, offline.
+        (Method::Get, "/api/help") => {
+            let full = query_u64(request.url(), "full") == Some(1);
+            json_response(json!(crate::help::PAGES.iter().map(|p| help_view(p, full)).collect::<Vec<_>>()))
+        }
+        (Method::Get, p) if p.starts_with("/api/help/") => match crate::help::page(&p["/api/help/".len()..]) {
+            Some(page) => json_response(help_view(page, true)),
+            None => text(404, "page d'aide inconnue"),
+        },
         (Method::Post, "/api/keep_awake") => match body::<KeepAwakeRequest>(request) {
             // RÉGLAGES › Général (T-412): the setting only; never arms.
             Ok(req) => match crate::keep_awake::set_enabled(shared, req.enabled) {
@@ -3077,6 +3099,25 @@ struct KeepAwakeRequest {
 }
 
 #[derive(Deserialize)]
+struct OnboardingRequest {
+    tour_done: bool,
+}
+
+fn onboarding_view(s: &Shared) -> serde_json::Value {
+    json!({ "tour_done": s.onboarding.state.tour_done, "tour_version": crate::onboarding::TOUR_VERSION })
+}
+
+/// A help page for the UI; `full` adds its body (the list is searchable
+/// offline once fetched with `?full=1`).
+fn help_view(page: &crate::help::HelpPage, full: bool) -> serde_json::Value {
+    let mut v = json!({ "slug": page.slug, "title_fr": page.title_fr, "group_fr": page.group_fr });
+    if full {
+        v["body_html"] = json!(page.body_html);
+    }
+    v
+}
+
+#[derive(Deserialize)]
 struct SaveScene {
     name: String,
     duration_secs: f32,
@@ -3212,6 +3253,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "engine_ok": s.health.engine_ok(),
         "presence": s.presence.status(),
         "keep_awake": s.keep_awake,
+        "first_run": s.onboarding.first_run(),
         "lock": lock_view(s),
         "output": s.output_name,
         "output_kind": s.output_kind,
@@ -4196,7 +4238,23 @@ mod tests {
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).unwrap();
         let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
-        (String::from_utf8_lossy(&raw[..split]).into_owned(), raw[split + 4..].to_vec())
+        let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+        let mut body = raw[split + 4..].to_vec();
+        // tiny_http sends bodies of 32 KiB or more chunked.
+        if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+            let (mut out, mut rest) = (Vec::new(), &body[..]);
+            loop {
+                let eol = rest.windows(2).position(|w| w == b"\r\n").unwrap();
+                let size = usize::from_str_radix(std::str::from_utf8(&rest[..eol]).unwrap().trim(), 16).unwrap();
+                if size == 0 {
+                    break;
+                }
+                out.extend_from_slice(&rest[eol + 2..eol + 2 + size]);
+                rest = &rest[eol + 2 + size + 2..];
+            }
+            body = out;
+        }
+        (head, body)
     }
 
     /// T-403: the diagnostic report is a zip download with the logs and
@@ -4572,6 +4630,44 @@ mod tests {
         assert!(body.contains("adresse d'écoute invalide"), "{body}");
         assert_eq!(t.request("POST", "/api/netin", "[]").0, 400);
         assert_eq!(arm_status(&t)["armed"], false, "never arms");
+    }
+
+    /// T-437: the tour is offered on a fresh data folder, recorded once
+    /// seen, and never arms (it is a view, allowed in show mode too).
+    #[test]
+    fn onboarding_is_reported_and_recorded_without_arming() {
+        let t = TestServer::start(false);
+        let js = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["first_run"], true);
+        assert_eq!(js(&t.request("GET", "/api/onboarding", "").1)["tour_done"], false);
+        let (status, body) = t.request("POST", "/api/onboarding", r#"{"tour_done":true}"#);
+        assert_eq!((status, js(&body)["tour_done"].clone()), (200, json!(true)));
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["first_run"], false);
+        assert_eq!(t.request("POST", "/api/onboarding", "{}").0, 400);
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/onboarding", r#"{"tour_done":false}"#).0, 200, "not an edit: allowed in show mode");
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["first_run"], true);
+        assert_eq!(arm_status(&t)["armed"], false, "never arms");
+    }
+
+    /// T-438: the help pages come from the binary; unknown or malformed
+    /// slugs get 404.
+    #[test]
+    fn help_pages_are_served_from_the_binary() {
+        let t = TestServer::start(false);
+        let js = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let list = js(&t.request("GET", "/api/help", "").1);
+        assert_eq!(list.as_array().unwrap().len(), crate::help::PAGES.len());
+        assert!(list[0]["slug"].is_string() && list[0]["title_fr"].is_string());
+        assert!(list[0].get("body_html").is_none(), "the list is light");
+        let full = js(&t.request("GET", "/api/help?full=1", "").1);
+        assert!(full.as_array().unwrap().iter().all(|p| p["body_html"].is_string()));
+        let (status, body) = t.request("GET", "/api/help/securite-laser", "");
+        assert_eq!(status, 200);
+        assert_eq!(js(&body)["title_fr"], "Sécurité laser : armer, arrêter, réinitialiser");
+        for bad in ["/api/help/inconnue", "/api/help/..%2Fweb", "/api/help/Live-direct", "/api/help/"] {
+            assert_eq!(t.request("GET", bad, "").0, 404, "{bad}");
+        }
     }
 
     #[test]
