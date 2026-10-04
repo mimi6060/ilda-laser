@@ -25,7 +25,7 @@ const SECTIONS: Record<Workspace, string[]> = {
 const NOT_ALWAYS_SHOWN = new Set(['#lfoList', '#shapes', '#text', '#gen', '#genPanel', '#evoPanel',
   '#sfHz', '#holdToRun', '#cOx', '#midiLearnMode', '#midiAllowArm']);
 /** Always on screen, whatever the workspace. */
-const TOP_BAR = ['#projBtn', '#bpm', '#beats', '#midiStatus', '#armBtn', '#estopBtn', '#armInfo', '#wsTabs'];
+const TOP_BAR = ['#projBtn', '#bpm', '#beats', '#topMaster', '#midiStatus', '#output', '#blackoutBtn', '#armBtn', '#estopBtn', '#armInfo', '#wsTabs'];
 
 /** The part of /api/state a display change must not touch (tempo phase and presence tick on their own). */
 async function steadyState() {
