@@ -3,6 +3,7 @@
 
 use super::learn;
 use super::mapping::{LedFeedback, MapMode, RelEncoding};
+use super::palette::PadColors;
 use super::profile::GENERIC;
 use super::testing::InjectError;
 use crate::Shared;
@@ -44,6 +45,11 @@ struct DeviceRequest {
     /// « Retour LED » (T-205).
     #[serde(default)]
     leds: Option<bool>,
+    /// « Couleurs des pads » (T-206).
+    #[serde(default)]
+    pad_colors: Option<PadColors>,
+    #[serde(default)]
+    pulse_by_studio: Option<bool>,
 }
 
 /// `--midi-test` only: bytes "played" on a simulated controller.
@@ -163,12 +169,17 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             Err(e) => e,
         },
         (true, "/api/midi/device") => match parse::<DeviceRequest>(body) {
-            Ok(DeviceRequest { enabled: None, leds: None, .. }) => Reply::Text(400, "« enabled » ou « leds » attendu".into()),
+            Ok(DeviceRequest { enabled: None, leds: None, pad_colors: None, pulse_by_studio: None, .. }) => {
+                Reply::Text(400, "« enabled », « leds », « pad_colors » ou « pulse_by_studio » attendu".into())
+            }
             Ok(req) => {
                 let store = &mut s.midi.store;
                 let mut saved = req.enabled.map_or(Ok(()), |on| store.set_port_enabled(&req.port, on));
                 if let (Ok(()), Some(on)) = (&saved, req.leds) {
                     saved = store.set_port_leds(&req.port, on);
+                }
+                if saved.is_ok() && (req.pad_colors.is_some() || req.pulse_by_studio.is_some()) {
+                    saved = store.set_port_pads(&req.port, req.pad_colors, req.pulse_by_studio);
                 }
                 match saved {
                     Ok(()) => {
@@ -357,9 +368,17 @@ fn state(s: &Shared) -> Value {
         "test": m.sim.is_some(),
     });
     let now = Instant::now();
+    let t = s.now_s();
     for (i, d) in m.devices.iter().enumerate() {
         // Activity light (T-211): how long since its last message.
         v["devices"][i]["activity_ms"] = json!(d.last_at.map(|t| now.saturating_duration_since(t).as_millis() as u64));
+        // Pad colours (T-206) and, for an APC40 mkII, what its pads show.
+        let prefs = m.store.port_prefs(&d.name);
+        v["devices"][i]["pad_colors"] = json!(prefs.pad_colors);
+        v["devices"][i]["pulse_by_studio"] = json!(prefs.pulse_by_studio);
+        if d.model == super::Model::Apc40Mk2 {
+            v["devices"][i]["pads"] = super::led::mk2_preview(s, &d.name, t);
+        }
     }
     for (key, value) in learn::state(s, now) {
         v[key] = value;
@@ -417,6 +436,30 @@ mod tests {
             assert!(dev.get(key).is_some(), "{key}");
         }
         assert_eq!(v["last"]["msg"]["note"], 0x51);
+    }
+
+    /// T-206: pad colour options per port, and the mkII pad preview.
+    #[test]
+    fn pad_colours_are_saved_and_previewed() {
+        let mut s = test_support::shared();
+        s.midi.enabled = true;
+        let d = s.midi.device_mut("APC40 mkII");
+        d.model = crate::midi::Model::Apc40Mk2;
+        d.profile = "apc40-mk2".into();
+        let dev = |s: &mut Shared| json(route(s, false, "/api/midi", ""))["devices"][0].clone();
+        let v = dev(&mut s);
+        assert_eq!((v["pad_colors"].as_str(), v["pulse_by_studio"].as_bool()), (Some("cue"), Some(false)));
+        assert_eq!(v["pads"]["pads"].as_array().unwrap().len(), 5);
+        assert_eq!(v["pads"]["scenes"][0]["v"], crate::midi::led::MK2_WHITE);
+
+        let body = r#"{"port":"APC40 mkII","pad_colors":"classic","pulse_by_studio":true}"#;
+        assert_eq!(status(route(&mut s, true, "/api/midi/device", body)), 200);
+        let v = dev(&mut s);
+        assert_eq!((v["pad_colors"].as_str(), v["pulse_by_studio"].as_bool()), (Some("classic"), Some(true)));
+        assert_eq!(v["pads"]["pads"][0][0]["v"], crate::midi::led::MK2_YELLOW);
+        assert!(s.midi.store.port_leds("APC40 mkII") && s.midi.store.port_enabled("APC40 mkII"), "others unchanged");
+        assert_eq!(status(route(&mut s, true, "/api/midi/device", r#"{"port":"APC40 mkII","pad_colors":"rainbow"}"#)), 400);
+        assert_eq!(status(route(&mut s, true, "/api/midi/device", r#"{"port":"APC40 mkII"}"#)), 400);
     }
 
     #[test]

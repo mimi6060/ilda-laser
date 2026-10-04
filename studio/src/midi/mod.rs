@@ -19,6 +19,7 @@ pub mod engine;
 pub mod learn;
 pub mod led;
 pub mod mapping;
+pub mod palette;
 pub mod profile;
 pub mod safety;
 pub mod testing;

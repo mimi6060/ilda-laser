@@ -17,11 +17,16 @@
 //! metronome, no rings.
 //!
 //! Velocities and channels: Akai's public protocol documents
-//! (docs/research/midi-apc40.md §1.3, §2.3). The mkII pad colours are
-//! placeholders until T-206: white = cue present, green = playing.
+//! (docs/research/midi-apc40.md §1.3, §2.3). The mkII pads are RGB
+//! (T-206, `palette.rs`): a cue present shows its colour dimmed, a playing
+//! cue its full colour pulsing (1/4) to the dim one, a held flash blinks
+//! (1/8); the pad's own LED modes follow the MIDI clock the worker sends.
+//! Scene Launch: current page white, other pages grey, pages 6–10 pulsing.
 
 use super::engine::{profile_of, range};
 use super::mapping::{InputKind, LedFeedback, MapMode, Mapping};
+use super::palette::{self, PadColors, CH_BLINK_EIGHTH, CH_PULSE_QUARTER};
+pub use super::palette::{MK2_DIM_GREEN, MK2_GREEN, MK2_GREY, MK2_WHITE, MK2_YELLOW};
 use super::profile::Driver;
 use super::Model;
 use crate::controls::{self, ControlKind, GRID_COLS, GRID_ROWS};
@@ -44,27 +49,52 @@ const MK1_YELLOW: u8 = 5;
 /// Scene launch / clip stop: 1 on, 2 blinking (the device's own rate).
 const ON: u8 = 1;
 const BLINK: u8 = 2;
-/// APC40 mkII palette indexes (§2.4). T-206 will pick per-cue colours.
-pub const MK2_WHITE: u8 = 3;
-pub const MK2_GREEN: u8 = 21;
-pub const MK2_DIM_GREEN: u8 = 22;
-pub const MK2_ORANGE: u8 = 9;
-
 /// Desired state of every LED the studio drives on one device:
 /// (status byte, note or CC number) → velocity or value. The status keeps
 /// the channel: the APC40's grid and track buttons use it for the column.
+/// The second map is the mkII's LED modes: note (on status 0x90) →
+/// (mode channel, secondary colour), sent right after the solid colour.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct LedFrame(pub BTreeMap<(u8, u8), u8>);
+pub struct LedFrame(pub BTreeMap<(u8, u8), u8>, pub BTreeMap<u8, (u8, u8)>);
 
 impl LedFrame {
     fn set(&mut self, status: u8, key: u8, value: u8) {
         self.0.insert((status, key), value);
     }
 
+    /// A mkII RGB pad / scene button: `color` solid on channel 0, then,
+    /// if any, the secondary colour on a mode channel (pulse, blink).
+    fn set_rgb(&mut self, note: u8, (color, mode): (u8, Option<(u8, u8)>)) {
+        self.set(0x90, note, color);
+        match mode {
+            Some(m) if color != 0 => self.1.insert(note, m),
+            _ => self.1.remove(&note),
+        };
+    }
+
+    fn mode(&self, status: u8, key: u8) -> Option<&(u8, u8)> {
+        if status == 0x90 {
+            self.1.get(&key)
+        } else {
+            None
+        }
+    }
+
     /// Messages that take a device showing `last` to `self`. An LED no
-    /// longer driven is switched off (Note On velocity 0, CC value 0).
+    /// longer driven is switched off (Note On velocity 0, CC value 0). A
+    /// solid colour on channel 0 also ends a pulse / blink, so a pad whose
+    /// mode changes gets its colour again, then its new mode.
     pub fn diff(&self, last: &LedFrame) -> Vec<[u8; 3]> {
-        let mut msgs: Vec<[u8; 3]> = self.0.iter().filter(|(k, v)| last.0.get(k) != Some(v)).map(|(&(st, key), &v)| [st, key, v]).collect();
+        let mut msgs = Vec::new();
+        for (&(st, key), &v) in &self.0 {
+            let mode = self.mode(st, key);
+            if last.0.get(&(st, key)) != Some(&v) || mode != last.mode(st, key) {
+                msgs.push([st, key, v]);
+                if let Some(&(ch, secondary)) = mode {
+                    msgs.push([0x90 | ch & 0x0F, key, secondary]);
+                }
+            }
+        }
         msgs.extend(last.0.iter().filter(|(k, v)| **v != 0 && !self.0.contains_key(k)).map(|(&(st, key), _)| [st, key, 0]));
         msgs
     }
@@ -152,7 +182,7 @@ enum Look {
     On,
     /// Lit by its Shift mapping (e.g. page 6–8 on Scene Launch 1–3).
     Alt,
-    /// A cue sits in this pad.
+    /// A cue sits in this pad (mkII Scene Launch: that page exists).
     Present,
     Playing,
     /// Playing while the pad is held (flash / solo).
@@ -166,11 +196,18 @@ struct View<'a> {
     page: Vec<Option<&'a str>>,
     /// Playing cues: id → held (flash / solo).
     playing: HashMap<&'a str, bool>,
-    /// Soft blink phase (mkII flash pads), from the tempo clock.
+    /// Soft blink phase (generic flash LEDs), from the tempo clock.
     beat_on: bool,
+    /// Tempo clock, in beats (pulses made by the studio, T-206).
+    beat: f64,
     /// APC layout: a layer's Activator (`layer.N.mute`) is lit while the
     /// layer is heard. Elsewhere a mute button is lit while muted.
     apc: bool,
+    /// APC40 mkII: RGB pads, and its Scene Launch buttons show which pages exist.
+    mk2: bool,
+    /// The port's pad colour options (T-206).
+    pad_colors: PadColors,
+    pulse_by_studio: bool,
 }
 
 impl View<'_> {
@@ -215,6 +252,12 @@ impl View<'_> {
         })
     }
 
+    /// A `page.N` target whose page exists.
+    fn page_exists(&self, target: &str) -> bool {
+        let id = self.s.controls.get(target).map_or(target, |d| d.id.as_str());
+        id.strip_prefix("page.").and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| (1..=self.s.grid.page_count()).contains(&n))
+    }
+
     fn look(&self, mp: &Mapping) -> Option<Look> {
         if mp.mode == MapMode::Grid {
             let slot = mp.args.get("slot")?.as_u64()? as usize;
@@ -222,6 +265,7 @@ impl View<'_> {
         }
         let lit = self.lit(&mp.target)?;
         Some(match (lit, mp.shift) {
+            (false, _) if self.mk2 && self.page_exists(&mp.target) => Look::Present,
             (false, _) => Look::Off,
             (true, false) => Look::On,
             (true, true) => Look::Alt,
@@ -229,22 +273,60 @@ impl View<'_> {
     }
 }
 
-fn velocity(model: Model, kind: Kind, look: Look, blink_on: bool) -> u8 {
-    match (model, kind, look) {
-        (_, _, Look::Off) => 0,
-        (Model::Apc40Mk2, Kind::Grid | Kind::Scene, look) => match look {
-            Look::Present => MK2_WHITE,
-            Look::Alt => MK2_ORANGE,
-            Look::Flashing if !blink_on => MK2_DIM_GREEN,
-            _ => MK2_GREEN,
-        },
-        (_, Kind::Grid, look) => match look {
+/// A LED that is not a mkII RGB pad.
+fn velocity(kind: Kind, look: Look) -> u8 {
+    match (kind, look) {
+        (_, Look::Off) => 0,
+        (Kind::Grid, look) => match look {
             Look::Present => MK1_YELLOW,
             Look::Flashing | Look::Alt => MK1_GREEN_BLINK,
             _ => MK1_GREEN,
         },
-        (_, Kind::Scene | Kind::ClipStop, Look::Alt | Look::Flashing) => BLINK,
+        // "That page exists" only shows on the mkII's RGB scene buttons.
+        (_, Look::Present) => 0,
+        (Kind::Scene | Kind::ClipStop, Look::Alt | Look::Flashing) => BLINK,
         _ => ON,
+    }
+}
+
+/// An RGB LED: solid colour and, if it pulses / blinks, (mode channel,
+/// secondary colour).
+type RgbLed = (u8, Option<(u8, u8)>);
+
+impl View<'_> {
+    /// A mkII clip pad (`slot` = its grid slot) or scene button (T-206).
+    fn rgb(&self, kind: Kind, look: Look, slot: Option<usize>) -> RgbLed {
+        let cue = slot.and_then(|n| self.page.get(n).copied().flatten());
+        // (present, full, secondary of a pulse / blink)
+        let (present, full, secondary) = match (kind, cue.and_then(|c| palette::cue_rgb(self.s, c, self.pad_colors))) {
+            (Kind::Scene, _) => (MK2_GREY, MK2_WHITE, MK2_GREY),
+            (_, Some(rgb)) => {
+                let full = palette::nearest_velocity(rgb);
+                let dim = palette::dim_velocity(full);
+                (dim, full, dim)
+            }
+            // « Vert / jaune », like the original APC40.
+            (_, None) => (MK2_YELLOW, MK2_GREEN, MK2_DIM_GREEN),
+        };
+        match look {
+            Look::Off => (0, None),
+            Look::Present => (present, None),
+            Look::On => (full, None),
+            Look::Playing | Look::Alt => self.animate(full, secondary, CH_PULSE_QUARTER),
+            Look::Flashing => self.animate(full, secondary, CH_BLINK_EIGHTH),
+        }
+    }
+
+    /// The pad's own pulse / blink (it follows our MIDI clock), or, with
+    /// « pulsation par le studio », the two colours swapped on the beat:
+    /// a quarter-note pulse is bright for the first half of each beat, an
+    /// eighth-note blink for the first half of each eighth.
+    fn animate(&self, full: u8, secondary: u8, channel: u8) -> RgbLed {
+        if !self.pulse_by_studio {
+            return (full, Some((channel, secondary)));
+        }
+        let per_beat = if channel == CH_PULSE_QUARTER { 1.0 } else { 2.0 };
+        ((if (self.beat * per_beat).rem_euclid(1.0) < 0.5 { full } else { secondary }), None)
     }
 }
 
@@ -295,6 +377,7 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
     }
     let beat = s.tempo.beat_at(t);
     let phase = beat.rem_euclid(1.0);
+    let prefs = s.midi.store.port_prefs(port);
     let view = View {
         s,
         // Pad n = the grid's cell at row n / 8, column n % 8 (dark past its size).
@@ -304,7 +387,11 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
             m
         }),
         beat_on: phase < 0.5,
+        beat,
         apc,
+        mk2: model == Model::Apc40Mk2,
+        pad_colors: prefs.pad_colors,
+        pulse_by_studio: prefs.pulse_by_studio,
     };
     if !apc {
         render_generic(&view, &profile.mappings, &mut frame);
@@ -313,7 +400,7 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
 
     // Buttons and pads. The plain mapping speaks first; the Shift one
     // only lights a button its plain mapping leaves dark.
-    let mut looks: BTreeMap<(u8, u8), (Kind, Look)> = BTreeMap::new();
+    let mut looks: BTreeMap<(u8, u8), (Kind, Look, Option<usize>)> = BTreeMap::new();
     for shift in [false, true] {
         for mp in profile.mappings.iter().filter(|mp| mp.shift == shift && mp.input.kind == InputKind::Note) {
             let note = mp.input.number;
@@ -326,14 +413,21 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
             };
             // A mapped LED with nothing to show (a trigger) is kept dark.
             let look = view.look(mp).unwrap_or(Look::Off);
-            let entry = looks.entry((channel, note)).or_insert((kind, Look::Off));
-            if entry.1 == Look::Off {
-                entry.1 = look;
+            let slot = (mp.mode == MapMode::Grid).then(|| mp.args.get("slot").and_then(|v| v.as_u64())).flatten().map(|n| n as usize);
+            let entry = looks.entry((channel, note)).or_insert((kind, Look::Off, None));
+            // A scene button showing "page exists" still lights for its
+            // Shift page when that one is current.
+            if entry.1 == Look::Off || (entry.1 == Look::Present && kind == Kind::Scene && look != Look::Off) {
+                (entry.1, entry.2) = (look, slot);
             }
         }
     }
-    for ((channel, note), (kind, look)) in looks {
-        frame.set(0x90 | channel, note, velocity(model, kind, look, view.beat_on));
+    for ((channel, note), (kind, look, slot)) in looks {
+        if view.mk2 && matches!(kind, Kind::Grid | Kind::Scene) {
+            frame.set_rgb(note, view.rgb(kind, look, slot));
+        } else {
+            frame.set(0x90 | channel, note, velocity(kind, look));
+        }
     }
 
     // Knob rings: the value of the control each top / device knob drives,
@@ -374,6 +468,26 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
     let metronome = if model == Model::Apc40 { NOTE_METRONOME_APC40 } else { NOTE_METRONOME_MK2 };
     frame.set(0x90, metronome, u8::from(phase * beat_s < on_s));
     frame
+}
+
+/// What an APC40 mkII on `port` shows on its clip pads (5 rows × 8, top
+/// row first) and Scene Launch buttons, for the preview in « Contrôleur »:
+/// `{ v, rgb, mode }` per LED, `mode` = "pulse", "blink" or null.
+pub fn mk2_preview(s: &Shared, port: &str, t: f64) -> serde_json::Value {
+    let frame = render(Driver::Apc40Mk2, s, port, t);
+    let led = |note: u8| {
+        let v = frame.0.get(&(0x90, note)).copied().unwrap_or(0);
+        let mode = frame.1.get(&note).map(|&(ch, _)| match ch {
+            6..=10 => "pulse",
+            11..=15 => "blink",
+            _ => "once",
+        });
+        serde_json::json!({ "v": v, "rgb": palette::hex(v), "mode": mode })
+    };
+    // Pad (row, col) is note 32 + col - 8 × row (§2.2).
+    let pads: Vec<Vec<serde_json::Value>> = (0..5u8).map(|row| (0..8u8).map(|col| led(32 + col - 8 * row)).collect()).collect();
+    let scenes: Vec<serde_json::Value> = (0x52..=0x56).map(led).collect();
+    serde_json::json!({ "pads": pads, "scenes": scenes })
 }
 
 #[cfg(test)]
@@ -450,21 +564,119 @@ mod tests {
         }
     }
 
+    /// The pad colour of the cue in `slot` of the current page (full, dim).
+    fn colour(s: &Shared, slot: usize) -> (u8, u8) {
+        let full = palette::nearest_velocity(palette::cue_rgb(s, &page_cue(s, slot), PadColors::Cue).unwrap());
+        (full, palette::dim_velocity(full))
+    }
+
+    fn mode(f: &LedFrame, key: (u8, u8)) -> Option<(u8, u8)> {
+        f.1.get(&key.1).copied()
+    }
+
+    fn set_pads(s: &mut Shared, colors: Option<PadColors>, by_studio: Option<bool>) {
+        s.midi.store.set_port_pads(PORT, colors, by_studio).unwrap();
+    }
+
+    /// T-206: green / red / blue cues show green / red / blue, dimmed.
     #[test]
-    fn mk2_pads_are_white_then_green_and_flash_follows_the_beat() {
+    fn mk2_pads_show_the_cue_colours_dimmed() {
         let mut s = setup(Driver::Apc40Mk2);
+        // A page of our own: green, red and blue cues (colours of presets.rs).
+        let ids: Vec<String> = s.presets.iter().take(3).map(|p| p.id.clone()).collect();
+        for (id, rgb) in ids.iter().zip([[0, 255, 0], [255, 0, 0], [0, 80, 255]]) {
+            let p = s.presets.iter_mut().find(|p| &p.id == id).unwrap();
+            p.settings.color = rgb;
+            p.settings.content = crate::engine::Content::Wave;
+        }
+        let presets = s.presets.clone();
+        let page = s.grid.new_page("RGB", &presets).unwrap();
+        for (slot, id) in ids.iter().enumerate() {
+            s.grid.put(page, slot, Some(crate::grid::CueRef::Builtin(id.clone()))).unwrap();
+        }
+        s.grid.resolve(&presets);
+        s.cue_page = page;
         let f = render(Driver::Apc40Mk2, &s, PORT, T);
-        assert_eq!(at(&f, pad(Model::Apc40Mk2, 0, 0)), Some(MK2_WHITE));
+        let row: Vec<Option<u8>> = (0..4).map(|c| at(&f, pad(Model::Apc40Mk2, 0, c))).collect();
+        assert_eq!(row[0], Some(22), "dim green");
+        assert_eq!(row[1], Some(palette::dim_velocity(palette::nearest_velocity([255, 0, 0]))), "dim red");
+        assert!(matches!(row[1], Some(6) | Some(120) | Some(121)), "dim red: {row:?}");
+        assert!((41..=47).contains(&row[2].unwrap()), "dim blue: {row:?}");
+        assert_eq!(row[3], Some(0), "empty cell = dark");
+        assert!(f.1.keys().all(|&n| n >= 0x52), "nothing plays: no pulse on the pads");
+    }
+
+    /// The cue playing: full colour, pulsing (1/4) to its dim colour; a
+    /// held flash blinks (1/8); with the pulse made by the studio, both
+    /// colours swap on the beat.
+    #[test]
+    fn mk2_playing_pulses_and_flash_blinks() {
+        let mut s = setup(Driver::Apc40Mk2);
+        let (full, dim) = colour(&s, 9);
+        assert_eq!(at(&render(Driver::Apc40Mk2, &s, PORT, T), pad(Model::Apc40Mk2, 1, 1)), Some(dim));
         let cue = page_cue(&s, 9);
         play(&mut s, &cue);
         let f = render(Driver::Apc40Mk2, &s, PORT, T);
-        assert_eq!(at(&f, pad(Model::Apc40Mk2, 1, 1)), Some(MK2_GREEN));
+        let key = pad(Model::Apc40Mk2, 1, 1);
+        assert_eq!((at(&f, key), mode(&f, key)), (Some(full), Some((CH_PULSE_QUARTER, dim))));
 
+        let (hfull, hdim) = colour(&s, 3);
         let held = page_cue(&s, 3);
         assert!(controls::press_cue(&mut s, &held, Some(crate::cues::ClickMode::Flash), true));
-        // 120 BPM: first half of a beat bright, second half dim.
-        assert_eq!(at(&render(Driver::Apc40Mk2, &s, PORT, 0.1), pad(Model::Apc40Mk2, 0, 3)), Some(MK2_GREEN));
-        assert_eq!(at(&render(Driver::Apc40Mk2, &s, PORT, 0.4), pad(Model::Apc40Mk2, 0, 3)), Some(MK2_DIM_GREEN));
+        let f = render(Driver::Apc40Mk2, &s, PORT, T);
+        let key = pad(Model::Apc40Mk2, 0, 3);
+        assert_eq!((at(&f, key), mode(&f, key)), (Some(hfull), Some((CH_BLINK_EIGHTH, hdim))));
+
+        // By the studio: no LED mode, bright then dim within each beat (120 BPM).
+        set_pads(&mut s, None, Some(true));
+        let by_hand = |t: f64| {
+            let f = render(Driver::Apc40Mk2, &s, PORT, t);
+            (at(&f, pad(Model::Apc40Mk2, 1, 1)), at(&f, key), f.1.is_empty())
+        };
+        assert_eq!(by_hand(0.1), (Some(full), Some(hfull), true));
+        assert_eq!(by_hand(0.2), (Some(full), Some(hdim), true), "the blink is twice as fast");
+        assert_eq!(by_hand(0.3), (Some(dim), Some(hfull), true));
+    }
+
+    /// « Vert / jaune »: yellow / green like the APC40.
+    #[test]
+    fn mk2_classic_scheme_is_yellow_and_green() {
+        let mut s = setup(Driver::Apc40Mk2);
+        set_pads(&mut s, Some(PadColors::Classic), None);
+        let cue = page_cue(&s, 1);
+        play(&mut s, &cue);
+        let f = render(Driver::Apc40Mk2, &s, PORT, T);
+        assert_eq!(at(&f, pad(Model::Apc40Mk2, 0, 0)), Some(MK2_YELLOW));
+        assert_eq!(at(&f, pad(Model::Apc40Mk2, 0, 1)), Some(MK2_GREEN));
+        assert_eq!(mode(&f, pad(Model::Apc40Mk2, 0, 1)), Some((CH_PULSE_QUARTER, MK2_DIM_GREEN)));
+    }
+
+    /// « Couleur de la case »: the user cue's band, else the category colour.
+    #[test]
+    fn mk2_cell_scheme_uses_the_category_colours() {
+        let mut s = setup(Driver::Apc40Mk2);
+        set_pads(&mut s, Some(PadColors::Cell), None);
+        s.cue_page = 1;
+        let want = palette::dim_velocity(palette::nearest_velocity(palette::CATEGORY_COLORS[1]));
+        assert_eq!(at(&render(Driver::Apc40Mk2, &s, PORT, T), pad(Model::Apc40Mk2, 0, 0)), Some(want));
+    }
+
+    /// T-140: a colour changed live shows on the playing pad at the next update.
+    #[test]
+    fn mk2_live_colour_change_reaches_the_pad() {
+        let mut s = setup(Driver::Apc40Mk2);
+        let cue = page_cue(&s, 0);
+        play(&mut s, &cue);
+        s.settings.color = [255, 0, 0];
+        s.settings.content = crate::engine::Content::Wave;
+        let mut led = LedState::default();
+        let t0 = Instant::now();
+        led.update(render(Driver::Apc40Mk2, &s, PORT, T), t0);
+        s.settings.color = [0, 0, 255];
+        let msgs = led.update(render(Driver::Apc40Mk2, &s, PORT, T), t0 + LED_EVERY);
+        let blue = palette::nearest_velocity([0, 0, 255]);
+        // Note On channel 0 (colour), then channel 9 (pulse to the dim colour).
+        assert_eq!(msgs, vec![[0x90, 32, blue], [0x90 | CH_PULSE_QUARTER, 32, palette::dim_velocity(blue)]]);
     }
 
     #[test]
@@ -479,11 +691,16 @@ mod tests {
         let scenes: Vec<Option<u8>> = (0x52..=0x56).map(|n| at(&f, (0x90, n))).collect();
         assert_eq!(scenes, [Some(0), Some(BLINK), Some(0), Some(0), Some(0)]);
 
+        // mkII: current page white, the other pages grey, pages 6–10 pulse.
         let mut s = setup(Driver::Apc40Mk2);
+        let scenes = |s: &Shared| {
+            let f = render(Driver::Apc40Mk2, s, PORT, T);
+            (0x52..=0x56).map(|n| (at(&f, (0x90, n)).unwrap(), mode(&f, (0x90, n)))).collect::<Vec<_>>()
+        };
+        assert!(s.grid.page_count() >= 7);
+        assert_eq!(scenes(&s)[..2], [(MK2_WHITE, None), (MK2_GREY, None)]);
         s.cue_page = 6;
-        assert_eq!(at(&render(Driver::Apc40Mk2, &s, PORT, T), (0x90, 0x53)), Some(MK2_ORANGE));
-        s.cue_page = 0;
-        assert_eq!(at(&render(Driver::Apc40Mk2, &s, PORT, T), (0x90, 0x52)), Some(MK2_GREEN));
+        assert_eq!(scenes(&s)[..2], [(MK2_GREY, None), (MK2_WHITE, Some((CH_PULSE_QUARTER, MK2_GREY)))]);
     }
 
     #[test]
@@ -568,7 +785,8 @@ mod tests {
         let t0 = Instant::now();
         let full = led.update(render(Driver::Apc40Mk2, &s, PORT, T), t0);
         assert!(full.len() > 60, "first update: every LED ({})", full.len());
-        assert!(full.contains(&[0x90, 32, MK2_WHITE]) && full.contains(&[0x90, 0x52, MK2_GREEN]));
+        let (vfull, vdim) = colour(&s, 0);
+        assert!(full.contains(&[0x90, 32, vdim]) && full.contains(&[0x90, 0x52, MK2_WHITE]));
 
         // Idle: nothing to send (off-beat, same state).
         assert_eq!(led.update(render(Driver::Apc40Mk2, &s, PORT, T + 0.1), t0 + LED_EVERY), Vec::<[u8; 3]>::new());
@@ -577,15 +795,16 @@ mod tests {
         let cue = page_cue(&s, 0);
         play(&mut s, &cue);
         let msgs = led.update(render(Driver::Apc40Mk2, &s, PORT, T), t0 + LED_EVERY * 2);
-        assert!(msgs.contains(&[0x90, 32, MK2_GREEN]) && msgs.contains(&[0x90, NOTE_CLIP_STOP, 1]), "{msgs:?}");
+        assert!(msgs.contains(&[0x90, 32, vfull]) && msgs.contains(&[0x99, 32, vdim]) && msgs.contains(&[0x90, NOTE_CLIP_STOP, 1]), "{msgs:?}");
         // (the cue's look may also flip a Record Arm toggle such as « couleur au beat »)
         assert!(msgs.iter().all(|m| m[1] == 32 || m[1] > 0x27), "no other pad: {msgs:?}");
 
         // Page 2: the grid is redrawn, scene 1 → 2, nothing else.
         s.cue_page = 1;
         let msgs = led.update(render(Driver::Apc40Mk2, &s, PORT, T), t0 + LED_EVERY * 3);
-        assert!(msgs.contains(&[0x90, 0x52, 0]) && msgs.contains(&[0x90, 0x53, MK2_GREEN]));
+        assert!(msgs.contains(&[0x90, 0x52, MK2_GREY]) && msgs.contains(&[0x90, 0x53, MK2_WHITE]));
         assert!(msgs.iter().all(|m| m[1] <= 0x27 || m[1] == 0x52 || m[1] == 0x53), "{msgs:?}");
+        assert!(msgs.len() <= 2 * 40 + 2, "bounded: {}", msgs.len());
 
         // Reconnect / new Introduction: everything again.
         led.forget();
@@ -601,6 +820,41 @@ mod tests {
         last.set(0xB0, 0x30, 40);
         let next = LedFrame::default();
         assert_eq!(next.diff(&last), vec![[0x90, 5, 0], [0xB0, 0x30, 0]]);
+    }
+
+    /// A pad that stops pulsing gets its solid colour again (channel 0
+    /// ends the mode), never a black secondary colour.
+    #[test]
+    fn mode_changes_resend_the_colour_first() {
+        let mut pulsing = LedFrame::default();
+        pulsing.set_rgb(32, (21, Some((CH_PULSE_QUARTER, 22))));
+        let mut solid = LedFrame::default();
+        solid.set_rgb(32, (22, None));
+        assert_eq!(pulsing.diff(&solid), vec![[0x90, 32, 21], [0x99, 32, 22]]);
+        assert_eq!(solid.diff(&pulsing), vec![[0x90, 32, 22]]);
+        // Same colour, the mode alone changes: the colour goes again first.
+        let mut blinking = LedFrame::default();
+        blinking.set_rgb(32, (21, Some((CH_BLINK_EIGHTH, 22))));
+        assert_eq!(blinking.diff(&pulsing), vec![[0x90, 32, 21], [0x9D, 32, 22]]);
+        let mut same = LedFrame::default();
+        same.set_rgb(32, (21, None));
+        assert_eq!(same.diff(&pulsing), vec![[0x90, 32, 21]]);
+        assert!(pulsing.diff(&pulsing).is_empty());
+    }
+
+    #[test]
+    fn mk2_preview_shows_colours_and_modes() {
+        let mut s = setup(Driver::Apc40Mk2);
+        let (full, _) = colour(&s, 0);
+        let cue = page_cue(&s, 0);
+        play(&mut s, &cue);
+        let v = mk2_preview(&s, PORT, T);
+        assert_eq!(v["pads"].as_array().unwrap().len(), 5);
+        assert_eq!(v["pads"][0][0]["v"], full);
+        assert_eq!(v["pads"][0][0]["mode"], "pulse");
+        assert_eq!(v["pads"][0][0]["rgb"], palette::hex(full));
+        assert_eq!(v["pads"][0][1]["mode"], serde_json::Value::Null);
+        assert_eq!(v["scenes"][0]["v"], MK2_WHITE);
     }
 
     #[test]

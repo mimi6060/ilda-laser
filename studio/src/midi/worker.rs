@@ -7,6 +7,8 @@
 //! lock, and the lock is taken once per batch of events: the 60 fps
 //! engine thread never waits on MIDI. LED feedback (T-205, `led.rs`) is
 //! rendered under the lock at most 30 times a second and sent after it.
+//! An APC40 mkII also gets MIDI clock (T-206): its pads pulse and blink
+//! in time with the studio's tempo.
 
 use super::backend::{Backend, InputCallback, InputHandle, MidirBackend, OutputPort};
 use super::decode::Decoder;
@@ -30,6 +32,36 @@ const IDLE_WAIT: Duration = Duration::from_millis(20);
 /// A generic device with no LED to drive is looked at this often (a LED
 /// added to one of its mappings shows within that time).
 const GENERIC_IDLE: Duration = Duration::from_millis(250);
+/// MIDI clock: ticks per beat, and the most sent at once after a late wake-up.
+const CLOCK_PPQ: f64 = 24.0;
+const CLOCK_BURST: i64 = 3;
+/// A mkII that needs no clock (LEDs off, pulses made by the studio) is
+/// looked at again this often.
+const CLOCK_IDLE: Duration = Duration::from_millis(250);
+
+/// MIDI clock sent to one device, from the studio's tempo clock (T-150).
+#[derive(Debug, Default)]
+struct ClockOut {
+    /// Last tick sent (index on the tempo clock: beat × 24).
+    last: Option<i64>,
+    next_at: Option<Instant>,
+}
+
+impl ClockOut {
+    /// At `beat` (tempo `bpm`): how many ticks to send now, and how long
+    /// until the next one is due. A tempo clock moved back (tap, resync)
+    /// or far ahead restarts from the current tick.
+    fn advance(&mut self, beat: f64, bpm: f64) -> (i64, Duration) {
+        let tick = (beat * CLOCK_PPQ).floor() as i64;
+        let ticks = match self.last {
+            Some(last) if (0..=CLOCK_PPQ as i64).contains(&(tick - last)) => (tick - last).min(CLOCK_BURST),
+            _ => 1,
+        };
+        self.last = Some(tick);
+        let to_next = ((tick + 1) as f64 / CLOCK_PPQ - beat) * 60.0 / bpm.max(1.0);
+        (ticks, Duration::from_secs_f64(to_next.clamp(0.001, 0.1)))
+    }
+}
 
 /// Starts the MIDI thread on CoreMIDI. Returns `None` (and logs) if the
 /// thread can't be created; the studio then simply runs without MIDI.
@@ -46,6 +78,13 @@ pub fn spawn_on<B: Backend + Send + 'static>(backend: B, shared: Arc<Mutex<Share
         .ok()
 }
 
+impl Slot {
+    /// An APC40 mkII we took over: its pads pulse with our MIDI clock.
+    fn wants_clock(&self) -> bool {
+        self.output.is_some() && matches!(self.introduced, Some((Driver::Apc40Mk2, _)))
+    }
+}
+
 struct Slot {
     _input: InputHandle,
     output: Option<Box<dyn OutputPort>>,
@@ -58,6 +97,8 @@ struct Slot {
     introduced: Option<(Driver, u8)>,
     /// What its LEDs show (T-205).
     leds: LedState,
+    /// MIDI clock to an APC40 mkII (T-206).
+    clock: ClockOut,
 }
 
 enum Plan {
@@ -99,7 +140,12 @@ impl<B: Backend> Worker<B> {
     /// How long to wait for an event: until the next LED update at most.
     fn wait(&self, now: Instant) -> Duration {
         let next_led = self.slots.values().filter(|s| s.profile.is_some()).filter_map(|s| s.leds.next_at()).min();
-        next_led.map_or(IDLE_WAIT, |t| t.saturating_duration_since(now).clamp(Duration::from_millis(1), IDLE_WAIT))
+        let next_tick = self.slots.values().filter(|s| s.wants_clock()).filter_map(|s| s.clock.next_at).min();
+        let next = match (next_led, next_tick) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        next.map_or(IDLE_WAIT, |t| t.saturating_duration_since(now).clamp(Duration::from_millis(1), IDLE_WAIT))
     }
 
     /// One pass: events, commands, detection timeouts, rescan, profiles, LEDs.
@@ -157,6 +203,44 @@ impl<B: Backend> Worker<B> {
             self.next_reconcile = now + RECONCILE_EVERY;
         }
         self.update_leds(now);
+        self.update_clock(now);
+    }
+
+    /// MIDI clock to every introduced APC40 mkII whose LEDs we drive with
+    /// the pads' own pulse / blink: 24 ticks per beat of the tempo clock,
+    /// each sent when due (the worker wakes up for it).
+    fn update_clock(&mut self, now: Instant) {
+        let due: Vec<String> = self.slots.iter().filter(|(_, slot)| slot.wants_clock() && slot.clock.next_at.is_none_or(|t| now >= t)).map(|(name, _)| name.clone()).collect();
+        if due.is_empty() {
+            return;
+        }
+        let plans: Vec<(String, Option<(f64, f64)>)> = {
+            let s = lock(&self.shared);
+            let t = s.now_s();
+            due.into_iter()
+                .map(|name| {
+                    let wanted = s.midi.store.port_leds(&name) && !s.midi.store.port_prefs(&name).pulse_by_studio;
+                    let plan = wanted.then(|| (s.tempo.beat_at(t), s.tempo.bpm));
+                    (name, plan)
+                })
+                .collect()
+        };
+        for (name, plan) in plans {
+            let Some(slot) = self.slots.get_mut(&name) else { continue };
+            let Some((beat, bpm)) = plan else {
+                slot.clock = ClockOut { last: None, next_at: Some(now + CLOCK_IDLE) };
+                continue;
+            };
+            let (ticks, wait) = slot.clock.advance(beat, bpm);
+            slot.clock.next_at = Some(now + wait);
+            let Some(out) = slot.output.as_mut() else { continue };
+            for _ in 0..ticks {
+                if let Err(e) = out.send(&[0xF8]) {
+                    log::debug!("MIDI : horloge vers {name} impossible : {e}");
+                    break;
+                }
+            }
+        }
     }
 
     /// LED feedback: one lock for every device that is due, frames rendered
@@ -294,7 +378,7 @@ impl<B: Backend> Worker<B> {
         let detecting = output.as_mut().and_then(|out| out.send(&DEVICE_INQUIRY).ok()).map(|_| now + INQUIRY_TIMEOUT);
         let model = if detecting.is_some() { Model::Unknown } else { Model::from_port_name(name) };
         log::info!("MIDI : {name} connecté");
-        self.slots.insert(name.to_string(), Slot { _input: input, output, detecting, model, profile: None, introduced: None, leds: LedState::default() });
+        self.slots.insert(name.to_string(), Slot { _input: input, output, detecting, model, profile: None, introduced: None, leds: LedState::default(), clock: ClockOut::default() });
     }
 
     /// Applies UI changes (enabled, chosen profile) and the profile of
@@ -546,7 +630,8 @@ pub mod tests {
         assert_eq!(sysex(fake.sent("USB MIDI Device")), vec![DEVICE_INQUIRY.to_vec(), introduction(PID_APC40_MK2, MODE_ABLETON)]);
         let sent = fake.sent("USB MIDI Device");
         assert_eq!(sent[1], introduction(PID_APC40_MK2, MODE_ABLETON), "Introduction before any LED");
-        assert!(sent[2..].iter().all(|m| m.len() == 3), "then LEDs (T-205)");
+        assert!(sent[2..].iter().all(|m| m.len() == 3 || m[..] == [0xF8]), "then LEDs (T-205) and clock (T-206)");
+        assert!(sent.contains(&vec![0xF8]), "MIDI clock for the pads' pulse");
         let d = device(&shared, "USB MIDI Device");
         assert_eq!((d.model, d.profile.as_str(), d.connected, d.input, d.output), (Model::Apc40Mk2, "apc40-mk2", true, true, true));
         assert!(d.connected_at.is_some());
@@ -829,6 +914,14 @@ pub mod tests {
         (w, fake, shared, t0)
     }
 
+    /// Pad colours of the first cue of page 1 (T-206): (full, dim).
+    fn first_cue_colour(shared: &Arc<Mutex<Shared>>) -> (u8, u8) {
+        let s = shared.lock().unwrap();
+        let cue = s.grid.slot(0, 0).unwrap().to_string();
+        let full = crate::midi::palette::nearest_velocity(crate::midi::palette::cue_rgb(&s, &cue, Default::default()).unwrap());
+        (full, crate::midi::palette::dim_velocity(full))
+    }
+
     fn leds(sent: &[Vec<u8>]) -> Vec<Vec<u8>> {
         sent.iter().filter(|m| m.len() == 3).cloned().collect()
     }
@@ -837,8 +930,9 @@ pub mod tests {
     fn leds_follow_the_studio_as_diffs_at_most_30_times_a_second() {
         let (mut w, fake, shared, t0) = led_setup();
         let first = leds(&fake.sent("APC40 mkII"));
-        assert!(first.contains(&vec![0x90, 32, led::MK2_WHITE]), "full frame after the Introduction");
-        assert!(first.contains(&vec![0x90, 0x52, led::MK2_GREEN]), "page 1 on Scene Launch 1");
+        let (full, dim) = first_cue_colour(&shared);
+        assert!(first.contains(&vec![0x90, 32, dim]), "full frame after the Introduction");
+        assert!(first.contains(&vec![0x90, 0x52, led::MK2_WHITE]), "page 1 on Scene Launch 1");
 
         // A cue started from the UI: at the next update (≤ 33 ms later)
         // only what changed is sent.
@@ -855,7 +949,7 @@ pub mod tests {
         assert_eq!(fake.sent("APC40 mkII").len(), before, "not yet: 30 per second at most");
         w.step(t0 + ms(45), None);
         let new = leds(&fake.sent("APC40 mkII")[before..]);
-        assert!(new.contains(&vec![0x90, 32, led::MK2_GREEN]), "{new:?}");
+        assert!(new.contains(&vec![0x90, 32, full]), "{new:?}");
         assert!(new.len() < 10, "a diff, not a full frame: {new:?}");
 
         // Page change: the grid is redrawn at the next update.
@@ -863,7 +957,7 @@ pub mod tests {
         let before = fake.sent("APC40 mkII").len();
         w.step(t0 + ms(80), None);
         let new = leds(&fake.sent("APC40 mkII")[before..]);
-        assert!(new.contains(&vec![0x90, 0x53, led::MK2_GREEN]) && new.contains(&vec![0x90, 0x52, 0]), "{new:?}");
+        assert!(new.contains(&vec![0x90, 0x53, led::MK2_WHITE]) && new.contains(&vec![0x90, 0x52, led::MK2_GREY]), "{new:?}");
 
         // Idle: over two seconds, only the metronome LED (2 per beat at 120 BPM).
         let before = fake.sent("APC40 mkII").len();
@@ -874,6 +968,36 @@ pub mod tests {
         assert!(idle.iter().all(|m| m[1] == led::NOTE_METRONOME_MK2), "{idle:?}");
         assert!(idle.len() <= 10, "{idle:?}");
         assert!(w.wait(t0 + ms(2100)) <= IDLE_WAIT);
+    }
+
+    /// T-206: 24 ticks per beat, each when due; never a flood.
+    #[test]
+    fn clock_ticks_follow_the_tempo() {
+        let mut c = ClockOut::default();
+        // 120 BPM: a tick every 1/48 s.
+        let (n, wait) = c.advance(0.0, 120.0);
+        assert_eq!(n, 1);
+        assert!((wait.as_secs_f64() - 1.0 / 48.0).abs() < 1e-3, "{wait:?}");
+        assert_eq!(c.advance(0.01, 120.0).0, 0, "same tick: nothing");
+        assert_eq!(c.advance(1.0 / 24.0 + 1e-6, 120.0).0, 1);
+        assert_eq!(c.advance(0.5, 120.0).0, CLOCK_BURST, "woken late: a few at most");
+        assert_eq!(c.advance(0.1, 120.0).0, 1, "tempo clock moved back: start again");
+        assert_eq!(c.advance(50.0, 120.0).0, 1, "far ahead: start again");
+    }
+
+    #[test]
+    fn mk2_gets_midi_clock_unless_the_studio_pulses_its_pads() {
+        let (mut w, fake, shared, t0) = led_setup();
+        let ticks = || fake.sent("APC40 mkII").iter().filter(|m| m[..] == [0xF8]).count();
+        assert!(ticks() >= 1, "clock from the Introduction on");
+        assert!(w.wait(t0 + ms(10)) <= Duration::from_millis(21), "the worker wakes up for the next tick");
+        shared.lock().unwrap().midi.store.set_port_pads("APC40 mkII", None, Some(true)).unwrap();
+        w.step(t0 + ms(200), None);
+        let before = ticks();
+        for i in 0..100 {
+            w.step(t0 + ms(300 + i * 10), None);
+        }
+        assert_eq!(ticks(), before, "pulse made by the studio: no clock");
     }
 
     #[test]
@@ -906,7 +1030,8 @@ pub mod tests {
         w.step(t0 + ms(4000), None);
         w.step(t0 + ms(4010), None);
         let again = leds(&fake.sent("APC40 mkII")[before..]);
-        assert!(again.len() > 60 && again.contains(&vec![0x90, 32, led::MK2_WHITE]), "full frame after a replug");
+        let (_, dim) = first_cue_colour(&shared);
+        assert!(again.len() > 60 && again.contains(&vec![0x90, 32, dim]), "full frame after a replug");
 
         w.shutdown();
         let sent = fake.sent("APC40 mkII");

@@ -8,6 +8,7 @@
 //! readable error (shown by `/api/midi`) and the port falls back to `generic`.
 
 use super::mapping::{Mapping, MidiInput, RelEncoding};
+use super::palette::PadColors;
 use super::safety::MidiSafety;
 use super::detect::{Model, MODE_ABLETON, MODE_ALTERNATE, MODE_GENERIC, PID_APC40, PID_APC40_MK2};
 use serde::{Deserialize, Serialize};
@@ -139,6 +140,14 @@ pub struct PortPrefs {
     /// « Retour LED » (T-205): the studio drives the device's LEDs.
     #[serde(default = "yes")]
     pub leds: bool,
+    /// « Couleurs des pads » (T-206, APC40 mkII).
+    #[serde(default)]
+    pub pad_colors: PadColors,
+    /// The studio pulses / blinks the mkII pads itself, beat by beat,
+    /// instead of the pads' own LED modes following our MIDI clock (for a
+    /// unit that ignores the clock).
+    #[serde(default)]
+    pub pulse_by_studio: bool,
 }
 
 fn yes() -> bool {
@@ -147,7 +156,7 @@ fn yes() -> bool {
 
 impl Default for PortPrefs {
     fn default() -> Self {
-        PortPrefs { profile: None, enabled: true, leds: true }
+        PortPrefs { profile: None, enabled: true, leds: true, pad_colors: PadColors::default(), pulse_by_studio: false }
     }
 }
 
@@ -329,6 +338,19 @@ impl ProfileStore {
 
     pub fn port_leds(&self, port: &str) -> bool {
         self.devices.ports.get(port).is_none_or(|p| p.leds)
+    }
+
+    /// The saved options of `port` (defaults if never set).
+    pub fn port_prefs(&self, port: &str) -> PortPrefs {
+        self.devices.ports.get(port).cloned().unwrap_or_default()
+    }
+
+    /// Pad colour options (T-206); `None` = unchanged.
+    pub fn set_port_pads(&mut self, port: &str, colors: Option<PadColors>, pulse_by_studio: Option<bool>) -> Result<(), String> {
+        let p = self.devices.ports.entry(port.to_string()).or_default();
+        p.pad_colors = colors.unwrap_or(p.pad_colors);
+        p.pulse_by_studio = pulse_by_studio.unwrap_or(p.pulse_by_studio);
+        self.save_devices()
     }
 
     pub fn set_port_leds(&mut self, port: &str, leds: bool) -> Result<(), String> {
@@ -522,7 +544,7 @@ mod tests {
     #[test]
     fn missing_preferred_profile_falls_back_to_generic_with_an_error() {
         let mut store = ProfileStore::in_memory();
-        store.devices.ports.insert("APC40 mkII".into(), PortPrefs { profile: Some("broken".into()), enabled: true, leds: true });
+        store.devices.ports.insert("APC40 mkII".into(), PortPrefs { profile: Some("broken".into()), ..Default::default() });
         let choice = store.choose("APC40 mkII", Model::Apc40Mk2);
         assert_eq!(choice.slug, GENERIC);
         assert!(choice.error.unwrap().contains("broken"));
