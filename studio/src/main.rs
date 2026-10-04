@@ -17,6 +17,7 @@ mod chases;
 mod checklist;
 mod colorcal;
 mod controls;
+mod crossings;
 mod cues;
 mod devices;
 mod dmx;

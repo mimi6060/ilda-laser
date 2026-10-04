@@ -1391,6 +1391,10 @@
         <label>Forme B <span class="v" id="gBV"></span></label>
         <input type="range" id="gB" min="-1" max="3" step="0.05">
         <div class="hint" id="gBH" hidden></div>
+        <div id="gCrossRow" hidden>
+          <div class="check"><input type="checkbox" id="gCrossFlash"><span>Flash blanc au croisement</span></div>
+          <div class="hint">Les deux groupes passent au blanc pendant 1/8 de temps quand ils se croisent.</div>
+        </div>
         <div id="gSnapRow" hidden>
           <div class="check"><input type="checkbox" id="gSnap"><span>Rotation par à-coups</span></div>
           <div class="hint">Tourne d’un côté (360°/côtés) à chaque pas, immobile entre deux ; Pas par temps règle la cadence. Se voit mieux en Dégradé ou Arc-en-ciel.</div>
@@ -2223,6 +2227,7 @@ function showSettings() {
     setVal('gGroups', String(p.groups ?? 1)); setVal('gGroupMode', p.group_mode ?? 'unison');
     setVal('gEasing', p.easing ?? 'sine');
     setCheck('gSnap', !!p.snap);
+    setCheck('gCrossFlash', !!p.cross_flash);
     setVal('gTurns', TURNS.includes(+p.a) ? String(+p.a) : '');
     setVal('gLoop', p.loop_mode ?? 'ping_pong');
     setVal('gChase', String(Math.min(7, Math.max(0, Math.round(p.a)))));
@@ -2308,6 +2313,7 @@ const LOOK_EDITS = {
   gGroupMode: v => genEdit(c => { c.params.group_mode = v; }),
   gEasing: v => genEdit(c => { c.params.easing = v; }),
   gSnap: v => genEdit(c => { c.params.snap = v; }),
+  gCrossFlash: v => genEdit(c => { c.params.cross_flash = v; }),
   gTurns: v => genEdit(c => { if (v !== '') c.params.a = +v; }),
   gLoop: v => genEdit(c => { c.params.loop_mode = v; }),
   gChase: v => genEdit(c => { c.params.a = +v; }),
@@ -5671,12 +5677,22 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   positions: 'Positions au temps', finger_tunnel: 'Tunnel de faisceaux', tunnel_pump: 'Tunnel qui pompe',
   twin_tunnel: 'Double tunnel', sunburst: 'Soleil levant',
   ceiling: 'Plafond liquide', blade: 'Lame', curtain: 'Rideaux', waterfall: 'Cascade', scanner: 'Scanner',
-  slats: 'Lamelles', aurora: 'Aurore', grid: 'Grille', chase_fan: 'Chaser' };
+  slats: 'Lamelles', aurora: 'Aurore', grid: 'Grille', chase_fan: 'Chaser',
+  scissor: 'Ciseaux (X)', hot_beam: 'Faisceau chaud', bundle_burst: 'Faisceaux qui s’ouvrent', beam_v: 'V de faisceaux' };
 
 // Festival fans (T-102) and sheets (T-106): what Nombre / A / B mean for
 // each, plus how the tempo settings drive it. Old generators keep the
 // generic labels. Sheets stay above the audience (never scan it).
 const GEN_HELP = {
+  // Crossings, hot beam and convergences (T-104).
+  scissor: ['Faisceaux, en deux groupes (8 conseillé).', 'Amplitude (0,4 à 0,6) : au-dessus de 0,3, les groupes se croisent deux fois par période.',
+    'Hauteur au-dessus du public.', 'Groupe gauche en couleur principale, droit en deuxième couleur (Uni ou Alterné) ; inclinés de ±15° pour lire un X. Taille = largeur des groupes.'],
+  hot_beam: ['Non utilisé (un seul faisceau).', 'Amplitude du panoramique (0,3 conseillé).', 'Luminosité max (0,6 par défaut, 0 à 1).',
+    'Un aller-retour par période (16 temps conseillés) ; un petit cercle s’y ajoute pour qu’il ne reste jamais immobile.'],
+  bundle_burst: ['Faisceaux (8 à 12).', 'Durée d’ouverture en temps (0,25 = 1/4 temps).', 'Hauteur au-dessus du public.',
+    'Groupés en un seul faisceau, ils s’ouvrent en éventail sur le premier temps de chaque période, puis se referment avant le suivant. Taille = demi-largeur ouverte.'],
+  beam_v: ['Faisceaux, en deux jambes (10 = 2 × 5).', 'Bascule en degrés (0 = fixe, jusqu’à 45).', '0 = V, 1 = Λ (pointe en haut).',
+    'Jambes à ±30° de la verticale ; avec A, le V penche d’un côté puis de l’autre, une position par pas. Taille = longueur des jambes.'],
   chase_fan: ['Faisceaux (8 conseillé).', 'Forme du chaser (voir la liste ci-dessous).', 'Traîne : 0 à 3 faisceaux derrière la tête (40 %, 15 %, 6 %).',
     'Un pas par Pas par temps (2 = 1/2 temps) ; seuls les faisceaux allumés changent, l’éventail reste fixe. Alterné : traîne en deuxième couleur.'],
   fan: ['Faisceaux (6 à 16).', 'Pompage : 0 = fixe, 1 = s’ouvre sur chaque temps puis se referme.', 'Hauteur au-dessus du public.',
@@ -5717,6 +5733,10 @@ const GEN_HELP = {
     'La grille défile d’une ligne par temps ; ← : dans l’autre sens.'],
 };
 const GEN_DEFAULTS = {
+  scissor: { count: 8, a: 0.5, b: 0.3, period: 2, steps: 1 },
+  hot_beam: { count: 1, a: 0.3, b: 0.6, period: 16, steps: 1 },
+  bundle_burst: { count: 10, a: 0.25, b: 0.35, period: 4, steps: 1 },
+  beam_v: { count: 10, a: 0, b: 0, period: 4, steps: 1 },
   chase_fan: { count: 8, a: 0, b: 2, period: 4, steps: 2 },
   fan: { count: 8, a: 0, b: 0.3, period: 4, steps: 1 },
   fan_sweep: { count: 8, a: 0.35, b: 0.3, period: 4, steps: 1 },
@@ -5742,6 +5762,7 @@ function showGenHelp(name) {
   $('gTurnsRow').hidden = !ROTATING.has(name);
   $('gSnapRow').hidden = name !== 'polygon_tunnel';
   $('gChaseRow').hidden = name !== 'chase_fan';
+  $('gCrossRow').hidden = name !== 'scissor';
   // Slow rotations (1/64 turn per beat) need any value; the ceiling's
   // ripple (0.01 to 0.03) needs hundredths.
   $('gA').step = ROTATING.has(name) ? 'any' : '0.01';

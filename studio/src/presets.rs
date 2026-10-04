@@ -61,6 +61,8 @@ const GREEN_RED: Look = Look("vert → rouge", GREEN, ColorMode::Gradient, RED);
 const RED_BLUE: Look = Look("rouge / bleu", RED, ColorMode::Alternate, BLUE);
 const GREEN_YELLOW: Look = Look("vert / jaune", GREEN, ColorMode::Alternate, YELLOW);
 const SOLID_MAGENTA: Look = Look("magenta", MAGENTA, ColorMode::Solid, MAGENTA);
+/// Scissors in « Alterné »: the left group cyan, the right one blue.
+const CYAN_BLUE: Look = Look("cyan / bleu", CYAN, ColorMode::Alternate, BLUE);
 /// Chasers in « Alterné »: a white head with a blue tail.
 const WHITE_BLUE: Look = Look("blanc / bleu", WHITE, ColorMode::Alternate, BLUE);
 
@@ -275,6 +277,29 @@ pub fn catalog() -> Vec<Preset> {
     for (category, name, settings) in program_cues() {
         b.add(category, name.to_string(), settings);
     }
+
+    // Crossings, hot beam and convergences (T-104), appended on the
+    // « Faisceaux » page (its second grid page). Values from the research
+    // (§A.5, 11, 12, 29): scissors cross every 2 beats with a = 0.5, the
+    // hot beam pans 0.3 over 16 beats at 60 %, bursts open in 1/4 beat.
+    let shape = |period: f32, flash: bool| {
+        move |s: &mut Settings| {
+            if let Content::Generator { params, .. } = &mut s.content {
+                params.period_beats = period;
+                params.cross_flash = flash;
+            }
+        }
+    };
+    b.synced("Ciseaux (X)", "scissor", 8, 0.5, 0.3, 1.0, RED_BLUE, shape(2.0, false));
+    b.synced("Ciseaux (X) flash blanc", "scissor", 8, 0.5, 0.3, 1.0, GREEN_YELLOW, shape(2.0, true));
+    b.synced("Ciseaux lents (X)", "scissor", 12, 0.45, 0.4, 1.0, CYAN_BLUE, shape(4.0, false));
+    b.synced("Faisceau chaud", "hot_beam", 1, 0.3, 0.6, 1.0, SOLID_WHITE, shape(16.0, false));
+    b.synced("Faisceau chaud", "hot_beam", 1, 0.3, 0.6, 1.0, SOLID_RED, shape(16.0, false));
+    b.synced("Faisceaux qui s'ouvrent", "bundle_burst", 10, 0.25, 0.35, 1.0, SOLID_GREEN, shape(4.0, false));
+    b.synced("Faisceaux qui s'ouvrent lents", "bundle_burst", 12, 1.0, 0.45, 1.0, SOLID_CYAN, shape(8.0, false));
+    b.synced("V de faisceaux", "beam_v", 10, 0.0, 0.0, 1.0, SOLID_CYAN, none);
+    b.synced("Λ de faisceaux", "beam_v", 10, 0.0, 1.0, 1.0, SOLID_WHITE, none);
+    b.synced("V qui bascule", "beam_v", 10, 15.0, 0.0, 1.0, SOLID_MAGENTA, none);
 
     b.presets
 }
@@ -597,12 +622,44 @@ mod tests {
     const LEGACY_CUES: usize = 202;
     /// The T-103 rhythm cues, right after them.
     const RHYTHM_CUES: usize = 11;
+    /// The T-157 cue programs, after those.
+    const PROGRAM_CUES: usize = 3;
+    /// The T-104 crossings, after those.
+    const CROSSING_CUES: usize = 10;
+
+    #[test]
+    fn crossing_cues_are_appended_on_the_beams_page() {
+        let all = catalog();
+        let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES;
+        let new = &all[start..];
+        assert_eq!(new.len(), CROSSING_CUES);
+        assert!(new.iter().all(|p| p.category == "Faisceaux" && p.settings.program.is_none()));
+        // Numbered after the page's 42 older cues.
+        assert_eq!(new[0].id, "faisceaux-043");
+        let gens: Vec<(String, GenParams)> = new
+            .iter()
+            .map(|p| match &p.settings.content {
+                Content::Generator { generator, params } => (generator.clone(), params.clone()),
+                _ => panic!("{} is not a generator", p.id),
+            })
+            .collect();
+        assert!(gens.iter().all(|(_, p)| p.beat_sync), "they follow the tempo");
+        for name in ["scissor", "hot_beam", "bundle_burst", "beam_v"] {
+            assert!(gens.iter().any(|(g, _)| g == name), "a cue for {name}");
+        }
+        assert!(gens.iter().any(|(g, p)| g == "scissor" && p.cross_flash && p.period_beats == 2.0));
+        // Hot beams pan 0.3 over 16 beats, capped at 60 %.
+        assert!(gens.iter().filter(|(g, _)| g == "hot_beam").all(|(_, p)| p.a == 0.3 && p.b == 0.6 && p.period_beats == 16.0));
+        // The page's first grid page is full: they go on « Faisceaux 2 ».
+        let index = all.iter().filter(|q| q.category == "Faisceaux").position(|q| q.id == new[0].id).unwrap();
+        assert!(index >= crate::controls::GRID_ROWS * crate::controls::GRID_COLS);
+        assert!(all[..start].iter().all(|p| !matches!(&p.settings.content, Content::Generator { params, .. } if params.cross_flash)));
+    }
 
     #[test]
     fn program_cues_are_appended_after_the_rhythm_cues() {
         let all = catalog();
-        let new = &all[LEGACY_CUES + RHYTHM_CUES..];
-        assert_eq!(new.len(), 3);
+        let new = &all[LEGACY_CUES + RHYTHM_CUES..LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES];
         assert!(new.iter().all(|p| p.settings.program.as_ref().is_some_and(|p| p.validate().is_ok())));
         assert_eq!(new.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["tunnels-024", "balayages-017", "vagues-028"]);
         let plays: Vec<PlayMode> = new.iter().map(|p| p.settings.program.as_ref().unwrap().play).collect();
