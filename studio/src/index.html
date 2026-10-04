@@ -102,6 +102,28 @@
   #tlEdMsg { margin: 0; flex-basis: 100%; }
   #tlEdMsg.err { color: var(--danger); }
   #tlNewRow[hidden], #tlMarkRow[hidden] { display: none; }
+  /* Empty state and examples (T-124 to T-129), Theme (T-299) tokens. */
+  #tlTracks { position: relative; }
+  /* Over the four empty lanes (TL_TOP = 88 px, 4 × TL_LANE = 136 px). */
+  #tlEmpty { position: absolute; left: 180px; right: 0; top: 88px; height: 136px; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+  #tlEmpty[hidden] { display: none; }
+  .tl-empty-box { pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 20px; border-radius: 12px;
+    background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line); box-shadow: 0 12px 32px #0008; text-align: center; }
+  .tl-empty-title { font-size: 13px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+  .tl-empty-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .tl-empty-row button { padding: 10px 18px; font-size: 15px; font-weight: 600; border-radius: 10px; }
+  .tl-empty-box .hint { margin: 0; }
+  .tl-head.empty { color: var(--muted); font-size: 11px; padding-left: 8px; opacity: .7; }
+  #tlTempoHint { border-color: var(--ws-timeline); color: var(--ws-timeline); }
+  #tlTempoHint[hidden] { display: none; }
+  #tlModified.example { color: var(--ws-timeline); }
+  #tlExDialog .box { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+  #tlExList { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; margin-top: 10px; }
+  .tl-ex { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 12px; text-align: left; border-radius: 10px; white-space: normal; height: auto; }
+  .tl-ex b { font-size: 14px; color: var(--text); }
+  .tl-ex .meta { font-size: 11px; color: var(--ws-timeline); font-variant-numeric: tabular-nums; }
+  .tl-ex .desc { font-size: 12px; color: var(--muted); line-height: 1.35; }
+  .tl-ex:hover { border-color: var(--ws-timeline); }
   .tl-lib { grid-area: lib; display: flex; flex-direction: column; gap: 4px; min-height: 0; }
   .tl-lib select, .tl-lib input { width: 100%; padding: 4px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
   #tlLibList { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
@@ -1002,6 +1024,14 @@
     <div id="keysList"></div>
   </div>
 </div>
+<!-- TIMELINE › Ouvrir un exemple (T-124 à T-129). -->
+<div id="tlExDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="tlExTitle" hidden>
+  <div class="box">
+    <div class="keys-head"><h3 id="tlExTitle">Ouvrir un exemple</h3><button id="tlExClose">Fermer</button></div>
+    <div class="hint">Des shows prêts à jouer, faits avec les cues du catalogue. L'exemple s'ouvre comme une copie : rien n'est écrit tant que vous ne l'enregistrez pas sous votre nom. Il suit le tempo en direct et démarre à la mesure suivante.</div>
+    <div id="tlExList"></div>
+  </div>
+</div>
 <div id="projDialog" class="modal" hidden>
   <div class="box">
     <h3 id="projDlgTitle">Ouvrir…</h3>
@@ -1440,13 +1470,14 @@
       <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
       <div class="hint" id="tlMsg"></div>
     </section>
-    <div class="hint soon">À venir ici : modèles, timecode.</div>
+    <div class="hint soon">À venir ici : timecode.</div>
   </div>
 
   <!-- TIMELINE : éditeur (T-162) — bibliothèque, pistes, règle, marqueurs -->
   <section id="tlEditor" data-ws="timeline" aria-label="Éditeur de timeline" hidden>
     <div class="tl-tools">
       <button id="tlNew" title="Créer un show vide (deux pistes)">Nouveau show</button>
+      <button id="tlExamples" title="Shows prêts à jouer (T-124 à T-129), faits avec les cues du catalogue : ils s'ouvrent comme une copie">Ouvrir un exemple</button>
       <span id="tlNewRow" hidden>
         <input type="text" id="tlNewName" placeholder="Nom du show" maxlength="64" title="Lettres, chiffres, espaces, - et _">
         <select id="tlNewBase" title="Secondes : show calé sur un morceau · Temps : phrase qui suit le tempo en direct">
@@ -1456,6 +1487,7 @@
       </span>
       <button id="tlSave" title="Enregistrer le show dans studio-data/shows (ne touche jamais au laser)">Enregistrer</button>
       <span id="tlModified"></span>
+      <button id="tlTempoHint" hidden></button>
       <span class="sep"></span>
       <span class="hint" style="margin:0">Magnétisme :</span>
       <div class="seg" id="tlSnap" title="Magnétisme : Fort (temps / mesures), Moyen (à quelques pixels), Off">
@@ -1488,6 +1520,16 @@
       <div id="tlLibList" title="Glisser un cue sur une piste"></div>
     </div>
     <div id="tlTracks">
+      <div id="tlEmpty" hidden>
+        <div class="tl-empty-box">
+          <div class="tl-empty-title">Aucun show chargé</div>
+          <div class="tl-empty-row">
+            <button id="tlEmptyNew" class="primary">Nouveau show</button>
+            <button id="tlEmptyEx">Ouvrir un exemple</button>
+          </div>
+          <div class="hint">Glissez des cues depuis la liste de gauche sur une piste</div>
+        </div>
+      </div>
       <div id="tlHeads"></div>
       <canvas id="tlCanvas" tabindex="0" title="Glisser : déplacer · bords : durée · Alt+glisser : dupliquer · Maj+clic : sélection · règle : clic = se placer, glisser = boucle, double-clic = sans boucle · double-clic sur la ligne des marqueurs : marqueur"></canvas>
     </div>
@@ -2690,7 +2732,7 @@ const SAFETY_SHORTCUTS = [
 // After the stop, never instead of it: end a hold-key pick, a MIDI learn, the help.
 function afterEscape() {
   pickingHoldKey = false;
-  try { stopLearning(); closeKeysHelp(); } catch (err) { console.warn('Échap', err); }
+  try { stopLearning(); closeKeysHelp(); closeTlExamples(); } catch (err) { console.warn('Échap', err); }
 }
 let restShortcuts = null;
 function buildShortcuts() {
@@ -5478,6 +5520,8 @@ const TL_UNDO = 50, TL_MIN_LEN = 0.01, TL_SNAP_PX = 8;
 const TL_LAYER_COLORS = ['#3ddc84', '#4da3ff', '#ffb020', '#e062ff'];
 const TL_MARK_COLORS = [[255, 176, 32], [77, 163, 255], [224, 98, 255], [61, 220, 132], [255, 77, 79]];
 const tlSeconds = () => !TL.show || TL.show.time_base !== 'beats';
+// Empty state: the ruler and this many empty tracks (no show loaded).
+const TL_EMPTY_TRACKS = 4;
 
 // --- musical time: the show's tempo map (Secondes) or the live meter (Temps) ---
 function tlSegments() {
@@ -5655,8 +5699,25 @@ async function tlFetch() {
   } catch { /* studio unreachable: tried again next frame */ } finally { TL.fetching = false; }
 }
 function tlShowFlags(st) {
-  $('tlModified').textContent = st && st.name && st.modified ? '● modifié, non enregistré' : '';
+  const example = !!(st && st.name && st.example);
+  $('tlModified').textContent = example ? `◆ exemple, non enregistré${st.modified ? ' (modifié)' : ''} : Enregistrer en fait une copie à votre nom`
+    : st && st.name && st.modified ? '● modifié, non enregistré' : '';
+  $('tlModified').classList.toggle('example', example);
 }
+// « Tempo conseillé » of a Temps show that notes one (the examples): one
+// click sets the live tempo, which the show follows.
+function tlTempoHint() {
+  const tm = TL.show && TL.show.time_base === 'beats' && TL.show.tempo_map && TL.show.tempo_map[0];
+  const b = $('tlTempoHint');
+  b.hidden = !tm || Math.abs((TL.bpm || 120) - tm.bpm) < 0.05;
+  if (!tm) return;
+  const text = `Tempo conseillé : ${+tm.bpm.toFixed(1)} BPM`;
+  if (b.textContent !== text) { b.textContent = text; b.title = `Régler le tempo en direct à ${+tm.bpm.toFixed(1)} BPM (ce show suit le tempo en direct)`; }
+}
+$('tlTempoHint').onclick = () => {
+  const tm = TL.show && TL.show.tempo_map && TL.show.tempo_map[0];
+  if (tm) post('/api/control', { id: 'tempo.bpm', value: tm.bpm });
+};
 // Every frame (previewLoop): playhead, and the show if it changed elsewhere.
 function tlOnState(t, tempo) {
   if (!t) return;
@@ -5664,6 +5725,7 @@ function tlOnState(t, tempo) {
   if (tempo && tempo.bpm) TL.bpm = tempo.bpm;
   if ((t.name !== TL.name || t.rev !== TL.rev) && !TL.inflight && !TL.drag && !TL.fetching) tlFetch();
   if (!TL.inflight) tlShowFlags(t);
+  tlTempoHint();
   const has = !!TL.show;
   for (const id of ['tlSave', 'tlAddMarker', 'tlCopy', 'tlPaste', 'tlDup', 'tlDel', 'tlAddTrack', 'tlFit']) $(id).disabled = !has;
   $('tlUndo').disabled = !has || !TL.undo.length;
@@ -5703,6 +5765,14 @@ $('tlLibList').addEventListener('dragstart', e => {
 });
 $('tlLibList').addEventListener('dragend', () => { TL.dragCue = null; TL.drop = null; TL.need = true; });
 const tlPresetName = id => (presets.find(p => p.id === id) || {}).name || id;
+// A look stored in the show (the examples' tweaked cues, countdown digits).
+function tlEventName(e) {
+  if (e.source.kind === 'cue') return tlPresetName(e.source.id);
+  const c = e.source.settings && e.source.settings.content || {};
+  if (c.kind === 'text') return `Texte « ${c.text} »`;
+  if (c.kind === 'generator') return 'Look · ' + (GEN_NAMES[c.generator] || c.generator);
+  return 'Look';
+}
 // Default length: an evolving cue's own length, else 4 bars.
 function tlDefaultLen(id, start) {
   const p = presets.find(q => q.id === id);
@@ -5713,14 +5783,21 @@ function tlDefaultLen(id, start) {
 // --- track heads (DOM, aligned with the canvas lanes) ---
 function tlHeads() {
   const tracks = TL.show ? TL.show.tracks : [];
-  const key = JSON.stringify(tracks.map(t => [t.name, t.layer, t.mute, t.solo]));
+  const key = TL.show ? JSON.stringify(tracks.map(t => [t.name, t.layer, t.mute, t.solo])) : 'empty';
   const c = tlCanvas();
-  const h = TL_TOP + Math.max(1, tracks.length) * TL_LANE;
+  const h = TL_TOP + Math.max(1, TL.show ? tracks.length : TL_EMPTY_TRACKS) * TL_LANE;
   if (c.style.height !== h + 'px') { c.style.height = h + 'px'; TL.need = true; }
+  $('tlEmpty').hidden = !!TL.show;
   if (key === TL.headsKey && $('tlHeads').childElementCount) return;
   if ($('tlHeads').contains(document.activeElement)) return; // renaming: redrawn afterwards
   TL.headsKey = key;
-  $('tlHeads').innerHTML = `<div class="top" style="height:${TL_TOP}px">${TL.show ? 'Pistes' : 'Aucun show : Nouveau show ou choisir un show'}</div>` + tracks.map((t, i) => `
+  if (!TL.show) {
+    // Empty state: what a show will look like, four empty tracks.
+    $('tlHeads').innerHTML = `<div class="top" style="height:${TL_TOP}px">Pistes</div>` + Array.from({ length: TL_EMPTY_TRACKS }, (_, i) =>
+      `<div class="tl-head empty" style="height:${TL_LANE}px;border-left-color:${TL_LAYER_COLORS[i % 4]}">Piste ${i + 1}</div>`).join('');
+    return;
+  }
+  $('tlHeads').innerHTML = `<div class="top" style="height:${TL_TOP}px">Pistes</div>` + tracks.map((t, i) => `
     <div class="tl-head" data-ti="${i}" style="height:${TL_LANE}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
       <input type="text" value="${esc(t.name)}" maxlength="64" data-f="name" title="Nom de la piste">
       <select data-f="layer" title="Calque">${[1, 2, 3, 4].map(n => `<option value="${n}"${n === t.layer ? ' selected' : ''}>C${n}</option>`).join('')}</select>
@@ -5761,6 +5838,45 @@ tlSetSnap(TL.snap);
 $('tlFit').onclick = tlFit;
 $('tlFollow').addEventListener('change', () => { TL.follow = $('tlFollow').checked; });
 $('tlNew').onclick = () => { $('tlNewRow').hidden = !$('tlNewRow').hidden; if (!$('tlNewRow').hidden) $('tlNewName').focus(); };
+// Empty state: the name row opens with a free name, ready for Entrée.
+$('tlEmptyNew').onclick = async () => {
+  await loadShows();
+  $('tlNewRow').hidden = false;
+  if (!$('tlNewName').value.trim()) $('tlNewName').value = tlFreeName('Nouveau show');
+  $('tlNewName').focus(); $('tlNewName').select();
+  tlMsg('Nommez le show, puis Créer (ou Entrée).');
+};
+
+// --- built-in examples (T-124 to T-129): read-only, opened as a copy ---
+let tlExamples = null;
+async function openTlExamples() {
+  $('tlExDialog').hidden = false;
+  if (!tlExamples) {
+    try { tlExamples = await (await fetch('/api/timeline/examples')).json(); } catch { tlExamples = null; }
+  }
+  $('tlExList').innerHTML = (tlExamples || []).map(x => `<button class="tl-ex" data-ex="${esc(x.id)}">
+      <b>${esc(x.title)}</b><span class="meta">${+x.bpm} BPM conseillé · ${x.bars} mesures</span><span class="desc">${esc(x.description)}</span></button>`).join('')
+    || '<div class="hint">Exemples indisponibles.</div>';
+  const first = $('tlExList').querySelector('button');
+  if (first) first.focus();
+}
+function closeTlExamples() { $('tlExDialog').hidden = true; }
+$('tlExamples').onclick = openTlExamples;
+$('tlEmptyEx').onclick = openTlExamples;
+$('tlExClose').onclick = closeTlExamples;
+$('tlExDialog').addEventListener('click', e => { if (e.target === $('tlExDialog')) closeTlExamples(); });
+$('tlExList').addEventListener('click', async e => {
+  const b = e.target.closest('[data-ex]');
+  if (!b) return;
+  const x = (tlExamples || []).find(q => q.id === b.dataset.ex);
+  if (TL.state && TL.state.modified && !confirm(`« ${TL.name} » a des modifications non enregistrées : les abandonner ?`)) return;
+  const r = await fetch('/api/timeline/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ example: b.dataset.ex }) });
+  if (!r.ok) { tlMsg(await r.text(), true); return; }
+  closeTlExamples();
+  $('tlNewRow').hidden = true;
+  TL.rev = -1;
+  tlMsg(`Exemple « ${x ? x.title : b.dataset.ex} » ouvert : une copie, rien n'est enregistré. ▶ Lecture démarre à la mesure suivante${x ? ` (tempo conseillé ${+x.bpm} BPM)` : ''}.`);
+});
 async function tlNewShow() {
   const name = $('tlNewName').value.trim();
   if (!name) { tlMsg('Donnez un nom au show.', true); return; }
@@ -5774,8 +5890,24 @@ async function tlNewShow() {
 }
 $('tlNewOk').onclick = tlNewShow;
 $('tlNewName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); tlNewShow(); } });
+// A name nobody uses yet: `base`, else `base 2`, `base 3`…
+function tlFreeName(base) {
+  const taken = new Set(shows.map(s => s.name));
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
 $('tlSave').onclick = async () => {
-  const r = await fetch('/api/timeline/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  let body = '{}';
+  if (TL.state && TL.state.example) {
+    // An example's copy is saved under a name of its own, never over a show.
+    await loadShows();
+    const name = prompt('Enregistrer une copie de l\'exemple sous le nom :', tlFreeName(TL.name || 'Mon show'));
+    if (name === null) return;
+    body = JSON.stringify({ name: name.trim() });
+  }
+  const r = await fetch('/api/timeline/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
   if (!r.ok) { tlMsg('Enregistrement impossible : ' + await r.text(), true); return; }
   const st = await r.json();
   TL.rev = st.rev; tlShowFlags(st);
@@ -5896,9 +6028,9 @@ function tlDraw() {
   g.font = '11px system-ui, sans-serif';
   g.textBaseline = 'middle';
   const u0 = TL.t0, u1 = tlXToU(W);
-  if (!TL.show) { g.fillStyle = C.muted; g.fillText('Aucun show chargé', 10, TL_TOP / 2); return; }
-  // Lanes.
-  TL.show.tracks.forEach((t, i) => { g.fillStyle = i % 2 ? '#ffffff05' : '#00000030'; g.fillRect(0, tlLaneY(i), W, TL_LANE); });
+  // Lanes (with no show: the empty tracks of the empty state).
+  const lanes = TL.show ? TL.show.tracks.length : TL_EMPTY_TRACKS;
+  for (let i = 0; i < lanes; i++) { g.fillStyle = i % 2 ? '#ffffff05' : '#00000030'; g.fillRect(0, tlLaneY(i), W, TL_LANE); }
   g.fillStyle = C.panel; g.fillRect(0, 0, W, TL_RULER);
   // Grid: bars bright, beats faint, labels in the ruler (bars on top, seconds below).
   const grid = tlGrid();
@@ -5920,6 +6052,7 @@ function tlDraw() {
     g.fillText(fmtTime(s).replace(/\.0$/, ''), x + 3, TL_RULER - 8);
   }
   g.strokeStyle = C.line; g.beginPath(); g.moveTo(0, TL_RULER + 0.5); g.lineTo(W, TL_RULER + 0.5); g.moveTo(0, TL_RULER + TL_MARK + 0.5); g.lineTo(W, TL_RULER + TL_MARK + 0.5); g.moveTo(0, TL_TOP + 0.5); g.lineTo(W, TL_TOP + 0.5); g.stroke();
+  if (!TL.show) { TL.draws++; return; }
   // Loop region.
   const r = TL.show.loop_region;
   if (r) {
@@ -5956,7 +6089,7 @@ function tlDraw() {
       if (sel) { g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x0 + 1, y + 1, Math.max(2, x1 - x0) - 2, h - 2); g.lineWidth = 1; }
       if (x1 - x0 > 24) {
         g.save(); g.beginPath(); g.rect(x0, y, x1 - x0, h); g.clip();
-        g.fillStyle = '#06120b'; g.fillText(e.source.kind === 'cue' ? tlPresetName(e.source.id) : 'Look', Math.max(x0, 0) + 4, y + h / 2);
+        g.fillStyle = '#06120b'; g.fillText(tlEventName(e), Math.max(x0, 0) + 4, y + h / 2);
         g.restore();
       }
     }

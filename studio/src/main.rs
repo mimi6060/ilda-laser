@@ -27,6 +27,7 @@ mod datafile;
 mod dwell;
 mod engine;
 mod evolving;
+mod examples;
 mod fans;
 mod figure_import;
 mod figures;
