@@ -5,11 +5,13 @@
 //! The callback never allocates, locks or logs: it averages the channels
 //! of each frame to mono and pushes the samples into a lock-free SPSC ring
 //! (`rtrb`). A full ring drops the newest samples and counts an overrun;
-//! it never waits. Errors reported by the backend only set atomic flags,
+//! it never waits. With LTC in (T-168) it also copies one channel (or the
+//! mix) into a second ring for the timecode decoder; that channel is then
+//! left out of the mono mix. Errors reported by the backend only set atomic flags,
 //! read by the capture thread (worker.rs).
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -120,6 +122,14 @@ pub struct Sink {
     inv_channels: f32,
     counters: Arc<CaptureCounters>,
     epoch: Instant,
+    ltc: Option<LtcTap>,
+}
+
+/// The LTC copy (T-168): `tap` says which channel (-1 none, 0 the mix, n
+/// channel n), read once per callback.
+struct LtcTap {
+    tap: Arc<AtomicI32>,
+    producer: rtrb::Producer<f32>,
 }
 
 impl Sink {
@@ -132,13 +142,27 @@ impl Sink {
             c.first_ns.store(ns, Ordering::Release);
         }
         let mut lost = 0u64;
+        let tap = self.ltc.as_ref().map_or(-1, |l| l.tap.load(Ordering::Relaxed));
+        // A channel of its own carries the LTC: out of the music's mix.
+        let skip = if tap >= 1 && tap as usize <= self.channels && self.channels > 1 { tap as usize - 1 } else { usize::MAX };
+        let inv = if skip == usize::MAX { self.inv_channels } else { 1.0 / (self.channels - 1) as f32 };
         for frame in data.chunks_exact(self.channels) {
             let mut sum = 0.0f32;
-            for s in frame {
-                sum += s.to_f32();
+            for (i, s) in frame.iter().enumerate() {
+                if i != skip {
+                    sum += s.to_f32();
+                }
             }
-            if self.producer.push(sum * self.inv_channels).is_err() {
+            if self.producer.push(sum * inv).is_err() {
                 lost += 1;
+            }
+            if let (Some(l), true) = (self.ltc.as_mut(), tap >= 0) {
+                let v = match tap as usize {
+                    0 => sum * inv,
+                    n => frame.get(n - 1).map_or(0.0, |s| s.to_f32()),
+                };
+                // A full LTC ring loses samples, never time.
+                let _ = l.producer.push(v);
             }
         }
         if lost > 0 {
@@ -158,7 +182,17 @@ pub fn ring(sample_rate: u32, channels: u16, counters: Arc<CaptureCounters>, epo
 pub fn ring_with_capacity(capacity: usize, channels: u16, counters: Arc<CaptureCounters>, epoch: Instant) -> (Sink, rtrb::Consumer<f32>) {
     let (producer, consumer) = rtrb::RingBuffer::new(capacity.max(1));
     let channels = channels.max(1) as usize;
-    (Sink { producer, channels, inv_channels: 1.0 / channels as f32, counters, epoch }, consumer)
+    (Sink { producer, channels, inv_channels: 1.0 / channels as f32, counters, epoch, ltc: None }, consumer)
+}
+
+impl Sink {
+    /// Adds the LTC copy (T-168): a ring of `capacity` samples, filled
+    /// while `tap` is 0 or more. Returns the decoder's end.
+    pub fn with_ltc(mut self, tap: Arc<AtomicI32>, capacity: usize) -> (Sink, rtrb::Consumer<f32>) {
+        let (producer, consumer) = rtrb::RingBuffer::new(capacity.max(1));
+        self.ltc = Some(LtcTap { tap, producer });
+        (self, consumer)
+    }
 }
 
 /// An audio input as listed by `GET /api/audio/devices`.
@@ -566,6 +600,36 @@ pub(crate) mod tests {
         assert_eq!(n, 0, "allocations in the audio callback");
         assert!(counters.overruns.load(Ordering::Relaxed) > 0, "the overrun path ran");
         assert_eq!(drain(&mut out).len(), 1_024);
+    }
+
+    #[test]
+    fn the_ltc_channel_is_copied_and_left_out_of_the_mix() {
+        let tap = Arc::new(AtomicI32::new(-1));
+        let (sink, mut music) = ring(48_000, 2, Arc::new(CaptureCounters::default()), Instant::now());
+        let (mut sink, mut ltc) = sink.with_ltc(Arc::clone(&tap), 48_000);
+        // Off: the usual mix, nothing copied.
+        sink.push(&[0.25f32, 0.75]);
+        assert_eq!(drain(&mut music), vec![0.5]);
+        assert!(drain(&mut ltc).is_empty());
+        // Channel 2: copied, and the music is channel 1 alone.
+        tap.store(2, Ordering::Relaxed);
+        sink.push(&[0.25f32, 0.75, 0.125, -0.75]);
+        assert_eq!(drain(&mut music), vec![0.25, 0.125]);
+        assert_eq!(drain(&mut ltc), vec![0.75, -0.75]);
+        // The mix: both get it.
+        tap.store(0, Ordering::Relaxed);
+        sink.push(&[0.25f32, 0.75]);
+        assert_eq!(drain(&mut music), vec![0.5]);
+        assert_eq!(drain(&mut ltc), vec![0.5]);
+        // A channel the device doesn't have: silence, the mix untouched.
+        tap.store(5, Ordering::Relaxed);
+        sink.push(&[0.25f32, 0.75]);
+        assert_eq!(drain(&mut music), vec![0.5]);
+        assert_eq!(drain(&mut ltc), vec![0.0]);
+        // Still no allocation in the callback.
+        tap.store(2, Ordering::Relaxed);
+        let data = vec![0.1f32; 1024];
+        assert_eq!(allocations_during(|| sink.push(&data)), 0);
     }
 
     #[test]

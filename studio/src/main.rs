@@ -72,6 +72,7 @@ mod sheets;
 mod tempo;
 mod testpattern;
 mod textures;
+mod timecode;
 mod timeline;
 mod transition;
 mod tunnels;
@@ -320,6 +321,9 @@ pub struct Shared {
     pub timeline: timeline::Player,
     /// Saved shows, `studio-data/shows/`.
     pub shows: timeline::ShowStore,
+    /// Incoming timecode (timecode/, T-168): settings in `timecode.json`,
+    /// TC-IN in memory only (off at start). Drives the timeline only.
+    pub timecode: timecode::TimecodeState,
     /// The operator's figures (figures.rs, `studio-data/figures/`), also
     /// the cues of the « Figures » page.
     pub figures: figures::FigureStore,
@@ -594,6 +598,8 @@ impl Shared {
         // and so does the audio automation (T-240).
         external::sync(self);
         audio::triggers::sync_estop(self);
+        // Timecode restarts nothing until TC-IN is armed again (T-168).
+        timecode::sync(self);
         self.sync_audience();
     }
 
@@ -1022,6 +1028,7 @@ fn startup_state(cli: &Cli) -> Shared {
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
+        timecode: timecode::TimecodeState::load(cli.data_dir.join("timecode.json")),
         figures: figures::FigureStore::load(cli.data_dir.join("figures")),
         user_cues: usercues::UserCueStore::load_or_create(cli.data_dir.join("user_cues.json")),
         media: Arc::new(audio::media::MediaStore::new(&cli.data_dir).isolated(audio::isolate::Isolation::child(
@@ -1635,6 +1642,8 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
     }
     let song = Arc::clone(&s.song);
     s.song_sync.sync(&song, &mut s.timeline, &c);
+    // Incoming timecode (T-168) has the last word on the playhead.
+    timecode::frame(s, &c);
     // A cue event plays the cue's grid program too (T-157).
     let with_program = |cue: &timeline::TimelineCue, look: Settings| match &cue.source {
         timeline::EventSource::Cue { id } => s.deck.with_program(id, look),

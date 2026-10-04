@@ -51,7 +51,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spectrum::{AnalysisConfig, SpectralFrame, SPECTRUM_BANDS};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -365,6 +366,13 @@ pub struct AudioHub {
     /// The *Guider* tempo for the estimator (T-234) and a generation
     /// bumped on each change (the analysis thread compares).
     guide: Mutex<(Option<f32>, u64)>,
+    /// LTC in (T-168): the channel the audio callback copies for the
+    /// decoder (-1 none, 0 the mix, n channel n), read lock-free by the
+    /// callback; the engine sets it every frame.
+    ltc_tap: Arc<AtomicI32>,
+    /// The newest LTC frame the analysis thread decoded, its studio time,
+    /// and a count bumped on each one.
+    ltc: Mutex<(u64, Option<(crate::timecode::ltc::LtcFrame, f64)>)>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -381,7 +389,7 @@ impl AudioHub {
         } else {
             CaptureStatus { state: CaptureState::Disabled, message: "Capture audio désactivée (--no-audio)".into(), ..Default::default() }
         };
-        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }), guide: Mutex::new((None, 0)) }
+        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }), guide: Mutex::new((None, 0)), ltc_tap: Arc::new(AtomicI32::new(-1)), ltc: Mutex::new((0, None)) }
     }
 
     /// From `<data_dir>/audio.json`, then `--audio-device` (for this run).
@@ -497,6 +505,32 @@ impl AudioHub {
             return None;
         }
         self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE).map(|n| n.tempo)
+    }
+
+    /// The LTC channel switch, for the audio callback (capture.rs).
+    pub fn ltc_tap(&self) -> Arc<AtomicI32> {
+        Arc::clone(&self.ltc_tap)
+    }
+
+    pub fn set_ltc_tap(&self, tap: i32) {
+        self.ltc_tap.store(tap, Ordering::Relaxed);
+    }
+
+    /// From the analysis thread: a decoded LTC frame, ended at studio
+    /// time `t`.
+    pub fn publish_ltc(&self, frame: crate::timecode::ltc::LtcFrame, t: f64) {
+        let mut l = lock(&self.ltc);
+        l.0 += 1;
+        l.1 = Some((frame, t));
+    }
+
+    /// The newest LTC frame if it came after `gen`, with its count.
+    pub fn ltc_since(&self, gen: u64) -> Option<(u64, crate::timecode::ltc::LtcFrame, f64)> {
+        let l = lock(&self.ltc);
+        match l.1 {
+            Some((f, t)) if l.0 != gen => Some((l.0, f, t)),
+            _ => None,
+        }
     }
 
     pub fn publish(&self, snapshot: NativeSnapshot) {

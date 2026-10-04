@@ -710,6 +710,26 @@ impl Player {
         self.anchor_clock = c.t;
     }
 
+    /// Chase an outside timecode (T-168, timecode/): while a Secondes show
+    /// plays, `target` is where it should be now. Further than `jump`
+    /// away is a jump of the source: seek there (the events there start
+    /// over). Otherwise take up `pull` (0..1) of the error. True on a
+    /// jump.
+    pub fn chase(&mut self, target: f64, c: &Clock, pull: f64, jump: f64) -> bool {
+        if !self.is_playing() || self.base() != TimeBase::Seconds || !target.is_finite() {
+            return false;
+        }
+        let now = self.position_at(c);
+        let err = target - now;
+        if err.abs() > jump {
+            self.seek(target, c);
+            return true;
+        }
+        self.anchor = now + pull.clamp(0.0, 1.0) * err;
+        self.anchor_clock = c.t;
+        false
+    }
+
     fn base(&self) -> TimeBase {
         self.show.as_ref().map_or(TimeBase::Seconds, |s| s.time_base)
     }

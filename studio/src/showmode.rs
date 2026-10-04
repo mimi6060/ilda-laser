@@ -60,8 +60,10 @@ pub fn allowed(path: &str) -> bool {
         "/api/arm",
         "/api/heartbeat",
         "/api/lock",
-        // The external inputs gate (T-408) is a live switch, like arming.
+        // The external inputs gate (T-408) is a live switch, like arming,
+        // and so is TC-IN (T-168); the timecode settings are an edit.
         "/api/external/gate",
+        "/api/timecode/arm",
         // Leaving a pattern is allowed; the handler refuses showing one.
         "/api/testpattern",
         "/api/data/warnings/ack",
@@ -144,7 +146,7 @@ mod tests {
 
     #[test]
     fn playback_and_safety_are_allowed_edits_are_not() {
-        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/cuelist/go", "/api/cuelist/goto", "/api/lock", "/api/test/stall", "/api/external/gate"] {
+        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/cuelist/go", "/api/cuelist/goto", "/api/lock", "/api/test/stall", "/api/external/gate", "/api/timecode/arm"] {
             assert!(allowed(p), "{p}");
         }
         for p in [
@@ -165,6 +167,7 @@ mod tests {
             "/api/midi/learn",
             "/api/midi/safety",
             "/api/external/scopes",
+            "/api/timecode",
             "/api/audio/routes",
             "/api/audio/preset",
             "/api/audio/triggers",
