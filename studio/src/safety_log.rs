@@ -416,6 +416,7 @@ fn source_fr(source: Option<&str>) -> &'static str {
         Some("network") => "réseau",
         Some("osc") => "OSC",
         Some("dmx") => "DMX",
+        Some("audio") => "audio (automatisme)",
         _ => "",
     }
 }
@@ -540,6 +541,12 @@ pub fn describe(e: &SafetyEvent) -> String {
             _ => "Entrées externes fermées".into(),
         },
         "external_scopes" => format!("Périmètre des entrées externes modifié{}", changed()),
+        "audio_automation" => match (d.get("on").and_then(Value::as_bool), str_of(d, "reason")) {
+            (Some(true), _) => "Automatisme audio activé (déclencheurs)".into(),
+            (_, "estop") => "Automatisme audio coupé par l'arrêt d'urgence".into(),
+            _ => "Automatisme audio coupé".into(),
+        },
+        "audio_triggers" => format!("Déclencheurs audio modifiés ({} règle(s))", d.get("count").and_then(Value::as_u64).unwrap_or(0)),
         "log_overflow" => format!("{} événement(s) perdu(s) : journal saturé", d.get("lost").and_then(Value::as_u64).unwrap_or(0)),
         other => other.to_string(),
     }

@@ -66,6 +66,7 @@ pub fn shared() -> Shared {
         external: crate::external::External::in_memory(),
         lfos,
         routes,
+        triggers: crate::audio::triggers::TriggerStore::in_memory(),
         mixer: layers::Mixer::default(),
         mixer_dirty: false,
         mix: layers::MixReport::default(),

@@ -40,6 +40,10 @@
 //!     frame; fades and quantised launches (T-159) run before the safety
 //!     stage (the session fuzz sets them at random), and the e-stop cuts
 //!     every transition and drops every waiting launch at once.
+//! 12. audio triggers (T-240): they never arm (covered by 6, their frame
+//!     included), the automation is off whenever the e-stop is latched,
+//!     and no rule acts in a frame that starts with the stop latched or
+//!     the switch off.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst; and the ShowNET SD card over Art-Net
@@ -503,6 +507,35 @@ fn random_audio(s: &mut Shared, rng: &mut Rng, now: Instant, t: f64, beats: &mut
     }
 }
 
+/// Audio trigger rules (T-240) on random cues, any event and action, some
+/// mangled.
+fn random_triggers(s: &Shared, rng: &mut Rng) -> crate::audio::triggers::TriggerConfig {
+    use crate::audio::triggers::{AudioEvent, AudioTrigger, TriggerAction, TriggerConfig};
+    let triggers = (0..1 + rng.below(4))
+        .map(|_| {
+            let (cue, _) = random_preset(s, rng);
+            let event = match rng.below(7) {
+                0 => AudioEvent::Kick,
+                1 => AudioEvent::Snare,
+                2 => AudioEvent::Drop,
+                3 => AudioEvent::Break,
+                4 => AudioEvent::BuildupAbove(rng.f()),
+                5 => AudioEvent::Silence,
+                _ => AudioEvent::EveryBars(1 + rng.below(4) as u32),
+            };
+            let action = match rng.below(4) {
+                0 => TriggerAction::LaunchCue(cue),
+                1 => TriggerAction::NextCue,
+                2 => TriggerAction::FlashCue { id: cue, beats: rng.range(0.25, 4.0) },
+                _ => TriggerAction::BlackHold { beats: rng.range(0.25, 2.0) },
+            };
+            let base = AudioTrigger { event, action, min_interval_beats: rng.range(0.0, 2.0), ..Default::default() };
+            mutated(&base, rng, 0.1)
+        })
+        .collect();
+    TriggerConfig { triggers }
+}
+
 fn one_event_show(rng: &mut Rng, cue: &str) -> timeline::Show {
     let event = timeline::Event {
         id: 1,
@@ -774,6 +807,8 @@ struct Coverage {
     lit_with_public_scanning: usize,
     /// Frames with a lit preview while a transition between cues ran (T-158).
     lit_with_transition: usize,
+    /// Audio trigger actions taken (T-240).
+    trigger_actions: u64,
 }
 
 /// One DMX fixture instance per zone (T-407), random personalities and
@@ -881,8 +916,23 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if trng.chance(0.6) {
         random_transitions(&mut rig.s(), &mut trng);
     }
+    // Audio triggers (T-240), from their own stream: rules on random cues,
+    // the switch flipped from the UI or a controller now and then.
+    let mut grng = Rng::new(seed ^ 0x0240_0240);
+    if grng.chance(0.5) {
+        let mut s = rig.s();
+        let cfg = random_triggers(&s, &mut grng);
+        crate::audio::triggers::set_config(&mut s, cfg).map_err(|e| format!("setup: triggers refused: {e:#}"))?;
+        let _ = crate::audio::triggers::set_enabled(&mut s, grng.chance(0.8), ArmSource::Ui);
+    }
     let mut beats = 0;
     for frame in 0..frames {
+        if grng.chance(0.1) {
+            let mut s = rig.s();
+            let on = grng.chance(0.7);
+            let id = "audio.triggers.enabled";
+            let _ = if grng.chance(0.5) { controls::apply(&mut s, id, ControlInput::Value(on as u8 as f32), true) } else { crate::audio::triggers::set_enabled(&mut s, on, ArmSource::Ui).map_err(controls::ControlError::Refused) };
+        }
         if trng.chance(0.05) {
             random_transitions(&mut rig.s(), &mut trng);
         }
@@ -942,9 +992,27 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             (s.gate.is_armed() && !s.estop.is_latched(), s.outputs.active_limits(), s.presence.status().midi_hold, s.audience.is_scanning())
         };
         let armed_before = rig.s().gate.is_armed();
+        let (fired_before, triggers_may_act) = {
+            let s = rig.s();
+            if s.estop.is_latched() && s.triggers.enabled() {
+                return Err(format!("frame {frame}: audio automation on with the e-stop latched"));
+            }
+            (s.triggers.engine.fired_total(), s.triggers.enabled() && !s.estop.is_latched())
+        };
         rig.tick();
         if rig.s().gate.is_armed() && !armed_before {
             return Err(format!("frame {frame}: the engine frame armed the laser"));
+        }
+        {
+            let s = rig.s();
+            let fired = s.triggers.engine.fired_total() - fired_before;
+            if fired > 0 && !triggers_may_act {
+                return Err(format!("frame {frame}: {fired} audio trigger action(s) with the automation off or the e-stop latched"));
+            }
+            if s.estop.is_latched() && s.triggers.enabled() {
+                return Err(format!("frame {frame}: audio automation still on after an e-stop"));
+            }
+            cov.trigger_actions += fired;
         }
         // The frame ran in the mode it ends in: the engine only ever ends
         // audience scanning, at its top (invariants 8 to 10).
@@ -1039,6 +1107,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_public_above) > 0.1, "only {} of {} lit frames had a Public zone, scanning off", cov.lit_with_public_above, cov.frames);
         assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
         assert!(share(cov.lit_with_transition) > 0.01, "only {} of {} lit frames ran a transition", cov.lit_with_transition, cov.frames);
+        assert!(cov.trigger_actions > seeds.len() as u64 / 10, "only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
 

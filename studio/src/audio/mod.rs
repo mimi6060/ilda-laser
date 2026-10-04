@@ -34,9 +34,11 @@ pub mod onsets;
 pub mod sections;
 pub mod shape;
 pub mod playback;
+pub mod presets;
 pub mod routes;
 pub mod safety;
 pub mod spectrum;
+pub mod triggers;
 pub mod worker;
 
 use crate::engine::{AudioFeatures, Section, AUDIO_EVENTS, AUDIO_VALUES};

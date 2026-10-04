@@ -346,6 +346,29 @@ fn arrangement_cases() -> Vec<Case> {
     vec![Builder::new("arrangement_128", RATE, 128.0).groove(16, 1.0).breakdown(8).buildup(8).groove(24, 1.0).build()]
 }
 
+/// The arrangement case alone, for the tests of what reacts to sections
+/// (audio triggers, T-240).
+pub(super) fn arrangement_case() -> Case {
+    arrangement_cases().remove(0)
+}
+
+/// `signal` through a fresh analyser, hop by hop: (end of the hop, the
+/// features the engine would get), for tests that drive something with
+/// the analysis of a synthetic case (audio triggers, T-240).
+pub(super) fn feature_hops(signal: &[f32], rate: u32) -> Vec<(f64, crate::engine::AudioFeatures)> {
+    let mut a = Analyzer::with_config(rate, Onsets::default(), AnalysisConfig::default());
+    signal
+        .as_chunks::<HOP>()
+        .0
+        .iter()
+        .enumerate()
+        .map(|(h, hop)| {
+            let at = ((h + 1) * HOP) as f64 / rate as f64;
+            (at, a.process(hop, at).features)
+        })
+        .collect()
+}
+
 /// No drums: white noise at −20 dBFS, a bass line and pad.
 fn no_pulse_cases() -> Vec<Case> {
     vec![Builder::new("white_noise", RATE, 128.0).noise(10.0, 0.1).build(), Builder::new("bass_line", RATE, 128.0).bass_line(24).build()]

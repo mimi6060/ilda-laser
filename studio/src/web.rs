@@ -1071,7 +1071,11 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 })
                 .collect();
             let r = s.routes.routing();
-            json_response(json!({ "routes": r.routes, "mix": r.mix, "sources": sources, "targets": targets, "max": crate::audio::routes::MAX_ROUTES }))
+            // T-239: the preset these routes are exactly (null: custom).
+            let preset = crate::audio::presets::matching(r, &s.controls);
+            // Per route: high frequencies on a brightness (it flickers).
+            let flicker: Vec<bool> = r.routes.iter().map(crate::audio::presets::flickers).collect();
+            json_response(json!({ "routes": r.routes, "mix": r.mix, "sources": sources, "targets": targets, "max": crate::audio::routes::MAX_ROUTES, "preset": preset, "flicker": flicker }))
         }
         (Method::Post, "/api/audio/routes") => match body::<crate::audio::routes::AudioRouting>(request) {
             Ok(routing) => {
@@ -1079,6 +1083,49 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 match s.routes.set(routing, &s.controls) {
                     Ok(()) => ok(),
                     Err(e) => text(400, &e.to_string()),
+                }
+            }
+            Err(e) => e,
+        },
+        // Audio reactivity presets (T-239): sets of routes, applied in one click.
+        (Method::Get, "/api/audio/presets") => {
+            let s = shared.lock().unwrap();
+            let list: Vec<_> = crate::audio::presets::builtin_presets()
+                .into_iter()
+                .map(|p| json!({ "id": p.id, "name": p.name_fr, "hint": p.hint_fr, "routes": p.routes }))
+                .collect();
+            json_response(json!({ "presets": list, "current": crate::audio::presets::matching(s.routes.routing(), &s.controls) }))
+        }
+        // `{"id": "punch"}`: replaces the routes (crossfader and everything
+        // else kept). An edit: locked in show mode.
+        (Method::Post, "/api/audio/preset") => match body::<serde_json::Value>(request) {
+            Ok(v) => {
+                let s = &mut *shared.lock().unwrap();
+                let id = v.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+                match crate::audio::presets::apply(id, s.routes.routing(), &s.controls) {
+                    None => text(400, &format!("préréglage audio inconnu : « {id} »")),
+                    Some((routing, warnings)) => match s.routes.set(routing, &s.controls) {
+                        Ok(()) => {
+                            for w in &warnings {
+                                log::warn!("préréglage audio {id} : {w}");
+                            }
+                            json_response(json!({ "preset": id, "routes": s.routes.routing().routes, "warnings": warnings }))
+                        }
+                        Err(e) => text(400, &e.to_string()),
+                    },
+                }
+            }
+            Err(e) => e,
+        },
+        // Audio event triggers (T-240). The rules are an edit (locked in
+        // show mode); the switch is the control `audio.triggers.enabled`.
+        (Method::Get, "/api/audio/triggers") => json_response(crate::audio::triggers::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/audio/triggers") => match body::<crate::audio::triggers::TriggerConfig>(request) {
+            Ok(cfg) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::audio::triggers::set_config(s, cfg) {
+                    Ok(_) => json_response(crate::audio::triggers::view(s)),
+                    Err(e) => text(400, &format!("{e:#}")),
                 }
             }
             Err(e) => e,
@@ -2406,6 +2453,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "audio_routes": s.routes.meters().collect::<Vec<_>>(),
         "strobe": s.strobe,
         "audio_guard": s.audio_guard,
+        "audio_triggers": crate::audio::triggers::status(s),
         "dwell": s.dwell,
         "evolving": evolving_status(s),
         "test_pattern": s.test_pattern,
@@ -3134,6 +3182,40 @@ mod tests {
         assert_eq!((state["applog"]["enabled"].as_bool(), state["applog"]["write_failed"].as_bool()), (Some(true), Some(false)));
         drop(t);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-239 / T-240: presets replace the routes, trigger rules are checked
+    /// and logged, the switch is a control that never arms; in show mode
+    /// the rules and presets are locked, the switch is not.
+    #[test]
+    fn audio_presets_and_triggers_over_the_api() {
+        let t = TestServer::start(false);
+        let json = |(code, body): (u16, String)| -> (u16, serde_json::Value) { (code, serde_json::from_str(&body).unwrap_or(serde_json::Value::Null)) };
+        let (code, list) = json(t.request("GET", "/api/audio/presets", ""));
+        assert_eq!(code, 200);
+        assert_eq!(list["presets"].as_array().unwrap().len(), 5);
+        assert_eq!(t.request("POST", "/api/audio/preset", r#"{"id":"nope"}"#).0, 400);
+        let (code, r) = json(t.request("POST", "/api/audio/preset", r#"{"id":"punch"}"#));
+        assert_eq!((code, r["routes"].as_array().unwrap().len()), (200, 2));
+        let (_, routes) = json(t.request("GET", "/api/audio/routes", ""));
+        assert_eq!((routes["preset"].as_str(), routes["mix"].as_f64()), (Some("punch"), Some(0.5)));
+        assert_eq!(routes["flicker"], serde_json::json!([false, false]));
+
+        assert_eq!(t.request("POST", "/api/audio/triggers", r#"{"triggers":[{"event":"drop","action":{"launch_cue":"nope"}}]}"#).0, 400);
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        let body = format!(r#"{{"triggers":[{{"event":"drop","action":{{"launch_cue":"{cue}"}}}}]}}"#);
+        let (code, v) = json(t.request("POST", "/api/audio/triggers", &body));
+        assert_eq!((code, v["enabled"].as_bool(), v["triggers"].as_array().map(Vec::len)), (200, Some(false), Some(1)));
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"audio.triggers.enabled","value":1}"#).0, 200);
+        let (_, v) = json(t.request("GET", "/api/audio/triggers", ""));
+        assert_eq!(v["enabled"], true);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/audio/triggers", r#"{"triggers":[]}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/audio/preset", r#"{"id":"calm"}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"audio.triggers.enabled","value":0}"#).0, 200, "the switch is playback");
+        assert!(!t.shared.lock().unwrap().triggers.enabled());
     }
 
     /// T-283: in show mode, edits get 423 and change nothing; playing,

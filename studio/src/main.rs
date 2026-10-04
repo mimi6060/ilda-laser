@@ -278,6 +278,10 @@ pub struct Shared {
     /// Audio routes (audio/routes.rs, audio_routes.json): analysis values
     /// and events shaped onto controls, every frame, on the same copies.
     pub routes: audio::routes::RouteStore,
+    /// Audio event triggers (audio/triggers.rs, audio_triggers.json): rules
+    /// that press cues on a kick, a drop, a break… Their switch is memory
+    /// only and off at start; they never arm.
+    pub triggers: audio::triggers::TriggerStore,
     /// The four cue layers and the point budget (layers.rs), saved to
     /// layers.json when changed.
     pub mixer: layers::Mixer,
@@ -565,8 +569,10 @@ impl Shared {
         // Fades end and waiting cues are dropped at once (T-158 / T-159).
         self.deck.cut_transitions();
         self.gate.sync_estop(&self.estop);
-        // External inputs lose the hand until the operator reopens them.
+        // External inputs lose the hand until the operator reopens them,
+        // and so does the audio automation (T-240).
         external::sync(self);
+        audio::triggers::sync_estop(self);
         self.sync_audience();
     }
 
@@ -976,6 +982,7 @@ fn startup_state(cli: &Cli) -> Shared {
         },
         lfos,
         routes,
+        triggers: audio::triggers::TriggerStore::load(cli.data_dir.join("audio_triggers.json")),
         mixer: {
             let mut m: layers::Mixer = load_json(&cli.data_dir.join("layers.json"));
             m.sanitize();
@@ -1304,6 +1311,10 @@ impl Engine {
             controls::deck_frame(&mut s, t);
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             self.live_state.set_clock(t, clock.beat);
+            // Audio triggers (T-240): this frame's events press cues before
+            // the looks are read. Off, stale audio or e-stop: nothing.
+            // They never arm; their black is a gain on the master copy.
+            audio::triggers::frame(&mut s, &audio, active, reaction.guard.source_changed, t, &clock, audio_safety.max_flash_hz);
             // LFOs, then audio routes, move copies: the stored values stay
             // the operator's base. The Temps ↔ Audio crossfader shares them.
             // Silence with *Look calme*: that scene stands in for the manual
@@ -1322,6 +1333,9 @@ impl Engine {
             // Silence with *Noir*: the master copy fades to black. Not the
             // transport blackout: nothing to release, arming untouched.
             live.brightness = live.brightness.clamp(0.0, 1.0) * reaction.gain;
+            // A trigger's momentary black (T-240): the same copy, not the
+            // transport blackout.
+            live.brightness *= s.triggers.engine.gain();
             // DMX signal lost with *Fondu au noir* / *Noir immédiat* (T-406):
             // the same copy goes dark, before the safety stage. No disarm.
             live.brightness *= s.netin.gain.clamp(0.0, 1.0);
@@ -2443,7 +2457,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("laser-studio-startup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Files that try their luck with arming fields.
-        for name in ["presence.json", "live.json", "layers.json", "grid.json", "calibration.json", "scenes.json", "lfos.json", "audio_routes.json", "palettes.json"] {
+        for name in ["presence.json", "live.json", "layers.json", "grid.json", "calibration.json", "scenes.json", "lfos.json", "audio_routes.json", "audio_triggers.json", "palettes.json"] {
             std::fs::write(dir.join(name), r#"{"armed": true, "arm": true, "on": true, "hold_to_run": false}"#).unwrap();
         }
         let data_dir = dir.to_str().unwrap();

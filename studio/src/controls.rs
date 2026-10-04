@@ -151,6 +151,9 @@ impl ControlRegistry {
         add("audio.rotate".into(), "Rotation suit les basses".into(), "audio", cont(0.0, 1.0, d.audio.rotate, Unit::Percent), true);
         add("audio.flash".into(), "Flash sur le beat".into(), "audio", cont(0.0, 1.0, d.audio.flash, Unit::Percent), true);
         add("audio.color_on_beat".into(), "Couleur change au beat".into(), "audio", ControlKind::Toggle { default: true }, true);
+        // The audio triggers' switch (T-240): memory only, off at start,
+        // switched off by an e-stop. Turning it on never arms anything.
+        add("audio.triggers.enabled".into(), "Automatisme audio (déclencheurs)".into(), "audio", ControlKind::Toggle { default: false }, true);
 
         // Both latch the emergency stop (T-251): a controller's blackout pad
         // is the stop button. Only the UI resets it, and nothing external arms.
@@ -345,6 +348,7 @@ pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -
         "audio.rotate" => s.settings.audio.rotate = value(input),
         "audio.flash" => s.settings.audio.flash = value(input),
         "audio.color_on_beat" => s.settings.audio.color_on_beat = truthy(input),
+        "audio.triggers.enabled" => crate::audio::triggers::set_enabled(s, truthy(input), src).map_err(ControlError::Refused)?,
         "transport.blackout" | "safety.estop" => s.emergency_stop(src),
         "safety.hold" => s.presence.set_midi_hold(truthy(input)),
         // Only reachable from the UI (external is false): arming goes
@@ -473,7 +477,7 @@ pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -
             }
         }
     }
-    if desc.id.starts_with("look.") || desc.id.starts_with("audio.") {
+    if desc.id.starts_with("look.") || (desc.id.starts_with("audio.") && desc.id != "audio.triggers.enabled") {
         s.settings_rev += 1;
     }
     Ok(())
@@ -568,6 +572,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "audio.rotate" => json!(s.settings.audio.rotate),
         "audio.flash" => json!(s.settings.audio.flash),
         "audio.color_on_beat" => json!(s.settings.audio.color_on_beat),
+        "audio.triggers.enabled" => json!(s.triggers.enabled()),
         "transport.arm" => json!(s.gate.is_armed() && !s.estop.is_latched()),
         "safety.hold" => json!(s.presence.status().midi_hold),
         "tempo.bpm" => json!(s.tempo.bpm),
@@ -699,6 +704,14 @@ pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) 
 /// `src` (`ui`, `midi`) is for the safety log: a cue started while armed
 /// is logged (T-259).
 pub fn press_cue_from(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>) -> bool {
+    let now = s.now_s();
+    press_cue_at(s, id, mode, down, src, now)
+}
+
+/// `press_cue_from` at `t` on the studio clock: the engine's frame time,
+/// for the audio triggers (T-240), so a press made on a quantised
+/// boundary is on it for the deck too (no second wait).
+pub fn press_cue_at(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, t: f64) -> bool {
     if !s.presets.iter().any(|p| p.id == id) {
         return false;
     }
@@ -710,7 +723,7 @@ pub fn press_cue_from(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: b
     }
     let Some(settings) = cue_settings(s, id) else { return false };
     let first_new = s.deck.next_id();
-    with_deck(s, |deck, at| {
+    with_deck_at(s, deck_clock(s, t), |deck, at| {
         if down {
             deck.press(id, mode, at, || settings);
         } else {
