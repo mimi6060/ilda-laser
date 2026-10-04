@@ -547,6 +547,16 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
         "cue.multi" => json!(s.deck.multi),
         "cue.max_active" => json!(s.deck.max_active),
+        id if id.starts_with("master.rot_") => {
+            // master.rot_<axis>.angle / .speed, read back for the « Direct » panel.
+            let rest = &id["master.rot_".len()..];
+            let axis = ["x", "y", "z"].iter().position(|a| rest.starts_with(a))?;
+            match &rest[1..] {
+                ".angle" => json!(s.live.rot_angle[axis]),
+                ".speed" => json!(s.live.rot_speed[axis]),
+                _ => return None,
+            }
+        }
         id if id.starts_with("layer.") => {
             let (n, param) = layer_control(id)?;
             let l = s.mixer.layer(n);
@@ -796,6 +806,21 @@ mod tests {
         assert_eq!(native(-360.0, 360.0, ControlInput::Norm(1.0)), 360.0);
         assert_eq!(native(0.05, 1.0, ControlInput::Value(5.0)), 1.0);
         assert_eq!(native(0.05, 1.0, ControlInput::Norm(-3.0)), 0.05);
+    }
+
+    #[test]
+    fn every_master_fader_reads_back_for_the_direct_panel() {
+        // The « Direct » panel resyncs its sliders from /api/control-values.
+        let mut s = shared();
+        apply(&mut s, "master.rot_y.angle", ControlInput::Value(45.0), true).unwrap();
+        apply(&mut s, "master.rot_z.speed", ControlInput::Value(-90.0), true).unwrap();
+        assert_eq!(current(&s, s.controls.get("master.rot_y.angle").unwrap()), Some(serde_json::json!(45.0)));
+        assert_eq!(current(&s, s.controls.get("master.rot_z.speed").unwrap()), Some(serde_json::json!(-90.0)));
+        for d in s.controls.list().iter().filter(|d| d.id.starts_with("master.")) {
+            if matches!(d.kind, ControlKind::Continuous { .. } | ControlKind::Toggle { .. }) {
+                assert!(current(&s, d).is_some(), "{} has no value", d.id);
+            }
+        }
     }
 
     #[test]
