@@ -363,6 +363,15 @@
   .mdev .n { font-weight: 600; }
   .mdev.off .n { color: var(--muted); }
   .merr { color: var(--warn); font-size: 12px; margin-top: 4px; }
+  /* Aperçu des pads de l'APC40 mkII (T-206) : 8 × 5 pads + Scene Launch */
+  .apc-prev { display: grid; grid-template-columns: repeat(8, 1fr) 8px 1fr; gap: 3px; max-width: 260px; margin-top: 6px; padding: 6px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  .apc-prev i { aspect-ratio: 1; border-radius: 3px; border: 1px solid var(--line); background: var(--panel-2); }
+  .apc-prev i.sc { border-radius: 50%; grid-column: 10; }
+  .apc-prev i.pulse { animation: apcPulse 1s ease-in-out infinite; }
+  .apc-prev i.blink { animation: apcBlink .5s steps(1) infinite; }
+  @keyframes apcPulse { 50% { opacity: .35; } }
+  @keyframes apcBlink { 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) { .apc-prev i.pulse, .apc-prev i.blink { animation: none; } }
   #midiLost { display: none; background: #b3261e; color: #fff; font-weight: 600; font-size: 13px; padding: 6px 12px; text-align: center; }
   #midiLost.on { display: block; }
   /* Fichiers de données abîmés (T-402) */
@@ -6676,8 +6685,8 @@ async function midiLoop() {
     $('midiLost').classList.toggle('on', lost.length > 0);
     if (m.safety) { $('midiAllowArm').checked = m.safety.allow_arm; $('midiBlackoutLost').checked = m.safety.blackout_on_disconnect; }
     // Only rebuild the list when something changed, so an open menu isn't reset.
-    const key = JSON.stringify([m.enabled, m.devices.map(d => [d.name, d.connected, d.enabled, d.model, d.profile, d.profile_error]), m.errors]);
-    if (key !== midiKey) { midiKey = key; renderMidi(m); }
+    const key = JSON.stringify([m.enabled, m.devices.map(d => [d.name, d.connected, d.enabled, d.model, d.profile, d.profile_error, d.pad_colors, d.pulse_by_studio]), m.errors]);
+    if (key !== midiKey) { midiKey = key; renderMidi(m); } else showPads(m);
     showLearn(m);
     const mk = JSON.stringify(midiMaps);
     if (mk !== mapsKey) { mapsKey = mk; renderMappings(); }
@@ -6686,6 +6695,20 @@ async function midiLoop() {
   // Every 250 ms while learning, so the banner follows the controller;
   // 400 ms with the controller panel open (activity lights, monitor).
   midiTimer = setTimeout(midiLoop, learnBusy || learnMode ? 250 : $('midiPanel').open ? 400 : 2000);
+}
+// T-206: what the APC40 mkII's pads show (colour, pulse / blink), as the
+// studio drives them; rebuilt only when it changes.
+let padsKey = '';
+function showPads(m) {
+  const key = JSON.stringify(m.devices.map(d => d.pads || null));
+  if (key === padsKey) return;
+  padsKey = key;
+  const led = (l, cls) => `<i class="${cls}${l.mode ? ' ' + l.mode : ''}" data-v="${l.v}" style="${l.v ? `background:${l.rgb}` : ''}" title="Couleur ${l.v}${l.mode === 'pulse' ? ', pulse' : l.mode === 'blink' ? ', clignote' : ''}"></i>`;
+  m.devices.forEach((d, i) => {
+    const box = document.querySelector(`[data-mpads="${i}"]`);
+    if (!box || !d.pads) return;
+    box.innerHTML = d.pads.pads.map((row, r) => row.map(l => led(l, 'pad')).join('') + led(d.pads.scenes[r], 'sc')).join('');
+  });
 }
 // T-211: a light per device that flashes on each message, and the monitor.
 const MIDI_KIND_FR = { note_on: 'Note On', note_off: 'Note Off', cc: 'CC', pitch_bend: 'Pitch bend', program_change: 'Programme', sys_ex: 'SysEx' };
@@ -6764,17 +6787,33 @@ function renderMidi(m) {
       <div class="hint">Modèle détecté : ${esc(d.model_label)}</div>
       <label class="check"><input type="checkbox" data-mdev="${i}" ${d.enabled ? 'checked' : ''}> Activé</label>
       <label class="check"><input type="checkbox" data-mled="${i}" ${d.leds ? 'checked' : ''}> Retour LED</label>
+      ${d.model === 'Apc40Mk2' ? `
+      <label for="mpadc${i}">Couleurs des pads (mkII)</label>
+      <select id="mpadc${i}" data-mpadc="${i}">
+        <option value="cue">Couleur de la cue</option>
+        <option value="cell">Couleur de la case (comme à l'écran)</option>
+        <option value="classic">Vert / jaune (APC40 d'origine)</option>
+      </select>
+      <label class="check" title="Si les pads de votre APC ne pulsent pas avec l'horloge MIDI du studio"><input type="checkbox" data-mpulse="${i}" ${d.pulse_by_studio ? 'checked' : ''}> Pulsation calculée par le studio</label>
+      <div class="apc-prev" data-mpads="${i}" role="img" aria-label="Aperçu des pads de l'APC40 mkII"></div>` : ''}
       <label>Profil</label>
       <div class="row" style="margin-top:0"><select data-mprof="${i}">${opts}</select>
         <button data-mreset="${i}" style="flex:0;white-space:nowrap">Réinitialiser le profil</button></div>
       <div class="row"><button data-mexport="${i}">Exporter le profil</button><button data-mimport="${i}">Importer un profil</button></div>
       ${d.profile_error ? `<div class="merr">${esc(d.profile_error)}</div>` : ''}
     </div>`).join('') || '<div class="hint">Aucun appareil MIDI.</div>';
-  m.devices.forEach((d, i) => { const sel = document.querySelector(`[data-mprof="${i}"]`); if (sel) sel.value = d.profile; });
+  m.devices.forEach((d, i) => {
+    const sel = document.querySelector(`[data-mprof="${i}"]`); if (sel) sel.value = d.profile;
+    const pc = document.querySelector(`[data-mpadc="${i}"]`); if (pc) pc.value = d.pad_colors || 'cue';
+  });
+  padsKey = '';
+  showPads(m);
   $('midiHint').innerHTML = (m.enabled ? '' : 'Lancé avec --no-midi : aucun port ouvert. ') + m.errors.map(e => `<div class="merr">${esc(e)}</div>`).join('');
   const portOf = el => m.devices[+Object.values(el.dataset)[0]].name;
   document.querySelectorAll('[data-mdev]').forEach(el => el.onchange = () => post('/api/midi/device', { port: portOf(el), enabled: el.checked }));
   document.querySelectorAll('[data-mled]').forEach(el => el.onchange = () => post('/api/midi/device', { port: portOf(el), leds: el.checked }));
+  document.querySelectorAll('[data-mpadc]').forEach(el => el.onchange = async () => { await post('/api/midi/device', { port: portOf(el), pad_colors: el.value }); midiNow(); });
+  document.querySelectorAll('[data-mpulse]').forEach(el => el.onchange = async () => { await post('/api/midi/device', { port: portOf(el), pulse_by_studio: el.checked }); midiNow(); });
   document.querySelectorAll('[data-mprof]').forEach(el => el.onchange = () => post('/api/midi/profile', { port: portOf(el), profile: el.value }));
   document.querySelectorAll('[data-mreset]').forEach(el => el.onclick = () => post('/api/midi/profile', { port: portOf(el), profile: null }));
   document.querySelectorAll('[data-mexport]').forEach(el => el.onclick = () => exportProfile(portOf(el)));

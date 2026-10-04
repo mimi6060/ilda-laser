@@ -5,8 +5,8 @@
 import { test, expect, useStudio, openUi, reveal } from '../studio';
 import { Apc, testProfileFiles, DEVICE_INQUIRY, NOTE_ARM, NOTE_SCENE_1, NOTE_STOP_ALL, NOTE_SHIFT, CC_CUE_LEVEL, TEST_PORT } from '../midi';
 
-/** APC40 mkII palette indexes used by LED feedback (T-205). */
-const MK2_WHITE = 3;
+/** APC40 mkII palette indexes (T-206 « Vert / jaune » scheme). */
+const MK2_YELLOW = 13;
 const MK2_GREEN = 21;
 
 const studio = useStudio({ midiTest: true, files: testProfileFiles() });
@@ -32,6 +32,7 @@ test.beforeEach(async ({ page }) => {
   await studio.reset();
   await studio.post('/api/control', { id: 'page.1' });
   await studio.post('/api/midi/safety', { allow_arm: false });
+  await studio.post('/api/midi/device', { port: TEST_PORT, leds: true, pad_colors: 'cue', pulse_by_studio: false });
   await openUi(page, studio);
 });
 
@@ -54,24 +55,57 @@ test('a grid pad plays its cue, a second press stops it', async ({ page }) => {
   await expect.poll(async () => (await cueValues()).active_cue).toBe(cue.id);
   await expect(page.locator(`#cues .cue[data-id="${cue.id}"]`)).toHaveClass(/active/);
   expect((await studio.get('/api/midi')).last.msg).toMatchObject({ kind: 'note_off', note: 33 });
-  // LED feedback (T-205), APC40 mkII palette: green = playing, white = cue present.
-  await expect.poll(() => apc.ledAt(0, 1)).toBe(MK2_GREEN);
-  expect(await apc.ledAt(0, 0)).toBe(MK2_WHITE);
+  // LED feedback (T-205/T-206): the playing pad shows its cue's colour,
+  // full and pulsing; the others their cue's colour, dimmed and solid.
+  await expect.poll(async () => (await apc.preview(0, 1)).mode).toBe('pulse');
+  const playing = await apc.preview(0, 1);
+  await expect.poll(() => apc.ledAt(0, 1)).toBe(playing.v);
+  const other = await apc.preview(0, 0);
+  expect(other.mode).toBeNull();
+  expect(await apc.ledAt(0, 0)).toBe(other.v);
 
   await apc.pressPad(0, 1);
   await apc.releasePad(0, 1);
   await expect.poll(activeCues).not.toContain(cue.id);
-  await expect.poll(() => apc.ledAt(0, 1)).toBe(MK2_WHITE);
+  await expect.poll(async () => (await apc.preview(0, 1)).mode).toBeNull();
+  const dim = (await apc.preview(0, 1)).v;
+  expect(dim).not.toBe(playing.v);
+  await expect.poll(() => apc.ledAt(0, 1)).toBe(dim);
 
   // Started from the UI (tab closed or not, the studio drives the LEDs).
   expect(await studio.post('/api/control', { id: 'grid.1.1.1', value: 1 })).toBe(200);
   expect(await studio.post('/api/control', { id: 'grid.1.1.1', value: 0 })).toBe(200);
+  await expect.poll(async () => (await apc.preview(0, 0)).mode).toBe('pulse');
+  await expect.poll(() => apc.ledAt(0, 1)).toBe(dim);
+});
+
+test('« Couleurs des pads » : vert / jaune, then the cue colours again, previewed in Contrôleur', async ({ page }) => {
+  const dim = await apc.preview(0, 0);
+  await expect.poll(() => apc.ledAt(0, 0)).toBe(dim.v);
+  await reveal(page, '#midiPanel summary');
+  await page.locator('#midiPanel summary').click();
+  const pads = page.locator('[data-mpads="0"] i');
+  await expect(pads).toHaveCount(45);
+  await expect(pads.first()).toHaveAttribute('data-v', String(dim.v));
+
+  await page.locator('[data-mpadc="0"]').selectOption('classic');
+  await expect.poll(() => apc.ledAt(0, 0)).toBe(MK2_YELLOW);
+  await expect(pads.first()).toHaveAttribute('data-v', String(MK2_YELLOW));
+  await apc.pressPad(0, 0);
+  await apc.releasePad(0, 0);
   await expect.poll(() => apc.ledAt(0, 0)).toBe(MK2_GREEN);
-  await expect.poll(() => apc.ledAt(0, 1)).toBe(MK2_WHITE);
+  await expect(pads.first()).toHaveClass(/pulse/);
+
+  await page.locator('[data-mpadc="0"]').selectOption('cue');
+  await expect.poll(async () => (await studio.get('/api/midi')).devices[0].pad_colors).toBe('cue');
+  const back = await apc.preview(0, 0);
+  expect(back.mode).toBe('pulse');
+  await expect.poll(() => apc.ledAt(0, 0)).toBe(back.v);
 });
 
 test('« Retour LED » unticked leaves the APC dark, ticked lights it again', async ({ page }) => {
-  await expect.poll(() => apc.ledAt(0, 0)).toBe(MK2_WHITE);
+  const lit = (await apc.preview(0, 0)).v;
+  await expect.poll(() => apc.ledAt(0, 0)).toBe(lit);
   await reveal(page, '#midiPanel summary');
   await page.locator('#midiPanel summary').click();
   const box = page.locator('[data-mled="0"]');
@@ -80,7 +114,7 @@ test('« Retour LED » unticked leaves the APC dark, ticked lights it again', as
   await expect.poll(() => apc.ledAt(0, 0)).toBe(0);
   await expect.poll(async () => (await studio.get('/api/midi')).devices[0].leds).toBe(false);
   await page.locator('[data-mled="0"]').check();
-  await expect.poll(() => apc.ledAt(0, 0)).toBe(MK2_WHITE);
+  await expect.poll(() => apc.ledAt(0, 0)).toBe(lit);
 });
 
 test('track fader 1 takes over master size with pickup; the encoder steps', async () => {

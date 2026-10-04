@@ -42,19 +42,21 @@ pub struct FakeApc {
     /// Physical fader positions (tracks 1–8, master), as the mkII reports
     /// them after the Introduction.
     pub faders: [u8; 9],
+    /// MIDI clock ticks (`F8`) received: counted, not kept in `received`.
+    pub clock_ticks: u64,
 }
 
 impl FakeApc {
     /// `model` is `Apc40Mk2` or `Apc40`.
     pub fn new(model: Model) -> Self {
         assert!(matches!(model, Model::Apc40 | Model::Apc40Mk2), "FakeApc plays an APC40 or APC40 mkII");
-        FakeApc { model, received: VecDeque::new(), faders: [0; 9] }
+        FakeApc { model, received: VecDeque::new(), faders: [0; 9], clock_ticks: 0 }
     }
 
     /// Any other controller (T-211): answers nothing (not even the Device
     /// Inquiry), just records what the studio sends it.
     pub fn generic() -> Self {
-        FakeApc { model: Model::Unknown, received: VecDeque::new(), faders: [0; 9] }
+        FakeApc { model: Model::Unknown, received: VecDeque::new(), faders: [0; 9], clock_ticks: 0 }
     }
 
     /// Last value sent with `status` (e.g. `0x90` = Note On, channel 1) to
@@ -145,6 +147,10 @@ impl FakeApc {
     /// The studio sent `bytes` (one message): record it and return what the
     /// device answers.
     pub fn receive(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        if bytes == [0xF8] {
+            self.clock_ticks += 1;
+            return Vec::new();
+        }
         if self.received.len() >= RECEIVED_MAX {
             self.received.pop_front();
         }
@@ -171,21 +177,32 @@ impl FakeApc {
         self.received.iter().rev().find_map(|b| self.introduction_mode(b))
     }
 
-    /// Last LED value sent to pad `(row, col)`: the velocity (mkII: colour
-    /// index; APC40: 0 off, 1 green, 3 red, 5 yellow…), 0 after a Note
-    /// Off, `None` if the studio never addressed it.
+    /// Last LED value sent to pad `(row, col)`: the velocity (mkII: the
+    /// solid colour index, channel 0; APC40: 0 off, 1 green, 3 red,
+    /// 5 yellow…), 0 after a Note Off, `None` if the studio never
+    /// addressed it.
     pub fn led_at(&self, row: u8, col: u8) -> Option<u8> {
         let (channel, note) = self.pad_note(row, col);
         self.received.iter().rev().find_map(|b| {
             let [status, n, v] = b[..] else { return None };
-            // mkII pads: the channel is the LED behaviour (solid, pulse…).
-            let same_channel = self.model == Model::Apc40Mk2 || status & 0x0F == channel;
-            (n == note && same_channel).then_some(match status & 0xF0 {
+            (n == note && status & 0x0F == channel).then_some(match status & 0xF0 {
                 0x90 => Some(v),
                 0x80 => Some(0),
                 _ => None,
             })?
         })
+    }
+
+    /// mkII: the pulse / blink pad `(row, col)` shows on top of its colour,
+    /// as (mode channel 1–15, secondary colour); `None` = solid. A colour
+    /// on channel 0 ends any mode.
+    pub fn led_mode_at(&self, row: u8, col: u8) -> Option<(u8, u8)> {
+        let (_, note) = self.pad_note(row, col);
+        self.received.iter().rev().find_map(|b| match b[..] {
+            [status, n, v] if n == note && status & 0xF0 == 0x90 => Some((status & 0x0F != 0).then_some((status & 0x0F, v))),
+            [status, n, _] if n == note && status & 0xF0 == 0x80 => Some(None),
+            _ => None,
+        })?
     }
 
     /// The 5 × 8 grid as `led_at` sees it (row 0 at the top).
@@ -373,12 +390,18 @@ mod tests {
         let mut apc = FakeApc::new(Model::Apc40Mk2);
         assert_eq!(apc.led_at(0, 0), None);
         apc.receive(&[0x90, 32, 21]); // green
-        apc.receive(&[0x97, 0, 5]); // bottom-left, pulsing red
+        apc.receive(&[0x90, 0, 5]); // bottom-left red…
+        apc.receive(&[0x99, 0, 6]); // …pulsing to dark red (T-206)
         assert_eq!(apc.led_at(0, 0), Some(21));
-        assert_eq!(apc.led_at(4, 0), Some(5), "any channel on the mkII");
+        assert_eq!(apc.led_at(4, 0), Some(5), "the colour is on channel 0");
+        assert_eq!((apc.led_mode_at(4, 0), apc.led_mode_at(0, 0)), (Some((9, 6)), None));
+        apc.receive(&[0x90, 0, 5]);
+        assert_eq!(apc.led_mode_at(4, 0), None, "channel 0 ends the pulse");
         apc.receive(&[0x80, 32, 0]);
         assert_eq!(apc.led_at(0, 0), Some(0));
         assert_eq!(apc.pads()[4][0], Some(5));
+        apc.receive(&[0xF8]);
+        assert_eq!((apc.clock_ticks, apc.received.len()), (1, 5), "clock counted, not kept");
 
         let mut old = FakeApc::new(Model::Apc40);
         old.receive(&[0x92, 0x36, 1]);
@@ -516,14 +539,22 @@ mod tests {
         // (cue present); a second press stops it and it goes back to white.
         std::thread::sleep(crate::midi::led::LED_EVERY);
         rig.worker.step(Instant::now(), None);
-        assert_eq!(rig.apc(|a| a.led_at(0, 1)), Some(crate::midi::led::MK2_GREEN));
-        assert_eq!(rig.apc(|a| a.led_at(0, 0)), Some(crate::midi::led::MK2_WHITE));
+        // Pads in the cue's colour (T-206): full and pulsing while it plays, dim otherwise.
+        let colour = |slot: usize| {
+            let s = rig.shared.lock().unwrap();
+            let cue = s.grid.slot(0, slot).unwrap().to_string();
+            let full = crate::midi::palette::nearest_velocity(crate::midi::palette::cue_rgb(&s, &cue, Default::default()).unwrap());
+            (full, crate::midi::palette::dim_velocity(full))
+        };
+        let ((full, dim), (_, other)) = (colour(1), colour(0));
+        assert_eq!(rig.apc(|a| (a.led_at(0, 1), a.led_mode_at(0, 1))), (Some(full), Some((9, dim))));
+        assert_eq!(rig.apc(|a| a.led_at(0, 0)), Some(other));
         let (down, up) = rig.apc(|a| (a.pad(0, 1, true), a.pad(0, 1, false)));
         rig.play(&up);
         rig.play(&down);
         std::thread::sleep(crate::midi::led::LED_EVERY);
         rig.worker.step(Instant::now(), None);
-        assert_eq!(rig.apc(|a| a.led_at(0, 1)), Some(crate::midi::led::MK2_WHITE));
+        assert_eq!(rig.apc(|a| (a.led_at(0, 1), a.led_mode_at(0, 1))), (Some(dim), None));
     }
 
     #[test]

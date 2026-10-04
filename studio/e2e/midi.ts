@@ -56,6 +56,14 @@ export class Apc {
 
   /** Last LED value the studio sent to pad (row, col); null if never addressed. */
   async ledAt(row: number, col: number) { return (await this.device()).pads[row][col]; }
+
+  /** T-206: what « Contrôleur » previews for pad (row, col): colour index and pulse / blink. */
+  async preview(row: number, col: number): Promise<{ v: number; rgb: string; mode: string | null }> {
+    const m = await this.studio.get<{ devices: { name: string; pads?: { pads: { v: number; rgb: string; mode: string | null }[][] } }[] }>('/api/midi');
+    const d = m.devices.find(x => x.name === this.port);
+    if (!d?.pads) throw new Error(`no pad preview for ${this.port}`);
+    return d.pads.pads[row][col];
+  }
 }
 
 /**
