@@ -127,7 +127,7 @@ test('geometry: centre point is a horizontal beam straight ahead to the back wal
   expect(Math.asin(r.up[1]) * 180 / Math.PI).toBeCloseTo(20, 4);
   // Energy: exposure / N; sheets = consecutive lit pairs (the blank breaks one).
   expect(r.a).toBeCloseTo(0.005, 9);
-  expect(r.counts).toEqual({ beams: 5, sheets: 3 });
+  expect(r.counts).toEqual({ beams: 5, sheets: 3, inAudience: 0 });
   // Auto quality: fine at 16 ms, drops to medium after 2 s over 20 ms.
   expect(r.stillHigh).toBe('high');
   expect(r.loaded).toBe('medium');

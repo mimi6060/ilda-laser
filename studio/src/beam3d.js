@@ -14,10 +14,18 @@
 // z = 0. The default projector sits at the stage edge, 3 m high, facing
 // the audience (-z). A venue (T-277) places several projectors, each with
 // its own frame; `mirrorX` and `brightness` only change this drawing.
+//
+// Safety overlays (T-279): the venue's audience volume, and the studio's
+// horizon and safety zones (output space) cast into the room from every
+// projector. Beams that enter the audience volume are drawn red and
+// counted. A design aid only: the real safety stays on the server
+// (safety.rs, zones.rs), and nothing here changes what a laser draws.
 
 export const DEFAULT_ROOM = { w: 10, d: 15, h: 5 };
 export const DEFAULT_PROJECTOR = { pos: [0, 3, 11], yaw: 0, pitch: 0, roll: 0, scanDeg: 40 };
-export const DEFAULT_RENDER = { exposure: 1.0, sheets: true, haze: 0.5, hazeNoise: false, roomLight: 0.1, spots: true, bloom: true, quality: 'auto' };
+export const DEFAULT_RENDER = { exposure: 1.0, sheets: true, haze: 0.5, hazeNoise: false, roomLight: 0.1, spots: true, bloom: true, quality: 'auto',
+  // Safety overlays (T-279): master switch, then each layer.
+  safety: true, sfAudience: true, sfHorizon: true, sfZones: true };
 export const QUALITIES = ['low', 'medium', 'high'];
 
 const DEG = Math.PI / 180;
@@ -27,6 +35,12 @@ const BEAM_GAIN = 6, SHEET_GAIN = 5, SPOT_GAIN = 3;
 const BEAM_WIDTH_PX = 2;
 const BEAM_STRIDE = 7;   // hit x,y,z, r,g,b, weight
 const SHEET_STRIDE = 7;  // pos x,y,z, r,g,b, weight (3 vertices per triangle)
+/** Colour of a beam that enters the audience volume. */
+export const AUDIENCE_HIT_RGB = [1, 0.08, 0.08];
+// Overlay colours, as on the 2D preview (premultiplied below): red for
+// Blank zones and the horizon, orange for Dim, amber (--warn) for Public.
+const OV_RED = [1, 0.3, 0.31], OV_FILL_BLANK = [1, 0.16, 0.16], OV_FILL_DIM = [1, 0.47, 0.24], OV_AMBER = [1, 0.69, 0.13];
+const ZONE_EDGE_STEPS = 8, HORIZON_STEPS = 24;
 
 // ---------- geometry (pure, unit-tested from the e2e suite) ----------
 
@@ -74,6 +88,39 @@ export function rayBox(o, d, room) {
   return { t: Math.max(0, t), face };
 }
 
+/**
+ * The audience volume (T-279): the venue's floor rectangle `rect_m` [x0, z0,
+ * x1, z1] extruded up to `min_height_m`. Null when empty.
+ */
+export function audienceBox(aud) {
+  if (!aud || !Array.isArray(aud.rect_m) || aud.rect_m.length !== 4) return null;
+  const [x0, z0, x1, z1] = aud.rect_m.map(Number), h = Number(aud.min_height_m);
+  if (![x0, z0, x1, z1, h].every(Number.isFinite) || h <= 0 || x0 === x1 || z0 === z1) return null;
+  return { lo: [Math.min(x0, x1), 0, Math.min(z0, z1)], hi: [Math.max(x0, x1), h, Math.max(z0, z1)] };
+}
+
+/**
+ * Segment a → b goes inside `box` ({lo, hi}). Grazing a face does not count:
+ * the box is shrunk by `eps` (1 mm), so a beam exactly at the minimum height
+ * (or one a rounding error under it) is not in the audience.
+ */
+export function segmentHitsBox(a, b, box, eps = 1e-3) {
+  let t0 = 0, t1 = 1;
+  for (let i = 0; i < 3; i++) {
+    const lo = box.lo[i] + eps, hi = box.hi[i] - eps, d = b[i] - a[i];
+    if (lo >= hi) return false;
+    if (Math.abs(d) < 1e-12) {
+      if (a[i] <= lo || a[i] >= hi) return false;
+      continue;
+    }
+    let ta = (lo - a[i]) / d, tb = (hi - a[i]) / d;
+    if (ta > tb) [ta, tb] = [tb, ta];
+    t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+    if (t0 >= t1) return false;
+  }
+  return true;
+}
+
 /** Energy conservation: each sample gets exposure / N (N = samples in the frame). */
 export function beamAlpha(n, exposure = 1) {
   return n > 0 ? exposure / n : 0;
@@ -94,35 +141,107 @@ function grow(a, need, unit) {
  * triangle projector → hit i → hit i+1 per pair of consecutive lit points)
  * from a frame, from item `at.beams` / `at.sheets` on (several projectors
  * share the buffers). Buffers are reused and only grow. Returns the counts.
+ * With an audience box (T-279), a beam that enters it is drawn red, and so
+ * is a sheet next to it; `inAudience` counts those beams.
  */
-export function buildGeometry(points, projector, room, geo, withSheets = true, at = { beams: 0, sheets: 0 }) {
+export function buildGeometry(points, projector, room, geo, withSheets = true, at = { beams: 0, sheets: 0 }, audience = null) {
   const n = points.length;
   geo.beam = grow(geo.beam, (at.beams + n) * BEAM_STRIDE, BEAM_STRIDE);
   if (withSheets) geo.sheet = grow(geo.sheet, (at.sheets + n) * 3 * SHEET_STRIDE, 3 * SHEET_STRIDE);
   const basis = projectorBasis(projector), o = projector.pos, w = beamAlpha(n) * (projector.brightness ?? 1);
   const mx = projector.mirrorX ? -1 : 1;
   const dir = [0, 0, 0];
-  let beams = 0, sheets = 0, prev = -1; // prev = beam index of the previous point if it was lit
+  let beams = 0, sheets = 0, inAudience = 0, prev = -1, prevHot = false; // prev = beam index of the previous point if it was lit
+  const hit = [0, 0, 0];
   for (let i = 0; i < n; i++) {
     const p = points[i];
     if (!isLit(p)) { prev = -1; continue; }
     pointToDir(mx * p[0], p[1], projector, dir, basis);
     const t = rayBox(o, dir, room).t;
+    hit[0] = o[0] + dir[0] * t; hit[1] = o[1] + dir[1] * t; hit[2] = o[2] + dir[2] * t;
+    const hot = !!audience && segmentHitsBox(o, hit, audience);
+    if (hot) inAudience++;
+    const [cr, cg, cb] = hot ? AUDIENCE_HIT_RGB : [p[2], p[3], p[4]];
     const b = geo.beam, k = (at.beams + beams) * BEAM_STRIDE;
-    b[k] = o[0] + dir[0] * t; b[k + 1] = o[1] + dir[1] * t; b[k + 2] = o[2] + dir[2] * t;
-    b[k + 3] = p[2]; b[k + 4] = p[3]; b[k + 5] = p[4]; b[k + 6] = w;
+    b[k] = hit[0]; b[k + 1] = hit[1]; b[k + 2] = hit[2];
+    b[k + 3] = cr; b[k + 4] = cg; b[k + 5] = cb; b[k + 6] = w;
     if (withSheets && prev >= 0) {
       const s = geo.sheet, j = prev * BEAM_STRIDE;
       const m = (at.sheets + sheets) * 3 * SHEET_STRIDE;
+      const [sr, sg, sb] = hot || prevHot ? AUDIENCE_HIT_RGB : [p[2], p[3], p[4]];
       s[m] = o[0]; s[m + 1] = o[1]; s[m + 2] = o[2];
       s[m + 7] = b[j]; s[m + 8] = b[j + 1]; s[m + 9] = b[j + 2];
       s[m + 14] = b[k]; s[m + 15] = b[k + 1]; s[m + 16] = b[k + 2];
-      for (let v = m + 3; v < m + 3 * SHEET_STRIDE; v += SHEET_STRIDE) { s[v] = p[2]; s[v + 1] = p[3]; s[v + 2] = p[4]; s[v + 3] = w; }
+      for (let v = m + 3; v < m + 3 * SHEET_STRIDE; v += SHEET_STRIDE) { s[v] = sr; s[v + 1] = sg; s[v + 2] = sb; s[v + 3] = w; }
       sheets++;
     }
-    prev = at.beams + beams++;
+    prev = at.beams + beams++; prevHot = hot;
   }
-  return { beams, sheets };
+  return { beams, sheets, inAudience };
+}
+
+/**
+ * The safety overlays (T-279) as two vertex lists (x, y, z, r, g, b, 1;
+ * colours premultiplied by their opacity, drawn additively): `tris` (filled
+ * faces) and `lines`. From `safety` ({zones, horizon} of the safety
+ * settings, output space -1..1), every projector casts its zones as cones and
+ * its horizon as a plane fanning out to the walls; the audience box is
+ * drawn as a translucent volume. `show` picks the layers; `scanning` (the
+ * audience mode, T-255) draws Public zones like the 2D preview does:
+ * blanked unless audience scanning is on.
+ */
+export function buildSafetyOverlay({ room, projectors = [], audience = null, safety = null, scanning = false, show = {} }) {
+  const tris = [], lines = [];
+  const vert = (arr, p, c, a) => arr.push(p[0], p[1], p[2], c[0] * a, c[1] * a, c[2] * a, 1);
+  const tri = (a, b, c, col, alpha) => { vert(tris, a, col, alpha); vert(tris, b, col, alpha); vert(tris, c, col, alpha); };
+  const line = (a, b, col, alpha) => { vert(lines, a, col, alpha); vert(lines, b, col, alpha); };
+  if (show.audience !== false && audience) {
+    const { lo, hi } = audience;
+    const c = [[lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]], [hi[0], lo[1], hi[2]], [lo[0], lo[1], hi[2]],
+      [lo[0], hi[1], lo[2]], [hi[0], hi[1], lo[2]], [hi[0], hi[1], hi[2]], [lo[0], hi[1], hi[2]]];
+    // Floor and top a little stronger than the sides, so the volume reads.
+    for (const [q, a] of [[[0, 1, 2, 3], 0.1], [[4, 5, 6, 7], 0.07], [[0, 1, 5, 4], 0.04], [[1, 2, 6, 5], 0.04], [[2, 3, 7, 6], 0.04], [[3, 0, 4, 7], 0.04]]) {
+      tri(c[q[0]], c[q[1]], c[q[2]], OV_AMBER, a); tri(c[q[0]], c[q[2]], c[q[3]], OV_AMBER, a);
+    }
+    for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) line(c[a], c[b], OV_AMBER, 0.85);
+  }
+  if (!safety) return { tris: new Float32Array(tris), lines: new Float32Array(lines) };
+  const dir = [0, 0, 0];
+  for (const p of projectors) {
+    const o = p.pos, basis = projectorBasis(p), mx = p.mirrorX ? -1 : 1;
+    const cast = (x, y) => {
+      pointToDir(mx * x, y, p, dir, basis);
+      const t = rayBox(o, dir, room).t;
+      return [o[0] + dir[0] * t, o[1] + dir[1] * t, o[2] + dir[2] * t];
+    };
+    const h = safety.horizon;
+    if (show.horizon !== false && h && Number.isFinite(h.y) && h.y > -1 && h.y < 1) {
+      let last = null;
+      for (let i = 0; i <= HORIZON_STEPS; i++) {
+        const q = cast(-1 + 2 * i / HORIZON_STEPS, h.y);
+        if (last) { tri(o, last, q, OV_RED, 0.05); line(last, q, OV_RED, 0.55); }
+        last = q;
+      }
+    }
+    if (show.zones === false) continue;
+    for (const z of safety.zones || []) {
+      const pts = (z.points || []).filter(v => Array.isArray(v) && v.every(Number.isFinite));
+      if (pts.length < 3) continue;
+      const dim = z.kind === 'dim' && (!z.audience || scanning);
+      const fill = dim ? OV_FILL_DIM : OV_FILL_BLANK, stroke = z.audience ? OV_AMBER : OV_RED;
+      let last = null;
+      pts.forEach((v, k) => {
+        const w = pts[(k + 1) % pts.length];
+        line(o, cast(v[0], v[1]), stroke, 0.35);
+        for (let s = k === 0 ? 0 : 1; s <= ZONE_EDGE_STEPS; s++) {
+          const f = s / ZONE_EDGE_STEPS, q = cast(v[0] + (w[0] - v[0]) * f, v[1] + (w[1] - v[1]) * f);
+          if (last) { tri(o, last, q, fill, dim ? 0.05 : 0.08); line(last, q, stroke, 0.9); }
+          last = q;
+        }
+      });
+    }
+  }
+  return { tris: new Float32Array(tris), lines: new Float32Array(lines) };
 }
 
 /**
@@ -291,7 +410,10 @@ export class BeamView {
     // the main one, fed by setFrame. `selected` is drawn highlighted.
     this.projectors = [{ ...projector, pos: [...projector.pos] }];
     this.frames = [[]]; this.selected = -1; this.parts = [];
-    this.render = { ...render };
+    this.render = { ...DEFAULT_RENDER, ...render };
+    // Safety overlays (T-279): the venue's audience area, the safety
+    // settings' zones and horizon, the audience mode. Display only.
+    this.audience = null; this.safety = null; this.scanning = false; this.inAudience = 0;
     this.auto = new AutoQuality();
     this.geo = {}; this.counts = { beams: 0, sheets: 0 };
     this.dirty = false;
@@ -332,7 +454,7 @@ export class BeamView {
     this.cornerBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cornerBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, -1, 1, -1, 0, 1, 1, 1]), gl.STATIC_DRAW);
-    this.beamBuf = gl.createBuffer(); this.sheetBuf = gl.createBuffer(); this.roomBuf = gl.createBuffer();
+    this.beamBuf = gl.createBuffer(); this.sheetBuf = gl.createBuffer(); this.roomBuf = gl.createBuffer(); this.overlayBuf = gl.createBuffer();
 
     const attrib = (loc, size, stride, offset, divisor) => {
       gl.enableVertexAttribArray(loc);
@@ -348,9 +470,28 @@ export class BeamView {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.sheetBuf); attrib(0, 3, SHEET_STRIDE, 0, 0); attrib(1, 4, SHEET_STRIDE, 3, 0);
     this.roomVao = gl.createVertexArray(); gl.bindVertexArray(this.roomVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.roomBuf); attrib(0, 3, 7, 0, 0); attrib(1, 4, 7, 3, 0);
+    this.overlayVao = gl.createVertexArray(); gl.bindVertexArray(this.overlayVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.overlayBuf); attrib(0, 3, 7, 0, 0); attrib(1, 4, 7, 3, 0);
     gl.bindVertexArray(null);
     this.quadVao = gl.createVertexArray();
     this.buildRoom();
+  }
+
+  /** The audience volume, or null when the overlays are off or there is none. */
+  audienceVolume() { return this.render.safety ? audienceBox(this.audience) : null; }
+
+  /** The safety overlays (T-279) into their own buffer: faces, then lines. */
+  buildOverlay() {
+    const r = this.render, o = r.safety
+      ? buildSafetyOverlay({ room: this.room, projectors: this.projectors, audience: audienceBox(this.audience), safety: this.safety,
+        scanning: this.scanning, show: { audience: r.sfAudience, horizon: r.sfHorizon, zones: r.sfZones } })
+      : { tris: new Float32Array(0), lines: new Float32Array(0) };
+    this.overlayTris = o.tris.length / 7; this.overlayLines = o.lines.length / 7;
+    const all = new Float32Array(o.tris.length + o.lines.length);
+    all.set(o.tris); all.set(o.lines, o.tris.length);
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.overlayBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, all.length ? all : new Float32Array(7), gl.STATIC_DRAW);
   }
 
   /** The main projector. */
@@ -380,6 +521,7 @@ export class BeamView {
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.roomBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
+    this.buildOverlay();
   }
 
   // ----- data in -----
@@ -397,9 +539,11 @@ export class BeamView {
    * The venue (T-277): its room {w, d, h} and projectors [{pos, yaw, pitch,
    * roll, scanDeg, mirrorX, brightness}]; `selected` (an index, -1 = none)
    * is highlighted. Frames of projectors that stay keep showing.
+   * `audience` is the venue's audience area {rect_m, min_height_m} (T-279).
    */
-  setVenue({ room, projectors, selected = -1 } = {}) {
+  setVenue({ room, projectors, selected = -1, audience } = {}) {
     if (room) this.room = { ...room };
+    if (audience !== undefined) this.audience = audience;
     if (projectors && projectors.length) {
       this.projectors = projectors.map(p => ({ ...DEFAULT_PROJECTOR, ...p, pos: [...(p.pos || DEFAULT_PROJECTOR.pos)] }));
       this.frames = this.projectors.map((_, i) => this.frames[i] || []);
@@ -408,11 +552,23 @@ export class BeamView {
     this.buildRoom(); this.dirty = true;
   }
 
+  /**
+   * The safety settings to show (T-279): {zones, horizon} as the server's
+   * safety settings have them, and whether audience scanning is on (Public zones then
+   * drawn dimmed instead of blanked, as on the 2D preview).
+   */
+  setSafety(safety, scanning = false) {
+    this.safety = safety ? { zones: safety.zones || [], horizon: safety.horizon || null } : null;
+    this.scanning = !!scanning;
+    this.buildOverlay();
+  }
+
   setRender(patch) {
     const sheetsBefore = this.features().sheets;
     Object.assign(this.render, patch);
     if (patch.quality !== undefined && patch.quality === 'auto') this.auto = new AutoQuality();
     if (this.features().sheets !== sheetsBefore) this.dirty = true;
+    if (['safety', 'sfAudience', 'sfHorizon', 'sfZones'].some(k => k in patch)) { this.buildOverlay(); this.dirty = true; }
   }
 
   qualityLevel() { return this.render.quality === 'auto' ? this.auto.level : Math.max(0, QUALITIES.indexOf(this.render.quality)); }
@@ -421,14 +577,17 @@ export class BeamView {
   upload() {
     const t0 = performance.now(), gl = this.gl, f = this.features();
     // Every projector into the same buffers, the main one first.
-    const at = { beams: 0, sheets: 0 };
+    const at = { beams: 0, sheets: 0 }, aud = this.audienceVolume();
+    let inAudience = 0;
     this.parts = this.projectors.map((p, i) => {
-      const c = buildGeometry(this.frames[i] || [], p, this.room, this.geo, f.sheets, at);
+      const c = buildGeometry(this.frames[i] || [], p, this.room, this.geo, f.sheets, at, aud);
+      inAudience += c.inAudience;
       const part = { origin: p.pos, beamStart: at.beams, beams: c.beams, sheetStart: at.sheets, sheets: f.sheets ? c.sheets : 0 };
       at.beams += c.beams; at.sheets += part.sheets;
       return part;
     });
     this.counts = { beams: at.beams, sheets: at.sheets };
+    this.inAudience = inAudience;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.beamBuf);
     gl.bufferData(gl.ARRAY_BUFFER, this.geo.beam.subarray(0, Math.max(1, this.counts.beams) * BEAM_STRIDE), gl.DYNAMIC_DRAW);
     if (this.counts.sheets) {
@@ -557,6 +716,13 @@ export class BeamView {
     gl.bindVertexArray(this.roomVao);
     gl.drawArrays(gl.TRIANGLES, 0, this.roomTris);
     gl.drawArrays(gl.LINES, this.roomTris, this.roomLines);
+    // safety overlays (T-279): translucent, premultiplied, room light ignored
+    if (this.overlayTris || this.overlayLines) {
+      gl.uniform1f(P.u.uLight, 1);
+      gl.bindVertexArray(this.overlayVao);
+      if (this.overlayTris) gl.drawArrays(gl.TRIANGLES, 0, this.overlayTris);
+      if (this.overlayLines) gl.drawArrays(gl.LINES, this.overlayTris, this.overlayLines);
+    }
 
     const hazeGain = r.exposure * r.haze, sigma = 0.04 * r.haze, noise = f.noise ? 1 : 0;
     const setHaze = (P, gain) => {

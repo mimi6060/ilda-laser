@@ -534,6 +534,11 @@
   #beamsMsg { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
   .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
   .render3d .check { margin-top: 6px; }
+  /* Safety overlays in the 3D view (T-279), Theme (T-299) tokens. */
+  .r3safety { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0 14px; align-items: center; border-top: 1px solid var(--line); margin-top: 6px; }
+  #aud3d { position: absolute; top: 12px; right: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
+  #aud3d.hot, #stAudWrap.hot b { color: var(--danger); }
+  #aud3d.hot { border-color: var(--danger); }
   #strobeLed, #dwellLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }
   #pwLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
   #pwLoosenOk { border-color: var(--danger); color: var(--danger); }
@@ -1163,6 +1168,7 @@
       <canvas id="beams" width="900" height="900" hidden></canvas>
       <div id="beamsMsg" hidden>Visualiseur 3D indisponible sur ce navigateur</div>
       <div id="offBadge">Laser éteint : aperçu seulement</div>
+      <div id="aud3d" hidden role="status" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="aud3dN">0</b></div>
     </div>
     <div class="render3d" id="render3d" hidden>
       <div><label title="Aide à la conception, pas une mesure photométrique">Exposition <span class="v" id="r3exposureV"></span></label>
@@ -1177,10 +1183,17 @@
         <option value="auto">Auto</option><option value="low">Basse</option><option value="medium">Moyenne</option><option value="high">Haute</option>
       </select></div>
       <div class="hint" id="r3info"></div>
+      <div class="r3safety" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">
+        <label class="check" title="Surcouches de sécurité : la zone public du lieu (jusqu'à la hauteur minimale), l'horizon et les zones de « Sécurité » vus depuis chaque projecteur ; un faisceau qui entre dans la zone public est dessiné en rouge. Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale"><input type="checkbox" id="r3safety"> Afficher les surcouches de sécurité</label>
+        <label class="check"><input type="checkbox" id="r3sfAudience"> Zone public</label>
+        <label class="check"><input type="checkbox" id="r3sfHorizon"> Horizon</label>
+        <label class="check"><input type="checkbox" id="r3sfZones"> Zones de sécurité</label>
+      </div>
     </div>
     <div class="stats">
       <span>Points <b id="stPoints">0</b></span>
       <span>Images/s <b id="stFps">–</b></span>
+      <span id="stAudWrap" hidden title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="stAud">0</b></span>
       <span><kbd>Espace</kbd> laser on/off · <kbd>Échap</kbd> arrêt d'urgence · <kbd>Maj</kbd>+<kbd>Échap</kbd> désarmer</span>
     </div>
     <div id="evoBar" hidden title="Cue évolutif : temps courant / longueur, un trait par mesure">
@@ -3738,13 +3751,28 @@ function showRender3d() {
   $('r3exposure').value = Math.round(r.exposure * 100); $('r3exposureV').textContent = Math.round(r.exposure * 100) + ' %';
   $('r3haze').value = Math.round(r.haze * 100); $('r3hazeV').textContent = Math.round(r.haze * 100) + ' %';
   $('r3roomLight').value = Math.round(r.roomLight * 100); $('r3roomLightV').textContent = Math.round(r.roomLight * 100) + ' %';
-  for (const k of ['sheets', 'spots', 'bloom', 'hazeNoise']) $('r3' + k).checked = r[k];
+  for (const k of ['sheets', 'spots', 'bloom', 'hazeNoise', ...SF3D]) $('r3' + k).checked = r[k];
+  for (const k of SF3D.slice(1)) $('r3' + k).disabled = !r.safety;
   $('r3quality').value = r.quality;
+  showAud3d();
+}
+// Safety overlays (T-279): master switch, then each layer. Display only:
+// the counter is worked out here from the frames the page already has.
+const SF3D = ['safety', 'sfAudience', 'sfHorizon', 'sfZones'];
+function safetyTo3d() {
+  if (view3d) view3d.setSafety(safety, !!(audienceMode && audienceMode.scanning));
+}
+function showAud3d() {
+  const on = show3d && !!view3d && view3d.render.safety;
+  const n = on ? view3d.inAudience : 0;
+  $('aud3d').hidden = $('stAudWrap').hidden = !on;
+  $('aud3dN').textContent = $('stAud').textContent = n;
+  $('aud3d').classList.toggle('hot', n > 0); $('stAudWrap').classList.toggle('hot', n > 0);
 }
 function bindRender3d() {
   const set = patch => { view3d.setRender(patch); saveRender3d(); showRender3d(); };
   for (const k of ['exposure', 'haze', 'roomLight']) $('r3' + k).oninput = e => set({ [k]: e.target.value / 100 });
-  for (const k of ['sheets', 'spots', 'bloom', 'hazeNoise']) $('r3' + k).onchange = e => set({ [k]: e.target.checked });
+  for (const k of ['sheets', 'spots', 'bloom', 'hazeNoise', ...SF3D]) $('r3' + k).onchange = e => set({ [k]: e.target.checked });
   $('r3quality').onchange = e => set({ quality: e.target.value });
   $('recenter3d').onclick = () => view3d.recenter();
   // Which level Auto picked, and the render cost.
@@ -3753,6 +3781,7 @@ function bindRender3d() {
     const q = QUALITY_FR[beam3d.QUALITIES[view3d.qualityLevel()]];
     $('r3info').textContent = `${view3d.render.quality === 'auto' ? 'Auto : ' + q : q} · ${view3d.stats.drawMs.toFixed(1)} ms`;
   }, 500);
+  setInterval(() => { if (show3d && view3d) showAud3d(); }, 200);
 }
 // Stage tabs (T-270): 2D, 3D, or both side by side. The choice is
 // remembered in this browser.
@@ -3780,8 +3809,9 @@ async function setView(mode) {
   $('beams').hidden = !show3d;
   $('beamsMsg').hidden = !want3d || !!view3d;
   for (const id of ['recenter3d', 'hint3d', 'render3d']) $(id).hidden = !show3d;
-  if (show3d) { venueTo3d(); view3d.setFrame(lastPoints); view3d.start(); pollFrames3d(); }
+  if (show3d) { venueTo3d(); safetyTo3d(); view3d.setFrame(lastPoints); view3d.start(); pollFrames3d(); }
   else view3d?.stop();
+  showAud3d();
   if (show2d) draw(lastPoints);
   try { localStorage.setItem(STAGE_KEY, mode); } catch { /* private window: not remembered */ }
 }
@@ -4891,6 +4921,7 @@ function showSafety(force = false) {
     $(id + 'V').textContent = fmt(get(safety));
   }
   $('sfLines').checked = safety.horizon.lines;
+  safetyTo3d();
   if (force || document.activeElement !== $('sfDwellProfile')) $('sfDwellProfile').value = safety.dwell.profile;
   $('sfError').textContent = sfLoadError || '';
   $('sfZoneAdd').disabled = safety.zones.length >= 8;
@@ -8410,7 +8441,7 @@ function showAudienceMode(a) {
   $('audPill').hidden = !on;
   $('stage').classList.toggle('aud-scan', on);
   $('audSeg').querySelectorAll('button').forEach(b => b.classList.toggle('active', (b.dataset.aud === 'scanning') === on));
-  if (!!was !== on) { reloadAudience(); if (lastPoints && show2d) draw(lastPoints); }
+  if (!!was !== on) { reloadAudience(); safetyTo3d(); if (lastPoints && show2d) draw(lastPoints); }
 }
 async function reloadAudience() {
   try {
@@ -8699,6 +8730,7 @@ function venueTo3d() {
     room: { w: venue.room.width_m, d: venue.room.depth_m, h: venue.room.height_m },
     projectors: venue.projectors.map(p => ({ pos: p.pos_m, yaw: p.yaw_deg, pitch: p.pitch_deg, roll: p.roll_deg, scanDeg: p.scan_deg, mirrorX: p.mirror_x, brightness: p.brightness })),
     selected: venue.projectors.length > 1 && $('venuePanel').open ? vnSel : -1,
+    audience: venue.audience,
   });
 }
 async function pollFrames3d() {
