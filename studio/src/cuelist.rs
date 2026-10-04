@@ -249,6 +249,13 @@ impl CueListStore {
         self.lists = lists;
     }
 
+    /// Replaces every list and saves (undo / redo, T-285): the lists were
+    /// checked when they were first saved.
+    pub fn set_all(&mut self, lists: Vec<CueList>) -> Result<()> {
+        self.lists = lists;
+        self.save()
+    }
+
     /// Replaces the list with the same name, else appends; then saves.
     pub fn upsert(&mut self, mut list: CueList, reg: &ControlRegistry) -> Result<()> {
         list.sanitize();

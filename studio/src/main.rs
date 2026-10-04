@@ -37,6 +37,7 @@ mod font;
 mod generators;
 mod graphics;
 mod grid;
+mod history;
 mod ilda;
 mod ilda_library;
 mod instance;
@@ -508,6 +509,9 @@ pub struct Shared {
     pub projector_frames: Vec<venue::ProjectorFrame>,
     /// Notification centre (T-432): events without a request, in memory.
     pub notices: notices::Notices,
+    /// Undo / redo of edits (history.rs, T-285): in memory, 50 levels,
+    /// emptied when another project opens.
+    pub history: history::EditHistory,
 }
 
 impl Shared {
@@ -1324,6 +1328,7 @@ fn startup_state(cli: &Cli) -> Shared {
         projector_outputs: Default::default(),
         projector_frames: Vec::new(),
         notices: Default::default(),
+        history: Default::default(),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);

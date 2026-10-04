@@ -42,6 +42,12 @@ impl SceneStore {
         self.scenes = scenes;
     }
 
+    /// Replaces every scene and saves (undo / redo, T-285).
+    pub fn set_all(&mut self, scenes: Vec<Scene>) -> Result<()> {
+        self.scenes = scenes;
+        self.save()
+    }
+
     pub fn get(&self, name: &str) -> Option<&Scene> {
         self.scenes.iter().find(|s| s.name == name)
     }
