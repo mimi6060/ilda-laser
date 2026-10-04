@@ -5,12 +5,19 @@
 //! exposed to the rest of the network.
 //!
 //! One thread receives requests; `POST /api/estop` is handled right there,
-//! lock-free, ahead of everything queued. All other requests go, in order,
+//! without the studio lock, ahead of everything queued. All other requests go, in order,
 //! to a single worker thread, so a slow handler never delays a stop. The
 //! requests that may decode a song (import, waveform, attach: seconds, up
 //! to the decoding time limit) get their own thread, so they never hold up
 //! the heartbeats queued behind them (T-298: a slow or hanging decode must
 //! not disarm the laser as « Interface perdue »).
+//!
+//! The pushed state (`GET /api/events`, Server-Sent Events) and the binary
+//! frames (`GET /api/frame.bin`) are served on their own threads too, a
+//! bounded number of them (push.rs, T-411): a stream never occupies the
+//! worker, so it never delays a heartbeat or a stop. A stream whose page
+//! stops reading blocks only its own thread (no lock held while writing)
+//! until the page goes away; there are at most `MAX_STREAMS` of them.
 
 use crate::controls;
 use crate::cues::{ClickMode, CueSlot};
@@ -19,6 +26,7 @@ use crate::generators::GENERATOR_NAMES;
 use crate::interlock::{ArmSource, DisarmReason, EStop};
 use crate::patterns::SHAPE_NAMES;
 use crate::presets::CATEGORIES;
+use crate::push::{self, Hub, StateWait};
 use crate::scenes::Scene;
 use crate::{Playlist, Shared};
 use serde::Deserialize;
@@ -51,7 +59,14 @@ pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibratio
     Ok(())
 }
 
-fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) {
+pub(crate) fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) {
+    let hub = Arc::clone(&shared.lock().unwrap().push);
+    let frames = Arc::new(FramePool::default());
+    // The pushed state, built only while a stream is open (T-411).
+    let builder = std::thread::Builder::new().name("push-state".into()).spawn({
+        let (shared, hub, running) = (Arc::clone(&shared), Arc::clone(&hub), Arc::clone(&running));
+        move || build_states(&shared, &hub, &running)
+    });
     let (queue, pending) = std::sync::mpsc::channel::<Request>();
     // Draw the cue pictures now, beside the worker, so the first page
     // doesn't hold the heartbeat queue while they render.
@@ -84,13 +99,259 @@ fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibrat
             }
         };
         if is_estop(request.method(), request.url()) {
-            emergency_stop(request, &estop, &shared);
+            emergency_stop(request, &estop, &shared, &hub);
+        } else if let Some(push) = push_route(request.method(), request.url()) {
+            // Lock-free here: the hub only.
+            match push {
+                Push::Events => stream_aside(request, &hub),
+                Push::Frame => frame_aside(request, &hub, &frames),
+            }
         } else if let Err(e) = queue.send(request) {
             log::warn!("HTTP worker gone: {e}");
         }
     }
     drop(queue);
+    // Streams, frame waits and the state builder return at once.
+    hub.close();
+    frames.close();
     worker.join().ok();
+    if let Ok(builder) = builder {
+        builder.join().ok();
+    }
+}
+
+enum Push {
+    Events,
+    Frame,
+}
+
+/// The pushed routes (T-411), served beside the worker.
+fn push_route(method: &Method, url: &str) -> Option<Push> {
+    if *method != Method::Get {
+        return None;
+    }
+    match url.split('?').next() {
+        Some("/api/events") => Some(Push::Events),
+        Some("/api/frame.bin") => Some(Push::Frame),
+        _ => None,
+    }
+}
+
+/// While a state stream is open: the page's state (`/api/frame` without
+/// the points), at most 30 times a second, published when it changed.
+fn build_states(shared: &Mutex<Shared>, hub: &Hub, running: &AtomicBool) {
+    while running.load(Ordering::SeqCst) && !hub.is_closed() {
+        if !hub.wait_for_streams(Duration::from_millis(200)) {
+            continue;
+        }
+        let started = Instant::now();
+        let (mut state, anchor) = {
+            let Ok(mut s) = shared.lock() else { return };
+            (live_view(&mut s), s.tempo.beat_at(0.0))
+        };
+        let moving = split_moving(&mut state, anchor);
+        // Serialized only when it changed, with what moves put back.
+        hub.publish_state(state, |fingerprint| {
+            let mut full = fingerprint.clone();
+            put_back(&mut full, moving);
+            full.to_string()
+        });
+        std::thread::sleep(push::STATE_INTERVAL.saturating_sub(started.elapsed()));
+    }
+}
+
+/// What moves by itself in the page's state: the beat (the page counts it
+/// on from `bpm`) and the static beam guard's figures the page doesn't
+/// show (`extent` only matters while it limits).
+const MOVING: [(&str, &str); 6] = [("tempo", "beat"), ("tempo", "bar"), ("tempo", "beat_in_bar"), ("tempo", "phase"), ("dwell", "max_dose"), ("dwell", "extent")];
+
+/// Takes what moves by itself out of `state`, which is left as its
+/// fingerprint: a change in it is a real change, not time passing. The
+/// beat is replaced by `anchor` (the beat at the epoch), which only moves
+/// when the clock is nudged, synced or retimed. Returns what was taken.
+fn split_moving(state: &mut serde_json::Value, anchor: f64) -> Vec<(&'static str, &'static str, serde_json::Value)> {
+    let limiting = state["dwell"]["extent_factor"].as_f64().is_some_and(|f| f < 1.0);
+    let mut moved = Vec::new();
+    for (obj, key) in MOVING {
+        if (obj, key) == ("dwell", "extent") && limiting {
+            continue;
+        }
+        if let Some(v) = state.get_mut(obj).and_then(|o| o.as_object_mut()).and_then(|o| o.remove(key)) {
+            moved.push((obj, key, v));
+        }
+    }
+    if let Some(t) = state.get_mut("tempo").and_then(|t| t.as_object_mut()) {
+        t.insert("anchor".into(), json!((anchor * 1e6).round() / 1e6));
+    }
+    // How long ago each audio trigger fired (T-240) grows by itself: the
+    // page counts it on; a new firing changes `fired`.
+    if let Some(rules) = state.pointer_mut("/audio_triggers/rules").filter(|r| r.is_array()) {
+        let original = rules.clone();
+        for r in rules.as_array_mut().into_iter().flatten() {
+            if let Some(r) = r.as_object_mut() {
+                r.remove("ago_s");
+            }
+        }
+        moved.push(("audio_triggers", "rules", original));
+    }
+    moved
+}
+
+fn put_back(state: &mut serde_json::Value, moved: Vec<(&'static str, &'static str, serde_json::Value)>) {
+    for (obj, key, v) in moved {
+        if let Some(o) = state.get_mut(obj).and_then(|o| o.as_object_mut()) {
+            o.insert(key.into(), v);
+        }
+    }
+}
+
+/// `GET /api/events` (T-411): `text/event-stream` on its own thread. First
+/// the current state, then each new one (`id` = its version), and a
+/// comment after `KEEPALIVE` without change. At most `MAX_STREAMS` (503).
+/// A page that stops reading blocks this thread in a write until it goes
+/// away (tiny_http gives no send timeout on its connections); the write
+/// holds no lock: the event is a copy taken from the hub beforehand.
+fn stream_aside(request: Request, hub: &Arc<Hub>) {
+    let Some(slot) = hub.open_stream() else {
+        let _ = request.respond(text(503, "trop de flux d'état ouverts"));
+        return;
+    };
+    let hub = Arc::clone(hub);
+    let spawned = std::thread::Builder::new().name("http-events".into()).stack_size(PUSH_STACK).spawn(move || {
+        let _slot = slot;
+        let mut writer = request.into_writer();
+        if let Err(e) = write_stream(&mut writer, &hub) {
+            log::debug!("state stream closed: {e}");
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("no thread for a state stream: {e}");
+    }
+}
+
+/// Stack of a stream or frame thread: they only copy bytes.
+const PUSH_STACK: usize = 128 * 1024;
+
+fn write_stream(w: &mut impl std::io::Write, hub: &Hub) -> std::io::Result<()> {
+    // Written by hand: the body has no length, it ends with the connection.
+    w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nretry: 1000\n\n")?;
+    w.flush()?;
+    let mut version = 0;
+    loop {
+        match hub.wait_state(version, push::KEEPALIVE) {
+            StateWait::State(v, json) => {
+                // A slow reader skips versions: it always gets the newest.
+                write!(w, "id: {v}\nevent: state\ndata: {json}\n\n")?;
+                version = v;
+            }
+            StateWait::Timeout => w.write_all(b": maintien\n\n")?,
+            StateWait::Closed => return Ok(()),
+        }
+        w.flush()?;
+    }
+}
+
+/// `GET /api/frame.bin[?after=<seq>]` (T-411): waits at most `FRAME_WAIT`
+/// for a frame other than `after`, then sends the newest, binary
+/// (push.rs), with the state version in `X-State-Version`. On a frame
+/// thread (`FramePool`); at most `MAX_FRAME_WAITERS` in progress (503).
+fn frame_aside(request: Request, hub: &Arc<Hub>, pool: &Arc<FramePool>) {
+    let Some(slot) = hub.frame_request() else {
+        let _ = request.respond(text(503, "trop de demandes d'image en attente"));
+        return;
+    };
+    pool.submit(request, slot, hub);
+}
+
+fn send_frame(request: Request, slot: push::OwnedSlot, hub: &Hub) {
+    let after = query_u64(request.url(), "after").map(|v| v as u32);
+    let response = match hub.wait_frame(after, push::FRAME_WAIT) {
+        Some(f) => with_type(Response::from_data(f.bytes.to_vec()), "application/octet-stream")
+            .with_header(header("Cache-Control", "no-store"))
+            .with_header(header("X-State-Version", hub.state_version())),
+        None => text(503, "aucune image du moteur"),
+    };
+    if let Err(e) = request.respond(response) {
+        log::debug!("failed to send a frame: {e}");
+    }
+    // Held until sent: a client that doesn't read keeps its slot.
+    drop(slot);
+}
+
+/// The threads serving `/api/frame.bin`. Each page asks about 30 times a
+/// second: a thread stays `FRAME_THREAD_IDLE` for the next request instead
+/// of one thread per request. A new one starts whenever none is free, so a
+/// client that doesn't read never holds up the others.
+#[derive(Default)]
+struct FramePool {
+    jobs: Mutex<FrameJobs>,
+    ready: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct FrameJobs {
+    queue: std::collections::VecDeque<(Request, push::OwnedSlot)>,
+    idle: usize,
+    closed: bool,
+}
+
+const FRAME_THREAD_IDLE: Duration = Duration::from_secs(5);
+
+impl FramePool {
+    fn submit(self: &Arc<Self>, request: Request, slot: push::OwnedSlot, hub: &Arc<Hub>) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.queue.push_back((request, slot));
+        if jobs.idle >= jobs.queue.len() {
+            drop(jobs);
+            self.ready.notify_one();
+            return;
+        }
+        drop(jobs);
+        let (pool, hub) = (Arc::clone(self), Arc::clone(hub));
+        let spawned = std::thread::Builder::new().name("http-frame".into()).stack_size(PUSH_STACK).spawn(move || pool.work(&hub));
+        if let Err(e) = spawned {
+            // The request waits for the next thread (or is answered 500 at shutdown).
+            log::warn!("no thread for a frame request: {e}");
+        }
+    }
+
+    fn work(&self, hub: &Hub) {
+        loop {
+            let job = {
+                let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    if let Some(job) = jobs.queue.pop_front() {
+                        break Some(job);
+                    }
+                    if jobs.closed {
+                        break None;
+                    }
+                    jobs.idle += 1;
+                    let (guard, waited) = self.ready.wait_timeout(jobs, FRAME_THREAD_IDLE).unwrap_or_else(|e| e.into_inner());
+                    jobs = guard;
+                    jobs.idle -= 1;
+                    if waited.timed_out() && jobs.queue.is_empty() {
+                        break None;
+                    }
+                }
+            };
+            let Some((request, slot)) = job else { return };
+            send_frame(request, slot, hub);
+        }
+    }
+
+    /// The server stops: idle threads end, queued requests are dropped (500).
+    fn close(&self) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.closed = true;
+        jobs.queue.clear();
+        drop(jobs);
+        self.ready.notify_all();
+    }
+}
+
+fn header(name: &str, value: impl std::fmt::Display) -> Header {
+    Header::from_bytes(name.as_bytes(), value.to_string().as_bytes()).expect("ASCII header")
 }
 
 /// Requests whose handler may run for seconds (audio decoding, figure
@@ -155,7 +416,7 @@ fn is_estop(method: &Method, url: &str) -> bool {
 /// validated. Trips the latch (which also disarms the DAC directly), then
 /// records it in the gate only if the lock is free right now; otherwise
 /// the engine does so at the top of its next frame.
-fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>) {
+fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>, hub: &Hub) {
     let source = request
         .url()
         .split_once('?')
@@ -169,7 +430,11 @@ fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>) {
         s.gate.sync_estop(&s.estop);
         s.sync_audience();
     }
-    if let Err(e) = request.respond(ok()) {
+    // Binary frames after this one were finished after the latch, so they
+    // show the stop (T-411). One more than the last published: the engine
+    // may be publishing a frame it finished just before.
+    let response = ok().with_header(header("X-Frame-Seq", hub.seq().wrapping_add(1)));
+    if let Err(e) = request.respond(response) {
         log::debug!("failed to send HTTP response: {e}");
     }
 }
@@ -480,7 +745,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                     (None, Some(true)) => !s.gate.is_armed(),
                     _ => return text(400, "expected \"on\" or \"toggle\""),
                 };
-                if want {
+                let response = if want {
                     match s.request_arm(source) {
                         Ok(()) => json_response(json!({ "armed": s.gate.is_armed() })),
                         Err(blocking) => with_status(json_response(json!({ "armed": false, "blocking": blocking })), 409),
@@ -489,7 +754,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                     // Disarming is always accepted, whatever else the body says.
                     s.gate.disarm(DisarmReason::User, source);
                     json_response(json!({ "armed": false }))
-                }
+                };
+                // The last frame published before this change (T-411): a
+                // binary frame up to this one may still show the old state.
+                response.with_header(header("X-Frame-Seq", s.push.seq()))
             }
             Err(e) => e,
         },
@@ -2400,17 +2668,28 @@ fn diagnostic_report(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 }
 
 /// The current frame for the preview, as `[x, y, r, g, b]` rows rounded
-/// to 3 decimals to keep the payload small at 30 requests a second.
+/// to 3 decimals to keep the payload small at 30 requests a second, with
+/// the page's state (`live_view`). `X-State-Version`: the pushed state's
+/// version (T-411), so a page polling as a fallback knows when the
+/// stream has caught up.
 fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
-    let mut s = shared.lock().unwrap();
-    let s = &mut *s;
+    let (mut view, points, version) = {
+        let mut s = shared.lock().unwrap();
+        let round = |v: f32| (v * 1000.0).round() / 1000.0;
+        let points: Vec<[f32; 5]> = s.frame.iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect();
+        (live_view(&mut s), points, s.push.state_version())
+    };
+    view["points"] = json!(points);
+    json_response(view).with_header(header("X-State-Version", version))
+}
+
+/// What the page shows besides the points: `/api/frame` without them,
+/// and the pushed state (`/api/events`, T-411).
+fn live_view(s: &mut Shared) -> serde_json::Value {
     s.gate.sync_estop(&s.estop);
     let arm = s.gate.status(&s.estop);
     let now = s.now_s();
-    let round = |v: f32| (v * 1000.0).round() / 1000.0;
-    let points: Vec<[f32; 5]> = s.frame.iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect();
-    json_response(json!({
-        "points": points,
+    json!({
         "output_lit": s.output_lit,
         "armed": arm.armed,
         "estop": arm.estop.is_some(),
@@ -2460,7 +2739,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
         "audience": s.audience.view(),
         "shownet": shownet_view(s),
-    }))
+    })
 }
 
 /// The ShowNET reminders (T-472), in `/api/state` and every frame: whether
@@ -4487,5 +4766,275 @@ mod tests {
         assert_eq!(t.request("POST", "/api/grid/pages", &format!(r#"{{"op":"rename","page":{m},"name":"B"}}"#)).0, 200);
         assert_eq!(t.request("POST", "/api/grid/pages", &format!(r#"{{"op":"delete","page":{m}}}"#)).0, 200);
         assert!(!t.shared.lock().unwrap().gate.is_armed(), "nothing here arms");
+    }
+
+    fn js(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    /// `GET /api/events` opened, the status line and headers read.
+    fn open_events(addr: SocketAddr) -> (TcpStream, String) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        write!(stream, "GET /api/events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n").unwrap();
+        let mut head = String::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !head.contains("\r\n\r\n") && Instant::now() < deadline {
+            let mut buf = [0u8; 4096];
+            if let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                head.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        }
+        (stream, head)
+    }
+
+    /// The `state` events read from an open stream for `wait`: (version, state).
+    fn read_events(stream: &mut TcpStream, carry: &mut String, wait: Duration) -> Vec<(u64, serde_json::Value)> {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            let mut buf = [0u8; 65536];
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => carry.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(_) => {}
+            }
+        }
+        let mut events = Vec::new();
+        while let Some(end) = carry.find("\n\n") {
+            let block: String = carry.drain(..end + 2).collect();
+            let field = |name: &str| block.lines().find_map(|l| l.strip_prefix(name)).map(str::to_string);
+            if field("event: ").as_deref() == Some("state") {
+                events.push((field("id: ").unwrap().parse().unwrap(), serde_json::from_str(&field("data: ").unwrap()).unwrap()));
+            }
+        }
+        events
+    }
+
+    /// T-411: the first event is the whole state; nothing more while
+    /// nothing changes; a change made through the API comes at once.
+    #[test]
+    fn the_state_stream_sends_the_state_then_only_changes() {
+        let t = TestServer::start(false);
+        let (mut stream, head) = open_events(t.addr);
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("Content-Type: text/event-stream"), "{head}");
+        let mut carry = head.split_once("\r\n\r\n").map(|(_, rest)| rest.to_string()).unwrap_or_default();
+        // Without an engine here, the watchdog soon reports it stalled: a
+        // real change, after which nothing moves.
+        let first = read_events(&mut stream, &mut carry, Duration::from_millis(600));
+        assert!(!first.is_empty() && first.len() <= 2, "{first:?}");
+        let (_, state) = &first[0];
+        let frame = js(&t.request("GET", "/api/frame", "").1);
+        for key in frame.as_object().unwrap().keys().filter(|k| *k != "points") {
+            assert!(state.get(key).is_some(), "the pushed state has {key}");
+        }
+        assert!(state.get("points").is_none(), "no points in the state");
+        assert_eq!(state["armed"], false);
+        let v1 = first.last().unwrap().0;
+        assert!(read_events(&mut stream, &mut carry, Duration::from_millis(400)).is_empty(), "no change, no event (the beat runs on)");
+        let started = Instant::now();
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"master.size","value":0.5}"#).0, 200);
+        let mut got = Vec::new();
+        while got.is_empty() && started.elapsed() < Duration::from_secs(2) {
+            got = read_events(&mut stream, &mut carry, Duration::from_millis(20));
+        }
+        assert!(started.elapsed() < Duration::from_millis(500), "the change came after {:?}", started.elapsed());
+        let (v2, state) = got.last().unwrap();
+        assert!(*v2 > v1);
+        assert_eq!(state["live"]["size"], 0.5);
+        // The binary frames and the JSON polling routes say which version is current.
+        let (head, _) = get_bytes(t.addr, "/api/frame");
+        assert!(head.contains(&format!("X-State-Version: {v2}")), "{head}");
+    }
+
+    /// T-411: eight streams at most; the ninth is refused and the stop,
+    /// the heartbeat and the JSON routes still answer at once.
+    #[test]
+    fn a_ninth_stream_is_refused_and_streams_never_hold_up_the_worker() {
+        let t = TestServer::start(false);
+        enforce_presence(&t);
+        let streams: Vec<_> = (0..push::MAX_STREAMS).map(|_| open_events(t.addr)).collect();
+        assert!(streams.iter().all(|(_, head)| head.starts_with("HTTP/1.1 200")));
+        let (status, _) = t.request("GET", "/api/events", "");
+        assert_eq!(status, 503);
+        // An open stream is not the operator (T-252): only beats are.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 409, "streams but no page beating");
+        let started = Instant::now();
+        assert_eq!(t.request("POST", "/api/heartbeat", r#"{"client_id":"p"}"#).0, 200);
+        assert_eq!(t.request("GET", "/api/state", "").0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/estop?source=ui", "").0, 200);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(arm_status(&t)["armed"], false);
+        drop(streams);
+    }
+
+    /// T-411: `/api/frame.bin` and `/api/frame` describe the same image,
+    /// and the arm answer names the last frame published before it.
+    #[test]
+    fn the_binary_frame_matches_the_json_frame() {
+        let t = TestServer::start(false);
+        use crate::patterns::Point;
+        let points: Vec<Point> = (0..300).map(|i| Point::lit((i as f32 / 150.0) - 1.0, ((i * 7) % 100) as f32 / 100.0, 1.0, 0.25, 0.0)).collect();
+        let hub = Arc::clone(&t.shared.lock().unwrap().push);
+        // No engine here: published by hand, as the engine does.
+        hub.wait_frame(None, Duration::ZERO);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.frame = points.clone();
+            s.push.publish_frame(&points, push::flags::ENGINE_OK);
+        }
+        let (head, bytes) = get_bytes(t.addr, "/api/frame.bin?after=0");
+        assert!(head.contains("application/octet-stream"), "{head}");
+        let (seq, flags, bin) = push::decode_frame(&bytes).unwrap();
+        assert_eq!((seq, flags), (1, push::flags::ENGINE_OK));
+        let frame = js(&t.request("GET", "/api/frame", "").1);
+        let json_points = frame["points"].as_array().unwrap();
+        assert_eq!(bin.len(), json_points.len());
+        for (b, j) in bin.iter().zip(json_points) {
+            let j: Vec<f32> = j.as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            for (a, c) in [b.x, b.y, b.r, b.g, b.b].iter().zip(&j) {
+                assert!((a - c).abs() < 0.003, "{b:?} vs {j:?}");
+            }
+        }
+        // Nothing newer than 1 within the wait: the same frame, about 100 ms later.
+        let started = Instant::now();
+        let (_, again) = get_bytes(t.addr, "/api/frame.bin?after=1");
+        assert_eq!(push::decode_frame(&again).unwrap().0, 1);
+        assert!(started.elapsed() >= push::FRAME_WAIT);
+        let raw = {
+            let mut stream = TcpStream::connect(t.addr).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            write!(stream, "POST /api/arm HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 11\r\n\r\n{{\"on\":true}}").unwrap();
+            let mut raw = String::new();
+            stream.read_to_string(&mut raw).unwrap();
+            raw
+        };
+        assert!(raw.contains("X-Frame-Seq: 1"), "{raw}");
+    }
+
+    /// T-411: a client asking for frames and never reading them holds its
+    /// own threads only: another page's frames keep coming at once.
+    #[test]
+    fn a_frame_reader_that_never_reads_does_not_hold_up_the_others() {
+        use crate::patterns::Point;
+        let t = TestServer::start(false);
+        let hub = Arc::clone(&t.shared.lock().unwrap().push);
+        hub.wait_frame(None, Duration::ZERO);
+        let stop = Arc::new(AtomicBool::new(false));
+        let publisher = std::thread::spawn({
+            let (hub, stop) = (Arc::clone(&hub), Arc::clone(&stop));
+            move || {
+                let points: Vec<Point> = (0..3000).map(|i| Point::lit((i as f32 / 1500.0) - 1.0, 0.5, 1.0, 1.0, 1.0)).collect();
+                while !stop.load(Ordering::SeqCst) {
+                    hub.publish_frame(&points, 0);
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+            }
+        });
+        let stuck = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        stuck.set_recv_buffer_size(4096).unwrap();
+        stuck.connect(&t.addr.into()).unwrap();
+        let mut stuck: TcpStream = stuck.into();
+        for _ in 0..8 {
+            write!(stuck, "GET /api/frame.bin HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let mut seq = None;
+        for _ in 0..10 {
+            let started = Instant::now();
+            let path = seq.map_or("/api/frame.bin".to_string(), |s| format!("/api/frame.bin?after={s}"));
+            let (_, bytes) = get_bytes(t.addr, &path);
+            let (s, _, points) = push::decode_frame(&bytes).unwrap();
+            assert_eq!(points.len(), 3000);
+            assert_ne!(Some(s), seq, "a newer frame");
+            assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+            seq = Some(s);
+        }
+        stop.store(true, Ordering::SeqCst);
+        publisher.join().unwrap();
+        drop(stuck);
+    }
+
+    /// T-411: a client that opens the stream and never reads blocks only
+    /// its own stream thread: states keep being built and published (no
+    /// lock held by the blocked write), another stream keeps receiving
+    /// them, and the heartbeat, arming and the stop answer at once.
+    #[test]
+    fn a_stream_that_is_never_read_blocks_nothing_else() {
+        let t = TestServer::start(false);
+        let hub = Arc::clone(&t.shared.lock().unwrap().push);
+        let stuck = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        stuck.set_recv_buffer_size(4096).unwrap();
+        stuck.connect(&t.addr.into()).unwrap();
+        let mut stuck: TcpStream = stuck.into();
+        write!(stuck, "GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hub.streams() == 0 {
+            assert!(Instant::now() < deadline, "the stream never opened");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Big states until the stuck stream's socket is full and its write blocks.
+        let filler = "x".repeat(256 * 1024);
+        for n in 0..40u64 {
+            let started = Instant::now();
+            hub.publish_state(json!(n), |_| format!("{{\"n\":{n},\"f\":\"{filler}\"}}"));
+            assert!(started.elapsed() < Duration::from_millis(100), "publishing waited on the stuck stream");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(hub.streams(), 1, "the stuck stream keeps its slot until its page goes");
+        // The studio lock is free: the routes and the state builder carry on.
+        let started = Instant::now();
+        assert!(t.shared.try_lock().is_ok(), "no lock held by the blocked write");
+        assert_eq!(t.request("POST", "/api/heartbeat", r#"{"client_id":"p"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/estop?source=ui", "").0, 200);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        // Another page's stream gets the newest state at once.
+        let (mut other, head) = open_events(t.addr);
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let mut carry = head.split_once("\r\n\r\n").map(|(_, rest)| rest.to_string()).unwrap_or_default();
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while got.is_empty() && Instant::now() < deadline {
+            got = read_events(&mut other, &mut carry, Duration::from_millis(50));
+        }
+        assert!(!got.is_empty(), "the other stream got nothing");
+        // The page goes: its thread fails its write and frees the slot.
+        drop(stuck);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hub.streams() > 1 {
+            assert!(Instant::now() < deadline, "the closed stream kept its slot");
+            hub.publish_state(json!("bye"), |_| "{}".into());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_ignores_the_running_beat_but_not_a_change() {
+        let fingerprint = |mut state: serde_json::Value, anchor: f64| {
+            let original = state.clone();
+            let moved = split_moving(&mut state, anchor);
+            let mut back = state.clone();
+            put_back(&mut back, moved);
+            if let Some(t) = back.get_mut("tempo").and_then(|t| t.as_object_mut()) {
+                t.remove("anchor");
+            }
+            assert_eq!(back, original, "everything taken out is put back");
+            state
+        };
+        let state = |beat: f64, bpm: f64, dose: f64| json!({ "tempo": { "bpm": bpm, "beat": beat, "bar": 0, "beat_in_bar": 1, "phase": beat.fract() }, "dwell": { "max_dose": dose, "extent": 0.4, "extent_factor": 1.0 } });
+        assert_eq!(fingerprint(state(1.25, 120.0, 0.1), -3.0), fingerprint(state(7.5, 120.0, 0.3), -3.0));
+        assert_ne!(fingerprint(state(1.25, 120.0, 0.1), -3.0), fingerprint(state(1.25, 121.0, 0.1), -3.0));
+        assert_ne!(fingerprint(state(1.25, 120.0, 0.1), -3.0), fingerprint(state(1.25, 120.0, 0.1), -3.5), "a nudge of the clock");
+        let small = json!({ "dwell": { "max_dose": 0.1, "extent": 0.01, "extent_factor": 0.5 } });
+        let smaller = json!({ "dwell": { "max_dose": 0.1, "extent": 0.02, "extent_factor": 0.5 } });
+        assert_ne!(fingerprint(small, 0.0), fingerprint(smaller, 0.0), "the page shows a too-small figure's size");
+        let trig = |fired: u64, ago: Option<f64>| json!({ "audio_triggers": { "enabled": true, "rules": [{ "fired": fired, "ago_s": ago, "limited": false }] } });
+        assert_eq!(fingerprint(trig(1, Some(0.1)), 0.0), fingerprint(trig(1, Some(4.0)), 0.0), "time since a trigger fired");
+        assert_ne!(fingerprint(trig(1, Some(4.0)), 0.0), fingerprint(trig(2, Some(0.0)), 0.0), "a new firing");
     }
 }
