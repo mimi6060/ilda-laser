@@ -658,6 +658,11 @@ pub fn frame(s: &mut Shared, features: &AudioFeatures, active: Active, source_ch
             }
         }
     }
+    // A flash released by the stop (the switch goes off with it) must not
+    // leave a fade-out behind: the e-stop cuts every transition.
+    if s.estop.is_latched() {
+        s.deck.cut_transitions();
+    }
 }
 
 /// `GET /api/audio/triggers` and the panel's status.
@@ -1067,5 +1072,22 @@ mod tests {
         assert!(held(&s));
         frame(&mut s, &AudioFeatures { snare: 1, ..Default::default() }, Active::Native, false, t + 0.7, &clock(t + 0.7), 10.0);
         assert!(!held(&s), "released after one beat");
+    }
+
+    #[test]
+    fn a_flash_released_by_the_estop_leaves_no_fade_out() {
+        let mut s = rig();
+        s.deck.transition = crate::transition::Transition { kind: crate::transition::TransitionKind::Fade, in_flash: true, ..crate::transition::Transition::CUT };
+        let page: Vec<String> = s.grid.view()[0].cells.iter().flatten().cloned().collect();
+        let flash = page[0].clone();
+        set_config(&mut s, TriggerConfig { triggers: vec![rule(AudioEvent::Snare, TriggerAction::FlashCue { id: flash.clone(), beats: 4.0 })] }).unwrap();
+        set_enabled(&mut s, true, ArmSource::Ui).unwrap();
+        let t = 1.0;
+        frame(&mut s, &AudioFeatures::default(), Active::Native, false, t, &clock(t), 10.0);
+        frame(&mut s, &AudioFeatures { snare: 1, ..Default::default() }, Active::Native, false, t + 0.1, &clock(t + 0.1), 10.0);
+        assert!(s.deck.active.iter().any(|a| a.cue == flash && a.held));
+        s.emergency_stop(ArmSource::Keyboard);
+        frame(&mut s, &AudioFeatures { snare: 1, ..Default::default() }, Active::Native, false, t + 0.2, &clock(t + 0.2), 10.0);
+        assert!(s.deck.ending.is_empty() && s.deck.pending.is_empty(), "the e-stop cuts every transition");
     }
 }

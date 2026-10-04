@@ -435,9 +435,18 @@ pub struct Animator {
     /// counting from the program's zero, so every layer keeps its own
     /// motion, in phase with the curves.
     program_layers: Vec<Animator>,
+    /// A festival palette on show (T-130): (colour 1, colour 2) standing in
+    /// for the look's own `color` and `color2`. `None` = the look's colours.
+    palette: Option<([u8; 3], [u8; 3])>,
 }
 
 impl Animator {
+    /// Draw with a festival palette's two colours instead of the look's
+    /// (call before `render`); `None` gives the look its colours back.
+    pub fn set_palette(&mut self, palette: Option<([u8; 3], [u8; 3])>) {
+        self.palette = palette;
+    }
+
     /// Follow the output's optimiser settings (call before `render`). The
     /// optimiser keeps its path order across frames while it stays on.
     pub fn set_optimizer(&mut self, params: &OptimizeParams) {
@@ -527,6 +536,7 @@ impl Animator {
                 Some(params) => layer.set_optimizer(params),
                 None => layer.optimizer = None,
             }
+            layer.palette = self.palette;
             let look = Settings { content: content.clone(), program: None, ..s.clone() };
             looks.push(layer.render(&look, audio, dt, clock));
         }
@@ -577,6 +587,14 @@ impl Animator {
     }
 
     fn render_look(&mut self, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock, beat_pos: f64) -> Vec<Point> {
+        let painted;
+        let s = match self.palette {
+            Some((c1, c2)) => {
+                painted = with_palette(s, c1, c2);
+                &painted
+            }
+            None => s,
+        };
         let react = &s.audio;
         let (bass, level) = if react.enabled {
             (audio.bass.clamp(0.0, 1.0), audio.level.clamp(0.0, 1.0))
@@ -655,8 +673,14 @@ impl Animator {
                 match generators::generate(generator, params, &ctx) {
                     Some(geo) => {
                         let (r2, g2, b2) = shift_hue(params.color2, hue_shift);
-                        let c2 = (r2 * gain, g2 * gain, b2 * gain);
-                        generators::colorize(&geo, params.color_mode, (r, g, b), c2, t, gain)
+                        let (mut c1, mut c2) = ((r, g, b), (r2 * gain, g2 * gain, b2 * gain));
+                        if params.color_mode == generators::ColorMode::ToWhite {
+                            // White at the end of each period (T-130).
+                            let k = beat::phase(beat_pos, params.period_beats);
+                            (c1, c2) = (generators::toward_white(c1, k), generators::toward_white(c2, k));
+                        }
+                        let step = beat::step_index(beat_pos, params.steps_per_beat);
+                        generators::colorize_step(&geo, params.color_mode, c1, c2, t, gain, step)
                     }
                     None => Vec::new(),
                 }
@@ -679,6 +703,17 @@ impl Animator {
             None => densify(&rotated),
         }
     }
+}
+
+/// `s` drawn in a festival palette (T-130): colour 1 for the main colour,
+/// colour 2 for a generator's second colour. Mode and geometry stay.
+fn with_palette(s: &Settings, c1: [u8; 3], c2: [u8; 3]) -> Settings {
+    let mut s = s.clone();
+    s.color = c1;
+    if let Content::Generator { params, .. } = &mut s.content {
+        params.color2 = c2;
+    }
+    s
 }
 
 /// Generator time for a beat-synced look: one 2π cycle per
@@ -1338,5 +1373,68 @@ mod tests {
 
     fn a_frame(s: &Settings, audio: AudioFeatures) -> Vec<Point> {
         Animator::default().render(s, audio, 1.0 / 60.0, &BeatClock::default())
+    }
+
+    fn lit(points: &[Point]) -> Vec<Point> {
+        points.iter().copied().filter(|p| p.is_lit()).collect()
+    }
+
+    #[test]
+    fn to_white_reaches_zero_saturation_at_the_end_of_the_period() {
+        let s = Settings {
+            color: [255, 0, 0],
+            ..synced("beam_fan", GenParams { period_beats: 16.0, color_mode: generators::ColorMode::ToWhite, ..Default::default() })
+        };
+        let start = lit(&frame_at(&s, 0.0, 0.0, 128.0));
+        assert!(start.iter().all(|p| p.r > 0.9 && p.g == 0.0 && p.b == 0.0), "pure colour at the start");
+        let mid = lit(&frame_at(&s, 0.0, 8.0, 128.0));
+        assert!(mid.iter().all(|p| (p.g - 0.5 * p.r).abs() < 0.02), "half way at half the period");
+        let end = lit(&frame_at(&s, 0.0, 15.999, 128.0));
+        assert!(!end.is_empty());
+        for p in end {
+            let (max, min) = (p.r.max(p.g).max(p.b), p.r.min(p.g).min(p.b));
+            assert!(max - min < 0.01 * max, "saturation ~0 at the end: {p:?}");
+            assert!(max <= 1.0);
+        }
+    }
+
+    #[test]
+    fn color_chase_turns_beam_i_at_step_i() {
+        let s = Settings {
+            color: [255, 0, 0],
+            ..synced(
+                "beam_fan",
+                GenParams { count: 4, color_mode: generators::ColorMode::ColorChase, color2: [0, 0, 255], ..Default::default() },
+            )
+        };
+        let blue_share = |beat: f64| {
+            let pts = lit(&frame_at(&s, 0.0, beat, 120.0));
+            pts.iter().filter(|p| p.b > 0.0).count() as f32 / pts.len() as f32
+        };
+        let shares: Vec<f32> = [0.5, 1.5, 2.5, 3.5].into_iter().map(blue_share).collect();
+        assert!(shares.windows(2).all(|w| w[1] > w[0]), "the colour-2 front grows step by step: {shares:?}");
+        assert!((shares[3] - 1.0).abs() < 1e-6, "all beams turned at the last step");
+    }
+
+    #[test]
+    fn festival_palette_stands_in_for_the_look_colours_until_cleared() {
+        let s = Settings {
+            color: [255, 0, 0],
+            ..synced("beam_fan", GenParams { color_mode: generators::ColorMode::Alternate, color2: [0, 0, 255], ..Default::default() })
+        };
+        let clock = BeatClock { beat: 1.0, ..Default::default() };
+        let mut a = Animator::starting_at(0.0);
+        let own = a.render(&s, AudioFeatures::default(), 0.0, &clock);
+        a.set_palette(Some(([0, 255, 0], [255, 255, 255])));
+        let painted = lit(&a.render(&s, AudioFeatures::default(), 0.0, &clock));
+        assert!(painted.iter().all(|p| p.g > 0.9), "green and white only");
+        assert!(painted.iter().any(|p| p.r > 0.9 && p.b > 0.9), "colour 2 is the palette's white");
+        a.set_palette(None);
+        assert_eq!(a.render(&s, AudioFeatures::default(), 0.0, &clock), own, "the look's colours come back");
+        // Same geometry with or without a palette.
+        let mut b = Animator::starting_at(0.0);
+        b.set_palette(Some(([0, 255, 0], [255, 255, 255])));
+        let geo = |pts: Vec<Point>| pts.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>();
+        assert_eq!(geo(b.render(&s, AudioFeatures::default(), 0.0, &clock)), geo(own));
     }
 }

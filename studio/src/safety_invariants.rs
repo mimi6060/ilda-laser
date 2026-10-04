@@ -51,6 +51,10 @@
 //!     chain (1-12 hold with it), never arms, is paused by the e-stop and
 //!     never moves on by itself while paused; a fade from black never
 //!     shows intermediate geometry (`a_cue_list_fade_from_black_*`).
+//! 14. festival palettes and perceived balance (T-130): a palette, the
+//!     « Vers le blanc » and « Chase couleur » modes and any balance gains
+//!     (out of range ones included) render through the same chain, so
+//!     1-13 hold with them; the balance only ever dims.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst; and the ShowNET SD card over Art-Net
@@ -70,7 +74,9 @@
 use crate::colorcal::{ChannelCurve, ColorCalibration};
 use crate::controls::{self, ControlInput};
 use crate::cues::{ClickMode, CueSlot, Quantize, BEAT_EVERY, QUANTIZE_MODES};
-use crate::engine::{Calibration, Settings};
+use crate::engine::{Calibration, Content, Settings};
+use crate::festival::{Balance, PaletteQuantize, PALETTES};
+use crate::generators::ColorMode;
 use crate::evolving::KeyEase;
 use crate::interlock::ArmSource;
 use crate::midi::{self, decode::MidiMsg, MidiEvent};
@@ -653,6 +659,27 @@ fn random_case(rng: &mut Rng) -> (Shared, bool) {
     (s, hold_to_run)
 }
 
+/// `POST /api/festival`, `/api/festival/palette` and a look in one of the
+/// festival colour modes (T-130): any quantisation, any gains (out of
+/// range ones too), any palette on the next boundary or at once.
+fn random_festival(s: &mut Shared, rng: &mut Rng, t: f64) {
+    let quantize = *rng.pick(&[PaletteQuantize::Now, PaletteQuantize::Bar, PaletteQuantize::Phrase]);
+    let gains = [0, 1, 2].map(|_| rng.range(-0.5, 2.0));
+    s.festival.configure(quantize, Balance { enabled: rng.chance(0.7), gains });
+    let palette = rng.chance(0.8).then(|| rng.below(PALETTES.len() + 1));
+    let (beat, bpb) = (s.tempo.beat_at(t), s.tempo.beats_per_bar);
+    let _ = s.festival.request(palette, beat, bpb);
+    if rng.chance(0.5) {
+        let mut look = s.settings.clone();
+        if let Content::Generator { params, .. } = &mut look.content {
+            params.color_mode = *rng.pick(&[ColorMode::ToWhite, ColorMode::ColorChase]);
+            params.period_beats = *rng.pick(&[0.0, 1.0, 4.0, 16.0]);
+            params.steps_per_beat = *rng.pick(&[0.0, 0.5, 1.0, 4.0]);
+        }
+        controls::set_look(s, look);
+    }
+}
+
 /// One random action between two frames. Returns true when it was an
 /// explicit arm request (the only actions allowed to arm).
 fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
@@ -1025,6 +1052,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         crate::cuelist::save(&mut s, list).map_err(|e| format!("setup: cue list refused: {e:#}"))?;
         crate::cuelist::load(&mut s, "fuzz").map_err(|e| format!("setup: {e}"))?;
     }
+    // Festival palettes, colour modes and perceived balance (T-130), from
+    // their own stream.
+    let mut frng = Rng::new(seed ^ 0x0130_0130);
     let mut beats = 0;
     for frame in 0..frames {
         if lists && lrng.chance(0.08) {
@@ -1072,6 +1102,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         }
         if fixtures && drng.chance(0.5) {
             random_universe(&mut rig.s(), &mut drng, frame);
+        }
+        if frng.chance(0.1) {
+            let t = rig.t();
+            random_festival(&mut rig.s(), &mut frng, t);
         }
         if crng.chance(0.05) {
             let mut s = rig.s();

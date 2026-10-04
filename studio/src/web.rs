@@ -1297,6 +1297,30 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/festival") => json_response(festival_view(&shared.lock().unwrap())),
+        // A festival palette (T-130): `{ "palette": 0..7 }`, or `null` for
+        // the looks' own colours. Lands on the configured boundary.
+        (Method::Post, "/api/festival/palette") => match body::<FestivalPick>(request) {
+            Ok(pick) => {
+                let mut s = shared.lock().unwrap();
+                let t = s.now_s();
+                let (beat, bpb) = (s.tempo.beat_at(t), s.tempo.beats_per_bar);
+                match s.festival.request(pick.palette, beat, bpb) {
+                    Ok(()) => json_response(festival_view(&s)),
+                    Err(e) => text(400, &e.to_string()),
+                }
+            }
+            Err(e) => e,
+        },
+        // Quantisation and perceived balance: `{ "quantize": "bar", "balance": { … } }`.
+        (Method::Post, "/api/festival") => match body::<FestivalConfig>(request) {
+            Ok(cfg) => {
+                let mut s = shared.lock().unwrap();
+                s.festival.configure(cfg.quantize, cfg.balance);
+                json_response(festival_view(&s))
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/palettes") => {
             let s = shared.lock().unwrap();
             json_response(json!({ "builtin": crate::live::builtin_palettes(), "user": s.palettes.list() }))
@@ -2746,6 +2770,31 @@ fn timecode_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
     }
 }
 
+#[derive(serde::Deserialize)]
+struct FestivalPick {
+    palette: Option<usize>,
+}
+
+#[derive(serde::Deserialize)]
+struct FestivalConfig {
+    quantize: crate::festival::PaletteQuantize,
+    #[serde(default)]
+    balance: crate::festival::Balance,
+}
+
+/// The festival palettes (T-130): the list, the one on show, a change
+/// waiting for its boundary, the quantisation and the perceived balance.
+fn festival_view(s: &Shared) -> serde_json::Value {
+    let f = &s.festival;
+    json!({
+        "palettes": crate::festival::PALETTES,
+        "active": f.active,
+        "pending": f.pending,
+        "quantize": f.quantize,
+        "balance": f.balance,
+    })
+}
+
 /// `GET /api/state`'s body (also `state.json` in the diagnostic report).
 fn state_json(s: &mut Shared) -> serde_json::Value {
     s.sync_data_warnings();
@@ -2755,6 +2804,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     json!({
         "settings": s.settings,
         "settings_rev": s.settings_rev,
+        "festival": festival_view(s),
         "calibration": s.calibration,
         "projection": s.projection.get(),
         "safety": s.safety.get(),
@@ -2882,6 +2932,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         "grid_rev": s.grid.rev,
         "active_cue": s.active_cue,
         "settings_rev": s.settings_rev,
+        "festival": festival_view(s),
         "cues": {
             "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer, "phase": s.deck.phase(a.id, now) })).collect::<Vec<_>>(),
             "shown": s.deck.visible().iter().map(|a| a.cue.as_str()).collect::<Vec<_>>(),

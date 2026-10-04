@@ -866,6 +866,23 @@
   #cueStoreMsg { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; font-size: 12px; color: var(--warn); }
   #cueStoreMsg[hidden] { display: none; }
   #cueStoreMsg button { padding: 4px 10px; font-size: 12px; }
+  /* Palettes festival (T-130), Theme (T-299) tokens: a two-colour pill
+     per palette; the one on show is lit, the one waiting blinks with the beat. */
+  .fest-row { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 0 0 8px; font-size: 12px; }
+  .fest-row .sep { width: 1px; align-self: stretch; background: var(--line); }
+  .fest-pals { display: flex; flex-wrap: wrap; gap: 4px; }
+  .fest-pal { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border-radius: 999px; font-size: 12px; }
+  .fest-pal .dot { width: 16px; height: 16px; border-radius: 50%; flex: none; background: linear-gradient(90deg, var(--c1) 50%, var(--c2) 50%); box-shadow: 0 0 0 1px #0008, 0 0 8px color-mix(in srgb, var(--c1) 50%, transparent); }
+  .fest-pal.on, .fest-own.on { border-color: var(--accent); color: var(--text); box-shadow: 0 0 0 2px var(--accent), 0 0 14px color-mix(in srgb, var(--accent) 45%, transparent); }
+  .fest-pal.pending, .fest-own.pending { border-color: var(--accent); animation: cueWait var(--beat, .5s) steps(2, jump-none) infinite; }
+  .fest-own { border-radius: 999px; padding: 4px 10px; font-size: 12px; }
+  .fest-wait { color: var(--muted); min-width: 0; }
+  .fest-row label { display: inline-flex; gap: 4px; align-items: center; margin: 0; color: var(--muted); }
+  .fest-row label input[type=checkbox] { width: auto; padding: 0; }
+  .fest-gains { display: inline-flex; gap: 6px; align-items: center; }
+  .fest-gains[hidden] { display: none; }
+  .fest-gains input[type=range] { width: 64px; }
+  .fest-gains button { padding: 4px 8px; font-size: 12px; }
   .cue-tabs-row { display: flex; gap: 6px; align-items: flex-start; margin-bottom: 8px; }
   .cue-tabs-row .cue-tabs { flex: 1; min-width: 0; margin-bottom: 0; }
   #cuePageAdd { flex: none; border-radius: 999px; padding: 6px 12px; font-size: 12px; white-space: nowrap; }
@@ -1500,6 +1517,25 @@
       <button id="gridEdit" aria-pressed="false" title="Glisser une case sur une autre case ou sur un onglet de page ; les cues ne se lancent pas pendant ce temps">Réorganiser</button>
       <span class="hint" id="gridMsg" style="margin:0"></span>
     </div>
+    <div class="fest-row" id="festRow" aria-label="Palettes festival">
+      <span class="hint" style="margin:0">Palettes</span>
+      <div class="fest-pals" id="festPals"></div>
+      <button id="festOwn" class="fest-own" title="Rendre aux looks leurs propres couleurs (quantifié aussi)">Couleurs des cues</button>
+      <div class="seg" id="festQuant" title="Quand une palette s'applique">
+        <button data-fq="now" title="Tout de suite">Immédiat</button>
+        <button data-fq="bar" title="Au premier temps de la prochaine mesure">Mesure</button>
+        <button data-fq="phrase" title="Au premier temps de la prochaine phrase de 8 mesures">Phrase</button>
+      </div>
+      <span class="fest-wait" id="festWait" role="status"></span>
+      <span class="sep"></span>
+      <label title="Le vert paraît bien plus lumineux que le rouge et le bleu dans la fumée : baisse le vert pour équilibrer. Réglage du contenu, distinct des Couleurs de la sortie (calibration du projecteur) ; ne fait que baisser, avant toute la chaîne de sécurité."><input type="checkbox" id="festBal"> Équilibre perçu</label>
+      <span class="fest-gains" id="festGains" hidden>
+        <label title="Gain rouge">R <input type="range" id="festGainR" min="0" max="1" step="0.05"></label>
+        <label title="Gain vert">V <input type="range" id="festGainG" min="0" max="1" step="0.05"></label>
+        <label title="Gain bleu">B <input type="range" id="festGainB" min="0" max="1" step="0.05"></label>
+        <button id="festPreset" title="Vert 0,6 · rouge 1 · bleu 1">Préréglage</button>
+      </span>
+    </div>
     <div id="cueStoreMsg" class="lock-edit" hidden><span id="cueStoreText"></span><button id="cueStoreCopy" hidden>Copier vers une page utilisateur</button></div>
     <div class="cue-tabs-row">
       <div class="cue-tabs" id="cueTabs" role="tablist" aria-label="Pages de cues"></div>
@@ -1711,6 +1747,8 @@
           <option value="rainbow">Arc-en-ciel</option>
           <option value="gradient">Dégradé</option>
           <option value="alternate">Alterné</option>
+          <option value="to_white" title="La couleur se désature sur la période (Tempo du look) : blanc à la fin, pour les montées">Vers le blanc</option>
+          <option value="color_chase" title="La deuxième couleur traverse les faisceaux, un faisceau par pas">Chase couleur</option>
         </select>
         <label>Deuxième couleur</label>
         <input type="color" id="gColor2" value="#0000ff">
@@ -3470,6 +3508,64 @@ async function previewLoop() {
 }
 // Everything the page shows besides the points: a pushed state (`pushed`,
 // received at `at`) or a polled /api/frame (fetched at `at`).
+// Palettes festival (T-130): the pills, the quantisation and the
+// perceived balance. A pick lands on the server's boundary (next bar by
+// default); the pill blinks until then.
+let festival = null, festSentAt = 0;
+function rgbHex(c) { return '#' + c.map(v => v.toString(16).padStart(2, '0')).join(''); }
+function showFestival(f) {
+  if (!f) return;
+  festival = f;
+  const pals = $('festPals');
+  if (pals.children.length !== f.palettes.length) {
+    pals.replaceChildren(...f.palettes.map((p, i) => {
+      const b = document.createElement('button');
+      b.className = 'fest-pal'; b.dataset.pal = i;
+      b.style.setProperty('--c1', rgbHex(p.c1)); b.style.setProperty('--c2', rgbHex(p.c2));
+      b.title = p.name + ' (couleur 1, couleur 2) : s’applique à tout ce qui joue';
+      const dot = document.createElement('span'); dot.className = 'dot';
+      b.append(dot, document.createTextNode(p.name));
+      b.onclick = () => pickPalette(i);
+      return b;
+    }));
+  }
+  const waiting = f.pending ? f.pending.palette : undefined;
+  pals.querySelectorAll('.fest-pal').forEach(b => {
+    const i = +b.dataset.pal;
+    b.classList.toggle('on', f.active === i);
+    b.classList.toggle('pending', waiting === i);
+  });
+  $('festOwn').classList.toggle('on', f.active == null);
+  $('festOwn').classList.toggle('pending', !!f.pending && waiting == null);
+  $('festWait').textContent = f.pending
+    ? (f.quantize === 'phrase' ? 'attend la phrase…' : 'attend la mesure…') : '';
+  // Our own edit in flight: don't draw an older state over the controls.
+  if (performance.now() - festSentAt < 400) return;
+  document.querySelectorAll('#festQuant button').forEach(b => b.classList.toggle('active', b.dataset.fq === f.quantize));
+  $('festBal').checked = f.balance.enabled;
+  $('festGains').hidden = !f.balance.enabled;
+  ['R', 'G', 'B'].forEach((k, i) => { if (document.activeElement !== $('festGain' + k)) $('festGain' + k).value = f.balance.gains[i]; });
+}
+async function pickPalette(palette) {
+  const r = await fetch('/api/festival/palette', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ palette }) });
+  if (r.ok) showFestival(await r.json());
+}
+async function sendFestival(patch) {
+  if (!festival) return;
+  festSentAt = performance.now();
+  const body = { quantize: festival.quantize, balance: { ...festival.balance }, ...patch };
+  const r = await fetch('/api/festival', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.ok) { festSentAt = 0; showFestival(await r.json()); }
+}
+$('festOwn').onclick = () => pickPalette(null);
+document.querySelectorAll('#festQuant button').forEach(b => b.onclick = () => sendFestival({ quantize: b.dataset.fq }));
+$('festBal').onchange = () => sendFestival({ balance: { ...festival.balance, enabled: $('festBal').checked } });
+['R', 'G', 'B'].forEach((k, i) => $('festGain' + k).oninput = () => {
+  const gains = [...festival.balance.gains]; gains[i] = +$('festGain' + k).value;
+  sendFestival({ balance: { ...festival.balance, gains } });
+});
+$('festPreset').onclick = () => sendFestival({ balance: { enabled: true, gains: [1, 0.6, 1] } });
+
 function applyState(f, at, pushed) {
   if (!f) return;
   dwellStatus = f.dwell;
@@ -3496,6 +3592,7 @@ function applyState(f, at, pushed) {
   if (pushed ? liveAnsweredAt >= liveSentAt && performance.now() - liveAnsweredAt > 100
     : at > liveAnsweredAt && liveAnsweredAt >= liveSentAt) showLive(f.live);
   showLfos(f.lfos);
+  showFestival(f.festival);
   showRoutes(f.audio_routes);
   // How long ago each trigger fired, counted on since a pushed state.
   const trig = pushed && f.audio_triggers ? { ...f.audio_triggers, rules: (f.audio_triggers.rules || []).map(r =>

@@ -63,6 +63,7 @@ pub fn shared() -> Shared {
         live: live::LiveModifiers::default(),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
+        festival: Default::default(),
         midi: midi::MidiState::new(false, midi::profile::ProfileStore::in_memory()),
         netin: crate::netin::NetInState::new(crate::netin::NetHub::in_memory(estop)),
         external: crate::external::External::in_memory(),
