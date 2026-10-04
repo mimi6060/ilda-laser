@@ -17,7 +17,11 @@
 //!    DMX access channel ≥ 128, or `/ls/access 1` from that OSC client
 //!    (dropped after `ACCESS_TIMEOUT` without a message from it).
 //! 5. The control's group must be in the source's scope (default: the
-//!    masters only).
+//!    masters only; for timecode, the timeline only).
+//!
+//! Timecode (T-168, timecode/) drives the timeline's playhead only, never
+//! a control: `timecode_allows` checks the gate and the *Timeline*
+//! scope, and its access is the operator's TC-IN button.
 //!
 //! The receivers (netin/) never call `controls::apply` themselves: every
 //! external write goes through `apply`, `play_cue`, `set_page`,
@@ -106,7 +110,9 @@ pub struct SourceScope {
 
 impl SourceScope {
     pub fn default_for(source: SourceKind) -> Self {
-        SourceScope { source, groups: SCOPE_SETS[0].groups.iter().map(|g| g.to_string()).collect(), require_access: true }
+        // Timecode can only ever move the timeline (T-168).
+        let set = if source == SourceKind::Timecode { 3 } else { 0 };
+        SourceScope { source, groups: SCOPE_SETS[set].groups.iter().map(|g| g.to_string()).collect(), require_access: true }
     }
 }
 
@@ -385,6 +391,20 @@ fn check_instance(s: &mut Shared, group: &str, access: bool) -> Result<(), Refus
     Ok(())
 }
 
+/// Whether timecode may drive the timeline (T-168): the gate open and
+/// *Timeline* in the source's scope. TC-IN, its access, is checked by
+/// the caller. Checked every frame, so not counted.
+pub fn timecode_allows(s: &mut Shared) -> Result<(), Refusal> {
+    sync(s);
+    if !s.external.gate.open {
+        return Err(Refusal::GateClosed);
+    }
+    if !s.external.config.scope(SourceKind::Timecode).groups.iter().any(|g| g == "timeline") {
+        return Err(Refusal::OutOfScope);
+    }
+    Ok(())
+}
+
 /// Whether an instance with its access raised may shape its zone's image
 /// (`group`: « master »). Checked every frame, so not counted.
 pub fn instance_allows(s: &mut Shared, group: &str) -> Result<(), Refusal> {
@@ -442,6 +462,8 @@ pub fn view(s: &mut Shared, now: Instant) -> Value {
             };
             let access = match src {
                 SourceKind::Osc => !clients.is_empty(),
+                // TC-IN (T-168).
+                SourceKind::Timecode => s.timecode.armed,
                 _ => has_access(gate, &access_key(src, ""), now),
             };
             let sets: Vec<&str> = SCOPE_SETS.iter().filter(|set| set.groups.iter().all(|g| scope.groups.iter().any(|h| h == g))).map(|set| set.id).collect();
@@ -514,7 +536,8 @@ mod tests {
         assert!(!s.external.gate.open);
         for src in SourceKind::ALL {
             let sc = s.external.config().scope(src);
-            assert_eq!(sc.groups, ["layer", "look", "master"]);
+            let want: &[&str] = if src == SourceKind::Timecode { &["timeline"] } else { &["layer", "look", "master"] };
+            assert_eq!(sc.groups, want);
             assert!(sc.require_access);
         }
     }
@@ -538,6 +561,11 @@ mod tests {
         for (gate, access, id, want) in cases {
             for src in [SourceKind::Dmx, SourceKind::Osc, SourceKind::Timecode] {
                 let mut s = shared();
+                if src == SourceKind::Timecode {
+                    // Its default is the timeline only: given the masters
+                    // here, the same rules hold.
+                    update_scopes(&mut s, &json!({ "scopes": [{ "source": "timecode", "groups": ["master", "look", "layer"], "require_access": true }] })).unwrap();
+                }
                 if gate {
                     open(&mut s);
                 }

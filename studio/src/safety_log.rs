@@ -545,6 +545,14 @@ pub fn describe(e: &SafetyEvent) -> String {
             _ => "Entrées externes fermées".into(),
         },
         "external_scopes" => format!("Périmètre des entrées externes modifié{}", changed()),
+        "timecode_in" => match (d.get("armed").and_then(Value::as_bool), str_of(d, "reason")) {
+            (Some(true), _) => format!("TC-IN armé (timecode {})", str_of(d, "source").to_uppercase()),
+            (_, "estop") => "TC-IN désarmé par l'arrêt d'urgence".into(),
+            (_, "disarm") => "TC-IN désarmé : laser désarmé".into(),
+            (_, "source") => "TC-IN désarmé : source de timecode changée".into(),
+            _ => "TC-IN désarmé".into(),
+        },
+        "timecode_settings" => format!("Réglages du timecode modifiés{}", changed()),
         "audio_automation" => match (d.get("on").and_then(Value::as_bool), str_of(d, "reason")) {
             (Some(true), _) => "Automatisme audio activé (déclencheurs)".into(),
             (_, "estop") => "Automatisme audio coupé par l'arrêt d'urgence".into(),

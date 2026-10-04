@@ -1674,6 +1674,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             Err(e) => e,
         },
         (method, p) if p.starts_with("/api/external") || p.starts_with("/api/dmx/") => external_route(request, shared, method, p),
+        (method, p) if p == "/api/timecode" || p == "/api/timecode/arm" => timecode_route(request, shared, method, p),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         _ => text(404, "not found"),
     }
@@ -2690,6 +2691,61 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     json_response(state_json(&mut s))
 }
 
+/// Incoming timecode (T-168):
+/// - `GET /api/timecode`: settings, TC-IN, status, readout, MIDI ports
+///   and audio input.
+/// - `POST /api/timecode` `{ "source": "mtc", "offset_s": 3600, … }`:
+///   the settings given (an edit, locked in show mode).
+/// - `POST /api/timecode/arm` `{ "on": bool }` or `{ "toggle": true }`:
+///   TC-IN, from this Mac's interface only (like the external gate).
+///   Never arms the laser.
+fn timecode_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Method, path: &str) -> HttpResponse {
+    match (method, path) {
+        (Method::Get, "/api/timecode") => json_response(crate::timecode::view(&mut shared.lock().unwrap())),
+        (Method::Post, "/api/timecode") => match body::<serde_json::Value>(request) {
+            Ok(patch) => {
+                let (result, job) = {
+                    let mut s = shared.lock().unwrap();
+                    let r = crate::timecode::update(&mut s, &patch);
+                    (r, s.timecode.save_job())
+                };
+                match result {
+                    Ok(changed) => {
+                        if let (true, Some((path, cfg))) = (changed, job) {
+                            crate::save_json(&path, &cfg);
+                        }
+                        json_response(crate::timecode::view(&mut shared.lock().unwrap()))
+                    }
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/timecode/arm") => {
+            let local = request.remote_addr().is_some_and(|a| a.ip().is_loopback());
+            let req = match body::<serde_json::Value>(request) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let source = ArmSource::parse(req.get("source").and_then(|v| v.as_str()).unwrap_or("ui"));
+            if !local || !matches!(source, ArmSource::Ui | ArmSource::Keyboard | ArmSource::Api) {
+                return text(403, "TC-IN ne s'arme que depuis l'interface de ce Mac");
+            }
+            let mut s = shared.lock().unwrap();
+            let want = match (req.get("on").and_then(|v| v.as_bool()), req.get("toggle").and_then(|v| v.as_bool())) {
+                (Some(on), _) => on,
+                (None, Some(true)) => !s.timecode.armed,
+                _ => return text(400, "expected \"on\" or \"toggle\""),
+            };
+            match crate::timecode::set_armed(&mut s, want, source) {
+                Ok(()) => json_response(crate::timecode::view(&mut s)),
+                Err(why) => with_status(json_response(json!({ "armed": false, "error": why })), 409),
+            }
+        }
+        _ => text(404, "not found"),
+    }
+}
+
 /// `GET /api/state`'s body (also `state.json` in the diagnostic report).
 fn state_json(s: &mut Shared) -> serde_json::Value {
     s.sync_data_warnings();
@@ -2731,6 +2787,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "shownet": shownet_view(s),
         "applog": s.applog.status(),
         "external": { "open": s.external.gate.open },
+        "timecode": crate::timecode::summary(s),
         "dmx": crate::netin::summary(s, Instant::now()),
     })
 }
@@ -2843,6 +2900,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         "tempo": s.tempo.state(s.now_s()),
         "timeline": s.timeline.state(&s.timeline_clock()),
         "timeline_audio": song_view(s),
+        "timecode": crate::timecode::summary(s),
         "live": s.live,
         "lfos": lfo_positions(s),
         "audio_routes": s.routes.meters().collect::<Vec<_>>(),
@@ -4222,6 +4280,31 @@ mod tests {
         assert!(module_type.starts_with("text/javascript"));
         assert!(module.contains("export class BeamView"));
         assert!(static_asset("/vendor/nothing.js").is_none());
+    }
+
+    #[test]
+    fn timecode_routes_set_tc_in_and_never_arm() {
+        let t = TestServer::start(false);
+        let get = |path| serde_json::from_str::<serde_json::Value>(&t.request("GET", path, "").1).unwrap();
+        let tc = get("/api/timecode");
+        assert_eq!((tc["armed"].as_bool(), tc["status"].as_str(), tc["config"]["source"].as_str()), (Some(false), Some("off"), Some("off")));
+        assert_eq!(t.request("POST", "/api/timecode/arm", r#"{"on":true}"#).0, 409, "no source yet");
+        assert_eq!(t.request("POST", "/api/timecode", r#"{"source":"ltc","ltc_channel":2,"offset_s":3600}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timecode", r#"{"freewheel_frames":0}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/timecode", r#"{"bogus":1}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/timecode/arm", r#"{"on":true,"source":"midi"}"#).0, 403, "from the UI only");
+        let (status, body) = t.request("POST", "/api/timecode/arm", r#"{"toggle":true}"#);
+        assert_eq!(status, 200);
+        let tc: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((tc["armed"].as_bool(), tc["config"]["ltc_channel"].as_u64()), (Some(true), Some(2)));
+        let state = get("/api/state");
+        assert_eq!((state["timecode"]["armed"].as_bool(), state["armed"].as_bool()), (Some(true), Some(false)));
+        assert_eq!(get("/api/frame")["timecode"]["source"], "ltc");
+        // Show mode: TC-IN stays a live switch, the settings are locked.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/timecode", r#"{"offset_s":0}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/timecode/arm", r#"{"on":false}"#).0, 200);
+        assert!(!t.shared.lock().unwrap().timecode.armed);
     }
 
     #[test]

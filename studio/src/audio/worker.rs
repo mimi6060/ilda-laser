@@ -9,6 +9,8 @@
 //!
 //! **analysis**: gets each new stream's ring through a channel, reads it
 //! by hops and publishes the result in the hub. It never touches a device.
+//! It also decodes the LTC channel's ring (T-168, timecode/ltc.rs) and
+//! publishes each timecode frame in the hub.
 //!
 //! Neither ever takes the `Shared` lock: a stuck device can't stall the
 //! engine or the UI.
@@ -20,6 +22,7 @@ use super::onsets::Onsets;
 use super::sections::SectionState;
 use super::capture::{self, CaptureCounters, CpalSource, OpenError, OpenRequest, SampleSource};
 use super::{AudioHub, AudioInputSource, CaptureState, CaptureStatus, NativeSnapshot};
+use crate::timecode::ltc::LtcDecoder;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -43,6 +46,8 @@ pub struct Feed {
     pub consumer: rtrb::Consumer<f32>,
     pub sample_rate: u32,
     pub counters: Arc<CaptureCounters>,
+    /// The LTC channel's copy (T-168): empty while no LTC is asked for.
+    pub ltc: Option<rtrb::Consumer<f32>>,
 }
 
 struct Live {
@@ -156,16 +161,20 @@ impl<S: SampleSource> Capture<S> {
         let req = OpenRequest { device: device.as_deref(), buffer_frames, counters: Arc::clone(&counters) };
         let epoch = self.hub.epoch();
         let mut consumer = None;
+        let mut ltc = None;
+        let tap = self.hub.ltc_tap();
         let result = self.source.open(&req, &mut |rate, channels| {
             let (sink, c) = capture::ring(rate, channels, Arc::clone(&counters), epoch);
             consumer = Some(c);
+            let (sink, l) = sink.with_ltc(Arc::clone(&tap), rate.max(1) as usize * capture::RING_SECONDS);
+            ltc = Some(l);
             sink
         });
         let wanted = device.clone().unwrap_or_else(|| "entrée par défaut".into());
         match (result, consumer) {
             (Ok(opened), Some(consumer)) => {
                 let message = format!("Écoute : {} ({} Hz, {} canaux)", opened.device, opened.sample_rate, opened.channels);
-                let feed = Feed { consumer, sample_rate: opened.sample_rate, counters: Arc::clone(&counters) };
+                let feed = Feed { consumer, sample_rate: opened.sample_rate, counters: Arc::clone(&counters), ltc };
                 let name = opened.device.clone();
                 self.live = Some(Live { opened, counters, device: name.clone(), named: device.is_some(), callbacks: 0, progress_at: now });
                 if self.feed.send(feed).is_err() {
@@ -206,7 +215,11 @@ struct Current {
     feed: Feed,
     analyzer: Analyzer,
     consumed: u64,
+    ltc: LtcDecoder,
 }
+
+/// LTC samples read from the ring at once.
+const LTC_CHUNK: usize = 512;
 
 pub struct Analysis {
     hub: Arc<AudioHub>,
@@ -226,12 +239,13 @@ pub struct Analysis {
     /// Generation of the *Guider* tempo already applied (`AudioHub::set_guide`).
     guides: u64,
     buf: [f32; HOP],
+    ltc_buf: [f32; LTC_CHUNK],
 }
 
 impl Analysis {
     pub fn new(hub: Arc<AudioHub>, feeds: Receiver<Feed>) -> Self {
         let new_tracks = hub.new_track_requests();
-        Self { hub, feeds, current: None, onsets: Onsets::default(), tempo: TempoEstimate::default(), sections: SectionState::default(), new_tracks, guides: 0, buf: [0.0; HOP] }
+        Self { hub, feeds, current: None, onsets: Onsets::default(), tempo: TempoEstimate::default(), sections: SectionState::default(), new_tracks, guides: 0, buf: [0.0; HOP], ltc_buf: [0.0; LTC_CHUNK] }
     }
 
     /// Reads every complete hop waiting in the ring and publishes the
@@ -242,9 +256,11 @@ impl Analysis {
             analyzer.carry_bpm(self.tempo.bpm);
             analyzer.set_guide(self.hub.guide().0);
             analyzer.carry_sections(&self.sections);
-            self.current = Some(Current { analyzer, feed, consumed: 0 });
+            let ltc = LtcDecoder::new(feed.sample_rate);
+            self.current = Some(Current { analyzer, feed, consumed: 0, ltc });
         }
         let Some(cur) = self.current.as_mut() else { return 0 };
+        Self::decode_ltc(&self.hub, cur, &mut self.ltc_buf);
         let new_tracks = self.hub.new_track_requests();
         if new_tracks != self.new_tracks {
             self.new_tracks = new_tracks;
@@ -285,6 +301,25 @@ impl Analysis {
             self.current = None;
         }
         hops
+    }
+
+    /// Everything waiting in the LTC ring, through the decoder; the newest
+    /// frame goes to the hub. Its time is the capture time of the sample
+    /// that ended it, on the same clock as the analysis.
+    fn decode_ltc(hub: &AudioHub, cur: &mut Current, buf: &mut [f32; LTC_CHUNK]) {
+        let Some(ring) = cur.feed.ltc.as_mut() else { return };
+        let mut newest = None;
+        loop {
+            let n = ring.slots().min(LTC_CHUNK);
+            if n == 0 || ring.pop_entire_slice(&mut buf[..n]).is_err() {
+                break;
+            }
+            cur.ltc.feed(&buf[..n], |f| newest = Some(f));
+        }
+        if let Some(f) = newest {
+            let first = cur.feed.counters.first_callback_s().unwrap_or(0.0);
+            hub.publish_ltc(f, first + f.end_sample as f64 / cur.feed.sample_rate.max(1) as f64);
+        }
     }
 
     pub fn run(mut self, running: &AtomicBool) {
@@ -362,6 +397,40 @@ mod tests {
         fn state(&self) -> CaptureState {
             self.hub.status().state
         }
+    }
+
+    /// LTC on channel 2 (T-168), music on channel 1: the analysis thread
+    /// decodes it and publishes each frame with its capture time, and the
+    /// music analysis doesn't hear the timecode. Our own generated LTC:
+    /// no microphone is ever opened.
+    #[test]
+    fn ltc_on_its_own_channel_is_decoded_and_kept_out_of_the_music() {
+        use crate::timecode::{ltc, Rate, Tc};
+        let mut r = rig(&["Scarlett 2i2 USB"], AudioConfig::native());
+        r.hub.set_ltc_tap(2);
+        let code = ltc::encode(Tc { h: 10, m: 0, s: 0, f: 0 }, Rate::F25, 50, 48_000, 0.5);
+        let tone = sine(1_000.0, 0.5, 48_000, code.len(), 0);
+        let stereo: Vec<f32> = tone.iter().zip(&code).flat_map(|(&a, &b)| [a, b]).collect();
+        r.capture.step(r.now);
+        for chunk in stereo.chunks(960) {
+            r.now += Duration::from_millis(10);
+            r.capture.step(r.now);
+            assert!(r.fake.feed(chunk));
+            r.analysis.poll();
+        }
+        let (gen, f, t) = r.hub.ltc_since(0).expect("decoded");
+        // The last frame's closing flip is the next frame's start: the one
+        // before is the newest complete one.
+        assert_eq!(f.tc, Tc { h: 10, m: 0, s: 1, f: 23 });
+        assert_eq!(Rate::from_ltc(f.fps, f.drop_frame), Rate::F25);
+        // It ended 49 frames (1.96 s) of audio after the first callback.
+        assert!((-0.04..0.5).contains(&(t - 1.96)), "{t}");
+        let snap = r.hub.snapshot().expect("published");
+        assert!((snap.rms_db + 9.0).abs() < 0.5, "the tone alone: {}", snap.rms_db);
+        // Off: nothing more is copied or decoded.
+        r.hub.set_ltc_tap(-1);
+        r.run(200, 0.5);
+        assert!(r.hub.ltc_since(gen).is_none());
     }
 
     #[test]

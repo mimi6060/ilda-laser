@@ -191,6 +191,8 @@ impl<B: Backend> Worker<B> {
                 s.midi.record(ev);
             }
             super::engine::handle_batch(&mut s, &events);
+            // MIDI Time Code (T-168): read here, applied by the engine.
+            crate::timecode::midi(&mut s, &events);
         }
 
         if now >= self.next_scan {

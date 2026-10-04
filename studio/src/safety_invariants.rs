@@ -732,7 +732,22 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
             let (id, _) = random_preset(&s, rng);
             let show = one_event_show(&s, rng, &id);
             s.timeline.load(show);
-            let _ = controls::timeline_play(&mut s);
+            if rng.chance(0.6) {
+                let _ = controls::timeline_play(&mut s);
+            } else {
+                // Incoming timecode (T-168), TC-IN armed when allowed and
+                // the gate open: it drives the timeline, never arming.
+                use crate::timecode::{self, mtc, Rate, Tc};
+                let _ = timecode::update(&mut s, &json!({ "source": "mtc", "offset_s": rng.range(-5.0, 5.0) as f64 }));
+                let _ = crate::external::set_open(&mut s, true, ArmSource::Ui);
+                let _ = timecode::set_armed(&mut s, true, ArmSource::Ui);
+                let from = (rng.f() * 400.0) as i64;
+                let events: Vec<MidiEvent> = (0..3)
+                    .flat_map(|p| mtc::quarter_frames(Tc::from_frames(from + 2 * p, Rate::F25), Rate::F25))
+                    .map(|data| MidiEvent { port: "MTC".into(), msg: MidiMsg::QuarterFrame { data }, at: Instant::now() })
+                    .collect();
+                timecode::midi(&mut s, &events);
+            }
         }
         18 => {
             let bpm = rng.range(40.0, 220.0) as f64;

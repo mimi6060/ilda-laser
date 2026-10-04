@@ -66,6 +66,7 @@ pub fn shared() -> Shared {
         midi: midi::MidiState::new(false, midi::profile::ProfileStore::in_memory()),
         netin: crate::netin::NetInState::new(crate::netin::NetHub::in_memory(estop)),
         external: crate::external::External::in_memory(),
+        timecode: crate::timecode::TimecodeState::in_memory(),
         lfos,
         routes,
         triggers: crate::audio::triggers::TriggerStore::in_memory(),

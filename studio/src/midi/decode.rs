@@ -21,6 +21,8 @@ pub enum MidiMsg {
     ProgramChange { channel: u8, program: u8 },
     /// Whole message, `F0` .. `F7` included.
     SysEx { bytes: Vec<u8> },
+    /// MIDI Time Code quarter frame (`F1`): the data byte (T-168).
+    QuarterFrame { data: u8 },
     Clock,
     Start,
     Stop,
@@ -28,9 +30,10 @@ pub enum MidiMsg {
 }
 
 impl MidiMsg {
-    /// MIDI clock and transport: high-rate, not worth showing in the monitor.
+    /// MIDI clock, transport and MTC quarter frames: high-rate, not worth
+    /// showing in the monitor.
     pub fn is_realtime(&self) -> bool {
-        matches!(self, MidiMsg::Clock | MidiMsg::Start | MidiMsg::Stop | MidiMsg::Continue)
+        matches!(self, MidiMsg::Clock | MidiMsg::Start | MidiMsg::Stop | MidiMsg::Continue | MidiMsg::QuarterFrame { .. })
     }
 }
 
@@ -44,6 +47,8 @@ pub struct Decoder {
     have: usize,
     /// Bytes still to skip for a system common message we ignore.
     skip: usize,
+    /// An `F1` waits for its data byte.
+    quarter: bool,
     sysex: Option<Vec<u8>>,
 }
 
@@ -83,12 +88,17 @@ impl Decoder {
             if b >= 0x80 {
                 self.have = 0;
                 self.skip = 0;
+                self.quarter = false;
                 match b {
                     0xF0 => {
                         self.running = None;
                         self.sysex = Some(vec![b]);
                     }
-                    0xF1 | 0xF3 => {
+                    0xF1 => {
+                        self.running = None;
+                        self.quarter = true;
+                    }
+                    0xF3 => {
                         self.running = None;
                         self.skip = 1;
                     }
@@ -102,6 +112,11 @@ impl Decoder {
                 continue;
             }
             // Data byte.
+            if self.quarter {
+                self.quarter = false;
+                out(MidiMsg::QuarterFrame { data: b });
+                continue;
+            }
             if self.skip > 0 {
                 self.skip -= 1;
                 continue;
@@ -231,6 +246,21 @@ mod tests {
     #[test]
     fn system_common_and_aftertouch_are_skipped() {
         assert_eq!(decode(&[0xF2, 0x10, 0x20, 0xA0, 0x01, 0x02, 0xD0, 0x40, 0xF8]), vec![MidiMsg::Clock]);
+    }
+
+    #[test]
+    fn mtc_quarter_frames() {
+        // Between notes, inside a running status, and split over packets.
+        assert_eq!(
+            decode(&[0x90, 0x01, 0x02, 0xF1, 0x23, 0x03, 0x04]),
+            vec![MidiMsg::NoteOn { channel: 0, note: 1, velocity: 2 }, MidiMsg::QuarterFrame { data: 0x23 }]
+        );
+        let mut d = Decoder::default();
+        let mut got = Vec::new();
+        d.feed(&[0xF1], |m| got.push(m));
+        d.feed(&[0x71, 0xF1, 0xF8, 0x05], |m| got.push(m));
+        assert_eq!(got, vec![MidiMsg::QuarterFrame { data: 0x71 }, MidiMsg::Clock, MidiMsg::QuarterFrame { data: 0x05 }]);
+        assert!(MidiMsg::QuarterFrame { data: 0 }.is_realtime());
     }
 
     #[test]
