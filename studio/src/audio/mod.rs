@@ -23,6 +23,8 @@
 //! its own thread, its clock driving the timeline (playback.rs).
 
 pub mod analysis;
+#[cfg(test)]
+mod bench;
 pub mod bpm;
 pub mod capture;
 pub mod decode;
