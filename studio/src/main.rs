@@ -9,6 +9,7 @@
 //! state.
 
 mod applog;
+mod artnet;
 mod audience;
 mod audio;
 mod autosave;
@@ -105,6 +106,15 @@ struct Cli {
     #[arg(long, value_name = "HOST:PORT", num_args = 0..=1, default_missing_value = ponk::DEFAULT_TARGET,
           value_parser = ponk::parse_target, conflicts_with_all = ["device", "test_output", "midi_test"])]
     ponk: Option<std::net::SocketAddr>,
+    /// Drive a ShowNET in Art-Net mode (T-301): the box plays the files of
+    /// its SD card (RÉGLAGES › Carte SD ShowNET), the studio sends the
+    /// bank number of the cue on show and the intensity. An IPv4 address,
+    /// optionally `:port` (6454). Profile, universe and DMX address come
+    /// from RÉGLAGES › Sorties. Off by default; starts disarmed, intensity
+    /// 0 and pattern 0 until armed.
+    #[arg(long, value_name = "IP[:PORT]", value_parser = artnet::parse_target,
+          conflicts_with_all = ["device", "ponk", "test_output", "list_devices", "midi_test"])]
+    shownet_artnet: Option<std::net::SocketAddr>,
     /// Points per second sent to the laser (default: the one in
     /// outputs.json, else 30000).
     #[arg(long)]
@@ -345,6 +355,11 @@ pub struct Shared {
     /// The ShowNET SD card bank (sdbank.rs, T-302, `sdbank.json`): which
     /// cue is which card file. A machine file, not part of a project.
     pub sdbank: sdbank::SdBankStore,
+    /// The ShowNET SD card box over Art-Net (artnet.rs, T-301,
+    /// `shownet_artnet.json`), shared with the output backend.
+    pub shownet_dmx: Arc<artnet::ShowNetDmxStore>,
+    /// The connected output's own report (`Output::status`), last frame.
+    pub output_status: Option<serde_json::Value>,
     /// Whether a ShowNET output's link is the Wi-Fi (T-472): a warning in
     /// the top bar, nothing else.
     pub wifi: Arc<wifi::WifiWatch>,
@@ -461,7 +476,11 @@ impl Shared {
             self.gate.register(interlock::HW_STOP, interlock::HW_STOP_LABEL, self.checklist.hw_stop_ok());
         }
         // A PONK id holds an address literal: parsed, never resolved.
-        let receiver = self.output_mgr.selected().and_then(|id| id.strip_prefix("ponk:")?.parse::<std::net::SocketAddr>().ok()).map(|a| a.ip());
+        let receiver = self
+            .output_mgr
+            .selected()
+            .and_then(|id| id.strip_prefix("ponk:").or_else(|| id.strip_prefix(artnet::ID_PREFIX))?.parse::<std::net::SocketAddr>().ok())
+            .map(|a| a.ip());
         self.wifi.set_target(kind.map(|_| wifi::Target::for_receiver(receiver)));
         // The audience mode follows the checklist and the sheet (T-255).
         self.sync_audience();
@@ -623,6 +642,7 @@ fn main() -> Result<()> {
             let out = state.output_mgr.open_at_start(&id).inspect_err(|e| log::error!("sortie laser : {e:#}"))?;
             match out.kind() {
                 "ponk" => println!("Laser output: {} (disarmed: empty PONK frames until armed).", out.name()),
+                artnet::KIND => println!("Laser output: {} (disarmed: intensity 0 and pattern 0 until armed; the box plays its SD card).", out.name()),
                 "test" => println!("--test-output: fake output logged to {} (no laser).", cli.test_output.as_ref().map(|p| p.display().to_string()).unwrap_or_default()),
                 _ => println!("Laser output: {}", out.name()),
             }
@@ -904,7 +924,8 @@ fn startup_state(cli: &Cli) -> Shared {
     let outputs = power::OutputStore::load_or_create(cli.data_dir.join("outputs.json"));
     let prefs = outputs.connection();
     let pps = cli.pps.unwrap_or(prefs.pps);
-    let output_mgr = Arc::new(output_backend(cli, &prefs, pps));
+    let shownet_dmx = Arc::new(artnet::ShowNetDmxStore::load(cli.data_dir.join("shownet_artnet.json")));
+    let output_mgr = Arc::new(output_backend(cli, &prefs, pps, &shownet_dmx));
     let epoch = Instant::now();
     let estop = Arc::new(EStop::default());
     let netin_cli = netin::CliOverride { osc: cli.osc, artnet: cli.artnet };
@@ -927,6 +948,8 @@ fn startup_state(cli: &Cli) -> Shared {
         pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
         sdbank: sdbank::SdBankStore::load(cli.data_dir.join("sdbank.json")),
+        shownet_dmx,
+        output_status: None,
         playlist: None,
         controls,
         presets,
@@ -1011,17 +1034,18 @@ fn startup_state(cli: &Cli) -> Shared {
 /// (a DAC, or PONK towards MadMapper and the ShowNET), or in tests with
 /// `--test-checklist`. Pure preview and the fake `--test-output` don't.
 fn checklist_enforced(cli: &Cli) -> bool {
-    cli.device.is_some() || cli.ponk.is_some() || cli.test_checklist
+    cli.device.is_some() || cli.ponk.is_some() || cli.shownet_artnet.is_some() || cli.test_checklist
 }
 
 /// The output manager and what it can open: the fake backend whenever a
 /// test flag is given (`--test-devices`, `--test-output`), so a test can
 /// never open a real DAC; the real one (laser-dac, PONK) otherwise.
-fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32) -> output_manager::OutputManager {
+fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32, shownet_dmx: &Arc<artnet::ShowNetDmxStore>) -> output_manager::OutputManager {
     use output_manager::{FakeBackend, OutputManager, RealBackend};
     if cli.test_devices.is_some() || cli.test_output.is_some() {
         let fake = cli.test_devices.as_ref().map(|d| d.0.clone()).unwrap_or_default();
-        let backend = FakeBackend::new(fake.clone(), cli.test_output.clone(), cli.ponk, cli.data_dir.clone());
+        let mut backend = FakeBackend::new(fake.clone(), cli.test_output.clone(), cli.ponk, cli.data_dir.clone());
+        backend.artnet = Arc::clone(shownet_dmx);
         let dropped = Arc::clone(&backend.dropped);
         let list = Arc::new(devices::DeviceList::fixed(fake));
         return OutputManager::new(Arc::new(backend), list, prefs, pps).with_test_drop(dropped);
@@ -1029,6 +1053,7 @@ fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32) -> o
     let backend = Arc::new(RealBackend {
         ponk: cli.ponk.unwrap_or_else(|| ponk::DEFAULT_TARGET.parse().expect("valid default PONK target")),
         data_dir: cli.data_dir.clone(),
+        artnet: Arc::clone(shownet_dmx),
     });
     let scanner: devices::Scanner = {
         let backend = Arc::clone(&backend);
@@ -1045,6 +1070,9 @@ fn startup_output_id(cli: &Cli) -> Option<String> {
     }
     if let Some(device) = &cli.device {
         return Some(device.clone());
+    }
+    if let Some(target) = cli.shownet_artnet {
+        return Some(format!("{}{target}", artnet::ID_PREFIX));
     }
     cli.test_output.as_ref().map(|_| output_manager::TEST_ID.to_string())
 }
@@ -1090,10 +1118,12 @@ fn apply_output_change(shared: &Mutex<Shared>, stage: &mut OutputStage, estop: &
     s.output_name = described.as_ref().map(|d| d.0.clone());
     s.output_kind = described.as_ref().map(|d| d.1);
     s.output_error = None;
+    s.output_status = None;
     s.devices.set_driving_dac(described.as_ref().is_some_and(|d| d.1 == "dac"));
-    // A real output (a DAC, or PONK to MadMapper): the pre-show checklist
-    // gates arming from now on, as with --device or --ponk (T-258).
-    if described.as_ref().is_some_and(|d| matches!(d.1, "dac" | "ponk")) && !s.checklist.enforced() {
+    // A real output (a DAC, PONK to MadMapper, the ShowNET over Art-Net):
+    // the pre-show checklist gates arming from now on, as with --device
+    // or --ponk (T-258).
+    if described.as_ref().is_some_and(|d| matches!(d.1, "dac" | "ponk" | artnet::KIND)) && !s.checklist.enforced() {
         s.checklist.enforce();
     }
     // And the ShowNET items and `hw_stop` follow the new output (T-472).
@@ -1112,6 +1142,7 @@ fn output_lost(shared: &Mutex<Shared>, stage: &mut OutputStage, estop: &EStop, m
         s.gate.set_output_ready(false);
         s.gate.log().record("output", Some("system"), serde_json::json!({ "action": "lost", "name": s.output_name, "error": error }));
         s.output_error = Some(error.clone());
+        s.output_status = None;
     }
     estop.replace_kill_switch(None);
     close_aside(stage.replace(None));
@@ -1217,7 +1248,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing) = {
+        let (looks, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1303,7 +1334,17 @@ impl Engine {
                 s.deck.active.iter().filter_map(|a| Some((a.id, usercues::master_of(&s, &a.cue)?))).collect();
             let armed = s.gate.is_armed();
             let routing = Routing::read(&s, &looks, &show_cues);
-            (looks, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), s.outputs.active_limits(), s.outputs.active_color(), pattern, routing)
+            let caps = s.outputs.active_limits();
+            // The ShowNET SD card over Art-Net (T-301) plays the cue's bank
+            // number itself: it needs the cue, not only the points.
+            let cue_signal = (s.output_kind == Some(artnet::KIND)).then(|| {
+                let timeline_cue = show_cues.iter().rev().find_map(|(c, _)| match &c.source {
+                    timeline::EventSource::Cue { id } => Some(id.as_str()),
+                    timeline::EventSource::Look { .. } => None,
+                });
+                artnet::cue_signal(&s, &live, timeline_cue, pattern.is_some(), &caps)
+            });
+            (looks, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1408,7 +1449,11 @@ impl Engine {
         // Last stage: the gate. `armed` was read under the lock at the top
         // of the frame; the e-stop latch and a watchdog trip (this frame
         // stalled) are re-read here, lock-free.
+        if let Some(signal) = &cue_signal {
+            self.stage.cue_signal(signal);
+        }
         let emitted = self.stage.emit(&frame, armed && !health.is_tripped(), hold_ok, &estop);
+        let output_status = self.stage.status();
         // An output that stopped answering (T-401): disarm, close, retry.
         if let Some(error) = self.stage.fault() {
             output_lost(shared, &mut self.stage, &estop, &self.output_mgr, self.output_gen, error);
@@ -1425,6 +1470,7 @@ impl Engine {
             s.output_error = error;
         }
         s.output_lit = emitted.lit;
+        s.output_status = output_status;
         s.frame = frame;
         s.mix = mix;
         s.strobe = strobe;
@@ -1809,6 +1855,27 @@ mod tests {
         assert!(parse(&["--ponk", "--device", "auto"]).is_err(), "one output at a time");
         assert!(parse(&["--ponk", "127.0.0.1:6001", "--test-output", "/tmp/x"]).is_err());
         assert!(parse(&["--no-midi", "--midi-test", "--ponk"]).is_err(), "MIDI tests stay preview only");
+    }
+
+    /// T-301: the ShowNET SD card over Art-Net only on request, to one
+    /// typed box, never next to another output; a real output, so the
+    /// pre-show checklist gates arming.
+    #[test]
+    fn shownet_artnet_is_opt_in_and_exclusive() {
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("laser-studio").chain(args.iter().copied()));
+        assert!(parse(&[]).unwrap().shownet_artnet.is_none(), "off by default");
+        let cli = parse(&["--shownet-artnet", "127.0.0.1"]).unwrap();
+        assert_eq!(cli.shownet_artnet, Some("127.0.0.1:6454".parse().unwrap()));
+        assert_eq!(startup_output_id(&cli).as_deref(), Some("artnet:127.0.0.1:6454"));
+        assert!(checklist_enforced(&cli));
+        assert_eq!(parse(&["--shownet-artnet", "127.0.0.1:7000"]).unwrap().shownet_artnet, Some("127.0.0.1:7000".parse().unwrap()));
+        for bad in ["255.255.255.255", "shownet.local", "192.168.1.255"] {
+            assert!(parse(&["--shownet-artnet", bad]).is_err(), "{bad}");
+        }
+        for other in [&["--device", "auto"][..], &["--ponk"], &["--test-output", "/tmp/x"], &["--list-devices"]] {
+            let args = [&["--shownet-artnet", "127.0.0.1"][..], other].concat();
+            assert!(parse(&args).is_err(), "one output at a time: {other:?}");
+        }
     }
     use crate::test_support;
     use std::time::Duration;
@@ -2356,12 +2423,13 @@ mod tests {
             std::fs::write(dir.join(name), r#"{"armed": true, "arm": true, "on": true, "hold_to_run": false}"#).unwrap();
         }
         let data_dir = dir.to_str().unwrap();
-        let variants: [&[&str]; 5] = [
+        let variants: [&[&str]; 6] = [
             &[],
             &["--test-interlock"],
             &["--test-hooks", "--pps", "12000"],
             &["--test-hooks", "--test-interlock", "--port", "0"],
             &["--ponk", "127.0.0.1:9"],
+            &["--shownet-artnet", "127.0.0.1:9"],
         ];
         for extra in variants {
             let args = [&["laser-studio", "--no-midi", "--data-dir", data_dir][..], extra].concat();

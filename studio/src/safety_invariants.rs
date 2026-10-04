@@ -35,7 +35,9 @@
 //!     no frame runs it with the e-stop latched.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
-//! longer than the allowed burst.
+//! longer than the allowed burst; and the ShowNET SD card over Art-Net
+//! (T-301): what it would send is intensity 0 and pattern 0 whenever the
+//! stage sends no light, and its intensity never exceeds the caps.
 //!
 //! The generator is a small seeded xorshift (no new dependency); every
 //! failure prints its seed. `SAFETY_SEED=<n>` replays one seed,
@@ -162,6 +164,8 @@ struct Wire {
     armed: bool,
     last: Vec<Point>,
     frames: u64,
+    /// The last cue signal (only for an "artnet" output, T-301).
+    signal: Option<crate::output::CueSignal>,
 }
 
 /// The recording output, with an optional frame size limit (like a Helios
@@ -186,6 +190,9 @@ impl Output for Recorder {
     }
     fn max_points(&self) -> Option<usize> {
         self.1
+    }
+    fn cue_signal(&mut self, signal: &crate::output::CueSignal) {
+        self.0.lock().unwrap().signal = Some(signal.clone());
     }
 }
 
@@ -989,6 +996,81 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_remote) > 0.02, "only {} of {} lit frames went through a DMX fixture instance", cov.lit_with_remote, cov.frames);
         assert!(share(cov.lit_with_public_above) > 0.1, "only {} of {} lit frames had a Public zone, scanning off", cov.lit_with_public_above, cov.frames);
         assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
+    }
+}
+
+// ---------- ShowNET SD card over Art-Net (T-301) ----------
+
+/// Random sessions with the engine believing its output is the Art-Net
+/// one: the DMX values it would send (`artnet::look_for`, from what the
+/// stage really sent) are dark whenever the stage is disarmed, e-stopped
+/// or sends no light, never brighter than the caps allow, and pattern 0
+/// always comes with intensity 0.
+fn run_artnet_case(seed: u64) -> Result<(), String> {
+    use crate::artnet::{look_for, DmxLook};
+    let mut rng = Rng::new(seed);
+    let (mut s, _) = random_case(&mut rng);
+    // Half the cues in the SD bank, the rest without a number.
+    let slots = s.presets.iter().step_by(2).take(sdbank_len()).enumerate().map(|(i, p)| crate::sdbank::SdSlot { number: i as u8 + 1, cue_id: p.id.clone(), seconds: 1.0 }).collect();
+    s.sdbank.set(crate::sdbank::SdBank { slots }).map_err(|e| format!("setup: {e:#}"))?;
+    s.output_kind = Some(crate::artnet::KIND);
+    // A ShowNET output: its hardware stop item, ticked by the operator.
+    s.sync_checklist();
+    s.checklist.check(crate::checklist::HW_STOP_ITEM, true, None).map_err(|e| format!("setup: {e:#}"))?;
+    s.sync_checklist();
+    let mut rig = Rig::new(s, "artnet", seed);
+    let (mut beats, mut lit_dmx) = (0, 0);
+    for frame in 0..60 {
+        for _ in 0..rng.below(3) {
+            random_action(&mut rig, &mut rng, &mut beats);
+        }
+        let (may_emit, caps) = {
+            let s = rig.s();
+            (s.gate.is_armed() && !s.estop.is_latched(), s.outputs.active_limits())
+        };
+        rig.tick();
+        let w = rig.wire.lock().unwrap();
+        let signal = w.signal.clone().ok_or_else(|| format!("frame {frame}: no cue signal for the Art-Net output"))?;
+        let lit = w.last.iter().any(|p| p.is_lit());
+        let look = look_for(w.armed, lit, true, &signal, rng.chance(0.5));
+        if look != DmxLook::DARK && !may_emit {
+            return Err(format!("frame {frame}: Art-Net {look:?} while disarmed or e-stopped"));
+        }
+        if look != DmxLook::DARK && !lit {
+            return Err(format!("frame {frame}: Art-Net {look:?} for a dark frame"));
+        }
+        if (look.intensity == 0) != (look.pattern == 0) {
+            return Err(format!("frame {frame}: Art-Net {look:?}: intensity 0 must mean pattern 0"));
+        }
+        let l = caps.sanitized();
+        let bound = 255.0 * l.max_power * l.max_color.iter().copied().fold(1.0f32, f32::min);
+        if look.intensity as f32 > bound + 1e-3 {
+            return Err(format!("frame {frame}: Art-Net intensity {} above the caps ({bound:.1})", look.intensity));
+        }
+        if look.pattern != 0 && rig.s().sdbank.get().slots.iter().all(|sl| sl.number != look.pattern) {
+            return Err(format!("frame {frame}: pattern {} is not in the SD bank", look.pattern));
+        }
+        lit_dmx += (look != DmxLook::DARK) as usize;
+    }
+    LIT_DMX.fetch_add(lit_dmx, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// Frames that played a bank cue lit, over all cases (coverage).
+static LIT_DMX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn sdbank_len() -> usize {
+    (crate::sdbank::LAST - crate::sdbank::FIRST + 1) as usize
+}
+
+#[test]
+fn artnet_dmx_is_dark_whenever_the_stage_is_and_within_the_caps() {
+    let name = "artnet_dmx_is_dark_whenever_the_stage_is_and_within_the_caps";
+    run_property(name, 8, 300, run_artnet_case);
+    // Coverage at the default case count: bank cues really went out lit.
+    if env_u64("SAFETY_SEED").is_none() && env_u64("SAFETY_CASES").is_none() {
+        let lit = LIT_DMX.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(lit > 50, "only {lit} frames played a bank cue lit");
     }
 }
 

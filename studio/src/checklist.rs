@@ -44,9 +44,9 @@ const MAX_ID: usize = 40;
 /// The kind of output an item is only for (T-472).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputKind {
-    /// A ShowNET path: PONK to MadMapper (which drives the ShowNET), or an
-    /// output whose projector sheet says ShowNET (the SD card / Art-Net
-    /// and SDK paths once they exist).
+    /// A ShowNET path: PONK to MadMapper (which drives the ShowNET), the
+    /// SD card over Art-Net (T-301), the SDK, or an output whose projector
+    /// sheet says ShowNET.
     #[serde(rename = "shownet")]
     ShowNet,
 }
@@ -60,7 +60,7 @@ impl OutputKind {
     pub fn of(output: Option<&str>, model: DacModel) -> Option<Self> {
         match output {
             None | Some("dac") => None,
-            Some("ponk" | "shownet") => Some(Self::ShowNet),
+            Some("ponk" | "shownet" | crate::artnet::KIND) => Some(Self::ShowNet),
             Some(_) => (model == DacModel::ShowNet).then_some(Self::ShowNet),
         }
     }
@@ -616,6 +616,7 @@ mod tests {
         assert_eq!(OutputKind::of(Some("dac"), Other), None);
         assert_eq!(OutputKind::of(None, ShowNet), None, "preview");
         assert_eq!(OutputKind::of(Some("ponk"), Other), Some(OutputKind::ShowNet));
+        assert_eq!(OutputKind::of(Some("artnet"), Other), Some(OutputKind::ShowNet), "the SD card over Art-Net (T-301)");
         assert_eq!(OutputKind::of(Some("test"), Other), None);
         assert_eq!(OutputKind::of(Some("test"), ShowNet), Some(OutputKind::ShowNet), "declared on the sheet");
 

@@ -10,8 +10,12 @@ static ILDA_DIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 /// A fresh `Shared` like the one `main` builds, with scenes stored in a
 /// path that is never written unless a test saves a scene.
 pub fn shared() -> Shared {
+    // One Art-Net box setting (T-301) for the backend and the handlers.
+    let shownet_dmx = std::sync::Arc::new(crate::artnet::ShowNetDmxStore::in_memory());
+    let mut backend = crate::output_manager::FakeBackend::new(Vec::new(), None, None, std::env::temp_dir().join("laser-studio-test-unused"));
+    backend.artnet = std::sync::Arc::clone(&shownet_dmx);
     let output_mgr = std::sync::Arc::new(crate::output_manager::OutputManager::new(
-        std::sync::Arc::new(crate::output_manager::FakeBackend::new(Vec::new(), None, None, std::env::temp_dir().join("laser-studio-test-unused"))),
+        std::sync::Arc::new(backend),
         std::sync::Arc::new(crate::devices::DeviceList::fixed(Vec::new())),
         &Default::default(),
         30_000,
@@ -41,6 +45,8 @@ pub fn shared() -> Shared {
         pps: 30_000,
         scenes: SceneStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scenes.json")),
         sdbank: crate::sdbank::SdBankStore::in_memory(),
+        shownet_dmx,
+        output_status: None,
         playlist: None,
         controls,
         presets,

@@ -302,6 +302,11 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/outputs/artnet") => json_response(artnet_view(&shared.lock().unwrap())),
+        (Method::Post, "/api/outputs/artnet") => match body::<crate::artnet::ShowNetDmxConfig>(request) {
+            Ok(cfg) => set_artnet(cfg, shared),
+            Err(e) => e,
+        },
         (Method::Post, "/api/test/output") => {
             // `--test-hooks` only (e2e of T-401): unplugs or plugs back the
             // fake outputs. A real output has no such switch.
@@ -2111,6 +2116,32 @@ fn color_view(s: &Shared, id: &str) -> serde_json::Value {
     })
 }
 
+/// `GET /api/outputs/artnet` (T-301): the ShowNET SD card box settings.
+fn artnet_view(s: &Shared) -> serde_json::Value {
+    use crate::artnet::{Profile, PORT};
+    let profiles: Vec<_> = [Profile::Dj, Profile::Pro].iter().map(|p| json!({ "id": p, "label": p.label_fr(), "channels": p.channels() })).collect();
+    let cfg = s.shownet_dmx.get();
+    json!({ "config": cfg, "id": cfg.id(), "port": PORT, "profiles": profiles })
+}
+
+/// `POST /api/outputs/artnet` (T-301): the box's address (empty: off),
+/// universe, DMX address, profile and zone. Refused while that output is
+/// selected (disconnect first: the values are fixed when it opens).
+/// Never connects, never arms.
+fn set_artnet(cfg: crate::artnet::ShowNetDmxConfig, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let s = shared.lock().unwrap();
+    if s.output_mgr.selected().is_some_and(|id| id.starts_with(crate::artnet::ID_PREFIX)) {
+        return text(409, "Déconnectez la sortie ShowNET carte SD avant de changer ses réglages");
+    }
+    match s.shownet_dmx.set(cfg) {
+        Ok(cfg) => {
+            log::info!("Sortie ShowNET carte SD (Art-Net) : {}", cfg.target.as_deref().unwrap_or("désactivée"));
+            json_response(artnet_view(&s))
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
 /// `POST /api/outputs/config` (T-401).
 #[derive(Deserialize)]
 struct OutputConfigBody {
@@ -2252,6 +2283,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "output": s.output_name,
         "output_kind": s.output_kind,
         "output_state": s.output_mgr.state(),
+        "output_status": s.output_status,
         "pps": s.pps,
         "shapes": SHAPE_NAMES,
         "generators": GENERATOR_NAMES,
@@ -2343,6 +2375,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "output_kind": s.output_kind,
         "output_error": s.output_error,
         "output_state": s.output_mgr.state(),
+        "output_status": s.output_status,
         "pps": s.pps,
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "cue_page": s.cue_page,
@@ -3575,6 +3608,34 @@ mod tests {
         // The frame says where the output is.
         let f: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
         assert_eq!(f["output_state"], "available");
+    }
+
+    /// T-301: the ShowNET SD card box is off until an address is typed,
+    /// then listed; bad values and broadcasts are refused, and nothing
+    /// changes while it is the selected output.
+    #[test]
+    fn the_artnet_box_is_typed_listed_and_locked_while_selected() {
+        let t = TestServer::start(false);
+        let v: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/outputs/artnet", "").1).unwrap();
+        assert_eq!((v["id"].clone(), v["config"]["target"].clone(), v["port"].as_u64()), (json!(null), json!(null), Some(6454)));
+        assert!(outputs(&t)["devices"].as_array().unwrap().iter().all(|d| d["kind"] != "artnet"), "off by default");
+        for bad in [r#"{"target":"255.255.255.255"}"#, r#"{"target":"shownet.local"}"#, r#"{"target":"127.0.0.1","dmx_address":0}"#, r#"{"target":"127.0.0.1","universe":40000}"#] {
+            assert_eq!(t.request("POST", "/api/outputs/artnet", bad).0, 400, "{bad}");
+        }
+        let (code, body) = t.request("POST", "/api/outputs/artnet", r#"{"target":"127.0.0.1:7000","universe":2,"dmx_address":20,"profile":"pro"}"#);
+        assert_eq!(code, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["id"], "artnet:127.0.0.1:7000");
+        assert_eq!((v["config"]["universe"].as_u64(), v["config"]["profile"].as_str()), (Some(2), Some("pro")));
+        let listed = outputs(&t)["devices"].as_array().unwrap().iter().find(|d| d["kind"] == "artnet").cloned().unwrap();
+        assert_eq!((listed["id"].as_str(), listed["name"].as_str()), (Some("artnet:127.0.0.1:7000"), Some("ShowNET carte SD (Art-Net 127.0.0.1:7000)")));
+        assert_eq!(t.request("POST", "/api/outputs/select", r#"{"id":"artnet:127.0.0.1:7000"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/outputs/artnet", r#"{"target":"127.0.0.1:7001"}"#).0, 409);
+        assert_eq!(t.request("POST", "/api/outputs/select", r#"{"id":null}"#).0, 200);
+        let (code, body) = t.request("POST", "/api/outputs/artnet", r#"{"target":""}"#);
+        assert_eq!((code, serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].clone()), (200, json!(null)), "emptied: off");
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/outputs/artnet", r#"{"target":"127.0.0.1"}"#).0, 423);
     }
 
     /// T-401: with the `output` interlock open (nothing connected), arming

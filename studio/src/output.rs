@@ -11,8 +11,9 @@ use std::borrow::Cow;
 
 pub trait Output: Send {
     fn name(&self) -> &str;
-    /// What kind of output this is, for the UI: "dac", "ponk", "test", or
-    /// "shownet" (`shownet.rs`, behind the `shownet` feature).
+    /// What kind of output this is, for the UI: "dac", "ponk", "test",
+    /// "artnet" (the ShowNET SD card, `artnet.rs`) or "shownet"
+    /// (`shownet.rs`, behind the `shownet` feature).
     fn kind(&self) -> &'static str {
         "dac"
     }
@@ -46,6 +47,34 @@ pub trait Output: Send {
     fn fault(&self) -> Option<String> {
         None
     }
+    /// For an output that plays its own content (the ShowNET SD card over
+    /// Art-Net, `artnet.rs`, T-301): the cue on show, its bank number and
+    /// the master × cap, once per frame before `send`. Ignored by outputs
+    /// that draw the points.
+    fn cue_signal(&mut self, _signal: &CueSignal) {}
+    /// What the output reports to the UI beside its name (the values the
+    /// Art-Net output sends, its warning), or `None`. Cheap, never blocks.
+    fn status(&self) -> Option<serde_json::Value> {
+        None
+    }
+}
+
+/// What a cue-playing output needs beside the points (T-301), read by the
+/// engine under the lock each frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CueSignal {
+    /// Name of the cue on show (the newest one played by hand, else the
+    /// timeline's), None for a hand-made look, a scene or a test pattern.
+    pub cue: Option<String>,
+    /// Its number in the SD bank (`sdbank.rs`), if it has one.
+    pub pattern: Option<u8>,
+    /// Master dimmer after its automatic gains (audio silence, DMX loss), 0..1.
+    pub master: f32,
+    /// The output's power cap as one factor, 0..1: global × the lowest
+    /// colour cap (the card's colours can't be changed live).
+    pub cap: f32,
+    /// Master size, 0..2 (1 = as drawn).
+    pub size: f32,
 }
 
 /// The last pipeline stage: what actually leaves for the laser. The arm
@@ -127,6 +156,18 @@ impl OutputStage {
         self.output = next;
         self.output_armed = false;
         old
+    }
+
+    /// Passes this frame's cue signal to the output (`Output::cue_signal`).
+    pub fn cue_signal(&mut self, signal: &CueSignal) {
+        if let Some(out) = self.output.as_mut() {
+            out.cue_signal(signal);
+        }
+    }
+
+    /// The installed output's report for the UI (`Output::status`).
+    pub fn status(&self) -> Option<serde_json::Value> {
+        self.output.as_ref()?.status()
     }
 
     /// The installed output's fault, if it has one (see `Output::fault`).
