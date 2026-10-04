@@ -134,6 +134,20 @@ pub struct ActiveCue {
     pub fade: Option<Fade>,
 }
 
+impl ActiveCue {
+    /// How far in it is at `now_s`: 1 once playing, its fade-in gain
+    /// (a morph's progress) while starting.
+    pub fn level(&self, now_s: f64) -> f32 {
+        match self.fade {
+            Some(f) if !f.done(now_s) => match f.kind {
+                TransitionKind::Morph => f.progress(now_s),
+                kind => Fade::gain_in(kind, f.progress(now_s)),
+            },
+            _ => 1.0,
+        }
+    }
+}
+
 /// A stopped cue still drawn while it fades out (*Fin*).
 #[derive(Clone, Debug, PartialEq)]
 pub struct EndingCue {
@@ -467,15 +481,23 @@ impl CueDeck {
 
     /// `cue` leaves the playing list: kept while it fades out with `t`
     /// (into the new cue `into` for a morph), else gone.
+    ///
+    /// A cue stopped while still fading in fades out from where it is,
+    /// never from full: its fade-out starts part-way, at its current level
+    /// (and it is never a morph's source, which would draw it at full).
     fn retire(&mut self, cue: ActiveCue, t: Transition, at: At, into: Option<u64>) {
         if t.is_cut() {
             return;
         }
+        let level = cue.level(at.s);
+        let into = into.filter(|_| level >= 1.0);
         let kind = match (t.kind, into) {
             (TransitionKind::Morph, None) => TransitionKind::Fade,
             (kind, _) => kind,
         };
-        let fade = Fade { kind, start_s: at.s, length_s: t.length.seconds(at.bpm), partner: into };
+        let length_s = t.length.seconds(at.bpm);
+        let start_s = at.s - Fade::out_progress_at(kind, level) as f64 * length_s;
+        let fade = Fade { kind, start_s, length_s, partner: into };
         self.ending.push(EndingCue { cue, fade });
     }
 
@@ -512,10 +534,12 @@ impl CueDeck {
         let t = self.transition_of(cue, held);
         let id = self.next_id;
         self.next_id += 1;
-        // A morph turns the first cue replaced into this one; the others fade.
-        let from = (t.kind == TransitionKind::Morph && !t.is_cut()).then(|| replaced.first().map(|a| a.id)).flatten();
-        for (k, a) in replaced.into_iter().enumerate() {
-            self.retire(a, t, at, if k == 0 && from.is_some() { Some(id) } else { None });
+        // A morph turns the first cue replaced that is fully in into this
+        // one; the others fade from where they are.
+        let from = (t.kind == TransitionKind::Morph && !t.is_cut()).then(|| replaced.iter().find(|a| a.level(at.s) >= 1.0).map(|a| a.id)).flatten();
+        for a in replaced {
+            let into = (Some(a.id) == from).then_some(id);
+            self.retire(a, t, at, into);
         }
         let fade = (!t.is_cut()).then(|| Fade { kind: t.kind, start_s: at.s, length_s: t.length.seconds(at.bpm), partner: from });
         self.active.push(ActiveCue {
@@ -1127,6 +1151,52 @@ mod tests {
         assert_eq!(d.on_show(0.0), Some("a"));
         d.tick(at(0.5, 1.5));
         assert_eq!(d.on_show(0.5), Some("b"));
+    }
+
+    #[test]
+    fn a_cue_stopped_while_fading_in_fades_out_from_where_it_is() {
+        let gain = |d: &CueDeck, now: f64, cue: &str| match fx_of(d, now, cue) {
+            Some(LookFx::Gain(g)) => g,
+            Some(LookFx::MorphFrom { p, .. }) => p,
+            Some(LookFx::Absorbed) => 0.0,
+            None => 1.0,
+        };
+        for (kind_in, kind_out) in [
+            (TransitionKind::Fade, TransitionKind::Fade),
+            (TransitionKind::Fade, TransitionKind::FadeThroughBlack),
+            (TransitionKind::FadeThroughBlack, TransitionKind::Fade),
+            (TransitionKind::Morph, TransitionKind::Morph),
+            (TransitionKind::FadeThroughBlack, TransitionKind::FadeThroughBlack),
+        ] {
+            for stop_at in [10.1, 10.3, 10.6, 10.9] {
+                let mut d = with(kind_in, 1.0);
+                d.press("a", None, at(0.0, 0.0), Settings::default);
+                d.tick(at(5.0, 10.0));
+                d.press("b", None, at(10.0, 20.0), Settings::default);
+                let before = gain(&d, stop_at, "b");
+                assert!(before < 1.0, "{kind_in:?}: b is still coming in");
+                // b replaced by c (with kind_out) while still fading in.
+                d.transition.kind = kind_out;
+                d.press("c", None, at(stop_at, stop_at * 2.0), Settings::default);
+                let ending = d.ending.iter().find(|e| e.cue.cue == "b").expect("b fades out");
+                assert_eq!(ending.fade.partner, None, "never a morph's source while not fully in");
+                let after = gain(&d, stop_at, "b");
+                assert!(after <= before + 1e-5, "{kind_in:?} → {kind_out:?} at {stop_at}: {before} jumped to {after}");
+                // And only goes down from there.
+                let mut last = after;
+                for k in 1..=20 {
+                    let g = gain(&d, stop_at + k as f64 * 0.05, "b");
+                    assert!(g <= last + 1e-5, "{kind_in:?} → {kind_out:?}: went up {last} → {g}");
+                    last = g;
+                }
+                assert_eq!(last, 0.0);
+            }
+        }
+        // Toggled off while fading in: the same.
+        let mut d = CueDeck { multi: true, ..with(TransitionKind::Fade, 1.0) };
+        d.press("a", None, at(0.0, 0.0), Settings::default);
+        d.press("a", None, at(0.25, 0.5), Settings::default);
+        assert_eq!(fx_of(&d, 0.25, "a"), Some(LookFx::Gain(0.25)), "a quarter in: fades out from a quarter, not from full");
     }
 
     // ---------- quantised launch (T-159) ----------

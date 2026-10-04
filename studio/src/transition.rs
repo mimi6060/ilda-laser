@@ -142,6 +142,16 @@ impl Fade {
         }
     }
 
+    /// The progress at which a fade-out of `kind` is at gain `level` (the
+    /// latest one, so a stop never brightens).
+    pub fn out_progress_at(kind: TransitionKind, level: f32) -> f32 {
+        let g = if level.is_finite() { level.clamp(0.0, 1.0) } else { 0.0 };
+        match kind {
+            TransitionKind::FadeThroughBlack => (1.0 - g) / 2.0,
+            _ => 1.0 - g,
+        }
+    }
+
     /// Gain of a cue fading out at progress `p`.
     pub fn gain_out(kind: TransitionKind, p: f32) -> f32 {
         match kind {
@@ -437,6 +447,11 @@ mod tests {
         assert_eq!((f.progress(9.0), f.progress(10.5), f.progress(12.0)), (0.0, 0.5, 1.0));
         assert!(f.done(11.0) && !f.done(10.9));
         assert!(Fade { length_s: 0.0, ..f }.done(0.0));
+        for kind in TRANSITION_KINDS {
+            for g in [0.0, 0.3, 1.0] {
+                assert!((Fade::gain_out(kind, Fade::out_progress_at(kind, g)) - g).abs() < 1e-6, "{kind:?} {g}");
+            }
+        }
     }
 
     #[test]
