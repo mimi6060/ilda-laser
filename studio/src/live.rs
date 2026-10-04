@@ -418,7 +418,7 @@ fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 /// Hue 0..1 (wraps), saturation, value → RGB 0..1.
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+pub(crate) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
     let h6 = h.rem_euclid(1.0) * 6.0;
     let f = h6 - h6.floor();
     let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));

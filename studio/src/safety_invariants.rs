@@ -752,9 +752,54 @@ struct Coverage {
     lit_with_horizon: usize,
     /// Frames with a lit preview through a non-neutral projection zone.
     lit_with_projection: usize,
+    /// Frames with a lit preview while a DMX fixture instance shaped a zone (T-407).
+    lit_with_remote: usize,
     /// Frames with a lit preview and a Public zone, scanning off / on.
     lit_with_public_above: usize,
     lit_with_public_scanning: usize,
+}
+
+/// One DMX fixture instance per zone (T-407), random personalities and
+/// addresses on universe 1, sACN on (in memory), the gate open on every
+/// group. What the instances do comes from `random_universe`.
+fn setup_fixtures(s: &mut Shared, rng: &mut Rng) {
+    use crate::dmx::{fixture::DmxFixture, personality::Personality};
+    let mut cfg = s.netin.hub.file();
+    cfg.sacn.enabled = true;
+    let mut address = 1;
+    for z in s.projection.get().zones.clone() {
+        let mode = *rng.pick(&Personality::ALL);
+        if address + mode.width() > 513 {
+            break;
+        }
+        cfg.dmx.fixtures.push(DmxFixture { enabled: true, zone: z.id, mode, universe: 1, address, smoothing_ms: rng.below(200) as u16 });
+        address += mode.width() + rng.below(8) as u16;
+    }
+    s.netin.hub.store(cfg).expect("valid fixtures");
+    let groups: Vec<String> = crate::external::SCOPE_SETS.iter().flat_map(|set| set.groups.iter().map(|g| g.to_string())).collect();
+    let scopes = crate::external::SourceKind::ALL.iter().map(|&source| crate::external::SourceScope { source, groups: groups.clone(), require_access: true }).collect();
+    s.external.set_config(crate::external::ExternalConfig { scopes });
+    let _ = crate::external::set_open(s, true, ArmSource::Ui);
+}
+
+/// A universe as a console could send it: random levels, access mostly
+/// raised, the function channels mostly at « rien ».
+fn random_universe(s: &mut Shared, rng: &mut Rng, frame: usize) {
+    let mut data: Vec<u8> = (0..512).map(|_| (rng.next() & 0xFF) as u8).collect();
+    for f in s.netin.hub.file().dmx.fixtures {
+        let at = |key: &str| f.mode.channels().iter().find(|c| c.key == key).map(|c| f.address as usize - 1 + c.offset as usize);
+        if let Some(i) = at("access") {
+            data[i] = if rng.chance(0.85) { 255 } else { 0 };
+        }
+        if let Some(i) = at("function").filter(|_| rng.chance(0.97)) {
+            data[i] = 0;
+        }
+        if let Some(i) = at("intensity").filter(|_| rng.chance(0.5)) {
+            data[i] = 255;
+        }
+    }
+    let ev = crate::netin::patch::UniverseEvent { proto: crate::netin::Proto::Sacn, universe: 1, from: "127.0.0.1".parse().unwrap(), name: format!("fuzz {frame}"), data };
+    let _ = s.netin.sender().try_send(crate::netin::NetEvent::Universe(ev));
 }
 
 /// Runs one fuzz case; `Err` describes the first broken invariant.
@@ -788,10 +833,20 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         prepare_scanning(&mut s, &mut arng);
         s.unlock_audience_scanning(audience::PHRASE, ArmSource::Ui).map_err(|e| format!("setup: unlock refused: {e:?}"))?;
     }
+    // DMX fixture instances on the zones (T-407), from their own stream:
+    // a console sending random universes, the gate opened.
+    let mut drng = Rng::new(seed ^ 0x0407_0407);
+    let fixtures = drng.chance(0.4);
+    if fixtures {
+        setup_fixtures(&mut rig.s(), &mut drng);
+    }
     let mut beats = 0;
     for frame in 0..frames {
         if zrng.chance(0.15) {
             random_routing(&mut rig.s(), &mut zrng);
+        }
+        if fixtures && drng.chance(0.5) {
+            random_universe(&mut rig.s(), &mut drng, frame);
         }
         if crng.chance(0.05) {
             let mut s = rig.s();
@@ -889,6 +944,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         cov.lit_with_zones += (preview_lit && cfg.zones.iter().any(|z| z.kind == ZoneKind::Blank)) as usize;
         cov.lit_with_horizon += (preview_lit && cfg.horizon.lines && cfg.horizon.level == 0.0) as usize;
         cov.lit_with_projection += (preview_lit && s.projection.get().zones.iter().any(|z| !z.geometry.is_identity())) as usize;
+        cov.lit_with_remote += (preview_lit && !s.netin.fixtures.remotes.is_empty()) as usize;
     }
     Ok(())
 }
@@ -930,6 +986,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
         assert!(share(cov.lit_with_projection) > 0.2, "only {} of {} lit frames went through a projection zone", cov.lit_with_projection, cov.frames);
+        assert!(share(cov.lit_with_remote) > 0.02, "only {} of {} lit frames went through a DMX fixture instance", cov.lit_with_remote, cov.frames);
         assert!(share(cov.lit_with_public_above) > 0.1, "only {} of {} lit frames had a Public zone, scanning off", cov.lit_with_public_above, cov.frames);
         assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
     }

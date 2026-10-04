@@ -437,7 +437,8 @@ pub type Routed = (u8, Vec<Point>, Vec<u8>);
 type Layered = (u8, Vec<Point>);
 
 /// Mixes the looks of each active zone (its share of the point budget),
-/// runs `finish` (the master live controls) on each zone's mix, places it
+/// runs `finish` (the master live controls, and the zone's DMX remote of
+/// T-407: `finish(zone id, mix)`) on each zone's mix, places it
 /// through the zone geometry and the calibration, and joins the zones
 /// with blanked travel. With one neutral zone this is exactly
 /// mix → finish → calibration.
@@ -446,7 +447,7 @@ pub fn render(
     cfg: &ProjectionConfig,
     output: Option<&str>,
     mixer: &Mixer,
-    finish: impl Fn(&[Point]) -> Vec<Point>,
+    finish: impl Fn(u8, &[Point]) -> Vec<Point>,
     calibration: &Calibration,
 ) -> (Vec<Point>, MixReport) {
     let zones: Vec<(&ProjectionZone, Vec<Layered>)> = cfg
@@ -481,7 +482,7 @@ pub fn render(
         for (sum, n) in report.per_layer.iter_mut().zip(r.per_layer) {
             *sum = (*sum).max(n);
         }
-        placed.push(zone.geometry.placer().place(&finish(&mix), calibration));
+        placed.push(zone.geometry.placer().place(&finish(zone.id, &mix), calibration));
     }
     if placed.len() == 1 {
         return (placed.pop().unwrap_or_default(), report);
@@ -691,7 +692,7 @@ mod tests {
     #[test]
     fn a_cue_can_play_on_several_zones() {
         let cfg = two_zones();
-        let (frame, report) = render(vec![(1, line(0.0), vec![1, 2])], &cfg, None, &Mixer::default(), |p| p.to_vec(), &Calibration::default());
+        let (frame, report) = render(vec![(1, line(0.0), vec![1, 2])], &cfg, None, &Mixer::default(), |_, p| p.to_vec(), &Calibration::default());
         let lit: Vec<&Point> = frame.iter().filter(|p| p.is_lit()).collect();
         assert!(lit.iter().any(|p| (p.x + 0.5).abs() < 1e-6), "drawn in zone 1");
         assert!(lit.iter().any(|p| (p.x - 0.5).abs() < 1e-6), "drawn in zone 2");
@@ -703,7 +704,7 @@ mod tests {
     #[test]
     fn cues_without_zones_play_on_the_default_ones_and_disabled_zones_stay_dark() {
         let mut cfg = two_zones();
-        let draw = |cfg: &ProjectionConfig, zones: Vec<u8>| render(vec![(1, line(0.0), zones)], cfg, None, &Mixer::default(), |p| p.to_vec(), &Calibration::default()).0;
+        let draw = |cfg: &ProjectionConfig, zones: Vec<u8>| render(vec![(1, line(0.0), zones)], cfg, None, &Mixer::default(), |_, p| p.to_vec(), &Calibration::default()).0;
         assert!(draw(&cfg, vec![]).iter().filter(|p| p.is_lit()).all(|p| (p.x + 0.5).abs() < 1e-6));
         cfg.default_zones = vec![2];
         assert!(draw(&cfg, vec![]).iter().filter(|p| p.is_lit()).all(|p| (p.x - 0.5).abs() < 1e-6));
@@ -716,7 +717,7 @@ mod tests {
         let looks = vec![(1, line(0.2), vec![]), (2, line(-0.3), vec![])];
         let cal = Calibration { offset_x: 0.1, scale_y: 0.8, rotation_deg: 12.0, ..Default::default() };
         let mixer = Mixer::default();
-        let (frame, report) = render(looks.clone(), &ProjectionConfig::default(), None, &mixer, |p| p.to_vec(), &cal);
+        let (frame, report) = render(looks.clone(), &ProjectionConfig::default(), None, &mixer, |_, p| p.to_vec(), &cal);
         let (mix, want_report) = layers::mix(looks.into_iter().map(|(l, p, _)| (l, p)).collect(), &mixer);
         let want: Vec<Point> = mix
             .into_iter()

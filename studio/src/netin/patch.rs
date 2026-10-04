@@ -20,6 +20,7 @@
 
 use super::{signal_log, NetInConfig, Proto};
 use crate::controls::{self, ControlDesc, ControlInput, ControlKind};
+use crate::dmx::fixture::DmxFixture;
 use crate::external::{self, SourceKind};
 use crate::interlock::ArmSource;
 use crate::midi::mapping::pickup_catches;
@@ -71,6 +72,8 @@ pub struct PatchConfig {
     pub mappings: Vec<DmxMapping>,
     /// The DMX access channel (T-408); none: DMX never has access.
     pub access: Option<DmxAddr>,
+    /// One fixture instance per projection zone (T-407).
+    pub fixtures: Vec<DmxFixture>,
 }
 
 fn channel_ok(c: u16) -> bool {
@@ -95,12 +98,13 @@ impl PatchConfig {
                 return Err(format!("canal d'accès DMX invalide : univers {}, canal {}", a.universe, a.channel));
             }
         }
-        Ok(())
+        crate::dmx::fixture::check(&self.fixtures, |z| format!("Zone {z}"))
     }
 
-    /// The universes the patch listens to.
+    /// The universes the patch and the fixture instances listen to.
     pub fn universes(&self) -> Vec<u16> {
-        let mut v: Vec<u16> = self.mappings.iter().map(|m| m.universe).chain(self.access.map(|a| a.universe)).collect();
+        let fixtures = self.fixtures.iter().filter(|f| f.enabled).map(|f| f.universe);
+        let mut v: Vec<u16> = self.mappings.iter().map(|m| m.universe).chain(self.access.map(|a| a.universe)).chain(fixtures).collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -214,6 +218,7 @@ pub fn universe(s: &mut Shared, cfg: &NetInConfig, ev: UniverseEvent, now: Insta
     for m in cfg.dmx.mappings.iter().filter(|m| m.universe == universe) {
         mapping(s, m, &data, now);
     }
+    crate::dmx::fixture::universe(s, cfg, universe, &data, now);
 }
 
 fn mapping(s: &mut Shared, m: &DmxMapping, data: &[u8], now: Instant) {
