@@ -196,6 +196,19 @@ fn tapped_bpm(taps: &mut VecDeque<f64>, t: f64) -> Option<f64> {
     (median > 0.0).then(|| 60.0 / median)
 }
 
+/// The one launch quantisation (T-159), used by the cue grid and the
+/// evolving cues (T-111): the first multiple of `grid` beats at or after
+/// `beat`, or the one just passed when `beat` is less than `catch_up`
+/// beats after it (a press a hair late still starts on that beat). A grid
+/// of 0 (or less) is no quantisation: `beat` itself.
+pub fn quantize(beat: f64, grid: f64, catch_up: f64) -> f64 {
+    if grid.is_nan() || grid <= 0.0 || !beat.is_finite() {
+        return beat;
+    }
+    let before = (beat / grid).floor() * grid;
+    if beat - before < catch_up.max(0.0) { before } else { before + grid }
+}
+
 /// `x` wrapped to -½..½.
 fn wrap_half(x: f64) -> f64 {
     x - x.round()
@@ -440,6 +453,18 @@ impl TempoClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quantize_to_the_next_boundary_with_catch_up() {
+        let eighth = 0.125;
+        assert_eq!(quantize(10.4, 1.0, eighth), 11.0);
+        assert_eq!(quantize(11.05, 1.0, eighth), 11.0, "just after the beat: catch up");
+        assert_eq!(quantize(11.2, 1.0, eighth), 12.0);
+        assert_eq!(quantize(10.4, 4.0, eighth), 12.0);
+        assert_eq!(quantize(12.1, 4.0, eighth), 12.0);
+        assert_eq!(quantize(10.4, 0.0, eighth), 10.4, "no grid: no quantisation");
+        assert_eq!(quantize(-0.5, 1.0, eighth), 0.0);
+    }
 
     #[test]
     fn four_regular_taps_give_the_tapped_tempo() {

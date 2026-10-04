@@ -17,6 +17,8 @@ use std::sync::{LazyLock, Mutex};
 /// LED mode channels (§2.3): secondary colour pulsing at 1/4, blinking at 1/8.
 pub const CH_PULSE_QUARTER: u8 = 9;
 pub const CH_BLINK_EIGHTH: u8 = 13;
+/// Blinking at 1/4 (a cue waiting for its quantised start, T-159).
+pub const CH_BLINK_QUARTER: u8 = 14;
 
 pub const MK2_GREY: u8 = 1;
 pub const MK2_WHITE: u8 = 3;

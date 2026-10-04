@@ -736,6 +736,12 @@
   .cues.storing .cue, .cues.storing .cue-empty { cursor: copy; animation: storeBlink 1s ease-in-out infinite; }
   .cues.storing .cue-empty { opacity: .9; }
   @keyframes storeBlink { 50% { box-shadow: 0 0 0 2px var(--accent-2), 0 0 14px color-mix(in srgb, var(--accent-2) 50%, transparent); } }
+  /* Transitions et lancement quantifié (T-158 / T-159), Theme (T-299) tokens:
+     a cell waiting for its start blinks with the beat, a cue fading out is dimmed. */
+  .cue.pending { border-color: var(--accent); animation: cueWait var(--beat, .5s) steps(2, jump-none) infinite; }
+  @keyframes cueWait { 0% { box-shadow: 0 0 0 2px var(--accent), 0 0 14px color-mix(in srgb, var(--accent) 50%, transparent); } 100% { box-shadow: none; } }
+  .cue.ending { border-color: color-mix(in srgb, var(--cat, var(--accent)) 60%, transparent); opacity: .75; }
+  .cue-bar .sep { width: 1px; align-self: stretch; background: var(--line); }
   #cueStore[aria-pressed="true"] { background: #ff3dc822; color: var(--accent-2); border-color: #ff3dc855; }
   .cue-bar select { width: auto; padding: 5px; font-size: 12px; }
   .cue-bar label { display: inline-flex; gap: 4px; align-items: center; margin: 0; font-size: 12px; color: var(--muted); }
@@ -1235,6 +1241,23 @@
       <span class="hint" style="margin:0">Max</span>
       <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
       <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
+      <span class="sep"></span>
+      <label title="cue.transition : comment un cue remplace le précédent (le Flash reste immédiat)">Transition
+        <select id="cueTransition" data-control="cue.transition">
+          <option value="0">Coupe</option><option value="1">Fondu</option><option value="2">Fondu au noir</option><option value="3">Morph</option>
+        </select></label>
+      <label title="cue.transition_length : en temps (suit le tempo) ou en secondes">Durée
+        <select id="cueTransLen" data-control="cue.transition_length"><option value="0">¼ temps</option><option value="1">½ temps</option><option value="2">1 temps</option><option value="3">2 temps</option><option value="4">4 temps</option><option value="5">0,5 s</option><option value="6">1 s</option><option value="7">2 s</option><option value="8">4 s</option></select></label>
+      <span class="hint" style="margin:0">Quantif.</span>
+      <div class="seg" id="cueQuant" data-control="cue.quantize" title="cue.quantize : un cue lancé attend le prochain temps ou la prochaine mesure">
+        <button data-q="0" title="Départ immédiat">Off</button>
+        <button data-q="1" title="Départ au prochain temps">Temps</button>
+        <button data-q="2" title="Départ au début de la prochaine mesure">Mesure</button>
+      </div>
+      <label title="cue.beat_mode : sur chaque calque, montre tour à tour un des cues actifs (en Multi)">Mode beat
+        <select id="cueBeatMode" data-control="cue.beat_mode">
+          <option value="0">Off</option><option value="1">1 temps</option><option value="2">2 temps</option><option value="3">4 temps</option><option value="4">8 temps</option><option value="5">16 temps</option>
+        </select></label>
       <button id="cueStore" class="lock-edit" aria-pressed="false" title="Enregistrer le look courant dans une case (Cmd/Ctrl+E) : activer, puis cliquer la case. Recliquer pour annuler.">Enregistrer dans une case</button>
       <button id="cueUpdate" class="lock-edit" title="Réenregistrer le look courant dans le cue utilisateur en cours (Cmd/Ctrl+Maj+E)">Mettre à jour</button>
       <select id="cueStoreFilter" class="lock-edit" title="Ce que l'enregistrement prend du look courant">
@@ -2183,6 +2206,14 @@
     <option value="1">Calque 1</option><option value="2">Calque 2</option>
     <option value="3">Calque 3</option><option value="4">Calque 4</option>
   </select>
+  <label>Transition (à l'entrée et à l'arrêt de ce cue)</label>
+  <div class="row">
+    <select id="cueMenuTransition">
+      <option value="">Comme la grille</option><option value="cut">Coupe</option><option value="fade">Fondu</option>
+      <option value="fade_through_black">Fondu au noir</option><option value="morph">Morph</option>
+    </select>
+    <select id="cueMenuTransLen" title="Durée"><option value="0">¼ temps</option><option value="1">½ temps</option><option value="2">1 temps</option><option value="3">2 temps</option><option value="4">4 temps</option><option value="5">0,5 s</option><option value="6">1 s</option><option value="7">2 s</option><option value="8">4 s</option></select>
+  </div>
   <label>Show (joué à la place du cue)</label>
   <select id="cueMenuShow"><option value="">Aucun</option></select>
   <label>Zones de projection (aucune = zones par défaut)</label>
@@ -2814,6 +2845,8 @@ async function previewLoop() {
       if (grid.pages[serverPage] && serverPage !== gridPage) { gridPage = serverPage; renderCues(); }
     }
     showCueDeck(f.cues);
+    // A cell « en attente » (T-159) blinks with the beat.
+    if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
     // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
     // control); our own requests update settingsRev themselves.
     if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
@@ -4257,7 +4290,11 @@ let presets = [], presetById = new Map(), cueCategories = [], serverPage = null;
 // instead of played.
 let grid = { cols: 8, rows: 5, pages: [], rev: -1 }, gridPage = 0, gridEditing = false, dragFrom = null;
 // What the server says plays (from /api/frame), and the grid's cue properties.
-let deck = { active: [], shown: [], click_mode: 'toggle', multi: false, max_active: 4 }, deckKey = '', slots = {};
+let deck = { active: [], shown: [], ending: [], pending: [], click_mode: 'toggle', multi: false, max_active: 4 }, deckKey = '', slots = {};
+// T-158: the grid bar's transition lengths, in the server's order (cue.transition_length).
+const TRANS_LENGTHS = [{ beats: 0.25 }, { beats: 0.5 }, { beats: 1 }, { beats: 2 }, { beats: 4 }, { seconds: 0.5 }, { seconds: 1 }, { seconds: 2 }, { seconds: 4 }];
+const TRANS_KINDS = ['cut', 'fade', 'fade_through_black', 'morph'];
+const lengthIndex = l => TRANS_LENGTHS.findIndex(x => l && (x.beats === l.beats && x.beats !== undefined || x.seconds === l.seconds && x.seconds !== undefined));
 const heldKeys = new Map(); // key code -> cue id, for keyup
 let pointerCue = null;      // cue id under a held mouse button / finger
 const MODE_TAGS = { toggle: 'B', flash: 'F', solo: 'S', restart: 'R' };
@@ -4419,7 +4456,7 @@ function renderCues() {
       el.style.setProperty('--cat', p.user && p.color ? hex(p.color) : catColor(p.category));
       el.classList.toggle('user', !!p.user);
       const slot = slots[p.id] || {};
-      const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '']
+      const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '', slot.transition ? 'T' : '']
         .filter(Boolean).join(' ');
       el.innerHTML = `<span class="key">${key}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`;
       el.querySelector('.n').textContent = p.name;
@@ -4618,11 +4655,16 @@ function paintCues() {
   const latched = new Set(deck.active.filter(a => !a.held).map(a => a.cue));
   const held = new Set(deck.active.filter(a => a.held).map(a => a.cue));
   const shown = new Set(deck.shown);
+  // T-159: « en attente » until its quantised start; T-158: still fading out.
+  const waiting = new Set((deck.pending || []).map(p => p.cue));
+  const ending = new Set((deck.ending || []).map(e => e.cue));
   document.querySelectorAll('#cues .cue').forEach(b => {
     const id = b.dataset.id;
     b.classList.toggle('flash', held.has(id));
     b.classList.toggle('active', latched.has(id) && !held.has(id));
     b.classList.toggle('hidden-out', (latched.has(id) || held.has(id)) && !shown.has(id));
+    b.classList.toggle('pending', waiting.has(id));
+    b.classList.toggle('ending', ending.has(id) && !latched.has(id) && !held.has(id));
   });
 }
 function showCueDeck(c) {
@@ -4633,6 +4675,14 @@ function showCueDeck(c) {
   document.querySelectorAll('#cueModes button').forEach(b => b.classList.toggle('active', b.dataset.mode === c.click_mode));
   document.querySelectorAll('#cueMulti button').forEach(b => b.classList.toggle('active', (b.dataset.multi === '1') === c.multi));
   if (document.activeElement !== $('cueMax')) $('cueMax').value = c.max_active;
+  if (c.transition) {
+    $('cueTransition').value = String(Math.max(0, TRANS_KINDS.indexOf(c.transition.kind)));
+    const li = lengthIndex(c.transition.length);
+    if (li >= 0) $('cueTransLen').value = String(li);
+  }
+  document.querySelectorAll('#cueQuant button').forEach(b => b.classList.toggle('active', ['off', 'beat', 'bar'][+b.dataset.q] === c.quantize));
+  const be = [0, 1, 2, 4, 8, 16].indexOf(c.beat_every);
+  if (be >= 0) $('cueBeatMode').value = String(be);
   paintCues();
 }
 async function cueDown(id, mode) {
@@ -4648,6 +4698,10 @@ function refreshLook() {
 document.querySelectorAll('#cueModes button').forEach((b, i) => b.addEventListener('click', () => post('/api/control', { id: 'cue.mode', value: i })));
 document.querySelectorAll('#cueMulti button').forEach(b => b.addEventListener('click', () => post('/api/control', { id: 'cue.multi', value: b.dataset.multi === '1' })));
 $('cueMax').addEventListener('change', () => post('/api/control', { id: 'cue.max_active', value: +$('cueMax').value }));
+$('cueTransition').addEventListener('change', () => post('/api/control', { id: 'cue.transition', value: +$('cueTransition').value }));
+$('cueTransLen').addEventListener('change', () => post('/api/control', { id: 'cue.transition_length', value: +$('cueTransLen').value }));
+document.querySelectorAll('#cueQuant button').forEach(b => b.addEventListener('click', () => post('/api/control', { id: 'cue.quantize', value: +b.dataset.q })));
+$('cueBeatMode').addEventListener('change', () => post('/api/control', { id: 'cue.beat_mode', value: +$('cueBeatMode').value }));
 
 // « Propriétés du cue » (right click): its own click mode and group.
 let menuCue = null;
@@ -4673,6 +4727,11 @@ function openCueMenu(p, x, y, at) {
   $('cueMenuMode').value = slot.mode || '';
   $('cueMenuGroup').value = slot.group ? String(slot.group) : '';
   $('cueMenuLayer').value = String(slot.layer || 1);
+  // T-158: the cue's own transition, else the grid's.
+  $('cueMenuTransition').value = slot.transition ? slot.transition.kind : '';
+  const li = lengthIndex((slot.transition || deck.transition || {}).length);
+  $('cueMenuTransLen').value = String(li >= 0 ? li : 2);
+  $('cueMenuTransLen').disabled = !slot.transition;
   fillShowSelect($('cueMenuShow'), 'Aucun', slot.show || '');
   // Projection zones (T-012): none ticked = the default zones.
   $('cueMenuZones').replaceChildren(...(proj ? proj.zones : []).map(z => {
@@ -4696,10 +4755,14 @@ async function saveCueMenu() {
   const layer = +$('cueMenuLayer').value > 1 ? +$('cueMenuLayer').value : null;
   const show = $('cueMenuShow').value || null;
   const zones = [...$('cueMenuZones').querySelectorAll('input:checked')].map(c => +c.value);
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones });
+  const kind = $('cueMenuTransition').value;
+  const own = slots[menuCue] && slots[menuCue].transition;
+  const transition = kind ? { kind, length: TRANS_LENGTHS[+$('cueMenuTransLen').value], in_flash: !!(own && own.in_flash) } : null;
+  $('cueMenuTransLen').disabled = !kind;
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition });
   await loadSlots();
 }
-['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuShow'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 $('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
 $('cueMenuRemove').onclick = async () => {
   $('cueMenu').hidden = true; menuCue = null;
