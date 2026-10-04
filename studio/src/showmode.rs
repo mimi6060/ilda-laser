@@ -70,6 +70,8 @@ pub fn allowed(path: &str) -> bool {
         // Back above the audience is allowed; the handler refuses unlocking.
         "/api/audience",
         "/api/keep_awake",
+        // The guided tour seen or not (T-437): a view, not an edit.
+        "/api/onboarding",
         "/api/devices/scan",
         // Playing.
         "/api/cue",

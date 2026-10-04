@@ -1,0 +1,16 @@
+<p>Ce que fait le logiciel, et seulement cela. Il ne remplace ni l'arrêt d'urgence matériel du projecteur, ni l'évaluation des risques, ni la réglementation locale.</p>
+<svg class="help-fig" viewBox="0 0 520 92" role="img" aria-label="Désarmé, Espace arme, Échap verrouille l'arrêt d'urgence, il faut le réinitialiser avant de réarmer">
+  <g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="30" width="110" height="34" rx="8"/><rect x="204" y="30" width="110" height="34" rx="8"/><rect x="404" y="30" width="112" height="34" rx="8"/>
+  <path d="M114 40h86M200 54h-86M314 47h86M460 64v20H59V68"/><path d="M194 35l6 5-6 5M120 49l-6 5 6 5M394 42l6 5-6 5M54 74l5-6 5 6"/></g>
+  <g fill="currentColor" font-size="12" text-anchor="middle"><text x="59" y="51">Désarmé</text><text x="259" y="51">Armé</text><text x="460" y="51">Arrêt verrouillé</text>
+  <text x="157" y="33" font-size="10">Espace</text><text x="157" y="72" font-size="10">Espace, Noir</text><text x="357" y="40" font-size="10">Échap</text><text x="260" y="80" font-size="10">Réinitialiser, puis réarmer à la main</text></g>
+</svg>
+<ul>
+<li><b>Démarrage désarmé</b>, toujours : seul un geste de l'opérateur arme (« LASER OFF » ou <kbd>Espace</kbd>). Désarmé, rien ne sort ; l'aperçu continue.</li>
+<li><b><kbd>Échap</kbd> = arrêt d'urgence verrouillé</b> (« ARRÊT ») : sortie noire et désarmement immédiats, dans tous les onglets, même pendant une saisie ou avec l'aide ouverte. Pour réarmer, cliquez d'abord « Réinitialiser l'arrêt d'urgence » dans le bandeau rouge, puis armez.</li>
+<li><b>« Noir »</b> (ou <kbd>Maj</kbd>+<kbd>Échap</kbd>) : désarme tout de suite, sans verrouiller.</li>
+<li><b>Les verrous d'armement</b> : avec une vraie sortie (DAC, PONK, ShowNET), l'armement est refusé tant que la liste « Avant le show » n'est pas terminée et que le public n'est pas déclaré (une zone « Public » ou l'horizon complet). Avec PONK ou un ShowNET, il faut aussi cocher « Arrêt matériel testé (interlock ou arrêt d'urgence du projecteur) ». Sans sortie connectée, l'armement est refusé. Les raisons s'affichent sous le bouton du laser.</li>
+<li><b>Opérateur absent</b> : sans aucune page de l'interface ouverte, le laser se désarme. Le « Mode maintien (homme mort) » ne laisse émettre que tant qu'une touche est tenue.</li>
+<li><b>Limiteur de stroboscope</b>, <b>horizon</b>, <b>zones</b> et <b>garde anti-point fixe</b> : appliqués en dernier, après la calibration, à tout ce qui sort (cues, MIDI, modulateurs, timeline). Voir <a href="#aide/reglages-securite">Sécurité</a>.</li>
+</ul>
+<p>Le logiciel ne voit pas une panne des galvos : un miroir bloqué fait un faisceau fixe, que seule une protection matérielle du projecteur coupe à temps. Ce que font MadMapper et le ShowNET quand le flux s'arrête n'est pas garanti : gardez la main sur l'arrêt matériel.</p>

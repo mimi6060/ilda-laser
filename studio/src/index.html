@@ -352,6 +352,8 @@
     .ws-layers { order: 2; }
     #wsHint { display: none; }
     #wsTabs { flex-wrap: wrap; }
+    /* « ? Aide » keeps « Raccourcis clavier » in its menu (and the ? key). */
+    #wsTabs #keysBtn { display: none; }
     header { flex-wrap: wrap; }
   }
   #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
@@ -1161,6 +1163,57 @@
   /* Armed: a 3 px red frame around the whole window. */
   body.emitting::after { content: ''; position: fixed; inset: 0; border: 3px solid var(--danger); pointer-events: none; z-index: 1000; }
   #armBtn.on { color: #fff; }
+  /* Aide (T-438): « ? Aide » in the tab bar, its menu, the « ? » of each
+     panel and the drawer on the right (under the top bar, beside the
+     preview). Nothing here takes the keyboard: Espace and Échap keep
+     their role. */
+  #wsTabs #helpBtn { align-self: center; margin-left: 6px; padding: 4px 10px; border-radius: 8px; border: 1px solid #2a2f44; font-weight: 600; letter-spacing: 0; font-size: 12px; }
+  #wsTabs #helpBtn::before { display: none; }
+  #helpMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 2px; min-width: 200px; padding: 6px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
+  #helpMenu[hidden] { display: none; }
+  #helpMenu button { text-align: left; }
+  .help-title { display: inline-flex; align-items: center; gap: 6px; }
+  .help-q { flex: none; width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; font-weight: 700; line-height: 18px; text-transform: none; letter-spacing: 0;
+    color: var(--muted); }
+  .help-q:hover { color: var(--accent); border-color: var(--accent); }
+  summary > .help-q { float: right; margin-left: 8px; }
+  #helpDrawer { position: fixed; z-index: 35; top: var(--top-h, 150px); right: 0; bottom: 0; width: min(400px, 100vw); display: flex; flex-direction: column; gap: 8px;
+    padding: 12px 14px; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -12px 0 32px #0008; overflow: hidden; }
+  #helpDrawer[hidden] { display: none; }
+  #helpDrawer .hd-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #helpDrawer .hd-head h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
+  #helpSearch { width: 100%; padding: 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  #helpDrawer .hd-head button { padding: 4px 10px; font-size: 12px; }
+  #helpDrawer .hd-head h3 { margin-right: auto; }
+  #helpToc, #helpArticle { flex: 1; min-height: 0; overflow: auto; }
+  #helpToc h4 { margin: 10px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  #helpToc button { display: block; width: 100%; margin: 2px 0; text-align: left; }
+  #helpToc .hint { margin: 8px 0; }
+  #helpArticle h2 { margin: 4px 0 8px; font-size: 16px; color: var(--text); }
+  #helpBody { line-height: 1.5; font-size: 13px; }
+  #helpBody h3 { margin: 12px 0 4px; font-size: 13px; color: var(--accent); }
+  #helpBody ul, #helpBody ol { padding-left: 20px; margin: 6px 0; }
+  #helpBody li { margin: 3px 0; }
+  #helpBody a { color: var(--accent); }
+  #helpBody .help-fig { display: block; width: 100%; height: auto; margin: 8px 0; color: var(--accent); }
+  /* Visite guidée (T-437): a ring around the step's target and a bubble.
+     Neither catches a click outside the bubble (pointer-events: none). */
+  #tourRing { position: fixed; z-index: 44; pointer-events: none; border: 2px solid var(--accent); border-radius: 12px;
+    box-shadow: 0 0 0 4px #22e3ff33, 0 0 0 9999px #0007; transition: all .2s; }
+  #tourRing[hidden] { display: none; }
+  #tourBubble { position: fixed; z-index: 45; width: min(360px, calc(100vw - 24px)); padding: 14px 16px; border-radius: 12px;
+    background: var(--panel-2); border: 1px solid var(--accent); box-shadow: 0 12px 40px #000c, 0 0 18px #22e3ff33; }
+  #tourBubble[hidden] { display: none; }
+  #tourBubble h3 { margin: 0 0 6px; font-size: 15px; color: var(--accent); }
+  #tourBubble p { margin: 0 0 6px; font-size: 13px; line-height: 1.45; }
+  #tourBubble .tour-foot { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  #tourBubble #tourCount { color: var(--muted); font-size: 12px; margin-right: auto; font-variant-numeric: tabular-nums; }
+  /* États vides (T-437): what the list is for and the first action. */
+  .empty-state { padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .empty-state p { margin: 0 0 6px; }
+  .empty-state .row { margin: 0; gap: 6px; flex-wrap: wrap; }
+  .empty-state button { flex: none; padding: 4px 10px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -1261,7 +1314,31 @@
     <button id="historyBtn" aria-haspopup="true" aria-expanded="false" aria-label="Historique" title="Historique des modifications (cliquer une ligne annule jusqu'à elle)"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.6"/></svg></button>
   </div>
   <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
+  <button id="helpBtn" aria-haspopup="menu" aria-expanded="false" title="Aide intégrée, raccourcis et visite guidée">? Aide</button>
 </nav>
+</div>
+<!-- Aide (T-437, T-438): the menu behind « ? Aide », no shortcut of its own. -->
+<div id="helpMenu" role="menu" aria-label="Aide" hidden>
+  <button role="menuitem" id="helpMenuToc">Sommaire de l'aide</button>
+  <button role="menuitem" id="helpMenuFirst">Premier show avec MadMapper et le ShowNET</button>
+  <button role="menuitem" id="helpMenuKeys">Raccourcis clavier</button>
+  <button role="menuitem" id="helpMenuTour">Revoir la visite</button>
+</div>
+<!-- Aide intégrée (T-438): pages compiled into the studio, no network.
+     Not modal: Espace and Échap keep their role while it is open. -->
+<aside id="helpDrawer" aria-label="Aide" hidden>
+  <div class="hd-head"><h3>Aide</h3><button id="helpTocBtn" hidden>Sommaire</button><button id="helpClose">Fermer</button></div>
+  <input type="search" id="helpSearch" placeholder="Chercher dans l'aide…" autocomplete="off" spellcheck="false" aria-label="Chercher dans l'aide">
+  <nav id="helpToc" aria-label="Sommaire de l'aide"></nav>
+  <article id="helpArticle" hidden><h2 id="helpTitle"></h2><div id="helpBody"></div></article>
+</aside>
+<!-- Visite guidée (T-437): highlights, never clicks; never arms. -->
+<div id="tourRing" hidden></div>
+<div id="tourBubble" role="dialog" aria-modal="false" aria-labelledby="tourTitle" hidden>
+  <h3 id="tourTitle"></h3>
+  <div id="tourText"></div>
+  <div class="tour-foot"><span id="tourCount"></span>
+    <button id="tourPrev">Précédent</button><button id="tourNext" class="primary">Suivant</button><button id="tourSkip">Passer la visite</button></div>
 </div>
 <div id="noticePanel" role="dialog" aria-labelledby="noticeTitle" hidden>
   <div class="n-head"><h3 id="noticeTitle">Notifications</h3><button id="noticeClear">Tout effacer</button></div>
@@ -1298,7 +1375,7 @@
 <!-- Raccourcis (T-284): built from the shortcut table. -->
 <div id="keysHelp" class="modal" role="dialog" aria-modal="true" aria-labelledby="keysTitle" hidden>
   <div class="box">
-    <div class="keys-head"><h3 id="keysTitle">Raccourcis</h3><button id="keysClose">Fermer</button></div>
+    <div class="keys-head"><h3 id="keysTitle">Raccourcis</h3><span class="row" style="margin:0;flex:none"><button id="keysOpenHelp" title="Les pages d'aide intégrées (sans réseau)">Ouvrir l'aide</button><button id="keysClose">Fermer</button></span></div>
     <div class="hint">Échap fait toujours l'arrêt d'urgence, même dans un champ texte ; les autres touches ne marchent pas pendant la saisie (sauf mention).</div>
     <div class="hint" style="color:var(--warn)">⚠ Épilepsie : le stroboscope (touche S tenue, LIVE › Direct › Effets) peut déclencher des crises chez les personnes photosensibles. Le limiteur de RÉGLAGES › Sécurité rend la sortie continue au-delà de sa limite. « Noir momentané » (LIVE › Direct › Effets) assombrit tant qu'il est tenu, sans désarmer ; Échap reste l'arrêt d'urgence.</div>
     <div id="keysList"></div>
@@ -1400,7 +1477,7 @@
       <button role="tab" data-panel-tab="cuelist" title="Liste de cues : une séquence de pas, GO pour passer au suivant">Liste de cues</button>
       <button role="tab" data-panel-tab="running" title="Ce qui joue, qui le pilote, tout arrêter">En cours<span class="run-count" id="runCount" hidden></span></button>
     </div>
-    <section data-panel="direct">
+    <section data-panel="direct" data-help="live-direct">
       <h2>Direct <button id="liveReset" data-ctl="master.reset" data-control="master.reset" title="master.reset : toutes les valeurs du direct reviennent au neutre" style="padding:4px 8px;font-size:11px">Tout réinitialiser</button></h2>
       <!-- Calque / Cue: per-layer and per-cue modifiers come with T-144. -->
       <div class="seg" id="directTabs" role="tablist" aria-label="Portée du direct">
@@ -1523,22 +1600,24 @@
       </div>
     </section>
 
-    <section data-panel="lfo">
+    <section data-panel="lfo" data-help="live-modulateurs">
       <h2>Modulateurs <button id="lfoAdd" title="Ajouter un modulateur (LFO calé sur le tempo)" style="padding:4px 8px;font-size:11px">+ Modulateur</button></h2>
       <div id="lfoList"></div>
-      <div class="hint" id="lfoHint">Un modulateur fait osciller un réglage autour de sa valeur, calé sur le tempo.</div>
+      <div class="empty-state" id="lfoHint"><p>Un modulateur fait osciller un réglage autour de sa valeur, calé sur le tempo : la taille qui respire, une rotation qui va et vient.</p>
+        <div class="row"><button type="button" id="lfoHintAdd">Ajouter un modulateur</button></div></div>
     </section>
 
     <!-- Liens audio (T-153) : une valeur ou un évènement de l'analyse audio, mis en forme, vers un réglage -->
-    <section data-panel="lfo" id="arPanel">
+    <section data-panel="lfo" id="arPanel" data-help="live-modulateurs">
       <h2>Liens audio <button id="arAdd" title="Ajouter un lien audio (la musique pilote un réglage)" style="padding:4px 8px;font-size:11px">+ Lien audio</button></h2>
       <label title="0 = seuls les modulateurs (temps), 100 = seuls les liens audio, au milieu les deux en plein">Temps ↔ Audio <span class="v" id="arMixV"></span></label>
       <input type="range" id="arMix" min="0" max="100" value="50">
       <div id="arList"></div>
-      <div class="hint" id="arHint">Un lien audio fait réagir un réglage à la musique : basses → taille, kick → luminosité, montée → vitesse…</div>
+      <div class="empty-state" id="arHint"><p>Un lien audio fait réagir un réglage à la musique : basses → taille, kick → luminosité, montée → vitesse… (LIVE › Musique doit écouter).</p>
+        <div class="row"><button type="button" id="arHintAdd">Ajouter un lien audio</button></div></div>
     </section>
 
-    <section data-panel="music" id="musPanel">
+    <section data-panel="music" id="musPanel" data-help="live-musique">
       <h2>Musique <span id="beatDot" title="Beat détecté"></span></h2>
       <!-- T-243 : source, écoute, analyse (niveau, bandes, spectre, coups, tempo, section) -->
       <div class="seg" id="musSrc" role="radiogroup" aria-label="Source audio">
@@ -1651,7 +1730,7 @@
     </section>
 
     <!-- « En cours » (T-423): what plays, who drove it, the stop buttons. -->
-    <section data-panel="running" id="runPanel">
+    <section data-panel="running" id="runPanel" data-help="live-en-cours">
       <h2>En cours <button id="runAll" data-control="running.stop_all" title="running.stop_all : arrête les cues (sauf protégés), la timeline et la playlist. Ne désarme pas : l'arrêt d'urgence reste Échap.">Tout arrêter</button></h2>
       <h3>Cues <button data-run-stop="cues" title="Tous les cues sauf ceux « Protégé de Tout arrêter »">Arrêter les cues</button></h3>
       <div id="runCues"></div>
@@ -1668,7 +1747,7 @@
       <div class="hint" id="runMsg" role="status"></div>
     </section>
 
-    <section data-panel="scenes">
+    <section data-panel="scenes" data-help="live-scenes">
       <h2>Scènes</h2>
       <div class="row">
         <input type="text" id="sceneName" placeholder="Nom de la scène">
@@ -1682,7 +1761,7 @@
       </div>
     </section>
     <!-- Liste de cues (T-410): a sequence of steps played with GO. -->
-    <section data-panel="cuelist" id="cqPanel">
+    <section data-panel="cuelist" id="cqPanel" data-help="live-liste-cues">
       <h2>Liste de cues</h2>
       <div class="row">
         <select id="cqSelect" title="La liste chargée (GO joue ses pas)"></select>
@@ -1717,7 +1796,7 @@
     </section>
   </div>
 
-  <section class="ws-cues" data-ws="live" id="cueRegion" aria-label="Grille de cues">
+  <section class="ws-cues" data-ws="live" id="cueRegion" aria-label="Grille de cues" data-help="live-cues">
     <h2>Cues <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">touches du clavier = cues de la page</span></h2>
     <div class="cue-bar">
       <div class="seg" id="cueModes" data-control="cue.mode" title="cue.mode">
@@ -1802,9 +1881,9 @@
   </section>
 
   <!-- LIVE : calques, à côté de l'aperçu -->
-  <section class="ws-layers" data-ws="live" id="layerRegion" aria-label="Calques">
+  <section class="ws-layers" data-ws="live" id="layerRegion" aria-label="Calques" data-help="live-calques">
     <div class="layers-head">
-      <span>Calques <span id="layerWarn"></span></span>
+      <span data-help-title>Calques <span id="layerWarn"></span></span>
       <span id="layerPoints" title="Points demandés par les calques / budget (au-delà : points espacés, puis calques du haut coupés)">Points : <b>0 / 750</b></span>
     </div>
     <div class="layers" id="layers"></div>
@@ -1812,7 +1891,7 @@
 
   <!-- TIMELINE : lecteur de shows (éditeur, forme d'onde, timecode) -->
   <div class="ws-panel" data-ws="timeline" id="timelinePanel" hidden>
-    <section id="timeline">
+    <section id="timeline" data-help="timeline-shows">
       <h2>Timeline <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">shows enregistrés dans studio-data/shows</span></h2>
       <div class="cue-bar">
         <select id="tlShow" title="Show à charger"><option value="">Aucun show</option></select>
@@ -1847,9 +1926,9 @@
       <div class="hint" id="tlMsg"></div>
     </section>
     <!-- Timecode entrant (T-168, T-409) : MTC par le MIDI, LTC par une entrée audio, Art-Net par le réseau -->
-    <section id="tcPanel" aria-label="Timecode entrant">
+    <section id="tcPanel" aria-label="Timecode entrant" data-help="timeline-timecode">
       <div class="cue-bar">
-        <span class="tl-track">Timecode</span>
+        <span class="tl-track" data-help-title>Timecode</span>
         <button id="tcArm" aria-pressed="false" title="TC-IN : le timecode entrant pilote la timeline (jamais le laser). Désarmé au démarrage, par Échap et quand le laser est désarmé.">TC-IN</button>
         <span id="tcLed" data-status="off" role="img" aria-label="Pas de source"></span>
         <span id="tcReadout" data-status="off">--:--:--:--</span>
@@ -1881,8 +1960,8 @@
   </div>
 
   <!-- TIMELINE : éditeur (T-162) — bibliothèque, pistes, règle, marqueurs -->
-  <section id="tlEditor" data-ws="timeline" aria-label="Éditeur de timeline" hidden>
-    <div class="tl-tools">
+  <section id="tlEditor" data-ws="timeline" aria-label="Éditeur de timeline" data-help="timeline-editeur" hidden>
+    <div class="tl-tools" data-help-title>
       <button id="tlNew" title="Créer un show vide (deux pistes)">Nouveau show</button>
       <button id="tlExamples" title="Shows prêts à jouer (T-124 à T-129), faits avec les cues du catalogue : ils s'ouvrent comme une copie">Ouvrir un exemple</button>
       <span id="tlNewRow" hidden>
@@ -1933,6 +2012,7 @@
       <div id="tlEmpty" hidden>
         <div class="tl-empty-box">
           <div class="tl-empty-title">Aucun show chargé</div>
+          <div class="hint">Un show enchaîne des cues dans le temps, calé sur une musique ou sur le tempo.</div>
           <div class="tl-empty-row">
             <button id="tlEmptyNew" class="primary">Nouveau show</button>
             <button id="tlEmptyEx">Ouvrir un exemple</button>
@@ -1953,7 +2033,7 @@
       <button role="tab" data-ctab="media">Médiathèque</button>
       <button role="tab" data-ctab="program">Cue évolutif</button>
     </div>
-    <section data-cpanel="look">
+    <section data-cpanel="look" data-help="creation-look">
       <h2>Contenu</h2>
       <div class="seg">
         <button data-kind="shape">Forme</button>
@@ -2066,7 +2146,7 @@
       </div>
     </section>
 
-    <section data-cpanel="look">
+    <section data-cpanel="look" data-help="creation-look">
       <h2>Apparence</h2>
       <label>Couleur</label>
       <input type="color" id="color" value="#00ff00">
@@ -2078,7 +2158,7 @@
       <input type="range" id="bright" min="0" max="100">
     </section>
 
-    <section data-cpanel="look" id="rhythmPanel">
+    <section data-cpanel="look" id="rhythmPanel" data-help="creation-look">
       <h2>Rythme</h2>
       <label>Gate</label>
       <select id="rGate">
@@ -2099,7 +2179,7 @@
     <div class="hint soon" data-cpanel="look">Courbes, couches et modulateurs d'un cue : onglet Cue évolutif. Import SVG / image : onglet Figures, « Importer… » ; fichiers ILDA : onglet Médiathèque.</div>
 
     <!-- Cue évolutif (T-164) : le cue édité, ses couches internes, ses modulateurs -->
-    <section data-cpanel="program" id="pgProps" hidden>
+    <section data-cpanel="program" id="pgProps" data-help="creation-evolutif" hidden>
       <h2>Cue évolutif</h2>
       <label for="pgCue">Cue</label>
       <select id="pgCue" title="Le cue dont on édite le programme (aussi : clic droit sur une case › Modifier le programme…)"></select>
@@ -2123,7 +2203,7 @@
     </section>
 
     <!-- Médiathèque (T-011) : fichiers ILDA importés, export pour la carte SD du ShowNET -->
-    <section data-cpanel="media" id="ildaMedia" hidden>
+    <section data-cpanel="media" id="ildaMedia" data-help="creation-mediatheque" hidden>
       <h2>Médiathèque ILDA</h2>
       <div class="ilda-rights" id="ildaRights" role="note"><b>N'importez que des fichiers dont vous avez les droits</b> :
         vos propres créations, ou du contenu acheté avec une licence qui l'autorise. Les fichiers restent sur ce Mac
@@ -2161,7 +2241,7 @@
     </section>
 
     <!-- Figures (T-296) : propriétés, bibliothèque, animation -->
-    <section data-cpanel="figures" id="figProps" hidden>
+    <section data-cpanel="figures" id="figProps" data-help="creation-figures" hidden>
       <h2>Figure</h2>
       <label for="figName">Nom</label>
       <input type="text" id="figName" maxlength="64" placeholder="Mon logo" autocomplete="off">
@@ -2173,7 +2253,7 @@
       </div>
       <div id="figMsg" class="hint" role="status"></div>
       <label>Bibliothèque</label>
-      <div id="figLib"><div class="hint">Aucune figure enregistrée.</div></div>
+      <div id="figLib"></div>
       <h2 style="margin-top:14px">Tracé sélectionné</h2>
       <label for="figColor">Couleur (nouveaux tracés et sélection)</label>
       <input type="color" id="figColor" value="#00ff00">
@@ -2211,7 +2291,7 @@
   </div>
 
   <!-- CRÉATION › Cue évolutif (T-164) : longueur, lecture, aperçu, courbes -->
-  <section id="pgEditor" aria-label="Éditeur de cue" hidden>
+  <section id="pgEditor" aria-label="Éditeur de cue" data-help="creation-evolutif" hidden>
     <div class="pg-tools">
       <h2>Éditeur de cue</h2>
       <span id="pgCueName"></span>
@@ -2253,8 +2333,8 @@
   </section>
 
   <!-- CRÉATION › Figures : outils à gauche, canvas au centre, images en bas -->
-  <section id="figEditor" aria-label="Éditeur de figures" hidden>
-    <div class="fig-tools" id="figTools">
+  <section id="figEditor" aria-label="Éditeur de figures" data-help="creation-figures" hidden>
+    <div class="fig-tools" id="figTools" data-help-title>
       <button data-tool="select" title="Cliquer un tracé pour le choisir (Maj : plusieurs), glisser pour le déplacer">Sélection</button>
       <button data-tool="point">Point</button>
       <button data-tool="line" title="Un clic par point ; double-clic ou clic droit pour finir">Polyligne</button>
@@ -2288,7 +2368,7 @@
   </section>
 
   <!-- CRÉATION › Figures › Importer (T-297) : fichier, réglages, aperçu, « Créer la figure » -->
-  <dialog id="figImportDlg" aria-labelledby="impTitle">
+  <dialog id="figImportDlg" aria-labelledby="impTitle" data-help="creation-import">
     <div class="imp-head">
       <h2 id="impTitle">Importer un SVG ou une image</h2>
       <button id="impClose" title="Fermer sans créer">×</button>
@@ -2351,7 +2431,7 @@
 
   <!-- RÉGLAGES : sécurité, calibration, contrôleurs MIDI, entrées réseau (le projet est dans la barre du haut) -->
   <div class="ws-panel ws-grid" data-ws="settings" id="settingsPanel" hidden>
-    <section>
+    <section data-help="reglages-avant-show">
       <details id="checklistPanel">
         <summary>Avant le show <span id="clLed">Aperçu : facultative</span></summary>
         <div class="hint">Aide-mémoire des vérifications avant un show : il ne remplace ni une analyse de risques, ni une autorisation, ni une conformité légale. Avec une vraie sortie laser, l'armement attend que la liste soit terminée ; terminer la liste n'arme jamais le laser. Elle repart à zéro à chaque démarrage du studio.</div>
@@ -2381,7 +2461,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-securite">
       <details id="safetyPanel">
         <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span><span id="dwellLed" title="Garde anti-point fixe">Garde active</span></summary>
         <div class="sf-sub">Mode de sortie</div>
@@ -2449,7 +2529,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-securite">
       <details id="safetyLogPanel">
         <summary>Journal de sécurité</summary>
         <div class="row">
@@ -2475,7 +2555,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="depannage">
       <details id="diagPanel">
         <summary>Diagnostic</summary>
         <div class="hint">Après un incident, exportez un rapport et transmettez-le vous-même à la personne qui vous aide : rien n'est envoyé sur le réseau.</div>
@@ -2498,7 +2578,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-calibration">
       <details>
         <summary>Calibration</summary>
         <label>Décalage X <span class="v" id="cOxV"></span></label><input type="range" id="cOx" min="-100" max="100">
@@ -2516,7 +2596,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-calibration">
       <details id="pzPanel">
         <summary>Zones de projection</summary>
         <div class="hint">Chaque zone a sa propre correction géométrique ; un cue joue sur les zones choisies dans « Propriétés du cue » (clic droit), sinon sur les zones par défaut. Ordre : contenu → contrôles live → zone → calibration → sécurité. Les zones de sécurité et l'horizon restent dans l'espace de sortie : ils protègent toujours la même zone réelle, quelle que soit la géométrie.</div>
@@ -2551,7 +2631,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-calibration">
       <details id="venuePanel">
         <summary>Lieu et projecteurs</summary>
         <div class="hint">Chaque projecteur est une sortie laser à part entière : ses zones de projection (« Sortie » d'une zone), ses plafonds et ses couleurs (« Sorties et projecteurs », choisir le projecteur) et toute la sécurité. Un seul armement et un seul arrêt d'urgence pour tous ; perdre la sortie d'un projecteur désarme tout. Changer la sortie d'un projecteur se fait laser désarmé. Position, angles, luminosité et miroir servent seulement à la vue 3D.</div>
@@ -2601,7 +2681,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="projet">
       <details id="generalPanel">
         <summary>Général</summary>
         <label class="check"><input type="checkbox" id="kaEnabled"> Empêcher la mise en veille pendant un show</label>
@@ -2610,7 +2690,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="projet">
       <details id="autosavePanel">
         <summary>Sauvegarde auto</summary>
         <label class="check"><input type="checkbox" id="asEnabled"> Sauvegarde auto</label>
@@ -2621,7 +2701,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-midi">
       <details id="midiPanel">
         <summary>Contrôleur</summary>
         <div class="mdev" id="vapcBox" style="border-top:0;padding-top:0">
@@ -2659,7 +2739,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-entrees">
       <details id="extPanel">
         <summary>Entrées externes (porte et périmètres)</summary>
         <div class="hint"><b>Le noir et l'arrêt d'urgence sont acceptés de toutes les sources, tout le temps. Rien d'externe ne peut armer le laser.</b></div>
@@ -2669,7 +2749,7 @@
       </details>
     </section>
 
-    <section>
+    <section data-help="reglages-entrees">
       <details id="netinPanel">
         <summary>Entrées réseau (OSC, Art-Net, sACN, DMX)</summary>
         <div class="hint">Pilotage depuis une console lumière ou une autre application. Rien de ce qui arrive par le réseau ne peut armer le laser ; le blackout et l'arrêt d'urgence sont toujours acceptés. Écoute seule : le studio n'envoie rien. Réglage de cette machine (pas du projet).</div>
@@ -2755,7 +2835,7 @@
       </details>
     </section>
 
-    <section id="outputsPanel">
+    <section id="outputsPanel" data-help="reglages-sorties">
       <h2>Sorties et projecteurs</h2>
       <div class="hint">La sortie en cours est aussi indiquée dans la barre du haut.</div>
       <div class="sf-sub">Sortie laser</div>
@@ -2902,7 +2982,7 @@
     </section>
 
     <!-- Carte SD ShowNET (T-302) : banque de cues numérotés, export d'un dossier prêt à copier -->
-    <section id="sdBankPanel">
+    <section id="sdBankPanel" data-help="reglages-sorties">
       <h2>Carte SD ShowNET</h2>
       <div class="hint">Le ShowNET joue seul les fichiers <b>001.ild</b> à <b>229.ild</b> de sa carte microSD, choisis par DMX / Art-Net
         (valeur du canal figure). 000 et 230 à 255 sont réservés. Chaque cue est rendu à <span id="sdFps">50</span> images/s, puis bouclé.</div>
@@ -3328,7 +3408,7 @@ async function apiRefused(method, path, r, opts) {
 // raised by every editing request so a reload within that time is caught),
 // the timeline editor's show, the figure being drawn and the cue program
 // being edited in CRÉATION. An autosave is not a save: the guard stays.
-const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame)/;
+const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame|onboarding|help)/;
 const DIRTY = { editAt: -1, savedAt: 0, server: false, serverAt: 0 };
 function noteEdit(path) { if (!NOT_EDITS.test(path)) DIRTY.editAt = performance.now(); }
 function takeProjectModified(modified, at) {
@@ -5077,7 +5157,10 @@ musicLoop();
 // ---------- scenes ----------
 let scenes = [];
 function renderScenes() {
-  $('sceneList').innerHTML = scenes.length ? '' : '<div class="hint">Réglez un look, donnez-lui un nom, puis « Sauver ».</div>';
+  $('sceneList').replaceChildren();
+  // T-437: what a scene is for, and the first one in one click.
+  if (!scenes.length) $('sceneList').appendChild(emptyState('Une scène garde le look courant pour le rejouer. Réglez un look, donnez-lui un nom (ou pas), puis sauvez-le.',
+    [['Sauver le look courant', () => saveScene($('sceneName').value.trim() || 'Scène 1')]]));
   scenes.forEach((sc, i) => {
     const row = document.createElement('div');
     row.className = 'scene'; row.dataset.index = i;
@@ -5093,6 +5176,11 @@ function renderScenes() {
 }
 function highlightPlaylist(index) {
   document.querySelectorAll('.scene').forEach(r => r.classList.toggle('playing', index !== null && +r.dataset.index === index));
+}
+async function saveScene(name) {
+  await post('/api/scenes/save', { name, duration_secs: +$('sceneDur').value || 8 });
+  $('sceneName').value = '';
+  await loadState();
 }
 $('sceneSave').onclick = async () => {
   const name = $('sceneName').value.trim();
@@ -8665,6 +8753,7 @@ function renderLfos() {
   $('lfoAdd').disabled = lfos.length >= lfoMax;
   $('lfoHint').style.display = lfos.length ? 'none' : '';
 }
+$('lfoHintAdd').onclick = () => $('lfoAdd').click(); // the empty state's first action (T-437)
 $('lfoAdd').addEventListener('click', () => {
   if (lfos.length >= lfoMax) return;
   lfos.push({ target: 'master.size', wave: 'sine', rate: { beats: 4 }, depth: 0.5, phase: 0, offset: 0, enabled: true });
@@ -8760,6 +8849,7 @@ function renderRoutes() {
   $('arAdd').disabled = aroutes.length >= arMax;
   $('arHint').style.display = aroutes.length ? 'none' : '';
 }
+$('arHintAdd').onclick = () => $('arAdd').click();
 $('arAdd').addEventListener('click', () => {
   if (aroutes.length >= arMax) return;
   aroutes.push({ source: 'bass', target: 'master.size', enabled: true, shape: { gate: 0.05, hysteresis: 0.02, gain: 1, curve: 'linear',
@@ -10045,7 +10135,10 @@ function renderMappings() {
     <button data-mdel="${i}" title="${esc(mp.port)} · profil ${esc(mp.profile)}">Supprimer</button>`).join('');
   $('midiMappings').innerHTML = rows
     ? `<div class="mmap"><span class="h">Message</span><span class="h">Cible</span><span class="h">Mode</span><span class="h">LED</span><span></span>${rows}</div>`
-    : '<div class="hint">Aucune affectation. Clic droit sur un contrôle → « Apprendre MIDI ».</div>';
+    : '';
+  // T-437: what a mapping is, and the learn mode in one click.
+  if (!rows) $('midiMappings').appendChild(emptyState('Aucune affectation. Reliez un bouton ou un curseur de votre contrôleur à un réglage : « Apprendre MIDI », puis cliquez le réglage et touchez le contrôleur (ou clic droit sur un contrôle).',
+    [['Apprendre MIDI', () => { if (!learnMode) setLearnMode(true); }]]));
   const update = async (mp, patch) => {
     const r = await api('POST', '/api/midi/mapping/update', { port: mp.port, index: mp.index, ...patch }, { quiet: true });
     if (!r.ok) showBanner(await r.text(), 5000);
@@ -10806,7 +10899,7 @@ function showProject() {
   $('projName').classList.toggle('modified', project.modified);
   showAutosave(project.autosave);
   $('projRecent').innerHTML = project.recent.length
-    ? project.recent.map(n => `<button data-recent="${esc(n)}">${esc(n)}</button>`).join('') : '<div class="hint">Aucun</div>';
+    ? project.recent.map(n => `<button data-recent="${esc(n)}">${esc(n)}</button>`).join('') : '<div class="hint">Aucun projet récent : « Enregistrer » garde tout le show dans un projet.</div>';
   $('projRecent').querySelectorAll('[data-recent]').forEach(b => b.onclick = () => { $('projMenu').hidden = true; projOpen(b.dataset.recent); });
 }
 async function loadProject() {
@@ -11440,7 +11533,12 @@ async function loadFigLib() {
   try { fe.lib = await apiJson('GET', '/api/figures'); } catch { return; }
   const box = $('figLib');
   box.innerHTML = '';
-  if (!fe.lib.length) { box.innerHTML = '<div class="hint">Aucune figure enregistrée.</div>'; return; }
+  if (!fe.lib.length) {
+    // T-437: the first figure, drawn or imported.
+    box.appendChild(emptyState('Aucune figure enregistrée. Dessinez vos propres figures ou importez un SVG.',
+      [['Nouvelle figure', () => $('figNew').click()], ['Importer…', () => $('figImport').click()]]));
+    return;
+  }
   for (const f of fe.lib) {
     const row = document.createElement('div'); row.className = 'figitem';
     const open = document.createElement('button'); open.className = 'n';
@@ -12356,10 +12454,269 @@ setFigTool('line');
 showFigProps();
 setCreationTab(remembered(CTAB_KEY));
 
+// ---------- aide intégrée (T-438) ----------
+// Pages compiled into the studio (GET /api/help?full=1), fetched once in
+// the background so the help keeps working even if the network goes. The
+// drawer is not modal: it never takes a global key (Espace arms, Échap is
+// the e-stop, never « fermer »). Each panel's « ? » comes from its
+// data-help attribute; links between pages are #aide/<page>.
+const HELP = { pages: null, loading: null, slug: null };
+const helpFold = t => String(t).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+function helpLoad() {
+  if (HELP.pages) return Promise.resolve(HELP.pages);
+  HELP.loading ??= apiJson('GET', '/api/help?full=1', undefined, { source: 'Aide' }).then(list => {
+    const div = document.createElement('div');
+    HELP.pages = list.map(p => { div.innerHTML = p.body_html; return { ...p, text: helpFold(p.title_fr + ' ' + div.textContent) }; });
+    return HELP.pages;
+  }).finally(() => { HELP.loading = null; });
+  return HELP.loading;
+}
+function helpShowToc() {
+  HELP.slug = null;
+  $('helpArticle').hidden = true;
+  $('helpToc').hidden = false;
+  $('helpTocBtn').hidden = true;
+  const box = $('helpToc');
+  box.replaceChildren();
+  if (!HELP.pages) { box.innerHTML = '<div class="hint">Chargement de l\'aide…</div>'; return; }
+  const q = helpFold($('helpSearch').value.trim());
+  const words = q.split(/\s+/).filter(Boolean);
+  const found = HELP.pages.filter(p => words.every(w => p.text.includes(w)));
+  if (!found.length) { box.innerHTML = '<div class="hint">Aucune page ne correspond.</div>'; return; }
+  const groups = [...new Set(found.map(p => p.group_fr))];
+  for (const g of groups) {
+    const h = document.createElement('h4'); h.textContent = g; box.appendChild(h);
+    for (const p of found.filter(x => x.group_fr === g)) {
+      const b = document.createElement('button');
+      b.textContent = p.title_fr; b.dataset.helpSlug = p.slug;
+      b.onclick = () => openHelp(p.slug);
+      box.appendChild(b);
+    }
+  }
+}
+// Opens the drawer on `slug` (or on the table of contents).
+async function openHelp(slug = null) {
+  closeHelpMenu();
+  $('helpDrawer').hidden = false;
+  if (!HELP.pages) {
+    helpShowToc();
+    try { await helpLoad(); } catch { $('helpToc').innerHTML = '<div class="hint">Aide indisponible : le studio ne répond pas.</div>'; return; }
+  }
+  const page = slug && HELP.pages.find(p => p.slug === slug);
+  if (!page) { helpShowToc(); return; }
+  HELP.slug = page.slug;
+  $('helpToc').hidden = true;
+  $('helpTocBtn').hidden = false;
+  $('helpArticle').hidden = false;
+  $('helpTitle').textContent = page.title_fr;
+  $('helpBody').innerHTML = page.body_html; // our own pages, compiled into the studio
+  $('helpArticle').scrollTop = 0;
+}
+function closeHelp() { $('helpDrawer').hidden = true; HELP.slug = null; }
+$('helpClose').onclick = closeHelp;
+$('helpTocBtn').onclick = () => helpShowToc();
+$('helpSearch').addEventListener('input', () => { if (HELP.pages) helpShowToc(); else openHelp(); });
+$('helpBody').addEventListener('click', e => {
+  const a = e.target.closest('a[href^="#aide/"]');
+  if (!a) return;
+  e.preventDefault();
+  openHelp(a.getAttribute('href').slice('#aide/'.length));
+});
+window.addEventListener('hashchange', () => {
+  if (location.hash.startsWith('#aide/')) openHelp(decodeURIComponent(location.hash.slice('#aide/'.length)));
+});
+// « ? » on every panel: next to its title (h2, summary or [data-help-title]).
+function addHelpButtons() {
+  document.querySelectorAll('[data-help]').forEach(panel => {
+    const title = panel.querySelector('[data-help-title]') || panel.querySelector('h2, summary');
+    if (!title || title.querySelector(':scope > .help-q, :scope > .help-title > .help-q')) return;
+    const q = document.createElement('button');
+    q.type = 'button'; q.className = 'help-q'; q.textContent = '?';
+    q.title = 'Aide sur ce panneau'; q.setAttribute('aria-label', 'Aide sur ce panneau');
+    q.dataset.helpFor = panel.dataset.help;
+    q.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation(); // a « ? » in a summary must not fold the panel
+      helpFrom(q);
+    });
+    const first = title.firstChild;
+    if (title.tagName === 'H2' && first && first.nodeType === Node.TEXT_NODE && title.children.length) {
+      // Keep the title and its « ? » together on the left of the heading.
+      const wrap = document.createElement('span'); wrap.className = 'help-title';
+      title.insertBefore(wrap, first);
+      wrap.append(first, q);
+    } else if (title.tagName === 'SUMMARY') {
+      title.insertBefore(q, title.firstChild); // floated to the right edge
+    } else title.appendChild(q);
+  });
+}
+// From a « ? » inside a modal dialog (Importer…): the drawer goes into
+// the dialog's top layer while it is open, else it would sit behind it.
+function helpFrom(btn) {
+  const dlg = btn.closest('dialog[open]');
+  const drawer = $('helpDrawer');
+  if (dlg && drawer.parentElement !== dlg) {
+    dlg.appendChild(drawer);
+    dlg.addEventListener('close', () => document.body.appendChild(drawer), { once: true });
+  }
+  openHelp(btn.dataset.helpFor);
+}
+// « ? Aide » menu.
+function closeHelpMenu() { $('helpMenu').hidden = true; $('helpBtn').setAttribute('aria-expanded', 'false'); }
+$('helpBtn').onclick = e => {
+  e.stopPropagation();
+  if (!$('helpMenu').hidden) { closeHelpMenu(); return; }
+  const r = $('helpBtn').getBoundingClientRect();
+  const menu = $('helpMenu');
+  menu.hidden = false;
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
+  $('helpBtn').setAttribute('aria-expanded', 'true');
+};
+document.addEventListener('click', e => { if (!$('helpMenu').hidden && !e.target.closest('#helpMenu')) closeHelpMenu(); });
+$('helpMenuToc').onclick = () => { $('helpSearch').value = ''; openHelp(); };
+$('helpMenuFirst').onclick = () => openHelp('premier-show');
+$('helpMenuKeys').onclick = () => { closeHelpMenu(); openKeysHelp(); };
+$('helpMenuTour').onclick = () => { closeHelpMenu(); startTour(); };
+$('keysOpenHelp').onclick = () => { closeKeysHelp(); openHelp(); };
+
+// ---------- visite guidée (T-437) ----------
+// Shown once on a fresh data folder (onboarding.json on the studio, not
+// localStorage: another browser doesn't replay it), replayed from
+// « ? Aide ». It only highlights: never clicks a control, never arms,
+// never connects an output. It catches no key and no click outside its
+// bubble: Espace and Échap keep their role, cues stay clickable. A step
+// on another workspace switches to it (a view, like clicking its tab).
+const TOUR_STEPS = [
+  { target: '#armBtn, #estopBtn, #blackoutBtn', title: 'Allumer et arrêter',
+    text: ['Le laser démarre toujours éteint. « LASER OFF » (ou <kbd>Espace</kbd>) l\'arme ; « Noir » coupe tout de suite.',
+      '« ARRÊT » (<kbd>Échap</kbd>, dans tous les onglets) est un arrêt d\'urgence verrouillé : il faut le réinitialiser avant de réarmer. L\'arrêt d\'urgence matériel du projecteur reste votre vraie sécurité.'] },
+  { target: '#cueRegion', ws: 'live', title: 'La grille de cues',
+    text: ['Cliquez une case, ou tapez la lettre du clavier affichée dans son coin, pour jouer un cue. Laser éteint, seul l\'aperçu change : essayez sans crainte.',
+      'Les pages changent avec leurs onglets ou <kbd>F5</kbd> à <kbd>F12</kbd>.'] },
+  { target: 'header .tempo', title: 'Le tempo',
+    text: ['Le tempo cale modulateurs, chenillards et shows. Tapez le BPM, ou « Tap » (<kbd>Entrée</kbd>) sur la musique.',
+      '« Sync 1 » (<kbd>⌫</kbd>) recale le premier temps ; « Auto » suit la musique détectée.'] },
+  { target: '#wsTabs [data-ws-tab]', title: 'Les espaces de travail',
+    text: ['LIVE pour jouer, TIMELINE pour les shows, CRÉATION pour vos looks et figures, RÉGLAGES pour la sortie et la sécurité (<kbd>F1</kbd> à <kbd>F4</kbd>).',
+      'Changer d\'onglet ne change que l\'affichage : ce qui joue continue.'] },
+  { target: '#outputsPanel', ws: 'settings', title: 'Sortie vers MadMapper',
+    text: ['Pour votre ShowNET : dans MadMapper, laissez la sortie laser coupée ; ici, « Connecter » sur la ligne PONK. Une source Laser Studio apparaît dans MadMapper : donnez-la à la surface laser du ShowNET.',
+      'Connecter une sortie n\'arme jamais le laser. Le pas à pas complet est dans l\'aide : « Premier show avec MadMapper et le ShowNET ».'] },
+  { target: '#checklistPanel', ws: 'settings', title: 'Les verrous d\'armement',
+    text: ['Avec une vraie sortie, le laser refuse de s\'armer tant que la liste « Avant le show » n\'est pas terminée (avec PONK : arrêt matériel testé compris) et que le public n\'est pas déclaré dans « Sécurité » (une zone Public ou l\'horizon complet).',
+      'Les raisons du refus s\'affichent sous le bouton du laser. Ces verrous sont un aide-mémoire : ils ne remplacent ni l\'arrêt matériel ni l\'évaluation des risques.'] },
+  { target: '#tlExamples, #tlAutoRow', ws: 'timeline', title: 'Des shows tout de suite',
+    text: ['« Ouvrir un exemple » charge un show prêt à jouer, calé sur le tempo. Avec un morceau importé, « Générer un show depuis le morceau » en propose un à retoucher.',
+      'Rien n\'est enregistré tant que vous ne le décidez pas, et rien ne touche au laser.'] },
+  { target: '#helpBtn', title: 'L\'aide, même sans réseau',
+    text: ['« ? Aide » ouvre le sommaire, les raccourcis et cette visite. Chaque panneau a son « ? ».',
+      'Bon show ! Armez seulement quand le projecteur, la salle et l\'arrêt matériel sont prêts.'] },
+];
+const TOUR = { on: false, i: 0, ws: null, timer: 0 };
+function tourTargets(step) {
+  return [...document.querySelectorAll(step.target)].filter(el => el.getClientRects().length && el.getBoundingClientRect().width > 0);
+}
+function tourPlace() {
+  if (!TOUR.on) return;
+  const step = TOUR_STEPS[TOUR.i];
+  const els = tourTargets(step);
+  const ring = $('tourRing'), bub = $('tourBubble');
+  const bw = bub.offsetWidth, bh = bub.offsetHeight, m = 12;
+  if (!els.length) {
+    ring.hidden = true;
+    bub.style.left = Math.max(m, (innerWidth - bw) / 2) + 'px';
+    bub.style.top = Math.max(m, (innerHeight - bh) / 2) + 'px';
+    return;
+  }
+  const rs = els.map(el => el.getBoundingClientRect());
+  const r = { left: Math.min(...rs.map(x => x.left)), top: Math.min(...rs.map(x => x.top)), right: Math.max(...rs.map(x => x.right)), bottom: Math.max(...rs.map(x => x.bottom)) };
+  const pad = 6;
+  ring.hidden = false;
+  Object.assign(ring.style, { left: (r.left - pad) + 'px', top: (r.top - pad) + 'px', width: (r.right - r.left + 2 * pad) + 'px', height: (r.bottom - r.top + 2 * pad) + 'px' });
+  let top = r.bottom + pad + m;
+  if (top + bh > innerHeight - m) top = r.top - pad - m - bh;              // above
+  if (top < m) top = Math.min(innerHeight - bh - m, Math.max(m, r.top));    // beside
+  let left = Math.min(Math.max(m, r.left), innerWidth - bw - m);
+  if (top + bh > r.top - pad && top < r.bottom + pad) {                     // beside: left or right of the target
+    left = r.left - pad - m - bw >= m ? r.left - pad - m - bw : Math.min(r.right + pad + m, innerWidth - bw - m);
+  }
+  bub.style.left = Math.max(m, left) + 'px';
+  bub.style.top = Math.max(m, top) + 'px';
+}
+function tourShow(i) {
+  TOUR.i = Math.max(0, Math.min(TOUR_STEPS.length - 1, i));
+  const step = TOUR_STEPS[TOUR.i];
+  if (step.ws && activeWs !== step.ws) setWorkspace(step.ws);
+  $('tourTitle').textContent = step.title;
+  $('tourText').innerHTML = step.text.map(t => `<p>${t}</p>`).join(''); // our own text
+  $('tourCount').textContent = `${TOUR.i + 1} / ${TOUR_STEPS.length}`;
+  $('tourPrev').disabled = TOUR.i === 0;
+  const last = TOUR.i === TOUR_STEPS.length - 1;
+  $('tourNext').textContent = last ? 'Terminer' : 'Suivant';
+  $('tourSkip').hidden = last;
+  $('tourBubble').hidden = false;
+  tourTargets(step)[0]?.scrollIntoView({ block: 'nearest' });
+  requestAnimationFrame(tourPlace);
+}
+function startTour() {
+  if (TOUR.on) { tourShow(0); return; }
+  TOUR.on = true;
+  TOUR.ws = activeWs;
+  tourShow(0);
+  TOUR.timer = setInterval(tourPlace, 400); // panels load and move under the ring
+}
+// Finished or skipped: recorded on the studio, so a reload or another
+// browser doesn't show it again.
+async function endTour() {
+  if (!TOUR.on) return;
+  TOUR.on = false;
+  clearInterval(TOUR.timer);
+  $('tourBubble').hidden = true;
+  $('tourRing').hidden = true;
+  if (TOUR.ws && activeWs !== TOUR.ws) setWorkspace(TOUR.ws);
+  try { await api('POST', '/api/onboarding', { tour_done: true }, { source: 'Aide' }); } catch { /* said by api() */ }
+}
+$('tourPrev').onclick = () => tourShow(TOUR.i - 1);
+$('tourNext').onclick = () => { if (TOUR.i >= TOUR_STEPS.length - 1) endTour(); else tourShow(TOUR.i + 1); };
+$('tourSkip').onclick = endTour;
+window.addEventListener('resize', tourPlace);
+document.addEventListener('scroll', tourPlace, true);
+async function maybeStartTour() {
+  try {
+    const o = await apiJson('GET', '/api/onboarding', undefined, { source: 'Aide' });
+    if (!o.tour_done) startTour();
+  } catch { /* the studio said why */ }
+}
+// For the e2e tests: what the tour and the help hold.
+window.helpDebug = { steps: () => TOUR_STEPS.map(s => ({ target: s.target, ws: s.ws || null, title: s.title })), tourOn: () => TOUR.on, page: () => HELP.slug, loaded: () => !!HELP.pages };
+
+// ---------- états vides (T-437) ----------
+// What an empty list is for, and a button for the first action (the same
+// as the control it names). Returns the element to put in the list.
+function emptyState(text, actions = []) {
+  const box = document.createElement('div');
+  box.className = 'empty-state';
+  const p = document.createElement('p'); p.textContent = text; box.appendChild(p);
+  if (actions.length) {
+    const row = document.createElement('div'); row.className = 'row';
+    for (const [label, run] of actions) {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.onclick = run;
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+  return box;
+}
+addHelpButtons();
+
 loadState().then(loadTestPatterns).then(loadProjection).then(loadPresets).then(loadPalettes).then(loadLfos).then(loadRoutes).then(loadAudioPresets).then(loadTriggers).then(previewLoop);
 setTimeout(dataWarnLoop, 5000);
 midiLoop();
 loadPresence().catch(() => {});
+// T-437: the tour on a fresh data folder, once the page has its state.
+setTimeout(maybeStartTour, 600);
+// T-438: the help, fetched once so it still opens if the network goes.
+setTimeout(() => helpLoad().catch(() => {}), 1500);
 </script>
 </body>
 </html>

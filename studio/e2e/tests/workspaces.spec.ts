@@ -33,7 +33,7 @@ async function steadyState() {
   // Fields that move on their own, whatever the page does: the tempo
   // clock, the heartbeat, the app log's line counter (T-403), the sleep
   // blocker catching up with an arm (T-412) and browser audio going stale.
-  const { tempo, presence, applog, audio, keep_awake, ...rest } = st;
+  const { tempo, presence, applog, audio, keep_awake, project_modified, notices_last, ...rest } = st;
   return { ...rest, bpm: tempo.bpm, keep_awake: keep_awake && keep_awake.enabled };
 }
 async function steadyFrame() {

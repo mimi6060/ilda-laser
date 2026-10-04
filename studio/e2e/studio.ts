@@ -23,6 +23,8 @@ import path from 'node:path';
 export const REPO_ROOT = path.resolve(__dirname, '..', '..');
 export const STUDIO_BIN = process.env.LASER_STUDIO_BIN ?? path.join(REPO_ROOT, 'target', 'debug', 'laser-studio');
 const USER_PORT = 8080;
+/** `onboarding.json` of a data dir whose guided tour was seen (T-437). */
+export const TOUR_SEEN = '{"tour_done":true,"tour_version":1}';
 /** The name of the fake output (`--test-output`): never a laser. */
 export const FAKE_OUTPUT = 'Sortie de test';
 
@@ -64,6 +66,12 @@ export interface StudioOptions {
   midiTest?: boolean;
   /** Files written into the fresh data dir before the first start (path → content). */
   files?: Record<string, string>;
+  /**
+   * T-437: a fresh data dir shows the guided tour. By default the harness
+   * writes `onboarding.json` (tour seen) so it never gets in the way;
+   * `tour: true` leaves it out (onboarding.spec.ts).
+   */
+  tour?: boolean;
   /** Pass the hidden --test-interlock flag: an interlock that is never satisfied, so arming is always refused (T-264). */
   testInterlock?: boolean;
   /** Pass the hidden --test-hooks flag (simulated engine stall, T-253; crashing decoder files, T-298). */
@@ -107,7 +115,8 @@ export class Studio {
   async start() {
     if (!this.dataDir) {
       this.dataDir = mkdtempSync(path.join(tmpdir(), 'laser-studio-e2e-'));
-      for (const [rel, content] of Object.entries(this.opts.files ?? {})) {
+      const seeds = { ...(this.opts.tour ? {} : { 'onboarding.json': TOUR_SEEN }), ...(this.opts.files ?? {}) };
+      for (const [rel, content] of Object.entries(seeds)) {
         const file = path.join(this.dataDir, rel);
         if (!file.startsWith(this.dataDir + path.sep)) throw new Error(`seed file outside the data dir: ${rel}`);
         mkdirSync(path.dirname(file), { recursive: true });

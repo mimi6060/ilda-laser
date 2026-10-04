@@ -44,12 +44,14 @@ mod instance;
 mod layers;
 mod lfo;
 mod interlock;
+mod help;
 mod keep_awake;
 mod live;
 mod menubar;
 mod midi;
 mod netin;
 mod notices;
+mod onboarding;
 mod external;
 mod optimize;
 mod output;
@@ -457,6 +459,8 @@ pub struct Shared {
     pub test_pattern: testpattern::TestPatternState,
     /// Prevent sleep during a show (keep_awake.rs): setting and status.
     pub keep_awake: keep_awake::KeepAwakeState,
+    /// First launch (onboarding.rs, T-437): whether the tour was seen.
+    pub onboarding: onboarding::OnboardingStore,
     /// Show mode (showmode.rs, T-283): editing routes refused with 423.
     /// Kept in `prefs.json`; never arms anything.
     pub show_mode: showmode::ShowMode,
@@ -1311,6 +1315,7 @@ fn startup_state(cli: &Cli) -> Shared {
         project: project::ProjectState::load(&cli.data_dir),
         test_pattern: Default::default(),
         keep_awake: keep_awake::KeepAwakeState::load(&cli.data_dir),
+        onboarding: onboarding::OnboardingStore::load(&cli.data_dir),
         show_mode: showmode::ShowMode::load(&cli.data_dir),
         data_warnings: Vec::new(),
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
