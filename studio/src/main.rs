@@ -30,6 +30,7 @@ mod engine;
 mod evolving;
 mod examples;
 mod fans;
+mod festival;
 mod figure_import;
 mod figures;
 mod font;
@@ -277,6 +278,9 @@ pub struct Shared {
     pub live_dirty: bool,
     /// User colour palettes (palettes.json).
     pub palettes: live::PaletteStore,
+    /// Festival palettes on show and perceived balance (T-130,
+    /// festival.json; the palette on show is memory only).
+    pub festival: festival::Festival,
     /// MIDI controllers (midi/mod.rs); not part of any saved look.
     pub midi: midi::MidiState,
     /// OSC and Art-Net inputs (netin/, netin.json); never in a look or a project.
@@ -1068,6 +1072,7 @@ fn startup_state(cli: &Cli) -> Shared {
         live: load_json(&cli.data_dir.join("live.json")),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
+        festival: festival::Festival::load(festival::path(&cli.data_dir)),
         midi: {
             let mut m = midi::MidiState::new(!cli.no_midi || cli.midi_test, midi::profile::ProfileStore::load(cli.data_dir.join("midi")));
             m.sim = sim.clone();
@@ -1522,7 +1527,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal, plans) = {
+        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal, plans, (festival_palette, balance)) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1573,6 +1578,8 @@ impl Engine {
             controls::deck_frame(&mut s, t);
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             self.live_state.set_clock(t, clock.beat);
+            // A festival palette waiting for its « one » lands (T-130).
+            s.festival.fire_due(clock.beat);
             // Audio triggers (T-240): this frame's events press cues before
             // the looks are read. Off, stale audio or e-stop: nothing.
             // They never arm; their black is a gain on the master copy.
@@ -1664,7 +1671,8 @@ impl Engine {
                     ProjectorPlan { id: p.id.clone(), output: p.output.clone(), caps: cfg.limits, color: cfg.color, cue_signal }
                 })
                 .collect();
-            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal, plans)
+            let festival = (s.festival.colors(), s.festival.balance);
+            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal, plans, festival)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1694,6 +1702,7 @@ impl Engine {
                         let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
                         let event_dt = if cue.frozen { 0.0 } else { anim_dt };
                         animator.set_optimizer(&mixer.optimizer);
+                        animator.set_palette(festival_palette);
                         let mut points = animator.render(settings, audio, event_dt, &content_clock);
                         if cue.modifiers != live::LiveModifiers::default() {
                             let st = event_live.entry(cue.instance).or_default();
@@ -1711,6 +1720,7 @@ impl Engine {
                         None => Animator::default(),
                     });
                     animator.set_optimizer(&mixer.optimizer);
+                    animator.set_palette(festival_palette);
                     let mut points = animator.render(settings, audio, anim_dt, &clock);
                     // A user cue's own master modifiers (T-405), before the
                     // master stage, like a timeline event's.
@@ -1738,9 +1748,16 @@ impl Engine {
                 // A zone patched as a DMX fixture (T-407) gets its remote on
                 // top of the master controls, still before the geometry,
                 // the calibration and the safety stage.
-                let finish = |zone: u8, look: &[Point]| match routing.remotes.iter().find(|(z, _)| *z == zone) {
-                    Some((_, remote)) => dmx::fixture::apply(look, remote, &live, &self.live_state, &user_palettes, t),
-                    None => live::apply(look, &live, &self.live_state, &user_palettes),
+                // Perceived balance (T-130) on the content, with the master
+                // stage: gains of at most 1, before the calibration, the
+                // output's colour calibration and the safety stage.
+                let finish = |zone: u8, look: &[Point]| {
+                    let mut out = match routing.remotes.iter().find(|(z, _)| *z == zone) {
+                        Some((_, remote)) => dmx::fixture::apply(look, remote, &live, &self.live_state, &user_palettes, t),
+                        None => live::apply(look, &live, &self.live_state, &user_palettes),
+                    };
+                    balance.apply(&mut out);
+                    out
                 };
                 if plans.is_empty() {
                     let (frame, mix) = projection::render(rendered, &routing.config, routing.output.as_deref(), &mixer, finish, &calibration);

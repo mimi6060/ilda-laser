@@ -142,6 +142,17 @@ pub enum ColorMode {
     Gradient,
     /// Strokes alternate between the main colour and `color2`.
     Alternate,
+    /// « Vers le blanc » (T-130): both colours lose their saturation over
+    /// `period_beats`, white at the end of each period (for builds). The
+    /// brightest channel is kept and the others rise to it; the power caps
+    /// and the rest of the safety stage still apply afterwards.
+    #[serde(rename = "to_white")]
+    ToWhite,
+    /// « Chase couleur » (T-130): a `color2` front travels through the
+    /// beams, beam i turning at step i (`steps_per_beat`), then the main
+    /// colour comes back the same way.
+    #[serde(rename = "color_chase")]
+    ColorChase,
 }
 
 /// Names accepted by `generate`, in UI order.
@@ -474,6 +485,7 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
 /// with blanked jumps. `hue_time` makes rainbow colours drift. `c1`/`c2`
 /// arrive already dimmed; `gain` dims the colours made here (rainbow,
 /// `Tint::Rgb`). Per-stroke styles set the intensity and tint.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn colorize(
     geo: &Geometry,
     mode: ColorMode,
@@ -481,6 +493,19 @@ pub fn colorize(
     c2: (f32, f32, f32),
     hue_time: f32,
     gain: f32,
+) -> Vec<Point> {
+    colorize_step(geo, mode, c1, c2, hue_time, gain, 0)
+}
+
+/// `colorize` at chase step `step` (read by `ColorChase` only).
+pub fn colorize_step(
+    geo: &Geometry,
+    mode: ColorMode,
+    c1: (f32, f32, f32),
+    c2: (f32, f32, f32),
+    hue_time: f32,
+    gain: f32,
+    step: u64,
 ) -> Vec<Point> {
     const DOT_DWELL: usize = 12;
     let total: usize = geo.strokes.iter().map(|s| s.len()).sum::<usize>().max(1);
@@ -497,7 +522,9 @@ pub fn colorize(
         for &(x, y) in stroke {
             let along = index as f32 / total as f32;
             let (r, g, b) = match (style.tint, mode) {
-                (Tint::Primary, _) | (Tint::Auto, ColorMode::Solid) => c1,
+                // `ToWhite` arrives with its colours already desaturated
+                // (the engine knows the beat, see `toward_white`).
+                (Tint::Primary, _) | (Tint::Auto, ColorMode::Solid | ColorMode::ToWhite) => c1,
                 (Tint::Secondary, _) => c2,
                 (Tint::Rgb(r, g, b), _) => (r * gain, g * gain, b * gain),
                 (Tint::Auto, ColorMode::Rainbow) => {
@@ -507,6 +534,9 @@ pub fn colorize(
                 (Tint::Auto, ColorMode::Gradient) => mix(c1, c2, along),
                 (Tint::Auto, ColorMode::Alternate) => {
                     if si % 2 == 0 { c1 } else { c2 }
+                }
+                (Tint::Auto, ColorMode::ColorChase) => {
+                    if chase_on(si, geo.strokes.len(), step) { c2 } else { c1 }
                 }
             };
             let k = style.intensity.clamp(0.0, 1.0);
@@ -525,6 +555,26 @@ pub fn colorize(
         }
     }
     out
+}
+
+/// Colour chase: over `2n` steps, beams 0..=k turn to `color2` (k = the
+/// step), then beams 0..=k-n turn back, so the front sweeps the fan one
+/// beam per step and the cycle loops without a jump.
+pub fn chase_on(i: usize, n: usize, step: u64) -> bool {
+    if n == 0 {
+        return false;
+    }
+    let k = (step % (2 * n as u64)) as usize;
+    if k < n { i <= k } else { i > k - n }
+}
+
+/// `c` with its saturation taken down by `k` (0 = as is, 1 = white at the
+/// same value): each channel moves towards the brightest one. Channels
+/// stay within 0..max(c).
+pub fn toward_white(c: (f32, f32, f32), k: f32) -> (f32, f32, f32) {
+    let k = if k.is_finite() { k.clamp(0.0, 1.0) } else { 0.0 };
+    let v = c.0.max(c.1).max(c.2);
+    (lerp(c.0, v, k), lerp(c.1, v, k), lerp(c.2, v, k))
 }
 
 fn sample(n: usize, f: impl Fn(f32) -> (f32, f32)) -> Stroke {
@@ -606,6 +656,56 @@ fn clock_seconds() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_chase_front_moves_one_beam_per_step_and_loops() {
+        let n = 4;
+        let row = |step| (0..n).map(|i| chase_on(i, n, step)).collect::<Vec<_>>();
+        assert_eq!(row(0), [true, false, false, false]);
+        assert_eq!(row(2), [true, true, true, false]);
+        assert_eq!(row(3), [true; 4]);
+        // Then the main colour comes back the same way.
+        assert_eq!(row(4), [false, true, true, true]);
+        assert_eq!(row(7), [false; 4]);
+        assert_eq!(row(8), row(0));
+        assert!(!chase_on(0, 0, 3));
+        // Through `colorize_step`: beam i is colour 2 from step i.
+        let geo = Geometry::dots((0..n).map(|i| (i as f32 * 0.1, 0.0)).collect());
+        for step in 0..n as u64 {
+            let pts = colorize_step(&geo, ColorMode::ColorChase, (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), 0.0, 1.0, step);
+            let blue: Vec<bool> = pts.iter().filter(|p| p.is_lit()).step_by(12).map(|p| p.b > 0.0).collect();
+            assert_eq!(blue, (0..n).map(|i| i as u64 <= step).collect::<Vec<_>>(), "step {step}");
+        }
+    }
+
+    #[test]
+    fn toward_white_ends_unsaturated_at_the_same_value() {
+        let c = (0.8, 0.2, 0.0);
+        assert_eq!(toward_white(c, 0.0), c);
+        assert_eq!(toward_white(c, 1.0), (0.8, 0.8, 0.8));
+        let half = toward_white(c, 0.5);
+        assert!((half.1 - 0.5).abs() < 1e-6 && (half.2 - 0.4).abs() < 1e-6);
+        assert_eq!(toward_white(c, f32::NAN), c);
+        assert_eq!(toward_white(c, 7.0), (0.8, 0.8, 0.8));
+        // Dark stays dark.
+        assert_eq!(toward_white((0.0, 0.0, 0.0), 1.0), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn new_colour_modes_keep_their_json_names_and_old_ones_too() {
+        let names = [
+            (ColorMode::Solid, "solid"),
+            (ColorMode::Rainbow, "rainbow"),
+            (ColorMode::Gradient, "gradient"),
+            (ColorMode::Alternate, "alternate"),
+            (ColorMode::ToWhite, "to_white"),
+            (ColorMode::ColorChase, "color_chase"),
+        ];
+        for (mode, name) in names {
+            assert_eq!(serde_json::to_value(mode).unwrap(), name);
+            assert_eq!(serde_json::from_value::<ColorMode>(name.into()).unwrap(), mode);
+        }
+    }
 
     #[test]
     fn every_generator_produces_points_in_bounds() {
