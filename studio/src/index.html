@@ -629,6 +629,15 @@
   .pz-state.on { color: var(--ws-settings); font-weight: 700; }
   .pz-checks { display: flex; flex-wrap: wrap; gap: 2px 10px; }
   .pz-checks label { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 12px; }
+  /* RÉGLAGES › Lieu et projecteurs (T-277), Theme (T-299) tokens. */
+  .vn-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 8px; }
+  .vn-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .vn-grid label { margin-top: 4px; font-size: 12px; }
+  .vn-grid input { width: 100%; box-sizing: border-box; }
+  .vn-out { font-size: 12px; color: var(--muted); }
+  .vn-out.ok { color: var(--ok); }
+  .vn-out.bad { color: var(--danger); font-weight: 700; }
+  .pz-tabs button.main::after { content: ' ★'; color: var(--ws-settings); }
   /* LIVE › Direct (T-143), Theme (T-299) tokens. */
   #directTabs button { padding: 5px 4px; font-size: 12px; }
   #directTabs button[disabled] { opacity: .4; cursor: not-allowed; }
@@ -2133,6 +2142,56 @@
     </section>
 
     <section>
+      <details id="venuePanel">
+        <summary>Lieu et projecteurs</summary>
+        <div class="hint">Chaque projecteur est une sortie laser à part entière : ses zones de projection (« Sortie » d'une zone), ses plafonds et ses couleurs (« Sorties et projecteurs », choisir le projecteur) et toute la sécurité. Un seul armement et un seul arrêt d'urgence pour tous ; perdre la sortie d'un projecteur désarme tout. Changer la sortie d'un projecteur se fait laser désarmé. Position, angles, luminosité et miroir servent seulement à la vue 3D.</div>
+        <label for="vnPreset">Préréglage</label>
+        <select id="vnPreset"><option value="">Personnalisé</option></select>
+        <div class="vn-grid">
+          <div><label for="vnWidth">Largeur (m)</label><input type="number" id="vnWidth" min="2" max="200" step="0.5"></div>
+          <div><label for="vnDepth">Profondeur (m)</label><input type="number" id="vnDepth" min="2" max="200" step="0.5"></div>
+          <div><label for="vnHeight">Hauteur (m)</label><input type="number" id="vnHeight" min="2" max="100" step="0.5"></div>
+        </div>
+        <label class="check"><input type="checkbox" id="vnCeiling"> Plafond</label>
+        <div class="tp-sub">Zone public</div>
+        <div class="vn-grid four">
+          <div><label for="vnAud0">X1 (m)</label><input type="number" id="vnAud0" step="0.5"></div>
+          <div><label for="vnAud1">Z1 (m)</label><input type="number" id="vnAud1" step="0.5"></div>
+          <div><label for="vnAud2">X2 (m)</label><input type="number" id="vnAud2" step="0.5"></div>
+          <div><label for="vnAud3">Z2 (m)</label><input type="number" id="vnAud3" step="0.5"></div>
+        </div>
+        <label for="vnAudH">Hauteur minimale au-dessus du public (m)</label><input type="number" id="vnAudH" min="0" max="20" step="0.1">
+        <div class="tp-sub">Projecteurs</div>
+        <div class="pz-tabs" id="vnList" role="tablist"></div>
+        <div class="row">
+          <button id="vnAdd">Ajouter un projecteur</button>
+          <button id="vnDup">Dupliquer</button>
+          <button id="vnDel">Supprimer</button>
+        </div>
+        <div id="vnEdit">
+          <label for="vnName">Nom</label>
+          <input type="text" id="vnName" maxlength="40" autocomplete="off">
+          <label for="vnOutput">Sortie</label>
+          <select id="vnOutput"></select>
+          <div class="vn-out" id="vnOutState" role="status"></div>
+          <div class="vn-grid">
+            <div><label for="vnPosX">Position X (m)</label><input type="number" id="vnPosX" step="0.1"></div>
+            <div><label for="vnPosY">Position Y (m)</label><input type="number" id="vnPosY" step="0.1"></div>
+            <div><label for="vnPosZ">Position Z (m)</label><input type="number" id="vnPosZ" step="0.1"></div>
+            <div><label for="vnYaw">Lacet (°)</label><input type="number" id="vnYaw" min="-180" max="180" step="1"></div>
+            <div><label for="vnPitch">Tangage (°)</label><input type="number" id="vnPitch" min="-90" max="90" step="1"></div>
+            <div><label for="vnRoll">Roulis (°)</label><input type="number" id="vnRoll" min="-180" max="180" step="1"></div>
+            <div><label for="vnScan">Angle de scan (°)</label><input type="number" id="vnScan" min="1" max="120" step="1"></div>
+            <div><label for="vnBright">Luminosité (%)</label><input type="number" id="vnBright" min="0" max="100" step="1"></div>
+          </div>
+          <label class="check" title="Vue 3D seulement : la sortie réelle de ce projecteur n'est pas inversée"><input type="checkbox" id="vnMirror"> Miroir X</label>
+        </div>
+        <div class="hint">Écrans : <span id="vnScreens">0</span> (gardés dans le lieu ; leur édition viendra avec la vue 3D).</div>
+        <div class="hint sf-error" id="vnError" role="alert"></div>
+      </details>
+    </section>
+
+    <section>
       <details id="generalPanel">
         <summary>Général</summary>
         <label class="check"><input type="checkbox" id="kaEnabled"> Empêcher la mise en veille pendant un show</label>
@@ -2317,6 +2376,10 @@
       </details>
       <div class="hint">Connecter, changer, déconnecter ou perdre la sortie désarme le laser ; une sortie retrouvée reste désarmée : seul l'opérateur réarme. Ce désarmement est logiciel : l'arrêt d'urgence matériel du projecteur reste votre vraie sécurité. Préférez un réseau filaire. La sortie choisie est retenue pour le prochain lancement ; <code>--device &lt;id&gt;</code> en impose une pour un seul lancement.</div>
       <div class="sf-sub">Limites de sécurité</div>
+      <div id="pwTargetRow" hidden>
+        <label for="pwTarget">Projecteur</label>
+        <select id="pwTarget" title="Plafonds, fiche et couleurs de ce projecteur (RÉGLAGES › Lieu et projecteurs)"></select>
+      </div>
       <div id="pwLoosen" hidden>
         <div id="pwLoosenText"></div>
         <div class="row"><button id="pwLoosenOk">Confirmer la hausse</button><button id="pwLoosenCancel">Annuler</button></div>
@@ -3554,7 +3617,7 @@ async function setView(mode) {
   $('beams').hidden = !show3d;
   $('beamsMsg').hidden = !want3d || !!view3d;
   for (const id of ['recenter3d', 'hint3d', 'render3d']) $(id).hidden = !show3d;
-  if (show3d) { view3d.setFrame(lastPoints); view3d.start(); }
+  if (show3d) { venueTo3d(); view3d.setFrame(lastPoints); view3d.start(); pollFrames3d(); }
   else view3d?.stop();
   if (show2d) draw(lastPoints);
   try { localStorage.setItem(STAGE_KEY, mode); } catch { /* private window: not remembered */ }
@@ -7659,9 +7722,11 @@ function showOutputs(force = false) {
 }
 // Interface models (T-472): choosing one fills its resolution and rate.
 let pjModels = [];
+// The projector whose caps, sheet and colours are shown (T-277).
+const pwTargetId = () => $('pwTarget').value || 'main';
 async function reloadOutputs() {
   const j = await (await fetch('/api/outputs/limits')).json();
-  outputCfg = j.outputs.find(o => o.id === j.active); pwLoadError = j.load_error;
+  outputCfg = j.outputs.find(o => o.id === pwTargetId()) || j.outputs.find(o => o.id === j.active); pwLoadError = j.load_error;
   if (!pjModels.length && j.models) {
     pjModels = j.models;
     $('pjModel').innerHTML = pjModels.map(m => `<option value="${m.model}">${m.label_fr}</option>`).join('');
@@ -7684,6 +7749,7 @@ function pjFromControls() {
   };
 }
 async function saveOutputs(body, confirm = false) {
+  body = { ...body, id: pwTargetId() };
   const r = await fetch('/api/outputs/limits', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(confirm ? { ...body, confirm_loosen: true } : body) });
   if (r.ok) {
@@ -7792,12 +7858,12 @@ function showOutColor(force = false) {
 }
 async function reloadOutColor() {
   try {
-    const r = await fetch('/api/outputs/color');
+    const r = await fetch('/api/outputs/color?output=' + encodeURIComponent(pwTargetId()));
     if (r.ok) { outColor = await r.json(); showOutColor(true); }
   } catch (e) { console.warn('/api/outputs/color', e); }
 }
 async function saveOutColor(color, confirm = false) {
-  const r = await fetch('/api/outputs/color', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const r = await fetch('/api/outputs/color?output=' + encodeURIComponent(pwTargetId()), { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(confirm ? { color, confirm_loosen: true } : { color }) });
   $('ocError').textContent = '';
   if (r.ok) {
@@ -8240,6 +8306,150 @@ $('clDefaults').onclick = async () => {
 };
 $('clSave').onclick = async () => { if (await clPost('config', clConfig({ items: clEditing }))) { clEditing = null; showClEditor(); } };
 
+// ---------- RÉGLAGES › Lieu et projecteurs (T-277) ----------
+// The venue lives on the server (GET/POST /api/venue). Each projector is
+// an output stage of its own there; here: the form, the projector list of
+// the caps panel and of the zones' « Sortie », and the 3D view's venue.
+let venue = null, venueLinks = [], vnSel = 0, vnMax = 8, vnTimer = 0, vnDevices = [], vnFramesTimer = 0;
+const VN_NUM = { vnWidth: ['room', 'width_m'], vnDepth: ['room', 'depth_m'], vnHeight: ['room', 'height_m'], vnAudH: ['audience', 'min_height_m'] };
+const VN_PROJ = { vnPosX: p => [p.pos_m, 0], vnPosY: p => [p.pos_m, 1], vnPosZ: p => [p.pos_m, 2], vnYaw: p => [p, 'yaw_deg'], vnPitch: p => [p, 'pitch_deg'], vnRoll: p => [p, 'roll_deg'], vnScan: p => [p, 'scan_deg'] };
+const VN_STATE = { connected: 'connectée', connecting: 'connexion…', lost: 'perdue', available: 'non connectée' };
+async function reloadVenue() {
+  try {
+    const r = await fetch('/api/venue');
+    if (r.ok) applyVenue(await r.json());
+  } catch (e) { console.warn('/api/venue', e); }
+}
+function applyVenue(j) {
+  venue = j.venue; venueLinks = j.links || []; vnMax = j.max_projectors || 8;
+  const pre = $('vnPreset');
+  if (pre.options.length <= 1) for (const p of j.presets || []) pre.add(new Option(`${p.label_fr} (${p.depth_m} × ${p.width_m}${p.ceiling ? ' × ' + p.height_m : ''} m)`, p.id));
+  if (vnSel >= venue.projectors.length) vnSel = 0;
+  showVenue(); vnTargets(); venueTo3d(); pollFrames3d();
+}
+function vnProj() { return venue && venue.projectors[vnSel]; }
+function vnSet(id, v) { if (document.activeElement !== $(id)) $(id).value = v; }
+function showVenue() {
+  if (!venue) return;
+  $('vnPreset').value = venue.preset || '';
+  for (const [id, [a, k]] of Object.entries(VN_NUM)) vnSet(id, venue[a][k]);
+  $('vnCeiling').checked = venue.room.ceiling;
+  venue.audience.rect_m.forEach((v, i) => vnSet('vnAud' + i, v));
+  $('vnScreens').textContent = venue.screens.length;
+  $('vnList').replaceChildren(...venue.projectors.map((p, i) => {
+    const b = document.createElement('button');
+    b.textContent = p.name; b.setAttribute('role', 'tab'); b.dataset.projector = p.id;
+    b.classList.toggle('active', i === vnSel); b.classList.toggle('main', i === 0);
+    b.title = i === 0 ? 'Projecteur principal : la sortie choisie dans « Sorties et projecteurs »' : p.id;
+    b.onclick = () => { vnSel = i; showVenue(); venueTo3d(); };
+    return b;
+  }));
+  const p = vnProj(), link = venueLinks.find(l => l.id === p.id) || {};
+  vnSet('vnName', p.name);
+  for (const [id, f] of Object.entries(VN_PROJ)) { const [o, k] = f(p); vnSet(id, o[k]); }
+  vnSet('vnBright', Math.round(p.brightness * 100));
+  $('vnMirror').checked = p.mirror_x;
+  const sel = $('vnOutput');
+  if (vnSel === 0) {
+    sel.replaceChildren(new Option(link.output_name || link.output || 'Aucune (aperçu seulement)', ''));
+    sel.disabled = true;
+    sel.title = 'Le projecteur principal utilise la sortie choisie dans « Sorties et projecteurs »';
+  } else {
+    const main = venueLinks[0] && venueLinks[0].output, used = venue.projectors.filter((q, i) => i > 0 && i !== vnSel && q.output).map(q => q.output);
+    const opts = [new Option('Aucune (aperçu seulement)', '')];
+    for (const d of vnDevices) if (d.id !== main && !used.includes(d.id)) opts.push(new Option(`${d.name} (${d.id})`, d.id));
+    if (p.output && !opts.some(o => o.value === p.output)) opts.push(new Option(p.output, p.output));
+    sel.replaceChildren(...opts); sel.value = p.output || ''; sel.disabled = false; sel.title = '';
+  }
+  const st = $('vnOutState');
+  const state = link.state, ok = state === 'connected' && (vnSel === 0 || link.output_name);
+  st.textContent = !(vnSel === 0 ? link.output : p.output) ? 'Aperçu seulement : ce projecteur ne pilote aucune sortie.' + (vnSel > 0 && !vnDevices.length ? ' « Rechercher » (Sorties et projecteurs) liste les sorties disponibles.' : '')
+    : `Sortie ${VN_STATE[state] || '…'}${link.output_name ? ' : ' + link.output_name : ''}${link.error ? ' — ' + link.error : ''}`;
+  st.className = 'vn-out' + (ok ? ' ok' : state === 'lost' ? ' bad' : '');
+  $('vnDel').disabled = vnSel === 0;
+  $('vnAdd').disabled = $('vnDup').disabled = venue.projectors.length >= vnMax;
+}
+// The caps panel and the zones' « Sortie »: one entry per projector.
+function vnTargets() {
+  const t = $('pwTarget'), keep = t.value || 'main';
+  t.replaceChildren(...venue.projectors.map(p => new Option(p.name, p.id)));
+  t.value = venue.projectors.some(p => p.id === keep) ? keep : 'main';
+  $('pwTargetRow').hidden = venue.projectors.length <= 1;
+  if (t.value !== keep) { reloadOutputs(); reloadOutColor(); }
+  const z = $('pzOutput');
+  for (const o of [...z.options]) if (o.dataset.projector) o.remove();
+  venue.projectors.forEach((p, i) => {
+    if (i === 0 && venue.projectors.length <= 1) return;
+    const o = new Option('Projecteur : ' + p.name, p.id); o.dataset.projector = '1'; z.add(o);
+  });
+  if (typeof showProjection === 'function' && proj) showProjection();
+}
+// The 3D view: the room and every projector; the other projectors' frames
+// come from /api/frames while it is shown (the main one's is the preview's).
+function venueTo3d() {
+  if (!view3d || !venue) return;
+  view3d.setVenue({
+    room: { w: venue.room.width_m, d: venue.room.depth_m, h: venue.room.height_m },
+    projectors: venue.projectors.map(p => ({ pos: p.pos_m, yaw: p.yaw_deg, pitch: p.pitch_deg, roll: p.roll_deg, scanDeg: p.scan_deg, mirrorX: p.mirror_x, brightness: p.brightness })),
+    selected: venue.projectors.length > 1 && $('venuePanel').open ? vnSel : -1,
+  });
+}
+async function pollFrames3d() {
+  clearTimeout(vnFramesTimer);
+  if (!show3d || !view3d || !venue || venue.projectors.length <= 1) return;
+  try {
+    const j = await (await fetch('/api/frames', { cache: 'no-store' })).json();
+    j.frames.forEach((f, i) => { if (i > 0) view3d.setProjectorFrame(i, f.points); });
+  } catch { /* next time */ }
+  vnFramesTimer = setTimeout(pollFrames3d, 100);
+}
+async function saveVenue(body = venue, path = '/api/venue') {
+  $('vnError').textContent = '';
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.ok) { applyVenue(await r.json()); pollFrames3d(); return true; }
+  const msg = r.status === 409 && (r.headers.get('content-type') || '').includes('json') ? (await r.json()).error : await r.text();
+  await reloadVenue();
+  $('vnError').textContent = msg;
+  return false;
+}
+function vnChanged() { showVenue(); venueTo3d(); clearTimeout(vnTimer); vnTimer = setTimeout(() => { vnTimer = 0; saveVenue(); }, 200); }
+const vnNum = (id, lo, hi) => { const v = +$(id).value; return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null; };
+for (const [id, [a, k]] of Object.entries(VN_NUM)) $(id).addEventListener('change', () => { const v = vnNum(id, 0, 500); if (v !== null) { venue[a][k] = v; venue.preset = ''; vnChanged(); } });
+[0, 1, 2, 3].forEach(i => $('vnAud' + i).addEventListener('change', () => { const v = vnNum('vnAud' + i, -500, 500); if (v !== null) { venue.audience.rect_m[i] = v; vnChanged(); } }));
+$('vnCeiling').addEventListener('change', () => { venue.room.ceiling = $('vnCeiling').checked; venue.preset = ''; vnChanged(); });
+$('vnPreset').addEventListener('change', () => { if ($('vnPreset').value) saveVenue({ name: $('vnPreset').value }, '/api/venue/preset'); });
+$('vnName').addEventListener('change', () => { vnProj().name = $('vnName').value; vnChanged(); });
+for (const [id, f] of Object.entries(VN_PROJ)) $(id).addEventListener('change', () => { const v = vnNum(id, -500, 500); if (v !== null) { const [o, k] = f(vnProj()); o[k] = v; vnChanged(); } });
+$('vnBright').addEventListener('change', () => { const v = vnNum('vnBright', 0, 100); if (v !== null) { vnProj().brightness = v / 100; vnChanged(); } });
+$('vnMirror').addEventListener('change', () => { vnProj().mirror_x = $('vnMirror').checked; vnChanged(); });
+$('vnOutput').addEventListener('change', () => { vnProj().output = $('vnOutput').value || null; clearTimeout(vnTimer); saveVenue(); });
+function vnNewId() { for (let n = 2; ; n++) if (!venue.projectors.some(p => p.id === 'p' + n)) return 'p' + n; }
+$('vnAdd').onclick = () => {
+  const p = { ...venue.projectors[0], id: vnNewId(), name: 'Projecteur ' + (venue.projectors.length + 1), output: null, mirror_x: false, pos_m: [...venue.projectors[0].pos_m] };
+  venue.projectors.push(p); vnSel = venue.projectors.length - 1; clearTimeout(vnTimer); saveVenue();
+};
+$('vnDup').onclick = () => {
+  const src = vnProj(), p = { ...src, id: vnNewId(), name: (src.name + ' (copie)').slice(0, 40), output: null, pos_m: [...src.pos_m] };
+  // A copy faces the other way across the room (Miroir X): symmetric rigs.
+  p.pos_m[0] = -p.pos_m[0]; p.yaw_deg = -p.yaw_deg; p.mirror_x = !src.mirror_x;
+  venue.projectors.push(p); vnSel = venue.projectors.length - 1; clearTimeout(vnTimer); saveVenue();
+};
+$('vnDel').onclick = () => {
+  if (vnSel === 0) return;
+  venue.projectors.splice(vnSel, 1); vnSel = Math.max(0, vnSel - 1); clearTimeout(vnTimer); saveVenue();
+};
+$('pwTarget').addEventListener('change', () => { reloadOutputs(); reloadOutColor(); });
+// While the panel is open, the projectors' outputs follow connections and
+// losses (never over an edit still to be sent).
+setInterval(() => { if (activeWs === 'settings' && $('venuePanel').open && !vnTimer && !$('venuePanel').contains(document.activeElement)) reloadVenue(); }, 1000);
+// The output list when the panel opens (no scan: what the studio knows).
+$('venuePanel').addEventListener('toggle', async () => {
+  venueTo3d();
+  if (!$('venuePanel').open) return;
+  try { vnDevices = (await (await fetch('/api/outputs')).json()).devices || []; } catch { /* keep the list */ }
+  reloadVenue();
+});
+
 // ---------- boot ----------
 async function loadState() {
   const st = await (await fetch('/api/state')).json();
@@ -8249,6 +8459,7 @@ async function loadState() {
   reloadOutputs();
   reloadOutColor();
   reloadDevices();
+  reloadVenue();
   loadArtnet();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   showShowMode(st.lock);

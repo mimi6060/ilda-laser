@@ -178,6 +178,10 @@ pub const HW_STOP_LABEL: &str = "Arrêt matériel non vérifié";
 pub const OUTPUT: &str = "output";
 /// Its label, also the refusal message.
 pub const OUTPUT_LABEL: &str = "Aucune sortie connectée";
+/// Id of the interlock held open while a projector of the venue that
+/// drives an output (T-277, venue.rs) has none connected: every output of
+/// the venue must be there to arm.
+pub const PROJECTORS: &str = "projectors";
 
 pub struct ArmGate {
     armed: bool,
@@ -447,6 +451,9 @@ pub struct EStop {
     trips: AtomicU64,
     /// Disarms the output directly (DAC-level), called on every trip.
     kill: Mutex<Option<KillSwitch>>,
+    /// The other projectors' outputs (venue.rs, T-277), by projector id:
+    /// every trip calls them all too.
+    projector_kills: Mutex<Vec<(String, KillSwitch)>>,
 }
 
 impl EStop {
@@ -458,6 +465,16 @@ impl EStop {
     /// the studio goes back to preview (T-401). A poisoned lock is reused.
     pub fn replace_kill_switch(&self, kill: Option<KillSwitch>) {
         *self.kill.lock().unwrap_or_else(|e| e.into_inner()) = kill;
+    }
+
+    /// Installs (or removes, with None) the kill switch of another
+    /// projector's output (T-277).
+    pub fn replace_projector_kill_switch(&self, projector: &str, kill: Option<KillSwitch>) {
+        let mut kills = self.projector_kills.lock().unwrap_or_else(|e| e.into_inner());
+        kills.retain(|(id, _)| id != projector);
+        if let Some(kill) = kill {
+            kills.push((projector.to_string(), kill));
+        }
     }
 
     /// Whether an output kill switch is installed.
@@ -483,6 +500,11 @@ impl EStop {
         // A poisoned lock still holds the switch: use it anyway.
         let kill = self.kill.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(kill) = kill.as_ref() {
+            kill();
+        }
+        drop(kill);
+        // Every projector of the venue (T-277): one stop darkens them all.
+        for (_, kill) in self.projector_kills.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             kill();
         }
     }
@@ -702,6 +724,29 @@ mod tests {
         estop.kill_output();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(!estop.is_latched());
+    }
+
+    #[test]
+    fn one_trip_kills_every_projectors_output() {
+        let estop = EStop::default();
+        let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)]);
+        let switch = |i: usize| {
+            let c = Arc::clone(&calls);
+            Box::new(move || {
+                c[i].fetch_add(1, Ordering::SeqCst);
+            }) as KillSwitch
+        };
+        estop.replace_kill_switch(Some(switch(0)));
+        estop.replace_projector_kill_switch("p2", Some(switch(1)));
+        estop.replace_projector_kill_switch("p3", Some(switch(2)));
+        estop.trip(ArmSource::Keyboard);
+        assert!(calls.iter().all(|c| c.load(Ordering::SeqCst) == 1), "the main output and both projectors");
+        // A projector removed (or replaced) is no longer called.
+        estop.replace_projector_kill_switch("p3", None);
+        estop.replace_projector_kill_switch("p2", Some(switch(1)));
+        estop.kill_output();
+        let n: Vec<usize> = calls.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        assert_eq!(n, [2, 2, 1]);
     }
 
     use crate::safety_log::testing::memory_log;

@@ -117,11 +117,44 @@ pub struct StageChange {
     /// late report never marks a newer output lost.
     pub gen: u64,
     pub id: Option<String>,
+    /// None: the main output. Some: the output of that projector of the
+    /// venue (venue.rs, T-277), with its own generations.
+    pub projector: Option<String>,
 }
 
 enum Cmd {
     Select(Option<String>, ArmSource),
     Lost(u64, String),
+    /// A venue projector's output (T-277): (projector id, output id).
+    SelectProjector(String, Option<String>, ArmSource),
+    LostProjector(String, u64, String),
+}
+
+/// The output of one more projector of the venue (T-277): the same
+/// connect / lose / retry cycle as the main output, with its own
+/// generations. Auto-reconnect is the main output's setting.
+#[derive(Default)]
+struct Slot {
+    selected: Option<String>,
+    name: Option<String>,
+    kind: Option<&'static str>,
+    state: LinkState,
+    error: Option<String>,
+    retry_at: Option<Instant>,
+    failed: u32,
+    gen: u64,
+    handed: bool,
+}
+
+/// One venue projector's link, for the UI and the `projectors` interlock.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ProjectorLink {
+    pub projector: String,
+    pub selected: Option<String>,
+    pub name: Option<String>,
+    pub kind: Option<&'static str>,
+    pub state: LinkState,
+    pub error: Option<String>,
 }
 
 #[derive(Default)]
@@ -146,6 +179,8 @@ struct Status {
     remembered: Option<String>,
     /// `connection.pps` as read (a `--pps` for this run is not saved).
     saved_pps: u32,
+    /// The venue's other projectors (T-277), by projector id.
+    projectors: std::collections::BTreeMap<String, Slot>,
 }
 
 pub struct OutputManager {
@@ -213,9 +248,11 @@ impl OutputManager {
                 continue;
             }
             let selected = st.selected.as_deref() == Some(d.id.as_str());
+            // Driven by another projector of the venue (T-277).
+            let slot = st.projectors.values().find(|p| p.selected.as_deref() == Some(d.id.as_str()));
             out.push(OutputInfo {
-                state: if selected { st.state } else { LinkState::Available },
-                error: if selected { st.error.clone() } else { None },
+                state: if selected { st.state } else { slot.map_or(LinkState::Available, |p| p.state) },
+                error: if selected { st.error.clone() } else { slot.and_then(|p| p.error.clone()) },
                 id: d.id,
                 name: d.name,
                 kind: d.kind,
@@ -295,6 +332,78 @@ impl OutputManager {
         let _ = self.cmd_tx.lock().unwrap().send(Cmd::Lost(gen, error));
     }
 
+    /// `POST /api/venue` (T-277): projector `projector` now drives `id`
+    /// (None: no output, or the projector was removed). The caller checked
+    /// the laser is disarmed. Returns at once, like `select`.
+    pub fn select_projector(&self, projector: &str, id: Option<String>, src: ArmSource) {
+        {
+            let mut st = self.status.lock().unwrap();
+            let slot = st.projectors.entry(projector.to_string()).or_default();
+            if slot.selected == id && slot.state != LinkState::Lost {
+                if id.is_none() && !slot.handed {
+                    st.projectors.remove(projector);
+                }
+                return;
+            }
+            slot.state = if id.is_some() { LinkState::Connecting } else { LinkState::Available };
+            slot.selected = id.clone();
+            slot.name = None;
+            slot.kind = None;
+            slot.error = None;
+            slot.retry_at = None;
+            slot.failed = 0;
+        }
+        log::info!("Projecteur {projector} ({}) : sortie {}", src.label_fr(), id.as_deref().unwrap_or("aucune"));
+        let _ = self.cmd_tx.lock().unwrap().send(Cmd::SelectProjector(projector.to_string(), id, src));
+    }
+
+    /// The venue projectors' links (T-277), in projector id order.
+    pub fn projector_links(&self) -> Vec<ProjectorLink> {
+        let st = self.status.lock().unwrap();
+        st.projectors
+            .iter()
+            .filter(|(_, p)| p.selected.is_some() || p.handed)
+            .map(|(id, p)| ProjectorLink { projector: id.clone(), selected: p.selected.clone(), name: p.name.clone(), kind: p.kind, state: p.state, error: p.error.clone() })
+            .collect()
+    }
+
+    /// Which output slot drives output `id`: `Some(None)` the main one,
+    /// `Some(Some(projector))` a venue projector, None nobody.
+    pub fn driver_of(&self, id: &str) -> Option<Option<String>> {
+        let st = self.status.lock().unwrap();
+        if st.selected.as_deref() == Some(id) {
+            return Some(None);
+        }
+        st.projectors.iter().find(|(_, p)| p.selected.as_deref() == Some(id)).map(|(pid, _)| Some(pid.clone()))
+    }
+
+    /// The engine's question when a projector's change lands (T-277).
+    pub fn is_current_projector(&self, projector: &str, gen: u64) -> bool {
+        let st = self.status.lock().unwrap();
+        st.projectors.get(projector).is_some_and(|p| p.gen == gen && p.state == LinkState::Connected)
+    }
+
+    /// The engine thread saw projector `projector`'s hand-over `gen` fail.
+    pub fn report_lost_projector(&self, projector: &str, gen: u64, error: String) {
+        let _ = self.cmd_tx.lock().unwrap().send(Cmd::LostProjector(projector.to_string(), gen, error));
+    }
+
+    /// Unit tests (safety invariants): hands `output` to the engine as
+    /// projector `projector`'s, as if the manager had opened it.
+    #[cfg(test)]
+    pub fn inject_projector(&self, projector: &str, id: &str, output: Box<dyn Output>) {
+        {
+            let mut st = self.status.lock().unwrap();
+            let slot = st.projectors.entry(projector.to_string()).or_default();
+            slot.selected = Some(id.to_string());
+            slot.name = Some(output.name().to_string());
+            slot.kind = Some(output.kind());
+            slot.state = LinkState::Connected;
+            slot.handed = true;
+        }
+        self.hand_over_projector(projector, Some(output), ChangeKind::Connected, ArmSource::Ui, Some(id.to_string()));
+    }
+
     /// The engine thread, once per frame: the next output to install.
     pub fn engine_take(&self) -> Option<StageChange> {
         self.stage_rx.lock().unwrap().try_recv().ok()
@@ -332,6 +441,9 @@ impl OutputManager {
             "scanned": scan["scanned"],
             "scan_error": scan["error"],
             "usb": scan["usb"],
+            "projectors": st.projectors.iter().filter(|(_, p)| p.selected.is_some() || p.handed).map(|(id, p)| json!({
+                "projector": id, "selected": p.selected, "name": p.name, "kind": p.kind, "state": p.state, "error": p.error,
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -362,8 +474,118 @@ impl OutputManager {
         match cmd {
             Some(Cmd::Select(id, src)) => self.on_select(id, src, now),
             Some(Cmd::Lost(gen, error)) => self.on_lost(gen, error, now),
-            None => self.on_tick(now),
+            Some(Cmd::SelectProjector(pid, id, src)) => self.on_select_projector(&pid, id, src, now),
+            Some(Cmd::LostProjector(pid, gen, error)) => self.on_lost_projector(&pid, gen, error, now),
+            None => {
+                self.on_tick(now);
+                self.on_tick_projectors(now);
+            }
         }
+    }
+
+    fn on_select_projector(&self, pid: &str, id: Option<String>, src: ArmSource, now: Instant) {
+        let handed = {
+            let mut st = self.status.lock().unwrap();
+            st.projectors.get_mut(pid).is_some_and(|p| std::mem::take(&mut p.handed))
+        };
+        if handed {
+            self.hand_over_projector(pid, None, ChangeKind::Disconnected, src, None);
+        }
+        let Some(id) = id else {
+            // Nothing to drive: forget the slot once the engine is told.
+            let mut st = self.status.lock().unwrap();
+            if st.projectors.get(pid).is_some_and(|p| p.selected.is_none()) {
+                st.projectors.remove(pid);
+            }
+            return;
+        };
+        if self.status.lock().unwrap().projectors.get(pid).and_then(|p| p.selected.as_deref()) != Some(id.as_str()) {
+            return; // a newer choice is queued
+        }
+        self.attempt_projector(pid, &id, ChangeKind::Connected, src, now);
+    }
+
+    fn on_lost_projector(&self, pid: &str, gen: u64, error: String, now: Instant) {
+        let mut st = self.status.lock().unwrap();
+        let auto = st.auto_reconnect;
+        let Some(slot) = st.projectors.get_mut(pid) else { return };
+        if slot.gen != gen || slot.state != LinkState::Connected {
+            return;
+        }
+        log::warn!("Projecteur {pid} : sortie perdue : {error}");
+        slot.state = LinkState::Lost;
+        slot.error = Some(error);
+        slot.failed = 0;
+        slot.retry_at = auto.then(|| now + backoff(0));
+    }
+
+    fn on_tick_projectors(&self, now: Instant) {
+        let due: Vec<(String, String)> = {
+            let st = self.status.lock().unwrap();
+            if !st.auto_reconnect {
+                return;
+            }
+            st.projectors
+                .iter()
+                .filter(|(_, p)| p.state == LinkState::Lost && p.retry_at.is_some_and(|at| at <= now))
+                .filter_map(|(pid, p)| Some((pid.clone(), p.selected.clone()?)))
+                .collect()
+        };
+        for (pid, id) in due {
+            self.attempt_projector(&pid, &id, ChangeKind::Reconnected, ArmSource::System, now);
+        }
+    }
+
+    /// `attempt` for a venue projector's output.
+    fn attempt_projector(&self, pid: &str, id: &str, kind: ChangeKind, src: ArmSource, now: Instant) {
+        let pps = self.status.lock().unwrap().pps;
+        let opened = self.backend.open(id, pps);
+        let mut st = self.status.lock().unwrap();
+        let auto = st.auto_reconnect;
+        let Some(slot) = st.projectors.get_mut(pid).filter(|p| p.selected.as_deref() == Some(id)) else {
+            drop(st);
+            if let Ok(mut out) = opened {
+                let _ = out.blank_now();
+            }
+            return;
+        };
+        match opened {
+            Ok(out) => {
+                log::info!("Projecteur {pid} : sortie {} {}", out.name(), if kind == ChangeKind::Reconnected { "retrouvée (laser désarmé)" } else { "connectée" });
+                slot.name = Some(out.name().to_string());
+                slot.kind = Some(out.kind());
+                slot.state = LinkState::Connected;
+                slot.error = None;
+                slot.retry_at = None;
+                slot.failed = 0;
+                slot.handed = true;
+                drop(st);
+                self.hand_over_projector(pid, Some(out), kind, src, Some(id.to_string()));
+            }
+            Err(e) => {
+                let error = format!("{e:#}");
+                if kind == ChangeKind::Reconnected {
+                    slot.failed += 1;
+                } else {
+                    log::warn!("Projecteur {pid} : connexion de la sortie {id} impossible : {error}");
+                    slot.failed = 0;
+                }
+                slot.state = LinkState::Lost;
+                slot.error = Some(error);
+                slot.retry_at = auto.then(|| now + backoff(slot.failed));
+            }
+        }
+    }
+
+    /// `hand_over` for a venue projector, under that projector's generation.
+    fn hand_over_projector(&self, pid: &str, output: Option<Box<dyn Output>>, kind: ChangeKind, source: ArmSource, id: Option<String>) {
+        let gen = {
+            let mut st = self.status.lock().unwrap();
+            let slot = st.projectors.entry(pid.to_string()).or_default();
+            slot.gen += 1;
+            slot.gen
+        };
+        let _ = self.stage_tx.lock().unwrap().send(StageChange { output, kind, source, gen, id, projector: Some(pid.to_string()) });
     }
 
     fn on_select(&self, id: Option<String>, src: ArmSource, now: Instant) {
@@ -457,7 +679,7 @@ impl OutputManager {
             st.gen += 1;
             st.gen
         };
-        let _ = self.stage_tx.lock().unwrap().send(StageChange { output, kind, source, gen, id });
+        let _ = self.stage_tx.lock().unwrap().send(StageChange { output, kind, source, gen, id, projector: None });
     }
 
     /// The generation of the output opened by `open_at_start` (0).
@@ -981,5 +1203,57 @@ mod tests {
         assert_eq!(list.last().unwrap().id, "auto");
         assert_eq!(list.last().unwrap().state, LinkState::Connected);
         assert!(mgr.knows("auto") && mgr.knows("b") && !mgr.knows("c"));
+    }
+
+    fn projector_changes(mgr: &OutputManager) -> Vec<(Option<String>, ChangeKind, Option<String>, bool)> {
+        std::iter::from_fn(|| mgr.engine_take()).map(|c| (c.projector, c.kind, c.id, c.output.is_some())).collect()
+    }
+
+    #[test]
+    fn a_venue_projector_gets_its_own_output_and_generations() {
+        let (mgr, _, _) = manager(true);
+        let t0 = Instant::now();
+        mgr.select(Some("a".into()), ArmSource::Ui);
+        drain(&mgr, t0);
+        let main_gen = mgr.current_gen();
+        mgr.select_projector("p2", Some("b".into()), ArmSource::Ui);
+        drain(&mgr, t0);
+        let got = projector_changes(&mgr);
+        assert_eq!(got.last().unwrap(), &(Some("p2".into()), ChangeKind::Connected, Some("b".into()), true));
+        assert!(mgr.is_current(main_gen), "a projector's hand-over leaves the main generation alone");
+        assert!(mgr.is_current_projector("p2", 1));
+        assert_eq!(mgr.driver_of("b"), Some(Some("p2".into())));
+        assert_eq!(mgr.driver_of("a"), Some(None));
+        assert_eq!(mgr.list().iter().find(|o| o.id == "b").unwrap().state, LinkState::Connected);
+        assert_eq!(mgr.projector_links().len(), 1);
+        // Removing it: the engine gets a dark hand-over and the slot goes.
+        mgr.select_projector("p2", None, ArmSource::Ui);
+        drain(&mgr, t0);
+        assert_eq!(projector_changes(&mgr), [(Some("p2".into()), ChangeKind::Disconnected, None, false)]);
+        assert!(mgr.projector_links().is_empty());
+        assert_eq!(mgr.driver_of("b"), None);
+    }
+
+    #[test]
+    fn a_lost_projector_output_is_retried_and_comes_back_disarmed() {
+        let (mgr, dropped, _) = manager(true);
+        let t0 = Instant::now();
+        mgr.select_projector("p2", Some("b".into()), ArmSource::Ui);
+        drain(&mgr, t0);
+        projector_changes(&mgr);
+        dropped.store(true, Ordering::SeqCst);
+        mgr.report_lost_projector("p2", 1, "b ne répond plus".into());
+        drain(&mgr, t0);
+        assert_eq!(mgr.projector_links()[0].state, LinkState::Lost);
+        mgr.step(None, t0 + Duration::from_millis(1500));
+        assert_eq!(mgr.projector_links()[0].state, LinkState::Lost, "still unplugged");
+        dropped.store(false, Ordering::SeqCst);
+        mgr.step(None, t0 + Duration::from_secs(10));
+        assert_eq!(mgr.projector_links()[0].state, LinkState::Connected);
+        assert_eq!(projector_changes(&mgr), [(Some("p2".into()), ChangeKind::Reconnected, Some("b".into()), true)]);
+        // A late report about an older hand-over changes nothing.
+        mgr.report_lost_projector("p2", 1, "vieux".into());
+        drain(&mgr, t0);
+        assert_eq!(mgr.projector_links()[0].state, LinkState::Connected);
     }
 }
