@@ -622,10 +622,19 @@ pub struct Preview {
 /// A look over its program's length (4 beats without a program) at `bpm`.
 /// Display only: it never reaches the output.
 pub fn preview(settings: &Settings, bpm: f64, beats_per_bar: u8) -> Preview {
+    preview_with(settings, bpm, beats_per_bar, PREVIEW_FRAMES, 0.25)
+}
+
+/// Most pictures in the cue editor's live preview (T-164): smoother than
+/// the grid's hover, still a light request.
+pub const EDITOR_PREVIEW_FRAMES: usize = 128;
+
+/// `preview` with at most `max_frames` pictures, `min_step` beats apart or more.
+pub fn preview_with(settings: &Settings, bpm: f64, beats_per_bar: u8, max_frames: usize, min_step: f64) -> Preview {
     let bpm = if bpm.is_finite() { bpm.clamp(20.0, 400.0) } else { 120.0 };
     let len = settings.program.as_ref().map_or(4.0, |p| p.length(&settings.content));
-    let step = (len / PREVIEW_FRAMES as f64).max(0.25);
-    let count = ((len / step).round() as usize).clamp(1, PREVIEW_FRAMES);
+    let step = (len / max_frames.max(1) as f64).max(min_step);
+    let count = ((len / step).round() as usize).clamp(1, max_frames.max(1));
     let dt = (step * 60.0 / bpm) as f32;
     let audio = AudioFeatures { level: 0.6, bass: 0.6, ..AudioFeatures::default() };
     let mut animator = Animator::starting_at(0.0);
