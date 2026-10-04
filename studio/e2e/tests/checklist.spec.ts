@@ -81,6 +81,12 @@ test.describe('simulated real output', () => {
     expect(done.detail.items.find((i: { id: string }) => i.id === 'outdoor_permit').value).toBe('DGTA-2026-042');
     expect(done.text).toContain('terminée par Michel');
 
+    // T-255: with a real output, the audience must be located too.
+    await armBtn.click();
+    await expect(page.locator('#armRefused')).toContainText('Aucune zone Public');
+    expect((await studio.state()).armed).toBe(false);
+    await studio.declareAudience();
+
     await armBtn.click();
     await expect.poll(async () => (await studio.state()).armed).toBe(true);
 

@@ -9,6 +9,7 @@
 //! state.
 
 mod applog;
+mod audience;
 mod audio;
 mod autosave;
 mod beat;
@@ -313,6 +314,9 @@ pub struct Shared {
     /// The pre-show checklist (checklist.rs, T-258): the list is saved,
     /// what was ticked lives for this run only.
     pub checklist: checklist::Checklist,
+    /// Audience scanning mode (audience.rs, T-255). In memory only: every
+    /// start is « Au-dessus du public ».
+    pub audience: audience::AudienceState,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
     /// A pending simulated stall (ms): the engine sleeps this long while
@@ -337,6 +341,7 @@ impl Shared {
     pub fn request_arm(&mut self, src: interlock::ArmSource) -> Result<(), Vec<String>> {
         self.sync_data_warnings();
         self.sync_safety(Instant::now());
+        self.sync_audience();
         self.gate.request_arm(src)?;
         self.health.note_armed();
         Ok(())
@@ -351,6 +356,7 @@ impl Shared {
         }
         self.sync_data_warnings();
         self.sync_safety(Instant::now());
+        self.sync_audience();
         self.gate.request_arm_midi_opt_in()?;
         self.health.note_armed();
         Ok(())
@@ -442,14 +448,85 @@ impl Shared {
         // A PONK id holds an address literal: parsed, never resolved.
         let receiver = self.output_mgr.selected().and_then(|id| id.strip_prefix("ponk:")?.parse::<std::net::SocketAddr>().ok()).map(|a| a.ip());
         self.wifi.set_target(kind.map(|_| wifi::Target::for_receiver(receiver)));
+        // The audience mode follows the checklist and the sheet (T-255).
+        self.sync_audience();
     }
 
-    /// Trips the emergency stop and records it in the gate.
+    /// The conditions to unlock audience scanning, as they stand (T-255).
+    pub fn audience_conditions(&self) -> Vec<audience::Condition> {
+        let safety = self.safety.get();
+        audience::conditions(&audience::Inputs {
+            safety: &safety,
+            projector: &self.outputs.active().projector,
+            checklist: &self.checklist,
+            hold_to_run: self.presence.settings.hold_to_run,
+        })
+    }
+
+    /// `POST /api/audience {mode: "scanning", phrase}`: unlocks audience
+    /// scanning (disarmed, every condition met, the phrase typed), logged
+    /// with every condition. Never arms anything.
+    pub fn unlock_audience_scanning(&mut self, phrase: &str, src: interlock::ArmSource) -> Result<(), audience::UnlockError> {
+        self.sync_safety(Instant::now());
+        let conds = self.audience_conditions();
+        let mut detail = self.audience.unlock(&conds, phrase, self.gate.is_armed())?;
+        detail["operator"] = serde_json::json!(self.checklist.view()["operator"]);
+        log::warn!("Balayage public déverrouillé ({})", src.label_fr());
+        self.gate.log().record("audience_mode", Some(src.id()), detail);
+        Ok(())
+    }
+
+    /// Back to « Au-dessus du public » (tightening: always allowed, even
+    /// armed). `reason` goes to the safety log. No-op when already there.
+    pub fn end_audience_scanning(&mut self, reason: &str, src: interlock::ArmSource, missing: &[String]) {
+        if self.audience.lock() {
+            log::warn!("Balayage public terminé : {reason}");
+            self.gate.log().record("audience_mode", Some(src.id()), serde_json::json!({ "mode": "above", "reason": reason, "missing": missing }));
+        }
+    }
+
+    /// Keeps the audience mode and the `audience_zone` interlock in line
+    /// (T-255), at every frame and after every change that matters.
+    /// Audience scanning ends on an e-stop, on any disarm the operator did
+    /// not ask for, and as soon as a condition stops being met. With a
+    /// real output (checklist enforced), arming waits for a Public zone or
+    /// a full horizon. Never arms.
+    pub fn sync_audience(&mut self) {
+        if let Some(unlocked_at) = self.audience.unlocked_at() {
+            let disarm = self.gate.last_disarm().filter(|(reason, at)| *at > unlocked_at && **reason != interlock::DisarmReason::User).map(|(reason, _)| reason.id());
+            if self.estop.is_latched() {
+                self.end_audience_scanning("estop", interlock::ArmSource::System, &[]);
+            } else if let Some(reason) = disarm {
+                self.end_audience_scanning(&format!("disarm:{reason}"), interlock::ArmSource::System, &[]);
+            } else {
+                let missing: Vec<String> = self.audience_conditions().into_iter().filter(|c| !c.ok).map(|c| c.label_fr.to_string()).collect();
+                if !missing.is_empty() {
+                    self.end_audience_scanning("condition", interlock::ArmSource::System, &missing);
+                }
+            }
+        }
+        if self.checklist.enforced() {
+            let ok = audience::protected(&self.safety.get());
+            if !self.gate.has_interlock(interlock::AUDIENCE_ZONE) || self.gate.interlock_ok(interlock::AUDIENCE_ZONE) != ok {
+                self.gate.register(interlock::AUDIENCE_ZONE, audience::INTERLOCK_LABEL, ok);
+            }
+        }
+    }
+
+    /// The safety settings the output stage applies now: Public zones
+    /// blanked outside audience scanning (audience.rs).
+    pub fn effective_safety(&self) -> safety::SafetySettings {
+        audience::effective(&self.safety.get(), self.audience.is_scanning())
+    }
+
+    /// Trips the emergency stop and records it in the gate. Audience
+    /// scanning ends with it (T-255).
     pub fn emergency_stop(&mut self, src: interlock::ArmSource) {
         self.estop.trip(src);
         self.gate.sync_estop(&self.estop);
         // External inputs lose the hand until the operator reopens them.
         external::sync(self);
+        self.sync_audience();
     }
 
     /// Seconds since startup: the time base of the tempo clock.
@@ -853,6 +930,7 @@ fn startup_state(cli: &Cli) -> Shared {
         show_mode: showmode::ShowMode::load(&cli.data_dir),
         data_warnings: Vec::new(),
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
+        audience: Default::default(),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
         devices: Arc::clone(output_mgr.devices()),
@@ -1085,8 +1163,10 @@ impl Engine {
 
         let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing) = {
             let mut s = shared.lock().unwrap();
-            // E-stop latch, watchdog trip, heartbeats and hold-to-run.
+            // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
+            // the audience mode, which ends with any of them (T-255).
             let hold_ok = s.sync_safety(now);
+            s.sync_audience();
             s.health.tick(s.gate.is_armed());
             if s.test_stall_ms > 0 {
                 // `--test-hooks` only: a stall while holding the lock.
@@ -1164,7 +1244,7 @@ impl Engine {
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
             let armed = s.gate.is_armed();
             let routing = Routing::read(&s, &looks, &show_cues);
-            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits(), s.outputs.active_color(), pattern, routing)
+            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), s.outputs.active_limits(), s.outputs.active_color(), pattern, routing)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1242,7 +1322,9 @@ impl Engine {
         // Static beam guard (T-256): on the frame that really goes out
         // (after zones and the limiter), so a figure shrunk to a point, a
         // frozen frame or a held beam is dimmed whatever made it.
-        let mut frame = self.dwell_guard.apply(frame, t, &safety_cfg.dwell, safety_cfg.horizon.y, armed);
+        // Strict below the horizon and in the Public zones (T-255).
+        let area = dwell::StrictArea::new(safety_cfg.horizon.y, &safety_cfg.zones);
+        let mut frame = self.dwell_guard.apply(frame, t, &safety_cfg.dwell, &area, armed);
         // Power caps of the output (T-254), after everything else in the
         // safety stage: they can only reduce, and a lowered cap applies
         // from this tick. The preview shows the capped frame too.
@@ -1427,6 +1509,118 @@ mod tests {
         assert_eq!(s.checklist.visible_items().filter(|i| i.only_for.is_some()).count(), 3);
     }
 
+    /// A studio where every condition of audience scanning is met (T-255).
+    fn ready_for_audience_scanning(log: safety_log::SafetyLog) -> Shared {
+        let mut s = test_support::shared();
+        s.gate.set_log(log);
+        let zone = zones::Zone { id: 1, name: "Public".into(), kind: zones::ZoneKind::Dim, level: 0.1, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 0.0], [-1.0, 0.0]], audience: true };
+        let mut cfg = safety::SafetySettings { zones: vec![zone], ..Default::default() };
+        cfg.dwell.profile = dwell::DwellProfile::Strict;
+        s.safety.set(cfg, true).unwrap();
+        let sheet = power::ProjectorInfo { name: "P".into(), power_mw: [100.0; 3], divergence_mrad: 1.0, hw_scan_fail: Some(true), ..Default::default() };
+        s.outputs.set(power::MAIN_OUTPUT, None, Some(sheet), false, false).unwrap();
+        let mut list = s.checklist.config().clone();
+        list.audience_scan = true;
+        s.checklist.set_config(list, false).unwrap();
+        s.checklist.set_operator("Op").unwrap();
+        let ids: Vec<String> = s.checklist.visible_items().map(|i| i.id.clone()).collect();
+        for id in ids {
+            s.checklist.check(&id, true, Some("0.8")).unwrap();
+        }
+        s.checklist.complete().unwrap();
+        s.presence.settings.hold_to_run = true;
+        s
+    }
+
+    /// T-255: the mode ends on an e-stop (and stays ended after the reset),
+    /// on a disarm the operator did not ask for, and when a condition stops
+    /// being met; a disarm by the operator keeps it. Never arms.
+    #[test]
+    fn audience_scanning_ends_on_estop_unasked_disarm_or_a_lost_condition() {
+        use crate::audience::{UnlockError, PHRASE};
+        let (log, sink) = safety_log::testing::memory_log();
+        let mut s = ready_for_audience_scanning(log.clone());
+        assert!(!s.audience.is_scanning(), "every start is above the audience");
+        s.request_arm(interlock::ArmSource::Ui).unwrap();
+        assert_eq!(s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui), Err(UnlockError::Armed));
+        s.gate.disarm(interlock::DisarmReason::User, interlock::ArmSource::Ui);
+        s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui).unwrap();
+        assert!(s.audience.is_scanning() && !s.gate.is_armed(), "unlocking never arms");
+        let cfg = s.effective_safety();
+        assert_eq!(cfg.zones[0].kind, zones::ZoneKind::Dim, "the Public zone keeps its attenuation");
+
+        // The operator arms and disarms: still scanning.
+        s.request_arm(interlock::ArmSource::Ui).unwrap();
+        s.gate.disarm(interlock::DisarmReason::User, interlock::ArmSource::Ui);
+        s.sync_audience();
+        assert!(s.audience.is_scanning());
+
+        // E-stop: back above, and the reset does not bring it back.
+        s.emergency_stop(interlock::ArmSource::Keyboard);
+        assert!(!s.audience.is_scanning());
+        assert_eq!(s.effective_safety().zones[0].kind, zones::ZoneKind::Blank);
+        let estop = Arc::clone(&s.estop);
+        s.gate.reset_estop(&estop);
+        s.sync_audience();
+        assert!(!s.audience.is_scanning());
+
+        // A disarm nobody asked for (the watchdog).
+        s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        s.gate.watchdog_trip();
+        s.sync_audience();
+        assert!(!s.audience.is_scanning());
+
+        // A condition lost: the guard loosened, or the checklist restarted.
+        s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui).unwrap();
+        let mut cfg = s.safety.get();
+        cfg.dwell.profile = dwell::DwellProfile::Beams;
+        s.safety.set(cfg, true).unwrap();
+        s.sync_audience();
+        assert!(!s.audience.is_scanning());
+        let mut cfg = s.safety.get();
+        cfg.dwell.profile = dwell::DwellProfile::Strict;
+        s.safety.set(cfg, true).unwrap();
+        s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui).unwrap();
+        s.checklist.restart();
+        s.sync_audience();
+        assert!(!s.audience.is_scanning());
+        assert_eq!(s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui).unwrap_err(), UnlockError::Missing(vec![s.audience_conditions()[2].label_fr.to_string()]));
+
+        // Every change is in the safety log, the unlock with its conditions.
+        log.flush(Duration::from_secs(2));
+        let events = sink.events();
+        let modes: Vec<&serde_json::Value> = events.iter().filter(|e| e.kind == "audience_mode").map(|e| &e.detail).collect();
+        assert_eq!(modes.iter().filter(|d| d["mode"] == "scanning").count(), 4);
+        assert!(modes.iter().any(|d| d["reason"] == "estop"));
+        assert!(modes.iter().any(|d| d["reason"] == "disarm:engine_stall"));
+        assert!(modes.iter().any(|d| d["reason"] == "condition"));
+    }
+
+    /// T-255: with a real output, arming waits until a Public zone or a
+    /// full horizon says where the audience is. Pure preview: no interlock.
+    #[test]
+    fn a_real_output_refuses_arming_until_the_audience_is_located() {
+        let mut s = test_support::shared();
+        s.sync_checklist();
+        assert!(!s.gate.has_interlock(interlock::AUDIENCE_ZONE), "preview: no audience interlock");
+        s.checklist.enforce();
+        s.sync_checklist();
+        assert!(!s.gate.interlock_ok(interlock::AUDIENCE_ZONE));
+        assert!(s.gate.blocking().contains(&audience::INTERLOCK_LABEL.to_string()));
+        let mut cfg = s.safety.get();
+        cfg.horizon = zones::Horizon { lines: true, level: 0.0, ..cfg.horizon };
+        s.safety.set(cfg, true).unwrap();
+        s.sync_audience();
+        assert!(s.gate.interlock_ok(interlock::AUDIENCE_ZONE), "a full horizon at 0 % is enough");
+        let mut cfg = s.safety.get();
+        cfg.horizon.lines = false;
+        cfg.zones.push(zones::Zone { name: "Public".into(), points: vec![[-1.0, -1.0], [1.0, -1.0], [0.0, -0.5]], audience: true, ..Default::default() });
+        s.safety.set(cfg, true).unwrap();
+        s.sync_audience();
+        assert!(s.gate.interlock_ok(interlock::AUDIENCE_ZONE), "a Public zone too");
+    }
+
     #[test]
     fn the_checklist_is_enforced_only_with_a_real_output() {
         let parse = |args: &[&str]| Cli::try_parse_from([&["laser-studio"][..], args].concat()).unwrap();
@@ -1457,7 +1651,8 @@ mod tests {
         assert!(!s.gate.is_armed(), "completing never arms");
         drop(s);
         let again = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
-        assert_eq!(again.checklist.config().items.iter().filter(|i| i.only_for.is_none()).count(), 1, "the edited list is kept");
+        // The ShowNET and audience items are put back (T-472, T-255).
+        assert_eq!(again.checklist.config().items.iter().filter(|i| i.only_for.is_none() && i.when != checklist::ItemWhen::AudienceScan).count(), 1, "the edited list is kept");
         assert!(!again.gate.interlock_ok(interlock::CHECKLIST), "the ticks are not");
         drop(again);
         let _ = std::fs::remove_dir_all(dir);

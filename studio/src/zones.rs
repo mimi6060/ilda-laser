@@ -72,11 +72,14 @@ pub struct Zone {
     pub level: f32,
     /// Polygon vertices in output coordinates, not closed.
     pub points: Vec<[f32; 2]>,
+    /// A « Public » zone: where the audience is (T-255, `audience.rs`).
+    /// Outside audience scanning mode it is blanked whatever its kind.
+    pub audience: bool,
 }
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { id: 0, name: "Zone".into(), kind: ZoneKind::Blank, level: 0.3, points: Vec::new() }
+        Self { id: 0, name: "Zone".into(), kind: ZoneKind::Blank, level: 0.3, points: Vec::new(), audience: false }
     }
 }
 
@@ -280,6 +283,48 @@ impl Poly {
                 }
             }
         }
+    }
+}
+
+/// The audience (« Public ») zones as polygons (T-255): where the static
+/// beam guard applies its strict rules (dwell.rs).
+#[derive(Default)]
+pub struct AudienceArea {
+    polys: Vec<Poly>,
+}
+
+impl AudienceArea {
+    pub fn new(zones: &[Zone]) -> Self {
+        Self { polys: zones.iter().filter(|z| z.audience).filter_map(Poly::new).collect() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.polys.is_empty()
+    }
+
+    /// (x, y) is inside a Public zone or on its edge.
+    pub fn covers(&self, x: f32, y: f32) -> bool {
+        self.polys.iter().any(|p| p.covers(x, y))
+    }
+
+    /// The rectangle (x0, y0)–(x1, y1) touches a Public zone: a corner of
+    /// one inside the other, or two edges crossing.
+    pub fn overlaps_rect(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        self.polys.iter().any(|p| {
+            if p.max.0 < x0 || p.min.0 > x1 || p.max.1 < y0 || p.min.1 > y1 {
+                return false;
+            }
+            if corners.iter().any(|&(x, y)| p.covers(x, y)) || p.v.iter().any(|&(x, y)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y)) {
+                return true;
+            }
+            let mut ts = Vec::new();
+            (0..4).any(|i| {
+                ts.clear();
+                p.crossings(corners[i], corners[(i + 1) % 4], &mut ts);
+                !ts.is_empty()
+            })
+        })
     }
 }
 
@@ -693,6 +738,23 @@ mod tests {
         let m = Mask::new(&[], Horizon::default(), [3.0, f32::NAN, -1.0], 2.0);
         assert_eq!(m.gain, [1.0, 1.0, 0.0]);
         assert_eq!(m.min_level, 0.5);
+    }
+
+    /// T-255: the Public zones as an area, and rectangles touching it.
+    #[test]
+    fn the_audience_area_is_the_public_zones_only() {
+        // A triangle: cases where no corner of either is inside the other.
+        let tri = Zone { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], audience: true, ..Default::default() };
+        let other = rect(0.6, 0.6, 0.9, 0.9, ZoneKind::Blank);
+        let area = AudienceArea::new(&[tri.clone(), other]);
+        assert!(area.covers(0.0, 0.0) && area.covers(0.5, -0.5), "inside and on a vertex");
+        assert!(!area.covers(0.7, 0.7), "a zone not marked Public is not in the area");
+        assert!(area.overlaps_rect(-0.1, -0.1, 0.1, 0.1), "inside");
+        assert!(area.overlaps_rect(-1.0, -1.0, 1.0, 1.0), "around it");
+        assert!(area.overlaps_rect(-0.6, -0.1, 0.6, 0.0), "a band crossing two edges, no corner inside");
+        assert!(!area.overlaps_rect(0.3, 0.3, 0.5, 0.5), "beside the slanted edge");
+        assert!(!area.overlaps_rect(0.6, 0.6, 0.9, 0.9));
+        assert!(AudienceArea::new(&[Zone { audience: false, ..tri }]).is_empty());
     }
 
     #[test]

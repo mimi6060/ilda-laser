@@ -509,6 +509,16 @@ pub fn describe(e: &SafetyEvent) -> String {
         "checklist_reset" if str_of(d, "reason") == "shownet" => "Liste de contrôle avant show recommencée : sortie ShowNET, nouveaux points à cocher".into(),
         "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
         "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),
+        "audience_mode" if str_of(d, "mode") == "scanning" => {
+            let n = d.get("conditions").and_then(Value::as_array).map_or(0, |a| a.len());
+            format!("Balayage public déverrouillé par {} ({n} conditions remplies)", str_of(d, "operator"))
+        }
+        "audience_mode" => match str_of(d, "reason") {
+            "user" => "Retour au-dessus du public".into(),
+            "estop" => "Balayage public terminé : arrêt d'urgence".into(),
+            "condition" => "Balayage public terminé : une condition n'est plus remplie".into(),
+            _ => "Balayage public terminé : désarmement".into(),
+        },
         "output_select" => match d.get("id").and_then(Value::as_str) {
             Some(id) => format!("Sortie choisie : {id} (laser désarmé)"),
             None => "Sortie déconnectée : aperçu seulement (laser désarmé)".into(),

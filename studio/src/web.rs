@@ -167,6 +167,7 @@ fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>) {
     if let Ok(mut s) = shared.try_lock() {
         let s = &mut *s;
         s.gate.sync_estop(&s.estop);
+        s.sync_audience();
     }
     if let Err(e) = request.respond(ok()) {
         log::debug!("failed to send HTTP response: {e}");
@@ -372,6 +373,8 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 if let Some(change) = crate::safety_log::settings_change(&before, &s.presence.settings) {
                     s.gate.log().record("presence_settings", Some("ui"), change);
                 }
+                // Hold-to-run off ends audience scanning (T-255).
+                s.sync_audience();
                 json_response(json!(s.presence.settings))
             }
             Err(e) => e,
@@ -526,6 +529,8 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                                     change["confirmed_loosen"] = json!(confirm);
                                     s.gate.log().record("safety_settings", Some("ui"), change);
                                 }
+                                // Public zones: the `audience_zone` interlock and the audience mode (T-255).
+                                s.sync_audience();
                                 json_response(json!({ "settings": stored }))
                             }
                             Err(crate::safety::SetError::Invalid(msg)) => text(400, &msg),
@@ -535,6 +540,53 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                             ),
                         }
                     }
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/audience") => {
+            let mut s = shared.lock().unwrap();
+            s.sync_audience();
+            json_response(audience_view(&s))
+        }
+        // Audience scanning (T-255). `{"mode": "above"}` always applies (it
+        // only tightens, even armed). `{"mode": "scanning", "phrase": ..}`
+        // unlocks only disarmed (409 `{error, armed}`), with every
+        // condition met (409 `{error, missing}`) and the exact phrase (409
+        // `{error, needs_phrase}`), never in show mode (423). Logged; never
+        // arms.
+        (Method::Post, "/api/audience") => match body::<serde_json::Value>(request) {
+            Ok(v) => {
+                let source = ArmSource::parse(v.get("source").and_then(|s| s.as_str()).unwrap_or("ui"));
+                let mut s = shared.lock().unwrap();
+                match v.get("mode").and_then(|m| m.as_str()) {
+                    Some("above") => {
+                        s.end_audience_scanning("user", source, &[]);
+                        json_response(audience_view(&s))
+                    }
+                    Some("scanning") => {
+                        if s.show_mode.on {
+                            return locked();
+                        }
+                        if !matches!(source, ArmSource::Ui | ArmSource::Keyboard | ArmSource::Api) {
+                            return text(403, "le balayage public se déverrouille depuis l'interface seulement");
+                        }
+                        let phrase = v.get("phrase").and_then(|p| p.as_str()).unwrap_or("");
+                        match s.unlock_audience_scanning(phrase, source) {
+                            Ok(()) => json_response(audience_view(&s)),
+                            Err(e) => {
+                                let mut reply = audience_view(&s);
+                                reply["error"] = json!(e.message_fr());
+                                match &e {
+                                    crate::audience::UnlockError::Armed => reply["armed"] = json!(true),
+                                    crate::audience::UnlockError::Missing(m) => reply["missing"] = json!(m),
+                                    crate::audience::UnlockError::Phrase => reply["needs_phrase"] = json!(true),
+                                }
+                                with_status(json_response(reply), 409)
+                            }
+                        }
+                    }
+                    _ => text(400, "expected \"mode\": \"above\" or \"scanning\""),
                 }
             }
             Err(e) => e,
@@ -1862,6 +1914,18 @@ fn lock_view(s: &Shared) -> serde_json::Value {
     json!({ "show_mode": s.show_mode.on })
 }
 
+/// `GET /api/audience` (T-255): the mode, every unlock condition, the
+/// phrase to type and whether the `audience_zone` interlock is satisfied.
+fn audience_view(s: &Shared) -> serde_json::Value {
+    let mut v = s.audience.view();
+    v["conditions"] = json!(s.audience_conditions());
+    v["phrase"] = json!(crate::audience::PHRASE);
+    v["protected"] = json!(crate::audience::protected(&s.safety.get()));
+    v["enforced"] = json!(s.checklist.enforced());
+    v["armed"] = json!(s.gate.is_armed());
+    v
+}
+
 /// 423 Locked: an edit refused in show mode (T-283).
 fn locked() -> HttpResponse {
     text(423, crate::showmode::LOCKED_FR)
@@ -1910,6 +1974,7 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 fn state_json(s: &mut Shared) -> serde_json::Value {
     s.sync_data_warnings();
     s.gate.sync_estop(&s.estop);
+    s.sync_audience();
     let arm = s.gate.status(&s.estop);
     json!({
         "settings": s.settings,
@@ -1941,6 +2006,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "audio": s.audio_in.view(s.audio, s.audio_at, Instant::now()),
         "data_warnings": data_warnings_view(s),
         "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
+        "audience": s.audience.view(),
         "shownet": shownet_view(s),
         "applog": s.applog.status(),
         "external": { "open": s.external.gate.open },
@@ -2044,6 +2110,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "evolving": evolving_status(s),
         "test_pattern": s.test_pattern,
         "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
+        "audience": s.audience.view(),
         "shownet": shownet_view(s),
     }))
 }
@@ -2539,6 +2606,14 @@ mod tests {
         let (status, body) = t.request("POST", "/api/checklist/complete", "");
         assert_eq!(status, 200, "{body}");
         assert_eq!(arm_status(&t)["armed"], false, "completing never arms");
+        // T-255: and the audience is located (a full horizon at 0 %).
+        let (status, body) = t.request("POST", "/api/arm", r#"{"on":true}"#);
+        assert_eq!(status, 409);
+        assert!(body.contains("Aucune zone Public"), "{body}");
+        let mut safety = json!(t.shared.lock().unwrap().safety.get());
+        safety["horizon"]["lines"] = json!(true);
+        safety["horizon"]["level"] = json!(0.0);
+        assert_eq!(t.request("POST", "/api/safety", &safety.to_string()).0, 200);
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
         // Editing the list while armed is refused; restarting it disarms.
         let cfg = json!(t.shared.lock().unwrap().checklist.config()).to_string();
@@ -2548,6 +2623,68 @@ mod tests {
         assert_eq!(st["armed"], false);
         assert_eq!(st["last_disarm"]["reason_fr"], format!("Verrou : {}", crate::checklist::LABEL_FR));
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 409);
+    }
+
+    /// T-255: `/api/audience`. Above by default; unlocking answers 409
+    /// with the missing conditions, then while armed, then without the
+    /// phrase; 423 in show mode, 403 from a controller; never arms.
+    #[test]
+    fn the_audience_route_unlocks_only_through_every_step() {
+        let t = TestServer::start(false);
+        let unlock = |phrase: &str| t.request("POST", "/api/audience", &json!({ "mode": "scanning", "phrase": phrase }).to_string());
+        let view: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/audience", "").1).unwrap();
+        assert_eq!(view["mode"], "above");
+        assert_eq!(view["conditions"].as_array().unwrap().len(), 5);
+        assert_eq!(view["phrase"], crate::audience::PHRASE);
+        let (status, body) = unlock(crate::audience::PHRASE);
+        assert_eq!(status, 409);
+        let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(reply["missing"].as_array().unwrap().len(), 5, "{body}");
+        // Every condition met (fictitious declarations).
+        {
+            let mut s = t.shared.lock().unwrap();
+            let zone = crate::zones::Zone { name: "Public".into(), kind: crate::zones::ZoneKind::Dim, level: 0.1, points: vec![[-1.0, -1.0], [1.0, -1.0], [0.0, 0.0]], audience: true, ..Default::default() };
+            let mut cfg = crate::safety::SafetySettings { zones: vec![zone], ..Default::default() };
+            cfg.dwell.profile = crate::dwell::DwellProfile::Strict;
+            s.safety.set(cfg, true).unwrap();
+            let sheet = crate::power::ProjectorInfo { name: "P".into(), power_mw: [10.0; 3], divergence_mrad: 1.0, hw_scan_fail: Some(true), ..Default::default() };
+            s.outputs.set(crate::power::MAIN_OUTPUT, None, Some(sheet), false, false).unwrap();
+            let mut list = s.checklist.config().clone();
+            list.audience_scan = true;
+            s.checklist.set_config(list, false).unwrap();
+            s.checklist.set_operator("Op").unwrap();
+            let ids: Vec<String> = s.checklist.visible_items().map(|i| i.id.clone()).collect();
+            for id in ids {
+                s.checklist.check(&id, true, Some("1")).unwrap();
+            }
+            s.checklist.complete().unwrap();
+            s.presence.settings.hold_to_run = true;
+        }
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (status, body) = unlock(crate::audience::PHRASE);
+        assert_eq!((status, serde_json::from_str::<serde_json::Value>(&body).unwrap()["armed"].clone()), (409, json!(true)));
+        t.request("POST", "/api/arm", r#"{"on":false}"#);
+        let (status, body) = unlock("JE PRENDS");
+        assert_eq!(status, 409);
+        assert!(body.contains("needs_phrase"), "{body}");
+        let source = t.request("POST", "/api/audience", &json!({ "mode": "scanning", "phrase": crate::audience::PHRASE, "source": "midi" }).to_string());
+        assert_eq!(source.0, 403);
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(unlock(crate::audience::PHRASE).0, 423);
+        t.shared.lock().unwrap().show_mode.on = false;
+        let (status, body) = unlock(crate::audience::PHRASE);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(arm_status(&t)["armed"], false, "unlocking never arms");
+        let state: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/state", "").1).unwrap();
+        assert_eq!(state["audience"]["mode"], "scanning");
+        // Back above: allowed in show mode and armed, it only tightens.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        t.shared.lock().unwrap().show_mode.on = true;
+        let (status, body) = t.request("POST", "/api/audience", r#"{"mode":"above"}"#);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""mode":"above""#), "{body}");
+        assert_eq!(arm_status(&t)["armed"], true, "going back above leaves the arming alone");
+        assert_eq!(t.request("POST", "/api/audience", r#"{"mode":"nope"}"#).0, 400);
     }
 
     #[test]

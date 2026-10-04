@@ -163,6 +163,10 @@ pub const DATA_ACK: &str = "data_ack";
 /// Id of the interlock held open until the pre-show checklist is completed,
 /// only when a real output is configured (T-258, checklist.rs).
 pub const CHECKLIST: &str = "checklist";
+/// Id of the interlock held open, with a real output (like `checklist`),
+/// until a « Public » zone or a full horizon at 0 % says where the
+/// audience is (T-255, audience.rs).
+pub const AUDIENCE_ZONE: &str = "audience_zone";
 /// Id of the interlock held open, on a ShowNET output (T-472), until the
 /// checklist's « Arrêt matériel testé » item is ticked. The ShowNET may hold
 /// its last frame when the stream stops: only a hardware stop is sure.
@@ -222,6 +226,12 @@ impl ArmGate {
     /// Dropping it while armed disarms, like any interlock.
     pub fn set_output_ready(&mut self, ok: bool) {
         self.register(OUTPUT, OUTPUT_LABEL, ok);
+    }
+
+    /// The latest disarm's reason and time (T-255: a disarm the operator
+    /// did not ask for ends audience scanning).
+    pub fn last_disarm(&self) -> Option<(&DisarmReason, SystemTime)> {
+        self.last_disarm.as_ref().map(|(reason, _, at)| (reason, *at))
     }
 
     /// Labels of the interlocks that currently block arming.

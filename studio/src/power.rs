@@ -101,7 +101,9 @@ impl Default for OutputLimits {
 }
 
 /// What the operator knows about the projector on an output. Informative
-/// only (estimates and the safety sheet); never used to allow anything.
+/// (estimates and the safety sheet); never enough to allow anything on its
+/// own: audience scanning (T-255) only *requires* a complete sheet that
+/// declares a hardware scan-fail, among other conditions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectorInfo {

@@ -33,6 +33,11 @@
 //! out), and again to a held frame the limiter puts back, with the current
 //! settings.
 //!
+//! **Public zones (T-255, `audience.rs`).** A zone marked `audience` is
+//! where the audience is. Outside audience scanning mode the engine applies
+//! `audience::effective`, which turns every Public zone into a Blank one;
+//! a Dim Public zone keeps at most `audience::MAX_AUDIENCE_LEVEL`.
+//!
 //! These settings belong to the machine (`safety.json`), never to a look or
 //! a project. The strobe limits can never be looser than the defaults, and
 //! nothing can be loosened relative to the current settings (a zone removed
@@ -200,6 +205,14 @@ impl SafetySettings {
                 check(p[1], FLOOR_RANGE, &what)?;
             }
             check(z.level, UNIT_RANGE, &format!("{what}, luminosité"))?;
+            // A Public zone attenuates by 50 % at least (T-255).
+            if z.audience && z.kind == ZoneKind::Dim && z.level > crate::audience::MAX_AUDIENCE_LEVEL {
+                bail!(
+                    "{what} (Public) : luminosité {:.0} %, {:.0} % au plus (atténuation d'au moins 50 %)",
+                    z.level * 100.0,
+                    crate::audience::MAX_AUDIENCE_LEVEL * 100.0
+                );
+            }
             if z.name.chars().count() > MAX_ZONE_NAME {
                 bail!("{what} : nom trop long ({MAX_ZONE_NAME} caractères au plus)");
             }
@@ -221,7 +234,7 @@ impl SafetySettings {
             .filter(|z| z.points.len() >= 3)
             .map(|z| Zone {
                 points: z.points.iter().map(|p| [fix(p[0], FLOOR_RANGE, 0.0), fix(p[1], FLOOR_RANGE, 0.0)]).collect(),
-                level: fix(z.level, UNIT_RANGE, 0.0),
+                level: fix(z.level, if z.audience { (0.0, crate::audience::MAX_AUDIENCE_LEVEL) } else { UNIT_RANGE }, 0.0),
                 ..z.clone()
             })
             .collect();
@@ -288,6 +301,7 @@ impl SafetySettings {
             match new.zones.iter().find(|n| n.id == z.id) {
                 None => more(true, format!("Zone « {} » supprimée", z.name)),
                 Some(n) => {
+                    more(z.audience && !n.audience, format!("Zone « {} » : n'est plus une zone Public", z.name));
                     more(z.kind == ZoneKind::Blank && n.kind == ZoneKind::Dim, format!("Zone « {} » : masquée → atténuée", z.name));
                     more(
                         z.kind == ZoneKind::Dim && n.kind == ZoneKind::Dim && n.level > z.level,
@@ -1295,7 +1309,7 @@ mod tests {
                 let t = i as f64 / FPS;
                 let look = if i < 60 { &point } else { &full };
                 let frame = apply(a.render(look, Default::default(), 1.0 / 60.0, &BeatClock::default()), t, &cfg, &mut lim);
-                let out = guard.apply(frame, t, &cfg.dwell, cfg.horizon.y, true);
+                let out = guard.apply(frame, t, &cfg.dwell, &crate::dwell::StrictArea::new(cfg.horizon.y, &cfg.zones), true);
                 if i == 59 {
                     let peak = level_max(&out);
                     match profile {

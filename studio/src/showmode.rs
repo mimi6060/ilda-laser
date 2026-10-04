@@ -65,6 +65,8 @@ pub fn allowed(path: &str) -> bool {
         // Leaving a pattern is allowed; the handler refuses showing one.
         "/api/testpattern",
         "/api/data/warnings/ack",
+        // Back above the audience is allowed; the handler refuses unlocking.
+        "/api/audience",
         "/api/keep_awake",
         "/api/devices/scan",
         // Playing.
