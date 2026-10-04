@@ -467,7 +467,9 @@ impl Shared {
     /// scanning (disarmed, every condition met, the phrase typed), logged
     /// with every condition. Never arms anything.
     pub fn unlock_audience_scanning(&mut self, phrase: &str, src: interlock::ArmSource) -> Result<(), audience::UnlockError> {
-        self.sync_safety(Instant::now());
+        // Only the e-stop latch: no wall-clock read here, so a simulated
+        // clock (the safety invariants) stays the only time base.
+        self.gate.sync_estop(&self.estop);
         let conds = self.audience_conditions();
         let mut detail = self.audience.unlock(&conds, phrase, self.gate.is_armed())?;
         detail["operator"] = serde_json::json!(self.checklist.view()["operator"]);

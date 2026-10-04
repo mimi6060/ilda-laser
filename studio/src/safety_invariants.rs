@@ -31,8 +31,8 @@
 //! 9. audience scanning on: no lit sample in a Public zone brighter than
 //!    the zone's level allows (through the minimum diode level and caps);
 //! 10. audience scanning starts only from the explicit unlock (never from
-//!    an action, a frame or a refused unlock), an unlock never arms, and
-//!    no frame runs it with the e-stop latched.
+//!     an action, a frame or a refused unlock), an unlock never arms, and
+//!     no frame runs it with the e-stop latched.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst.
@@ -872,6 +872,7 @@ fn random_sessions_keep_every_output_invariant() {
     }
     if seeds.len() > 100 {
         let share = |n: usize| n as f64 / cov.frames as f64;
+        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning));
         assert!(share(cov.sent_lit) > 0.1, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
