@@ -146,9 +146,9 @@ test('« Annuler » leaves the cue as it was', async ({ page }) => {
 test('refusals show in French and show mode refuses saving', async ({ page }) => {
   await openEditor(page, CUE);
   // A program the editor can't make: the server's own words.
-  await page.evaluate(() => { (window as any).eval('pg.prog.lanes.push({ target: "trace", keys: [] })'); });
+  await page.evaluate(() => { (window as any).eval('pg.prog.lanes.push({ target: "mirror", keys: [] })'); });
   await page.locator('#pgSave').click();
-  await expect(page.locator('#pgMsg')).toHaveText('Programme refusé : courbe : « trace » n\'est pas un paramètre du cue');
+  await expect(page.locator('#pgMsg')).toHaveText('Programme refusé : courbe : « mirror » n\'est pas un paramètre du cue');
   await expect(page.locator('#pgMsg')).toHaveClass(/err/);
   await page.locator('#pgCancel').click();
 

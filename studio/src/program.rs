@@ -15,7 +15,7 @@
 use crate::engine::Content;
 use crate::evolving::{self, KeyEase};
 use crate::lfo::Modulator;
-use crate::live::{self, ColorOverride, LiveModifiers};
+use crate::live::{self, ColorOverride, LiveModifiers, MAX_PRISM};
 use crate::patterns::Point;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -99,6 +99,12 @@ pub const TARGETS: &[(&str, f32, f32, f32)] = &[
     // A curve or LFO here switches the cue to « Teinte » colouring.
     ("color.hue", 0.0, 360.0, 0.0),
     ("strobe.div", 0.0, evolving::MAX_STROBE_DIV, 0.0),
+    // Live effects (T-142) on the cue's own frame: visible points and
+    // dotted lines only remove light; the prism's copies (rounded to a
+    // whole count) are joined by blanked travel.
+    ("trace", 0.0, 1.0, 1.0),
+    ("dots", 0.0, 1.0, 0.0),
+    ("prism", 1.0, MAX_PRISM as f32, 1.0),
 ];
 
 const BRIGHTNESS: usize = 0;
@@ -106,6 +112,9 @@ const ROT_ANGLE: usize = 6;
 const ROT_SPEED: usize = 9;
 const HUE: usize = 13;
 const STROBE: usize = 14;
+const TRACE: usize = 15;
+const DOTS: usize = 16;
+const PRISM: usize = 17;
 
 fn target_index(id: &str) -> Option<usize> {
     TARGETS.iter().position(|t| t.0 == id)
@@ -300,6 +309,9 @@ impl CueProgram {
             pos_y: v(5),
             rot_angle: [0, 1, 2].map(|a| ((v(ROT_ANGLE + a) as f64 + spin[a]).rem_euclid(360.0)) as f32),
             perspective: v(12),
+            trace: v(TRACE),
+            dots: v(DOTS),
+            prism: v(PRISM).round().clamp(1.0, MAX_PRISM as f32) as u8,
             ..LiveModifiers::default()
         };
         if touched[HUE] {
@@ -490,11 +502,24 @@ mod tests {
         assert!(CueProgram::default().validate().is_ok());
         let bad = |p: CueProgram| p.validate().unwrap_err().to_string();
         assert!(bad(CueProgram { layers: vec![Content::Wave; 5], ..Default::default() }).contains("4 couches"));
-        assert!(bad(program(PlayMode::Loop, vec![lane("trace", &[])])).contains("trace"));
+        assert!(bad(program(PlayMode::Loop, vec![lane("mirror", &[])])).contains("mirror"));
+        // The live effects of T-142 are cue parameters now.
+        assert!(program(PlayMode::Loop, vec![lane("trace", &[]), lane("prism", &[]), lane("dots", &[])]).validate().is_ok());
         assert!(bad(program(PlayMode::Loop, vec![lane("size", &[]), lane("size", &[])])).contains("deux courbes"));
         assert!(bad(CueProgram { length_beats: Some(0.0), ..Default::default() }).contains("longueur"));
         let spin_lfo = Modulator { target: "rot_z.speed".into(), ..Default::default() };
         assert!(bad(CueProgram { lfos: vec![spin_lfo], ..Default::default() }).contains("rot_z.speed"));
+    }
+
+    #[test]
+    fn trace_and_prism_curves_drive_the_cues_own_effects() {
+        let p = program(PlayMode::Loop, vec![lane("prism", &[(0.0, 3.6, KeyEase::Step)]), lane("trace", &[(0.0, 0.5, KeyEase::Step)])]);
+        let m = p.modifiers(1.0, 16.0, 120.0).unwrap();
+        assert_eq!((m.live.prism, m.live.trace), (4, 0.5));
+        let line: Vec<Point> = (0..40).map(|i| Point::lit(i as f32 / 40.0, 0.1, 1.0, 1.0, 1.0)).collect();
+        let out = m.apply(line, 1.0);
+        let runs = (0..out.len()).filter(|&i| out[i].is_lit() && (i == 0 || !out[i - 1].is_lit())).count();
+        assert_eq!(runs, 2, "half of four copies stays lit");
     }
 
     #[test]

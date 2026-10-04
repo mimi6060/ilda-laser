@@ -1214,7 +1214,12 @@ fn startup_state(cli: &Cli) -> Shared {
         look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch,
-        live: load_json(&cli.data_dir.join("live.json")),
+        // Held effects (« Noir », « Figer », strobe flash) never survive a restart.
+        live: {
+            let mut live: live::LiveModifiers = load_json(&cli.data_dir.join("live.json"));
+            live.release_momentary();
+            live
+        },
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
         scan_presets: scan::ScanPresetStore::load_or_create(cli.data_dir.join("scan_presets.json")),
@@ -1607,6 +1612,10 @@ struct Engine {
     event_live: HashMap<u64, live::LiveState>,
     /// Rotation state of user cues stored with master modifiers (T-405).
     cue_live: HashMap<u64, live::LiveState>,
+    /// « Figer » held (T-142): the (seconds, beats) time stood still at,
+    /// and the content beat of each timeline event met while frozen.
+    frozen: Option<(f64, f64)>,
+    frozen_events: HashMap<u64, f64>,
     frames_since_save: u32,
     last: Instant,
     /// If this thread panics, unwinding drops the stage: dark frame + disarm.
@@ -1640,6 +1649,8 @@ impl Engine {
             live_state: live::LiveState::default(),
             event_live: HashMap::new(),
             cue_live: HashMap::new(),
+            frozen: None,
+            frozen_events: HashMap::new(),
             frames_since_save: 0,
             last: Instant::now(),
             stage: OutputStage::new(output),
@@ -1725,6 +1736,17 @@ impl Engine {
             controls::deck_frame(&mut s, t);
             let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             self.live_state.set_clock(t, clock.beat);
+            // « Figer » (T-142): while held, animation, LFOs and colour
+            // effects read the time it was pressed at. The strobe, the
+            // limiter and the static-beam guard keep the real clock.
+            if !s.live.freeze {
+                self.frozen = None;
+                self.frozen_events.clear();
+            } else if self.frozen.is_none() {
+                self.frozen = Some((t, clock.beat));
+            }
+            let (mod_t, mod_beat) = self.frozen.unwrap_or((t, clock.beat));
+            self.live_state.freeze_colours(self.frozen);
             // A festival palette waiting for its « one » lands (T-130).
             s.festival.fire_due(clock.beat);
             // Audio triggers (T-240): this frame's events press cues before
@@ -1741,7 +1763,7 @@ impl Engine {
             };
             let (mut settings, mut live) = (calm.unwrap_or_else(|| s.settings.clone()), s.live.clone());
             let time_share = s.routes.routing().time_share();
-            lfo::modulate_scaled(s.lfos.list(), &s.controls, &mut settings, &mut live, t, clock.beat, time_share);
+            lfo::modulate_scaled(s.lfos.list(), &s.controls, &mut settings, &mut live, mod_t, mod_beat, time_share);
             let beat_len_s = (60.0 / clock.bpm.max(1.0)) as f32;
             if s.routes.apply(&audio, dt, beat_len_s, &reaction.guard, &mut settings, &mut live) {
                 lfo::recolor_live(&mut live);
@@ -1828,8 +1850,15 @@ impl Engine {
             (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
         };
 
-        self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
-        let (frame, extra_frames, mix, evolving) = match pattern {
+        // « Figer »: no time passes for the animators and the rotations,
+        // and the looks see the beat it was pressed on.
+        let (live_dt, frozen) = if self.frozen.is_some() { (0.0, true) } else { (dt, false) };
+        let render_clock = match self.frozen {
+            Some((_, beat)) => engine::BeatClock { beat, ..clock },
+            None => clock,
+        };
+        self.live_state.advance(&live, live_dt, clock.bpm, clock.beats_per_bar);
+        let (mut frame, mut extra_frames, mix, evolving) = match pattern {
             // The pattern alone, densified and calibrated, without live
             // modifiers (exact geometry). The cue animators are left as
             // they are, so the cues carry on where they were afterwards.
@@ -1840,8 +1869,9 @@ impl Engine {
                 (frame.clone(), vec![frame; plans.len()], layers::MixReport::default(), Vec::new())
             }
             None => {
-                let anim_dt = dt * live.speed.clamp(0.0, 4.0);
-                let (animators, event_live, cue_live) = (&mut self.animators, &mut self.event_live, &mut self.cue_live);
+                let anim_dt = live_dt * live.speed.clamp(0.0, 4.0);
+                let (animators, event_live, cue_live, frozen_events) = (&mut self.animators, &mut self.event_live, &mut self.cue_live, &mut self.frozen_events);
+                let frozen_at = self.frozen;
                 animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id));
                 event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
                 cue_live.retain(|id, _| cue_masters.contains_key(id));
@@ -1857,8 +1887,9 @@ impl Engine {
                         // its start: its first step is all the time elapsed.
                         let fresh = !animators.contains_key(&cue.instance);
                         let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
-                        let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
-                        let event_dt = match (fresh, cue.frozen) {
+                        let content_beat = if frozen { *frozen_events.entry(cue.instance).or_insert(cue.content_beat) } else { cue.content_beat };
+                        let content_clock = engine::BeatClock { beat: content_beat, ..clock };
+                        let event_dt = match (fresh, cue.frozen || frozen) {
                             (true, _) => cue.elapsed_s as f32 * live.speed.clamp(0.0, 4.0),
                             (false, true) => 0.0,
                             (false, false) => anim_dt,
@@ -1870,7 +1901,8 @@ impl Engine {
                             let fresh = !event_live.contains_key(&cue.instance);
                             let st = event_live.entry(cue.instance).or_default();
                             st.set_clock(t, clock.beat);
-                            let live_dt = match (fresh, cue.frozen) {
+                            st.freeze_colours(frozen_at);
+                            let live_dt = match (fresh, cue.frozen || frozen) {
                                 (true, _) => cue.elapsed_s as f32,
                                 (false, true) => 0.0,
                                 (false, false) => dt,
@@ -1889,13 +1921,14 @@ impl Engine {
                     });
                     animator.set_optimizer(scan);
                     animator.set_palette(festival_palette);
-                    let mut points = animator.render(settings, audio, anim_dt, &clock);
+                    let mut points = animator.render(settings, audio, anim_dt, &render_clock);
                     // A user cue's own master modifiers (T-405), before the
                     // master stage, like a timeline event's.
                     if let Some(m) = cue_masters.get(id) {
                         let st = cue_live.entry(*id).or_default();
                         st.set_clock(t, clock.beat);
-                        st.advance(m, dt, clock.bpm, clock.beats_per_bar);
+                        st.freeze_colours(frozen_at);
+                        st.advance(m, live_dt, clock.bpm, clock.beats_per_bar);
                         points = live::apply(&points, m, st, &user_palettes);
                     }
                     (*id, points, (*layer, zones.clone()))
@@ -1948,6 +1981,13 @@ impl Engine {
                 }
             }
         };
+        // « Noir » held (T-142): every projector's frame dark, a test
+        // pattern's too (the master stage already darkened the looks).
+        // Arming is untouched, and the safety stage still follows.
+        if live.black {
+            live::black_out(&mut frame);
+            extra_frames.iter_mut().for_each(|f| live::black_out(f));
+        }
         // The safety stage (`safety_chain`): frame size, colour rendering,
         // strobe limiter and horizon, static beam guard, power caps.
         let frame = safety_chain(frame, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps);

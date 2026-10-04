@@ -492,6 +492,7 @@ fn apply(s: &mut Shared, p: &Project) {
     s.tempo.set_bpm_manual(p.tempo.bpm, t);
     s.tempo.beats_per_bar = p.tempo.beats_per_bar;
     s.live = p.live.clone();
+    s.live.release_momentary();
     s.mixer = p.layers.clone();
     s.lfos.replace_in_memory(p.lfos.clone());
     s.routes.replace_in_memory(p.audio_routes.clone(), &s.controls);

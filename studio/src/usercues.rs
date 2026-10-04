@@ -121,7 +121,7 @@ fn set_gen_colors(c: &mut Content, colors: Option<(crate::generators::ColorMode,
 }
 
 /// A master copy fit to be stored: in range, without the momentary
-/// reverse.
+/// reverse (nor the held effects of T-142: `sanitize_modifiers`).
 fn master_copy(live: &LiveModifiers) -> LiveModifiers {
     let mut m = live.clone();
     m.rot_reverse = false;

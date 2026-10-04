@@ -5446,9 +5446,9 @@ mod tests {
         let slot = &js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"];
         assert_eq!((slot["layer"].clone(), slot["program"]["lanes"][0]["target"].clone()), (json!(2), json!("size")));
         // Refused: unknown target, too many layers, unknown cue.
-        let (code, text) = set("tunnels-001", &json!({ "lanes": [{ "target": "trace" }] }));
+        let (code, text) = set("tunnels-001", &json!({ "lanes": [{ "target": "mirror" }] }));
         assert_eq!(code, 400, "{text}");
-        assert!(text.contains("trace"));
+        assert!(text.contains("mirror"));
         assert_eq!(set("tunnels-001", &json!({ "layers": vec![json!({ "kind": "wave" }); 5] })).0, 400);
         assert_eq!(set("nope", &program).0, 404);
         // The cue plays with it.
@@ -5512,7 +5512,7 @@ mod tests {
         assert_eq!((small["step_beats"].clone(), small["frames"].as_array().unwrap().len()), (json!(0.125), 32));
         let big = js(&preview(size(1.0, 1.0)).1);
         assert_ne!(small["frames"], big["frames"]);
-        let (code, text) = preview(json!({ "lanes": [{ "target": "trace" }] }));
+        let (code, text) = preview(json!({ "lanes": [{ "target": "mirror" }] }));
         assert!(code == 400 && text.contains("n'est pas un paramètre du cue"), "{code} {text}");
         assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["program"], serde_json::Value::Null);
 

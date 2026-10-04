@@ -960,6 +960,30 @@ struct Coverage {
     lit_with_transition: usize,
     /// Audio trigger actions taken (T-240).
     trigger_actions: u64,
+    /// Frames with a lit preview through a live effect (T-142): strobe,
+    /// visible points, dotted lines, mirror, prism or « Figer ».
+    lit_with_effects: usize,
+}
+
+/// The live effects of T-142 as a controller would drive them: latched
+/// effects set, momentary ones pressed and released.
+fn random_live_effect(s: &mut Shared, rng: &mut Rng) {
+    let ids = [
+        "master.strobe.on",
+        "master.strobe.hold",
+        "master.strobe.rate",
+        "master.strobe.sync",
+        "master.strobe.duty",
+        "master.trace",
+        "master.dots",
+        "master.mirror",
+        "master.prism",
+        "transport.freeze",
+        "transport.black_hold",
+    ];
+    let id = *rng.pick(&ids);
+    let input = if rng.chance(0.8) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-2.0, 30.0)) };
+    let _ = controls::apply(s, id, input, rng.chance(0.5));
 }
 
 /// One DMX fixture instance per zone (T-407), random personalities and
@@ -1088,8 +1112,27 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // Festival palettes, colour modes and perceived balance (T-130), from
     // their own stream.
     let mut frng = Rng::new(seed ^ 0x0130_0130);
+    // Live effects (T-142), from their own stream.
+    let mut erng = Rng::new(seed ^ 0x0142_0142);
+    let effects = erng.chance(0.25);
     let mut beats = 0;
     for frame in 0..frames {
+        {
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            if effects && erng.chance(0.3) {
+                random_live_effect(&mut s, &mut erng);
+            }
+            // Held buttons are let go of: « Noir » and « Figer » don't
+            // stay down for the whole session.
+            if (s.live.black || s.live.freeze || s.live.strobe.hold) && erng.chance(0.7) {
+                let id = *erng.pick(&["transport.black_hold", "transport.freeze", "master.strobe.hold"]);
+                let _ = controls::apply(&mut s, id, ControlInput::Value(0.0), erng.chance(0.5));
+            }
+            if s.gate.is_armed() != armed {
+                return Err(format!("frame {frame}: a live effect changed the arming"));
+            }
+        }
         if lists && lrng.chance(0.08) {
             let mut s = rig.s();
             let src = *lrng.pick(&[controls::ControlSource::Ui, controls::ControlSource::Midi, controls::ControlSource::Keyboard]);
@@ -1190,6 +1233,11 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             (s.gate.is_armed() && !s.estop.is_latched(), s.outputs.active_limits(), s.presence.status().midi_hold, s.audience.is_scanning())
         };
         let armed_before = rig.s().gate.is_armed();
+        let (black_held, with_effects) = {
+            let s = rig.s();
+            let m = &s.live;
+            (m.black, m.strobe.active() || m.trace < 1.0 || m.dots > 0.0 || m.mirror != live::Mirror::None || m.prism > 1 || m.freeze)
+        };
         let (fired_before, triggers_may_act) = {
             let s = rig.s();
             if s.estop.is_latched() && s.triggers.enabled() {
@@ -1225,6 +1273,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             // The saved settings: the checks don't trust `audience::effective`.
             (s.audience.is_scanning(), s.safety.get())
         };
+        let limiter_holding = rig.s().strobe.active;
         let w = rig.wire.lock().unwrap();
         let lit = w.last.iter().filter(|p| p.is_lit()).count();
         if lit > 0 && !may_emit {
@@ -1235,6 +1284,13 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         }
         if lit > 0 && hold_to_run && !held {
             return Err(format!("frame {frame}: {lit} lit points with hold-to-run not held"));
+        }
+        // « Noir » held (T-142): a dark output, whatever plays - except
+        // while the strobe limiter holds steady output, which fills a dip
+        // shorter than one allowed flash period with the last lit frame
+        // (so « Noir » hammered on a pad can't make a strobe either).
+        if lit > 0 && black_held && !limiter_holding {
+            return Err(format!("frame {frame}: {lit} lit points sent while « Noir » is held"));
         }
         check_points(&w.last, &caps, &cfg, &format!("frame {frame}, sent"))?;
         check_public(&w.last, &caps, &cfg, scanning, &format!("frame {frame}, sent"))?;
@@ -1257,6 +1313,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         cov.lit_with_projection += (preview_lit && s.projection.get().zones.iter().any(|z| !z.geometry.is_identity())) as usize;
         cov.lit_with_remote += (preview_lit && !s.netin.fixtures.remotes.is_empty()) as usize;
         cov.lit_with_transition += (preview_lit && !s.deck.transition_fx(t).is_empty()) as usize;
+        cov.lit_with_effects += (preview_lit && with_effects) as usize;
+        if black_held && preview_lit && !limiter_holding {
+            return Err(format!("frame {frame}: the preview is lit while « Noir » is held"));
+        }
         if s.estop.is_latched() && (!s.deck.ending.is_empty() || !s.deck.pending.is_empty()) {
             return Err(format!("frame {frame}: a transition or a waiting launch survived the e-stop"));
         }
@@ -1296,7 +1356,7 @@ fn random_sessions_keep_every_output_invariant() {
     }
     if seeds.len() > 100 {
         let share = |n: usize| n as f64 / cov.frames as f64;
-        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition));
+        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}; sent lit {:.3}, effects {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition), share(cov.sent_lit), share(cov.lit_with_effects));
         assert!(share(cov.sent_lit) > 0.1, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
@@ -1305,7 +1365,8 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_public_above) > 0.1, "only {} of {} lit frames had a Public zone, scanning off", cov.lit_with_public_above, cov.frames);
         assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
         assert!(share(cov.lit_with_transition) > 0.01, "only {} of {} lit frames ran a transition", cov.lit_with_transition, cov.frames);
-        assert!(cov.trigger_actions > seeds.len() as u64 / 10, "only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
+        assert!(share(cov.lit_with_effects) > 0.05, "only {} of {} lit frames went through a live effect", cov.lit_with_effects, cov.frames);
+        assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
 
@@ -1440,8 +1501,19 @@ fn run_strobe_case(seed: u64) -> Result<(), String> {
     let bpm = rng.range(90.0, 200.0) as f64;
     s.tempo.set_bpm_manual(bpm, 0.0);
     let hz = rng.range(6.0, 15.0);
-    let way = rng.below(4);
+    let way = rng.below(5);
     match way {
+        // The live strobe (T-142), free or synced: it runs before the
+        // limiter and must not get past it.
+        4 => {
+            let _ = controls::apply(&mut s, "master.strobe.on", ControlInput::Value(1.0), true);
+            let _ = controls::apply(&mut s, "master.strobe.rate", ControlInput::Value(hz), true);
+            if rng.chance(0.5) {
+                let sync = 1.0 + rng.below(5) as f32;
+                let _ = controls::apply(&mut s, "master.strobe.sync", ControlInput::Value(sync), true);
+            }
+            let _ = controls::apply(&mut s, "master.strobe.duty", ControlInput::Value(rng.range(0.1, 0.9)), true);
+        }
         0 => {
             s.settings.gate = crate::engine::GateMode::BeatAndOffbeat;
             s.settings.gate_beats = 0.1;
@@ -2431,4 +2503,80 @@ fn the_estop_darkens_every_projector_and_a_lost_one_disarms_all() {
     rig.s().request_arm(ArmSource::Ui).unwrap();
     rig.tick();
     assert!(lit(&wires[1].1) > 0);
+}
+
+// ---------- live effects through the engine (T-142) ----------
+
+/// « Noir » held: the armed output and the preview go dark at once, a
+/// test pattern too, the gate stays armed, and the light is back on the
+/// frame it is released.
+#[test]
+fn black_hold_darkens_the_output_and_never_disarms() {
+    let mut rig = armed_square_rig("black-hold");
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    rig.tick();
+    assert!(lit(&rig.wire) > 0);
+    for pattern in [None, Some(testpattern::TestPattern::WhiteRamp)] {
+        {
+            let mut s = rig.s();
+            s.test_pattern.brightness = 1.0;
+            testpattern::select(&mut s, pattern);
+            controls::apply(&mut s, "transport.black_hold", ControlInput::Value(1.0), true).unwrap();
+        }
+        rig.tick();
+        assert_eq!(lit(&rig.wire), 0, "{pattern:?}: dark while held");
+        assert!(!rig.s().frame.iter().any(|p| p.is_lit()), "{pattern:?}: preview dark");
+        assert!(rig.s().gate.is_armed() && rig.wire.lock().unwrap().armed, "{pattern:?}: still armed");
+        controls::apply(&mut rig.s(), "transport.black_hold", ControlInput::Value(0.0), true).unwrap();
+        rig.tick();
+        assert!(lit(&rig.wire) > 0, "{pattern:?}: lit again once released");
+    }
+}
+
+/// « Figer » held: a spinning look stands still (same frame again and
+/// again), then moves once released. The static-beam guard still runs
+/// after it.
+#[test]
+fn freeze_holds_the_motion_while_held() {
+    let mut rig = armed_square_rig("freeze");
+    controls::apply(&mut rig.s(), "master.rot_z.speed", ControlInput::Value(180.0), false).unwrap();
+    rig.tick();
+    let frame = |rig: &Rig| rig.s().frame.clone();
+    let a = frame(&rig);
+    rig.tick();
+    assert_ne!(frame(&rig), a, "spins");
+    controls::apply(&mut rig.s(), "transport.freeze", ControlInput::Value(1.0), true).unwrap();
+    rig.tick();
+    let held = frame(&rig);
+    for _ in 0..10 {
+        rig.tick();
+        assert_eq!(frame(&rig), held, "frozen");
+    }
+    controls::apply(&mut rig.s(), "transport.freeze", ControlInput::Value(0.0), true).unwrap();
+    rig.tick();
+    rig.tick();
+    assert_ne!(frame(&rig), held, "moves again");
+}
+
+/// Prism and mirror copies through the whole engine: the lit runs that
+/// go out are entered from the dark, and the safety stage still applies
+/// (a Blank zone over the left half stays dark).
+#[test]
+fn prism_and_mirror_copies_go_through_the_safety_stage() {
+    let mut rig = armed_square_rig("prism");
+    {
+        let mut s = rig.s();
+        let left = Zone { kind: ZoneKind::Blank, points: vec![[-1.0, -1.0], [0.0, -1.0], [0.0, 1.0], [-1.0, 1.0]], ..Default::default() };
+        s.safety.set(SafetySettings { zones: vec![left], horizon: Horizon { y: -1.0, ..Default::default() }, ..Default::default() }, true).unwrap();
+        controls::apply(&mut s, "master.prism", ControlInput::Value(4.0), true).unwrap();
+        controls::apply(&mut s, "master.mirror", ControlInput::Value(3.0), true).unwrap();
+        s.request_arm(ArmSource::Ui).unwrap();
+    }
+    rig.tick();
+    let w = rig.wire.lock().unwrap();
+    let pts = &w.last;
+    assert!(pts.iter().any(|p| p.is_lit()));
+    assert!(pts.iter().filter(|p| p.is_lit()).all(|p| p.x >= -1e-3), "nothing lit in the Blank zone");
+    let runs = (1..pts.len()).filter(|&i| pts[i].is_lit() && !pts[i - 1].is_lit()).count();
+    assert!(runs >= 4, "{runs} lit runs");
 }
