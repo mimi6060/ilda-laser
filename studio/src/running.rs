@@ -288,7 +288,7 @@ fn status(s: &Shared) -> Vec<Value> {
         if s.external.gate.open { "Porte ouverte (OSC, DMX, timecode)".into() } else { "Porte fermée".into() },
         false,
     );
-    let tc = s.timecode.config().source;
+    let tc = s.timecode.source();
     if tc != crate::timecode::TcSource::Off {
         // Incoming timecode (T-168): its source, TC-IN and what it reads.
         let st = s.timecode.status();
@@ -296,7 +296,7 @@ fn status(s: &Shared) -> Vec<Value> {
         if let Some(code) = s.timecode.display(s.now_s()) {
             value.push_str(&format!(" · TC {code}"));
         }
-        let warn = matches!(st, crate::timecode::Status::Freewheel | crate::timecode::Status::Lost);
+        let warn = matches!(st, crate::timecode::Status::Preroll | crate::timecode::Status::Afterroll | crate::timecode::Status::Lost);
         add("timecode", "Timecode", value, warn);
     }
     let midi: Vec<&str> = s.midi.devices.iter().filter(|d| d.connected).map(|d| d.name.as_str()).collect();

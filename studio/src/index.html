@@ -432,11 +432,23 @@
   #tcArm.on { background: var(--ok); color: var(--bg); border-color: var(--ok); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 45%, transparent); }
   #tcLed { width: 12px; height: 12px; flex: none; border-radius: 50%; background: var(--line); }
   #tcLed[data-status="locked"] { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  #tcLed[data-status="freewheel"], #tcLed[data-status="stopped"] { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  #tcLed[data-status="preroll"], #tcLed[data-status="afterroll"], #tcLed[data-status="stopped"] { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
   #tcLed[data-status="lost"] { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
   #tcReadout { font: 700 30px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .04em; color: var(--muted); }
   #tcReadout[data-status="locked"] { color: var(--ok); }
-  #tcReadout[data-status="freewheel"], #tcReadout[data-status="stopped"] { color: var(--warn); }
+  #tcReadout[data-status="preroll"], #tcReadout[data-status="afterroll"], #tcReadout[data-status="stopped"] { color: var(--warn); }
+  #tcReadout[data-status="lost"] { color: var(--danger); }
+  /* Grand afficheur (T-409): the timecode filling the window, for the crew. */
+  #tcBig { position: fixed; inset: 0; z-index: 900; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2vh; background: var(--bg); color: var(--muted); cursor: pointer; user-select: none; }
+  #tcBig[hidden] { display: none; }
+  #tcBigTc { font: 800 min(19vw, 40vh)/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .02em; white-space: nowrap; }
+  #tcBigShow { font-size: min(5vw, 6vh); font-weight: 700; color: var(--text); }
+  #tcBigState { font-size: min(4vw, 5vh); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+  #tcBigHint { position: absolute; bottom: 16px; font-size: 13px; }
+  #tcBig[data-state="locked"] #tcBigTc, #tcBig[data-state="locked"] #tcBigState { color: var(--ok); }
+  #tcBig[data-state="preroll"] #tcBigTc, #tcBig[data-state="preroll"] #tcBigState,
+  #tcBig[data-state="afterroll"] #tcBigTc, #tcBig[data-state="afterroll"] #tcBigState { color: var(--warn); }
+  #tcBig[data-state="lost"] #tcBigTc, #tcBig[data-state="lost"] #tcBigState { color: var(--danger); }
   #tcStatus { margin: 0; }
   #tcStatus.warn { color: var(--warn); }
   #tcPanel .cue-bar label[hidden] { display: none; }
@@ -1565,7 +1577,7 @@
     <div class="layers" id="layers"></div>
   </section>
 
-  <!-- TIMELINE : lecteur de shows (éditeur, forme d'onde, timecode à venir) -->
+  <!-- TIMELINE : lecteur de shows (éditeur, forme d'onde, timecode) -->
   <div class="ws-panel" data-ws="timeline" id="timelinePanel" hidden>
     <section id="timeline">
       <h2>Timeline <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">shows enregistrés dans studio-data/shows</span></h2>
@@ -1601,7 +1613,7 @@
       <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
       <div class="hint" id="tlMsg"></div>
     </section>
-    <!-- Timecode entrant (T-168) : MTC par le MIDI, LTC par une entrée audio -->
+    <!-- Timecode entrant (T-168, T-409) : MTC par le MIDI, LTC par une entrée audio, Art-Net par le réseau -->
     <section id="tcPanel" aria-label="Timecode entrant">
       <div class="cue-bar">
         <span class="tl-track">Timecode</span>
@@ -1609,20 +1621,30 @@
         <span id="tcLed" data-status="off" role="img" aria-label="Pas de source"></span>
         <span id="tcReadout" data-status="off">--:--:--:--</span>
         <span class="hint" id="tcStatus">Pas de source</span>
+        <button id="tcBigBtn" title="Le timecode en très grand, plein cadre, pour la régie · clic ou Alt+T pour refermer">Grand afficheur</button>
       </div>
       <div class="cue-bar lock-edit" id="tcSettings">
-        <label>Source <select id="tcSource"><option value="off">Aucune</option><option value="mtc">MTC (MIDI)</option><option value="ltc">LTC (entrée audio)</option></select></label>
+        <label title="Source, images/s et décalage enregistrés dans le show chargé (sinon : le réglage général)"><input type="checkbox" id="tcPerShow"> Propre à ce show</label>
+        <label>Source <select id="tcSource"><option value="off">Aucune</option><option value="mtc">MTC (MIDI)</option><option value="ltc">LTC (entrée audio)</option><option value="artnet">Art-Net (réseau)</option></select></label>
+        <label id="tcIfaceRow" hidden title="L'adresse de ce Mac où écouter le timecode Art-Net (port Art-Net des Entrées réseau). Ouvert seulement avec TC-IN armé. Si l'entrée Art-Net de RÉGLAGES est active, son adresse sert aussi au timecode.">Interface réseau <select id="tcIface"><option value="">Aucune</option></select></label>
         <label id="tcPortRow" hidden>Port <select id="tcPort"><option value="">Tous les ports</option></select></label>
         <label id="tcChanRow" hidden title="La voie de l'entrée audio native qui porte le LTC (elle n'est plus analysée comme musique)">Voie <select id="tcChan"></select></label>
         <label>Images/s <select id="tcFps"><option value="auto">Auto</option><option value="24">24</option><option value="25">25</option><option value="29.97df">29,97 drop</option><option value="30">30</option></select></label>
         <label title="Position dans le show = timecode − décalage (un show qui démarre à 01:00:00:00 : 3600 s)">Décalage <input type="number" id="tcOffset" step="0.04" min="-86400" max="86400" value="0"> s</label>
         <button id="tcOffsetNow" title="Le timecode actuel devient le début du show">Caler le début ici</button>
         <label title="Suit la vitesse du timecode en douceur au lieu de sauter à chaque image"><input type="checkbox" id="tcSmooth"> Lissage</label>
-        <label title="Sans timecode, le show continue seul au lieu de s'arrêter après la roue libre"><input type="checkbox" id="tcKeep"> Continuer si perte</label>
-        <label title="Images sans timecode avant d'arrêter le show (25 = 1 s à 25 im/s)">Roue libre <input type="number" id="tcFree" min="5" max="300" step="1" value="25"> im.</label>
+        <label title="Images consécutives à recevoir avant de suivre le timecode (les premières sont ignorées)">Pré-roll <input type="number" id="tcPreroll" min="0" max="100" step="1" value="5"> im.</label>
+        <label title="Sans timecode, le show continue seul pendant ce temps, puis s'arrête (Timecode perdu)">Post-roll <input type="number" id="tcAfter" min="0" max="60" step="0.1" value="1"> s</label>
+        <label title="Post-roll sans limite : sans timecode, le show continue seul"><input type="checkbox" id="tcKeep"> Continuer</label>
       </div>
       <div class="hint" id="tcMsg"></div>
     </section>
+    <div id="tcBig" hidden role="dialog" aria-label="Grand afficheur du timecode" data-state="off">
+      <div id="tcBigShow"></div>
+      <div id="tcBigTc">--:--:--:--</div>
+      <div id="tcBigState"></div>
+      <div id="tcBigHint" class="hint">Clic ou Alt+T pour refermer · Échap reste l'arrêt d'urgence</div>
+    </div>
   </div>
 
   <!-- TIMELINE : éditeur (T-162) — bibliothèque, pistes, règle, marqueurs -->
@@ -3006,6 +3028,10 @@ function buildShortcuts() {
     { id: 'strobe', group: 'Direct', codes: ['KeyS'], alt: '*', zones: NOT_LIVE, show: true,
       label: 'Tenir : stroboscope 1/4 (hors LIVE)',
       down: () => holdStrobe(true), up: () => holdStrobe(false) },
+    // Grand afficheur du timecode (T-409), in every workspace.
+    { id: 'tc.big', group: 'Timeline', codes: ['KeyT'], alt: true, zones: '*', show: true,
+      label: 'Grand afficheur du timecode (ouvrir / fermer)',
+      down: e => { if (!e.repeat) toggleTcBig(); } },
     // Entrées externes (T-408).
     { id: 'gate', group: 'Direct', codes: ['KeyX'], alt: true, shift: '*', zones: '*', show: true,
       label: 'Ouvrir / fermer les entrées externes (DMX, OSC, timecode)',
@@ -3687,6 +3713,7 @@ function applyState(f, at, pushed) {
   figFrameInfo(f);
   showEvolving(f.evolving);
   showTimeline(f.timeline);
+  lastTimeline = f.timeline;
   showTimecode(f.timecode);
   showSong(f.timeline, f.timeline_audio);
   tlOnState(f.timeline, f.tempo, at);
@@ -5999,8 +6026,8 @@ function showTimeline(t) {
 // ports and audio channels from GET /api/timecode when they may have
 // changed. TC-IN is a live switch (allowed in show mode); it never arms
 // the laser.
-let tcState = null, tcCfg = null;
-const TC_LED_FR = { off: 'Pas de source', no_signal: 'Pas de timecode', locked: 'Verrouillé', freewheel: 'Roue libre', stopped: 'Timecode à l\'arrêt', lost: 'Timecode perdu' };
+let tcState = null, tcCfg = null, tcView = null, lastTimeline = null;
+const TC_LED_FR = { off: 'Pas de source', no_signal: 'Pas de timecode', preroll: 'Pré-roll', locked: 'Suivi', afterroll: 'Post-roll', stopped: 'Timecode à l\'arrêt', lost: 'Timecode perdu' };
 function showTimecode(t) {
   if (!t) return;
   tcState = t;
@@ -6017,21 +6044,61 @@ function showTimecode(t) {
   else if (t.armed && t.blocked) parts.push(t.blocked);
   else if (!t.armed && t.source !== 'off') parts.push('TC-IN désarmé');
   $('tcStatus').textContent = parts.join(' · ');
-  $('tcStatus').classList.toggle('warn', ['freewheel', 'lost'].includes(t.status) || (t.armed && !!t.blocked && !t.chasing));
-  if (tcCfg && tcCfg.source !== t.source) loadTimecode();
+  $('tcStatus').classList.toggle('warn', ['preroll', 'afterroll', 'lost'].includes(t.status) || (t.armed && !!t.blocked && !t.chasing));
+  if (tcView && (tcView.source !== t.source || tcView.per_show !== t.per_show)) loadTimecode();
+  showTcBig();
 }
+// Grand afficheur (T-409): the timecode received, else the timeline's
+// position; green followed, orange pre-roll / post-roll, red lost.
+let tcBigOn = false;
+function fmtPosTc(secs) {
+  const n = Math.floor(Math.max(0, secs) * 25 + 1e-6);
+  const p = v => String(v).padStart(2, '0');
+  return `${p(Math.floor(n / 90000) % 24)}:${p(Math.floor(n / 1500) % 60)}:${p(Math.floor(n / 25) % 60)}:${p(n % 25)}`;
+}
+function showTcBig() {
+  if (!tcBigOn) return;
+  const t = tcState, tl = lastTimeline;
+  const on = t && t.source !== 'off';
+  $('tcBigTc').textContent = on && t.tc ? t.tc : tl && tl.name && tl.time_base === 'seconds' ? fmtPosTc(tl.position) : '--:--:--:--';
+  $('tcBig').dataset.state = on ? t.state : 'off';
+  $('tcBigState').textContent = !on ? 'Position de la timeline' : t.status_fr + (t.rate_fr ? ' · ' + t.rate_fr : '');
+  $('tcBigShow').textContent = tl && tl.name ? tl.name : 'Aucun show';
+}
+function toggleTcBig(on = !tcBigOn) {
+  tcBigOn = on;
+  $('tcBig').hidden = !on;
+  showTcBig();
+}
+$('tcBigBtn').onclick = () => toggleTcBig(true);
+$('tcBig').onclick = () => toggleTcBig(false);
 function fillTimecode(v) {
   tcCfg = v.config;
+  tcView = { source: v.source, per_show: v.per_show };
   const c = v.config;
+  // The loaded show's own source, rate and offset, or the global ones.
+  const e = v.show || c;
   const keep = id => document.activeElement === $(id);
-  if (!keep('tcSource')) $('tcSource').value = c.source;
-  if (!keep('tcFps')) $('tcFps').value = c.fps;
-  if (!keep('tcOffset')) $('tcOffset').value = +c.offset_s.toFixed(3);
-  if (!keep('tcFree')) $('tcFree').value = c.freewheel_frames;
+  $('tcPerShow').checked = !!v.show;
+  $('tcPerShow').disabled = !v.show_name;
+  $('tcPerShow').parentElement.title = v.show_name ? `Source, images/s et décalage enregistrés dans « ${v.show_name} » (sinon : le réglage général)` : 'Chargez un show pour lui donner son propre timecode';
+  if (!keep('tcSource')) $('tcSource').value = e.source;
+  if (!keep('tcFps')) $('tcFps').value = e.fps;
+  if (!keep('tcOffset')) $('tcOffset').value = +e.offset_s.toFixed(3);
+  if (!keep('tcPreroll')) $('tcPreroll').value = c.pre_roll_frames;
+  if (!keep('tcAfter')) $('tcAfter').value = c.after_roll_s ?? 1;
+  $('tcAfter').disabled = c.after_roll_s === null;
   $('tcSmooth').checked = c.smooth;
-  $('tcKeep').checked = c.keep_running;
-  $('tcPortRow').hidden = c.source !== 'mtc';
-  $('tcChanRow').hidden = c.source !== 'ltc';
+  $('tcKeep').checked = c.after_roll_s === null;
+  $('tcPortRow').hidden = v.source !== 'mtc';
+  $('tcChanRow').hidden = v.source !== 'ltc';
+  $('tcIfaceRow').hidden = v.source !== 'artnet';
+  if (!keep('tcIface')) {
+    const ifs = (v.artnet && v.artnet.interfaces) || [];
+    const ips = [...new Set([...ifs.map(i => i.ip), ...(c.interface ? [c.interface] : [])])];
+    $('tcIface').innerHTML = '<option value="">Aucune</option>' + ips.map(ip => { const i = ifs.find(x => x.ip === ip); return `<option value="${esc(ip)}">${esc(ip)}${i ? ' (' + esc(i.name) + ')' : ''}</option>`; }).join('');
+    $('tcIface').value = c.interface || '';
+  }
   if (!keep('tcPort')) {
     const ports = [...new Set([...(v.midi_ports || []), ...(c.midi_port ? [c.midi_port] : [])])];
     $('tcPort').innerHTML = '<option value="">Tous les ports</option>' + ports.map(p => `<option>${esc(p)}</option>`).join('');
@@ -6042,9 +6109,11 @@ function fillTimecode(v) {
     $('tcChan').innerHTML = '<option value="0">Mixage de toutes les voies</option>' + Array.from({ length: n }, (_, i) => `<option value="${i + 1}">Voie ${i + 1}</option>`).join('');
     $('tcChan').value = String(c.ltc_channel);
   }
-  $('tcMsg').textContent = c.source === 'ltc' && !v.audio.native
+  $('tcMsg').textContent = v.source === 'ltc' && !v.audio.native
     ? 'LTC : choisissez l\'entrée audio native (Musique › Source) pour que le studio écoute l\'entrée.'
-    : c.source !== 'off' && !v.armed ? 'Pour piloter la timeline : armer TC-IN, ouvrir les entrées externes (périmètre « Timeline » du timecode) et charger un show en secondes.' : '';
+    : v.source === 'artnet' && !c.interface && !(v.artnet && v.artnet.chart)
+    ? `Art-Net : choisissez l'interface réseau où écouter (port ${v.artnet ? v.artnet.port : 6454}).`
+    : v.source !== 'off' && !v.armed ? 'Pour piloter la timeline : armer TC-IN, ouvrir les entrées externes (périmètre « Timeline » du timecode) et charger un show en secondes.' : '';
   showTimecode(v);
 }
 async function loadTimecode() {
@@ -6065,21 +6134,32 @@ $('tcArm').onclick = async () => {
     else fillTimecode(j);
   } catch {}
 };
-$('tcSource').onchange = e => setTimecode({ source: e.target.value });
+// Source, rate and offset go to the show when it has its own.
+function tcShowFields() {
+  return { source: $('tcSource').value, fps: $('tcFps').value, offset_s: +$('tcOffset').value || 0 };
+}
+function setTcShowOr(key, value) {
+  if (!$('tcPerShow').checked) return setTimecode({ [key]: value });
+  setTimecode({ show: { ...tcShowFields(), [key]: value } });
+}
+$('tcPerShow').onchange = e => setTimecode({ show: e.target.checked ? tcShowFields() : null });
+$('tcSource').onchange = e => setTcShowOr('source', e.target.value);
+$('tcIface').onchange = e => setTimecode({ interface: e.target.value });
 $('tcPort').onchange = e => setTimecode({ midi_port: e.target.value || null });
 $('tcChan').onchange = e => setTimecode({ ltc_channel: +e.target.value });
-$('tcFps').onchange = e => setTimecode({ fps: e.target.value });
-$('tcOffset').onchange = e => { const v = +e.target.value; if (Number.isFinite(v)) setTimecode({ offset_s: v }); };
-$('tcFree').onchange = e => setTimecode({ freewheel_frames: Math.round(+e.target.value) });
+$('tcFps').onchange = e => setTcShowOr('fps', e.target.value);
+$('tcOffset').onchange = e => { const v = +e.target.value; if (Number.isFinite(v)) setTcShowOr('offset_s', v); };
+$('tcPreroll').onchange = e => setTimecode({ pre_roll_frames: Math.round(+e.target.value) });
+$('tcAfter').onchange = e => { const v = +e.target.value; if (Number.isFinite(v)) setTimecode({ after_roll_s: v }); };
 $('tcSmooth').onchange = e => setTimecode({ smooth: e.target.checked });
-$('tcKeep').onchange = e => setTimecode({ keep_running: e.target.checked });
+$('tcKeep').onchange = e => setTimecode({ after_roll_s: e.target.checked ? null : (+$('tcAfter').value || 1) });
 $('tcOffsetNow').onclick = () => {
   // hh:mm:ss:ff → seconds at the rate shown (drop frame: close enough
   // for a start mark; the field can be fine-tuned).
   const m = tcState && tcState.tc && tcState.tc.match(/^(\d+):(\d+):(\d+):(\d+)$/);
   if (!m) return notify('Aucun timecode reçu');
   const fps = { '24': 24, '25': 25, '29.97df': 30000 / 1001, '30': 30 }[tcState.rate] || 25;
-  setTimecode({ offset_s: Math.round(((+m[1] * 60 + +m[2]) * 60 + +m[3] + +m[4] / Math.round(fps)) * 1000) / 1000 });
+  setTcShowOr('offset_s', Math.round(((+m[1] * 60 + +m[2]) * 60 + +m[3] + +m[4] / Math.round(fps)) * 1000) / 1000);
 };
 $('timelinePanel').addEventListener('focusin', () => { if (!tcCfg) loadTimecode(); });
 setInterval(() => { if (!document.hidden && !$('timelinePanel').hidden) loadTimecode(); }, 2000);

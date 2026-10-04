@@ -707,6 +707,30 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 Err(e) => e,
             }
         }
+        (Method::Post, "/api/test/timecode") => {
+            // `--test-hooks` only (e2e of T-409): ArtTimeCode packets built
+            // by our encoder, `count` consecutive frames from `frames`,
+            // handed over as the Art-Net listener would (no socket).
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            match body::<SimTimecode>(request) {
+                Ok(sim) => {
+                    let s = shared.lock().unwrap();
+                    let mut accepted = 0;
+                    for k in 0..sim.count.clamp(1, 100) {
+                        let tc = crate::timecode::Tc::from_frames(sim.frames + k as i64, sim.rate);
+                        match crate::timecode::inject_artnet(&s, &crate::timecode::artnet::encode(tc, sim.rate)) {
+                            Ok(true) => accepted += 1,
+                            Ok(false) => {}
+                            Err(e) => return text(400, &e),
+                        }
+                    }
+                    json_response(json!({ "accepted": accepted }))
+                }
+                Err(e) => e,
+            }
+        }
         (Method::Post, "/api/test/native_audio") => {
             // `--test-hooks` only (e2e of the « Musique » panel, T-243): a
             // simulated native input: capture state, device list and/or one
@@ -3023,6 +3047,13 @@ fn diagnostic_report(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     with_type(Response::from_data(zip), "application/zip").with_header(header)
 }
 
+/// The timeline's state with the timecode's under `timecode` (T-409).
+fn timeline_with_timecode(s: &Shared) -> serde_json::Value {
+    let mut tl = json!(s.timeline.state(&s.timeline_clock()));
+    tl["timecode"] = crate::timecode::summary(s);
+    tl
+}
+
 /// The current frame for the preview, as `[x, y, r, g, b]` rows rounded
 /// to 3 decimals to keep the payload small at 30 requests a second, with
 /// the page's state (`live_view`). `X-State-Version`: the pushed state's
@@ -3082,7 +3113,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         },
         "layers": { "mixer": s.mixer, "mix": s.mix },
         "tempo": s.tempo.state(s.now_s()),
-        "timeline": s.timeline.state(&s.timeline_clock()),
+        // T-409: the timecode state also under `timeline.timecode`.
+        "timeline": timeline_with_timecode(s),
         "timeline_audio": song_view(s),
         "timecode": crate::timecode::summary(s),
         "live": s.live,
@@ -3424,6 +3456,20 @@ fn json_response(value: serde_json::Value) -> HttpResponse {
 fn with_type(response: HttpResponse, content_type: &str) -> HttpResponse {
     let header = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).expect("content type is valid ASCII");
     response.with_header(header)
+}
+
+/// `POST /api/test/timecode` (`--test-hooks`): Art-Net timecode frames.
+#[derive(Deserialize)]
+struct SimTimecode {
+    /// Frames since 00:00:00:00 at `rate`.
+    frames: i64,
+    rate: crate::timecode::Rate,
+    #[serde(default = "one")]
+    count: u32,
+}
+
+fn one() -> u32 {
+    1
 }
 
 /// `POST /api/test/tempo_estimate` (`--test-hooks`): a simulated detector.
@@ -4259,6 +4305,26 @@ mod tests {
         assert_eq!(t.shared.lock().unwrap().test_stall_ms, 2_000, "bounded");
     }
 
+    /// T-409: Art-Net timecode injection, `--test-hooks` only, taken only
+    /// while the source is Art-Net and TC-IN armed.
+    #[test]
+    fn the_timecode_hook_exists_only_with_test_hooks() {
+        let t = TestServer::start(false);
+        let sim = r#"{"frames":250,"rate":"25","count":6}"#;
+        assert_eq!(t.request("POST", "/api/test/timecode", sim).0, 404);
+        t.shared.lock().unwrap().test_hooks = true;
+        let (status, body) = t.request("POST", "/api/test/timecode", sim);
+        assert_eq!((status, serde_json::from_str::<serde_json::Value>(&body).unwrap()["accepted"].as_u64()), (200, Some(0)), "not wanted yet");
+        assert_eq!(t.request("POST", "/api/timecode", r#"{"source":"artnet"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timecode/arm", r#"{"on":true}"#).0, 200);
+        crate::timecode::sync(&mut t.shared.lock().unwrap());
+        t.shared.lock().unwrap().netin.hub.set_timecode(true, None);
+        let (status, body) = t.request("POST", "/api/test/timecode", sim);
+        assert_eq!((status, serde_json::from_str::<serde_json::Value>(&body).unwrap()["accepted"].as_u64()), (200, Some(6)));
+        assert_eq!(t.request("POST", "/api/test/timecode", r#"{"frames":1,"rate":"50"}"#).0, 400);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+    }
+
     #[test]
     fn the_tempo_estimate_hook_exists_only_with_test_hooks() {
         let t = TestServer::start(false);
@@ -4519,7 +4585,7 @@ mod tests {
         assert_eq!((tc["armed"].as_bool(), tc["status"].as_str(), tc["config"]["source"].as_str()), (Some(false), Some("off"), Some("off")));
         assert_eq!(t.request("POST", "/api/timecode/arm", r#"{"on":true}"#).0, 409, "no source yet");
         assert_eq!(t.request("POST", "/api/timecode", r#"{"source":"ltc","ltc_channel":2,"offset_s":3600}"#).0, 200);
-        assert_eq!(t.request("POST", "/api/timecode", r#"{"freewheel_frames":0}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/timecode", r#"{"after_roll_s":-1}"#).0, 400);
         assert_eq!(t.request("POST", "/api/timecode", r#"{"bogus":1}"#).0, 400);
         assert_eq!(t.request("POST", "/api/timecode/arm", r#"{"on":true,"source":"midi"}"#).0, 403, "from the UI only");
         let (status, body) = t.request("POST", "/api/timecode/arm", r#"{"toggle":true}"#);

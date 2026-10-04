@@ -1,7 +1,8 @@
-//! Incoming timecode (T-168): the timeline chases a show controller's
-//! clock, read as MIDI Time Code (mtc.rs, from the MIDI worker) or as LTC
-//! on an audio input channel (ltc.rs, decoded on the audio analysis
-//! thread).
+//! Incoming timecode (T-168, T-409): the timeline chases a show
+//! controller's clock, read as MIDI Time Code (mtc.rs, from the MIDI
+//! worker), as LTC on an audio input channel (ltc.rs, decoded on the audio
+//! analysis thread) or as Art-Net timecode (artnet.rs, received by the
+//! Art-Net listener of netin/).
 //!
 //! What timecode may do, and what it never does:
 //! - It drives the **timeline only**: seek, play, and the playhead's
@@ -10,30 +11,41 @@
 //! - It acts only when the operator armed **TC-IN** (memory only, off at
 //!   every start), the external inputs gate is open and the *Timecode*
 //!   source's scope includes *Timeline* (external.rs, T-408). TC-IN is
-//!   that source's access.
+//!   that source's access. The Art-Net receiver is open only while the
+//!   source is Art-Net and TC-IN is armed (receive only).
 //! - An emergency stop (Échap) or the laser being disarmed drops TC-IN:
 //!   after a blackout, timecode restarts nothing until TC-IN is armed
 //!   again by hand.
 //! - Only shows in seconds follow it; a time outside the show (after the
 //!   offset) is ignored and stops a show it was driving.
 //!
-//! Chase policy, every engine frame (`frame`):
-//! - **Locked** (a moving time less than 4 frames old): the show plays at
-//!   `timecode - offset`. Started if needed; a playhead more than
-//!   `JUMP_FRAMES` away is a jump of the source: seek. Otherwise, with
-//!   *Lissage*, a tenth of the error is taken up per frame (jitter
-//!   smoothed, the source's speed followed), without it the playhead is
-//!   set on the time.
-//! - **Roue libre** (no new time, for up to `freewheel_frames` frames):
-//!   the show runs on by itself.
-//! - Beyond that: the show it was driving stops (it keeps its position,
-//!   nothing is drawn), unless *Continuer si perte* is ticked.
-//! - A time that doesn't move (an MTC full frame when the source
-//!   locates, frozen LTC) cues a stopped show up at that position.
+//! Source, rate and offset are the global settings (`timecode.json`)
+//! unless the loaded show has its own (`Show::timecode`, T-409).
 //!
-//! The frame rate comes from the signal (MTC carries it; LTC from its
-//! measured speed and drop-frame flag) unless one is forced.
+//! Chase policy, every engine frame (`frame`):
+//! - **Pré-roll**: a moving time is followed once it has run on
+//!   consecutive frames for `pre_roll_frames` frames; the frames before
+//!   are ignored. A frame that doesn't follow the one before (a jump, a
+//!   gap) starts the pre-roll over.
+//! - **Suivi** (past the pre-roll, a moving time less than 4 frames old):
+//!   the show plays at `timecode - offset`. Started if needed; a playhead
+//!   more than `JUMP_FRAMES` away is a jump of the source: seek.
+//!   Otherwise, with *Lissage*, a tenth of the error is taken up per frame
+//!   (jitter smoothed, the source's speed followed), without it the
+//!   playhead is set on the time.
+//! - **Post-roll** (no new time, up to `after_roll_s` seconds after the
+//!   last one followed): the show runs on by itself. Beyond that the show
+//!   it was driving stops (it keeps its position, nothing is drawn) and
+//!   the status says *Timecode perdu*. `after_roll_s = None` (*Continuer*)
+//!   is a post-roll without limit.
+//! - A time that doesn't move (an MTC full frame when the source locates,
+//!   frozen LTC, a paused Art-Net sender) cues a stopped show up at that
+//!   position.
+//!
+//! The frame rate comes from the signal (MTC and Art-Net carry it; LTC
+//! from its measured speed and drop-frame flag) unless one is forced.
 
+pub mod artnet;
 pub mod ltc;
 pub mod mtc;
 
@@ -47,10 +59,12 @@ use serde_json::{json, Value};
 use std::fmt;
 use std::path::PathBuf;
 
-pub const DEFAULT_FREEWHEEL_FRAMES: u32 = 25;
-/// MTC completes a time every 2 frames: less than this would flicker.
-pub const MIN_FREEWHEEL_FRAMES: u32 = 5;
-pub const MAX_FREEWHEEL_FRAMES: u32 = 300;
+pub const DEFAULT_PRE_ROLL_FRAMES: u8 = 5;
+pub const MAX_PRE_ROLL_FRAMES: u8 = 100;
+pub const DEFAULT_AFTER_ROLL_S: f32 = 1.0;
+pub const MAX_AFTER_ROLL_S: f32 = 60.0;
+/// T-168's *roue libre* was counted in frames at 25 im/s.
+const LEGACY_FREEWHEEL_FPS: f64 = 25.0;
 /// No new moving time for longer than this: the signal dropped.
 const DROPOUT_FRAMES: f64 = 4.0;
 /// The playhead further than this from the timecode: a jump, seek.
@@ -206,6 +220,8 @@ pub enum TcSource {
     Off,
     Mtc,
     Ltc,
+    #[serde(rename = "artnet")]
+    ArtNet,
 }
 
 impl TcSource {
@@ -214,6 +230,7 @@ impl TcSource {
             TcSource::Off => "Aucune",
             TcSource::Mtc => "MTC",
             TcSource::Ltc => "LTC",
+            TcSource::ArtNet => "Art-Net",
         }
     }
 }
@@ -252,10 +269,11 @@ impl TcFps {
 pub struct TcConfig {
     pub source: TcSource,
     pub fps: TcFps,
-    /// *Continuer si perte*: the show runs on after the freewheel.
-    pub keep_running: bool,
-    /// Frames of *roue libre* before a show driven by timecode stops.
-    pub freewheel_frames: u32,
+    /// *Pré-roll*: consecutive frames needed before a time is followed.
+    pub pre_roll_frames: u8,
+    /// *Post-roll*: seconds the show runs on after the timecode drops;
+    /// `None` = *Continuer* (no limit).
+    pub after_roll_s: Option<f32>,
     /// *Lissage*: pull the playhead gently instead of setting it.
     pub smooth: bool,
     /// Show position = timecode - offset (s): a show starting at TC
@@ -265,21 +283,43 @@ pub struct TcConfig {
     pub midi_port: Option<String>,
     /// LTC on this input channel (1-based); 0: the mix of all channels.
     pub ltc_channel: u16,
+    /// Art-Net: the address of this Mac to listen on, at the Art-Net port
+    /// of RÉGLAGES › Entrées réseau; "" = none. With the Art-Net chart on,
+    /// its socket carries the timecode as well.
+    pub interface: String,
 }
 
 impl Default for TcConfig {
     fn default() -> Self {
-        TcConfig { source: TcSource::Off, fps: TcFps::Auto, keep_running: false, freewheel_frames: DEFAULT_FREEWHEEL_FRAMES, smooth: true, offset_s: 0.0, midi_port: None, ltc_channel: 0 }
+        TcConfig {
+            source: TcSource::Off,
+            fps: TcFps::Auto,
+            pre_roll_frames: DEFAULT_PRE_ROLL_FRAMES,
+            after_roll_s: Some(DEFAULT_AFTER_ROLL_S),
+            smooth: true,
+            offset_s: 0.0,
+            midi_port: None,
+            ltc_channel: 0,
+            interface: String::new(),
+        }
     }
+}
+
+fn valid_offset(offset_s: f64) -> Result<(), String> {
+    if !offset_s.is_finite() || offset_s.abs() > MAX_OFFSET_S {
+        return Err("décalage hors limites (± 24 h)".into());
+    }
+    Ok(())
 }
 
 impl TcConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if !self.offset_s.is_finite() || self.offset_s.abs() > MAX_OFFSET_S {
-            return Err("décalage hors limites (± 24 h)".into());
+        valid_offset(self.offset_s)?;
+        if self.pre_roll_frames > MAX_PRE_ROLL_FRAMES {
+            return Err(format!("pré-roll : de 0 à {MAX_PRE_ROLL_FRAMES} images"));
         }
-        if !(MIN_FREEWHEEL_FRAMES..=MAX_FREEWHEEL_FRAMES).contains(&self.freewheel_frames) {
-            return Err(format!("roue libre : de {MIN_FREEWHEEL_FRAMES} à {MAX_FREEWHEEL_FRAMES} images"));
+        if self.after_roll_s.is_some_and(|s| !(0.0..=MAX_AFTER_ROLL_S).contains(&s)) {
+            return Err(format!("post-roll : de 0 à {MAX_AFTER_ROLL_S} s"));
         }
         if self.ltc_channel > MAX_LTC_CHANNEL {
             return Err(format!("voie LTC : de 0 à {MAX_LTC_CHANNEL}"));
@@ -287,16 +327,42 @@ impl TcConfig {
         if self.midi_port.as_ref().is_some_and(|p| p.is_empty() || p.len() > 128) {
             return Err("port MIDI invalide".into());
         }
+        if !self.interface.is_empty() {
+            crate::netin::parse_bind(&self.interface, 0)?;
+        }
         Ok(())
     }
 
-    /// What the audio callback copies for the LTC decoder: -1 nothing.
-    pub fn ltc_tap(&self) -> i32 {
-        if self.source == TcSource::Ltc {
-            self.ltc_channel as i32
-        } else {
-            -1
+    /// A saved file of T-168: `keep_running` becomes a post-roll without
+    /// limit, `freewheel_frames` the same time in seconds.
+    fn migrate(v: &mut Value) {
+        let Some(obj) = v.as_object_mut() else { return };
+        let keep = obj.remove("keep_running").and_then(|k| k.as_bool());
+        let frames = obj.remove("freewheel_frames").and_then(|f| f.as_f64());
+        if obj.contains_key("after_roll_s") {
+            return;
         }
+        if keep == Some(true) {
+            obj.insert("after_roll_s".into(), Value::Null);
+        } else if let Some(n) = frames {
+            obj.insert("after_roll_s".into(), json!(((n / LEGACY_FREEWHEEL_FPS) as f32).clamp(0.0, MAX_AFTER_ROLL_S)));
+        }
+    }
+}
+
+/// A show's own timecode (T-409), saved in the show. A show without one
+/// follows the global settings.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShowTimecode {
+    pub source: TcSource,
+    pub fps: TcFps,
+    pub offset_s: f64,
+}
+
+impl ShowTimecode {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_offset(self.offset_s)
     }
 }
 
@@ -304,13 +370,13 @@ impl TcConfig {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reading {
     pub tc: Tc,
-    /// The rate the source says (MTC) or seems to run at (LTC).
+    /// The rate the source says (MTC, Art-Net) or seems to run at (LTC).
     pub rate: Rate,
     /// Studio seconds (`Shared::now_s`) at which the source was at `tc`
     /// plus `lag` frames.
     pub t: f64,
     pub lag: f64,
-    /// Quarter frames or LTC (false: an MTC full frame, a locate).
+    /// Quarter frames, LTC or Art-Net (false: an MTC full frame, a locate).
     pub running: bool,
 }
 
@@ -320,8 +386,9 @@ pub enum Status {
     #[default]
     Off,
     NoSignal,
+    Preroll,
     Locked,
-    Freewheel,
+    Afterroll,
     Stopped,
     Lost,
 }
@@ -331,18 +398,36 @@ impl Status {
         match self {
             Status::Off => "Pas de source",
             Status::NoSignal => "Pas de timecode",
-            Status::Locked => "Verrouillé",
-            Status::Freewheel => "Roue libre",
+            Status::Preroll => "Pré-roll",
+            Status::Locked => "Suivi",
+            Status::Afterroll => "Post-roll",
             Status::Stopped => "Timecode à l'arrêt",
             Status::Lost => "Timecode perdu",
         }
     }
+
+    /// The five states of the API and the big readout.
+    pub fn state(self) -> &'static str {
+        match self {
+            Status::Off | Status::NoSignal => "off",
+            Status::Preroll => "preroll",
+            Status::Locked | Status::Stopped => "locked",
+            Status::Afterroll => "afterroll",
+            Status::Lost => "lost",
+        }
+    }
 }
+
+/// What a new input is: a change forgets the readings and drops TC-IN.
+type InputKey = (TcSource, Option<String>, u16, String);
 
 /// `Shared.timecode`.
 pub struct TimecodeState {
     config: TcConfig,
     path: Option<PathBuf>,
+    /// The loaded show's own settings (`sync`).
+    show: Option<ShowTimecode>,
+    input: InputKey,
     /// TC-IN: memory only, off at every start.
     pub armed: bool,
     estop_trips: u64,
@@ -352,6 +437,10 @@ pub struct TimecodeState {
     /// The newest reading that moved on from the one before.
     moved: Option<Reading>,
     last_moved: bool,
+    /// Frames run on consecutively (the pre-roll).
+    consecutive: u32,
+    /// Studio time of the last reading followed (past the pre-roll).
+    locked_at: Option<f64>,
     /// Readings received, and the count the chase has looked at.
     received: u64,
     handled: u64,
@@ -367,9 +456,12 @@ pub struct TimecodeState {
 
 impl TimecodeState {
     fn with(config: TcConfig, path: Option<PathBuf>) -> Self {
+        let input = (config.source, config.midi_port.clone(), config.ltc_channel, config.interface.clone());
         TimecodeState {
             config,
             path,
+            show: None,
+            input,
             armed: false,
             estop_trips: 0,
             laser_armed: false,
@@ -377,6 +469,8 @@ impl TimecodeState {
             last: None,
             moved: None,
             last_moved: false,
+            consecutive: 0,
+            locked_at: None,
             received: 0,
             handled: 0,
             ltc_gen: 0,
@@ -388,7 +482,9 @@ impl TimecodeState {
     }
 
     pub fn load(path: PathBuf) -> Self {
-        let mut config: TcConfig = crate::load_json(&path);
+        let mut raw: Value = crate::load_json(&path);
+        TcConfig::migrate(&mut raw);
+        let mut config: TcConfig = if raw.is_null() { TcConfig::default() } else { serde_json::from_value(raw).unwrap_or_default() };
         if let Err(e) = config.validate() {
             log::warn!("timecode.json : {e} ; réglages par défaut");
             config = TcConfig::default();
@@ -402,6 +498,23 @@ impl TimecodeState {
 
     pub fn config(&self) -> &TcConfig {
         &self.config
+    }
+
+    /// The source in use: the loaded show's, else the global one.
+    pub fn source(&self) -> TcSource {
+        self.show.as_ref().map_or(self.config.source, |s| s.source)
+    }
+
+    fn fps(&self) -> TcFps {
+        self.show.as_ref().map_or(self.config.fps, |s| s.fps)
+    }
+
+    pub fn offset_s(&self) -> f64 {
+        self.show.as_ref().map_or(self.config.offset_s, |s| s.offset_s)
+    }
+
+    fn input_key(&self) -> InputKey {
+        (self.source(), self.config.midi_port.clone(), self.config.ltc_channel, self.config.interface.clone())
     }
 
     /// What to write, out of the `Shared` lock.
@@ -422,11 +535,13 @@ impl TimecodeState {
         self.last = None;
         self.moved = None;
         self.last_moved = false;
+        self.consecutive = 0;
+        self.locked_at = None;
         self.chasing = false;
     }
 
     fn rate_of(&self, r: &Reading) -> Rate {
-        self.config.fps.forced().unwrap_or(r.rate)
+        self.fps().forced().unwrap_or(r.rate)
     }
 
     fn secs_of(&self, r: &Reading) -> f64 {
@@ -434,42 +549,83 @@ impl TimecodeState {
         r.tc.seconds(rate) + r.lag / rate.fps()
     }
 
+    fn prerolled(&self) -> bool {
+        self.consecutive >= self.config.pre_roll_frames as u32
+    }
+
     /// A time from the source.
     pub fn push(&mut self, r: Reading) {
-        let moved = r.running && self.last.is_some_and(|p| p.running && p.tc != r.tc);
+        self.received += 1;
+        let rate = self.rate_of(&r);
+        let window = DROPOUT_FRAMES / rate.fps();
+        let prev = self.last.filter(|p| p.running && r.running);
+        // The same frame again (a sender faster than its frames): not news
+        // while the time moves; a time that stays is a stop.
+        if prev.is_some_and(|p| p.tc == r.tc) && self.moved.is_some_and(|m| r.t - m.t <= window) {
+            return;
+        }
+        let moved = prev.is_some_and(|p| p.tc != r.tc);
+        self.consecutive = match prev {
+            Some(p) if p.tc == r.tc => self.consecutive,
+            Some(p) => {
+                let step = r.tc.frames(rate) - p.tc.frames(rate);
+                if (1..=2).contains(&step) && r.t - p.t <= window {
+                    self.consecutive.saturating_add(step as u32)
+                } else {
+                    1
+                }
+            }
+            None if r.running => 1,
+            None => 0,
+        };
         if moved {
             self.moved = Some(r);
+            if self.prerolled() {
+                self.locked_at = Some(r.t);
+            }
         }
         self.last_moved = moved;
         self.last = Some(r);
-        self.received += 1;
     }
 
     /// The timecode now (seconds) and its rate: run on from the last time
-    /// while locked.
+    /// while it moves.
     pub fn now(&self, t: f64) -> Option<(f64, Rate)> {
         let last = self.last?;
         let mut secs = self.secs_of(&last);
-        if self.status == Status::Locked {
+        if matches!(self.status, Status::Locked | Status::Preroll) {
             secs += (t - last.t).max(0.0);
         }
         Some((secs, self.rate_of(&last)))
     }
 
+    /// The post-roll is over (never with *Continuer*).
+    fn after_roll_over(&self, t: f64) -> bool {
+        match (self.locked_at, self.config.after_roll_s) {
+            (Some(at), Some(limit)) => t - at > limit as f64,
+            _ => false,
+        }
+    }
+
     fn update_status(&mut self, t: f64) {
         let Some(last) = self.last else {
-            self.status = if self.config.source == TcSource::Off { Status::Off } else { Status::NoSignal };
+            self.status = if self.source() == TcSource::Off { Status::Off } else { Status::NoSignal };
             return;
         };
         let frame_s = 1.0 / self.rate_of(&last).fps();
-        let age = self.moved.map(|m| t - m.t);
-        let freewheel = self.config.freewheel_frames.max(MIN_FREEWHEEL_FRAMES) as f64 * frame_s;
-        self.status = match age {
-            Some(a) if self.last_moved && a <= DROPOUT_FRAMES * frame_s => Status::Locked,
-            Some(a) if a <= freewheel => Status::Freewheel,
-            _ if !self.last_moved && t - last.t <= STILL_FOR_S => Status::Stopped,
-            Some(_) => Status::Lost,
-            None => Status::NoSignal,
+        let fresh = self.last_moved && self.moved.is_some_and(|m| t - m.t <= DROPOUT_FRAMES * frame_s);
+        self.status = if fresh && self.prerolled() {
+            Status::Locked
+        } else if fresh {
+            Status::Preroll
+        } else if !self.last_moved && t - last.t <= STILL_FOR_S {
+            Status::Stopped
+        } else if self.locked_at.is_some() && !self.after_roll_over(t) {
+            Status::Afterroll
+        } else if self.moved.is_some() {
+            Status::Lost
+        } else {
+            Status::NoSignal
         };
     }
 
@@ -486,7 +642,7 @@ impl TimecodeState {
         self.blocked = None;
         let end = player.show.as_ref().map_or(0.0, Show::end);
         let Some((secs, rate)) = self.now(c.t) else { return };
-        let target = secs - self.config.offset_s;
+        let target = secs - self.offset_s();
         let inside = (0.0..end).contains(&target);
         match self.status {
             Status::Locked if !inside => {
@@ -509,10 +665,16 @@ impl TimecodeState {
                 }
                 self.chasing = true;
             }
-            // The show runs on by itself.
-            Status::Freewheel => {}
+            // The show runs on by itself; pre-roll frames are not followed.
+            Status::Preroll | Status::Afterroll => {
+                if self.chasing && self.after_roll_over(c.t) {
+                    player.halt(c);
+                    self.chasing = false;
+                }
+            }
             _ => {
-                if self.chasing && !self.config.keep_running {
+                let keep = self.status == Status::Stopped && self.config.after_roll_s.is_none();
+                if self.chasing && !keep {
                     // Stopped where it is: nothing drawn, position kept.
                     player.halt(c);
                     self.chasing = false;
@@ -524,7 +686,7 @@ impl TimecodeState {
         }
     }
 
-    /// The readout: `TC 01:02:03:04` while a time is known.
+    /// The readout: `01:02:03:04` while a time is known.
     pub fn display(&self, t: f64) -> Option<String> {
         self.now(t).map(|(secs, rate)| Tc::from_seconds(secs, rate).to_string())
     }
@@ -532,10 +694,33 @@ impl TimecodeState {
     pub fn rate(&self) -> Option<Rate> {
         self.last.map(|r| self.rate_of(&r))
     }
+
+    /// What the audio callback copies for the LTC decoder: -1 nothing.
+    fn ltc_tap(&self) -> i32 {
+        if self.source() == TcSource::Ltc {
+            self.config.ltc_channel as i32
+        } else {
+            -1
+        }
+    }
 }
 
-/// Drops TC-IN after an emergency stop or when the laser is disarmed.
+/// Follows the loaded show's own settings; drops TC-IN after an emergency
+/// stop, when the laser is disarmed, and when the input changes (another
+/// source, port, channel or interface: its readings are forgotten).
 pub fn sync(s: &mut Shared) {
+    let show = s.timeline.show.as_ref().and_then(|sh| sh.timecode.clone());
+    if show != s.timecode.show {
+        s.timecode.show = show;
+    }
+    let input = s.timecode.input_key();
+    if input != s.timecode.input {
+        s.timecode.input = input;
+        s.timecode.forget();
+        if s.timecode.armed {
+            disarm(s, ArmSource::System, "source");
+        }
+    }
     let trips = s.estop.trips();
     let laser = s.gate.is_armed();
     let tc = &mut s.timecode;
@@ -571,18 +756,18 @@ pub fn set_armed(s: &mut Shared, on: bool, src: ArmSource) -> Result<(), &'stati
     if s.estop.is_latched() {
         return Err("arrêt d'urgence enclenché : réinitialisez-le avant d'armer TC-IN");
     }
-    if s.timecode.config.source == TcSource::Off {
+    if s.timecode.source() == TcSource::Off {
         return Err("choisissez d'abord une source de timecode");
     }
     s.timecode.armed = true;
     log::info!("TC-IN armé ({})", src.label_fr());
-    s.gate.log().record("timecode_in", Some(src.id()), json!({ "armed": true, "source": s.timecode.config.source }));
+    s.gate.log().record("timecode_in", Some(src.id()), json!({ "armed": true, "source": s.timecode.source() }));
     Ok(())
 }
 
 /// MTC from the MIDI worker's batch (quarter frames and full frames).
 pub fn midi(s: &mut Shared, events: &[MidiEvent]) {
-    if s.timecode.config.source != TcSource::Mtc {
+    if s.timecode.source() != TcSource::Mtc {
         return;
     }
     let epoch = s.epoch;
@@ -609,9 +794,37 @@ pub fn midi(s: &mut Shared, events: &[MidiEvent]) {
     }
 }
 
+/// Art-Net timecode: tells the listener whether to receive it (and
+/// where), and takes what arrived.
+fn artnet_in(s: &mut Shared) {
+    let tc = &s.timecode;
+    let wanted = tc.source() == TcSource::ArtNet && tc.armed;
+    let hub = std::sync::Arc::clone(&s.netin.hub);
+    let bind = if wanted && !tc.config.interface.is_empty() { crate::netin::parse_bind(&tc.config.interface, hub.effective().artnet.port).ok() } else { None };
+    hub.set_timecode(wanted, bind);
+    if !wanted {
+        return;
+    }
+    let epoch = s.epoch;
+    for (code, rate, at) in hub.take_timecode() {
+        let t = at.saturating_duration_since(epoch).as_secs_f64();
+        s.timecode.push(Reading { tc: code, rate, t, lag: 0.0, running: true });
+    }
+}
+
+/// `POST /api/test/timecode` (`--test-hooks`): one ArtTimeCode datagram,
+/// handed over as the listener would. False: not wanted (another source,
+/// or TC-IN disarmed), ignored like on the network.
+pub fn inject_artnet(s: &Shared, packet: &[u8]) -> Result<bool, String> {
+    match crate::netin::artnet::decode(packet)? {
+        crate::netin::artnet::Packet::TimeCode { tc, rate } => Ok(s.netin.hub.push_timecode((tc, rate, std::time::Instant::now()))),
+        _ => Err("pas un ArtTimeCode".into()),
+    }
+}
+
 /// Whether the timecode may drive the timeline now; the reason if not.
 fn allowed(s: &mut Shared) -> Result<(), String> {
-    if s.timecode.config.source == TcSource::Off {
+    if s.timecode.source() == TcSource::Off {
         return Err("aucune source".into());
     }
     if !s.timecode.armed {
@@ -634,13 +847,14 @@ fn allowed(s: &mut Shared) -> Result<(), String> {
 /// Once per engine frame, before the timeline advances (main.rs).
 pub fn frame(s: &mut Shared, c: &Clock) {
     sync(s);
-    s.audio_in.set_ltc_tap(s.timecode.config.ltc_tap());
-    if s.timecode.config.source == TcSource::Ltc {
+    s.audio_in.set_ltc_tap(s.timecode.ltc_tap());
+    if s.timecode.source() == TcSource::Ltc {
         if let Some((gen, f, t)) = s.audio_in.ltc_since(s.timecode.ltc_gen) {
             s.timecode.ltc_gen = gen;
             s.timecode.push(Reading { tc: f.tc, rate: Rate::from_ltc(f.fps, f.drop_frame), t, lag: 1.0, running: true });
         }
     }
+    artnet_in(s);
     let ok = allowed(s);
     let (tc, player) = (&mut s.timecode, &mut s.timeline);
     tc.chase(player, c, ok);
@@ -651,15 +865,19 @@ pub fn summary(s: &Shared) -> Value {
     let tc = &s.timecode;
     let t = s.now_s();
     json!({
-        "source": tc.config.source,
+        "source": tc.source(),
         "armed": tc.armed,
         "status": tc.status,
         "status_fr": tc.status.label_fr(),
+        "state": tc.status.state(),
         "tc": tc.display(t),
         "rate": tc.rate(),
         "rate_fr": tc.rate().map(Rate::label_fr),
         "blocked": tc.blocked,
         "chasing": tc.chasing,
+        "offset_s": tc.offset_s(),
+        // The loaded show has its own source, rate and offset.
+        "per_show": tc.show.is_some(),
     })
 }
 
@@ -669,21 +887,44 @@ pub fn view(s: &mut Shared) -> Value {
     let mut v = summary(s);
     let audio = s.audio_in.status();
     let native = s.audio_in.config().0.source == crate::audio::AudioInputSource::Native;
+    let net = s.netin.hub.effective();
     v["config"] = json!(s.timecode.config);
+    v["show"] = json!(s.timecode.show);
+    v["show_name"] = json!(s.timeline.show.as_ref().map(|sh| sh.name.as_str()));
     v["midi_ports"] = json!(s.midi.devices.iter().filter(|d| d.connected).map(|d| d.name.as_str()).collect::<Vec<_>>());
     v["audio"] = json!({ "native": native, "channels": audio.channels, "message": audio.message });
+    v["artnet"] = json!({
+        "port": net.artnet.port,
+        "chart": net.artnet.enabled,
+        "listening": s.netin.hub.status(crate::netin::Proto::ArtNet).local,
+        "interfaces": crate::netin::interfaces(),
+    });
     v["rates"] = json!(Rate::ALL.iter().map(|r| json!({ "id": r, "label": r.label_fr() })).collect::<Vec<_>>());
     v
 }
 
 /// `POST /api/timecode` `{ "source": "mtc", "offset_s": 3600, … }`: the
-/// fields given replace the current ones. Returns whether anything
-/// changed; the caller saves. A new source forgets the old one's
-/// readings and drops TC-IN.
+/// fields given replace the current ones; `"show": { "source", "fps",
+/// "offset_s" }` (or null) sets the loaded show's own settings, saved with
+/// the show. Returns whether anything changed; the caller saves the
+/// global settings. A new source forgets the old one's readings and drops
+/// TC-IN.
 pub fn update(s: &mut Shared, patch: &Value) -> Result<bool, String> {
     let obj = patch.as_object().ok_or("objet JSON attendu")?;
+    let show_patch = match obj.get("show") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => {
+            let st: ShowTimecode = serde_json::from_value(v.clone()).map_err(|e| format!("réglage du show invalide : {e}"))?;
+            st.validate()?;
+            Some(Some(st))
+        }
+    };
+    if show_patch.is_some() && s.timeline.show.is_none() {
+        return Err("aucun show chargé".into());
+    }
     let mut v = json!(s.timecode.config);
-    for (k, val) in obj {
+    for (k, val) in obj.iter().filter(|(k, _)| *k != "show") {
         if v.get(k).is_none() {
             return Err(format!("réglage inconnu : {k}"));
         }
@@ -692,21 +933,38 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<bool, String> {
     let cfg: TcConfig = serde_json::from_value(v).map_err(|e| format!("réglage invalide : {e}"))?;
     cfg.validate()?;
     let before = s.timecode.config.clone();
-    if cfg == before {
-        return Ok(false);
-    }
-    if let Some(change) = crate::safety_log::settings_change(&before, &cfg) {
-        s.gate.log().record("timecode_settings", Some(ArmSource::Ui.id()), change);
-    }
-    let new_source = cfg.source != before.source || cfg.midi_port != before.midi_port || cfg.ltc_channel != before.ltc_channel;
-    s.timecode.config = cfg;
-    if new_source {
-        s.timecode.forget();
-        if s.timecode.armed {
-            disarm(s, ArmSource::Ui, "source");
+    let mut changed = false;
+    if cfg != before {
+        if let Some(change) = crate::safety_log::settings_change(&before, &cfg) {
+            s.gate.log().record("timecode_settings", Some(ArmSource::Ui.id()), change);
         }
+        s.timecode.config = cfg;
+        changed = true;
     }
-    Ok(true)
+    if let Some(st) = show_patch {
+        changed |= set_show(s, st);
+    }
+    sync(s);
+    Ok(changed)
+}
+
+/// The loaded show's own settings: written to its file at once (a
+/// built-in example's copy only once it is saved under a name).
+fn set_show(s: &mut Shared, st: Option<ShowTimecode>) -> bool {
+    let example = s.timeline.is_example();
+    let Some(show) = s.timeline.show.as_mut() else { return false };
+    if show.timecode == st {
+        return false;
+    }
+    s.gate.log().record("timecode_settings", Some(ArmSource::Ui.id()), json!({ "show": show.name, "timecode": st }));
+    show.timecode = st;
+    let saved = !example && crate::timeline::valid_show_name(&show.name) && s.shows.save(show).is_ok();
+    if saved {
+        s.timeline.saved();
+    } else {
+        s.timeline.touch();
+    }
+    true
 }
 
 #[cfg(test)]
@@ -841,16 +1099,16 @@ mod tests {
     }
 
     #[test]
-    fn a_dropout_freewheels_then_stops_after_a_second() {
+    fn a_dropout_runs_the_post_roll_then_stops_after_a_second() {
         let (mut st, mut player) = ltc_state();
         let t = feed(&mut st, &mut player, 0.0, 1.0, |t| 5.0 + t);
         assert!(player.is_playing() && st.is_chasing());
-        // Signal gone: a few frames later, roue libre; the show runs on.
+        // Signal gone: a few frames later, post-roll; the show runs on.
         st.chase(&mut player, &clock(t + 0.2), Ok(()));
-        assert_eq!(st.status(), Status::Freewheel);
+        assert_eq!(st.status(), Status::Afterroll);
         assert!(player.is_playing());
         st.chase(&mut player, &clock(t + 0.9), Ok(()));
-        assert!(player.is_playing(), "still within the 25 frames");
+        assert!(player.is_playing(), "still within the 1 s post-roll");
         // After 1 s: stopped where it was, nothing drawn.
         st.chase(&mut player, &clock(t + 1.05), Ok(()));
         assert_eq!(st.status(), Status::Lost);
@@ -865,12 +1123,12 @@ mod tests {
     }
 
     #[test]
-    fn keep_running_continues_without_timecode() {
+    fn continuer_is_a_post_roll_without_limit() {
         let (mut st, mut player) = ltc_state();
-        st.config.keep_running = true;
+        st.config.after_roll_s = None;
         let t = feed(&mut st, &mut player, 0.0, 1.0, |t| 5.0 + t);
         st.chase(&mut player, &clock(t + 5.0), Ok(()));
-        assert_eq!(st.status(), Status::Lost);
+        assert_eq!(st.status(), Status::Afterroll);
         assert!(player.is_playing());
         assert!((player.position_at(&clock(t + 5.0)) - (10.0 + t)).abs() < 0.04);
     }
@@ -896,7 +1154,7 @@ mod tests {
         // Without Lissage the playhead is set on the time.
         st.config.smooth = false;
         let src = |t: f64| 200.16 + (t - 1.0);
-        let t = feed(&mut st, &mut player, t, t + 0.1, src);
+        let t = feed(&mut st, &mut player, t, t + 0.4, src);
         assert_eq!(st.jumps, jumps + 1);
         assert!((player.position_at(&clock(t)) - src(t)).abs() < 0.02);
     }
@@ -969,7 +1227,7 @@ mod tests {
     #[test]
     fn tc_in_gate_and_estop() {
         let mut s = armed_studio();
-        mtc_batch(&mut s, 250, 2);
+        mtc_batch(&mut s, 250, 3);
         let c = s.timeline_clock();
         frame(&mut s, &c);
         assert!(s.timeline.is_playing(), "{:?}", s.timecode.blocked);
@@ -984,7 +1242,7 @@ mod tests {
         s.gate.reset_estop(&estop);
         external::set_open(&mut s, true, ArmSource::Ui).unwrap();
         for _ in 0..3 {
-            mtc_batch(&mut s, 400, 2);
+            mtc_batch(&mut s, 400, 3);
             let c = s.timeline_clock();
             frame(&mut s, &c);
             assert!(!s.timeline.is_playing());
@@ -993,7 +1251,7 @@ mod tests {
         assert_eq!(s.timecode.blocked.as_deref(), Some("TC-IN désarmé"));
         // Re-armed by hand: it chases again.
         set_armed(&mut s, true, ArmSource::Ui).unwrap();
-        mtc_batch(&mut s, 500, 2);
+        mtc_batch(&mut s, 500, 3);
         let c = s.timeline_clock();
         frame(&mut s, &c);
         assert!(s.timeline.is_playing());
@@ -1004,7 +1262,7 @@ mod tests {
     fn gate_scope_and_laser_disarm_block_it() {
         let mut s = armed_studio();
         external::set_open(&mut s, false, ArmSource::Ui).unwrap();
-        mtc_batch(&mut s, 250, 2);
+        mtc_batch(&mut s, 250, 3);
         let c = s.timeline_clock();
         frame(&mut s, &c);
         assert!(!s.timeline.is_playing());
@@ -1049,7 +1307,7 @@ mod tests {
         assert!(s.timecode.blocked.as_deref().unwrap().contains("en temps"));
         assert!(summary(&s)["tc"].as_str().is_some());
         // Settings: validated, unknown keys refused, saved without TC-IN.
-        for bad in [json!({ "offset_s": 1e9 }), json!({ "freewheel_frames": 1 }), json!({ "nope": 1 }), json!({ "source": "smpte" }), json!([1])] {
+        for bad in [json!({ "offset_s": 1e9 }), json!({ "after_roll_s": 61 }), json!({ "pre_roll_frames": 101 }), json!({ "interface": "239.1.1.1" }), json!({ "interface": "nom" }), json!({ "nope": 1 }), json!({ "source": "smpte" }), json!([1])] {
             assert!(update(&mut s, &bad).is_err(), "{bad}");
         }
         assert_eq!(update(&mut s, &json!({ "offset_s": 3600, "smooth": false })), Ok(true));
@@ -1058,5 +1316,202 @@ mod tests {
         assert!(!saved.contains("armed"), "{saved}");
         let back: TcConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(back, TcConfig::default());
+    }
+
+    /// LTC-like frames at 25 im/s from `from`, one per 40 ms from `t0`;
+    /// returns the time of the last one.
+    fn frames(st: &mut TimecodeState, player: &mut Player, from: i64, n: i64, t0: f64) -> f64 {
+        let mut t = t0;
+        for k in 0..n {
+            t = t0 + k as f64 * 0.04;
+            running(st, Tc::from_frames(from + k, Rate::F25), t);
+            st.chase(player, &clock(t), Ok(()));
+        }
+        t
+    }
+
+    #[test]
+    fn pre_roll_ignores_the_first_frames_and_restarts_on_a_gap() {
+        let (mut st, mut player) = ltc_state();
+        assert_eq!(st.config.pre_roll_frames, 5);
+        // n - 1 frames: nothing followed.
+        let t = frames(&mut st, &mut player, 250, 4, 0.0);
+        assert_eq!(st.status(), Status::Preroll);
+        assert!(!player.is_playing() && !st.is_chasing());
+        // The n-th: followed, from that frame.
+        running(&mut st, Tc::from_frames(254, Rate::F25), t + 0.04);
+        st.chase(&mut player, &clock(t + 0.04), Ok(()));
+        assert_eq!(st.status(), Status::Locked);
+        assert!(player.is_playing());
+        assert!((player.position_at(&clock(t + 0.04)) - 254.0 / 25.0).abs() < 1e-6);
+        // A frame that doesn't follow (a jump of 3 s): pre-roll again, the
+        // show runs on by itself meanwhile, then seeks once locked.
+        let t = t + 0.08;
+        running(&mut st, Tc::from_frames(330, Rate::F25), t);
+        st.chase(&mut player, &clock(t), Ok(()));
+        assert_eq!(st.status(), Status::Preroll);
+        assert!((player.position_at(&clock(t)) - (254.0 / 25.0 + 0.04)).abs() < 1e-6, "not followed yet");
+        let t = frames(&mut st, &mut player, 331, 4, t + 0.04);
+        assert_eq!(st.status(), Status::Locked);
+        assert!((player.position_at(&clock(t)) - 334.0 / 25.0).abs() < 1e-6);
+        // Without a pre-roll, the second frame locks.
+        let (mut st, mut player) = ltc_state();
+        st.config.pre_roll_frames = 0;
+        frames(&mut st, &mut player, 100, 2, 0.0);
+        assert!(player.is_playing());
+    }
+
+    #[test]
+    fn a_gap_shorter_than_the_post_roll_keeps_the_show_going() {
+        let (mut st, mut player) = ltc_state();
+        st.config.after_roll_s = Some(0.5);
+        let t = frames(&mut st, &mut player, 250, 20, 0.0);
+        assert!(player.is_playing());
+        // 0.4 s without timecode: post-roll, the show runs on.
+        st.chase(&mut player, &clock(t + 0.4), Ok(()));
+        assert_eq!(st.status(), Status::Afterroll);
+        assert!(player.is_playing() && st.is_chasing());
+        // Back after a gap: a new pre-roll, the show still running.
+        let t2 = frames(&mut st, &mut player, 280, 6, t + 0.44);
+        assert_eq!(st.status(), Status::Locked);
+        assert!(player.is_playing());
+        // 0.6 s without: stopped, « Timecode perdu ».
+        st.chase(&mut player, &clock(t2 + 0.6), Ok(()));
+        assert_eq!(st.status(), Status::Lost);
+        assert_eq!(st.status().label_fr(), "Timecode perdu");
+        assert_eq!(st.status().state(), "lost");
+        assert!(!player.is_playing() && !st.is_chasing());
+    }
+
+    #[test]
+    fn a_time_outside_the_show_is_ignored() {
+        let (mut st, mut player) = ltc_state();
+        st.config.offset_s = 3600.0;
+        frames(&mut st, &mut player, 25 * 60, 10, 0.0);
+        assert!(!player.is_playing());
+        assert_eq!(st.blocked.as_deref(), Some("timecode hors du show"));
+    }
+
+    #[test]
+    fn drop_frame_labels_and_seconds_over_a_day() {
+        let r = Rate::F2997Df;
+        assert_eq!(Tc::from_frames(tc(0, 0, 59, 29).frames(r) + 1, r).to_string(), "00:01:00:02");
+        let day = 24 * 3600 * 30 - 2 * (24 * 60 - 24 * 6);
+        assert_eq!(tc(23, 59, 59, 29).frames(r), day - 1);
+        // Every frame of the day: a label that exists, and back to the
+        // same frame count and the exact time.
+        for n in 0..day {
+            let label = Tc::from_frames(n, r);
+            assert!(label.valid(r), "{label}");
+            assert_eq!(label.frames(r), n);
+            assert_eq!(label.seconds(r), n as f64 / r.fps());
+        }
+        assert_eq!(Tc::from_frames(day, r), tc(0, 0, 0, 0), "wraps at midnight");
+        assert!((tc(23, 59, 59, 29).seconds(r) - (day - 1) as f64 * 1.001 / 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn legacy_settings_become_the_post_roll() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-tc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("timecode.json");
+        std::fs::write(&path, r#"{"source":"ltc","keep_running":true,"freewheel_frames":50}"#).unwrap();
+        let st = TimecodeState::load(path.clone());
+        assert_eq!((st.config.source, st.config.after_roll_s), (TcSource::Ltc, None));
+        std::fs::write(&path, r#"{"source":"mtc","freewheel_frames":50}"#).unwrap();
+        assert_eq!(TimecodeState::load(path.clone()).config.after_roll_s, Some(2.0));
+        assert_eq!(TimecodeState::load(dir.join("none.json")).config, TcConfig::default());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn artnet_studio() -> Shared {
+        let mut s = shared();
+        update(&mut s, &json!({ "source": "artnet" })).unwrap();
+        external::set_open(&mut s, true, ArmSource::Ui).unwrap();
+        set_armed(&mut s, true, ArmSource::Ui).unwrap();
+        s.timeline.load(show(60.0));
+        s
+    }
+
+    /// One engine frame, `n` consecutive Art-Net frames from `from` at
+    /// 25 im/s handed over as the listener does, one more engine frame.
+    /// Returns the packets the receiver took.
+    fn artnet_frames(s: &mut Shared, from: i64, n: i64) -> usize {
+        let c = s.timeline_clock();
+        frame(s, &c);
+        let mut taken = 0;
+        for k in 0..n {
+            let packet = artnet::encode(Tc::from_frames(from + k, Rate::F25), Rate::F25);
+            taken += inject_artnet(s, &packet).unwrap() as usize;
+        }
+        let c = s.timeline_clock();
+        frame(s, &c);
+        taken
+    }
+
+    /// Art-Net timecode through `Shared`: received only with TC-IN armed,
+    /// moves the playhead past the pre-roll, never arms; after Échap
+    /// nothing restarts until TC-IN is armed again by hand.
+    #[test]
+    fn artnet_drives_the_show_and_never_arms() {
+        let mut s = artnet_studio();
+        assert_eq!(artnet_frames(&mut s, 250, 3), 3);
+        assert!(!s.timeline.is_playing(), "inside the pre-roll");
+        assert_eq!(s.timecode.status(), Status::Preroll);
+        artnet_frames(&mut s, 253, 3);
+        assert!(s.timeline.is_playing(), "{:?}", s.timecode.blocked);
+        let pos = s.timeline.position_at(&s.timeline_clock());
+        assert!((pos - 255.0 / 25.0).abs() < 0.1, "{pos}");
+        assert_eq!(summary(&s)["state"], "locked");
+        assert!(!s.gate.is_armed(), "timecode never arms");
+
+        s.emergency_stop(ArmSource::Keyboard);
+        let c = s.timeline_clock();
+        s.timeline.halt(&c);
+        let estop = std::sync::Arc::clone(&s.estop);
+        s.gate.reset_estop(&estop);
+        external::set_open(&mut s, true, ArmSource::Ui).unwrap();
+        for _ in 0..3 {
+            assert_eq!(artnet_frames(&mut s, 400, 8), 0, "the receiver is closed");
+            assert!(!s.timeline.is_playing());
+        }
+        assert!(!s.timecode.armed && !s.gate.is_armed());
+        set_armed(&mut s, true, ArmSource::Ui).unwrap();
+        artnet_frames(&mut s, 500, 8);
+        assert!(s.timeline.is_playing());
+        assert!(!s.gate.is_armed());
+        // TC-IN off: the receiver closes and drops what waits.
+        set_armed(&mut s, false, ArmSource::Ui).unwrap();
+        assert_eq!(artnet_frames(&mut s, 600, 8), 0);
+    }
+
+    #[test]
+    fn a_show_has_its_own_source_and_offset_or_follows_the_global_ones() {
+        let mut s = artnet_studio();
+        // An older show file, without `timecode`: the global settings.
+        let old: Show = serde_json::from_str(r#"{"name":"vieux","tracks":[{"events":[{"start":0,"len":30,"source":{"kind":"cue","id":"x"}}]}]}"#).unwrap();
+        assert_eq!(old.timecode, None);
+        s.timeline.load(old);
+        sync(&mut s);
+        assert_eq!((s.timecode.source(), s.timecode.offset_s()), (TcSource::ArtNet, 0.0));
+        assert!(s.timecode.armed);
+        // Its own: MTC from 01:00:00:00. The input changed: TC-IN drops.
+        update(&mut s, &json!({ "show": { "source": "mtc", "fps": "25", "offset_s": 3600 } })).unwrap();
+        assert_eq!((s.timecode.source(), s.timecode.offset_s()), (TcSource::Mtc, 3600.0));
+        assert!(!s.timecode.armed, "a new source drops TC-IN");
+        assert_eq!(s.timeline.show.as_ref().unwrap().timecode.as_ref().unwrap().fps, TcFps::F25);
+        assert_eq!(summary(&s)["per_show"], true);
+        assert_eq!(s.timecode.config().source, TcSource::ArtNet, "the global setting is kept");
+        // The editor keeps it.
+        let mut edited = s.timeline.show.clone().unwrap();
+        edited.timecode = None;
+        s.timeline.edit(edited);
+        assert!(s.timeline.show.as_ref().unwrap().timecode.is_some());
+        // Back to the global settings; refused when invalid or without a show.
+        update(&mut s, &json!({ "show": null })).unwrap();
+        assert_eq!(s.timecode.source(), TcSource::ArtNet);
+        assert!(update(&mut s, &json!({ "show": { "offset_s": 1e9 } })).is_err());
+        s.timeline.show = None;
+        assert!(update(&mut s, &json!({ "show": { "source": "ltc" } })).is_err());
     }
 }

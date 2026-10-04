@@ -110,7 +110,7 @@ impl Listener {
         if self.proto == Proto::Sacn {
             self.reconcile_groups(cfg.multicast().map(|(ip, u)| (ip, u, cfg.sacn.port)));
         }
-        let want = cfg.listen(self.proto);
+        let want = self.hub.listen_addr(&cfg, self.proto);
         if self.socket.as_ref().map(|(a, _)| *a) == want {
             return;
         }
@@ -206,6 +206,13 @@ impl Listener {
     fn artnet(&mut self, data: &[u8], from: SocketAddr) {
         let (universe, data) = match artnet::decode(data) {
             Ok(Packet::Dmx { universe, data }) => (universe, data),
+            Ok(Packet::TimeCode { tc, rate }) => {
+                // T-409: for the timecode chase only, when it wants it.
+                if self.hub.push_timecode((tc, rate, Instant::now())) {
+                    return self.seen(from);
+                }
+                return self.hub.update_status(Proto::ArtNet, |st| st.ignored += 1);
+            }
             Ok(Packet::Other(_)) => return, // ArtPoll and co: we never answer
             Err(e) => {
                 log::debug!("Art-Net de {from} : {e}");
@@ -213,6 +220,10 @@ impl Listener {
             }
         };
         let cfg = self.hub.effective();
+        if !cfg.artnet.enabled {
+            // Open for the timecode only (T-409): levels are not ours.
+            return self.hub.update_status(Proto::ArtNet, |st| st.ignored += 1);
+        }
         let chart = universe == cfg.artnet.universe;
         let patched = cfg.dmx.universes().contains(&universe);
         if !chart && !patched {
@@ -429,6 +440,46 @@ mod tests {
         for t in threads {
             t.join().unwrap();
         }
+    }
+
+    /// Art-Net timecode (T-409) on loopback: the socket opens only while
+    /// the timecode wants it, takes ArtTimeCode and ignores levels (the
+    /// chart is off), and closes again.
+    #[test]
+    fn art_timecode_round_trip_on_loopback() {
+        use crate::timecode::{artnet::encode, Rate, Tc};
+        let hub = Arc::new(NetHub::in_memory(Arc::default()));
+        let mut cfg = NetInConfig::default();
+        cfg.artnet.port = 0;
+        hub.set_file(cfg).unwrap();
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let running = Arc::new(AtomicBool::new(true));
+        let thread = {
+            let (hub, running) = (Arc::clone(&hub), Arc::clone(&running));
+            std::thread::spawn(move || Listener::new(Proto::ArtNet, hub, tx).run(&running))
+        };
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(hub.status(Proto::ArtNet).local.is_none(), "closed until the timecode wants it");
+        hub.set_timecode(true, Some(bind));
+        let local = || hub.status(Proto::ArtNet).local.and_then(|a| a.parse::<SocketAddr>().ok());
+        wait_for("the Art-Net socket", || local().is_some());
+        let addr = local().unwrap();
+        assert!(addr.ip().is_loopback());
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let tc = Tc { h: 1, m: 2, s: 3, f: 4 };
+        client.send_to(&artnet::tests::art_dmx(0, &[255; 16]), addr).unwrap();
+        client.send_to(&encode(tc, Rate::F25), addr).unwrap();
+        wait_for("the timecode", || hub.status(Proto::ArtNet).packets == 1);
+        assert_eq!(hub.status(Proto::ArtNet).ignored, 1, "levels ignored without the chart");
+        let got = hub.take_timecode();
+        assert_eq!((got.len(), got[0].0, got[0].1), (1, tc, Rate::F25));
+        assert!(rx.try_recv().is_err(), "nothing queued for the controls");
+        hub.set_timecode(false, Some(bind));
+        wait_for("Art-Net closed", || hub.status(Proto::ArtNet).local.is_none());
+        assert!(!hub.push_timecode((tc, Rate::F25, Instant::now())), "not wanted: ignored");
+        running.store(false, Ordering::SeqCst);
+        thread.join().unwrap();
     }
 
     #[test]
