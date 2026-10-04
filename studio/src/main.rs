@@ -57,6 +57,7 @@ mod running;
 mod program;
 mod project;
 mod projection;
+mod push;
 mod safety;
 #[cfg(test)]
 mod safety_invariants;
@@ -379,6 +380,9 @@ pub struct Shared {
     /// Whether a ShowNET output's link is the Wi-Fi (T-472): a warning in
     /// the top bar, nothing else.
     pub wifi: Arc<wifi::WifiWatch>,
+    /// The newest frame and page state for the pushed routes (push.rs,
+    /// T-411): the engine drops each frame there and never waits.
+    pub push: Arc<push::Hub>,
 }
 
 impl Shared {
@@ -1035,6 +1039,7 @@ fn startup_state(cli: &Cli) -> Shared {
         output_mgr,
         // Simulated (no command run) whenever a test flag is given.
         wifi: Arc::new(wifi::WifiWatch::new(cli.test_hooks || cli.test_devices.is_some() || cli.test_output.is_some())),
+        push: Default::default(),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
@@ -1520,6 +1525,19 @@ impl Engine {
         }
         s.output_lit = emitted.lit;
         s.output_status = output_status;
+        // The pages' binary frames (T-411): a swap in the hub, no network
+        // write, no wait on a client. The flags say what the gate is now.
+        let estop_latched = s.estop.is_latched();
+        let flags = [
+            (s.gate.is_armed() && !estop_latched, push::flags::ARMED),
+            (estop_latched, push::flags::ESTOP),
+            (emitted.lit > 0, push::flags::LIT),
+            (s.health.engine_ok(), push::flags::ENGINE_OK),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |acc, (_, bit)| acc | bit);
+        s.push.publish_frame(&frame, flags);
         s.frame = frame;
         s.mix = mix;
         s.strobe = strobe;
@@ -2241,32 +2259,95 @@ mod tests {
         assert!(worst < Duration::from_millis(watchdog::STALL_MS as u64), "a frame took {worst:?}");
     }
 
+    /// T-411: a page that opens the state stream and asks for binary frames
+    /// but never reads them does not slow the engine: over 300 frames,
+    /// with big states published all along, the cadence is that of the
+    /// same engine without any page.
+    #[test]
+    fn a_push_reader_that_never_reads_does_not_slow_the_engine() {
+        let _guard = test_support::time_guard("a_push_reader_that_never_reads_does_not_slow_the_engine", Duration::from_secs(180));
+        let (quiet, _) = engine_cadence(false);
+        let (mean, worst) = engine_cadence_with(|shared, running| {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let addr = server.server_addr().to_ip().unwrap();
+            let estop = Arc::clone(&shared.lock().unwrap().estop);
+            let hub = Arc::clone(&shared.lock().unwrap().push);
+            let web = std::thread::spawn({
+                let (shared, running) = (Arc::clone(shared), Arc::clone(running));
+                move || web::serve(server, shared, estop, std::env::temp_dir().join("laser-studio-test-unused/calibration.json"), running)
+            });
+            // A reader with a tiny buffer that never reads: the stream and
+            // twenty frame requests, all left unread.
+            let stuck = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+            stuck.set_recv_buffer_size(4096).unwrap();
+            stuck.connect(&addr.into()).unwrap();
+            let mut stuck: std::net::TcpStream = stuck.into();
+            std::io::Write::write_all(&mut stuck, b"GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let frames = std::net::TcpStream::connect(addr).unwrap();
+            for _ in 0..20 {
+                std::io::Write::write_all(&mut &frames, b"GET /api/frame.bin HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            }
+            let flood = std::thread::spawn({
+                let running = Arc::clone(running);
+                move || {
+                    let filler = "x".repeat(64 * 1024);
+                    let mut n = 0u64;
+                    while running.load(Ordering::SeqCst) {
+                        n += 1;
+                        hub.publish_state(serde_json::json!(n), |_| format!("{{\"n\":{n},\"f\":\"{filler}\"}}"));
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            });
+            Box::new(move || {
+                flood.join().unwrap();
+                web.join().unwrap();
+                drop((stuck, frames));
+            })
+        });
+        assert!(mean <= quiet + quiet / 4 + Duration::from_millis(1), "mean frame interval {mean:?}, {quiet:?} without a page");
+        assert!(worst < Duration::from_millis(watchdog::STALL_MS as u64), "a frame took {worst:?}");
+    }
+
+    type Teardown = Box<dyn FnOnce()>;
+
     /// Mean and worst interval of 300 engine frames, with or without a
     /// thread flooding the log.
     fn engine_cadence(flooded: bool) -> (Duration, Duration) {
-        let dir = std::env::temp_dir().join(format!("laser-studio-engine-applog-{flooded}-{}", std::process::id()));
+        engine_cadence_with(|shared, running| {
+            let flood = std::thread::spawn({
+                let (shared, running) = (Arc::clone(shared), Arc::clone(running));
+                move || {
+                    while flooded && running.load(Ordering::SeqCst) {
+                        log::info!("bruit");
+                        {
+                            let mut s = shared.lock().unwrap();
+                            let _ = s.request_arm(ArmSource::Ui);
+                            s.gate.disarm(interlock::DisarmReason::User, ArmSource::Ui);
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            });
+            Box::new(move || flood.join().unwrap())
+        })
+    }
+
+    /// Mean and worst interval of 300 engine frames, with `load` running
+    /// beside the engine (its teardown runs once `running` is false).
+    fn engine_cadence_with(load: impl FnOnce(&Arc<Mutex<Shared>>, &Arc<AtomicBool>) -> Teardown) -> (Duration, Duration) {
+        static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let run = RUN.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("laser-studio-engine-cadence-{run}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let shared = Arc::new(Mutex::new(test_support::shared()));
         let running = Arc::new(AtomicBool::new(true));
         let sent = Arc::new(Mutex::new(Vec::new()));
+        let teardown = load(&shared, &running);
         let engine = std::thread::spawn({
             let (shared, running, out) = (Arc::clone(&shared), Arc::clone(&running), TimedOutput(Arc::clone(&sent)));
             let (live, layers) = (dir.join("live.json"), dir.join("layers.json"));
             move || run_engine(shared, Some(Box::new(out)), running, live, layers)
-        });
-        let flood = std::thread::spawn({
-            let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
-            move || {
-                while flooded && running.load(Ordering::SeqCst) {
-                    log::info!("bruit");
-                    {
-                        let mut s = shared.lock().unwrap();
-                        let _ = s.request_arm(ArmSource::Ui);
-                        s.gate.disarm(interlock::DisarmReason::User, ArmSource::Ui);
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            }
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         while sent.lock().unwrap().len() < 301 {
@@ -2275,7 +2356,7 @@ mod tests {
         }
         running.store(false, Ordering::SeqCst);
         engine.join().unwrap();
-        flood.join().unwrap();
+        teardown();
         let times: Vec<Instant> = sent.lock().unwrap()[..301].to_vec();
         let mean = (times[300] - times[0]) / 300;
         let worst = times.windows(2).map(|w| w[1] - w[0]).max().unwrap();

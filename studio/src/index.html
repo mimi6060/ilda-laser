@@ -2631,6 +2631,8 @@ async function sendArm(body) {
   // client_id: this page is alive, even if its first heartbeat is late.
   const r = await fetch('/api/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, client_id: clientId }) });
   armAnsweredAt = performance.now();
+  // Binary frames up to this one were published before the change (T-411).
+  LINK.armSeqMin = +(r.headers.get('X-Frame-Seq') || 0);
   if (r.ok) { armed = (await r.json()).armed; $('armRefused').hidden = true; showArmed(); return; }
   if (r.status === 409) {
     const { blocking } = await r.json();
@@ -2649,7 +2651,11 @@ const toggleArmed = source => sendArm({ toggle: true, source });
 // Latched stop: no JSON, no await before the request leaves.
 function emergencyStop(source) {
   armed = false; showArmed();
-  fetch('/api/estop?source=' + source, { method: 'POST', keepalive: true }).catch(() => {});
+  // Frames already on their way still say "armed": not shown (T-411).
+  armAnsweredAt = performance.now();
+  LINK.armSeqMin = (LINK.seq ?? 0) + 3;
+  fetch('/api/estop?source=' + source, { method: 'POST', keepalive: true })
+    .then(r => { const seq = +(r.headers.get('X-Frame-Seq') || 0); if (seq) LINK.armSeqMin = seq; }).catch(() => {});
   $('estopBanner').hidden = false;
 }
 // Only text entry counts as typing: after a slider, checkbox or button,
@@ -3199,73 +3205,205 @@ function showOutputKind(f) {
   el.title = title;
 }
 
-// Engine link (T-271): no frame for more than 1 s = an orange warning in the top bar.
+// Engine link (T-271): no new frame for more than 1 s = an orange warning in the top bar.
 let lastFrameAt = performance.now();
 setInterval(() => { $('linkLost').hidden = performance.now() - lastFrameAt <= 1000; }, 250);
+
+// ---------- pushed state and binary frames (T-411) ----------
+// The state is pushed by the studio (GET /api/events, on each change) and
+// the preview reads binary frames (GET /api/frame.bin, which waits for the
+// next one). One stream per browser: the page holding the Web Lock opens
+// it and passes each state to the other windows (BroadcastChannel), so
+// several windows never use up the connections the heartbeat and the stop
+// need. If the stream is down, or more than 1 s behind the version the
+// frames announce, the page polls /api/frame as before until it is back.
+// The stream never counts as the operator's presence: the heartbeat does.
+const LINK = {
+  leader: false, es: null, up: false, last: null, // this page's own stream (leader)
+  leaderUp: false,                                // the leader's, as it last said
+  version: 0, state: null, stateAt: 0,            // the last pushed state
+  serverVersion: 0, waitFor: 0, waitSince: 0,     // the version frames announce
+  seq: undefined, push: null, armSeqMin: 0,         // push: null until the first frame
+};
+const linkChan = 'BroadcastChannel' in window ? new BroadcastChannel('laser-studio-state') : null;
+function takePushed(v, json) {
+  if (v === LINK.version) return;
+  if (v < LINK.version) LINK.waitFor = 0; // a restarted studio counts from 1 again
+  LINK.version = v; LINK.state = JSON.parse(json); LINK.stateAt = performance.now();
+  if (LINK.push) applyState(LINK.state, LINK.stateAt, true);
+}
+function openStream() {
+  const es = new EventSource('/api/events');
+  LINK.es = es;
+  es.addEventListener('state', e => {
+    LINK.up = true;
+    LINK.last = { v: +e.lastEventId, s: e.data };
+    linkChan?.postMessage({ ...LINK.last, up: true });
+    takePushed(LINK.last.v, e.data);
+  });
+  es.onerror = () => {
+    // The browser reconnects by itself; until a state comes, poll.
+    LINK.up = false;
+    linkChan?.postMessage({ up: false });
+    if (es.readyState === EventSource.CLOSED) { LINK.es = null; setTimeout(openStream, 3000); }
+  };
+}
+if (linkChan) {
+  linkChan.onmessage = ({ data: d }) => {
+    if (d.want) { if (LINK.leader && LINK.up && LINK.last) linkChan.postMessage({ ...LINK.last, up: true }); return; }
+    if ('up' in d) LINK.leaderUp = d.up;
+    if (d.s) takePushed(d.v, d.s);
+  };
+}
+if (linkChan && navigator.locks) {
+  // Held until the page closes; then another window takes the stream over.
+  navigator.locks.request('laser-studio-events', () => { LINK.leader = true; openStream(); return new Promise(() => {}); });
+  linkChan.postMessage({ want: true });
+} else {
+  LINK.leader = true; openStream();
+}
+// Whether the pushed state is current: a stream is up and has caught up
+// with what the frames say within 1 s.
+function linkHealthy(now) {
+  if (!LINK.state || !(LINK.leader ? LINK.up : LINK.leaderUp)) return false;
+  if (LINK.waitFor && LINK.version >= LINK.waitFor) LINK.waitFor = 0;
+  if (!LINK.waitFor && LINK.serverVersion > LINK.version) { LINK.waitFor = LINK.serverVersion; LINK.waitSince = now; }
+  return !LINK.waitFor || now - LINK.waitSince <= 1000;
+}
+function updateLink() {
+  const push = linkHealthy(performance.now());
+  if (push === LINK.push) return;
+  LINK.push = push;
+  $('engineLed').title = 'Chien de garde du moteur — Liaison : ' + (push ? 'flux' : 'interrogation (secours)');
+  if (push) applyState(LINK.state, LINK.stateAt, true);
+}
+// A state skipped by a guard (an edit in flight) is shown on the next pass.
+setInterval(() => { if (LINK.push && !document.hidden) applyState(LINK.state, LINK.stateAt, true); }, 500);
+// The beat counted on from the last state: at rest no state comes.
+function tempoNow() {
+  const t = LINK.state && LINK.state.tempo;
+  if (!t) return null;
+  const beat = t.beat + (performance.now() - LINK.stateAt) / 1000 * t.bpm / 60, whole = Math.floor(beat), bpb = t.beats_per_bar || 4;
+  return { ...t, beat, bar: Math.floor(whole / bpb), beat_in_bar: ((whole % bpb) + bpb) % bpb, phase: beat - whole };
+}
+// GET /api/frame.bin: "LSF1", seq u32, count u16, flags u16, then x, y
+// (i16, ±32767) and r, g, b (u8) per point, little-endian.
+function decodeFrame(buf) {
+  const d = new DataView(buf);
+  if (buf.byteLength < 12 || d.getUint32(0, false) !== 0x4C534631) return null;
+  const n = d.getUint16(8, true), points = new Array(n);
+  if (buf.byteLength !== 12 + 7 * n) return null;
+  for (let i = 0, o = 12; i < n; i++, o += 7) {
+    points[i] = [d.getInt16(o, true) / 32767, d.getInt16(o + 2, true) / 32767, d.getUint8(o + 4) / 255, d.getUint8(o + 5) / 255, d.getUint8(o + 6) / 255];
+  }
+  return { seq: d.getUint32(4, true), flags: d.getUint16(10, true), points };
+}
+function showPoints(points) {
+  lastPoints = points;
+  // One frame feeds whichever view is shown; the 3D view only reads it.
+  if (view3d && show3d) view3d.setFrame(points);
+  if (show2d) draw(points);
+  const n = points.length, fps = n ? pps / n : 0;
+  $('stPoints').textContent = n;
+  $('stFps').textContent = n ? fps.toFixed(1) : '–';
+  $('stFps').classList.toggle('bad', n && fps < 15);
+}
+async function pushFrame() {
+  const fetchedAt = performance.now();
+  const r = await fetch('/api/frame.bin' + (LINK.seq === undefined ? '' : '?after=' + LINK.seq), { cache: 'no-store' });
+  if (!r.ok) throw new Error('/api/frame.bin ' + r.status);
+  LINK.serverVersion = +(r.headers.get('X-State-Version') || 0);
+  const fr = decodeFrame(await r.arrayBuffer());
+  if (!fr) throw new Error('/api/frame.bin: image illisible');
+  // Only a new frame counts: the same one again means the engine is stuck.
+  if (fr.seq !== LINK.seq) lastFrameAt = performance.now();
+  LINK.seq = fr.seq;
+  // The armed state comes with every frame, as the engine saw it. A frame
+  // published before our last arm request was handled may be older.
+  if (fetchedAt > armAnsweredAt && (fr.seq > LINK.armSeqMin || fetchedAt - armAnsweredAt > 1000)) armed = !!(fr.flags & 1);
+  showArmed();
+  showPoints(fr.points);
+  showTempo(tempoNow());
+}
+async function pollFrame() {
+  const fetchedAt = performance.now();
+  const r = await fetch('/api/frame');
+  LINK.serverVersion = +(r.headers.get('X-State-Version') || 0);
+  const f = await r.json();
+  lastFrameAt = performance.now();
+  if (fetchedAt > armAnsweredAt) armed = f.armed;
+  showPoints(f.points);
+  applyState(f, fetchedAt, false);
+}
 async function previewLoop() {
+  const started = performance.now();
   try {
-    const fetchedAt = performance.now();
-    const f = await (await fetch('/api/frame')).json();
-    lastFrameAt = performance.now();
-    lastPoints = f.points;
-    // One fetch feeds whichever view is shown; the 3D view only reads it.
-    if (view3d && show3d) view3d.setFrame(f.points);
-    dwellStatus = f.dwell;
-    if (show2d) draw(f.points);
-    if (fetchedAt > armAnsweredAt) armed = f.armed;
-    arm = f.arm; pps = f.pps; checklistState = f.checklist;
-    showShownet(f.shownet);
-    showAudienceMode(f.audience);
-    // Ticked or restarted from another page, or the output became (or
-    // stopped being) a ShowNET: refresh the list.
-    if (checklist && f.checklist && f.checklist.complete !== checklist.complete) reloadChecklist();
-    else if (checklist && f.shownet && (f.shownet.active !== (checklist.output === 'shownet') || f.shownet.hw_stop_ok !== checklist.hw_stop_ok)) reloadChecklist();
-    showArmed(); showPresence(f); showKeepAwake(f.keep_awake);
-    $('output').textContent = f.output_state === 'lost' ? 'Sortie perdue'
-      : f.output_state === 'connecting' ? 'Connexion de la sortie…'
-      : f.output_error ? '⚠ ' + f.output_error
-      : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement';
-    showOutputKind(f);
-    showArtnetStatus(f.output_status);
-    const n = f.points.length, fps = n ? pps / n : 0;
-    $('stPoints').textContent = n;
-    $('stFps').textContent = n ? fps.toFixed(1) : '–';
-    $('stFps').classList.toggle('bad', n && fps < 15);
-    highlightPlaylist(f.playlist);
-    showTempo(f.tempo);
-    if (fetchedAt > liveAnsweredAt && liveAnsweredAt >= liveSentAt) showLive(f.live);
-    showLfos(f.lfos);
-    showRoutes(f.audio_routes);
-    showStrobe(f.strobe);
-    showAudioGuard(f.audio_guard);
-    showTriggers(f.audio_triggers);
-    showDwell(f.dwell);
-    showTestPattern(f.test_pattern);
-    showShowMode(f.lock);
-    // Follow page changes made elsewhere (MIDI controller, API) - only
-    // when the server's value changes, so a tab click that the server
-    // hasn't processed yet isn't undone by an older frame.
-    // The grid changed elsewhere (another page, a project opened, figures).
-    if (f.grid_rev !== undefined && f.grid_rev !== grid.rev && presets.length) { grid.rev = f.grid_rev; loadGrid(); }
-    if (f.cue_page !== serverPage) {
-      serverPage = f.cue_page;
-      if (grid.pages[serverPage] && serverPage !== gridPage) { gridPage = serverPage; renderCues(); }
-    }
-    showCueDeck(f.cues);
-    // A cell « en attente » (T-159) blinks with the beat.
-    if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
-    showRunCount(f);
-    // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
-    // control); our own requests update settingsRev themselves.
-    if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
-    showLayers(f.layers);
-    figFrameInfo(f);
-    showEvolving(f.evolving);
-    showTimeline(f.timeline);
-    showSong(f.timeline, f.timeline_audio);
-    tlOnState(f.timeline, f.tempo);
+    if (LINK.push) await pushFrame(); else await pollFrame();
   } catch (e) { $('output').textContent = '⚠ Studio injoignable'; }
-  setTimeout(previewLoop, 33);
+  updateLink();
+  // About 30 images a second; a polled one waits as before.
+  setTimeout(previewLoop, LINK.push ? Math.max(0, 33 - (performance.now() - started)) : 33);
+}
+// Everything the page shows besides the points: a pushed state (`pushed`,
+// received at `at`) or a polled /api/frame (fetched at `at`).
+function applyState(f, at, pushed) {
+  if (!f) return;
+  dwellStatus = f.dwell;
+  arm = f.arm; pps = f.pps; checklistState = f.checklist;
+  showShownet(f.shownet);
+  showAudienceMode(f.audience);
+  // Ticked or restarted from another page, or the output became (or
+  // stopped being) a ShowNET: refresh the list.
+  if (checklist && f.checklist && f.checklist.complete !== checklist.complete) reloadChecklist();
+  else if (checklist && f.shownet && (f.shownet.active !== (checklist.output === 'shownet') || f.shownet.hw_stop_ok !== checklist.hw_stop_ok)) reloadChecklist();
+  showArmed(); showPresence(f); showKeepAwake(f.keep_awake);
+  $('output').textContent = f.output_state === 'lost' ? 'Sortie perdue'
+    : f.output_state === 'connecting' ? 'Connexion de la sortie…'
+    : f.output_error ? '⚠ ' + f.output_error
+    : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement';
+  showOutputKind(f);
+  showArtnetStatus(f.output_status);
+  highlightPlaylist(f.playlist);
+  showTempo(pushed ? tempoNow() : f.tempo);
+  // A live change of ours in flight, or just answered: an older state must
+  // not be drawn over the controls (it would e.g. untick « Synchro tempo »
+  // right after it was ticked). A pushed one skipped now is shown on the
+  // next pass.
+  if (pushed ? liveAnsweredAt >= liveSentAt && performance.now() - liveAnsweredAt > 100
+    : at > liveAnsweredAt && liveAnsweredAt >= liveSentAt) showLive(f.live);
+  showLfos(f.lfos);
+  showRoutes(f.audio_routes);
+  // How long ago each trigger fired, counted on since a pushed state.
+  const trig = pushed && f.audio_triggers ? { ...f.audio_triggers, rules: (f.audio_triggers.rules || []).map(r =>
+    r.ago_s == null ? r : { ...r, ago_s: r.ago_s + (performance.now() - at) / 1000 }) } : f.audio_triggers;
+  showTriggers(trig);
+  showStrobe(f.strobe);
+  showAudioGuard(f.audio_guard);
+  showDwell(f.dwell);
+  showTestPattern(f.test_pattern);
+  showShowMode(f.lock);
+  // Follow page changes made elsewhere (MIDI controller, API) - only
+  // when the server's value changes, so a tab click that the server
+  // hasn't processed yet isn't undone by an older frame.
+  // The grid changed elsewhere (another page, a project opened, figures).
+  if (f.grid_rev !== undefined && f.grid_rev !== grid.rev && presets.length) { grid.rev = f.grid_rev; loadGrid(); }
+  if (f.cue_page !== serverPage) {
+    serverPage = f.cue_page;
+    if (grid.pages[serverPage] && serverPage !== gridPage) { gridPage = serverPage; renderCues(); }
+  }
+  showCueDeck(f.cues);
+  // A cell « en attente » (T-159) blinks with the beat.
+  if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
+  showRunCount(f);
+  // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
+  // control); our own requests update settingsRev themselves.
+  if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
+  showLayers(f.layers);
+  figFrameInfo(f);
+  showEvolving(f.evolving);
+  showTimeline(f.timeline);
+  showSong(f.timeline, f.timeline_audio);
+  tlOnState(f.timeline, f.tempo, at);
 }
 
 // ---------- 3D beam view (T-275, T-276) ----------
@@ -5718,10 +5856,10 @@ $('tlTempoHint').onclick = () => {
   const tm = TL.show && TL.show.tempo_map && TL.show.tempo_map[0];
   if (tm) post('/api/control', { id: 'tempo.bpm', value: tm.bpm });
 };
-// Every frame (previewLoop): playhead, and the show if it changed elsewhere.
-function tlOnState(t, tempo) {
+// Every state (applyState, `at` when it was read): playhead, and the show if it changed elsewhere.
+function tlOnState(t, tempo, at = performance.now()) {
   if (!t) return;
-  TL.state = t; TL.stateAt = performance.now();
+  TL.state = t; TL.stateAt = at;
   if (tempo && tempo.bpm) TL.bpm = tempo.bpm;
   if ((t.name !== TL.name || t.rev !== TL.rev) && !TL.inflight && !TL.drag && !TL.fetching) tlFetch();
   if (!TL.inflight) tlShowFlags(t);

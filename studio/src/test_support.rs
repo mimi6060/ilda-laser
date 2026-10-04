@@ -111,6 +111,7 @@ pub fn shared() -> Shared {
         devices: std::sync::Arc::clone(output_mgr.devices()),
         output_mgr,
         wifi: std::sync::Arc::new(crate::wifi::WifiWatch::new(true)),
+        push: Default::default(),
     }
 }
 
