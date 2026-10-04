@@ -51,6 +51,7 @@ mod safety_invariants;
 mod safety_log;
 mod showmode;
 mod scenes;
+mod sdbank;
 mod sheets;
 mod tempo;
 mod testpattern;
@@ -310,6 +311,9 @@ pub struct Shared {
     /// Choosing, connecting and reconnecting the output (T-401). Its own
     /// lock: taken under this one, never the other way round.
     pub output_mgr: Arc<output_manager::OutputManager>,
+    /// The ShowNET SD card bank (sdbank.rs, T-302, `sdbank.json`): which
+    /// cue is which card file. A machine file, not part of a project.
+    pub sdbank: sdbank::SdBankStore,
 }
 
 impl Shared {
@@ -759,6 +763,7 @@ fn startup_state(cli: &Cli) -> Shared {
         applog: Default::default(),
         pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
+        sdbank: sdbank::SdBankStore::load(cli.data_dir.join("sdbank.json")),
         playlist: None,
         controls,
         presets,

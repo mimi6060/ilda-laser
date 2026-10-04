@@ -501,6 +501,14 @@ impl StrobeLimiter {
         }
     }
 
+    /// Measures a finished frame without changing it, and tells whether the
+    /// limiter is now cutting (holding). The ILDA export (T-355) checks
+    /// its looped file with a fresh limiter this way.
+    pub fn would_cut(&mut self, frame: &[Point], t: f64, cfg: &SafetySettings) -> bool {
+        self.step(frame, Vec::new(), t, cfg);
+        self.status.active
+    }
+
     /// Measures `measured` (the frame about to go out). Keeps `keep` as the
     /// frame to put back during a hold. Returns `Some(kept frame)` when the
     /// output must be replaced by it, `None` to send `measured` as it is.

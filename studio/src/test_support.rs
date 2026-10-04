@@ -38,6 +38,7 @@ pub fn shared() -> Shared {
         applog: Default::default(),
         pps: 30_000,
         scenes: SceneStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scenes.json")),
+        sdbank: crate::sdbank::SdBankStore::in_memory(),
         playlist: None,
         controls,
         presets,

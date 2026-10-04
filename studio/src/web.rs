@@ -110,6 +110,8 @@ fn may_decode(method: &Method, url: &str) -> bool {
             // up to `MAX_EXPORT_FRAMES` images (T-011).
             | (Method::Post, "/api/media/ilda")
             | (Method::Get, "/api/media/ilda/export")
+            // A whole SD bank: up to 229 cues rendered and written (T-302).
+            | (Method::Post, "/api/sdbank/export")
     )
 }
 
@@ -939,6 +941,52 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             Err(e) => e,
         },
         (Method::Get, "/api/media/ilda/export") => export_ilda(request.url(), shared),
+        // The ShowNET SD card bank (T-302): edited here, exported to a
+        // folder beside the single worker (`may_decode`). Show mode locks
+        // the POSTs (not in its allow-list).
+        (Method::Get, "/api/sdbank") => json_response(sdbank_view(&shared.lock().unwrap())),
+        (Method::Post, "/api/sdbank") => match body::<crate::sdbank::SdBank>(request) {
+            Ok(bank) => {
+                let mut s = shared.lock().unwrap();
+                match s.sdbank.set(bank) {
+                    Ok(()) => json_response(sdbank_view(&s)),
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(r) => r,
+        },
+        (Method::Post, "/api/sdbank/add") => match body::<SdAddRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let Some(id) = req.id.filter(|i| !i.is_empty()).or_else(|| s.active_cue.clone()) else {
+                    return text(400, "Aucun cue en cours : lancez un cue d'abord");
+                };
+                if !s.presets.iter().any(|p| p.id == id) {
+                    return text(404, "cue introuvable");
+                }
+                let mut bank = s.sdbank.get().clone();
+                let added = bank.add(&id, req.seconds.unwrap_or(crate::sdbank::DEFAULT_SECONDS)).and_then(|n| s.sdbank.set(bank).map(|()| n));
+                match added {
+                    Ok(n) => {
+                        let mut v = sdbank_view(&s);
+                        v["added"] = json!(n);
+                        json_response(v)
+                    }
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(r) => r,
+        },
+        (Method::Post, "/api/sdbank/renumber") => {
+            let mut s = shared.lock().unwrap();
+            let mut bank = s.sdbank.get().clone();
+            bank.renumber();
+            match s.sdbank.set(bank) {
+                Ok(()) => json_response(sdbank_view(&s)),
+                Err(e) => text(400, &format!("{e:#}")),
+            }
+        }
+        (Method::Post, "/api/sdbank/export") => export_sdbank(request, shared),
         (Method::Get, "/api/timeline/waveform") => waveform(request.url(), shared),
         (Method::Post, "/api/timeline/audio") => match body::<SongPatch>(request) {
             Ok(patch) => attach_song(patch, shared),
@@ -1055,10 +1103,12 @@ fn import_ilda(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpRespon
     }
 }
 
-/// `GET /api/media/ilda/export?number=1..229&frames=&fps=[&id=<cue>]`:
+/// `GET /api/media/ilda/export?number=1..229&frames=&fps=[&id=<cue>][&output=<id>]`:
 /// the look on show (or that cue) as an ILDA format 5 download named for
-/// the ShowNET SD card (`001.ild`-`229.ild`). The file leaves the studio's
-/// safety stage behind: the page says so.
+/// the ShowNET SD card (`001.ild`-`229.ild`), with the safety chain of
+/// output `output` (default `main`) baked in (T-355). The ShowNET plays it
+/// alone: the page says the hardware stop stays the real safety. A GET
+/// that only builds a download, so show mode lets it through.
 fn export_ilda(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     // Missing: the default; present but not a number: refused (NaN).
     let num = |k: &str, default: f64| query_str(url, k).map_or(default, |v| v.trim().parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(f64::NAN));
@@ -1069,7 +1119,8 @@ fn export_ilda(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     };
     let frames = num("frames", 60.0);
     let fps = num("fps", 30.0) as f32;
-    let (settings, bpm) = {
+    let output = query_str(url, "output").filter(|o| !o.is_empty()).unwrap_or_else(|| crate::power::MAIN_OUTPUT.to_string());
+    let (settings, bpm, chain) = {
         let s = shared.lock().unwrap();
         let look = match query_str(url, "id").filter(|id| !id.is_empty()) {
             Some(id) => match s.presets.iter().find(|p| p.id == id) {
@@ -1078,15 +1129,95 @@ fn export_ilda(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
             },
             None => s.settings.clone(),
         };
-        (look, s.tempo.bpm)
+        let chain = match crate::ilda_library::ExportSafety::of(&s, &output) {
+            Ok(c) => c,
+            Err(e) => return text(400, &format!("{e:#}")),
+        };
+        (look, s.tempo.bpm, chain)
     };
     let frames = if frames >= 1.0 && frames.fract() == 0.0 { frames as usize } else { 0 };
-    match crate::ilda_library::export_look(&settings, frames, fps, bpm) {
-        Ok(bytes) => {
-            log::info!("Look exporté en ILDA format 5 : {name} ({frames} images, {} Ko)", bytes.len().div_ceil(1024));
+    // Rendered and put through the safety chain with the lock released.
+    match crate::ilda_library::export_look(&settings, frames, fps, bpm, &chain) {
+        Ok(exported) => {
+            let bytes = exported.bytes;
+            log::info!(
+                "Look exporté en ILDA format 5 : {name} ({frames} images, {} Ko, chaîne de sécurité de la sortie « {} »)",
+                bytes.len().div_ceil(1024),
+                chain.output
+            );
             let disposition = format!("attachment; filename=\"{name}\"");
             let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
             with_type(Response::from_data(bytes), "application/octet-stream").with_header(header)
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct SdAddRequest {
+    /// The cue to add; none: the cue playing now.
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    seconds: Option<f32>,
+}
+
+#[derive(Deserialize)]
+struct SdExportRequest {
+    dir: String,
+    #[serde(default)]
+    output: Option<String>,
+}
+
+/// The bank with each cue's name (null: no such cue any more), and the
+/// outputs whose safety chain an export can bake in.
+fn sdbank_view(s: &Shared) -> serde_json::Value {
+    use crate::sdbank as sd;
+    let slots: Vec<_> = s
+        .sdbank
+        .get()
+        .slots
+        .iter()
+        .map(|slot| {
+            let name = s.presets.iter().find(|p| p.id == slot.cue_id).map(|p| p.name.clone());
+            json!({ "number": slot.number, "cue_id": slot.cue_id, "seconds": slot.seconds, "name": name, "file": format!("{:03}.ild", slot.number) })
+        })
+        .collect();
+    json!({
+        "slots": slots,
+        "fps": sd::SD_FPS,
+        "min_seconds": sd::MIN_SECONDS,
+        "max_seconds": sd::MAX_SECONDS,
+        "default_seconds": sd::DEFAULT_SECONDS,
+        "first": sd::FIRST,
+        "last": sd::LAST,
+        "outputs": s.outputs.list().iter().map(|o| json!({ "id": o.id, "name": o.projector.name, "max_power": o.limits.max_power })).collect::<Vec<_>>(),
+        "output": crate::power::MAIN_OUTPUT,
+    })
+}
+
+/// `POST /api/sdbank/export {dir, output?}`: renders every cue of the bank
+/// with the safety chain of `output` (default `main`) and writes
+/// `NNN.ild` + `banque.json` into `dir`. Runs beside the single worker;
+/// the engine lock is only held to copy the cues out.
+fn export_sdbank(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let req: SdExportRequest = match body(request) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let dir = match crate::sdbank::resolve_dir(&req.dir) {
+        Ok(d) => d,
+        Err(e) => return text(400, &format!("{e:#}")),
+    };
+    let output = req.output.filter(|o| !o.is_empty()).unwrap_or_else(|| crate::power::MAIN_OUTPUT.to_string());
+    let job = match crate::sdbank::prepare(&shared.lock().unwrap(), &output) {
+        Ok(j) => j,
+        Err(e) => return text(400, &format!("{e:#}")),
+    };
+    match crate::sdbank::export(&job, &dir) {
+        Ok(report) => {
+            log::info!("Banque SD ShowNET exportée : {} fichiers dans {} (sortie « {} »)", report.files.len(), report.dir, report.output);
+            json_response(json!(report))
         }
         Err(e) => text(400, &format!("{e:#}")),
     }
@@ -2637,6 +2768,8 @@ mod tests {
         assert!(may_decode(&Method::Post, "/api/timeline/audio"));
         assert!(may_decode(&Method::Post, "/api/media/ilda?name=a.ild"));
         assert!(may_decode(&Method::Get, "/api/media/ilda/export?number=1"));
+        assert!(may_decode(&Method::Post, "/api/sdbank/export"));
+        assert!(!may_decode(&Method::Post, "/api/sdbank"));
         assert!(!may_decode(&Method::Get, "/api/media/ilda"));
         assert!(!may_decode(&Method::Post, "/api/media/ilda/delete"));
         for (m, p) in [(Method::Get, "/api/media/audio"), (Method::Post, "/api/heartbeat"), (Method::Post, "/api/arm"), (Method::Get, "/api/state"), (Method::Post, "/api/timeline/play")] {
@@ -2948,6 +3081,60 @@ mod tests {
         assert!(!presets["presets"].as_array().unwrap().iter().any(|p| p["id"] == "ilda:webtest logo.ild"));
         assert_eq!(arm_status(&t)["armed"], false);
         let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
+    }
+
+    /// The SD bank (T-302): cues added with automatic numbers, renumbered,
+    /// exported to a folder with the safety chain (T-355), locked in show
+    /// mode, never arming anything.
+    #[test]
+    fn the_sd_bank_is_edited_and_exported_to_a_folder_without_arming() {
+        let t = TestServer::start(false);
+        let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        let empty = json(&t.request("GET", "/api/sdbank", "").1);
+        assert_eq!(empty["slots"], json!([]));
+        assert_eq!(empty["outputs"][0]["id"], "main");
+        // Nothing playing: « the current cue » is refused.
+        assert_eq!(t.request("POST", "/api/sdbank/add", "{}").0, 400);
+        assert_eq!(t.request("POST", "/api/sdbank/add", r#"{"id":"nope"}"#).0, 404);
+        assert_eq!(t.request("POST", "/api/presets/play", r#"{"id":"tunnels-001"}"#).0, 200);
+        let (status, body) = t.request("POST", "/api/sdbank/add", "{}");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(json(&body)["added"], 1);
+        let added = json(&t.request("POST", "/api/sdbank/add", r#"{"id":"tunnels-002","seconds":0.5}"#).1);
+        assert_eq!(added["added"], 2);
+        assert_eq!(added["slots"][0]["cue_id"], "tunnels-001");
+        assert!(added["slots"][0]["name"].is_string());
+        // Reserved numbers and doubles refused; a hole closed by renumbering.
+        for bad in [r#"{"slots":[{"number":0,"cue_id":"a"}]}"#, r#"{"slots":[{"number":230,"cue_id":"a"}]}"#, r#"{"slots":[{"number":4,"cue_id":"a"},{"number":4,"cue_id":"b"}]}"#] {
+            assert_eq!(t.request("POST", "/api/sdbank", bad).0, 400, "{bad}");
+        }
+        let set = r#"{"slots":[{"number":9,"cue_id":"tunnels-002","seconds":0.5},{"number":3,"cue_id":"tunnels-001","seconds":0.3}]}"#;
+        assert_eq!(t.request("POST", "/api/sdbank", set).0, 200);
+        let renumbered = json(&t.request("POST", "/api/sdbank/renumber", "").1);
+        assert_eq!(renumbered["slots"][0]["number"], 1);
+        assert_eq!(renumbered["slots"][1]["number"], 2);
+        assert_eq!(renumbered["slots"][1]["file"], "002.ild");
+
+        let dir = std::env::temp_dir().join(format!("laser-studio-web-sdbank-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(t.request("POST", "/api/sdbank/export", r#"{"dir":"relatif"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/sdbank/export", &json!({ "dir": dir, "output": "ailleurs" }).to_string()).0, 400);
+        let (status, body) = t.request("POST", "/api/sdbank/export", &json!({ "dir": dir }).to_string());
+        assert_eq!(status, 200, "{body}");
+        let report = json(&body);
+        assert_eq!(report["files"].as_array().unwrap().len(), 2);
+        assert_eq!(report["output"], "main");
+        assert_eq!(crate::ilda::read(&std::fs::read(dir.join("001.ild")).unwrap()).unwrap().len(), 15);
+        assert!(dir.join("002.ild").exists() && dir.join("banque.json").exists());
+
+        // Show mode: the bank can't be edited or exported, only looked at.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/sdbank/renumber", "").0, 423);
+        assert_eq!(t.request("POST", "/api/sdbank/export", &json!({ "dir": dir }).to_string()).0, 423);
+        assert_eq!(t.request("GET", "/api/sdbank", "").0, 200);
+        t.shared.lock().unwrap().show_mode.on = false;
+        assert_eq!(arm_status(&t)["armed"], false);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
