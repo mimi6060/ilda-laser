@@ -1627,8 +1627,11 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
     s.timeline
         .frame(&c)
         .into_iter()
-        .filter_map(|cue| {
-            let look = with_program(&cue, timeline::look_of(&cue, &s.presets)?);
+        .filter_map(|mut cue| {
+            let mut look = with_program(&cue, timeline::look_of(&cue, &s.presets)?);
+            // Envelopes (T-163): on these per-frame copies only, before
+            // the master live stage and the safety chain.
+            timeline::apply_envelopes(&cue.envelopes, &s.controls, &mut look, &mut cue.modifiers);
             Some((cue, look))
         })
         .collect()
@@ -1995,6 +1998,31 @@ mod tests {
         s.gate.reset_estop(&s.estop.clone());
         controls::timeline_play(&mut s).unwrap();
         assert!(!s.gate.is_armed(), "resetting the e-stop and playing again doesn't arm");
+    }
+
+    /// T-163: an event's envelopes move the frame's copies of its look and
+    /// modifiers (never the stored values), an envelope on a forbidden
+    /// control does nothing, and the e-stop cuts them with the timeline.
+    #[test]
+    fn envelopes_move_copies_only_and_end_with_the_estop() {
+        let mut s = test_support::shared();
+        let cue = s.presets[0].id.clone();
+        let mut show = one_event_show(&cue);
+        let key = |value| timeline::Key { at: 0.0, value, ease: Default::default() };
+        let env = |target: &str, value| timeline::Envelope { target: target.into(), mode: timeline::EnvMode::Absolute, keys: vec![key(value)] };
+        show.tracks[0].events[0].envelopes = vec![env("look.size", 0.3), env("master.brightness", 0.4), env("transport.arm", 1.0), env("layer.2.dimmer", 1.0)];
+        s.timeline.load(show);
+        controls::timeline_play(&mut s).unwrap();
+        let (live_before, settings_before) = (s.live.clone(), s.settings.clone());
+        let clock = |t: f64| engine::BeatClock { beat: t * 2.0, bpm: 120.0, beats_per_bar: 4 };
+        let t = s.now_s();
+        let cues = timeline_cues(&mut s, t, &clock(t));
+        assert!((cues[0].1.scale - 0.3).abs() < 1e-6);
+        assert!(cues[0].0.modifiers.brightness <= 0.4 + 1e-6);
+        assert_eq!((s.live.clone(), s.settings.clone()), (live_before, settings_before), "the stored values stay the operator's");
+        assert!(!s.gate.is_armed(), "an envelope on transport.arm arms nothing");
+        s.emergency_stop(interlock::ArmSource::Keyboard);
+        assert!(timeline_cues(&mut s, t + 0.5, &clock(t + 0.5)).is_empty(), "Échap: no envelope any more");
     }
 
     use crate::cues::ClickMode;

@@ -4,7 +4,8 @@
 //! (`Engine::tick`, the very function the 60 fps thread runs) on a
 //! simulated clock, with random actions between frames: cues, looks and
 //! live modifiers sent as an API client could send them, LFOs, audio
-//! routes and features, MIDI, the timeline, test patterns, zones, caps,
+//! routes and features, MIDI, the timeline (with envelopes and bus
+//! tracks, T-163), test patterns, zones, caps,
 //! calibration, projection zones and their geometry (T-012, cue → zone
 //! routing included), arm / disarm / e-stop. A recording output captures what
 //! would leave for the laser. After every frame we check:
@@ -64,6 +65,7 @@ use crate::colorcal::{ChannelCurve, ColorCalibration};
 use crate::controls::{self, ControlInput};
 use crate::cues::{ClickMode, CueSlot, Quantize, BEAT_EVERY, QUANTIZE_MODES};
 use crate::engine::{Calibration, Settings};
+use crate::evolving::KeyEase;
 use crate::interlock::ArmSource;
 use crate::midi::{self, decode::MidiMsg, MidiEvent};
 use crate::output::Output;
@@ -536,16 +538,41 @@ fn random_triggers(s: &Shared, rng: &mut Rng) -> crate::audio::triggers::Trigger
     TriggerConfig { triggers }
 }
 
-fn one_event_show(rng: &mut Rng, cue: &str) -> timeline::Show {
+/// Random envelopes (T-163): mostly on controls LFOs may move, sometimes
+/// on any control id (arm, safety, layers…), which must be ignored.
+fn random_envelopes(rng: &mut Rng, targets: &[String], every: &[String]) -> Vec<timeline::Envelope> {
+    let eases = [KeyEase::Step, KeyEase::Linear, KeyEase::EaseIn, KeyEase::EaseOut, KeyEase::Smooth];
+    (0..rng.below(4))
+        .map(|_| timeline::Envelope {
+            target: if rng.chance(0.8) { rng.pick(targets).clone() } else { rng.pick(every).clone() },
+            mode: if rng.chance(0.5) { timeline::EnvMode::Absolute } else { timeline::EnvMode::Relative },
+            keys: (0..1 + rng.below(5))
+                .map(|_| timeline::Key { at: rng.range(0.0, 10.0) as f64, value: rng.range(-400.0, 400.0) * if rng.chance(0.7) { 0.005 } else { 1.0 }, ease: *rng.pick(&eases) })
+                .collect(),
+        })
+        .collect()
+}
+
+fn one_event_show(s: &Shared, rng: &mut Rng, cue: &str) -> timeline::Show {
+    let (targets, every) = (modulatable(s), s.controls.list().iter().map(|d| d.id.clone()).collect::<Vec<_>>());
+    let layer = 1 + rng.below(4) as u8;
     let event = timeline::Event {
         id: 1,
         start: rng.range(0.0, 2.0) as f64,
         len: rng.range(0.1, 30.0) as f64,
         source: timeline::EventSource::Cue { id: cue.into() },
         modifiers: if rng.chance(0.5) { mutated(&live::LiveModifiers::default(), rng, 0.2) } else { Default::default() },
+        envelopes: if rng.chance(0.5) { random_envelopes(rng, &targets, &every) } else { Vec::new() },
         ..Default::default()
     };
-    timeline::Show { name: "fuzz".into(), tracks: vec![timeline::Track { layer: 1 + rng.below(4) as u8, events: vec![event], ..Default::default() }], ..Default::default() }
+    let mut tracks = vec![timeline::Track { layer, events: vec![event], ..Default::default() }];
+    if rng.chance(0.4) {
+        // A bus on the same layer (or another one).
+        let bus = timeline::Event { id: 2, start: rng.range(0.0, 2.0) as f64, len: rng.range(0.1, 30.0) as f64, envelopes: random_envelopes(rng, &targets, &every), ..Default::default() };
+        let layer = if rng.chance(0.7) { layer } else { 1 + rng.below(4) as u8 };
+        tracks.push(timeline::Track { kind: timeline::TrackKind::Bus, layer, events: vec![bus], ..Default::default() });
+    }
+    timeline::Show { name: "fuzz".into(), tracks, ..Default::default() }
 }
 
 const PATTERNS: [testpattern::TestPattern; 7] = [
@@ -654,7 +681,7 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
         }
         17 => {
             let (id, _) = random_preset(&s, rng);
-            let show = one_event_show(rng, &id);
+            let show = one_event_show(&s, rng, &id);
             s.timeline.load(show);
             let _ = controls::timeline_play(&mut s);
         }
