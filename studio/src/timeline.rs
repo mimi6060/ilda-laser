@@ -284,7 +284,9 @@ pub struct Marker {
 pub struct Show {
     pub name: String,
     pub time_base: TimeBase,
-    /// Secondes shows only; empty = 120 BPM in 4/4.
+    /// Secondes shows only; empty = 120 BPM in 4/4. A Temps show plays on
+    /// the live tempo: there it only notes the tempo it was written for
+    /// (the built-in examples' « tempo conseillé »).
     pub tempo_map: Vec<TempoPoint>,
     pub audio: Option<AudioRef>,
     pub tracks: Vec<Track>,
@@ -529,6 +531,9 @@ pub struct Player {
     rev: u64,
     /// Edited since it was loaded or saved.
     modified: bool,
+    /// A built-in example (examples.rs) not saved yet: *Enregistrer* asks
+    /// for a name, so the copy never overwrites a show by surprise.
+    example: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -558,6 +563,8 @@ pub struct TimelineState {
     pub rev: u64,
     /// Edited and not saved yet.
     pub modified: bool,
+    /// See `Player::example`.
+    pub example: bool,
 }
 
 impl Player {
@@ -568,6 +575,19 @@ impl Player {
         self.show = Some(show);
         self.rev += 1;
         self.modified = false;
+        self.example = false;
+    }
+
+    /// Load a built-in example: a copy in memory only, saved under a new
+    /// name (`saved`). Nothing is written, so the project stays unmodified.
+    pub fn load_example(&mut self, show: Show) {
+        self.load(show);
+        self.example = true;
+    }
+
+    /// The loaded show is a built-in example not saved yet.
+    pub fn is_example(&self) -> bool {
+        self.show.is_some() && self.example
     }
 
     /// The editor's change (T-162): the loaded show's tracks, markers,
@@ -596,6 +616,7 @@ impl Player {
     pub fn saved(&mut self) {
         self.rev += 1;
         self.modified = false;
+        self.example = false;
     }
 
     /// See `jumps` on the struct.
@@ -811,6 +832,7 @@ impl Player {
             audio: show.and_then(|s| s.song()).cloned(),
             rev: self.rev,
             modified: self.modified,
+            example: self.is_example(),
         }
     }
 }

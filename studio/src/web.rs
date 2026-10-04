@@ -1262,6 +1262,9 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         }
         (Method::Post, "/api/sdbank/export") => export_sdbank(request, shared),
         (Method::Get, "/api/timeline/waveform") => waveform(request.url(), shared),
+        // Built-in example shows (T-124 to T-129): opened with
+        // `POST /api/timeline/load { "example": id }`.
+        (Method::Get, "/api/timeline/examples") => json_response(json!(crate::examples::EXAMPLES)),
         (Method::Post, "/api/timeline/audio") => match body::<SongPatch>(request) {
             Ok(patch) => attach_song(patch, shared),
             Err(e) => e,
@@ -1619,13 +1622,21 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
     let c = s.timeline_clock();
     match action {
         "load" => {
+            // A built-in example: a copy in memory, nothing written.
+            if let Some(id) = req.example {
+                match crate::examples::build(&id, &s.presets) {
+                    Ok(show) => s.timeline.load_example(show),
+                    Err(e) => return text(404, &format!("{e:#}")),
+                }
+                return json_response(json!(s.timeline.state(&c)));
+            }
             let show = match (req.show, req.name) {
                 (Some(show), _) => show,
                 (None, Some(name)) => match s.shows.load(&name) {
                     Ok(show) => show,
                     Err(e) => return text(404, &format!("{e:#}")),
                 },
-                (None, None) => return text(400, "expected \"name\" or \"show\""),
+                (None, None) => return text(400, "expected \"name\", \"show\" or \"example\""),
             };
             s.timeline.load(show);
         }
@@ -1678,8 +1689,18 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
         }
         "save" => {
             let st = &mut *s;
+            let example = st.timeline.is_example();
             let Some(show) = st.timeline.show.as_mut() else { return text(409, "aucun show chargé") };
-            if let Some(name) = req.name.map(|n| n.trim().to_string()).filter(|n| *n != show.name) {
+            let name = req.name.map(|n| n.trim().to_string());
+            // An example's copy gets a name of its own, never one in use:
+            // saving it can't overwrite a show by surprise.
+            if example {
+                let Some(name) = name.as_ref().filter(|n| !n.is_empty()) else { return text(400, "exemple : donnez un nom à votre copie") };
+                if st.shows.list().iter().any(|i| i.name == *name) {
+                    return text(409, &format!("un show s'appelle déjà « {name} »"));
+                }
+            }
+            if let Some(name) = name.filter(|n| *n != show.name) {
                 if !crate::timeline::valid_show_name(&name) {
                     return text(400, "nom de show invalide (lettres, chiffres, espaces, - et _ seulement)");
                 }
@@ -1698,6 +1719,8 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
 #[derive(Deserialize, Default)]
 struct TimelineRequest {
     name: Option<String>,
+    /// `load`: a built-in example's id (examples.rs).
+    example: Option<String>,
     /// `new`: *Secondes* (default) or *Temps*.
     time_base: Option<crate::timeline::TimeBase>,
     show: Option<crate::timeline::Show>,
@@ -3769,6 +3792,44 @@ mod tests {
         let state = json(&t.request("GET", "/api/state", "").1);
         assert_eq!(state["timeline"]["name"], "Editeur copie");
         assert_eq!(state["armed"], false, "editing and saving never arm");
+        t.request("POST", "/api/timeline/stop", "");
+    }
+
+    /// T-124 to T-129: the built-in examples open as an unsaved copy
+    /// (nothing written), play without arming, and save only under a name
+    /// of their own. Opening one is a load, allowed in show mode.
+    #[test]
+    fn timeline_examples_open_as_a_copy() {
+        let t = TestServer::start(false);
+        let json = |b: &str| serde_json::from_str::<serde_json::Value>(b).unwrap();
+        let list = json(&t.request("GET", "/api/timeline/examples", "").1);
+        assert_eq!(list.as_array().unwrap().len(), 6);
+        assert_eq!((list[3]["id"].as_str(), list[3]["bpm"].as_f64()), (Some("attaque-hardstyle"), Some(150.0)));
+        assert_eq!(t.request("POST", "/api/timeline/load", r#"{"example":"nope"}"#).0, 404);
+        let (status, body) = t.request("POST", "/api/timeline/load", r#"{"example":"bloc-techno"}"#);
+        assert_eq!(status, 200, "{body}");
+        let st = json(&body);
+        assert_eq!((st["name"].as_str(), st["example"].as_bool(), st["modified"].as_bool()), (Some("Bloc techno"), Some(true), Some(false)));
+        assert_eq!(st["time_base"], "beats");
+        assert!(t.shared.lock().unwrap().shows.load("Bloc techno").is_err(), "nothing written");
+        let (_, body) = t.request("GET", "/api/timeline", "");
+        assert_eq!(json(&body)["show"]["tempo_map"][0]["bpm"], 130.0);
+        assert_eq!(t.request("POST", "/api/timeline/play", "").0, 200);
+        assert_eq!(json(&t.request("GET", "/api/state", "").1)["armed"], false, "an example never arms");
+
+        let (status, body) = t.request("POST", "/api/timeline/save", "{}");
+        assert_eq!((status, body.contains("nom")), (400, true), "{body}");
+        t.shared.lock().unwrap().shows.save(&crate::timeline::Show { name: "Exemple pris".into(), ..Default::default() }).unwrap();
+        assert_eq!(t.request("POST", "/api/timeline/save", r#"{"name":"Exemple pris"}"#).0, 409, "never overwrites");
+        let (status, body) = t.request("POST", "/api/timeline/save", r#"{"name":"Mon bloc techno"}"#);
+        assert_eq!((status, json(&body)["example"].as_bool()), (200, Some(false)), "{body}");
+        assert_eq!(t.shared.lock().unwrap().shows.load("Mon bloc techno").unwrap().end(), 256.0);
+        assert_eq!(t.request("POST", "/api/timeline/save", "{}").0, 200, "a saved copy is a show like any other");
+
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/load", r#"{"example":"entree-dj"}"#).0, 200, "opening an example plays, it doesn't edit");
+        assert_eq!(t.request("POST", "/api/timeline/save", r#"{"name":"Entree copie"}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
         t.request("POST", "/api/timeline/stop", "");
     }
 
