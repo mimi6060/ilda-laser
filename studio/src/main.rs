@@ -66,6 +66,7 @@ mod sdbank;
 mod sheets;
 mod tempo;
 mod testpattern;
+mod textures;
 mod timeline;
 mod tunnels;
 mod usercues;
