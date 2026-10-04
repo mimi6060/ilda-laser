@@ -1373,6 +1373,33 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             },
             Err(e) => e,
         },
+        // Scan presets (T-415). POST takes the user list (a bare array) or
+        // `{ "user": [...], "default": "<id>" }` ("" = « Auto »).
+        (Method::Get, "/api/scan-presets") => json_response(scan_presets_view(&shared.lock().unwrap())),
+        (Method::Post, "/api/scan-presets") => match body::<ScanPresetsRequest>(request) {
+            Ok(req) => {
+                let (user, default) = match req {
+                    ScanPresetsRequest::List(list) => (Some(list), None),
+                    ScanPresetsRequest::Edit { user, default } => (user, default),
+                };
+                let mut s = shared.lock().unwrap();
+                if let Some(list) = user {
+                    if let Err(e) = s.scan_presets.set(list) {
+                        return text(400, &e.to_string());
+                    }
+                }
+                if let Some(id) = default {
+                    let id = id.trim().to_string();
+                    if !id.is_empty() && !s.scan_presets.is_known(&id) {
+                        return text(400, &format!("préréglage de balayage inconnu : « {id} »"));
+                    }
+                    s.mixer.scan_default = (!id.is_empty()).then_some(id);
+                    s.mixer_dirty = true;
+                }
+                json_response(scan_presets_view(&s))
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/lfos") => {
             let s = shared.lock().unwrap();
             let targets: Vec<_> = s
@@ -2512,6 +2539,44 @@ struct SlotRequest {
     id: String,
     #[serde(flatten)]
     slot: CueSlot,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScanPresetsRequest {
+    List(Vec<crate::scan::ScanPreset>),
+    Edit { user: Option<Vec<crate::scan::ScanPreset>>, default: Option<String> },
+}
+
+/// The scan presets (T-415): built-in and user ones, the output's default,
+/// each preset as drawn once bounded by the output (`effective`, with
+/// `clamped` when that changed something), and what refers to a preset
+/// that no longer exists (it draws with the output's default).
+fn scan_presets_view(s: &Shared) -> serde_json::Value {
+    use crate::scan::{effective, ScanLimits};
+    let limits = ScanLimits::default();
+    let effective: serde_json::Map<String, serde_json::Value> = s
+        .scan_presets
+        .all()
+        .iter()
+        .map(|p| {
+            let e = effective(p, &limits);
+            let clamped = e.scan_pct != p.scan_pct || e.params.max_points != p.params.max_points;
+            (p.id.clone(), json!({ "scan_pct": e.scan_pct, "max_points": e.params.max_points, "clamped": clamped }))
+        })
+        .collect();
+    let unknown = |id: &Option<String>| id.as_deref().is_some_and(|id| !id.is_empty() && !s.scan_presets.is_known(id));
+    let mut dangling: Vec<serde_json::Value> =
+        s.deck.slots.iter().filter(|(_, slot)| unknown(&slot.scan)).map(|(cue, slot)| json!({ "kind": "cue", "id": cue, "scan": slot.scan })).collect();
+    dangling.extend(s.figures.list().iter().filter(|f| unknown(&f.scan)).map(|f| json!({ "kind": "figure", "id": f.name, "scan": f.scan })));
+    json!({
+        "builtin": crate::scan::builtin_scan_presets(),
+        "user": s.scan_presets.user(),
+        "default": s.mixer.scan_default.as_deref().filter(|id| s.scan_presets.is_known(id)),
+        "limits": limits,
+        "effective": effective,
+        "dangling": dangling,
+    })
 }
 
 #[derive(Deserialize)]
@@ -5183,6 +5248,44 @@ mod tests {
         t.request("POST", "/api/estop/reset", "");
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
         assert!(t.shared.lock().unwrap().gate.is_armed());
+    }
+
+    #[test]
+    fn scan_presets_are_listed_edited_assigned_and_never_arm() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        let dir = std::env::temp_dir().join(format!("ls-scan-web-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        t.shared.lock().unwrap().scan_presets = crate::scan::ScanPresetStore::load_or_create(dir.join("scan_presets.json"));
+        let v = js(&t.request("GET", "/api/scan-presets", "").1);
+        let ids: Vec<&str> = v["builtin"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["beams", "graphics", "raster"]);
+        assert_eq!(v["default"], serde_json::Value::Null, "« Auto » until set");
+        assert_eq!(v["effective"]["beams"]["clamped"], false);
+
+        // Built-ins can't be overridden; a user preset is clamped and saved.
+        let (code, _) = t.request("POST", "/api/scan-presets", r#"[{"id":"beams","name":"X"}]"#);
+        assert_eq!(code, 400);
+        let (code, body) = t.request("POST", "/api/scan-presets", r#"[{"id":"u-1","name":"Logo lent","scan_pct":999}]"#);
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body)["user"][0]["scan_pct"], 150.0);
+        assert!(dir.join("scan_presets.json").exists());
+
+        // The output's default; an unknown one is refused, "" = Auto.
+        assert_eq!(t.request("POST", "/api/scan-presets", r#"{"default":"u-9"}"#).0, 400);
+        let v = js(&t.request("POST", "/api/scan-presets", r#"{"default":"raster"}"#).1);
+        assert_eq!(v["default"], "raster");
+        assert_eq!(t.shared.lock().unwrap().mixer.scan_default.as_deref(), Some("raster"));
+
+        // A cell takes a preset through the existing route; deleting the
+        // preset leaves it dangling (drawn with the default), listed.
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-001","scan":"u-1"}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().deck.slot("tunnels-001").scan.as_deref(), Some("u-1"));
+        let v = js(&t.request("POST", "/api/scan-presets", r#"{"user":[],"default":""}"#).1);
+        assert_eq!(v["default"], serde_json::Value::Null);
+        assert_eq!(v["dangling"][0]["id"], "tunnels-001");
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

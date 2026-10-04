@@ -33,6 +33,7 @@ use crate::layers::Mixer;
 use crate::lfo::Modulator;
 use crate::live::{LiveModifiers, Palette};
 use crate::midi::profile::{valid_slug, Profile, ProfileStore};
+use crate::scan::ScanPreset;
 use crate::scenes::Scene;
 use crate::tempo::{MAX_BPM, MIN_BPM};
 use crate::timeline::{valid_show_name, Show};
@@ -117,6 +118,10 @@ pub struct Project {
     /// saved before T-410: they open with none.
     #[serde(rename = "cuelists")]
     pub cue_lists: Vec<CueList>,
+    /// User scan presets (`scan_presets.json`, T-415). Missing in projects
+    /// saved before T-415: they open with none (the built-in ones are
+    /// always there).
+    pub scan_presets: Vec<ScanPreset>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -143,6 +148,7 @@ impl Default for Project {
             figures: Vec::new(),
             user_cues: Vec::new(),
             cue_lists: Vec::new(),
+            scan_presets: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -424,6 +430,7 @@ fn check(p: &mut Project) -> Result<()> {
     p.tempo = TempoDefaults { bpm: bpm.clamp(MIN_BPM, MAX_BPM), beats_per_bar: p.tempo.beats_per_bar.clamp(1, 16) };
     p.layers.sanitize();
     crate::live::validate_palettes(&p.palettes).map_err(|e| anyhow::anyhow!("palettes : {e}"))?;
+    crate::scan::validate(&mut p.scan_presets).map_err(|e| anyhow::anyhow!("préréglages de balayage : {e}"))?;
 
     let builtin = ProfileStore::in_memory();
     for (slug, profile) in &p.midi.profiles {
@@ -465,6 +472,7 @@ pub fn snapshot(s: &Shared) -> Project {
         figures: s.figures.list().to_vec(),
         user_cues: s.user_cues.list().to_vec(),
         cue_lists: s.cue_lists.list().to_vec(),
+        scan_presets: s.scan_presets.user().to_vec(),
         ..Project::default()
     }
 }
@@ -488,6 +496,7 @@ fn apply(s: &mut Shared, p: &Project) {
     s.lfos.replace_in_memory(p.lfos.clone());
     s.routes.replace_in_memory(p.audio_routes.clone(), &s.controls);
     s.palettes.replace_in_memory(p.palettes.clone());
+    s.scan_presets.replace_in_memory(p.scan_presets.clone());
     s.midi.store.replace_user_in_memory(p.midi.profiles.clone());
     s.figures.replace_in_memory(p.figures.clone());
     s.user_cues.replace_in_memory(p.user_cues.clone());
@@ -517,6 +526,7 @@ struct WorkingPaths {
     lfos: PathBuf,
     routes: PathBuf,
     palettes: PathBuf,
+    scan_presets: PathBuf,
     midi: Option<PathBuf>,
     figures: Option<PathBuf>,
     /// `user_cues.json` and its content (with the id counter) as opened.
@@ -535,6 +545,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         lfos: s.lfos.path().to_path_buf(),
         routes: s.routes.path().to_path_buf(),
         palettes: s.palettes.path().to_path_buf(),
+        scan_presets: s.scan_presets.path().to_path_buf(),
         midi: s.midi.store.dir().map(|d| d.join("profiles")),
         figures: s.figures.dir().map(Path::to_path_buf),
         user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.file_bytes().unwrap_or_default())),
@@ -570,6 +581,7 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
     put(&w.palettes, serde_json::to_vec_pretty(&p.palettes));
+    put(&w.scan_presets, serde_json::to_vec_pretty(&p.scan_presets));
     put(&w.live, serde_json::to_vec_pretty(&p.live));
     put(&w.layers, serde_json::to_vec_pretty(&p.layers));
     for show in &p.timelines {
@@ -906,6 +918,7 @@ mod tests {
         s.lfos = crate::lfo::LfoStore::load_or_create(dir.join("lfos.json"), &s.controls);
         s.routes = crate::audio::routes::RouteStore::load_or_create(dir.join("audio_routes.json"), &s.controls);
         s.palettes = crate::live::PaletteStore::load_or_create(dir.join("palettes.json"));
+        s.scan_presets = crate::scan::ScanPresetStore::load_or_create(dir.join("scan_presets.json"));
         s.midi.store = ProfileStore::load(dir.join("midi"));
         s.figures = crate::figures::FigureStore::load(dir.join("figures"));
         s.user_cues = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));

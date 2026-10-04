@@ -1686,6 +1686,9 @@
         <input type="color" id="tlMarkColor" title="Couleur du marqueur" style="width:36px;height:26px;padding:1px">
         <button id="tlMarkDel" title="Supprimer le marqueur">✕ marqueur</button>
       </span>
+      <span id="tlScanRow" hidden>
+        <label class="tl-knob" title="Préréglage de balayage des événements sélectionnés">Balayage <select id="tlScan"></select></label>
+      </span>
       <div class="hint" id="tlEdMsg"></div>
     </div>
     <div class="tl-lib">
@@ -1936,6 +1939,8 @@
       </div>
       <label for="figLoop">Après la dernière image</label>
       <select id="figLoop"><option value="loop">Boucle</option><option value="ping_pong">Aller-retour</option><option value="once">Une fois (reste sur la dernière)</option></select>
+      <label for="figScan">Balayage</label>
+      <select id="figScan" title="Préréglage de balayage de la figure (celui de la case ou de l'événement de timeline passe avant)"></select>
       <div id="figStats" class="hint"></div>
     </section>
   </div>
@@ -2509,6 +2514,26 @@
         </div>
         <div class="hint">Rendu des couleurs de ce projecteur : courbe, puis balance, puis retard, avant les zones, l'horizon, les gains de sécurité et les plafonds de puissance, qui s'appliquent toujours après. Le retard décale la couleur à l'intérieur de chaque trait : un déplacement éteint reste éteint. Baisser s'applique tout de suite ; augmenter la lumière demande une confirmation, laser désarmé. Réglages de cette machine (pas du projet), sans raccourci ni contrôle MIDI, OSC ou DMX.</div>
       </div>
+      <div class="sf-sub">Préréglages de balayage</div>
+      <div id="spBox">
+        <label for="spDefault">Balayage par défaut de la sortie</label>
+        <select id="spDefault" title="Pour les cues, figures et événements sans préréglage"></select>
+        <label for="spList">Préréglage</label>
+        <select id="spList"></select>
+        <div class="row">
+          <button id="spDup" title="Crée un préréglage utilisateur à partir de celui-ci">Dupliquer</button>
+          <button id="spDelete" title="Les cues qui l'utilisent prennent le balayage par défaut de la sortie">Supprimer</button>
+        </div>
+        <label for="spName">Nom (renommer)</label>
+        <input type="text" id="spName" maxlength="40" autocomplete="off">
+        <label>Pas des traits <span class="v" id="spLitV"></span></label><input type="range" id="spLit" min="0.005" max="0.2" step="0.005">
+        <label>Pas des déplacements <span class="v" id="spBlankV"></span></label><input type="range" id="spBlank" min="0.01" max="1" step="0.01">
+        <label>Arrêt aux angles (points au plus) <span class="v" id="spCornerV"></span></label><input type="range" id="spCorner" min="0" max="32" step="1">
+        <label>Arrêt aux extrémités (points) <span class="v" id="spEndV"></span></label><input type="range" id="spEnd" min="0" max="32" step="1">
+        <label>Vitesse de balayage (%) <span class="v" id="spScanV"></span></label><input type="range" id="spScan" min="50" max="150" step="5">
+        <div class="hint sf-error" id="spMsg" role="status"></div>
+        <div class="hint">Comment chaque cue est tracé : <b>Faisceaux</b> peu de points et des arrêts francs aux extrémités, <b>Graphismes</b> un pas fin et des angles nets, <b>Trame</b> un pas régulier sans arrêt aux angles. Choix par cue (clic droit sur la case), par figure ou par événement de timeline ; sinon le défaut de la sortie, et « Auto » garde le tracé habituel. Les préréglages intégrés ne se modifient pas : dupliquez-les. Un préréglage ne touche ni aux plafonds ni à la sécurité : le budget de points, les zones et toutes les protections s'appliquent après, et les déplacements restent éteints.</div>
+      </div>
       <div class="sf-sub">Fiche projecteur</div>
       <label for="pjName">Nom / modèle</label><input type="text" id="pjName" maxlength="60" autocomplete="off">
       <label for="pjClass">Classe (IEC 60825-1)</label>
@@ -2592,6 +2617,8 @@
     <option value="1">Calque 1</option><option value="2">Calque 2</option>
     <option value="3">Calque 3</option><option value="4">Calque 4</option>
   </select>
+  <label for="cueMenuScan">Balayage</label>
+  <select id="cueMenuScan" title="Préréglage de balayage de ce cue (RÉGLAGES › Sorties et projecteurs › Préréglages de balayage)"></select>
   <label>Transition (à l'entrée et à l'arrêt de ce cue)</label>
   <div class="row">
     <select id="cueMenuTransition">
@@ -5429,6 +5456,7 @@ async function loadPresets() {
   presetById = new Map(presets.map(p => [p.id, p]));
   await loadGrid(false);
   await loadSlots();
+  loadScanPresets();
   loadThumbs(); // not awaited: the grid works before its pictures arrive
 }
 async function loadThumbs() {
@@ -5818,6 +5846,83 @@ $('cueTransLen').addEventListener('change', () => post('/api/control', { id: 'cu
 document.querySelectorAll('#cueQuant button').forEach(b => b.addEventListener('click', () => post('/api/control', { id: 'cue.quantize', value: +b.dataset.q })));
 $('cueBeatMode').addEventListener('change', () => post('/api/control', { id: 'cue.beat_mode', value: +$('cueBeatMode').value }));
 
+// ---------- scan presets (T-415) ----------
+// GET /api/scan-presets: built-in and user presets, the output's default,
+// each one's effective values (bounded by the output) and the cells or
+// figures whose preset was deleted.
+let scanPresets = { builtin: [], user: [], default: null, effective: {}, dangling: [] }, scanRev = 0, spSel = 'graphics';
+const scanAll = () => [...scanPresets.builtin, ...scanPresets.user];
+async function loadScanPresets(v) {
+  try { scanPresets = v || await (await fetch('/api/scan-presets', { cache: 'no-store' })).json(); } catch { return; }
+  scanRev++;
+  showScanPresets();
+}
+// A preset list for a cue, a figure or an event; a deleted preset still
+// referenced shows as such (it draws with the output's default).
+function fillScanSelect(sel, none, value) {
+  const opt = (v, t) => `<option value="${esc(v)}">${esc(t)}</option>`;
+  sel.innerHTML = opt('', none) + scanAll().map(p => opt(p.id, p.name)).join('');
+  if (value && !scanAll().some(p => p.id === value)) sel.insertAdjacentHTML('beforeend', opt(value, 'Préréglage supprimé (défaut de la sortie)'));
+  sel.value = value;
+}
+async function postScan(body) {
+  const r = await fetch('/api/scan-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) { $('spMsg').textContent = await r.text(); return false; }
+  await loadScanPresets(await r.json());
+  return true;
+}
+function showScanPresets() {
+  if (!scanAll().some(p => p.id === spSel)) spSel = 'graphics';
+  fillScanSelect($('spDefault'), 'Auto (réglages de l\'optimiseur)', scanPresets.default || '');
+  const list = $('spList');
+  list.innerHTML = scanAll().map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.builtin ? ' (intégré)' : ''}</option>`).join('');
+  list.value = spSel;
+  const p = scanAll().find(x => x.id === spSel), eff = scanPresets.effective[spSel] || {};
+  if (!p) return;
+  const ro = !!p.builtin;
+  ['spLit', 'spBlank', 'spCorner', 'spEnd', 'spScan', 'spName', 'spDelete'].forEach(id => { $(id).disabled = ro; });
+  if (document.activeElement !== $('spName')) $('spName').value = p.name;
+  setVal('spLit', p.params.lit_step); $('spLitV').textContent = p.params.lit_step.toFixed(3);
+  setVal('spBlank', p.params.blank_step); $('spBlankV').textContent = p.params.blank_step.toFixed(2);
+  setVal('spCorner', p.params.max_corner_dwell); $('spCornerV').textContent = p.params.max_corner_dwell;
+  setVal('spEnd', p.params.endpoint_dwell); $('spEndV').textContent = p.params.endpoint_dwell;
+  setVal('spScan', p.scan_pct);
+  $('spScanV').textContent = Math.round(p.scan_pct) + (eff.clamped ? ` (limité par la sortie : ${Math.round(eff.scan_pct)})` : '');
+  const d = scanPresets.dangling || [];
+  $('spMsg').textContent = d.length ? `${d.length} cue(s) ou figure(s) utilisent un préréglage supprimé : ils prennent le balayage par défaut de la sortie.` : '';
+}
+$('spList').addEventListener('change', () => { spSel = $('spList').value; showScanPresets(); });
+$('spDefault').addEventListener('change', () => postScan({ default: $('spDefault').value }));
+$('spDup').addEventListener('click', async () => {
+  const p = scanAll().find(x => x.id === spSel);
+  if (!p) return;
+  const n = 1 + Math.max(0, ...scanPresets.user.map(u => +u.id.slice(2) || 0));
+  const copy = { ...JSON.parse(JSON.stringify(p)), id: 'u-' + n, name: (p.name + ' (copie)').slice(0, 40), builtin: false };
+  if (await postScan({ user: [...scanPresets.user, copy] })) { spSel = copy.id; showScanPresets(); }
+});
+$('spDelete').addEventListener('click', async () => {
+  if (!scanPresets.user.some(u => u.id === spSel)) return;
+  const id = spSel;
+  if (await postScan({ user: scanPresets.user.filter(u => u.id !== id) })) { spSel = 'graphics'; showScanPresets(); }
+});
+// Edit the selected user preset: one field, then the whole user list. The
+// local copy changes at once, so two quick edits never undo each other.
+let spQueue = Promise.resolve();
+function spEdit(fn) {
+  const p = scanPresets.user.find(u => u.id === spSel);
+  if (!p) return;
+  fn(p);
+  const user = JSON.parse(JSON.stringify(scanPresets.user));
+  spQueue = spQueue.then(() => postScan({ user }));
+}
+$('spName').addEventListener('change', () => { const v = $('spName').value.trim(); if (v) spEdit(p => { p.name = v; }); });
+[['spLit', 'lit_step'], ['spBlank', 'blank_step'], ['spCorner', 'max_corner_dwell'], ['spEnd', 'endpoint_dwell']].forEach(([id, key]) => {
+  $(id).addEventListener('input', () => { $(id + 'V').textContent = $(id).value; });
+  $(id).addEventListener('change', () => spEdit(p => { p.params[key] = +$(id).value; }));
+});
+$('spScan').addEventListener('input', () => { $('spScanV').textContent = $('spScan').value; });
+$('spScan').addEventListener('change', () => spEdit(p => { p.scan_pct = +$('spScan').value; }));
+
 // « Propriétés du cue » (right click): its own click mode and group.
 let menuCue = null;
 let menuSlot = null;
@@ -5842,6 +5947,7 @@ function openCueMenu(p, x, y, at) {
   $('cueMenuMode').value = slot.mode || '';
   $('cueMenuGroup').value = slot.group ? String(slot.group) : '';
   $('cueMenuLayer').value = String(slot.layer || 1);
+  fillScanSelect($('cueMenuScan'), 'Par défaut de la sortie', slot.scan || '');
   // T-158: the cue's own transition, else the grid's.
   $('cueMenuTransition').value = slot.transition ? slot.transition.kind : '';
   const li = lengthIndex((slot.transition || deck.transition || {}).length);
@@ -5877,10 +5983,11 @@ async function saveCueMenu() {
   const transition = kind ? { kind, length: TRANS_LENGTHS[+$('cueMenuTransLen').value], in_flash: !!(own && own.in_flash) } : null;
   $('cueMenuTransLen').disabled = !kind;
   const protect_stop = $('cueMenuProtStop').checked, protect_solo = $('cueMenuProtSolo').checked;
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo });
+  const scan = $('cueMenuScan').value || null;
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan });
   await loadSlots();
 }
-['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 
 // ---------- « En cours » (T-423) ----------
 // The tab's count comes with every frame (cues playing + 1 for a running
@@ -7005,6 +7112,23 @@ $('tlMarkName').addEventListener('change', () => { const i = TL.marker; if (i < 
 $('tlMarkColor').addEventListener('change', () => { const i = TL.marker; if (i < 0) return; tlChange(() => { TL.show.markers[i].color = rgb($('tlMarkColor').value); }); });
 $('tlMarkDel').onclick = () => { const i = TL.marker; if (i < 0) return; tlChange(() => { TL.show.markers.splice(i, 1); }); TL.marker = -1; tlMarkRow(); };
 
+// « Balayage » of the selected events (T-415): « Comme le cue » = none.
+let tlScanKey = '';
+function tlScanRow() {
+  const items = TL.show ? tlSelected() : [];
+  const key = items.map(x => x.e.id + ':' + (x.e.scan || '')).join(',') + '|' + scanRev;
+  if (key === tlScanKey) return;
+  tlScanKey = key;
+  $('tlScanRow').hidden = !items.length;
+  if (!items.length || document.activeElement === $('tlScan')) return;
+  const vals = [...new Set(items.map(x => x.e.scan || ''))];
+  fillScanSelect($('tlScan'), 'Comme le cue', vals.length === 1 ? vals[0] : '');
+}
+$('tlScan').addEventListener('change', () => {
+  const v = $('tlScan').value;
+  tlChange(() => { for (const x of tlSelected()) { if (v) x.e.scan = v; else delete x.e.scan; } });
+});
+
 // --- selection, copy / paste / duplicate / delete ---
 function tlSelected() { return tlEvents().filter(x => TL.sel.has(x.e.id)); }
 function tlDelete() {
@@ -7241,6 +7365,7 @@ function tlLoop() {
       if (x > W * 0.92 || x < 0) tlSetView(tlPlayhead() - (W * 0.08) / TL.pps, TL.pps);
     }
     tlHeads();
+    tlScanRow();
     if (TL.fitPending && tlCanvas().clientWidth) { TL.fitPending = false; tlFit(); }
     tlWaveWanted();
     if (TL.need || (t && t.playing)) { TL.need = false; tlDraw(); }
@@ -9911,6 +10036,7 @@ $('figRate').onchange = () => {
 };
 $('figPer').onchange = () => figChange(() => { fe.fig.per = $('figPer').value; });
 $('figLoop').onchange = () => figChange(() => { fe.fig.loop_mode = $('figLoop').value; });
+$('figScan').onchange = () => figChange(() => { const v = $('figScan').value; if (v) fe.fig.scan = v; else delete fe.fig.scan; });
 // « Lire »: the animation in the editor, at the studio's tempo.
 function stopFigPreview() {
   if (!fe.playing) return;
@@ -10068,6 +10194,7 @@ function showFigProps() {
   }
   setVal('figName', fe.fig.name);
   setVal('figRate', fe.fig.rate); setVal('figPer', fe.fig.per); setVal('figLoop', fe.fig.loop_mode);
+  if (document.activeElement !== $('figScan')) fillScanSelect($('figScan'), 'Par défaut de la sortie', fe.fig.scan || '');
   ['figUp', 'figDown', 'figReverse', 'figDelete'].forEach(id => { $(id).disabled = !sel.length; });
 }
 

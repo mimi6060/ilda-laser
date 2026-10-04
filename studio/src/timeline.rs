@@ -279,6 +279,9 @@ pub struct Event {
     /// Cue-level modifiers, applied to this event's points before the mix.
     pub modifiers: LiveModifiers,
     pub envelopes: Vec<Envelope>,
+    /// Scan preset (T-415, `scan.rs`); `None` = « Comme le cue ».
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan: Option<String>,
 }
 
 impl Default for Event {
@@ -296,6 +299,7 @@ impl Default for Event {
             to_next: None,
             modifiers: LiveModifiers::default(),
             envelopes: Vec::new(),
+            scan: None,
         }
     }
 }
@@ -574,6 +578,8 @@ pub struct TimelineCue {
     /// a timecode jump) starts there, as if played from the event's start
     /// (T-409).
     pub elapsed_s: f64,
+    /// The event's own scan preset (T-415).
+    pub scan: Option<String>,
 }
 
 struct Instance {
@@ -1092,6 +1098,7 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
                         TimeBase::Seconds => local_c,
                         TimeBase::Beats => local_c * 60.0 / c.bpm.max(1.0),
                     },
+                    scan: e.scan.clone(),
                 },
                 accumulate_seconds,
                 seconds_estimate: local_c * 60.0 / c.bpm.max(1.0),
@@ -1643,6 +1650,7 @@ mod tests {
             modifiers: LiveModifiers::default(),
             envelopes: Vec::new(),
             elapsed_s: 0.0,
+            scan: None,
         };
         let s = look_of(&c, &presets).unwrap();
         assert!((s.brightness - presets[0].settings.brightness * 0.5).abs() < 1e-6);
