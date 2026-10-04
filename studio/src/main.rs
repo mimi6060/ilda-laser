@@ -50,6 +50,8 @@ mod safety;
 mod safety_invariants;
 mod safety_log;
 mod showmode;
+#[cfg(feature = "shownet")]
+mod shownet;
 mod scenes;
 mod sheets;
 mod tempo;

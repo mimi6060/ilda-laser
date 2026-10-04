@@ -26,3 +26,9 @@ nanomp3 = "0.1.1"
 roxmltree = "0.21"
 ponk-protocol = "0.1"  # MIT, zero dependencies: PONK wire format (T-300)
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+
+[features]
+# Native ShowNET output foundation (T-471), off by default. Without the
+# Laserworld SDK binding (private, never in the repository: see
+# `src/shownet.rs`) it only adds the code and its tests with a fake box.
+shownet = []

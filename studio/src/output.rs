@@ -11,7 +11,8 @@ use std::borrow::Cow;
 
 pub trait Output: Send {
     fn name(&self) -> &str;
-    /// What kind of output this is, for the UI: "dac", "ponk" or "test".
+    /// What kind of output this is, for the UI: "dac", "ponk", "test", or
+    /// "shownet" (`shownet.rs`, behind the `shownet` feature).
     fn kind(&self) -> &'static str {
         "dac"
     }

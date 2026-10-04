@@ -1,0 +1,4 @@
+# Laserworld ShowNET SDK and our private binding to it (T-471): under NDA,
+# never committed. Library, headers, docs and keys stay in this folder (or
+# anywhere outside the repository).
+/shownet-sdk/
