@@ -43,7 +43,7 @@ test('a program set on a grid cue shows its badge and plays with it', async ({ p
   };
   try {
     expect(await studio.post('/api/cues/program', { id: 'tunnels-001', program })).toBe(200);
-    expect(await studio.post('/api/cues/program', { id: 'tunnels-001', program: { lanes: [{ target: 'trace' }] } })).toBe(400);
+    expect(await studio.post('/api/cues/program', { id: 'tunnels-001', program: { lanes: [{ target: 'mirror' }] } })).toBe(400);
     await openUi(page, studio);
     await page.locator('#cueTabs button', { hasText: 'Tunnels' }).click();
     const cue = page.locator('#cues .cue[data-id="tunnels-001"]');

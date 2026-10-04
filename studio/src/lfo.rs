@@ -178,6 +178,10 @@ fn slot<'a>(id: &str, settings: &'a mut Settings, live: &'a mut LiveModifiers) -
         "master.rot_z.speed" => Slot::F32(&mut live.rot_speed[2]),
         "master.perspective" => Slot::F32(&mut live.perspective),
         "master.speed" => Slot::F32(&mut live.speed),
+        // Live effects that only remove light (T-142). The strobe, mirror,
+        // prism and the momentary ones are left to the operator's hand.
+        "master.trace" => Slot::F32(&mut live.trace),
+        "master.dots" => Slot::F32(&mut live.dots),
         "master.color.hue" => Slot::F32(&mut c.hue),
         "master.color.spread" => Slot::F32(&mut c.spread),
         "master.color.offset" => Slot::Step(&mut c.offset),
@@ -499,7 +503,7 @@ mod tests {
     #[test]
     fn only_safe_continuous_controls_can_be_targets() {
         let reg = reg();
-        for id in ["transport.arm", "transport.blackout", "tempo.bpm", "cue.max_active", "master.rot.sync", "grid.1.1.1", "nope"] {
+        for id in ["transport.arm", "transport.blackout", "tempo.bpm", "cue.max_active", "master.rot.sync", "grid.1.1.1", "nope", "master.strobe.rate", "master.prism", "transport.black_hold"] {
             assert!(modulatable(&reg, id).is_none(), "{id} must not be modulatable");
         }
         for id in ["master.size", "master.color.hue", "look.rotation_speed", "audio.flash", "master.brightness"] {
@@ -508,7 +512,7 @@ mod tests {
         // Every allowed target is a real continuous, external registry control
         // and actually moves when modulated.
         let targets: Vec<&str> = reg.list().iter().map(|d| d.id.as_str()).filter(|id| modulatable(&reg, id).is_some()).collect();
-        assert_eq!(targets.len(), 26);
+        assert_eq!(targets.len(), 28);
         for id in targets {
             // Pushed fully up, then fully down: at least one must move it
             // (a base at the bottom of its range can only go up, brightness only down).

@@ -1,9 +1,12 @@
 //! Master live modifiers: what the laserist changes constantly while a
 //! cue plays - size, position, rotation (with speed presets and tempo
-//! sync), animation speed, colour (fixed, hue, palette, rainbow, chase)
-//! and a master dimmer. Applied to the rendered look, before calibration
-//! and safety, so a live move can never push the beam past the
-//! calibration clamp or into a safety zone.
+//! sync), animation speed, colour (fixed, hue, palette, rainbow, chase),
+//! the live effects of T-142 (strobe, visible points, dotted lines,
+//! mirror, prism, freeze, momentary black) and a master dimmer. Applied
+//! to the rendered look, before calibration and safety, so a live move
+//! can never push the beam past the calibration clamp or into a safety
+//! zone, and the strobe limiter and static-beam guard still have the last
+//! word on every effect.
 
 use crate::patterns::Point;
 use anyhow::{bail, Context, Result};
@@ -40,6 +43,22 @@ pub struct LiveModifiers {
     /// Every colour setting, including those of the modes not in use, so
     /// switching mode back and forth brings the operator's values back.
     pub color_params: ColorParams,
+    /// Live strobe (T-142): latched (`on`) or held (`hold`).
+    pub strobe: Strobe,
+    /// « Points visibles »: share of the lit path drawn, from its start, 0..1.
+    pub trace: f32,
+    /// « Pointillés »: 0 = solid, 1 = widely spaced dots. Only removes light.
+    pub dots: f32,
+    /// Mirrored copies of the figure.
+    pub mirror: Mirror,
+    /// « Prisme »: copies turned around the centre, 1 (off) ..= `MAX_PRISM`.
+    pub prism: u8,
+    /// Momentary « Figer »: animation and modulation time stand still while
+    /// held (the engine reads it; the static-beam guard still runs after).
+    pub freeze: bool,
+    /// Momentary « Noir »: a dark output while held. A dimmer, not a
+    /// disarm: the arm state is never touched.
+    pub black: bool,
 }
 
 impl Default for LiveModifiers {
@@ -59,17 +78,150 @@ impl Default for LiveModifiers {
             speed: 1.0,
             color: ColorOverride::Normal,
             color_params: ColorParams::default(),
+            strobe: Strobe::default(),
+            trace: 1.0,
+            dots: 0.0,
+            mirror: Mirror::None,
+            prism: 1,
+            freeze: false,
+            black: false,
         }
     }
 }
 
 impl LiveModifiers {
-    /// True when nothing but the colour differs from the defaults.
+    /// True when nothing but the colour and the effects differs from the
+    /// defaults.
     fn geometry_is_identity(&self) -> bool {
-        let defaults = Self::default();
-        Self { color: ColorOverride::Normal, color_params: defaults.color_params.clone(), ..self.clone() } == defaults
+        let d = Self::default();
+        let geometry = Self {
+            color: ColorOverride::Normal,
+            color_params: d.color_params.clone(),
+            strobe: d.strobe,
+            trace: d.trace,
+            dots: d.dots,
+            mirror: d.mirror,
+            prism: d.prism,
+            freeze: d.freeze,
+            black: d.black,
+            ..self.clone()
+        };
+        geometry == d
+    }
+
+    /// Releases the momentary effects (« Figer », « Noir », strobe held):
+    /// they never outlive the hand holding them - not in a saved file, a
+    /// stored cue or a timeline event.
+    pub fn release_momentary(&mut self) {
+        self.freeze = false;
+        self.black = false;
+        self.strobe.hold = false;
+    }
+
+    /// The effects within their ranges (values from a client, an old file,
+    /// a mangled event).
+    pub fn sanitize_effects(&mut self) {
+        let d = Self::default();
+        self.trace = if self.trace.is_finite() { self.trace.clamp(0.0, 1.0) } else { d.trace };
+        self.dots = if self.dots.is_finite() { self.dots.clamp(0.0, 1.0) } else { d.dots };
+        self.prism = self.prism.clamp(1, MAX_PRISM);
+        self.strobe.rate = self.strobe.rate();
+        self.strobe.duty = self.strobe.duty();
     }
 }
+
+/// Live strobe (T-142): the output is lit for `duty` of every cycle of
+/// `rate`, its phase on the clock (`Rate::cycles`), so a synced strobe
+/// flashes exactly on the tempo's subdivisions. It only ever cuts light,
+/// and runs before the strobe limiter (T-101), which still turns a strobe
+/// kept too fast for too long into steady output.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Strobe {
+    /// Latched (« Stroboscope »).
+    pub on: bool,
+    /// Momentary (« Flash strobe »), while held.
+    pub hold: bool,
+    /// Free (Hz, `STROBE_MIN_HZ..=STROBE_MAX_HZ`) or synced (beats per
+    /// flash, 1/16..1).
+    pub rate: Rate,
+    /// Lit share of a cycle, `STROBE_MIN_DUTY..=STROBE_MAX_DUTY`.
+    pub duty: f32,
+}
+
+pub const STROBE_MIN_HZ: f32 = 1.0;
+pub const STROBE_MAX_HZ: f32 = 25.0;
+pub const STROBE_MIN_DUTY: f32 = 0.1;
+pub const STROBE_MAX_DUTY: f32 = 0.9;
+/// Synced strobe choices: flashes per beat (each 1/1 .. 1/16 of a beat).
+pub const STROBE_DIVISIONS: [f32; 5] = [1.0, 2.0, 4.0, 8.0, 16.0];
+/// « Cadence » choices: free (the Hz fader), then the synced divisions.
+pub const STROBE_SYNC_LABELS: [&str; 6] = ["Libre (Hz)", "1/1", "1/2", "1/4", "1/8", "1/16"];
+
+impl Default for Strobe {
+    fn default() -> Self {
+        Self { on: false, hold: false, rate: Rate::Hz(8.0), duty: 0.5 }
+    }
+}
+
+impl Strobe {
+    pub fn active(&self) -> bool {
+        self.on || self.hold
+    }
+
+    /// The rate within its range (a bad number = the default).
+    pub fn rate(&self) -> Rate {
+        match self.rate {
+            Rate::Hz(hz) if hz.is_finite() => Rate::Hz(hz.clamp(STROBE_MIN_HZ, STROBE_MAX_HZ)),
+            Rate::Beats(b) if b.is_finite() && b > 0.0 => Rate::Beats(b.clamp(1.0 / 16.0, 1.0)),
+            Rate::Hz(_) => Strobe::default().rate,
+            Rate::Beats(_) => Rate::Beats(0.25),
+        }
+    }
+
+    pub fn duty(&self) -> f32 {
+        if self.duty.is_finite() {
+            self.duty.clamp(STROBE_MIN_DUTY, STROBE_MAX_DUTY)
+        } else {
+            Strobe::default().duty
+        }
+    }
+
+    /// Whether the strobe lets light through at `t` seconds, `beat` beats.
+    pub fn lit_at(&self, t: f64, beat: f64) -> bool {
+        !self.active() || self.rate().cycles(t, beat).rem_euclid(1.0) < self.duty() as f64
+    }
+
+    /// Index in `STROBE_SYNC_LABELS` (0 = free).
+    pub fn sync_index(&self) -> usize {
+        match self.rate() {
+            Rate::Hz(_) => 0,
+            Rate::Beats(b) => STROBE_DIVISIONS.iter().position(|d| (1.0 / d - b).abs() < 1e-4).map_or(0, |i| i + 1),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mirror {
+    #[default]
+    None,
+    /// A copy flipped left-right.
+    X,
+    /// A copy flipped top-bottom.
+    Y,
+    /// Both, and the copy flipped both ways: four in all.
+    Xy,
+}
+
+pub const MIRROR_LABELS: [&str; 4] = ["Aucun", "X", "Y", "XY"];
+pub const MIRRORS: [Mirror; 4] = [Mirror::None, Mirror::X, Mirror::Y, Mirror::Xy];
+pub const MAX_PRISM: u8 = 8;
+/// « Pointillés » at 1: dark points after each lit pair.
+const MAX_DOT_GAP: f32 = 12.0;
+/// Fewest points a mirror or prism copy keeps when the copies share the
+/// figure's point budget.
+const MIN_COPY_POINTS: usize = 48;
 
 /// A speed that is either free-running or locked to the tempo clock.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -314,6 +466,8 @@ pub struct LiveState {
     /// Seconds and tempo-clock beats of the frame being drawn.
     time: f64,
     beat: f64,
+    /// While « Figer » is held: the clock colour effects stay on.
+    frozen: Option<(f64, f64)>,
 }
 
 impl LiveState {
@@ -321,6 +475,17 @@ impl LiveState {
     pub fn set_clock(&mut self, t: f64, beat: f64) {
         self.time = t;
         self.beat = beat;
+    }
+
+    /// « Figer » (T-142): colour effects read `clock` (seconds, beats)
+    /// instead of the frame's own while it is `Some`. The strobe keeps the
+    /// real clock.
+    pub fn freeze_colours(&mut self, clock: Option<(f64, f64)>) {
+        self.frozen = clock;
+    }
+
+    fn colour_clock(&self) -> (f64, f64) {
+        self.frozen.unwrap_or((self.time, self.beat))
     }
 
     /// Advance the rotations by `dt` seconds. `bpm` and `beats_per_bar`
@@ -342,11 +507,19 @@ impl LiveState {
     }
 }
 
-/// Geometry, then colour, then the master dimmer. `user` are the user
-/// palettes (palette indexes past the built-ins point into it).
+/// Geometry, mirror and prism copies, colour, then the effects that only
+/// remove light (visible points, dotted lines, strobe, black) and the
+/// master dimmer. `user` are the user palettes (palette indexes past the
+/// built-ins point into it).
 pub fn apply(points: &[Point], m: &LiveModifiers, st: &LiveState, user: &[Palette]) -> Vec<Point> {
-    let mut out = if m.geometry_is_identity() && st.spin == [0.0; 3] { points.to_vec() } else { transform(points, m, st) };
+    let out = if m.geometry_is_identity() && st.spin == [0.0; 3] { points.to_vec() } else { transform(points, m, st) };
+    let mut out = copies(out, m.mirror, m.prism);
     recolor(&mut out, &m.color, st, user);
+    trace(&mut out, m.trace);
+    dots(&mut out, m.dots);
+    if m.black || !m.strobe.lit_at(st.time, st.beat) {
+        black_out(&mut out);
+    }
     if m.brightness != 1.0 {
         let gain = m.brightness.clamp(0.0, 1.0);
         for p in &mut out {
@@ -356,6 +529,82 @@ pub fn apply(points: &[Point], m: &LiveModifiers, st: &LiveState, user: &[Palett
         }
     }
     out
+}
+
+/// Every point dark, positions kept (« Noir », a strobe's off phase).
+pub fn black_out(points: &mut [Point]) {
+    for p in points {
+        (p.r, p.g, p.b) = (0.0, 0.0, 0.0);
+    }
+}
+
+/// Mirror and prism copies, around the centre of the frame, one after the
+/// other. Each copy starts with blanked travel from where the previous
+/// one ended (the beam goes dark before it moves), so no copy is ever
+/// joined by a lit line. The copies share the figure's point budget.
+fn copies(points: Vec<Point>, mirror: Mirror, prism: u8) -> Vec<Point> {
+    let flips: &[(f32, f32)] = match mirror {
+        Mirror::None => &[(1.0, 1.0)],
+        Mirror::X => &[(1.0, 1.0), (-1.0, 1.0)],
+        Mirror::Y => &[(1.0, 1.0), (1.0, -1.0)],
+        Mirror::Xy => &[(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)],
+    };
+    let turns = prism.clamp(1, MAX_PRISM) as usize;
+    let n = flips.len() * turns;
+    if n == 1 || points.is_empty() {
+        return points;
+    }
+    let src = crate::output::fit_frame(&points, (points.len() / n).max(MIN_COPY_POINTS));
+    let blank_step = crate::optimize::OptimizeParams::default().blank_step;
+    let mut out: Vec<Point> = Vec::with_capacity(src.len() * n + n * 32);
+    for k in 0..turns {
+        let (s, c) = (std::f32::consts::TAU * k as f32 / turns as f32).sin_cos();
+        for &(fx, fy) in flips {
+            let place = |p: &Point| {
+                let (x, y) = (p.x * fx, p.y * fy);
+                Point { x: x * c - y * s, y: x * s + y * c, ..*p }
+            };
+            if let (Some(&last), Some(first)) = (out.last(), src.first()) {
+                crate::optimize::travel(&mut out, last, place(first), blank_step);
+            }
+            out.extend(src.iter().map(place));
+        }
+    }
+    out
+}
+
+/// « Points visibles »: only the first `share` of the lit points stay lit.
+fn trace(points: &mut [Point], share: f32) {
+    let share = if share.is_finite() { share.clamp(0.0, 1.0) } else { 1.0 };
+    if share >= 1.0 {
+        return;
+    }
+    let keep = (points.iter().filter(|p| p.is_lit()).count() as f32 * share).round() as usize;
+    for (i, p) in points.iter_mut().filter(|p| p.is_lit()).enumerate() {
+        if i >= keep {
+            (p.r, p.g, p.b) = (0.0, 0.0, 0.0);
+        }
+    }
+}
+
+/// « Pointillés »: along each stroke, two lit points then a gap of 1 (just
+/// above 0) to `MAX_DOT_GAP` (at 1) dark ones. 0 = solid.
+fn dots(points: &mut [Point], amount: f32) {
+    if !(amount.is_finite() && amount > 0.0) {
+        return;
+    }
+    let period = 3 + (amount.min(1.0) * (MAX_DOT_GAP - 1.0)).round() as usize;
+    let mut i = 0;
+    for p in points.iter_mut() {
+        if !p.is_lit() {
+            i = 0;
+            continue;
+        }
+        if i % period >= 2 {
+            (p.r, p.g, p.b) = (0.0, 0.0, 0.0);
+        }
+        i += 1;
+    }
 }
 
 fn transform(points: &[Point], m: &LiveModifiers, st: &LiveState) -> Vec<Point> {
@@ -484,7 +733,8 @@ fn recolor(points: &mut [Point], c: &ColorOverride, st: &LiveState, user: &[Pale
             }
         }
         ColorOverride::Rainbow { spread, rate } => {
-            let phase = rate.cycles(st.time, st.beat).rem_euclid(1.0) as f32;
+            let (time, beat) = st.colour_clock();
+            let phase = rate.cycles(time, beat).rem_euclid(1.0) as f32;
             let (spread, n) = (spread.clamp(0.0, 4.0), points.len().max(1) as f32);
             for (i, p) in points.iter_mut().enumerate() {
                 let v = intensity(p);
@@ -496,7 +746,8 @@ fn recolor(points: &mut [Point], c: &ColorOverride, st: &LiveState, user: &[Pale
         ColorOverride::Chase { palette, step, spread } => {
             let Some(colors) = palette_colors(palette, user) else { return };
             let len = colors.len() as i64;
-            let now = step.cycles(st.time, st.beat).floor() as i64;
+            let (time, beat) = st.colour_clock();
+            let now = step.cycles(time, beat).floor() as i64;
             let (mut stroke, mut lit_points, mut was_lit) = (0i64, 0i64, false);
             for p in points.iter_mut() {
                 let v = intensity(p);
@@ -823,5 +1074,225 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(crate::datafile::take_pending(&dir.join(crate::datafile::QUARANTINE)).len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---------- live effects (T-142) ----------
+
+    /// A lit horizontal line of `n` points, white.
+    fn line(n: usize) -> Vec<Point> {
+        (0..n).map(|i| Point::lit(-0.5 + i as f32 / n as f32, 0.2, 1.0, 1.0, 1.0)).collect()
+    }
+
+    fn lit_count(points: &[Point]) -> usize {
+        points.iter().filter(|p| p.is_lit()).count()
+    }
+
+    fn strobe(rate: Rate, duty: f32) -> LiveModifiers {
+        LiveModifiers { strobe: Strobe { on: true, rate, duty, ..Default::default() }, ..Default::default() }
+    }
+
+    #[test]
+    fn strobe_10_hz_half_duty_lights_30_frames_a_second() {
+        let m = strobe(Rate::Hz(10.0), 0.5);
+        let mut st = LiveState::default();
+        let lit_frames = (0..60)
+            .filter(|&f| {
+                st.set_clock(5.0 + f as f64 / 60.0, 0.0);
+                lit_count(&apply(&line(10), &m, &st, &[])) > 0
+            })
+            .count();
+        assert!((29..=31).contains(&lit_frames), "{lit_frames} frames lit");
+    }
+
+    #[test]
+    fn strobe_off_or_released_changes_nothing() {
+        let mut m = strobe(Rate::Hz(10.0), 0.1);
+        m.strobe.on = false;
+        let mut st = LiveState::default();
+        for f in 0..60 {
+            st.set_clock(f as f64 / 60.0, 0.0);
+            assert_eq!(apply(&line(10), &m, &st, &[]), line(10));
+        }
+        // Held: the same strobe as latched.
+        m.strobe.hold = true;
+        st.set_clock(0.95, 0.0);
+        assert_eq!(lit_count(&apply(&line(10), &m, &st, &[])), 0);
+    }
+
+    #[test]
+    fn synced_strobe_edges_land_on_the_sixteenths() {
+        use crate::tempo::TempoClock;
+        let mut clock = TempoClock::default();
+        clock.set_bpm_manual(128.0, 0.0);
+        clock.nudge(0.37);
+        // 1/4: four flashes a beat, a rising edge on every sixteenth note.
+        let m = strobe(Rate::Beats(0.25), 0.5);
+        assert_eq!(m.strobe.sync_index(), 3);
+        let mut st = LiveState::default();
+        let mut was_lit = None;
+        let mut edges = 0;
+        for frame in 0..600 {
+            let t = frame as f64 / 60.0;
+            let beat = clock.beat_at(t);
+            st.set_clock(t, beat);
+            let lit = lit_count(&apply(&line(4), &m, &st, &[])) > 0;
+            if was_lit == Some(false) && lit {
+                edges += 1;
+                // The sixteenth this edge belongs to started at most one frame ago.
+                let sixteenth = (beat * 4.0).floor() / 4.0;
+                let since = (beat - sixteenth) * 60.0 / clock.bpm;
+                assert!(since < 1.0 / 60.0 + 1e-9, "frame {frame}: edge {since:.4} s after the sixteenth");
+            }
+            was_lit = Some(lit);
+        }
+        assert!(edges > 60, "{edges} rising edges in 10 s at 128 BPM");
+    }
+
+    #[test]
+    fn strobe_never_brightens_and_bad_values_stay_in_range() {
+        let m = LiveModifiers {
+            strobe: Strobe { on: true, rate: Rate::Hz(f32::NAN), duty: f32::INFINITY, ..Default::default() },
+            trace: f32::NAN,
+            dots: -4.0,
+            prism: 200,
+            ..Default::default()
+        };
+        let mut st = LiveState::default();
+        let src = line(50);
+        for f in 0..120 {
+            st.set_clock(f as f64 / 60.0, f as f64 / 30.0);
+            for p in apply(&src, &m, &st, &[]) {
+                assert!(p.r <= 1.0 && p.g <= 1.0 && p.b <= 1.0 && p.x.is_finite() && p.y.is_finite());
+            }
+        }
+        let mut s = m.clone();
+        s.sanitize_effects();
+        assert_eq!((s.strobe.rate, s.strobe.duty, s.trace, s.dots, s.prism), (Rate::Hz(8.0), 0.5, 1.0, 0.0, MAX_PRISM));
+        assert_eq!(strobe(Rate::Hz(99.0), 0.0).strobe.rate(), Rate::Hz(STROBE_MAX_HZ));
+        assert_eq!(strobe(Rate::Beats(9.0), 0.0).strobe.duty(), STROBE_MIN_DUTY);
+    }
+
+    #[test]
+    fn black_darkens_everything_and_keeps_the_path() {
+        let m = LiveModifiers { black: true, ..Default::default() };
+        let out = apply(&two_strokes(), &m, &LiveState::default(), &[]);
+        assert_eq!(lit_count(&out), 0);
+        assert_eq!(out.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(), two_strokes().iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn half_the_visible_points_are_the_start_of_the_path() {
+        let src = line(100);
+        let out = apply(&src, &LiveModifiers { trace: 0.5, ..Default::default() }, &LiveState::default(), &[]);
+        assert_eq!(lit_count(&out), 50);
+        assert!(out[..50].iter().all(Point::is_lit) && !out[50..].iter().any(Point::is_lit));
+        assert_eq!(out.len(), src.len(), "positions kept: travel unchanged");
+        assert_eq!(lit_count(&apply(&src, &LiveModifiers { trace: 0.0, ..Default::default() }, &LiveState::default(), &[])), 0);
+    }
+
+    #[test]
+    fn dots_only_remove_light_and_space_out_with_the_amount() {
+        let src = line(120);
+        let solid = apply(&src, &LiveModifiers { dots: 0.0, ..Default::default() }, &LiveState::default(), &[]);
+        assert_eq!(lit_count(&solid), 120);
+        let mut previous = 120;
+        for amount in [0.05, 0.3, 0.6, 1.0] {
+            let out = apply(&src, &LiveModifiers { dots: amount, ..Default::default() }, &LiveState::default(), &[]);
+            let n = lit_count(&out);
+            assert!(n > 0 && n < previous, "dots {amount}: {n} lit");
+            previous = n;
+            for (a, b) in src.iter().zip(&out) {
+                assert_eq!((a.x, a.y), (b.x, b.y));
+                assert!(b.r <= a.r && b.g <= a.g && b.b <= a.b);
+            }
+        }
+        // Dots restart on each stroke: its first point stays lit.
+        let out = apply(&two_strokes(), &LiveModifiers { dots: 1.0, ..Default::default() }, &LiveState::default(), &[]);
+        assert!(out[0].is_lit() && out[3].is_lit());
+    }
+
+    /// Every lit segment of `out` is a lit segment of `src` under one of
+    /// `maps` (the copies), so no copy is joined to the next by light.
+    type Place<'a> = &'a dyn Fn(&Point) -> (f32, f32);
+
+    fn lit_segments_come_from_the_source(src: &[Point], out: &[Point], maps: &[Place]) -> bool {
+        let close = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4;
+        out.windows(2).filter(|w| w[0].is_lit() && w[1].is_lit()).all(|w| {
+            maps.iter().any(|f| {
+                src.windows(2).any(|s| s[0].is_lit() && s[1].is_lit() && close(f(&s[0]), (w[0].x, w[0].y)) && close(f(&s[1]), (w[1].x, w[1].y)))
+                    || (close((w[0].x, w[0].y), (w[1].x, w[1].y)) && src.iter().any(|s| s.is_lit() && close(f(s), (w[0].x, w[0].y))))
+            })
+        })
+    }
+
+    #[test]
+    fn prism_4_draws_four_copies_each_after_blanked_travel() {
+        let src = line(40);
+        let out = apply(&src, &LiveModifiers { prism: 4, ..Default::default() }, &LiveState::default(), &[]);
+        // Four lit runs (one per copy), each preceded by dark travel.
+        let runs: Vec<usize> = (0..out.len()).filter(|&i| out[i].is_lit() && (i == 0 || !out[i - 1].is_lit())).collect();
+        assert_eq!(runs.len(), 4, "{runs:?}");
+        for &start in &runs[1..] {
+            assert!(!out[start - 1].is_lit() && !out[start - 2].is_lit(), "copy at {start} starts after blanked travel");
+            assert!((out[start - 1].x - out[start].x).abs() < 1e-5, "travel arrives where the copy starts");
+        }
+        // The copies are the figure turned by 0, 90, 180, 270 degrees.
+        let turn = |k: f32| move |p: &Point| {
+            let (s, c) = (std::f32::consts::FRAC_PI_2 * k).sin_cos();
+            (p.x * c - p.y * s, p.x * s + p.y * c)
+        };
+        let (a, b, c, d) = (turn(0.0), turn(1.0), turn(2.0), turn(3.0));
+        assert!(lit_segments_come_from_the_source(&src, &out, &[&a, &b, &c, &d]));
+        // Within the figure's point budget (plus the travel).
+        assert!(out.len() < src.len() + 4 * MIN_COPY_POINTS + 4 * 40, "{} points", out.len());
+    }
+
+    #[test]
+    fn mirrors_add_flipped_copies_joined_in_the_dark() {
+        let src = two_strokes();
+        for (mirror, copies) in [(Mirror::None, 1), (Mirror::X, 2), (Mirror::Y, 2), (Mirror::Xy, 4)] {
+            let out = apply(&src, &LiveModifiers { mirror, ..Default::default() }, &LiveState::default(), &[]);
+            let runs = (0..out.len()).filter(|&i| out[i].is_lit() && (i == 0 || !out[i - 1].is_lit())).count();
+            assert_eq!(runs, 2 * copies, "{mirror:?}");
+            let id = |p: &Point| (p.x, p.y);
+            let fx = |p: &Point| (-p.x, p.y);
+            let fy = |p: &Point| (p.x, -p.y);
+            let fxy = |p: &Point| (-p.x, -p.y);
+            assert!(lit_segments_come_from_the_source(&src, &out, &[&id, &fx, &fy, &fxy]), "{mirror:?}");
+        }
+        // Mirror X of a point on the right puts its twin on the left.
+        let out = apply(&[Point::lit(0.6, 0.1, 1.0, 0.0, 0.0)], &LiveModifiers { mirror: Mirror::X, ..Default::default() }, &LiveState::default(), &[]);
+        assert!(out.iter().any(|p| p.is_lit() && (p.x + 0.6).abs() < 1e-6 && (p.y - 0.1).abs() < 1e-6));
+    }
+
+    #[test]
+    fn frozen_colours_stand_still_and_the_strobe_does_not() {
+        let pts: Vec<Point> = (0..4).map(|i| Point::lit(i as f32 * 0.1, 0.0, 1.0, 1.0, 1.0)).collect();
+        let m = colored(ColorOverride::Rainbow { spread: 1.0, rate: Rate::Hz(0.25) });
+        let mut st = LiveState::default();
+        st.freeze_colours(Some((0.0, 0.0)));
+        st.set_clock(1.0, 2.0);
+        let frozen = apply(&pts, &m, &st, &[]);
+        assert_eq!(frozen, apply(&pts, &m, &LiveState::default(), &[]));
+        st.freeze_colours(None);
+        assert_ne!(apply(&pts, &m, &st, &[]), frozen);
+        // The strobe reads the real clock even while frozen.
+        let s = LiveModifiers { strobe: Strobe { on: true, rate: Rate::Hz(1.0), duty: 0.5, hold: false }, ..m };
+        st.freeze_colours(Some((0.0, 0.0)));
+        st.set_clock(0.75, 0.0);
+        assert_eq!(lit_count(&apply(&pts, &s, &st, &[])), 0);
+    }
+
+    #[test]
+    fn momentary_effects_are_released_and_old_files_load() {
+        let mut m = LiveModifiers { freeze: true, black: true, strobe: Strobe { hold: true, on: true, ..Default::default() }, ..Default::default() };
+        m.release_momentary();
+        assert!(!m.freeze && !m.black && !m.strobe.hold && m.strobe.on, "the latched strobe stays");
+        let old: LiveModifiers = serde_json::from_str(r#"{"size": 1.5}"#).unwrap();
+        assert_eq!((old.trace, old.dots, old.prism, old.mirror, old.strobe), (1.0, 0.0, 1, Mirror::None, Strobe::default()));
+        let json = serde_json::to_string(&LiveModifiers { mirror: Mirror::Xy, strobe: strobe(Rate::Beats(0.5), 0.3).strobe, ..Default::default() }).unwrap();
+        assert!(json.contains(r#""mirror":"xy""#), "{json}");
+        let back: LiveModifiers = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.mirror, back.strobe.rate), (Mirror::Xy, Rate::Beats(0.5)));
     }
 }

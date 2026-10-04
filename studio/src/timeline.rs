@@ -1125,6 +1125,10 @@ pub(crate) fn sanitize_modifiers(m: &mut LiveModifiers) {
     }
     m.perspective = fix(m.perspective, 0.0, 1.0, d.perspective);
     m.speed = fix(m.speed, 0.0, 4.0, d.speed);
+    // Live effects (T-142): in range, and never a held « Noir », « Figer »
+    // or strobe flash stored in an event or a cue.
+    m.sanitize_effects();
+    m.release_momentary();
 }
 
 /// The look an event draws: its catalogue cue or its own look, with the

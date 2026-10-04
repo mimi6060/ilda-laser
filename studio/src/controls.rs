@@ -15,7 +15,8 @@ use crate::layers::{Layer, LAYER_COUNT};
 use crate::presets::{Preset, CATEGORIES};
 use crate::live::{
     ChaseSpread, ColorOverride, ColorParams, LiveModifiers, PaletteMode, Rate, COLOR_MODE_LABELS, COLOR_STEPS_BEATS,
-    COLOR_STEP_LABELS, PALETTE_LABELS, ROT_PRESETS_FREE, ROT_PRESETS_SYNC, ROT_PRESET_LABELS,
+    COLOR_STEP_LABELS, MAX_PRISM, MIRRORS, MIRROR_LABELS, PALETTE_LABELS, ROT_PRESETS_FREE, ROT_PRESETS_SYNC, ROT_PRESET_LABELS,
+    STROBE_DIVISIONS, STROBE_MAX_DUTY, STROBE_MAX_HZ, STROBE_MIN_DUTY, STROBE_MIN_HZ, STROBE_SYNC_LABELS,
 };
 use crate::tempo;
 use crate::Shared;
@@ -218,6 +219,27 @@ impl ControlRegistry {
         add("master.perspective".into(), "Perspective".into(), "master", cont(0.0, 1.0, m.perspective, Unit::Percent), true);
         add("master.speed".into(), "Vitesse d'animation".into(), "master", cont(0.0, 4.0, m.speed, Unit::Percent), true);
         add("master.reset".into(), "Réinitialiser le direct".into(), "master", ControlKind::Trigger, true);
+        // Live effects (T-142). The strobe only cuts light, before the
+        // strobe limiter; « Noir » dims, it never disarms.
+        let st = m.strobe;
+        add("master.strobe.on".into(), "Stroboscope".into(), "master", ControlKind::Toggle { default: false }, true);
+        add("master.strobe.hold".into(), "Flash strobe (maintenir)".into(), "master", ControlKind::Momentary, true);
+        let hz = match st.rate { Rate::Hz(hz) => hz, Rate::Beats(_) => 8.0 };
+        add("master.strobe.rate".into(), "Cadence du strobe".into(), "master", cont(STROBE_MIN_HZ, STROBE_MAX_HZ, hz, Unit::Hz), true);
+        add(
+            "master.strobe.sync".into(),
+            "Cadence du strobe (temps)".into(),
+            "master",
+            ControlKind::Choice { options: STROBE_SYNC_LABELS.to_vec(), default: 0 },
+            true,
+        );
+        add("master.strobe.duty".into(), "Rapport cyclique du strobe".into(), "master", cont(STROBE_MIN_DUTY, STROBE_MAX_DUTY, st.duty, Unit::Percent), true);
+        add("master.trace".into(), "Points visibles".into(), "master", cont(0.0, 1.0, m.trace, Unit::Percent), true);
+        add("master.dots".into(), "Pointillés".into(), "master", cont(0.0, 1.0, m.dots, Unit::Percent), true);
+        add("master.mirror".into(), "Miroir".into(), "master", ControlKind::Choice { options: MIRROR_LABELS.to_vec(), default: 0 }, true);
+        add("master.prism".into(), "Prisme".into(), "master", cont(1.0, MAX_PRISM as f32, m.prism as f32, Unit::None), true);
+        add("transport.freeze".into(), "Figer (maintenir)".into(), "transport", ControlKind::Momentary, true);
+        add("transport.black_hold".into(), "Noir (maintenir, sans désarmer)".into(), "transport", ControlKind::Momentary, true);
 
         let c = ColorParams::default();
         let choice = |options: &[&'static str], default: usize| ControlKind::Choice { options: options.to_vec(), default };
@@ -436,6 +458,32 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "master.perspective" => set_live(s, |m| m.perspective = value(input)),
         "master.speed" => set_live(s, |m| m.speed = value(input)),
         "master.reset" => set_live(s, |m| *m = LiveModifiers::default()),
+        "master.strobe.on" => set_live(s, |m| m.strobe.on = truthy(input)),
+        "master.strobe.hold" => set_live(s, |m| m.strobe.hold = truthy(input)),
+        // The Hz fader frees the strobe; « Cadence (temps) » syncs it (0 = free).
+        "master.strobe.rate" => set_live(s, |m| m.strobe.rate = Rate::Hz(value(input))),
+        "master.strobe.sync" => {
+            let index = choice_index(&desc.kind, input);
+            set_live(s, |m| {
+                m.strobe.rate = match index {
+                    0 => Rate::Hz(match m.strobe.rate() {
+                        Rate::Hz(hz) => hz,
+                        Rate::Beats(_) => 8.0,
+                    }),
+                    i => Rate::Beats(1.0 / STROBE_DIVISIONS[i - 1]),
+                }
+            })
+        }
+        "master.strobe.duty" => set_live(s, |m| m.strobe.duty = value(input)),
+        "master.trace" => set_live(s, |m| m.trace = value(input)),
+        "master.dots" => set_live(s, |m| m.dots = value(input)),
+        "master.mirror" => {
+            let mirror = MIRRORS[choice_index(&desc.kind, input)];
+            set_live(s, |m| m.mirror = mirror)
+        }
+        "master.prism" => set_live(s, |m| m.prism = value(input).round() as u8),
+        "transport.freeze" => set_live(s, |m| m.freeze = truthy(input)),
+        "transport.black_hold" => set_live(s, |m| m.black = truthy(input)),
         "master.color.mode" => {
             let index = choice_index(&desc.kind, input);
             set_live(s, |m| m.color = m.color_params.build(index))
@@ -675,6 +723,20 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "master.rot.reverse" => json!(s.live.rot_reverse),
         "master.perspective" => json!(s.live.perspective),
         "master.speed" => json!(s.live.speed),
+        "master.strobe.on" => json!(s.live.strobe.on),
+        "master.strobe.hold" => json!(s.live.strobe.hold),
+        "master.strobe.rate" => match s.live.strobe.rate() {
+            Rate::Hz(hz) => json!(hz),
+            Rate::Beats(_) => serde_json::Value::Null,
+        },
+        "master.strobe.sync" => json!(s.live.strobe.sync_index()),
+        "master.strobe.duty" => json!(s.live.strobe.duty()),
+        "master.trace" => json!(s.live.trace),
+        "master.dots" => json!(s.live.dots),
+        "master.mirror" => json!(MIRRORS.iter().position(|&m| m == s.live.mirror).unwrap_or(0)),
+        "master.prism" => json!(s.live.prism),
+        "transport.freeze" => json!(s.live.freeze),
+        "transport.black_hold" => json!(s.live.black),
         "master.color.mode" => json!(s.live.color.mode_index()),
         "master.color.hue" => json!(s.live.color_params.hue),
         "master.color.palette" => json!(s.live.color_params.palette),

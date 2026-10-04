@@ -683,6 +683,11 @@
     background: linear-gradient(var(--line), var(--line)) 50% 0 / 1px 100% no-repeat, linear-gradient(var(--line), var(--line)) 0 50% / 100% 1px no-repeat, var(--bg); }
   #posDot { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); pointer-events: none; }
   #livePanel label[data-neutral] { cursor: context-menu; }
+  /* LIVE › Direct › Effets (T-142), Theme (T-299) tokens. */
+  #fxBlock button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  #fxBlock .fx-hold { touch-action: none; user-select: none; }
+  #fxBlock .fx-warn { color: var(--warn); }
+  #fxBlack.active { background: var(--panel-2); color: var(--muted); border-color: var(--line); box-shadow: inset 0 0 0 2px var(--text); }
   /* RÉGLAGES › Couleurs de la sortie (T-414), Theme (T-299) tokens. */
   .oc-ch { display: grid; grid-template-columns: 1fr 72px; gap: 2px 10px; align-items: start; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
   .oc-ch h4 { margin: 0; font-size: 12px; font-weight: 600; }
@@ -1122,6 +1127,7 @@
   <div class="box">
     <div class="keys-head"><h3 id="keysTitle">Raccourcis</h3><button id="keysClose">Fermer</button></div>
     <div class="hint">Échap fait toujours l'arrêt d'urgence, même dans un champ texte ; les autres touches ne marchent pas pendant la saisie (sauf mention).</div>
+    <div class="hint" style="color:var(--warn)">⚠ Épilepsie : le stroboscope (touche S tenue, LIVE › Direct › Effets) peut déclencher des crises chez les personnes photosensibles. Le limiteur de RÉGLAGES › Sécurité rend la sortie continue au-delà de sa limite. « Noir momentané » (LIVE › Direct › Effets) assombrit tant qu'il est tenu, sans désarmer ; Échap reste l'arrêt d'urgence.</div>
     <div id="keysList"></div>
   </div>
 </div>
@@ -1307,6 +1313,37 @@
         <input type="range" id="colorSpread" min="0" max="400" value="100" data-control="master.color.spread" title="master.color.spread">
         <label>Chenillard</label>
         <div class="seg" id="chaseSpreads" data-control="master.color.chase_spread"><button data-cs="0">Tout</button><button data-cs="1">Par trait</button><button data-cs="2">Par point</button></div>
+      </div>
+      <!-- Effets (T-142): only remove light or add copies joined in the dark; the strobe limiter and the static-beam guard still come after. -->
+      <div id="fxBlock">
+        <h4 class="dblk">Effets</h4>
+        <div class="row">
+          <button id="fxStrobe" data-control="master.strobe.on" title="master.strobe.on : stroboscope (bascule)">Stroboscope</button>
+          <button id="fxStrobeHold" class="fx-hold" data-control="master.strobe.hold" title="master.strobe.hold : stroboscope tant que le bouton est tenu">Flash strobe</button>
+        </div>
+        <label>Cadence <span class="v" id="fxRateV"></span></label>
+        <input type="range" id="fxRate" min="1" max="25" step="0.5" value="8" data-control="master.strobe.rate" title="master.strobe.rate (Hz, cadence libre)">
+        <div class="seg" id="fxSync" data-control="master.strobe.sync" title="master.strobe.sync : cadence libre (Hz) ou calée sur le tempo">
+          <button data-sync="0">Hz</button><button data-sync="1">1/1</button><button data-sync="2">1/2</button>
+          <button data-sync="3">1/4</button><button data-sync="4">1/8</button><button data-sync="5">1/16</button>
+        </div>
+        <label>Rapport <span class="v" id="fxDutyV"></span></label>
+        <input type="range" id="fxDuty" min="10" max="90" value="50" data-control="master.strobe.duty" title="master.strobe.duty (part allumée de chaque éclair)">
+        <div class="hint fx-warn" id="fxWarn">⚠ Épilepsie : un stroboscope peut déclencher des crises chez les personnes photosensibles. Au-delà de la limite de RÉGLAGES › Sécurité, la sortie redevient continue.</div>
+        <label>Points visibles <span class="v" id="mTraceV"></span></label>
+        <input type="range" id="mTrace" min="0" max="100" data-live="trace" data-k="100" data-control="master.trace" title="master.trace">
+        <label>Pointillés <span class="v" id="mDotsV"></span></label>
+        <input type="range" id="mDots" min="0" max="100" data-live="dots" data-k="100" data-control="master.dots" title="master.dots">
+        <label>Miroir</label>
+        <div class="seg" id="fxMirror" data-control="master.mirror" title="master.mirror : copies en miroir autour du centre">
+          <button data-mirror="0">Aucun</button><button data-mirror="1">X</button><button data-mirror="2">Y</button><button data-mirror="3">XY</button>
+        </div>
+        <label>Prisme <span class="v" id="fxPrismV"></span></label>
+        <input type="range" id="fxPrism" min="1" max="8" step="1" value="1" data-control="master.prism" title="master.prism : copies tournées autour du centre (1 = aucune)">
+        <div class="row">
+          <button id="fxFreeze" class="fx-hold" data-control="transport.freeze" title="transport.freeze : fige l'animation et les modulateurs tant que le bouton est tenu">Figer (maintenir)</button>
+          <button id="fxBlack" class="fx-hold" data-control="transport.black_hold" title="transport.black_hold : sortie noire tant que le bouton est tenu, sans désarmer (Échap reste l'arrêt d'urgence)">Noir momentané</button>
+        </div>
       </div>
     </section>
 
@@ -3338,6 +3375,8 @@ window.addEventListener('blur', () => {
   downCodes.clear();
   setHold(false);
   holdStrobe(false);
+  // Live effect hold buttons (T-142), defined further down.
+  try { FX_HOLDS.forEach(id => fxHold(id, false)); } catch (err) { console.warn('effets', err); }
 });
 // The look's strobe before S was held (null = not held). Released, the
 // look gets its own strobe back.
@@ -5279,6 +5318,7 @@ function showLive(l) {
   const table = l.rot_sync ? [0, 0.25, 1, 2] : [0, 30, 90, 270];
   document.querySelectorAll('#rotPresets button').forEach(b => b.classList.toggle('active', table[+b.dataset.preset] === l.rot_speed[2]));
   showColor(l);
+  if (l.strobe) showFx(l);
 }
 // Each slider drives its control id (in its title) directly, so a slider
 // move can't be overwritten by a slightly older state from the server.
@@ -5338,6 +5378,47 @@ const reverse = on => postLive({ id: 'master.rot.reverse', value: on });
 $('rotReverse').addEventListener('pointerdown', () => reverse(true));
 ['pointerup', 'pointerleave'].forEach(ev => $('rotReverse').addEventListener(ev, () => reverse(false)));
 let reverseKey = false;
+
+// ---------- live effects (T-142) ----------
+// Hold buttons (Flash strobe, Figer, Noir): pressed while the pointer is
+// down, released on up, leave or cancel, and when the window loses focus.
+const FX_HOLDS = ['fxStrobeHold', 'fxFreeze', 'fxBlack'];
+const fxHeld = new Set();
+function fxHold(id, on) {
+  if (on === fxHeld.has(id)) return;
+  if (on) fxHeld.add(id); else fxHeld.delete(id);
+  $(id).classList.toggle('active', on);
+  postLive({ id: $(id).dataset.control, value: on });
+}
+FX_HOLDS.forEach(id => {
+  $(id).addEventListener('pointerdown', e => { if (e.button === 0) { $(id).setPointerCapture?.(e.pointerId); fxHold(id, true); } });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => $(id).addEventListener(ev, () => fxHold(id, false)));
+});
+$('fxStrobe').addEventListener('click', () => postLive({ id: 'master.strobe.on', value: !(live && live.strobe.on) }));
+$('fxRate').addEventListener('input', () => { $('fxRateV').textContent = `${+$('fxRate').value} Hz`; postLive({ id: 'master.strobe.rate', value: +$('fxRate').value }); });
+$('fxSync').querySelectorAll('button').forEach(b => b.addEventListener('click', () => postLive({ id: 'master.strobe.sync', value: +b.dataset.sync })));
+$('fxDuty').addEventListener('input', () => { $('fxDutyV').textContent = `${$('fxDuty').value} %`; postLive({ id: 'master.strobe.duty', value: $('fxDuty').value / 100 }); });
+$('fxMirror').querySelectorAll('button').forEach(b => b.addEventListener('click', () => postLive({ id: 'master.mirror', value: +b.dataset.mirror })));
+$('fxPrism').addEventListener('input', () => { $('fxPrismV').textContent = $('fxPrism').value; postLive({ id: 'master.prism', value: +$('fxPrism').value }); });
+const FX_SYNC_BEATS = [1, 0.5, 0.25, 0.125, 0.0625];
+function showFx(l) {
+  const st = l.strobe, hz = st.rate.hz, beats = st.rate.beats;
+  $('fxStrobe').classList.toggle('active', st.on);
+  if (!fxHeld.has('fxStrobeHold')) $('fxStrobeHold').classList.toggle('active', st.hold);
+  if (!fxHeld.has('fxFreeze')) $('fxFreeze').classList.toggle('active', l.freeze);
+  if (!fxHeld.has('fxBlack')) $('fxBlack').classList.toggle('active', l.black);
+  const sync = hz !== undefined ? 0 : 1 + FX_SYNC_BEATS.findIndex(b => Math.abs(b - beats) < 1e-4);
+  $('fxSync').querySelectorAll('button').forEach(b => b.classList.toggle('active', +b.dataset.sync === sync));
+  $('fxRate').disabled = hz === undefined;
+  if (hz !== undefined && document.activeElement !== $('fxRate')) $('fxRate').value = hz;
+  $('fxRateV').textContent = hz !== undefined ? `${+hz.toFixed(1)} Hz` : `${['1/1', '1/2', '1/4', '1/8', '1/16'][sync - 1] ?? beats} temps`;
+  if (document.activeElement !== $('fxDuty')) $('fxDuty').value = Math.round(st.duty * 100);
+  $('fxDutyV').textContent = `${Math.round(st.duty * 100)} %`;
+  const mirror = ['none', 'x', 'y', 'xy'].indexOf(l.mirror);
+  $('fxMirror').querySelectorAll('button').forEach(b => b.classList.toggle('active', +b.dataset.mirror === mirror));
+  if (document.activeElement !== $('fxPrism')) $('fxPrism').value = l.prism;
+  $('fxPrismV').textContent = l.prism > 1 ? `${l.prism} copies` : 'aucun';
+}
 
 // ---------- live colour ----------
 const COLOR_MODES = ['normal', 'fixed', 'hue', 'palette', 'rainbow', 'chase'];
