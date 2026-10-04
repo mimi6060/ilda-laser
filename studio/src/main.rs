@@ -35,6 +35,7 @@ mod figure_import;
 mod figures;
 mod font;
 mod generators;
+mod graphics;
 mod grid;
 mod ilda;
 mod ilda_library;

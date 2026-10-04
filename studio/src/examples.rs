@@ -213,12 +213,6 @@ impl<'a> Builder<'a> {
         Ev(Event { start: bar(from), len: beats, source: EventSource::Look { settings }, ..Default::default() })
     }
 
-    /// Laser text, held for `beats`.
-    fn text(&mut self, text: &str, from: f64, beats: f64, color: [u8; 3], scale: f32) -> Ev {
-        let settings = Settings { content: Content::Text { text: text.to_string() }, color, scale, ..Settings::default() };
-        Ev(Event { start: bar(from), len: beats, source: EventSource::Look { settings }, ..Default::default() })
-    }
-
     fn put(&mut self, track: usize, ev: Ev) {
         self.show.tracks[track].events.push(ev.0);
     }
@@ -462,12 +456,10 @@ fn entree_dj(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     // 17-20: the artist's name, held.
     let e = b.cue("DJ · cyan", 17.0, 16.0).color(BRAND);
     b.put(1, e);
-    // 21-24: countdown 4-3-2-1, one digit a bar; black on beat 4 of bar 24.
-    for (i, digit) in ["4", "3", "2", "1"].into_iter().enumerate() {
-        let beats = if i == 3 { 3.0 } else { 4.0 };
-        let e = b.text(digit, 21.0 + i as f64, beats, WHITE, 0.4);
-        b.put(1, e);
-    }
+    // 21-24: countdown 4-3-2-1, one digit a bar (the countdown generator,
+    // T-108, counting from the event's start); black on beat 4 of bar 24.
+    let e = b.cue("Compte à rebours 4-3-2-1 · blanc", 21.0, 15.0);
+    b.put(1, e);
     // 25-32: rotating rays, amber then white, full level.
     let e = b.cue("Soleil 24 rayons · jaune", 25.0, 16.0).color(AMBER).spin(0.25);
     b.put(0, e);
@@ -573,6 +565,28 @@ mod tests {
             }
         }
         assert!(build("nope", &presets).is_err());
+    }
+
+    #[test]
+    fn the_dj_entrance_counts_down_4_3_2_1_a_bar_then_black() {
+        let presets = catalog();
+        let show = build("entree-dj", &presets).unwrap();
+        let countdown = presets.iter().find(|p| p.name == "Compte à rebours 4-3-2-1 · blanc").unwrap();
+        let Content::Generator { generator, params } = &countdown.settings.content else { panic!("not a generator") };
+        assert_eq!(generator, "countdown");
+        let mut p = Player::default();
+        p.load_example(show);
+        assert!(p.play(&clock(0.0, 128.0)));
+        for (at_bar, digit) in [(21.0, Some(4)), (22.0, Some(3)), (23.0, Some(2)), (24.0, Some(1)), (24.6, Some(1))] {
+            let active = p.frame(&clock(bar(at_bar) + 0.1, 128.0));
+            let cue = active.iter().find(|c| c.source == EventSource::Cue { id: countdown.id.clone() }).unwrap_or_else(|| panic!("bar {at_bar}"));
+            // The event's own clock: the countdown counts from its start.
+            assert!((cue.content_beat - (bar(at_bar) + 0.1 - bar(21.0))).abs() < 1e-6);
+            assert_eq!(crate::graphics::countdown_value(params, cue.content_beat), digit, "bar {at_bar}");
+        }
+        // Beat 4 of bar 24: the event is over, black before the entrance.
+        let active = p.frame(&clock(bar(24.75) + 0.03, 128.0));
+        assert!(active.iter().all(|c| c.source != EventSource::Cue { id: countdown.id.clone() }));
     }
 
     #[test]

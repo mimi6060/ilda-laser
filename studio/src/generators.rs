@@ -173,6 +173,8 @@ pub const GENERATOR_NAMES: &[&str] = &[
     "scissor", "hot_beam", "bundle_burst", "beam_v",
     // Textures (T-107), see `textures.rs`.
     "starfield", "lightning", "fat_beams",
+    // Countdown and 3D wireframes (T-108), see `graphics.rs`.
+    "countdown", "wire3d",
 ];
 
 pub struct Geometry {
@@ -433,6 +435,9 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
                 .collect(),
         ),
 
+        // In tempo (T-108): a progress ring filling over `period_beats`.
+        "clock" if p.beat_sync => lines(crate::graphics::progress_ring(crate::graphics::ring_fill(p, ctx), scale)),
+
         // A real analogue clock (local time from the system clock).
         "clock" => {
             let secs = clock_seconds();
@@ -477,7 +482,8 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
             .or_else(|| crate::sheets::generate(name, p, ctx))
             .or_else(|| crate::chases::generate(name, p, ctx))
             .or_else(|| crate::crossings::generate(name, p, ctx))
-            .or_else(|| crate::textures::generate(name, p, ctx)),
+            .or_else(|| crate::textures::generate(name, p, ctx))
+            .or_else(|| crate::graphics::generate(name, p, ctx)),
     }
 }
 

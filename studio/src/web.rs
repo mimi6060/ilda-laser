@@ -3892,7 +3892,24 @@ mod tests {
         let mut raw = String::new();
         stream.read_to_string(&mut raw).unwrap();
         let status = raw.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-        (status, raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+        // A long answer (over the server's 32 kB threshold) comes chunked.
+        let chunked = head.to_ascii_lowercase().contains("transfer-encoding: chunked");
+        (status, if chunked { dechunk(body) } else { body.to_string() })
+    }
+
+    /// The body of a chunked HTTP answer, put back together.
+    fn dechunk(raw: &str) -> String {
+        let (mut rest, mut out) = (raw, String::new());
+        while let Some((size, tail)) = rest.split_once("\r\n") {
+            let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+            if n == 0 || tail.len() < n {
+                break;
+            }
+            out.push_str(&tail[..n]);
+            rest = tail[n..].trim_start_matches("\r\n");
+        }
+        out
     }
 
     fn arm_status(t: &TestServer) -> serde_json::Value {
@@ -5652,26 +5669,8 @@ mod tests {
         assert_eq!(t.request("GET", "/api/cues/program?id=nope", "").0, 404);
 
         // Preview: a size curve changes the pictures; nothing is stored.
-        // A long answer comes chunked: undo the chunking.
-        let dechunk = |raw: String| -> String {
-            if raw.starts_with('{') || raw.is_empty() {
-                return raw;
-            }
-            let (mut rest, mut out) = (raw.as_str(), String::new());
-            while let Some((size, tail)) = rest.split_once("\r\n") {
-                let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
-                if n == 0 || tail.len() < n {
-                    break;
-                }
-                out.push_str(&tail[..n]);
-                rest = tail[n..].trim_start_matches("\r\n");
-            }
-            out
-        };
-        let preview = |program: serde_json::Value| {
-            let (code, body) = t.request("POST", "/api/cues/program/preview", &json!({ "id": "tunnels-001", "program": program }).to_string());
-            (code, if code == 200 { dechunk(body) } else { body })
-        };
+        // (A long answer: `http` undoes the chunking.)
+        let preview = |program: serde_json::Value| t.request("POST", "/api/cues/program/preview", &json!({ "id": "tunnels-001", "program": program }).to_string());
         let size = |a: f32, b: f32| json!({ "length_beats": 4, "lanes": [{ "target": "size", "keys": [{ "beat": 0, "value": a }, { "beat": 4, "value": b }] }] });
         let (code, small) = preview(size(0.1, 0.1));
         assert_eq!(code, 200);
