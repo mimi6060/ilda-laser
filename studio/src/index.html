@@ -501,6 +501,38 @@
   @keyframes apcPulse { 50% { opacity: .35; } }
   @keyframes apcBlink { 50% { opacity: .25; } }
   @media (prefers-reduced-motion: reduce) { .apc-prev i.pulse, .apc-prev i.blink { animation: none; } }
+  /* APC40 à l'écran (T-210) : dessin maison, couleurs du thème, LED = celles du vrai */
+  #settingsPanel > section:has(> #midiPanel[open]) { grid-column: 1 / -1; }
+  .vapc-bar { flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+  .vapc-bar > * { flex: 0 0 auto; width: auto; margin: 0; }
+  #vapc { margin-top: 6px; max-width: 980px; }
+  #vapc svg { display: block; width: 100%; height: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #vapc .ve { cursor: pointer; }
+  #vapc .ve .body { fill: var(--panel-2); stroke: var(--line); stroke-width: 1; }
+  #vapc .ve.key .body { fill: var(--panel); }
+  #vapc .ve:hover .body { stroke: var(--accent); }
+  #vapc .ve.mapped .body { stroke: #3a4058; }
+  #vapc .ve.down .body { stroke: var(--text); stroke-width: 2; }
+  #vapc .ve text { fill: var(--muted); font-size: 7.5px; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+  #vapc .ve.lit text { fill: #000c; font-weight: 600; }
+  #vapc .ve.shift-on .body { fill: var(--warn); }
+  #vapc .ve.shift-on text { fill: #000; font-weight: 700; }
+  #vapc .track { fill: var(--panel); stroke: var(--line); }
+  #vapc .cap { fill: var(--text); stroke: var(--bg); }
+  #vapc .ring { fill: none; stroke: var(--panel-2); stroke-width: 3; }
+  #vapc .ring.val { stroke: var(--accent); stroke-linecap: round; }
+  #vapc .ptr { stroke: var(--text); stroke-width: 2; stroke-linecap: round; }
+  #vapc .enc { stroke-dasharray: 2 3; }
+  #vapc .zone { fill: none; stroke: var(--line); stroke-dasharray: 3 4; }
+  #vapc .pulse { animation: apcPulse 1s ease-in-out infinite; }
+  #vapc .blink { animation: apcBlink .5s steps(1) infinite; }
+  @media (prefers-reduced-motion: reduce) { #vapc .pulse, #vapc .blink { animation: none; } }
+  #vapcTip { position: fixed; z-index: 60; pointer-events: none; max-width: 320px; padding: 6px 9px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; font-size: 12px; line-height: 1.45; }
+  #vapcTip b { color: var(--text); }
+  #vapcTip .m { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #vapcMenu { position: fixed; z-index: 61; width: 280px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+  #vapcMenu[hidden] { display: none; }
+  #vapcMenu .n { font-weight: 600; }
   #midiLost { display: none; background: #b3261e; color: #fff; font-weight: 600; font-size: 13px; padding: 6px 12px; text-align: center; }
   #midiLost.on { display: block; }
   /* Fichiers de données abîmés (T-402) */
@@ -1116,6 +1148,18 @@
   <button id="midiMenuShift">Apprendre avec Shift</button>
   <button id="midiMenuForget">Oublier MIDI</button>
   <button id="midiMenuDmx" title="Bougez ensuite un canal de la console : le premier qui bouge est affecté à ce contrôle">Apprendre DMX</button>
+</div>
+<!-- APC40 à l'écran (T-210): info-bulle et menu du clic droit. -->
+<div id="vapcTip" role="tooltip" hidden></div>
+<div id="vapcMenu" hidden>
+  <div class="n" id="vapcMenuName"></div>
+  <div class="hint" id="vapcMenuMaps" style="margin:0"></div>
+  <label for="vapcMenuTarget">Affecter à</label>
+  <select id="vapcMenuTarget"></select>
+  <label class="check"><input type="checkbox" id="vapcMenuShift"> Avec Shift</label>
+  <button id="vapcMenuLearn">Apprendre ici</button>
+  <button id="vapcMenuUnmap">Retirer l'affectation</button>
+  <button id="vapcMenuUnmapShift">Retirer l'affectation Shift</button>
 </div>
 <!-- Raccourcis (T-284): built from the shortcut table. -->
 <div id="keysHelp" class="modal" role="dialog" aria-modal="true" aria-labelledby="keysTitle" hidden>
@@ -2337,6 +2381,20 @@
     <section>
       <details id="midiPanel">
         <summary>Contrôleur</summary>
+        <div class="mdev" id="vapcBox" style="border-top:0;padding-top:0">
+          <div class="n">Disposition <span class="hint" id="vapcInfo"></span></div>
+          <div class="row vapc-bar">
+            <label for="vapcModel">Modèle</label>
+            <select id="vapcModel" title="Modèle dessiné quand aucun APC n'est branché">
+              <option value="Apc40Mk2">APC40 mkII</option>
+              <option value="Apc40">APC40</option>
+            </select>
+            <label class="check"><input type="checkbox" id="vapcShift"> Shift verrouillé</label>
+            <button id="vapcExport" title="Télécharge le profil utilisé par le schéma (JSON)">Exporter la disposition</button>
+          </div>
+          <div id="vapc" role="group" aria-label="APC40 à l'écran"></div>
+          <div class="hint">Clic = même action que le bouton du contrôleur (marche sans contrôleur branché) · survol = affectation · clic droit = « Apprendre ici » / « Retirer l'affectation ». Le schéma n'arme jamais le laser.</div>
+        </div>
         <div class="row"><button id="midiLearnMode" title="Puis cliquez un contrôle et touchez le contrôleur (ou clic droit sur un contrôle, à tout moment)">Apprendre MIDI</button></div>
         <div id="midiDevices"></div>
         <input type="file" id="midiImportFile" accept=".json,application/json" hidden>
@@ -3015,7 +3073,7 @@ const SAFETY_SHORTCUTS = [
 // After the stop, never instead of it: end a hold-key pick, a MIDI learn, the help.
 function afterEscape() {
   pickingHoldKey = false;
-  try { stopLearning(); closeKeysHelp(); closeTlExamples(); } catch (err) { console.warn('Échap', err); }
+  try { stopLearning(); closeKeysHelp(); closeTlExamples(); closeVapcMenu(); } catch (err) { console.warn('Échap', err); }
 }
 let restShortcuts = null;
 function buildShortcuts() {
@@ -9049,8 +9107,9 @@ function showActivity(m) {
     : '<div class="hint">Aucun message reçu.</div>';
   if ($('midiMonitor').innerHTML !== html) $('midiMonitor').innerHTML = html;
 }
-async function exportProfile(port) {
-  const r = await fetch('/api/midi/profile/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port }) });
+// By port (« Exporter le profil ») or slug (« Exporter la disposition », T-210).
+async function exportProfile(port, wanted) {
+  const r = await fetch('/api/midi/profile/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(wanted ? { slug: wanted } : { port }) });
   if (!r.ok) { showBanner(await r.text(), 5000); return; }
   const { slug, profile } = await r.json();
   const a = document.createElement('a');
@@ -9305,6 +9364,331 @@ $('learnNo').onclick = () => post('/api/midi/learn/confirm', { replace: false })
 $('midiAllowArm').onchange = e => post('/api/midi/safety', { allow_arm: e.target.checked });
 // Opening « Contrôleur » switches to the fast refresh at once (activity lights, monitor).
 $('midiPanel').addEventListener('toggle', () => { if ($('midiPanel').open) midiNow(); });
+
+// ---------- APC40 à l'écran (T-210) ----------
+// Our own drawing of the APC40 / mkII (layout from /api/midi/virtual), lit
+// like the real one (/api/midi/leds, 10 Hz while « Contrôleur » is open).
+// A click sends what the hardware button would (POST /api/midi/virtual):
+// same mappings and safety rules, recorded as the UI; it can never arm.
+const SVGNS = 'http://www.w3.org/2000/svg';
+let vapc = null, vapcKey = '', vapcTimer = null, vapcLayoutAt = 0, vapcLeds = null, vapcMenuEl = null, vapcTargets = null;
+const vapcDrag = {}; // element id → position (0..1) while the pointer drags it
+// APC40 clip pads (§1.3): 1 green, 2 green blink, 3 red, 4 red blink, 5 yellow, 6 yellow blink.
+const VAPC_MK1 = { 1: ['#3ddc84', ''], 2: ['#3ddc84', 'blink'], 3: ['#ff4d5e', ''], 4: ['#ff4d5e', 'blink'], 5: ['#ffd400', ''], 6: ['#ffd400', 'blink'] };
+// One-colour LEDs, by button row.
+const VAPC_ROW = { rec: '#ff4d5e', solo: '#3d9bff', select: '#ffb020', master: '#ffb020', activator: '#ffd400', ab: '#ff9a3d', stop: '#3ddc84', scene: '#3ddc84' };
+const vapcEls = () => vapc ? vapc.elements : [];
+const vapcEl = id => vapcEls().find(e => e.id === id);
+
+async function vapcLoadLayout() {
+  const l = await (await fetch('/api/midi/virtual')).json();
+  vapcLayoutAt = Date.now();
+  const key = JSON.stringify(l);
+  if (key === vapcKey) return;
+  vapcKey = key;
+  vapc = l;
+  vapcBuild();
+}
+async function vapcLoop() {
+  clearTimeout(vapcTimer);
+  const visible = $('midiPanel').open && !$('settingsPanel').hidden && !document.hidden;
+  if (visible) {
+    try {
+      if (!vapc || Date.now() - vapcLayoutAt > 2000) await vapcLoadLayout();
+      const L = await (await fetch('/api/midi/leds')).json();
+      if (L.model !== vapc.model || L.port !== vapc.port) await vapcLoadLayout();
+      vapcLeds = L;
+      vapcPaint();
+    } catch (e) { /* studio restarting */ }
+  }
+  vapcTimer = setTimeout(vapcLoop, visible ? 100 : 600);
+}
+const vapcNow = () => { vapcLayoutAt = 0; vapcLoop(); };
+
+function svgEl(tag, attrs, parent) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+// Short text drawn on a button: the number for track rows, else its name.
+function vapcText(e) {
+  const row = e.id.split('.')[0];
+  if (['stop', 'select', 'activator', 'solo', 'rec', 'ab'].includes(row)) return e.id.split('.')[1];
+  if (e.widget === 'pad' || e.widget === 'round' || e.widget === 'fader' || e.widget === 'knob') return '';
+  return e.label.length > 11 ? e.label.slice(0, 10) + '…' : e.label;
+}
+function vapcBuild() {
+  const box = $('vapc');
+  box.innerHTML = '';
+  if (!vapc) return;
+  const svg = svgEl('svg', { viewBox: `0 0 ${vapc.width} ${vapc.height}`, role: 'img', 'aria-label': `${vapc.model_label} à l'écran` }, box);
+  // Two dashed zones, the clip grid and the right-hand controls: our own frame.
+  const pads = vapc.elements.filter(e => e.widget === 'pad' || e.widget === 'round');
+  const x2 = Math.max(...pads.map(e => e.x + e.w)), y1 = Math.min(...pads.map(e => e.y)), y2 = Math.max(...pads.map(e => e.y + e.h));
+  svgEl('rect', { class: 'zone', x: 8, y: y1 - 6, width: x2 - 2, height: y2 - y1 + 12, rx: 8 }, svg);
+  for (const e of vapc.elements) {
+    const g = svgEl('g', { class: `ve ${e.widget === 'key' ? 'key' : ''} ${e.map ? 'mapped' : ''}`, 'data-vapc': e.id, 'aria-label': e.label }, svg);
+    const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
+    if (e.widget === 'fader' || e.widget === 'crossfader') {
+      const horiz = e.widget === 'crossfader';
+      svgEl('rect', { class: 'body', x: e.x, y: e.y, width: e.w, height: e.h, rx: 4, 'fill-opacity': 0 }, g);
+      svgEl('rect', { class: 'track', x: horiz ? e.x + 6 : cx - 2, y: horiz ? cy - 2 : e.y + 6, width: horiz ? e.w - 12 : 4, height: horiz ? 4 : e.h - 12, rx: 2 }, g);
+      svgEl('rect', { class: 'cap', x: horiz ? cx - 6 : e.x, y: horiz ? e.y : cy - 6, width: horiz ? 12 : e.w, height: horiz ? e.h : 12, rx: 2 }, g);
+      if (!horiz) svgEl('text', { x: cx, y: e.y + e.h + 7 }, g).textContent = e.id === 'fader.master' ? 'M' : e.id.split('.')[1];
+    } else if (e.widget === 'knob' || e.widget === 'encoder') {
+      const r = e.w / 2 - 4;
+      svgEl('circle', { class: 'body' + (e.widget === 'encoder' ? ' enc' : ''), cx, cy, r }, g);
+      if (e.widget === 'knob') {
+        svgEl('path', { class: 'ring', d: vapcArc(cx, cy, r + 3, 1) }, g);
+        svgEl('path', { class: 'ring val', d: '' }, g);
+      }
+      svgEl('line', { class: 'ptr', x1: cx, y1: cy, x2: cx, y2: cy - r + 3 }, g);
+      if (e.widget === 'encoder') svgEl('text', { x: cx, y: e.y + e.h + 5 }, g).textContent = e.label;
+    } else {
+      svgEl('rect', { class: 'body', x: e.x, y: e.y, width: e.w, height: e.h, rx: e.widget === 'round' ? e.h / 2 : e.widget === 'pad' ? 4 : 3 }, g);
+      const t = vapcText(e);
+      if (t) svgEl('text', { x: cx, y: cy }, g).textContent = t;
+    }
+    vapcBind(g, e);
+  }
+  vapcPaint();
+  $('vapcModel').value = vapc.model === 'Apc40' ? 'Apc40' : 'Apc40Mk2';
+  $('vapcModel').disabled = !!vapc.port;
+  $('vapcInfo').textContent = (vapc.port ? `· ${vapc.model_label} branché (${vapc.port})` : '· aucun APC branché : schéma seul')
+    + ` · profil « ${vapc.profile_name || vapc.profile} »${vapc.builtin ? ' (intégré)' : ''}`;
+}
+// Ring of a knob from 7 o'clock (0) to 5 o'clock (1).
+function vapcArc(cx, cy, r, f) {
+  const a0 = Math.PI * 0.75, a1 = a0 + Math.PI * 1.5 * Math.max(0.001, Math.min(1, f));
+  const p = a => [cx + r * Math.cos(a), cy + r * Math.sin(a)].map(v => v.toFixed(1)).join(' ');
+  return `M ${p(a0)} A ${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${p(a1)}`;
+}
+// What one LED shows: [colour or null, animation class].
+function vapcLed(e) {
+  const L = vapcLeds;
+  if (!L || e.kind !== 'note' || e.widget === 'key') return [null, ''];
+  const v = L.leds[`note:${e.number}:${e.channel}`] || 0;
+  if (!v) return [null, ''];
+  const mk2 = vapc.model !== 'Apc40';
+  if (mk2 && (e.widget === 'pad' || e.widget === 'round')) {
+    const mode = L.modes[`note:${e.number}:0`];
+    const anim = !mode ? '' : mode[0] >= 6 && mode[0] <= 10 ? 'pulse' : mode[0] >= 11 ? 'blink' : '';
+    return [vapc.palette[v], anim];
+  }
+  if (e.widget === 'pad') return VAPC_MK1[v] || ['#3ddc84', ''];
+  const row = e.widget === 'round' ? 'scene' : e.id.split('.')[0];
+  const blink = v === 2 && (row === 'scene' || row === 'stop') ? 'blink' : '';
+  return [VAPC_ROW[row] || 'var(--accent)', blink];
+}
+function vapcPos(e) {
+  if (e.id in vapcDrag) return vapcDrag[e.id];
+  const v = vapcLeds?.values?.[e.id];
+  return typeof v === 'number' ? v : e.widget === 'crossfader' ? 0.5 : 0;
+}
+function vapcPaint() {
+  if (!vapc) return;
+  const shift = !!vapcLeds?.shift;
+  $('vapcShift').checked = shift;
+  document.querySelectorAll('#vapc [data-vapc]').forEach(g => {
+    const e = vapcEl(g.dataset.vapc);
+    if (!e) return;
+    if (e.widget === 'fader' || e.widget === 'crossfader') {
+      const f = vapcPos(e), cap = g.querySelector('.cap');
+      if (e.widget === 'fader') cap.setAttribute('y', (e.y + 6 + (1 - f) * (e.h - 12) - 6).toFixed(1));
+      else cap.setAttribute('x', (e.x + 6 + f * (e.w - 12) - 6).toFixed(1));
+      return;
+    }
+    if (e.widget === 'knob' || e.widget === 'encoder') {
+      const cx = e.x + e.w / 2, cy = e.y + e.h / 2, r = e.w / 2 - 4;
+      const f = e.widget === 'knob' ? vapcPos(e) : 0.5;
+      const a = Math.PI * 0.75 + Math.PI * 1.5 * f;
+      const ptr = g.querySelector('.ptr');
+      ptr.setAttribute('x2', (cx + (r - 3) * Math.cos(a)).toFixed(1));
+      ptr.setAttribute('y2', (cy + (r - 3) * Math.sin(a)).toFixed(1));
+      // The ring shows the value the studio would send to the real one.
+      const ring = vapcLeds?.leds?.[`cc:${e.number}:${e.channel}`];
+      const val = g.querySelector('.ring.val');
+      if (val) val.setAttribute('d', ring > 0 ? vapcArc(cx, cy, r + 3, ring / 127) : '');
+      return;
+    }
+    const [color, anim] = vapcLed(e);
+    const body = g.querySelector('.body');
+    body.style.fill = color || '';
+    body.classList.toggle('pulse', anim === 'pulse');
+    body.classList.toggle('blink', anim === 'blink');
+    g.classList.toggle('lit', !!color);
+    g.classList.toggle('shift-on', e.id === 'shift' && shift);
+  });
+}
+
+async function vapcSend(body) {
+  const r = await fetch('/api/midi/virtual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const t = await r.text();
+    if (r.status === 423) notify(t);
+    else if (body.learn) showBanner(t, 5000);
+    else console.warn('/api/midi/virtual', t);
+  }
+  return r.ok;
+}
+// A learn is waiting (« Apprendre MIDI »): the drawing's buttons answer it.
+const vapcLearning = () => learnBusy && !$('learnYes').offsetParent;
+function vapcBind(g, e) {
+  const button = ['pad', 'round', 'button', 'key'].includes(e.widget);
+  g.addEventListener('pointerenter', ev => vapcTip(e, ev));
+  g.addEventListener('pointermove', ev => vapcTipMove(ev));
+  g.addEventListener('pointerleave', () => { $('vapcTip').hidden = true; });
+  g.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); vapcOpenMenu(e, ev.clientX, ev.clientY); });
+  g.addEventListener('pointerdown', ev => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    closeVapcMenu();
+    if (vapcLearning()) { vapcSend({ id: e.id, learn: true }).then(() => { midiNow(); vapcNow(); }); return; }
+    if (e.id === 'shift') { vapcSetShift(!vapcLeds?.shift); return; }
+    try { g.setPointerCapture(ev.pointerId); } catch (err) { /* synthetic pointer */ }
+    if (button) {
+      g.classList.add('down');
+      vapcSend({ id: e.id, down: true });
+      const up = () => {
+        g.classList.remove('down');
+        g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
+        vapcSend({ id: e.id, down: false });
+      };
+      g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
+      return;
+    }
+    vapcDragStart(g, e, ev);
+  });
+  if (e.widget === 'knob' || e.widget === 'encoder') {
+    g.addEventListener('wheel', ev => {
+      ev.preventDefault();
+      const step = ev.deltaY < 0 ? 1 : -1;
+      if (e.widget === 'encoder') vapcSend({ id: e.id, delta: step });
+      else vapcSend({ id: e.id, value: Math.round(Math.max(0, Math.min(1, vapcPos(e) + step * 2 / 127)) * 127) });
+    }, { passive: false });
+  }
+}
+// Faders follow the pointer; knobs turn with a vertical drag; encoders
+// send a step every 6 px. Moves are sent at most once per frame.
+function vapcDragStart(g, e, ev) {
+  const svg = g.ownerSVGElement;
+  const toUnits = (x, y) => { const p = svg.createSVGPoint(); p.x = x; p.y = y; return p.matrixTransform(svg.getScreenCTM().inverse()); };
+  const start = { y: ev.clientY, pos: vapcPos(e), steps: 0 };
+  let pending = null, raf = 0;
+  const flush = () => { raf = 0; if (pending) { vapcSend(pending); pending = null; } };
+  const move = mv => {
+    if (e.widget === 'encoder') {
+      const steps = Math.trunc((start.y - mv.clientY) / 6);
+      if (steps !== start.steps) { vapcSend({ id: e.id, delta: steps - start.steps }); start.steps = steps; }
+      return;
+    }
+    let f;
+    if (e.widget === 'knob') f = start.pos + (start.y - mv.clientY) / 150;
+    else {
+      const p = toUnits(mv.clientX, mv.clientY);
+      f = e.widget === 'fader' ? 1 - (p.y - e.y - 6) / (e.h - 12) : (p.x - e.x - 6) / (e.w - 12);
+    }
+    f = Math.max(0, Math.min(1, f));
+    vapcDrag[e.id] = f;
+    vapcPaint();
+    pending = { id: e.id, value: Math.round(f * 127) };
+    if (!raf) raf = requestAnimationFrame(flush);
+  };
+  const end = () => {
+    g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', end); g.removeEventListener('pointercancel', end);
+    flush();
+    // Keep showing the dragged position until the studio reports its value.
+    setTimeout(() => { delete vapcDrag[e.id]; }, 300);
+  };
+  g.addEventListener('pointermove', move); g.addEventListener('pointerup', end); g.addEventListener('pointercancel', end);
+  if (e.widget !== 'knob' && e.widget !== 'encoder') move(ev);
+}
+async function vapcSetShift(on) {
+  await vapcSend({ id: 'shift', down: on });
+  vapcLoop();
+}
+function vapcTipHtml(e) {
+  const map = e.map ? esc(e.map.label) : '<span class="m">non affecté</span>';
+  return `<b>${esc(e.label)} — ${map}</b>`
+    + (e.shift_map ? `<br>Shift : ${esc(e.shift_map.label)}` : '')
+    + `<br><span class="m">${esc(e.message)}</span>`;
+}
+function vapcTip(e, ev) {
+  const tip = $('vapcTip');
+  tip.innerHTML = vapcTipHtml(e);
+  tip.hidden = false;
+  vapcTipMove(ev);
+}
+function vapcTipMove(ev) {
+  const tip = $('vapcTip');
+  if (tip.hidden) return;
+  tip.style.left = Math.max(8, Math.min(ev.clientX + 14, innerWidth - tip.offsetWidth - 8)) + 'px';
+  tip.style.top = Math.max(8, Math.min(ev.clientY + 16, innerHeight - tip.offsetHeight - 8)) + 'px';
+}
+
+// Right click: « Apprendre ici » (pick a control, the element is bound to
+// it in the profile the drawing uses) or « Retirer l'affectation ».
+async function vapcOpenMenu(e, x, y) {
+  if (showMode) return notify(LOCKED_FR); // T-283: no MIDI learn
+  $('vapcTip').hidden = true;
+  vapcMenuEl = e;
+  if (!vapcTargets) {
+    try {
+      const list = await (await fetch('/api/controls')).json();
+      vapcTargets = (list.controls || list).filter(c => c.external && c.id !== 'transport.arm' && !c.id.startsWith('grid.'));
+    } catch (err) { vapcTargets = []; }
+  }
+  $('vapcMenuName').textContent = e.label;
+  $('vapcMenuMaps').innerHTML = vapcTipHtml(e).replace(/^<b>[^]*?<\/b><br>?/, '') || '';
+  const slot = e.widget === 'pad' ? (+e.id.split('.')[1] - 1) * 8 + (+e.id.split('.')[2] - 1) : null;
+  const groups = {};
+  for (const c of vapcTargets) (groups[c.group] ||= []).push(c);
+  $('vapcMenuTarget').innerHTML = (slot != null ? `<option value="grid:${slot}">Case ${slot + 1} de la grille (cue de la page)</option>` : '')
+    + Object.entries(groups).map(([g, list]) => `<optgroup label="${esc(g)}">${list.map(c => `<option value="${esc(c.id)}">${esc(c.label_fr)}</option>`).join('')}</optgroup>`).join('');
+  const current = e.map?.target && e.map.target !== 'grid' ? e.map.target : null;
+  if (current) $('vapcMenuTarget').value = current;
+  $('vapcMenuShift').checked = false;
+  $('vapcMenuUnmap').hidden = !e.map || e.id === 'shift';
+  $('vapcMenuUnmapShift').hidden = !e.shift_map;
+  $('vapcMenuLearn').disabled = e.id === 'shift';
+  const m = $('vapcMenu');
+  m.hidden = false;
+  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 8)) + 'px';
+}
+function closeVapcMenu() { $('vapcMenu').hidden = true; }
+document.addEventListener('pointerdown', e => {
+  if (!$('vapcMenu').hidden && !e.target.closest('#vapcMenu')) closeVapcMenu();
+}, true);
+$('vapcMenuLearn').onclick = async () => {
+  const e = vapcMenuEl, v = $('vapcMenuTarget').value;
+  closeVapcMenu();
+  if (!e || !v) return;
+  const [target, args] = v.startsWith('grid:') ? ['grid', { slot: +v.slice(5) }] : [v, null];
+  const r = await fetch('/api/midi/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target, args, shift: $('vapcMenuShift').checked }) });
+  if (!r.ok) { showBanner(await r.text(), 6000); return; }
+  await vapcSend({ id: e.id, learn: true });
+  midiNow();
+  vapcNow();
+};
+async function vapcUnmap(shift) {
+  const e = vapcMenuEl;
+  closeVapcMenu();
+  if (!e) return;
+  const r = await fetch('/api/midi/virtual/unmap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: e.id, shift }) });
+  showBanner(r.ok ? `Affectation retirée : ${e.label}${shift ? ' (Shift)' : ''}` : await r.text(), 3000);
+  midiNow();
+  vapcNow();
+}
+$('vapcMenuUnmap').onclick = () => vapcUnmap(false);
+$('vapcMenuUnmapShift').onclick = () => vapcUnmap(true);
+$('vapcShift').onchange = e => vapcSetShift(e.target.checked);
+$('vapcModel').onchange = async e => { await post('/api/midi/virtual/model', { model: e.target.value }); vapcNow(); };
+$('vapcExport').onclick = () => vapc && exportProfile(null, vapc.profile);
+$('midiPanel').addEventListener('toggle', () => { if ($('midiPanel').open) vapcNow(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) vapcLoop(); });
+vapcLoop();
 
 // RÉGLAGES › Entrées réseau (T-013): OSC and Art-Net settings, listener
 // state, the OSC monitor and the chart's live DMX values. Polled while open.

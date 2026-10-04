@@ -13,7 +13,7 @@ use super::mapping::{pickup_catches, Incoming, InputKind, MapMode, Mapping};
 use super::profile::{Profile, GENERIC};
 use super::safety::{self, ARM, ARM_HOLD, BLACKOUT, PLUG_GUARD};
 use super::{learn, MidiEvent};
-use crate::controls::{self, ControlInput, ControlKind};
+use crate::controls::{self, ControlInput, ControlKind, ControlSource};
 use crate::Shared;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -58,8 +58,12 @@ pub struct MapState {
     pickup: HashMap<(String, String), Pickup>,
     /// Toggle state for controls that don't report a value.
     toggles: HashMap<String, bool>,
-    /// Coalesced continuous writes: (control id, native value).
-    pending: Vec<(String, f32)>,
+    /// Coalesced continuous writes: (control id, native value, from the
+    /// on-screen controller).
+    pending: Vec<(String, f32, bool)>,
+    /// While handling the on-screen controller (T-210): writes are
+    /// recorded as « Interface », not MIDI (`apply`).
+    from_screen: bool,
     arm_hold: Option<ArmHold>,
     warned: HashSet<String>,
     /// Ignored mappings (unknown ids…), in French, for `/api/midi`.
@@ -69,6 +73,13 @@ pub struct MapState {
     /// Control ids in the order they were applied (tests only).
     #[cfg(test)]
     applied: Vec<String>,
+}
+
+impl MapState {
+    /// Shift held (or locked, on the on-screen controller) on `port`.
+    pub fn shift_held(&self, port: &str) -> bool {
+        self.shift.contains(port)
+    }
 }
 
 /// A batch of events from the worker. Blackout goes first: any press that
@@ -103,6 +114,27 @@ pub fn handle_batch(s: &mut Shared, events: &[MidiEvent]) {
     }
 }
 
+/// The on-screen controller (T-210, `virt.rs`): the same mapping rules as
+/// a hardware batch (blackout first, Shift, held buttons, pickup), but
+/// never arming and recorded as the UI. No MIDI learn here: `virt::press`
+/// decides that before.
+pub fn handle_screen(s: &mut Shared, events: &[MidiEvent]) {
+    s.midi.map.from_screen = true;
+    let blackout = events.iter().any(|ev| {
+        let Some(m) = Incoming::from_msg(&ev.msg).filter(|m| m.pressed == Some(true)) else { return false };
+        let Some(profile) = profile_of(s, &ev.port) else { return false };
+        let shift = s.midi.map.shift.contains(&ev.port);
+        !is_shift_key(profile, &m) && find(s, profile, &m, shift).and_then(|mp| s.controls.get(&mp.target)).is_some_and(|d| d.id == BLACKOUT)
+    });
+    if blackout {
+        do_blackout(s);
+    }
+    for ev in events {
+        handle_event(s, ev);
+    }
+    s.midi.map.from_screen = false;
+}
+
 /// Once per engine frame: flush coalesced fader/encoder writes and finish
 /// a Shift + arm hold that lasted long enough.
 pub fn frame(s: &mut Shared, now: Instant) {
@@ -110,9 +142,11 @@ pub fn frame(s: &mut Shared, now: Instant) {
     if s.midi.map.pending.is_empty() && s.midi.map.arm_hold.is_none() {
         return;
     }
-    for (id, v) in std::mem::take(&mut s.midi.map.pending) {
+    for (id, v, screen) in std::mem::take(&mut s.midi.map.pending) {
+        s.midi.map.from_screen = screen;
         send(s, &id, v);
     }
+    s.midi.map.from_screen = false;
     let Some(hold) = s.midi.map.arm_hold.as_ref() else { return };
     if now.saturating_duration_since(hold.since) < ARM_HOLD {
         return;
@@ -149,6 +183,9 @@ pub fn port_closed(s: &mut Shared, port: &str, unplugged: bool) {
 }
 
 pub(super) fn profile_of<'a>(s: &'a Shared, port: &str) -> Option<&'a Profile> {
+    if port == super::virt::PORT {
+        return s.midi.store.get(&super::virt::profile_slug(s));
+    }
     let slug = s.midi.devices.iter().find(|d| d.name == port).map_or(GENERIC, |d| d.profile.as_str());
     s.midi.store.get(slug)
 }
@@ -161,7 +198,8 @@ pub(super) fn is_shift_key(p: &Profile, m: &Incoming) -> bool {
 /// from MIDI is off, mappings to the arm control are skipped, so Shift +
 /// Stop All (the default profiles' arm gesture) stays a blackout.
 fn find<'a>(s: &Shared, p: &'a Profile, m: &Incoming, shift: bool) -> Option<&'a Mapping> {
-    let arm_off = !s.midi.store.devices.safety.allow_arm;
+    // The on-screen controller (T-210) skips them too, whatever the option.
+    let arm_off = !s.midi.store.devices.safety.allow_arm || s.midi.map.from_screen;
     let usable = |mp: &Mapping| !(arm_off && s.controls.get(&mp.target).is_some_and(|d| d.id == ARM));
     let layer = |sh: bool| p.mappings.iter().find(|mp| mp.shift == sh && mp.input.matches(m) && usable(mp));
     if shift {
@@ -212,6 +250,10 @@ fn handle_event(s: &mut Shared, ev: &MidiEvent) {
         return;
     }
     if id == ARM {
+        // The on-screen controller never arms: only the arm button and Space do.
+        if s.midi.map.from_screen {
+            return;
+        }
         if press && !s.midi.map.held.contains_key(&key) {
             arm_press(s, ev, key, shift);
         }
@@ -416,7 +458,7 @@ fn seed_position(s: &Shared, port: &str, m: &Incoming) -> Option<f32> {
 
 /// Current value, including a write still waiting for the next frame.
 fn value_now(s: &Shared, id: &str) -> Option<f32> {
-    if let Some((_, v)) = s.midi.map.pending.iter().find(|(p, _)| p == id) {
+    if let Some((_, v, _)) = s.midi.map.pending.iter().find(|(p, _, _)| p == id) {
         return Some(*v);
     }
     let desc = s.controls.get(id)?;
@@ -427,10 +469,11 @@ fn value_now(s: &Shared, id: &str) -> Option<f32> {
 }
 
 fn queue(s: &mut Shared, id: &str, v: f32) {
+    let screen = s.midi.map.from_screen;
     let pending = &mut s.midi.map.pending;
-    match pending.iter_mut().find(|(p, _)| p == id) {
-        Some(entry) => entry.1 = v,
-        None => pending.push((id.to_string(), v)),
+    match pending.iter_mut().find(|(p, _, _)| p == id) {
+        Some(entry) => (entry.1, entry.2) = (v, screen),
+        None => pending.push((id.to_string(), v, screen)),
     }
 }
 
@@ -452,7 +495,12 @@ fn apply(s: &mut Shared, id: &str, v: f32) -> Result<(), controls::ControlError>
     s.midi.map.writes += 1;
     #[cfg(test)]
     s.midi.map.applied.push(id.to_string());
-    controls::apply(s, id, ControlInput::Value(v), true)
+    if s.midi.map.from_screen {
+        // Checked like a controller (nothing that arms), recorded as the UI.
+        controls::apply_from(s, id, ControlInput::Value(v), ControlSource::Ui)
+    } else {
+        controls::apply(s, id, ControlInput::Value(v), true)
+    }
 }
 
 /// Logged and listed once per key, never a panic.

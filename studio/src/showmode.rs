@@ -97,6 +97,10 @@ pub fn allowed(path: &str) -> bool {
         "/api/timeline/seek",
         "/api/timeline/loop",
         "/api/midi/learn/cancel",
+        // The on-screen APC40 (T-210) plays like the real one; which model
+        // it draws is a view. Removing a mapping is an edit.
+        "/api/midi/virtual",
+        "/api/midi/virtual/model",
         // Writing the open project to its own file loses nothing.
         "/api/project/save",
         "/api/project/recover-ignore",
@@ -146,7 +150,7 @@ mod tests {
 
     #[test]
     fn playback_and_safety_are_allowed_edits_are_not() {
-        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/cuelist/go", "/api/cuelist/goto", "/api/lock", "/api/test/stall", "/api/external/gate", "/api/timecode/arm"] {
+        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/cuelist/go", "/api/cuelist/goto", "/api/lock", "/api/test/stall", "/api/external/gate", "/api/timecode/arm", "/api/midi/virtual"] {
             assert!(allowed(p), "{p}");
         }
         for p in [
@@ -166,6 +170,7 @@ mod tests {
             "/api/project/save-as",
             "/api/midi/learn",
             "/api/midi/safety",
+            "/api/midi/virtual/unmap",
             "/api/external/scopes",
             "/api/timecode",
             "/api/audio/routes",
