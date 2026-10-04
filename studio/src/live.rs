@@ -59,6 +59,11 @@ pub struct LiveModifiers {
     /// Momentary « Noir »: a dark output while held. A dimmer, not a
     /// disarm: the arm state is never touched.
     pub black: bool,
+    /// « Vitesse de balayage » (T-171): × 0.5..1.5 on the scan presets'
+    /// steps (`scan::ScanPresetStore::resolve`), bounded by the output's
+    /// scan speed range. Not geometry: the picture stays the same.
+    /// Absent in older files: 100 %.
+    pub scan: f32,
 }
 
 impl Default for LiveModifiers {
@@ -85,6 +90,7 @@ impl Default for LiveModifiers {
             prism: 1,
             freeze: false,
             black: false,
+            scan: 1.0,
         }
     }
 }
@@ -104,6 +110,7 @@ impl LiveModifiers {
             prism: d.prism,
             freeze: d.freeze,
             black: d.black,
+            scan: d.scan,
             ..self.clone()
         };
         geometry == d
@@ -125,6 +132,7 @@ impl LiveModifiers {
         self.trace = if self.trace.is_finite() { self.trace.clamp(0.0, 1.0) } else { d.trace };
         self.dots = if self.dots.is_finite() { self.dots.clamp(0.0, 1.0) } else { d.dots };
         self.prism = self.prism.clamp(1, MAX_PRISM);
+        self.scan = if self.scan.is_finite() { self.scan.clamp(crate::scan::MIN_MASTER_SCAN, crate::scan::MAX_MASTER_SCAN) } else { d.scan };
         self.strobe.rate = self.strobe.rate();
         self.strobe.duty = self.strobe.duty();
     }

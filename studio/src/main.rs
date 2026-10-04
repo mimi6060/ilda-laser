@@ -1465,6 +1465,8 @@ struct ProjectorPlan {
     output: Option<String>,
     caps: power::OutputLimits,
     color: colorcal::ColorCalibration,
+    /// Its points per frame (T-171).
+    frame_limits: output::FrameLimits,
     /// For an Art-Net output (T-301).
     cue_signal: Option<output::CueSignal>,
 }
@@ -1542,6 +1544,7 @@ fn projector_lost(shared: &Mutex<Shared>, st: &mut ProjectorStage, estop: &EStop
 #[allow(clippy::too_many_arguments)]
 fn safety_chain(
     frame: Vec<Point>,
+    frame_limits: output::FrameLimits,
     max_points: Option<usize>,
     color: &colorcal::ColorCalibration,
     t: f64,
@@ -1551,14 +1554,12 @@ fn safety_chain(
     armed: bool,
     caps: &power::OutputLimits,
 ) -> Vec<Point> {
-    // Frame size limit of the output (Helios USB, T-303): thinned here,
-    // before the safety stage (T-353), so zones, horizon, strobe
-    // limiter, static beam guard and caps all apply to the frame that
-    // really goes out. Nothing after the safety stage adds light.
-    let mut frame = match max_points.map(output::content_budget) {
-        Some(budget) if frame.len() > budget => output::fit_frame(&frame, budget).into_owned(),
-        _ => frame,
-    };
+    // Points per frame of the output (T-171: its own range, and the
+    // Helios USB frame size, T-303): thinned or completed here, before
+    // the safety stage (T-353), so zones, horizon, strobe limiter, static
+    // beam guard and caps all apply to the frame that really goes out.
+    // Nothing after the safety stage adds light.
+    let mut frame = output::fit_frame_limits(frame, frame_limits, max_points);
     // The output's colour rendering (T-414): curve, white balance and
     // colour delay, on the frame that goes out, *before* the safety
     // stage. Channels stay within 0..1, a dark point stays dark (the
@@ -1685,7 +1686,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
+        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1843,11 +1844,11 @@ impl Engine {
                         });
                         artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some(), &cfg.limits)
                     });
-                    ProjectorPlan { id: p.id.clone(), output: p.output.clone(), caps: cfg.limits, color: cfg.color, cue_signal }
+                    ProjectorPlan { id: p.id.clone(), output: p.output.clone(), caps: cfg.limits, color: cfg.color, frame_limits: cfg.scan.frame_limits(), cue_signal }
                 })
                 .collect();
             let festival = (s.festival.colors(), s.festival.balance);
-            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
+            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -1990,7 +1991,7 @@ impl Engine {
         }
         // The safety stage (`safety_chain`): frame size, colour rendering,
         // strobe limiter and horizon, static beam guard, power caps.
-        let frame = safety_chain(frame, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps);
+        let frame = safety_chain(frame, frame_limits, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps);
 
         // Last stage: the gate. `armed` was read under the lock at the top
         // of the frame; the e-stop latch and a watchdog trip (this frame
@@ -2071,7 +2072,7 @@ impl Engine {
                 }
             };
             let st = &mut self.extras[i];
-            let frame = safety_chain(frame, st.stage.max_points(), &plan.color, t, safety_cfg, &mut st.limiter, &mut st.dwell_guard, armed, &plan.caps);
+            let frame = safety_chain(frame, plan.frame_limits, st.stage.max_points(), &plan.color, t, safety_cfg, &mut st.limiter, &mut st.dwell_guard, armed, &plan.caps);
             if let Some(signal) = &plan.cue_signal {
                 st.stage.cue_signal(signal);
             }

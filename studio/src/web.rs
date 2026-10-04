@@ -1015,7 +1015,50 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 Err(e) => e,
             }
         }
-        (Method::Get, "/api/testpattern") => json_response(test_pattern_view(&shared.lock().unwrap())),
+        (Method::Get, "/api/outputs/scan_limits") => {
+            let s = shared.lock().unwrap();
+            match color_output(request.url(), &s) {
+                Ok(id) => json_response(scan_limits_view(&s, &id)),
+                Err(e) => e,
+            }
+        }
+        // Scan speed range and points per frame of one output (T-171),
+        // `?output=<id or index>` (default the main output). Body:
+        // `{scan}` (a missing field of `scan` is its default). Out of
+        // range is 400; a faster `pps_max` is 409 `{error, loosen, armed:
+        // true}` while the laser is armed. Refused in show mode (not on
+        // the allow-list).
+        (Method::Post, "/api/outputs/scan_limits") => {
+            let id = match color_output(request.url(), &shared.lock().unwrap()) {
+                Ok(id) => id,
+                Err(e) => return e,
+            };
+            match body::<ScanLimitsBody>(request) {
+                Ok(b) => {
+                    let mut s = shared.lock().unwrap();
+                    let s = &mut *s;
+                    s.gate.sync_estop(&s.estop);
+                    let armed = s.gate.is_armed();
+                    let before = s.outputs.get(&id).map(|o| o.scan);
+                    match s.outputs.set_scan(&id, b.scan, armed) {
+                        Ok(out) => {
+                            if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out.scan)) {
+                                change["output"] = json!(id);
+                                s.gate.log().record("output_scan", Some("ui"), change);
+                            }
+                            json_response(scan_limits_view(s, &id))
+                        }
+                        Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
+                        Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) => with_status(
+                            json_response(json!({ "error": "Désarmez le laser pour relever la vitesse max", "loosen": list, "armed": true })),
+                            409,
+                        ),
+                    }
+                }
+                Err(e) => e,
+            }
+        }
+        (Method::Get, "/api/testpattern") =>json_response(test_pattern_view(&shared.lock().unwrap())),
         // T-404: `{"pattern": "grid" | null, "brightness": 0.2}`, both
         // optional (a missing key keeps the current value). Shows or leaves
         // a test pattern; never arms, never touches the cue deck.
@@ -2650,8 +2693,8 @@ enum ScanPresetsRequest {
 /// `clamped` when that changed something), and what refers to a preset
 /// that no longer exists (it draws with the output's default).
 fn scan_presets_view(s: &Shared) -> serde_json::Value {
-    use crate::scan::{effective, ScanLimits};
-    let limits = ScanLimits::default();
+    use crate::scan::effective;
+    let limits = crate::scan::output_limits(s);
     let effective: serde_json::Map<String, serde_json::Value> = s
         .scan_presets
         .all()
@@ -2746,6 +2789,32 @@ struct ColorBody {
     color: crate::colorcal::ColorCalibration,
     #[serde(default)]
     confirm_loosen: bool,
+}
+
+/// `POST /api/outputs/scan_limits` (T-171).
+#[derive(Deserialize)]
+struct ScanLimitsBody {
+    scan: crate::power::OutputScan,
+}
+
+/// `GET /api/outputs/scan_limits`: one output's scan limits, the rate it
+/// runs at, its last frame's points and estimated frames/s, the frame rate at which the UI warns, the speed range as the
+/// scan presets see it, and what does not fit (the projector sheet's
+/// `max_pps` included: warned, never clamped silently).
+fn scan_limits_view(s: &Shared, id: &str) -> serde_json::Value {
+    let cfg = s.outputs.config_for(id);
+    let points = if id == crate::power::MAIN_OUTPUT { s.frame.len() } else { s.projector_frames.iter().find(|f| f.id == id).map_or(0, |f| f.points.len()) };
+    json!({
+        "output": id,
+        "points": points,
+        "fps": crate::power::fps(s.pps, points),
+        "scan": cfg.scan,
+        "defaults": crate::power::OutputScan::default(),
+        "pps": s.pps,
+        "alert_fps": cfg.scan.alert_fps(),
+        "limits": cfg.scan.scan_limits(s.pps),
+        "warnings": cfg.scan.warnings(s.pps, &cfg.projector),
+    })
 }
 
 /// The output named by `?output=`: an id, or an index in the list.
@@ -5207,6 +5276,44 @@ mod tests {
         assert_eq!(t.shared.lock().unwrap().outputs.active_limits(), crate::power::OutputLimits::default());
         assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"projector":{"name":"P"}}"#).0, 200);
         assert_eq!(t.shared.lock().unwrap().outputs.active_color().color_delay_points, 2);
+    }
+
+    /// T-171: an output's scan limits over HTTP: shown with the rate, the
+    /// alert and the warnings; out of range is 400; a faster `pps_max`
+    /// is refused while armed; the projector sheet's `max_pps` warns.
+    #[test]
+    fn output_scan_limits_over_http() {
+        let t = TestServer::start(false);
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let g = js(&t.request("GET", "/api/outputs/scan_limits", "").1);
+        assert_eq!((g["output"].as_str(), g["pps"].as_u64(), g["alert_fps"].as_f64()), (Some("main"), Some(30_000), Some(35.0)));
+        assert_eq!(g["scan"]["min_points"], 200);
+        assert!(g["warnings"].as_array().unwrap().is_empty());
+        assert_eq!(t.request("GET", "/api/outputs/scan_limits?output=nope", "").0, 400);
+        let (code, reply) = t.request("POST", "/api/outputs/scan_limits", r#"{"scan":{"pps_max":25000,"min_points":300}}"#);
+        assert_eq!(code, 200, "{reply}");
+        let r = js(&reply);
+        assert_eq!(r["scan"]["pps_min"], 10_000, "a missing field is its default");
+        assert_eq!(r["warnings"].as_array().unwrap().len(), 1, "30 kpps above a 25 kpps max: {reply}");
+        assert_eq!(t.shared.lock().unwrap().outputs.active().scan.min_points, 300);
+        for bad in [r#"{"scan":{"pps_min":50000}}"#, r#"{"scan":{"min_fps":0}}"#, r#"{"scan":{"max_points":5}}"#, r#"{}"#] {
+            assert_eq!(t.request("POST", "/api/outputs/scan_limits", bad).0, 400, "{bad}");
+        }
+        // Armed: faster refused, slower applies.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (code, reply) = t.request("POST", "/api/outputs/scan_limits", r#"{"scan":{"pps_max":60000}}"#);
+        assert_eq!(code, 409, "{reply}");
+        assert_eq!(js(&reply)["armed"], true);
+        assert_eq!(t.request("POST", "/api/outputs/scan_limits", r#"{"scan":{"pps_max":20000}}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/outputs/scan_limits", r#"{"scan":{"pps_max":60000}}"#).0, 200);
+        // A slower interface on the sheet: warned, nothing clamped.
+        assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"projector":{"max_pps":20000}}"#).0, 200);
+        let g = js(&t.request("GET", "/api/outputs/scan_limits", "").1);
+        assert_eq!(g["warnings"].as_array().unwrap().len(), 2, "{g}");
+        assert_eq!(g["scan"]["pps_max"], 60_000);
+        // The caps are untouched.
+        assert_eq!(t.shared.lock().unwrap().outputs.active_limits(), crate::power::OutputLimits::default());
     }
 
     #[test]

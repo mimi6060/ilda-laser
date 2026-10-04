@@ -1427,6 +1427,8 @@
         <input type="range" id="mTrace" min="0" max="100" data-live="trace" data-k="100" data-control="master.trace" title="master.trace">
         <label>Pointillés <span class="v" id="mDotsV"></span></label>
         <input type="range" id="mDots" min="0" max="100" data-live="dots" data-k="100" data-control="master.dots" title="master.dots">
+        <label>Vitesse de balayage <span class="v" id="mScanV"></span></label>
+        <input type="range" id="mScan" min="50" max="150" data-live="scan" data-k="100" data-control="master.scan" title="master.scan">
         <label>Miroir</label>
         <div class="seg" id="fxMirror" data-control="master.mirror" title="master.mirror : copies en miroir autour du centre">
           <button data-mirror="0">Aucun</button><button data-mirror="1">X</button><button data-mirror="2">Y</button><button data-mirror="3">XY</button>
@@ -2724,6 +2726,23 @@
       <label>Vert max (%) <span class="v" id="pwGreenV"></span></label><input type="range" id="pwGreen" min="0" max="100" step="1">
       <label>Bleu max (%) <span class="v" id="pwBlueV"></span></label><input type="range" id="pwBlue" min="0" max="100" step="1">
       <div class="hint">Plafond de cette sortie, appliqué en dernier à tout ce qui sort (cues, MIDI, LFO, audio, timeline) : chaque couleur est écrêtée à son maximum, puis tout est multiplié par la puissance max. Ces réglages appartiennent à cette machine (pas au projet). Baisser s'applique tout de suite ; relever demande une confirmation, laser désarmé.</div>
+      <div class="sf-sub">Balayage de la sortie</div>
+      <div id="oscanBox">
+        <div class="row">
+          <label for="oscanPpsMin">Vitesse min (points/s)</label><input type="number" id="oscanPpsMin" min="1000" max="100000" step="1000">
+          <label for="oscanPpsMax" title="Protection des galvos : les préréglages de balayage et la vitesse de balayage en direct ne tracent jamais plus vite">Vitesse max (points/s)</label><input type="number" id="oscanPpsMax" min="1000" max="100000" step="1000">
+        </div>
+        <div class="row">
+          <label for="oscanMinPts" title="Une image plus courte est complétée : un contour fermé est retracé, sinon le dernier point est tenu éteint ; une image immobile reste telle quelle (0 = désactivé)">Points minimum</label><input type="number" id="oscanMinPts" min="0" max="10000" step="10">
+          <label for="oscanMaxPts" title="Une image plus longue est allégée (0 = sans limite propre)">Points maximum</label><input type="number" id="oscanMaxPts" min="0" max="10000" step="10">
+          <label for="oscanFps" title="L'indicateur Images/s passe en alerte sous 7/8 de cette valeur">Images/s visées</label><input type="number" id="oscanFps" min="1" max="120" step="1">
+        </div>
+        <div class="row"><button id="oscanSave">Enregistrer</button></div>
+        <div class="hint sf-error" id="oscanError"></div>
+        <div class="hint sf-error" id="oscanWarn" role="status"></div>
+        <div class="hint" id="oscanInfo"></div>
+        <div class="hint">Appliqué à l'image avant toute la sécurité (zones, horizon, limiteur, faisceau statique, plafonds), qui garde le dernier mot. Relever la vitesse max se fait laser désarmé. Une vitesse au-delà de la fiche du projecteur est signalée, jamais corrigée en silence.</div>
+      </div>
       <div class="sf-sub">Couleurs de la sortie</div>
       <div id="ocBox">
         <div id="ocLoosen" hidden>
@@ -3820,7 +3839,7 @@ function showPoints(points) {
   const n = points.length, fps = n ? pps / n : 0;
   $('stPoints').textContent = n;
   $('stFps').textContent = n ? fps.toFixed(1) : '–';
-  $('stFps').classList.toggle('bad', n && fps < 15);
+  $('stFps').classList.toggle('bad', n && fps < scanAlertFps);
 }
 async function pushFrame() {
   const fetchedAt = performance.now();
@@ -8639,6 +8658,39 @@ $('ocLoosenCancel').addEventListener('click', () => { ocPending = null; $('ocLoo
 $('ocReset').addEventListener('click', () => { if (outColor) saveOutColor(outColor.defaults); });
 $('ocTpRamp').addEventListener('click', () => postTestPattern({ pattern: 'white_ramp' }));
 $('ocTpBlank').addEventListener('click', () => postTestPattern({ pattern: 'blanking' }));
+
+// Balayage de la sortie (T-171): scan speed range and points per frame of
+// the chosen output. The warnings (its rate outside the range, above the
+// projector sheet's interface maximum) are shown, never applied silently.
+// The main output's alert threshold drives the « Images/s » indicator.
+var scanAlertFps = 35;
+const OSCAN_FIELDS = { oscanPpsMin: 'pps_min', oscanPpsMax: 'pps_max', oscanMinPts: 'min_points', oscanMaxPts: 'max_points', oscanFps: 'min_fps' };
+function showScanLimits(j) {
+  for (const [id, k] of Object.entries(OSCAN_FIELDS)) if (document.activeElement !== $(id)) $(id).value = j.scan[k];
+  if (j.output === 'main') scanAlertFps = j.alert_fps;
+  $('oscanInfo').textContent = `La sortie tourne à ${j.pps} points/s : vitesse de balayage de ${Math.round(j.limits.min_scan_pct)} à ${Math.round(j.limits.max_scan_pct)} %. `
+    + `Alerte sous ${+j.alert_fps.toFixed(1)} images/s.`;
+  $('oscanWarn').textContent = j.warnings.join(' ');
+}
+async function reloadScanLimits() {
+  try {
+    const r = await fetch('/api/outputs/scan_limits?output=' + encodeURIComponent(pwTargetId()));
+    if (r.ok) showScanLimits(await r.json());
+  } catch (e) { console.warn('/api/outputs/scan_limits', e); }
+}
+async function saveScanLimits() {
+  const scan = Object.fromEntries(Object.entries(OSCAN_FIELDS).map(([id, k]) => [k, +$(id).value]));
+  const r = await fetch('/api/outputs/scan_limits?output=' + encodeURIComponent(pwTargetId()), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scan }) });
+  $('oscanError').textContent = '';
+  if (r.ok) { showScanLimits(await r.json()); return; }
+  const msg = r.status === 409 ? (j => j.error + ' (' + j.loosen.join(' · ') + ')')(await r.json()) : await r.text();
+  await reloadScanLimits();
+  $('oscanError').textContent = msg;
+}
+$('oscanSave').addEventListener('click', saveScanLimits);
+$('pwTarget').addEventListener('change', reloadScanLimits);
+reloadScanLimits();
 
 // Sorties (T-401, after T-303's read-only list): the studio scans only on
 // « Rechercher » (about 1.5 s, on its own thread). « Connecter » opens the

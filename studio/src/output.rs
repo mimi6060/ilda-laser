@@ -308,6 +308,74 @@ pub fn content_budget(max: usize) -> usize {
     (max - max / 8).max(2)
 }
 
+/// Points per frame an output takes (T-171, `power::OutputScan`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameLimits {
+    /// Fewer points are completed (`pad_frame`); 0 = off.
+    pub min: usize,
+    /// More points are thinned (`fit_frame`); None = no limit of its own.
+    pub max: Option<usize>,
+}
+
+/// A frame within `limits` and within `dac_max` (the DAC's frame size,
+/// `Output::max_points`), on content, **before** the safety stage: thinned
+/// with `fit_frame` (never lights travel), then completed with `pad_frame`
+/// (never adds a lit segment that wasn't there). The minimum gives way to
+/// the maxima, so the DAC fit that follows has room for the zone mask.
+pub fn fit_frame_limits(points: Vec<Point>, limits: FrameLimits, dac_max: Option<usize>) -> Vec<Point> {
+    let max = match (limits.max, dac_max.map(content_budget)) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let points = match max {
+        Some(max) if points.len() > max => fit_frame(&points, max).into_owned(),
+        _ => points,
+    };
+    pad_frame(points, max.map_or(limits.min, |m| limits.min.min(m)))
+}
+
+/// How close two points must be to count as the same position.
+const SAME_POSITION: f32 = 1e-6;
+
+/// Completes a frame shorter than `min` points (T-171): too few points
+/// make the DAC loop the frame too fast for the galvos. Never adds a lit
+/// segment the frame didn't already draw:
+///
+/// - a closed path (it ends where it starts) is drawn again, whole, as
+///   many times as fits: the same lit segments, retraced;
+/// - an open path waits on its last point, **dark** (holding a lit point
+///   would make a hot spot);
+/// - a frame that doesn't move (empty, or a beam held on one spot) is
+///   left as it is: the galvos are still, there is nothing to protect,
+///   and the static-beam guard sees it exactly as before.
+///
+/// Whatever is left after the last whole lap is a dark hold too, so the
+/// frame always ends where it ended. Runs before the safety stage, which
+/// still has the last word on every point.
+pub fn pad_frame(mut points: Vec<Point>, min: usize) -> Vec<Point> {
+    if points.len() >= min {
+        return points;
+    }
+    let Some(&last) = points.last() else {
+        return points;
+    };
+    let same = |a: &Point, b: &Point| (a.x - b.x).abs() <= SAME_POSITION && (a.y - b.y).abs() <= SAME_POSITION;
+    let first = points[0];
+    if points.iter().all(|p| same(p, &first)) {
+        return points;
+    }
+    if same(&first, &last) {
+        // One lap = every point after the first: its first segment, from
+        // the end (same place as the start), is the frame's first one.
+        let lap = points.len() - 1;
+        while points.len() + lap <= min {
+            points.extend_from_within(1..=lap);
+        }
+    }
+    points.resize(min, Point::blanked(last.x, last.y));
+    points
+}
+
 /// Thins a frame down to `max` points for a DAC with a frame size limit
 /// (`laser-dac` would cut the tail, leaving a lit end point to jump back
 /// from). Evenly spaced points are kept, first and last included, and a
@@ -734,5 +802,67 @@ mod tests {
     fn unlit_points_are_blanked() {
         let lp = to_laser_point(&Point::blanked(0.1, 0.2));
         assert_eq!((lp.r, lp.g, lp.b), (0, 0, 0));
+    }
+
+    fn lit_segments(f: &[Point]) -> Vec<[(f32, f32); 2]> {
+        f.windows(2).filter(|w| w[1].is_lit() && (w[0].x, w[0].y) != (w[1].x, w[1].y)).map(|w| [(w[0].x, w[0].y), (w[1].x, w[1].y)]).collect()
+    }
+
+    #[test]
+    fn a_50_point_frame_is_completed_to_200() {
+        // An open line: its 50 points as they were, then a dark hold on its end.
+        let line: Vec<Point> = (0..50).map(|i| Point::lit(-0.5 + i as f32 / 49.0, 0.1, 1.0, 0.5, 0.0)).collect();
+        let out = pad_frame(line.clone(), 200);
+        assert_eq!(out.len(), 200);
+        assert_eq!(out[..50], line[..]);
+        assert!(out[50..].iter().all(|p| !p.is_lit() && (p.x, p.y) == (line[49].x, line[49].y)), "dark hold on the last point");
+        // A closed outline of 50 points: drawn again, whole laps, ending where it starts.
+        let ring: Vec<Point> = (0..=49)
+            .map(|i| {
+                let a = std::f32::consts::TAU * (i % 49) as f32 / 49.0;
+                Point::lit(0.4 * a.cos(), 0.4 * a.sin(), 0.0, 1.0, 0.0)
+            })
+            .collect();
+        let out = pad_frame(ring.clone(), 200);
+        assert_eq!(out.len(), 200);
+        assert_eq!(out.iter().filter(|p| p.is_lit()).count(), 50 + 3 * 49, "three more whole laps");
+        assert!(out[50 + 3 * 49..].iter().all(|p| !p.is_lit()));
+        let (first, last) = (out[0], out[199]);
+        assert_eq!((first.x, first.y), (last.x, last.y));
+        // Never a lit segment the frame didn't draw.
+        let before = lit_segments(&ring);
+        assert!(lit_segments(&out).iter().all(|s| before.contains(s)));
+    }
+
+    #[test]
+    fn padding_never_holds_a_lit_spot_and_leaves_long_frames_alone() {
+        // A static beam (one spot, lit) or an empty frame: the galvos are
+        // still, left as it is (the static-beam guard sees the same frame).
+        let beam = vec![Point::lit(0.2, 0.3, 1.0, 1.0, 1.0); 6];
+        assert_eq!(pad_frame(beam.clone(), 200), beam);
+        assert_eq!(pad_frame(Vec::new(), 200), Vec::new());
+        // An open line ending lit: the hold is dark, never a lit spot.
+        let line = vec![Point::lit(0.0, 0.0, 1.0, 1.0, 1.0), Point::lit(0.5, 0.0, 1.0, 1.0, 1.0)];
+        let out = pad_frame(line, 200);
+        assert_eq!((out.len(), out.iter().filter(|p| p.is_lit()).count()), (200, 2));
+        // Long enough, or off: untouched.
+        let sq = crate::patterns::square(0.5, 1.0, 1.0, 1.0);
+        assert_eq!(pad_frame(sq.clone(), 3), sq);
+        assert_eq!(pad_frame(sq.clone(), 0), sq);
+        assert_eq!(pad_frame(Vec::new(), 0), Vec::new());
+    }
+
+    #[test]
+    fn frame_limits_thin_then_complete_within_the_dac() {
+        let long: Vec<Point> = (0..1000).map(|i| Point::lit((i as f32 / 999.0) * 2.0 - 1.0, 0.0, 1.0, 1.0, 1.0)).collect();
+        let lim = FrameLimits { min: 200, max: Some(600) };
+        assert_eq!(fit_frame_limits(long.clone(), lim, None).len(), 600);
+        // The DAC's frame size wins when smaller (room left for the zone mask).
+        assert_eq!(fit_frame_limits(long.clone(), lim, Some(300)).len(), content_budget(300));
+        assert_eq!(fit_frame_limits(long.clone(), FrameLimits::default(), None).len(), 1000);
+        // The minimum gives way to a smaller DAC.
+        let short = vec![Point::lit(0.0, 0.0, 1.0, 1.0, 1.0), Point::lit(0.1, 0.0, 1.0, 1.0, 1.0)];
+        assert_eq!(fit_frame_limits(short.clone(), lim, Some(100)).len(), content_budget(100));
+        assert_eq!(fit_frame_limits(short, lim, None).len(), 200);
     }
 }

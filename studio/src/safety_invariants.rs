@@ -55,6 +55,13 @@
 //!     « Vers le blanc » and « Chase couleur » modes and any balance gains
 //!     (out of range ones included) render through the same chain, so
 //!     1-13 hold with them; the balance only ever dims.
+//! 15. output scan limits (T-171): random points-per-frame and scan
+//!     speed ranges and the live scan speed run in the sessions (1-14
+//!     hold with them); completing a short frame never draws a lit
+//!     segment nor lights a spot the frame didn't, the limits run before
+//!     the safety stage (no Blank zone lit after it), and no look is
+//!     traced faster than the output's `pps_max`
+//!     (`scan_limits_never_add_light_and_never_trace_faster_than_pps_max`).
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst; and the ShowNET SD card over Art-Net
@@ -1112,6 +1119,15 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // Festival palettes, colour modes and perceived balance (T-130), from
     // their own stream.
     let mut frng = Rng::new(seed ^ 0x0130_0130);
+    // The output's scan limits and the live scan speed (T-171), from
+    // their own stream: frames completed or thinned before the safety
+    // stage, presets traced faster or slower; 1-14 hold with them.
+    let mut srng = Rng::new(seed ^ 0x0171_0171);
+    if srng.chance(0.6) {
+        let mut s = rig.s();
+        let _ = s.outputs.set_scan(MAIN_OUTPUT, random_output_scan(&mut srng), false);
+        let _ = controls::apply(&mut s, "master.scan", ControlInput::Norm(srng.f()), srng.chance(0.5));
+    }
     // Live effects (T-142), from their own stream.
     let mut erng = Rng::new(seed ^ 0x0142_0142);
     let effects = erng.chance(0.25);
@@ -1848,6 +1864,125 @@ fn random_strokes(rng: &mut Rng) -> Vec<Point> {
         }
     }
     f
+}
+
+/// Output scan limits (T-171) as `POST /api/outputs/scan_limits` could
+/// send them: mostly valid, sometimes out of range (the store refuses
+/// those, `sanitized` brings a hand-edited file into range).
+fn random_output_scan(rng: &mut Rng) -> crate::power::OutputScan {
+    let pps = |rng: &mut Rng| if rng.chance(0.1) { rng.below(300_000) as u32 } else { 1_000 + rng.below(99_000) as u32 };
+    let (a, b) = (pps(rng), pps(rng));
+    crate::power::OutputScan {
+        pps_min: a.min(b),
+        pps_max: a.max(b),
+        min_points: if rng.chance(0.2) { 0 } else { rng.below(1_500) },
+        max_points: if rng.chance(0.5) { 0 } else { rng.below(3_000) },
+        min_fps: if rng.chance(0.05) { f32::NAN } else { rng.range(-5.0, 150.0) },
+    }
+}
+
+/// T-171, before the safety stage: completing a frame (`pad_frame`)
+/// never draws a lit segment the frame didn't draw; the output's limits
+/// (`fit_frame_limits`) give a frame within the minimum and the maxima;
+/// then the safety stage and the DAC guard still leave nothing lit in a
+/// Blank zone. And the scan speed range: whatever the preset, the live
+/// scan speed and the output's rate, no look is traced faster than
+/// `pps_max` (unless the rate is above twice it: then at 50 %, warned).
+fn run_scan_limits_case(seed: u64) -> Result<(), String> {
+    use crate::output::{content_budget, fit_frame_dark, fit_frame_limits, pad_frame};
+    let mut rng = Rng::new(seed);
+    let frame = random_strokes(&mut rng);
+    let scan = random_output_scan(&mut rng).sanitized();
+    let lim = scan.frame_limits();
+    let dac = rng.chance(0.3).then(|| 16 + rng.below(800));
+    let seg = |f: &[Point]| -> Vec<[(u32, u32); 2]> {
+        f.windows(2).filter(|w| w[1].is_lit() && (w[0].x, w[0].y) != (w[1].x, w[1].y)).map(|w| [(w[0].x.to_bits(), w[0].y.to_bits()), (w[1].x.to_bits(), w[1].y.to_bits())]).collect()
+    };
+    // A frame that doesn't move (the galvos still) is left as it is.
+    let moves = |f: &[Point]| f.iter().any(|p| (p.x - f[0].x).abs() > 1e-6 || (p.y - f[0].y).abs() > 1e-6);
+    let padded = pad_frame(frame.clone(), lim.min);
+    let bits = |p: &Point| [p.x, p.y, p.r, p.g, p.b].map(f32::to_bits);
+    let want = if moves(&frame) { lim.min } else { frame.len() };
+    if padded.len() < want || padded.len() < frame.len() || padded.iter().zip(&frame).any(|(a, b)| bits(a) != bits(b)) {
+        return Err(format!("padding {} to {} gave {} points or changed the frame", frame.len(), lim.min, padded.len()));
+    }
+    let before = seg(&frame);
+    if let Some(s) = seg(&padded).into_iter().find(|s| !before.contains(s)) {
+        return Err(format!("padding drew a new lit segment {s:?}"));
+    }
+    let lit_spots = |f: &[Point]| f.iter().filter(|p| p.is_lit()).map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<std::collections::HashSet<_>>();
+    if !lit_spots(&padded).is_subset(&lit_spots(&frame)) {
+        return Err("padding lit a spot the frame didn't light".into());
+    }
+    let fitted = fit_frame_limits(frame.clone(), lim, dac);
+    let max = match (lim.max, dac.map(content_budget)) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    if max.is_some_and(|m| fitted.len() > m.max(2)) || (moves(&fitted) && fitted.len() < max.map_or(lim.min, |m| lim.min.min(m))) {
+        return Err(format!("{} points for limits {lim:?} and DAC {dac:?}", fitted.len()));
+    }
+    let cfg = SafetySettings { zones: random_safety(&mut rng).zones, horizon: Horizon { y: -1.0, ..Default::default() }, ..Default::default() };
+    let shaped = safety::apply(fitted, 0.0, &cfg, &mut safety::StrobeLimiter::default());
+    let sent = match dac {
+        Some(m) => fit_frame_dark(&shaped, m).into_owned(),
+        None => shaped,
+    };
+    let v = zones::blank_violations(&sent, &cfg.zones);
+    if v > 0 {
+        return Err(format!("{v} lit segments through a Blank zone after the scan limits"));
+    }
+    // The scan speed range.
+    let pps = 1_000 + rng.below(120_000) as u32;
+    let limits = scan.scan_limits(pps);
+    let base = crate::optimize::OptimizeParams { enabled: true, ..Default::default() };
+    let mixer = crate::layers::Mixer { optimizer: base.clone(), ..Default::default() };
+    let presets = crate::scan::ScanPresetStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scan_presets.json"));
+    let master = if rng.chance(0.1) { f32::NAN } else { rng.range(-1.0, 3.0) };
+    let chosen = *rng.pick(&[None, Some(crate::scan::GRAPHICS)]);
+    let p = presets.resolve(chosen, &mixer, &limits, master);
+    let traced = pps as f32 * p.lit_step / base.lit_step;
+    let bound = (scan.pps_max as f32).max(pps as f32 * crate::scan::MIN_SCAN_PCT / 100.0);
+    if traced > bound * 1.001 {
+        return Err(format!("traced at {traced} points/s for {pps} with pps_max {} (master {master})", scan.pps_max));
+    }
+    Ok(())
+}
+
+/// The engine applies the output's points per frame (T-171) before the
+/// safety stage: a short frame reaches the output completed, and a Blank
+/// zone over the whole field still leaves all of it dark.
+#[test]
+fn the_engine_completes_short_frames_before_the_safety_stage() {
+    let run = |min_points: usize, blank_all: bool| -> Vec<Point> {
+        let mut s = test_support::shared();
+        s.settings = Settings { content: Content::Shape { shape: "square".into() }, ..Settings::default() };
+        let scan = crate::power::OutputScan { min_points, ..Default::default() };
+        s.outputs.set_scan(MAIN_OUTPUT, scan, false).unwrap();
+        if blank_all {
+            let zone = Zone { kind: ZoneKind::Blank, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], ..Default::default() };
+            s.safety.set(SafetySettings { zones: vec![zone], ..s.safety.get() }, true).unwrap();
+        }
+        let mut rig = Rig::new(s, &format!("pad-{min_points}-{blank_all}"), 171);
+        rig.s().request_arm(ArmSource::Ui).unwrap();
+        for _ in 0..5 {
+            rig.tick();
+        }
+        let sent = rig.wire.lock().unwrap().last.clone();
+        sent
+    };
+    let plain = run(0, false);
+    assert!(plain.iter().any(|p| p.is_lit()) && plain.len() < 2_000, "{} points", plain.len());
+    let padded = run(2_000, false);
+    assert!(padded.len() >= 2_000, "{} points", padded.len());
+    assert!(padded.iter().filter(|p| p.is_lit()).count() > plain.iter().filter(|p| p.is_lit()).count(), "a square is retraced, lit");
+    let blank = run(2_000, true);
+    assert!(blank.len() >= 2_000 && blank.iter().all(|p| !p.is_lit()), "the zones run after the completion");
+}
+
+#[test]
+fn scan_limits_never_add_light_and_never_trace_faster_than_pps_max() {
+    run_property("scan_limits_never_add_light_and_never_trace_faster_than_pps_max", 171, 1000, run_scan_limits_case);
 }
 
 /// Invariant 7 directly, then the engine's order after it (safety stage,
