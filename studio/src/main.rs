@@ -44,6 +44,7 @@ mod lfo;
 mod interlock;
 mod keep_awake;
 mod live;
+mod menubar;
 mod midi;
 mod netin;
 mod external;
@@ -215,6 +216,96 @@ struct Cli {
     /// leaves no studio behind.
     #[arg(long, hide = true, value_name = "PID", conflicts_with = "device")]
     exit_with_parent: Option<u32>,
+    /// Application mode (the macOS app, T-413): data in
+    /// ~/Library/Application Support/Laser Studio unless --data-dir is
+    /// given, a free port from 8080 up unless --port is given, always on
+    /// 127.0.0.1, and the UI opens in the default browser. A second launch
+    /// on the same data opens the running studio's page instead. The laser
+    /// starts disarmed, as always.
+    #[arg(long)]
+    app: bool,
+    /// With --app: don't open the browser (tests).
+    #[arg(long, hide = true, requires = "app", conflicts_with = "device")]
+    no_open: bool,
+    /// Set by `resolve_app_mode`: the data directory is the application's
+    /// default one (for the startup line of the log).
+    #[arg(skip)]
+    app_default_data_dir: bool,
+}
+
+/// The port the application tries first (T-413), then the next ones.
+const APP_PORT: u16 = 8080;
+/// How many ports after `APP_PORT` are tried before any free one: a
+/// stable address keeps the page's own settings (stored per address).
+const APP_PORT_TRIES: u16 = 20;
+
+/// The application's data directory under `home` (T-413): the same files
+/// as `studio-data/`, in the place macOS apps keep theirs.
+fn app_data_dir(home: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
+    let home = home.filter(|h| !h.is_empty()).context("HOME n'est pas défini : impossible de trouver le dossier Application Support")?;
+    Ok(PathBuf::from(home).join("Library").join("Application Support").join("Laser Studio"))
+}
+
+/// A port free on 127.0.0.1: `preferred` or one of the next ones, else
+/// any the system gives. Checked by binding it (released at once; the web
+/// server binds it again a moment later).
+fn pick_port(preferred: u16, tries: u16) -> Result<u16> {
+    let free = |port: u16| std::net::TcpListener::bind(("127.0.0.1", port)).ok().and_then(|l| l.local_addr().ok()).map(|a| a.port());
+    (0..tries)
+        .filter_map(|i| preferred.checked_add(i))
+        .find_map(free)
+        .or_else(|| free(0))
+        .context("aucun port libre sur 127.0.0.1")
+}
+
+/// `--app`: the application's data directory and a free port, unless the
+/// command line names them. Nothing else changes; the CLI without `--app`
+/// behaves exactly as before.
+fn resolve_app_mode(cli: &mut Cli, explicit_data_dir: bool, explicit_port: bool, home: Option<&std::ffi::OsStr>) -> Result<()> {
+    if !cli.app {
+        return Ok(());
+    }
+    if !explicit_data_dir {
+        cli.data_dir = app_data_dir(home)?;
+        cli.app_default_data_dir = true;
+    }
+    if !explicit_port {
+        cli.port = pick_port(APP_PORT, APP_PORT_TRIES)?;
+    }
+    Ok(())
+}
+
+/// The command line as the binary sees it. Started from a `.app` bundle
+/// (Finder, Dock, `open`) with no argument, it is the application:
+/// `--app` is added. Any other start is unchanged, so the decoder child
+/// (`--decode …`) and every CLI use keep their meaning. Old macOS versions
+/// pass a `-psn_…` process serial number: dropped.
+fn launch_args(args: Vec<std::ffi::OsString>, exe: Option<&std::path::Path>) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<_> = args.into_iter().enumerate().filter(|(i, a)| *i == 0 || !a.to_string_lossy().starts_with("-psn_")).map(|(_, a)| a).collect();
+    let in_bundle = exe.is_some_and(|exe| {
+        let mut up = exe.ancestors().skip(1);
+        let (macos, contents, bundle) = (up.next(), up.next(), up.next());
+        macos.and_then(|p| p.file_name()) == Some("MacOS".as_ref())
+            && contents.and_then(|p| p.file_name()) == Some("Contents".as_ref())
+            && bundle.and_then(|p| p.extension()) == Some("app".as_ref())
+    });
+    if in_bundle && args.len() <= 1 {
+        args.push("--app".into());
+    }
+    args
+}
+
+/// Parses the command line, then applies `--app` (T-413).
+fn parse_cli() -> Result<Cli> {
+    use clap::{CommandFactory, FromArgMatches};
+    let args = launch_args(std::env::args_os().collect(), std::env::current_exe().ok().as_deref());
+    let matches = Cli::command().get_matches_from(args);
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if cli.decode.is_none() && !cli.list_devices && !cli.list_controls {
+        let explicit = |id: &str| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
+        resolve_app_mode(&mut cli, explicit("data_dir"), explicit("port"), std::env::var_os("HOME").as_deref())?;
+    }
+    Ok(cli)
 }
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -373,6 +464,9 @@ pub struct Shared {
     pub audience: audience::AudienceState,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
+    /// The menu-bar entries in application mode (menubar.rs, T-413), for
+    /// `POST /api/test/menu`; None otherwise.
+    pub menu: Option<Arc<menubar::MenuActions>>,
     /// A pending simulated stall (ms): the engine sleeps this long while
     /// holding the lock, the worst case for the watchdog.
     pub test_stall_ms: u64,
@@ -695,7 +789,7 @@ pub struct Playlist {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli()?;
     if let Some(name) = &cli.decode {
         // The decoder child (audio/isolate.rs): no panic hook, no output,
         // nothing but one file read and a reply on stdout. It never opens
@@ -717,7 +811,19 @@ fn main() -> Result<()> {
         print!("{}", controls::markdown(&controls::ControlRegistry::build(&presets::catalog())));
         return Ok(());
     }
+    // The macOS application with its menu-bar item (T-413): AppKit owns
+    // the main thread, the studio runs unchanged on another one.
+    #[cfg(all(feature = "macos-app", target_os = "macos"))]
+    if cli.app {
+        return menubar::native::run(move |ready| run_studio(cli, Some(ready)));
+    }
+    run_studio(cli, None)
+}
 
+/// The studio: everything `main` runs once the command line is read, until
+/// a clean shutdown. `on_ready` receives what the menu-bar item needs once
+/// the engine runs (application mode with the `macos-app` feature).
+fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>) -> Result<()> {
     let made = std::fs::create_dir_all(&cli.data_dir);
     // The application log (T-403): terminal as before, plus the file.
     let app_log = applog::init(&cli.data_dir, &applog::LogSettings::load(&cli.data_dir));
@@ -726,6 +832,16 @@ fn main() -> Result<()> {
     // until `main` returns, after the output is closed.
     let instance_lock = match instance::acquire(&cli.data_dir, cli.port) {
         Ok(lock) => Some(lock),
+        Err(instance::LockError::Held(Some(info))) if cli.app => {
+            // A second launch of the application: show the running one.
+            let url = format!("http://127.0.0.1:{}/", info.port);
+            println!("Laser Studio tourne déjà (PID {}) : {url}", info.pid);
+            log::info!("Laser Studio tourne déjà (PID {}) : ouverture de son interface", info.pid);
+            if !cli.no_open {
+                menubar::open_in_browser(&url)?;
+            }
+            return Ok(());
+        }
         Err(e @ instance::LockError::Held(_)) => {
             eprintln!("{}", e.message(&cli.data_dir));
             std::process::exit(2);
@@ -787,6 +903,15 @@ fn main() -> Result<()> {
     let remembered = state.outputs.connection().selected.filter(|_| output.is_none());
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
+    let url = format!("http://127.0.0.1:{}/", cli.port);
+    if cli.app {
+        // The menu-bar entries (T-413); also `POST /api/test/menu`.
+        let actions = Arc::new(menubar::MenuActions { estop: Arc::clone(&estop), running: Arc::clone(&running), url: url.clone(), open_browser: !cli.no_open });
+        shared.lock().unwrap().menu = Some(Arc::clone(&actions));
+        if let Some(on_ready) = on_ready {
+            on_ready(menubar::Ready { shared: Arc::clone(&shared), actions });
+        }
+    }
     // The ILDA files can be big: read beside everything else, their cues
     // appear once parsed.
     ilda_library::spawn_load(&shared);
@@ -863,7 +988,23 @@ fn main() -> Result<()> {
     };
 
     let addr = format!("127.0.0.1:{}", cli.port);
-    println!("Studio: open http://{addr}/ in your browser - Ctrl+C to quit");
+    println!("Studio: open {url} in your browser - Ctrl+C to quit");
+    if cli.app && !cli.no_open {
+        // The application opens its page once the server answers.
+        let addr = addr.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while std::net::TcpStream::connect(&addr).is_err() {
+                if Instant::now() > deadline {
+                    return log::warn!("Interface non ouverte : le serveur ne répond pas sur {addr}");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if let Err(e) = menubar::open_in_browser(&url) {
+                log::warn!("Ouverture de l'interface impossible : {e:#}");
+            }
+        });
+    }
     let autosave_thread = autosave::spawn(Arc::clone(&shared), Arc::clone(&running));
     // Keep the Mac awake while armed or playing (T-412); never the real
     // assertion in tests.
@@ -974,12 +1115,13 @@ fn startup_line(cli: &Cli, output: Option<&str>) -> String {
         (cli.audio_device.is_some(), "--audio-device"),
         (cli.osc.is_some(), "--osc"),
         (cli.artnet.is_some(), "--artnet"),
+        (cli.app, "--app"),
     ] {
         if on {
             options.push(name.to_string());
         }
     }
-    let data_dir = if cli.data_dir.as_path() == std::path::Path::new("studio-data") { "par défaut" } else { "personnalisé" };
+    let data_dir = if cli.app_default_data_dir || cli.data_dir.as_path() == std::path::Path::new("studio-data") { "par défaut" } else { "personnalisé" };
     format!(
         "Démarrage de Laser Studio {} ({} {}, {}) ; sortie : {} ; options : {} ; dossier de données {data_dir}",
         env!("CARGO_PKG_VERSION"),
@@ -1119,6 +1261,7 @@ fn startup_state(cli: &Cli) -> Shared {
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
         audience: Default::default(),
         test_hooks: cli.test_hooks,
+        menu: None,
         test_stall_ms: 0,
         touches: Default::default(),
         devices: Arc::clone(output_mgr.devices()),
@@ -2021,6 +2164,91 @@ fn advance_playlist(s: &mut Shared) {
 mod tests {
     use super::*;
     use crate::scenes::Scene;
+
+    /// T-413: the application keeps its data where macOS apps do.
+    #[test]
+    fn the_app_data_dir_is_in_application_support() {
+        let dir = app_data_dir(Some("/Users/someone".as_ref())).unwrap();
+        assert_eq!(dir, PathBuf::from("/Users/someone/Library/Application Support/Laser Studio"));
+        assert!(app_data_dir(None).is_err());
+        assert!(app_data_dir(Some("".as_ref())).is_err());
+    }
+
+    /// T-413: a busy preferred port is skipped; a free one is kept.
+    #[test]
+    fn the_app_picks_a_free_port() {
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = busy.local_addr().unwrap().port();
+        let got = pick_port(taken, 1).unwrap();
+        assert_ne!(got, taken);
+        assert_ne!(got, 0);
+        std::net::TcpListener::bind(("127.0.0.1", got)).expect("the port given is free");
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert_eq!(pick_port(free, 1).unwrap(), free);
+        drop(busy);
+    }
+
+    /// T-413: `--app` fills in the data directory and the port unless the
+    /// command line names them; without `--app` nothing changes.
+    #[test]
+    fn app_mode_resolves_only_what_the_command_line_leaves_out() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["laser-studio"][..], args].concat()).unwrap();
+        let home = Some("/Users/x".as_ref());
+
+        let mut cli = parse(&[]);
+        resolve_app_mode(&mut cli, false, false, home).unwrap();
+        assert_eq!((cli.data_dir.as_path(), cli.port, cli.app_default_data_dir), (std::path::Path::new("studio-data"), 8080, false), "CLI unchanged");
+
+        let mut cli = parse(&["--app"]);
+        resolve_app_mode(&mut cli, false, true, home).unwrap();
+        assert_eq!(cli.data_dir, PathBuf::from("/Users/x/Library/Application Support/Laser Studio"));
+        assert!(cli.app_default_data_dir);
+        // (The free port itself: `the_app_picks_a_free_port`, never on 8080.)
+
+        let mut cli = parse(&["--app", "--data-dir", "/tmp/d", "--port", "9123"]);
+        resolve_app_mode(&mut cli, true, true, home).unwrap();
+        assert_eq!((cli.data_dir.as_path(), cli.port, cli.app_default_data_dir), (std::path::Path::new("/tmp/d"), 9123, false));
+
+        // The test options never go with a real laser, nor without --app.
+        assert!(Cli::try_parse_from(["laser-studio", "--app", "--no-open", "--device", "auto"]).is_err());
+        assert!(Cli::try_parse_from(["laser-studio", "--no-open"]).is_err());
+        assert!(Cli::try_parse_from(["laser-studio", "--app", "--no-open"]).is_ok());
+    }
+
+    /// T-413: started from a bundle with no argument, the binary is the
+    /// application; any other start keeps its arguments.
+    #[test]
+    fn a_bundle_launch_adds_app_and_nothing_else_does() {
+        let args = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let bundle = std::path::Path::new("/Applications/Laser Studio.app/Contents/MacOS/laser-studio");
+        let plain = std::path::Path::new("/Users/x/ilda-laser/target/release/laser-studio");
+        assert_eq!(launch_args(args(&["ls"]), Some(bundle)), args(&["ls", "--app"]));
+        assert_eq!(launch_args(args(&["ls", "-psn_0_12345"]), Some(bundle)), args(&["ls", "--app"]));
+        assert_eq!(launch_args(args(&["ls"]), Some(plain)), args(&["ls"]));
+        assert_eq!(launch_args(args(&["ls"]), None), args(&["ls"]));
+        // The decoder child, run by the app on itself: untouched.
+        let child = args(&["ls", "--decode", "a.mp3", "--data-dir", "/d"]);
+        assert_eq!(launch_args(child.clone(), Some(bundle)), child);
+        assert_eq!(launch_args(args(&["ls"]), Some(std::path::Path::new("/x/Contents/MacOS/ls"))), args(&["ls"]), "no .app");
+    }
+
+    /// T-413: the application starts disarmed, like the CLI, whatever the
+    /// data directory holds.
+    #[test]
+    fn app_mode_starts_disarmed() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-appmode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cli = Cli::try_parse_from(["laser-studio", "--app", "--no-open", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
+        resolve_app_mode(&mut cli, true, false, None).unwrap();
+        let s = startup_state(&cli);
+        assert!(!s.gate.is_armed());
+        assert!(!s.estop.is_latched());
+        assert_eq!(s.gate.status(&s.estop).last_disarm.unwrap().reason_fr, "Démarrage");
+        let model = menubar::current_model(&Mutex::new(s), &EStop::default());
+        assert_eq!(model.status_line(), "Désarmé — Aperçu seulement");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// T-358: a test studio stops once its harness is gone or its data
     /// directory was deleted; the option is hidden and refuses --device.

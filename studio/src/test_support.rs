@@ -109,6 +109,7 @@ pub fn shared() -> Shared {
         checklist: crate::checklist::Checklist::in_memory(false),
         audience: Default::default(),
         test_hooks: false,
+        menu: None,
         test_stall_ms: 0,
         touches: Default::default(),
         // Never a real scan in unit tests, never a real output.

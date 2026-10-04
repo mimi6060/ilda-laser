@@ -681,6 +681,39 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 Err(e) => e,
             }
         }
+        (Method::Get, "/api/test/menu") => {
+            // `--test-hooks` with `--app` (T-413): the menu-bar item's lines.
+            let actions = {
+                let s = shared.lock().unwrap();
+                if !s.test_hooks {
+                    return text(404, "not found");
+                }
+                s.menu.clone()
+            };
+            match actions {
+                Some(a) => json_response(crate::menubar::current_model(shared, &a.estop).to_json()),
+                None => text(409, "pas en mode application (--app)"),
+            }
+        }
+        (Method::Post, "/api/test/menu") => {
+            // `--test-hooks` with `--app` (T-413): an entry of the
+            // menu-bar item, `?action=open|estop|quit`, as if clicked.
+            let actions = {
+                let s = shared.lock().unwrap();
+                if !s.test_hooks {
+                    return text(404, "not found");
+                }
+                s.menu.clone()
+            };
+            let Some(actions) = actions else { return text(409, "pas en mode application (--app)") };
+            match query_str(request.url(), "action").as_deref().and_then(crate::menubar::parse_action) {
+                Some(action) => {
+                    actions.perform(action, shared);
+                    ok()
+                }
+                None => text(400, "action : open, estop ou quit"),
+            }
+        }
         (Method::Post, "/api/test/stall") => {
             let ms = query_u64(request.url(), "ms").unwrap_or(200).min(2_000);
             let mut s = shared.lock().unwrap();
