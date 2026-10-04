@@ -394,6 +394,20 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             },
             Err(e) => e,
         },
+        (Method::Post, "/api/test/wifi") => {
+            // `--test-hooks` only (e2e of T-472): what the Wi-Fi check of a
+            // ShowNET output finds, `{ "wireless": bool, "interface"? }`.
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            match body::<crate::wifi::WifiStatus>(request) {
+                Ok(status) => {
+                    shared.lock().unwrap().wifi.simulate(Some(status));
+                    ok()
+                }
+                Err(e) => e,
+            }
+        }
         (Method::Post, "/api/test/stall") => {
             let ms = query_u64(request.url(), "ms").unwrap_or(200).min(2_000);
             let mut s = shared.lock().unwrap();
@@ -551,6 +565,8 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                             change["confirmed_loosen"] = json!(b.confirm_loosen);
                             s.gate.log().record("power_caps", Some("ui"), change);
                         }
+                        // The sheet may declare a ShowNET (T-472).
+                        s.sync_checklist();
                         json_response(json!({ "output": out, "max_brightness_effective": s.outputs.max_brightness_effective() }))
                     }
                     Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
@@ -1603,6 +1619,7 @@ fn outputs_view(s: &Shared) -> serde_json::Value {
         "outputs": s.outputs.list(),
         "defaults": { "limits": crate::power::OutputLimits::default(), "projector": crate::power::ProjectorInfo::default() },
         "classes": crate::power::LASER_CLASSES,
+        "models": crate::power::MODELS,
         "max_brightness_effective": s.outputs.max_brightness_effective(),
         "load_error": s.outputs.load_error(),
     })
@@ -1698,6 +1715,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "audio": s.audio_in.view(s.audio, s.audio_at, Instant::now()),
         "data_warnings": data_warnings_view(s),
         "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
+        "shownet": shownet_view(s),
         "applog": s.applog.status(),
     })
 }
@@ -1797,7 +1815,19 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "evolving": evolving_status(s),
         "test_pattern": s.test_pattern,
         "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
+        "shownet": shownet_view(s),
     }))
+}
+
+/// The ShowNET reminders (T-472), in `/api/state` and every frame: whether
+/// the output is a ShowNET path, whether its hardware stop is ticked, and
+/// the Wi-Fi warning (null when the link is not known to be Wi-Fi).
+fn shownet_view(s: &Shared) -> serde_json::Value {
+    json!({
+        "active": s.checklist.output().is_some(),
+        "hw_stop_ok": s.checklist.hw_stop_ok(),
+        "wifi": s.wifi.warning(),
+    })
 }
 
 /// `GET /api/testpattern`: the patterns (id and French name) and the mode.

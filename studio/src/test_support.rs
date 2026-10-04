@@ -94,5 +94,6 @@ pub fn shared() -> Shared {
         // Never a real scan in unit tests, never a real output.
         devices: std::sync::Arc::clone(output_mgr.devices()),
         output_mgr,
+        wifi: std::sync::Arc::new(crate::wifi::WifiWatch::new(true)),
     }
 }

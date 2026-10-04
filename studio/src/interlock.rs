@@ -148,6 +148,12 @@ pub const DATA_ACK: &str = "data_ack";
 /// Id of the interlock held open until the pre-show checklist is completed,
 /// only when a real output is configured (T-258, checklist.rs).
 pub const CHECKLIST: &str = "checklist";
+/// Id of the interlock held open, on a ShowNET output (T-472), until the
+/// checklist's « Arrêt matériel testé » item is ticked. The ShowNET may hold
+/// its last frame when the stream stops: only a hardware stop is sure.
+pub const HW_STOP: &str = "hw_stop";
+/// Its label, also the refusal message.
+pub const HW_STOP_LABEL: &str = "Arrêt matériel non vérifié";
 /// Id of the interlock held open while no output is connected (T-401):
 /// arming a studio that drives nothing is refused.
 pub const OUTPUT: &str = "output";
@@ -206,6 +212,10 @@ impl ArmGate {
     /// Labels of the interlocks that currently block arming.
     pub fn blocking(&self) -> Vec<String> {
         self.interlocks.iter().filter(|i| !i.ok).map(|i| i.label_fr.clone()).collect()
+    }
+
+    pub fn has_interlock(&self, id: &str) -> bool {
+        self.interlocks.iter().any(|i| i.id == id)
     }
 
     pub fn interlock_ok(&self, id: &str) -> bool {
