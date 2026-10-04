@@ -186,6 +186,8 @@ struct Wire {
     frames: u64,
     /// The last cue signal (only for an "artnet" output, T-301).
     signal: Option<crate::output::CueSignal>,
+    /// Set by a test: the output reports this fault (unplugged, T-277).
+    fault: Option<String>,
 }
 
 /// The recording output, with an optional frame size limit (like a Helios
@@ -213,6 +215,9 @@ impl Output for Recorder {
     }
     fn cue_signal(&mut self, signal: &crate::output::CueSignal) {
         self.0.lock().unwrap().signal = Some(signal.clone());
+    }
+    fn fault(&self) -> Option<String> {
+        self.0.lock().unwrap().fault.clone()
     }
 }
 
@@ -2062,4 +2067,306 @@ fn a_cue_list_fade_from_black_never_shows_intermediate_geometry() {
     let s = rig.s();
     assert_eq!((s.cue_list.index, s.cue_list.paused), (Some(1), true));
     assert!(!s.gate.is_armed());
+}
+
+// ---------- several projectors (T-277) ----------
+
+/// A venue with `n` more projectors (`p2`…), each driving the recording
+/// output `rec2`…, installed through the output manager's hand-over (the
+/// engine's real path). Returns their wires.
+fn add_projectors(rig: &mut Rig, n: usize, max_points: Option<usize>) -> Vec<(String, Arc<Mutex<Wire>>)> {
+    let mut venue = rig.s().venue.get().clone();
+    for i in 0..n {
+        venue.projectors.push(crate::venue::Projector { id: format!("p{}", i + 2), name: format!("P{}", i + 2), output: Some(format!("rec{}", i + 2)), ..Default::default() });
+    }
+    {
+        let mut s = rig.s();
+        s.venue.set(venue).expect("valid venue");
+        for i in 0..n {
+            s.outputs.ensure(&format!("p{}", i + 2)).unwrap();
+        }
+        s.sync_projectors();
+    }
+    (0..n)
+        .map(|i| {
+            let (id, out) = (format!("p{}", i + 2), format!("rec{}", i + 2));
+            let wire = Arc::new(Mutex::new(Wire::default()));
+            rig.s().output_mgr.inject_projector(&id, &out, Box::new(Recorder(Arc::clone(&wire), max_points)));
+            (id, wire)
+        })
+        .collect()
+}
+
+/// A lit square, armed from the UI, with no page needed.
+fn armed_square_rig(tag: &str) -> Rig {
+    let mut s = test_support::shared();
+    s.settings = Settings { content: crate::engine::Content::Shape { shape: "square".into() }, scale: 0.8, rotation_speed: 0.0, ..Settings::default() };
+    Rig::new(s, tag, 0)
+}
+
+fn lit(w: &Mutex<Wire>) -> usize {
+    w.lock().unwrap().last.iter().filter(|p| p.is_lit()).count()
+}
+
+/// Invariants 1 to 3, 5, 8 and 9 for every projector of a random venue:
+/// each output is sent light only while the one gate is armed, the e-stop
+/// is not latched and its stage is armed; each frame stays within that
+/// projector's own caps, out of the Blank zones, under the horizon rule
+/// and the Public zones' rule; arming waits for every projector's output;
+/// an e-stop darkens every projector in the frame it lands; losing any
+/// projector's output disarms them all, and it comes back disarmed.
+fn run_multi_case(seed: u64, cov: &mut [usize; 3]) -> Result<(), String> {
+    let mut rng = Rng::new(seed);
+    let (s, hold_to_run) = random_case(&mut rng);
+    let max_points = seed.is_multiple_of(4).then(|| 16 + (seed as usize).wrapping_mul(7919) % 600);
+    let mut rig = Rig::with_max_points(s, "multi", seed, max_points);
+    let n = 1 + rng.below(3);
+    let wires = add_projectors(&mut rig, n, max_points);
+    let ids: Vec<String> = wires.iter().map(|(id, _)| id.clone()).collect();
+    {
+        let mut s = rig.s();
+        if s.request_arm(ArmSource::Ui).is_ok() {
+            return Err("armed before the projectors' outputs were installed".into());
+        }
+        for id in &ids {
+            let _ = s.outputs.set(id, Some(random_limits(&mut rng)), None, false, true);
+            if rng.chance(0.6) {
+                let _ = s.outputs.set_color(id, random_color(&mut rng), false, true);
+            }
+        }
+        // Projection zones bound to nothing, a projector or an output.
+        if rng.chance(0.8) {
+            let mut cfg = random_projection(&mut rng);
+            for z in &mut cfg.zones {
+                z.output = match rng.below(4) {
+                    0 => None,
+                    1 => Some(MAIN_OUTPUT.into()),
+                    2 => Some(rng.pick(&ids).clone()),
+                    _ => Some(format!("rec{}", 2 + rng.below(n))),
+                };
+            }
+            let _ = s.projection.set(cfg);
+        }
+        if rng.chance(0.5) {
+            mark_public(&mut s, &mut rng);
+        }
+    }
+    rig.tick();
+    if !rig.s().gate.interlock_ok(interlock::PROJECTORS) {
+        return Err(format!("the projectors interlock stays open with every output installed: {:?}", rig.s().gate.blocking()));
+    }
+    let mut beats = 0;
+    // A projector whose output is unplugged, and since which frame.
+    let mut unplugged: Option<(usize, usize)> = None;
+    for frame in 0..40 {
+        for _ in 0..rng.below(3) {
+            let was = rig.s().gate.is_armed();
+            let explicit = random_action(&mut rig, &mut rng, &mut beats);
+            if rig.s().gate.is_armed() && !was && !explicit {
+                return Err(format!("frame {frame}: armed by a non-arming action"));
+            }
+        }
+        if rng.chance(0.05) {
+            // Another projector's caps, as `POST /api/outputs/limits` would.
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            let id = rng.pick(&ids).clone();
+            let _ = s.outputs.set(&id, Some(random_limits(&mut rng)), None, armed, true);
+        }
+        // Unplug one projector's output now and then, plug it back later.
+        match unplugged {
+            None if rng.chance(0.04) => {
+                let i = rng.below(n);
+                wires[i].1.lock().unwrap().fault = Some("débranché".into());
+                unplugged = Some((i, frame));
+            }
+            Some((i, since)) if frame > since + 3 && rng.chance(0.3) => {
+                let (id, w) = &wires[i];
+                w.lock().unwrap().fault = None;
+                rig.s().output_mgr.inject_projector(id, &format!("rec{}", i + 2), Box::new(Recorder(Arc::clone(w), max_points)));
+                unplugged = None;
+            }
+            _ => {}
+        }
+        let unplug_now = unplugged.is_some_and(|(_, since)| since == frame);
+        let trip = rng.chance(0.03);
+        if trip {
+            rig.s().emergency_stop(ArmSource::Keyboard);
+        }
+        let (may_emit, held, caps, cfg, scanning) = {
+            let s = rig.s();
+            let caps: Vec<OutputLimits> = std::iter::once(s.outputs.active_limits()).chain(ids.iter().map(|id| s.outputs.config_for(id).limits)).collect();
+            (s.gate.is_armed() && !s.estop.is_latched(), s.presence.status().midi_hold, caps, s.safety.get(), s.audience.is_scanning())
+        };
+        let armed_before = rig.s().gate.is_armed();
+        rig.tick();
+        if rig.s().gate.is_armed() && !armed_before {
+            return Err(format!("frame {frame}: the engine frame armed the laser"));
+        }
+        if unplug_now && rig.s().gate.is_armed() {
+            return Err(format!("frame {frame}: a projector's output was lost and the laser stays armed"));
+        }
+        if unplugged.is_some() && rig.s().gate.interlock_ok(interlock::PROJECTORS) {
+            return Err(format!("frame {frame}: a projector has no output and arming is allowed"));
+        }
+        let all: Vec<&Arc<Mutex<Wire>>> = std::iter::once(&rig.wire).chain(wires.iter().map(|(_, w)| w)).collect();
+        for (k, w) in all.iter().enumerate() {
+            let w = w.lock().unwrap();
+            let what = format!("frame {frame}, projector {k}");
+            let lit = w.last.iter().filter(|p| p.is_lit()).count();
+            if lit > 0 && !may_emit {
+                return Err(format!("{what}: {lit} lit points sent while disarmed or e-stopped"));
+            }
+            if lit > 0 && trip {
+                return Err(format!("{what}: {lit} lit points in the frame the e-stop landed"));
+            }
+            if lit > 0 && !w.armed {
+                return Err(format!("{what}: {lit} lit points sent to a disarmed output"));
+            }
+            if lit > 0 && hold_to_run && !held {
+                return Err(format!("{what}: {lit} lit points with hold-to-run not held"));
+            }
+            check_points(&w.last, &caps[k], &cfg, &format!("{what}, sent"))?;
+            check_public(&w.last, &caps[k], &cfg, scanning, &format!("{what}, sent"))?;
+            if let Some(max) = max_points.filter(|&m| w.last.len() > m) {
+                return Err(format!("{what}: {} points sent to an output that takes {max}", w.last.len()));
+            }
+            cov[0] += (k > 0 && lit > 0) as usize;
+        }
+        let s = rig.s();
+        for (k, f) in s.projector_frames.iter().enumerate() {
+            check_points(&f.points, &caps[k + 1], &cfg, &format!("frame {frame}, projector {}, preview", k + 1))?;
+        }
+        if s.projector_frames.len() != n {
+            return Err(format!("frame {frame}: {} projector frames for {n} projectors", s.projector_frames.len()));
+        }
+        cov[1] += unplug_now as usize;
+        cov[2] += 1;
+    }
+    Ok(())
+}
+
+#[test]
+fn every_projector_keeps_every_output_invariant() {
+    let name = "every_projector_keeps_every_output_invariant";
+    let mut cov = [0usize; 3];
+    let seeds = seeds(277, 300);
+    let _guard = property_guard(name, seeds.len(), 300);
+    for &seed in &seeds {
+        if let Err(e) = run_multi_case(seed, &mut cov) {
+            panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+        }
+    }
+    if seeds.len() >= 100 {
+        let [lit, unplugs, frames] = cov;
+        assert!(lit * 20 > frames, "only {lit} lit frames sent to the other projectors in {frames}");
+        assert!(unplugs > seeds.len() / 10, "only {unplugs} unplugged outputs in {} cases", seeds.len());
+    }
+}
+
+#[test]
+fn a_preview_projector_leaves_the_main_output_exactly_as_it_was() {
+    // Same session twice, once with a second (preview-only) projector:
+    // every frame the main output is sent is the same, bit for bit.
+    let run = |extra: bool| -> Vec<Vec<Point>> {
+        let mut rng = Rng::new(42);
+        let mut s = test_support::shared();
+        s.safety.set(random_safety(&mut rng), true).unwrap();
+        s.outputs.set(MAIN_OUTPUT, Some(random_limits(&mut rng)), None, false, true).unwrap();
+        s.calibration = random_calibration(&mut rng);
+        if extra {
+            let mut venue = s.venue.get().clone();
+            venue.projectors.push(crate::venue::Projector { id: "p2".into(), ..Default::default() });
+            s.venue.set(venue).unwrap();
+        }
+        let mut rig = Rig::new(s, if extra { "golden-2" } else { "golden-1" }, 42);
+        rig.s().request_arm(ArmSource::Ui).unwrap();
+        let mut beats = 0;
+        let mut sent = Vec::new();
+        for _ in 0..90 {
+            if rng.chance(0.3) {
+                random_action(&mut rig, &mut rng, &mut beats);
+            }
+            rig.tick();
+            sent.push(rig.wire.lock().unwrap().last.clone());
+        }
+        sent
+    };
+    let (one, two) = (run(false), run(true));
+    assert!(one.iter().any(|f| f.iter().any(|p| p.is_lit())), "the session sent light");
+    assert_eq!(one, two);
+}
+
+#[test]
+fn each_projector_draws_only_its_zones_through_its_own_caps() {
+    let mut rig = armed_square_rig("multi-zones");
+    let wires = add_projectors(&mut rig, 2, None);
+    {
+        let mut s = rig.s();
+        // Zone 1 (left) on the main projector, zone 2 (right) on p2, nothing for p3.
+        let zone = |id: u8, x: f32, output: &str| ProjectionZone {
+            id,
+            name: format!("Z{id}"),
+            output: Some(output.into()),
+            geometry: Geometry { size_x: 0.4, size_y: 0.4, pos_x: x, ..Default::default() },
+            ..Default::default()
+        };
+        s.projection.set(ProjectionConfig { zones: vec![zone(1, -0.5, MAIN_OUTPUT), zone(2, 0.5, "p2")], default_zones: vec![1, 2] }).unwrap();
+        s.outputs.set("p2", Some(OutputLimits { max_power: 0.2, max_color: [1.0, 1.0, 1.0] }), None, false, false).unwrap();
+    }
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    for _ in 0..3 {
+        rig.tick();
+    }
+    let main = rig.wire.lock().unwrap().last.clone();
+    let p2 = wires[0].1.lock().unwrap().last.clone();
+    assert!(main.iter().any(|p| p.is_lit()) && main.iter().filter(|p| p.is_lit()).all(|p| p.x < 0.0), "main: only the left zone");
+    assert!(p2.iter().any(|p| p.is_lit()) && p2.iter().filter(|p| p.is_lit()).all(|p| p.x > 0.0), "p2: only the right zone");
+    assert!(p2.iter().all(|p| p.r.max(p.g).max(p.b) <= 0.2 + 1e-6), "p2's own cap");
+    assert_eq!(lit(&wires[1].1), 0, "p3 has no zone");
+    let frames = rig.s().projector_frames.clone();
+    assert_eq!(frames.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["p2", "p3"]);
+    assert!(frames[0].lit > 0 && frames[1].lit == 0);
+}
+
+#[test]
+fn the_estop_darkens_every_projector_and_a_lost_one_disarms_all() {
+    let mut rig = armed_square_rig("multi-stop");
+    let wires = add_projectors(&mut rig, 2, None);
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    rig.tick();
+    assert!(lit(&rig.wire) > 0 && wires.iter().all(|(_, w)| lit(w) > 0), "every projector lit while armed");
+    // Escape: every projector dark in the very next frame, every stage disarmed.
+    rig.s().emergency_stop(ArmSource::Keyboard);
+    rig.tick();
+    assert_eq!(lit(&rig.wire), 0);
+    assert!(wires.iter().all(|(_, w)| lit(w) == 0 && !w.lock().unwrap().armed));
+    {
+        let mut s = rig.s();
+        let estop = Arc::clone(&s.estop);
+        s.gate.reset_estop(&estop);
+        s.request_arm(ArmSource::Ui).unwrap();
+    }
+    rig.tick();
+    assert!(wires.iter().all(|(_, w)| lit(w) > 0), "re-armed by the operator");
+    // p3's output is lost: all disarmed, arming refused until it is back.
+    wires[1].1.lock().unwrap().fault = Some("câble".into());
+    rig.tick();
+    assert!(!rig.s().gate.is_armed());
+    assert!(rig.s().request_arm(ArmSource::Ui).is_err(), "a projector without its output blocks arming");
+    rig.tick();
+    assert_eq!(lit(&rig.wire), 0);
+    assert_eq!(lit(&wires[0].1), 0);
+    let lost = rig.s().gate.last_disarm().map(|(r, _)| r.clone());
+    assert_eq!(lost, Some(interlock::DisarmReason::OutputLost));
+    // Back: installed disarmed, the operator re-arms.
+    wires[1].1.lock().unwrap().fault = None;
+    rig.s().output_mgr.inject_projector("p3", "rec3", Box::new(Recorder(Arc::clone(&wires[1].1), None)));
+    rig.tick();
+    assert!(!rig.s().gate.is_armed() && lit(&wires[1].1) == 0, "it comes back disarmed");
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    rig.tick();
+    assert!(lit(&wires[1].1) > 0);
 }

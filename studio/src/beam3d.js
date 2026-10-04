@@ -12,7 +12,8 @@
 // World: metres, y up. The room is a box x ∈ [-w/2, w/2], y ∈ [0, h],
 // z ∈ [0, d]; the stage is at the far end (z = d), the audience towards
 // z = 0. The default projector sits at the stage edge, 3 m high, facing
-// the audience (-z).
+// the audience (-z). A venue (T-277) places several projectors, each with
+// its own frame; `mirrorX` and `brightness` only change this drawing.
 
 export const DEFAULT_ROOM = { w: 10, d: 15, h: 5 };
 export const DEFAULT_PROJECTOR = { pos: [0, 3, 11], yaw: 0, pitch: 0, roll: 0, scanDeg: 40 };
@@ -80,36 +81,46 @@ export function beamAlpha(n, exposure = 1) {
 
 export const isLit = p => p[2] + p[3] + p[4] > 0;
 
+/** `a`, or a bigger copy of it holding at least `need` floats (`unit` per item). */
+function grow(a, need, unit) {
+  if (a && a.length >= need) return a;
+  const b = new Float32Array(Math.max(1024 * unit, need * 2));
+  if (a) b.set(a);
+  return b;
+}
+
 /**
  * Fills `geo.beam` (one instance per lit point) and `geo.sheet` (one thin
  * triangle projector → hit i → hit i+1 per pair of consecutive lit points)
- * from a frame. Buffers are reused and only grow. Returns the counts.
+ * from a frame, from item `at.beams` / `at.sheets` on (several projectors
+ * share the buffers). Buffers are reused and only grow. Returns the counts.
  */
-export function buildGeometry(points, projector, room, geo, withSheets = true) {
+export function buildGeometry(points, projector, room, geo, withSheets = true, at = { beams: 0, sheets: 0 }) {
   const n = points.length;
-  if (!geo.beam || geo.beam.length < n * BEAM_STRIDE) geo.beam = new Float32Array(Math.max(1024, n * 2) * BEAM_STRIDE);
-  if (withSheets && (!geo.sheet || geo.sheet.length < n * 3 * SHEET_STRIDE)) geo.sheet = new Float32Array(Math.max(1024, n * 2) * 3 * SHEET_STRIDE);
-  const basis = projectorBasis(projector), o = projector.pos, w = beamAlpha(n);
+  geo.beam = grow(geo.beam, (at.beams + n) * BEAM_STRIDE, BEAM_STRIDE);
+  if (withSheets) geo.sheet = grow(geo.sheet, (at.sheets + n) * 3 * SHEET_STRIDE, 3 * SHEET_STRIDE);
+  const basis = projectorBasis(projector), o = projector.pos, w = beamAlpha(n) * (projector.brightness ?? 1);
+  const mx = projector.mirrorX ? -1 : 1;
   const dir = [0, 0, 0];
   let beams = 0, sheets = 0, prev = -1; // prev = beam index of the previous point if it was lit
   for (let i = 0; i < n; i++) {
     const p = points[i];
     if (!isLit(p)) { prev = -1; continue; }
-    pointToDir(p[0], p[1], projector, dir, basis);
+    pointToDir(mx * p[0], p[1], projector, dir, basis);
     const t = rayBox(o, dir, room).t;
-    const b = geo.beam, k = beams * BEAM_STRIDE;
+    const b = geo.beam, k = (at.beams + beams) * BEAM_STRIDE;
     b[k] = o[0] + dir[0] * t; b[k + 1] = o[1] + dir[1] * t; b[k + 2] = o[2] + dir[2] * t;
     b[k + 3] = p[2]; b[k + 4] = p[3]; b[k + 5] = p[4]; b[k + 6] = w;
     if (withSheets && prev >= 0) {
       const s = geo.sheet, j = prev * BEAM_STRIDE;
-      const m = sheets * 3 * SHEET_STRIDE;
+      const m = (at.sheets + sheets) * 3 * SHEET_STRIDE;
       s[m] = o[0]; s[m + 1] = o[1]; s[m + 2] = o[2];
       s[m + 7] = b[j]; s[m + 8] = b[j + 1]; s[m + 9] = b[j + 2];
       s[m + 14] = b[k]; s[m + 15] = b[k + 1]; s[m + 16] = b[k + 2];
       for (let v = m + 3; v < m + 3 * SHEET_STRIDE; v += SHEET_STRIDE) { s[v] = p[2]; s[v + 1] = p[3]; s[v + 2] = p[4]; s[v + 3] = w; }
       sheets++;
     }
-    prev = beams++;
+    prev = at.beams + beams++;
   }
   return { beams, sheets };
 }
@@ -275,11 +286,15 @@ export class BeamView {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, premultipliedAlpha: false });
     if (!gl) throw new Error('WebGL2 unavailable');
     this.canvas = canvas; this.gl = gl;
-    this.room = { ...room }; this.projector = { ...projector, pos: [...projector.pos] };
+    this.room = { ...room };
+    // The venue's projectors (T-277), each with its frame; the first is
+    // the main one, fed by setFrame. `selected` is drawn highlighted.
+    this.projectors = [{ ...projector, pos: [...projector.pos] }];
+    this.frames = [[]]; this.selected = -1; this.parts = [];
     this.render = { ...render };
     this.auto = new AutoQuality();
     this.geo = {}; this.counts = { beams: 0, sheets: 0 };
-    this.points = []; this.dirty = false;
+    this.dirty = false;
     this.running = false; this.raf = 0; this.lastT = 0;
     this.stats = { frameMs: 0, drawMs: 0, buildMs: 0 };
     // Float targets so thousands of faint samples (1/N each) add up instead
@@ -338,7 +353,11 @@ export class BeamView {
     this.buildRoom();
   }
 
-  /** Floor (filled), floor grid, box edges and a projector marker. */
+  /** The main projector. */
+  get projector() { return this.projectors[0]; }
+  get points() { return this.frames[0]; }
+
+  /** Floor (filled), floor grid, box edges and a marker per projector. */
   buildRoom() {
     const { w, d, h } = this.room, x0 = -w / 2, x1 = w / 2, v = [];
     const vert = (p, c, min) => v.push(p[0], p[1], p[2], c, c, c * 1.1, min);
@@ -351,10 +370,12 @@ export class BeamView {
     for (let z = 0; z <= d; z++) line([x0, 0, z], [x1, 0, z], 0.35);
     const c = [[x0, 0, 0], [x1, 0, 0], [x1, 0, d], [x0, 0, d], [x0, h, 0], [x1, h, 0], [x1, h, d], [x0, h, d]];
     for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) line(c[a], c[b], 0.9, 0.03);
-    // projector: a small box, always visible
-    const [px, py, pz] = this.projector.pos, s = 0.15;
-    const q = [[-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s], [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s]].map(o => [px + o[0], py + o[1], pz + o[2]]);
-    for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) line(q[a], q[b], 0.6, 0.6);
+    // projectors: a small box each, always visible; the selected one bigger and brighter
+    this.projectors.forEach((p, i) => {
+      const [px, py, pz] = p.pos, sel = i === this.selected, s = sel ? 0.3 : 0.15, c = sel ? 1.0 : 0.6;
+      const q = [[-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s], [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s]].map(o => [px + o[0], py + o[1], pz + o[2]]);
+      for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) line(q[a], q[b], c, c);
+    });
     this.roomLines = v.length / 7 - this.roomTris;
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.roomBuf);
@@ -364,7 +385,28 @@ export class BeamView {
   // ----- data in -----
 
   /** A new frame: [x, y, r, g, b] points, as the frame endpoint sends them. */
-  setFrame(points) { this.points = points; this.dirty = true; }
+  setFrame(points) { this.frames[0] = points; this.dirty = true; }
+
+  /** Projector `i`'s frame (T-277: the page hands each projector's points). */
+  setProjectorFrame(i, points) {
+    if (i < 0 || i >= this.projectors.length) return;
+    this.frames[i] = points; this.dirty = true;
+  }
+
+  /**
+   * The venue (T-277): its room {w, d, h} and projectors [{pos, yaw, pitch,
+   * roll, scanDeg, mirrorX, brightness}]; `selected` (an index, -1 = none)
+   * is highlighted. Frames of projectors that stay keep showing.
+   */
+  setVenue({ room, projectors, selected = -1 } = {}) {
+    if (room) this.room = { ...room };
+    if (projectors && projectors.length) {
+      this.projectors = projectors.map(p => ({ ...DEFAULT_PROJECTOR, ...p, pos: [...(p.pos || DEFAULT_PROJECTOR.pos)] }));
+      this.frames = this.projectors.map((_, i) => this.frames[i] || []);
+    }
+    this.selected = selected;
+    this.buildRoom(); this.dirty = true;
+  }
 
   setRender(patch) {
     const sheetsBefore = this.features().sheets;
@@ -378,8 +420,15 @@ export class BeamView {
 
   upload() {
     const t0 = performance.now(), gl = this.gl, f = this.features();
-    this.counts = buildGeometry(this.points, this.projector, this.room, this.geo, f.sheets);
-    if (!f.sheets) this.counts.sheets = 0;
+    // Every projector into the same buffers, the main one first.
+    const at = { beams: 0, sheets: 0 };
+    this.parts = this.projectors.map((p, i) => {
+      const c = buildGeometry(this.frames[i] || [], p, this.room, this.geo, f.sheets, at);
+      const part = { origin: p.pos, beamStart: at.beams, beams: c.beams, sheetStart: at.sheets, sheets: f.sheets ? c.sheets : 0 };
+      at.beams += c.beams; at.sheets += part.sheets;
+      return part;
+    });
+    this.counts = { beams: at.beams, sheets: at.sheets };
     gl.bindBuffer(gl.ARRAY_BUFFER, this.beamBuf);
     gl.bufferData(gl.ARRAY_BUFFER, this.geo.beam.subarray(0, Math.max(1, this.counts.beams) * BEAM_STRIDE), gl.DYNAMIC_DRAW);
     if (this.counts.sheets) {
@@ -511,19 +560,33 @@ export class BeamView {
 
     const hazeGain = r.exposure * r.haze, sigma = 0.04 * r.haze, noise = f.noise ? 1 : 0;
     const setHaze = (P, gain) => {
-      gl.uniformMatrix4fv(P.u.uViewProj, false, vp); gl.uniform3fv(P.u.uOrigin, this.projector.pos);
+      gl.uniformMatrix4fv(P.u.uViewProj, false, vp);
       gl.uniform1f(P.u.uGain, gain); gl.uniform1f(P.u.uSigma, sigma); gl.uniform1f(P.u.uNoise, noise); gl.uniform1f(P.u.uTime, timeS);
     };
+    // One draw per projector: the haze is lit from its own origin.
     if (hazeGain > 0 && this.counts.sheets) {
       P = this.progs.sheet; gl.useProgram(P.p); setHaze(P, hazeGain * SHEET_GAIN);
       gl.bindVertexArray(this.sheetVao);
-      gl.drawArrays(gl.TRIANGLES, 0, this.counts.sheets * 3);
+      for (const part of this.parts) {
+        if (!part.sheets) continue;
+        gl.uniform3fv(P.u.uOrigin, part.origin);
+        gl.drawArrays(gl.TRIANGLES, part.sheetStart * 3, part.sheets * 3);
+      }
     }
     if (hazeGain > 0 && this.counts.beams) {
       P = this.progs.beam; gl.useProgram(P.p); setHaze(P, hazeGain * BEAM_GAIN);
       gl.uniform2f(P.u.uViewport, S.w, S.h); gl.uniform1f(P.u.uWidth, BEAM_WIDTH_PX * Math.max(0.75, f.scale));
       gl.bindVertexArray(this.beamVao);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.counts.beams);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.beamBuf);
+      for (const part of this.parts) {
+        if (!part.beams) continue;
+        // Instances start at the projector's first beam (no base instance in WebGL2).
+        const o = part.beamStart * BEAM_STRIDE * 4;
+        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, BEAM_STRIDE * 4, o);
+        gl.vertexAttribPointer(2, 4, gl.FLOAT, false, BEAM_STRIDE * 4, o + 12);
+        gl.uniform3fv(P.u.uOrigin, part.origin);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, part.beams);
+      }
     }
     if (r.spots && this.counts.beams) {
       P = this.progs.spot; gl.useProgram(P.p);

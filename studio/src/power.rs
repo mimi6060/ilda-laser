@@ -38,7 +38,8 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The one output the studio drives today (T-277 adds more).
+/// The main projector's output; a venue's other projectors (venue.rs,
+/// T-277) have entries under their own ids (`p2`, `p3`…).
 pub const MAIN_OUTPUT: &str = "main";
 
 /// The IEC 60825-1 classes the sheet accepts ("" = not filled in).
@@ -426,6 +427,29 @@ impl OutputStore {
         prefs
     }
 
+    /// A venue projector's entry (T-277), keyed by its projector id, or
+    /// the defaults (the cautious caps) while it has none.
+    pub fn config_for(&self, id: &str) -> OutputConfig {
+        self.get(id).cloned().unwrap_or_else(|| OutputConfig { id: id.into(), ..OutputConfig::default() })
+    }
+
+    /// Adds a venue projector's entry with the cautious defaults (T-277),
+    /// so its caps and colour can be set like the main output's. An
+    /// existing entry is kept as it is.
+    pub fn ensure(&mut self, id: &str) -> Result<()> {
+        if id.is_empty() || self.get(id).is_some() {
+            return Ok(());
+        }
+        let mut file = self.file.clone();
+        file.outputs.push(OutputConfig { id: id.into(), ..OutputConfig::default() });
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&file)?;
+            crate::datafile::replace(path, json.as_bytes()).map_err(|e| anyhow::anyhow!("enregistrement impossible de {} : {e:#}", path.display()))?;
+        }
+        self.file = file;
+        Ok(())
+    }
+
     /// Saves the connection part of `outputs.json`, keeping the caps.
     pub fn set_connection(&mut self, prefs: crate::output_manager::OutputPrefs) -> Result<()> {
         if self.file.connection == prefs {
@@ -553,6 +577,18 @@ mod tests {
                 assert!(v <= l.ceiling(c) + 1e-6, "{what}: channel {c} = {v} > {} ({l:?})", l.ceiling(c));
             }
         }
+    }
+
+    #[test]
+    fn a_venue_projector_starts_with_the_cautious_caps() {
+        let mut store = OutputStore::in_memory();
+        assert_eq!(store.config_for("p2").limits, OutputLimits::default(), "no entry yet: the defaults");
+        store.ensure("p2").unwrap();
+        store.set("p2", Some(OutputLimits { max_power: 0.1, ..Default::default() }), None, false, false).unwrap();
+        store.ensure("p2").unwrap();
+        assert_eq!(store.config_for("p2").limits.max_power, 0.1, "ensure keeps an existing entry");
+        assert_eq!(store.active().id, MAIN_OUTPUT, "the main output stays the active one");
+        assert!(OutputLimits::default().max_power <= 0.5);
     }
 
     #[test]

@@ -115,6 +115,9 @@ pub fn shared() -> Shared {
         output_mgr,
         wifi: std::sync::Arc::new(crate::wifi::WifiWatch::new(true)),
         push: Default::default(),
+        venue: crate::venue::VenueStore::in_memory(),
+        projector_outputs: Default::default(),
+        projector_frames: Vec::new(),
     }
 }
 

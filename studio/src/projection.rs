@@ -277,8 +277,10 @@ pub struct ProjectionZone {
     pub name: String,
     /// Off: nothing is drawn in it.
     pub enabled: bool,
-    /// The output (output_manager id) it belongs to; None: whatever output
-    /// is connected. While nothing is connected (preview) every zone shows.
+    /// The output (output_manager id) it belongs to, or a venue
+    /// projector's id (T-277); None: whatever output is connected (every
+    /// projector). While nothing is connected (preview) every zone shows,
+    /// except one bound to another projector (`ProjectionConfig::active_on`).
     pub output: Option<String>,
     pub geometry: Geometry,
 }
@@ -373,6 +375,26 @@ impl ProjectionConfig {
             .collect()
     }
 
+    /// The zones drawn on one projector of a venue with several (T-277):
+    /// `projector` its id, `output` the output it drives, `others` every
+    /// other projector's (id, output). A zone bound to nothing shows on
+    /// every projector; bound to this projector (its id) or to its output,
+    /// here; bound to another projector or its output, not here; bound to
+    /// an output no projector drives, as on a single output (shown only
+    /// while this projector has no output).
+    pub fn active_on(&self, projector: &str, output: Option<&str>, others: &[(&str, Option<&str>)]) -> Vec<&ProjectionZone> {
+        self.zones
+            .iter()
+            .filter(|z| z.enabled)
+            .filter(|z| match z.output.as_deref() {
+                None => true,
+                Some(want) if want == projector || Some(want) == output => true,
+                Some(want) if others.iter().any(|(id, out)| *id == want || *out == Some(want)) => false,
+                Some(_) => output.is_none(),
+            })
+            .collect()
+    }
+
     /// A cue's zones: its own, else the default ones.
     pub fn resolve<'a>(&'a self, zones: &'a [u8]) -> &'a [u8] {
         if zones.is_empty() {
@@ -450,8 +472,20 @@ pub fn render(
     finish: impl Fn(u8, &[Point]) -> Vec<Point>,
     calibration: &Calibration,
 ) -> (Vec<Point>, MixReport) {
-    let zones: Vec<(&ProjectionZone, Vec<Layered>)> = cfg
-        .active(output)
+    render_zones(&rendered, cfg, cfg.active(output), mixer, finish, calibration)
+}
+
+/// `render` on a given list of zones: one projector of a venue (T-277)
+/// draws the zones `ProjectionConfig::active_on` gives it.
+pub fn render_zones(
+    rendered: &[Routed],
+    cfg: &ProjectionConfig,
+    active: Vec<&ProjectionZone>,
+    mixer: &Mixer,
+    finish: impl Fn(u8, &[Point]) -> Vec<Point>,
+    calibration: &Calibration,
+) -> (Vec<Point>, MixReport) {
+    let zones: Vec<(&ProjectionZone, Vec<Layered>)> = active
         .into_iter()
         .map(|z| {
             let looks = rendered.iter().filter(|(_, _, on)| cfg.resolve(on).contains(&z.id)).map(|(l, p, _)| (*l, p.clone())).collect::<Vec<_>>();
@@ -462,7 +496,7 @@ pub fn render(
     let mut report = MixReport { budget: mixer.point_budget.max(1), ..Default::default() };
     if zones.is_empty() {
         // Nothing routed to a drawn zone: still count what the layers made.
-        for (l, p, _) in &rendered {
+        for (l, p, _) in rendered {
             report.per_layer[((*l).clamp(1, LAYER_COUNT as u8) - 1) as usize] += p.len();
         }
         return (Vec::new(), report);
@@ -728,5 +762,23 @@ mod tests {
             .collect();
         assert_eq!(frame, want);
         assert_eq!(report, want_report);
+    }
+
+    #[test]
+    fn each_projector_draws_its_own_zones_and_the_unbound_ones() {
+        let zone = |id: u8, output: Option<&str>| ProjectionZone { id, name: format!("Z{id}"), output: output.map(str::to_string), ..Default::default() };
+        let cfg = ProjectionConfig { zones: vec![zone(1, None), zone(2, Some("p2")), zone(3, Some("dac-b")), zone(4, Some("main")), zone(5, Some("ailleurs"))], default_zones: vec![1] };
+        let ids = |v: Vec<&ProjectionZone>| v.iter().map(|z| z.id).collect::<Vec<_>>();
+        // main drives dac-a, p2 drives dac-b.
+        assert_eq!(ids(cfg.active_on("main", Some("dac-a"), &[("p2", Some("dac-b"))])), [1, 4]);
+        assert_eq!(ids(cfg.active_on("p2", Some("dac-b"), &[("main", Some("dac-a"))])), [1, 2, 3]);
+        // Preview (no outputs): a zone bound to an unknown output shows, as today.
+        assert_eq!(ids(cfg.active_on("main", None, &[("p2", None)])), [1, 3, 4, 5]);
+        // One projector: exactly the single-output rule, whatever the zone says.
+        for out in [None, Some("dac-a"), Some("dac-b"), Some("ailleurs")] {
+            let single = ids(cfg.active(out));
+            let on = ids(cfg.active_on("main", out, &[]));
+            assert_eq!(on.iter().filter(|id| **id != 4).collect::<Vec<_>>(), single.iter().filter(|id| **id != 4).collect::<Vec<_>>(), "output {out:?}");
+        }
     }
 }

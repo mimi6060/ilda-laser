@@ -1017,6 +1017,23 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/venue") => json_response(venue_view(&shared.lock().unwrap())),
+        (Method::Post, "/api/venue") => match body::<crate::venue::Venue>(request) {
+            Ok(venue) => set_venue(venue, shared),
+            Err(e) => e,
+        },
+        // A room preset: the room is resized, the projectors stay.
+        (Method::Post, "/api/venue/preset") => match body::<NameRequest>(request) {
+            Ok(req) => {
+                let mut venue = shared.lock().unwrap().venue.get().clone();
+                if !venue.apply_preset(&req.name) {
+                    return text(400, &format!("Préréglage inconnu : « {} »", req.name));
+                }
+                set_venue(venue, shared)
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/frames") => frames(shared),
         (Method::Get, "/api/projection") => json_response(projection_view(&shared.lock().unwrap())),
         (Method::Post, "/api/projection") => match body::<crate::projection::ProjectionConfig>(request) {
             Ok(cfg) => {
@@ -2599,6 +2616,11 @@ fn select_output(req: &serde_json::Value, shared: &Arc<Mutex<Shared>>) -> HttpRe
         if !mgr.knows(id) {
             return text(400, &format!("Sortie inconnue : « {id} » (lancez une recherche)"));
         }
+        // An output drives one projector only (T-277).
+        let venue = s.venue.get();
+        if let Some(p) = venue.extras().find(|p| p.output.as_deref() == Some(id.as_str())) {
+            return text(409, &format!("La sortie « {id} » est celle du projecteur « {} » (RÉGLAGES › Lieu et projecteurs)", p.name));
+        }
     }
     s.gate.disarm(DisarmReason::OutputChanged, source);
     s.gate.set_output_ready(false);
@@ -2608,6 +2630,117 @@ fn select_output(req: &serde_json::Value, shared: &Arc<Mutex<Shared>>) -> HttpRe
         log::warn!("{e:#}");
     }
     json_response(mgr.view(Instant::now()))
+}
+
+/// `GET /api/venue` (T-277): the venue, the presets, and each projector's
+/// output as the engine has it.
+fn venue_view(s: &Shared) -> serde_json::Value {
+    let venue = s.venue.get();
+    let links = s.output_mgr.projector_links();
+    let projectors: Vec<serde_json::Value> = venue
+        .projectors
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if i == 0 {
+                return json!({ "id": p.id, "main": true, "output": s.output_mgr.selected(), "output_name": s.output_name, "output_kind": s.output_kind, "state": s.output_mgr.state() });
+            }
+            let link = links.iter().find(|l| l.projector == p.id);
+            let installed = s.projector_outputs.get(&p.id);
+            json!({
+                "id": p.id,
+                "main": false,
+                "output": p.output,
+                "output_name": installed.map(|o| o.name.clone()),
+                "output_kind": installed.map(|o| o.kind),
+                "state": link.map(|l| l.state),
+                "error": link.and_then(|l| l.error.clone()),
+            })
+        })
+        .collect();
+    json!({
+        "venue": venue,
+        "presets": crate::venue::PRESETS.iter().map(|(id, label, w, d, h, ceiling)| json!({ "id": id, "label_fr": label, "width_m": w, "depth_m": d, "height_m": h, "ceiling": ceiling })).collect::<Vec<_>>(),
+        "max_projectors": crate::venue::MAX_PROJECTORS,
+        "links": projectors,
+        "armed": s.gate.is_armed(),
+    })
+}
+
+/// `POST /api/venue` (T-277). Geometry changes apply armed or not (the
+/// venue only feeds the 3D view); changing which output a projector
+/// drives (adding or removing one that drives an output) is 409 while
+/// armed. An output already driven by the main projector is 409 too.
+fn set_venue(venue: crate::venue::Venue, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    if let Err(e) = venue.validate() {
+        return text(400, &e.to_string());
+    }
+    let next = venue.sanitized();
+    let mut s = shared.lock().unwrap();
+    let s = &mut *s;
+    s.gate.sync_estop(&s.estop);
+    if let Some(main) = s.output_mgr.selected() {
+        if let Some(p) = next.extras().find(|p| p.output.as_deref() == Some(main.as_str())) {
+            return text(409, &format!("La sortie « {main} » est déjà celle du projecteur principal : choisissez-en une autre pour « {} »", p.name));
+        }
+    }
+    let routing = s.venue.get().routing_changes(&next);
+    if routing && s.gate.is_armed() {
+        return with_status(json_response(json!({ "error": "Désarmez le laser pour changer les sorties des projecteurs", "armed": true })), 409);
+    }
+    if let Err(e) = s.venue.set(next) {
+        return text(400, &e.to_string());
+    }
+    if routing {
+        let outputs: Vec<serde_json::Value> = s.venue.get().extras().map(|p| json!({ "projector": p.id, "output": p.output })).collect();
+        s.gate.log().record("venue_outputs", Some("ui"), json!({ "projectors": outputs }));
+    }
+    s.connect_projectors(ArmSource::Ui);
+    s.sync_checklist();
+    json_response(venue_view(s))
+}
+
+/// `GET /api/frames` (T-277): one entry per projector of the venue, its
+/// frame after its whole safety chain (what the preview shows for the
+/// main one), the lit points its output was sent and its placement for
+/// the 3D view.
+fn frames(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let s = shared.lock().unwrap();
+    let round = |v: f32| (v * 1000.0).round() / 1000.0;
+    let pts = |frame: &[crate::patterns::Point]| frame.iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect::<Vec<_>>();
+    let estop = s.estop.is_latched();
+    let frames: Vec<serde_json::Value> = s
+        .venue
+        .get()
+        .projectors
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (points, lit, output_name) = if i == 0 {
+                (pts(&s.frame), s.output_lit, s.output_name.clone())
+            } else {
+                let f = s.projector_frames.iter().find(|f| f.id == p.id);
+                (f.map(|f| pts(&f.points)).unwrap_or_default(), f.map_or(0, |f| f.lit), s.projector_outputs.get(&p.id).map(|o| o.name.clone()))
+            };
+            json!({
+                "id": p.id,
+                "name": p.name,
+                "main": i == 0,
+                "output": if i == 0 { s.output_mgr.selected() } else { p.output.clone() },
+                "output_name": output_name,
+                "lit": lit,
+                "pos_m": p.pos_m,
+                "yaw_deg": p.yaw_deg,
+                "pitch_deg": p.pitch_deg,
+                "roll_deg": p.roll_deg,
+                "scan_deg": p.scan_deg,
+                "brightness": p.brightness,
+                "mirror_x": p.mirror_x,
+                "points": points,
+            })
+        })
+        .collect();
+    json_response(json!({ "armed": s.gate.is_armed() && !estop, "estop": estop, "frames": frames }))
 }
 
 /// `GET /api/outputs/limits`: every output's caps and projector sheet.
@@ -3421,6 +3554,51 @@ mod tests {
 
     fn arm_status(t: &TestServer) -> serde_json::Value {
         serde_json::from_str(&t.request("GET", "/api/arm", "").1).unwrap()
+    }
+
+    /// T-277: the venue over the API. A projector that drives an output
+    /// blocks arming until the engine has installed it; while armed, its
+    /// output can't change but its placement can; `/api/frames` has one
+    /// entry per projector; a preset keeps the projectors.
+    #[test]
+    fn the_venue_route_routes_outputs_only_while_disarmed() {
+        let t = TestServer::start(false);
+        let v: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/venue", "").1).unwrap();
+        assert_eq!(v["venue"]["projectors"].as_array().unwrap().len(), 1);
+        assert_eq!(v["presets"].as_array().unwrap().len(), 3);
+        let mut venue = v["venue"].clone();
+        venue["projectors"].as_array_mut().unwrap().push(json!({ "id": "p2", "name": "Jardin", "output": "rec", "mirror_x": true }));
+        let (status, body) = t.request("POST", "/api/venue", &venue.to_string());
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = t.request("POST", "/api/arm", r#"{"on":true}"#);
+        assert_eq!(status, 409);
+        assert!(body.contains("Sortie de projecteur non connectée : Jardin"), "{body}");
+        let frames: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frames", "").1).unwrap();
+        assert_eq!(frames["frames"].as_array().unwrap().len(), 2);
+        assert_eq!(frames["frames"][1]["mirror_x"], true);
+        // The engine installs p2's output: arming is allowed.
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.projector_outputs.insert("p2".into(), crate::venue::Installed { output: "rec".into(), name: "Rec".into(), kind: "test" });
+            s.sync_projectors();
+        }
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        venue["projectors"][1]["output"] = json!("autre");
+        let (status, body) = t.request("POST", "/api/venue", &venue.to_string());
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("Désarmez"), "{body}");
+        venue["projectors"][1]["output"] = json!("rec");
+        venue["projectors"][1]["pos_m"] = json!([4.0, 3.0, 11.0]);
+        assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 200, "placement changes while armed");
+        assert!(arm_status(&t)["armed"].as_bool().unwrap(), "and never disarm");
+        let (status, body) = t.request("POST", "/api/venue/preset", r#"{"name":"festival"}"#);
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["venue"]["room"]["width_m"].as_f64(), v["venue"]["projectors"].as_array().unwrap().len()), (Some(40.0), 2));
+        assert_eq!(t.request("POST", "/api/venue/preset", r#"{"name":"stade"}"#).0, 400);
+        // Two projectors on one output: refused.
+        venue["projectors"].as_array_mut().unwrap().push(json!({ "id": "p3", "output": "rec" }));
+        assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 400);
     }
 
     /// T-258: with a (simulated) real output, arming waits for the

@@ -77,6 +77,7 @@ mod timeline;
 mod transition;
 mod tunnels;
 mod usercues;
+mod venue;
 mod watchdog;
 mod zones;
 mod web;
@@ -393,6 +394,14 @@ pub struct Shared {
     /// The newest frame and page state for the pushed routes (push.rs,
     /// T-411): the engine drops each frame there and never waits.
     pub push: Arc<push::Hub>,
+    /// The venue and its projectors (venue.rs, T-277, `venue.json`): one
+    /// output stage per projector. Machine settings, like the outputs.
+    pub venue: venue::VenueStore,
+    /// The outputs the engine has installed for the venue's other
+    /// projectors, by projector id (the main one is `output_name`).
+    pub projector_outputs: std::collections::BTreeMap<String, venue::Installed>,
+    /// The other projectors' last frames (`GET /api/frames`).
+    pub projector_frames: Vec<venue::ProjectorFrame>,
 }
 
 impl Shared {
@@ -495,7 +504,11 @@ impl Shared {
     /// (registered from the first ShowNET output on) and the Wi-Fi watch.
     /// Call it after any change of output, sheet or checklist.
     pub fn sync_checklist(&mut self) {
-        let kind = checklist::OutputKind::of(self.output_kind, self.outputs.active().projector.dac_model);
+        // The main output, else any other projector's (T-277): one ShowNET
+        // anywhere brings its items and `hw_stop`.
+        let kind = checklist::OutputKind::of(self.output_kind, self.outputs.active().projector.dac_model).or_else(|| {
+            self.projector_outputs.iter().find_map(|(id, o)| checklist::OutputKind::of(Some(o.kind), self.outputs.config_for(id).projector.dac_model))
+        });
         if self.checklist.set_output(kind) {
             self.gate.log().record("checklist_reset", Some("system"), serde_json::json!({ "reason": "shownet" }));
         }
@@ -519,12 +532,61 @@ impl Shared {
     /// The conditions to unlock audience scanning, as they stand (T-255).
     pub fn audience_conditions(&self) -> Vec<audience::Condition> {
         let safety = self.safety.get();
-        audience::conditions(&audience::Inputs {
-            safety: &safety,
-            projector: &self.outputs.active().projector,
-            checklist: &self.checklist,
-            hold_to_run: self.presence.settings.hold_to_run,
-        })
+        let of = |projector: &power::ProjectorInfo| {
+            audience::conditions(&audience::Inputs { safety: &safety, projector, checklist: &self.checklist, hold_to_run: self.presence.settings.hold_to_run })
+        };
+        let mut conds = of(&self.outputs.active().projector);
+        // Every other projector that drives an output must meet them too
+        // (T-277): its own sheet is checked, the rest is shared.
+        for p in self.venue.get().extras().filter(|p| p.output.is_some()) {
+            for (c, other) in conds.iter_mut().zip(of(&self.outputs.config_for(&p.id).projector)) {
+                if c.ok && !other.ok {
+                    c.ok = false;
+                    c.detail_fr = format!("{} : {}", p.name, other.detail_fr);
+                }
+            }
+        }
+        conds
+    }
+
+    /// The `projectors` interlock (T-277): registered once the venue has a
+    /// projector besides the main one that drives an output, closed only
+    /// while every such projector has its output installed. Never arms.
+    pub fn sync_projectors(&mut self) {
+        let needed: Vec<(String, String, String)> = self.venue.get().extras().filter_map(|p| Some((p.name.clone(), p.id.clone(), p.output.clone()?))).collect();
+        if needed.is_empty() && !self.gate.has_interlock(interlock::PROJECTORS) {
+            return;
+        }
+        match venue::missing_outputs(&needed, &self.projector_outputs) {
+            Some(label) => self.gate.register(interlock::PROJECTORS, &label, false),
+            None => self.gate.register(interlock::PROJECTORS, "Sorties des projecteurs", true),
+        }
+    }
+
+    /// Asks the output manager for every venue projector's output, and to
+    /// close the outputs of projectors gone or changed (T-277). The output
+    /// the main projector drives is never opened twice. Never arms; the
+    /// caller made sure the laser is disarmed when anything changes.
+    pub fn connect_projectors(&mut self, src: interlock::ArmSource) {
+        let main = self.output_mgr.selected();
+        let venue = self.venue.get().clone();
+        for p in venue.extras() {
+            if let Err(e) = self.outputs.ensure(&p.id) {
+                log::warn!("{e:#}");
+            }
+            let output = p.output.clone().filter(|o| main.as_deref() != Some(o.as_str()));
+            if self.projector_outputs.get(&p.id).is_some_and(|i| Some(&i.output) != output.as_ref()) {
+                self.projector_outputs.remove(&p.id);
+            }
+            self.output_mgr.select_projector(&p.id, output, src);
+        }
+        for link in self.output_mgr.projector_links() {
+            if venue.projector(&link.projector).is_none() || link.projector == power::MAIN_OUTPUT {
+                self.projector_outputs.remove(&link.projector);
+                self.output_mgr.select_projector(&link.projector, None, src);
+            }
+        }
+        self.sync_projectors();
     }
 
     /// `POST /api/audience {mode: "scanning", phrase}`: unlocks audience
@@ -731,6 +793,8 @@ fn main() -> Result<()> {
     if let Some(id) = remembered {
         output_mgr.select(Some(id), interlock::ArmSource::System);
     }
+    // The venue's other projectors (T-277): their outputs too, disarmed.
+    shared.lock().unwrap().connect_projectors(interlock::ArmSource::System);
 
     // A panic anywhere: cut the output first (the DAC kill switch, no lock),
     // then let the default report run and every loop wind down. The engine's
@@ -1057,6 +1121,9 @@ fn startup_state(cli: &Cli) -> Shared {
         // Simulated (no command run) whenever a test flag is given.
         wifi: Arc::new(wifi::WifiWatch::new(cli.test_hooks || cli.test_devices.is_some() || cli.test_output.is_some())),
         push: Default::default(),
+        venue: venue::VenueStore::load_or_create(cli.data_dir.join("venue.json")),
+        projector_outputs: Default::default(),
+        projector_frames: Vec::new(),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
@@ -1072,6 +1139,8 @@ fn startup_state(cli: &Cli) -> Shared {
     state.sync_data_warnings();
     // A real output: arming waits for the pre-show checklist (T-258).
     state.sync_checklist();
+    // Projectors that drive an output: arming waits for them (T-277).
+    state.sync_projectors();
     state
 }
 
@@ -1206,6 +1275,157 @@ fn close_aside(old: Option<Box<dyn Output>>) {
     }
 }
 
+/// One more projector's output stage (T-277): its own output, strobe
+/// limiter, static-beam guard and safety-log tracker. The main projector's
+/// are the `Engine`'s own fields.
+struct ProjectorStage {
+    id: String,
+    stage: OutputStage,
+    limiter: safety::StrobeLimiter,
+    dwell_guard: dwell::DwellState,
+    strobe_log: safety_log::LimiterTracker,
+    /// The hand-over of its installed output, for loss reports.
+    gen: u64,
+}
+
+impl ProjectorStage {
+    fn new(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            stage: OutputStage::new(None),
+            limiter: safety::StrobeLimiter::default(),
+            dwell_guard: dwell::DwellState::default(),
+            strobe_log: safety_log::LimiterTracker::new("strobe"),
+            gen: 0,
+        }
+    }
+}
+
+/// What one more projector gets this frame, read under the lock (T-277).
+struct ProjectorPlan {
+    id: String,
+    /// The output it is meant to drive (its projection zones follow it).
+    output: Option<String>,
+    caps: power::OutputLimits,
+    color: colorcal::ColorCalibration,
+    /// For an Art-Net output (T-301).
+    cue_signal: Option<output::CueSignal>,
+}
+
+/// `apply_output_change` for a venue projector's output (T-277): the gate
+/// is disarmed first when armed (any output change disarms every
+/// projector), the old output gets its dark frames and closes, the new one
+/// is installed disarmed with its kill switch in the e-stop. The
+/// `projectors` interlock closes only once it is the output wanted.
+fn apply_projector_change(shared: &Mutex<Shared>, extras: &mut Vec<ProjectorStage>, estop: &EStop, mgr: &output_manager::OutputManager, pid: &str, change: output_manager::StageChange) {
+    use output_manager::ChangeKind;
+    let source = if change.kind == ChangeKind::Reconnected { interlock::ArmSource::System } else { change.source };
+    {
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if s.gate.is_armed() {
+            s.gate.disarm(interlock::DisarmReason::OutputChanged, source);
+        }
+        s.projector_outputs.remove(pid);
+        s.sync_projectors();
+    }
+    let i = match extras.iter().position(|p| p.id == pid) {
+        Some(i) => i,
+        None => {
+            extras.push(ProjectorStage::new(pid));
+            extras.len() - 1
+        }
+    };
+    let st = &mut extras[i];
+    estop.replace_projector_kill_switch(pid, None);
+    close_aside(st.stage.replace(change.output));
+    estop.replace_projector_kill_switch(pid, st.stage.kill_switch());
+    st.gen = change.gen;
+    let described = st.stage.describe();
+    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let action = match change.kind {
+        ChangeKind::Connected => "connect",
+        ChangeKind::Disconnected => "disconnect",
+        ChangeKind::Reconnected => "reconnect",
+    };
+    s.gate.log().record("output", Some(source.id()), serde_json::json!({ "action": action, "projector": pid, "id": change.id, "name": described.as_ref().map(|d| d.0.clone()) }));
+    if let (Some((name, kind)), Some(id)) = (described, change.id) {
+        if mgr.is_current_projector(pid, change.gen) {
+            s.projector_outputs.insert(pid.to_string(), venue::Installed { output: id, name, kind });
+        }
+        // A real output on any projector: the pre-show checklist gates
+        // arming from now on (T-258).
+        if matches!(kind, "dac" | "ponk" | artnet::KIND) && !s.checklist.enforced() {
+            s.checklist.enforce();
+        }
+    }
+    s.sync_checklist();
+    s.sync_projectors();
+}
+
+/// A venue projector's output stopped answering (T-277): every projector
+/// disarms (« Sortie perdue »), the `projectors` interlock opens until it
+/// is back, and the manager retries it.
+fn projector_lost(shared: &Mutex<Shared>, st: &mut ProjectorStage, estop: &EStop, mgr: &output_manager::OutputManager, error: String) {
+    {
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        s.gate.disarm(interlock::DisarmReason::OutputLost, interlock::ArmSource::System);
+        let name = s.projector_outputs.remove(&st.id).map(|i| i.name);
+        s.gate.log().record("output", Some("system"), serde_json::json!({ "action": "lost", "projector": st.id, "name": name, "error": error }));
+        s.sync_projectors();
+    }
+    estop.replace_projector_kill_switch(&st.id, None);
+    close_aside(st.stage.replace(None));
+    mgr.report_lost_projector(&st.id, st.gen, error);
+}
+
+/// The safety stage of one projector's frame, in its order (see
+/// `Engine::tick`): frame size, colour rendering, strobe limiter and
+/// horizon, static-beam guard, power caps. Every projector runs it with
+/// its own limiter, guard, colour and caps (T-277).
+#[allow(clippy::too_many_arguments)]
+fn safety_chain(
+    frame: Vec<Point>,
+    max_points: Option<usize>,
+    color: &colorcal::ColorCalibration,
+    t: f64,
+    safety_cfg: &safety::SafetySettings,
+    limiter: &mut safety::StrobeLimiter,
+    dwell_guard: &mut dwell::DwellState,
+    armed: bool,
+    caps: &power::OutputLimits,
+) -> Vec<Point> {
+    // Frame size limit of the output (Helios USB, T-303): thinned here,
+    // before the safety stage (T-353), so zones, horizon, strobe
+    // limiter, static beam guard and caps all apply to the frame that
+    // really goes out. Nothing after the safety stage adds light.
+    let mut frame = match max_points.map(output::content_budget) {
+        Some(budget) if frame.len() > budget => output::fit_frame(&frame, budget).into_owned(),
+        _ => frame,
+    };
+    // The output's colour rendering (T-414): curve, white balance and
+    // colour delay, on the frame that goes out, *before* the safety
+    // stage. Channels stay within 0..1, a dark point stays dark (the
+    // delay never colours travel), and the zones, horizon, safety
+    // gains, limiter, guard and caps all apply after it. Identity:
+    // the frame is untouched.
+    color.apply(&mut frame);
+    // Strobe limiter and beam horizon (T-101): on the finished,
+    // calibrated frame, so no layer, live move, LFO, gate or flash can
+    // get past it; the preview shows the limited frame too.
+    let frame = safety::apply(frame, t, safety_cfg, limiter);
+    // Static beam guard (T-256): on the frame that really goes out
+    // (after zones and the limiter), so a figure shrunk to a point, a
+    // frozen frame or a held beam is dimmed whatever made it.
+    // Strict below the horizon and in the Public zones (T-255).
+    let area = dwell::StrictArea::new(safety_cfg.horizon.y, &safety_cfg.zones);
+    let mut frame = dwell_guard.apply(frame, t, &safety_cfg.dwell, &area, armed);
+    // Power caps of the output (T-254), after everything else in the
+    // safety stage: they can only reduce, and a lowered cap applies
+    // from this tick. The preview shows the capped frame too.
+    power::cap(&mut frame, caps);
+    frame
+}
+
 fn run_engine(
     shared: Arc<Mutex<Shared>>,
     output: Option<Box<dyn Output>>,
@@ -1252,6 +1472,8 @@ struct Engine {
     output_mgr: Arc<output_manager::OutputManager>,
     /// The hand-over of the installed output, for loss reports.
     output_gen: u64,
+    /// The venue's other projectors (T-277), each with its own stage.
+    extras: Vec<ProjectorStage>,
 }
 
 impl Engine {
@@ -1278,6 +1500,7 @@ impl Engine {
             layers_path,
             output_mgr,
             output_gen,
+            extras: Vec::new(),
         }
     }
 
@@ -1286,14 +1509,20 @@ impl Engine {
         // A new output from the manager's thread: installed between two
         // frames, never opened here.
         while let Some(change) = self.output_mgr.engine_take() {
-            self.output_gen = change.gen;
             let estop = Arc::clone(&shared.lock().unwrap_or_else(|e| e.into_inner()).estop);
-            apply_output_change(shared, &mut self.stage, &estop, &self.output_mgr, change);
+            match change.projector.clone() {
+                // A venue projector's output (T-277).
+                Some(pid) => apply_projector_change(shared, &mut self.extras, &estop, &self.output_mgr, &pid, change),
+                None => {
+                    self.output_gen = change.gen;
+                    apply_output_change(shared, &mut self.stage, &estop, &self.output_mgr, change);
+                }
+            }
         }
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal) = {
+        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal, plans) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1415,16 +1644,40 @@ impl Engine {
                 // mode; a launch still waiting (T-159) is not on show.
                 artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some(), &caps)
             });
-            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal)
+            // The venue's other projectors (T-277): each its own caps and
+            // colour rendering (`outputs.json` under its id; the cautious
+            // defaults while it has none), and its cue signal if its
+            // output plays the SD card.
+            let plans: Vec<ProjectorPlan> = s
+                .venue
+                .get()
+                .extras()
+                .map(|p| {
+                    let cfg = s.outputs.config_for(&p.id);
+                    let cue_signal = s.projector_outputs.get(&p.id).filter(|o| o.kind == artnet::KIND).map(|_| {
+                        let timeline_cue = show_cues.iter().rev().find_map(|(c, _)| match &c.source {
+                            timeline::EventSource::Cue { id } => Some(id.as_str()),
+                            timeline::EventSource::Look { .. } => None,
+                        });
+                        artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some(), &cfg.limits)
+                    });
+                    ProjectorPlan { id: p.id.clone(), output: p.output.clone(), caps: cfg.limits, color: cfg.color, cue_signal }
+                })
+                .collect();
+            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal, plans)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
-        let (frame, mix, evolving) = match pattern {
+        let (frame, extra_frames, mix, evolving) = match pattern {
             // The pattern alone, densified and calibrated, without live
             // modifiers (exact geometry). The cue animators are left as
             // they are, so the cues carry on where they were afterwards.
             // While aligning a projection zone, through that zone's geometry.
-            Some((p, brightness)) => (testpattern::output_frame(p, brightness, routing.align.as_ref(), &calibration), layers::MixReport::default(), Vec::new()),
+            // Every projector of the venue shows it (T-277).
+            Some((p, brightness)) => {
+                let frame = testpattern::output_frame(p, brightness, routing.align.as_ref(), &calibration);
+                (frame.clone(), vec![frame; plans.len()], layers::MixReport::default(), Vec::new())
+            }
             None => {
                 let anim_dt = dt * live.speed.clamp(0.0, 4.0);
                 let (animators, event_live, cue_live) = (&mut self.animators, &mut self.event_live, &mut self.cue_live);
@@ -1489,39 +1742,30 @@ impl Engine {
                     Some((_, remote)) => dmx::fixture::apply(look, remote, &live, &self.live_state, &user_palettes, t),
                     None => live::apply(look, &live, &self.live_state, &user_palettes),
                 };
-                let (frame, mix) = projection::render(rendered, &routing.config, routing.output.as_deref(), &mixer, finish, &calibration);
-                (frame, mix, evolving)
+                if plans.is_empty() {
+                    let (frame, mix) = projection::render(rendered, &routing.config, routing.output.as_deref(), &mixer, finish, &calibration);
+                    (frame, Vec::new(), mix, evolving)
+                } else {
+                    // A venue with several projectors (T-277): each draws
+                    // its own zones (`ProjectionConfig::active_on`), from
+                    // the same rendered looks, through the same geometry
+                    // and calibration. The mix report is the main one's.
+                    let main = (power::MAIN_OUTPUT, routing.output.as_deref());
+                    let all: Vec<(&str, Option<&str>)> = std::iter::once(main).chain(plans.iter().map(|p| (p.id.as_str(), p.output.as_deref()))).collect();
+                    let draw = |me: usize| {
+                        let others: Vec<(&str, Option<&str>)> = all.iter().enumerate().filter(|(i, _)| *i != me).map(|(_, o)| *o).collect();
+                        let zones = routing.config.active_on(all[me].0, all[me].1, &others);
+                        projection::render_zones(&rendered, &routing.config, zones, &mixer, finish, &calibration)
+                    };
+                    let (frame, mix) = draw(0);
+                    let extra = (1..all.len()).map(|i| draw(i).0).collect();
+                    (frame, extra, mix, evolving)
+                }
             }
         };
-        // Frame size limit of the output (Helios USB, T-303): thinned here,
-        // before the safety stage (T-353), so zones, horizon, strobe
-        // limiter, static beam guard and caps all apply to the frame that
-        // really goes out. Nothing after the safety stage adds light.
-        let mut frame = match self.stage.max_points().map(output::content_budget) {
-            Some(budget) if frame.len() > budget => output::fit_frame(&frame, budget).into_owned(),
-            _ => frame,
-        };
-        // The output's colour rendering (T-414): curve, white balance and
-        // colour delay, on the frame that goes out, *before* the safety
-        // stage. Channels stay within 0..1, a dark point stays dark (the
-        // delay never colours travel), and the zones, horizon, safety
-        // gains, limiter, guard and caps all apply after it. Identity:
-        // the frame is untouched.
-        color.apply(&mut frame);
-        // Strobe limiter and beam horizon (T-101): on the finished,
-        // calibrated frame, so no layer, live move, LFO, gate or flash can
-        // get past it; the preview shows the limited frame too.
-        let frame = safety::apply(frame, t, &safety_cfg, &mut self.limiter);
-        // Static beam guard (T-256): on the frame that really goes out
-        // (after zones and the limiter), so a figure shrunk to a point, a
-        // frozen frame or a held beam is dimmed whatever made it.
-        // Strict below the horizon and in the Public zones (T-255).
-        let area = dwell::StrictArea::new(safety_cfg.horizon.y, &safety_cfg.zones);
-        let mut frame = self.dwell_guard.apply(frame, t, &safety_cfg.dwell, &area, armed);
-        // Power caps of the output (T-254), after everything else in the
-        // safety stage: they can only reduce, and a lowered cap applies
-        // from this tick. The preview shows the capped frame too.
-        power::cap(&mut frame, &caps);
+        // The safety stage (`safety_chain`): frame size, colour rendering,
+        // strobe limiter and horizon, static beam guard, power caps.
+        let frame = safety_chain(frame, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps);
 
         // Last stage: the gate. `armed` was read under the lock at the top
         // of the frame; the e-stop latch and a watchdog trip (this frame
@@ -1537,6 +1781,7 @@ impl Engine {
         }
         let strobe = self.limiter.status();
         self.strobe_log.update(strobe.active, now, &self.safety_log, || serde_json::json!({ "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
+        let projector_frames = self.emit_projectors(shared, plans, extra_frames, now, t, &safety_cfg, armed && !health.is_tripped(), hold_ok, &estop);
         let mut s = shared.lock().unwrap();
         if let Some(error) = emitted.arm_change {
             if let Some(e) = &error {
@@ -1566,6 +1811,58 @@ impl Engine {
         s.strobe = strobe;
         s.dwell = self.dwell_guard.status().clone();
         s.evolving = evolving;
+        s.projector_frames = projector_frames;
+    }
+
+    /// The venue's other projectors (T-277), after the main one: each frame
+    /// through its own safety chain and its own gate. The arm state is the
+    /// main one's (one arm, one e-stop); the e-stop latch is re-read by
+    /// each stage. A stage whose projector left the venue stays dark until
+    /// the manager takes its output away, then goes.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_projectors(
+        &mut self,
+        shared: &Mutex<Shared>,
+        plans: Vec<ProjectorPlan>,
+        frames: Vec<Vec<Point>>,
+        now: Instant,
+        t: f64,
+        safety_cfg: &safety::SafetySettings,
+        armed: bool,
+        hold_ok: bool,
+        estop: &EStop,
+    ) -> Vec<venue::ProjectorFrame> {
+        self.extras.retain(|st| st.stage.describe().is_some() || plans.iter().any(|p| p.id == st.id));
+        for st in self.extras.iter_mut().filter(|st| !plans.iter().any(|p| p.id == st.id)) {
+            st.stage.emit(&[Point::blanked(0.0, 0.0)], false, false, estop);
+        }
+        let mut out = Vec::with_capacity(plans.len());
+        for (plan, frame) in plans.into_iter().zip(frames) {
+            let i = match self.extras.iter().position(|st| st.id == plan.id) {
+                Some(i) => i,
+                None => {
+                    self.extras.push(ProjectorStage::new(&plan.id));
+                    self.extras.len() - 1
+                }
+            };
+            let st = &mut self.extras[i];
+            let frame = safety_chain(frame, st.stage.max_points(), &plan.color, t, safety_cfg, &mut st.limiter, &mut st.dwell_guard, armed, &plan.caps);
+            if let Some(signal) = &plan.cue_signal {
+                st.stage.cue_signal(signal);
+            }
+            let emitted = st.stage.emit(&frame, armed, hold_ok, estop);
+            if let Some(Some(e)) = &emitted.arm_change {
+                log::error!("sortie du projecteur {} : {e}", st.id);
+            }
+            if let Some(error) = st.stage.fault() {
+                projector_lost(shared, st, estop, &self.output_mgr, error);
+            }
+            let strobe = st.limiter.status();
+            let id = st.id.clone();
+            st.strobe_log.update(strobe.active, now, &self.safety_log, || serde_json::json!({ "projector": id, "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
+            out.push(venue::ProjectorFrame { id: plan.id, points: frame, lit: emitted.lit });
+        }
+        out
     }
 
     /// Clean shutdown: disarm the gate (recorded), then the output goes
@@ -1573,6 +1870,9 @@ impl Engine {
     fn shutdown(mut self, shared: &Mutex<Shared>) {
         shared.lock().unwrap_or_else(|e| e.into_inner()).gate.disarm(interlock::DisarmReason::Shutdown, interlock::ArmSource::System);
         self.stage.shutdown();
+        for st in &mut self.extras {
+            st.stage.shutdown();
+        }
         // The last second of live and layer moves joins the working copy (else
         // the next start would see them only in the autosave, T-287).
         let s = shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -2472,6 +2772,7 @@ mod tests {
             source: ArmSource::Ui,
             gen: 1,
             id: Some("b".into()),
+            projector: None,
         };
         apply_output_change(&shared, &mut stage, &estop, &mgr, change);
         // Closed on a thread of its own, after the dark frames.
@@ -2495,7 +2796,7 @@ mod tests {
         estop.trip(ArmSource::Keyboard);
         assert_eq!((old.kills.load(Ordering::SeqCst), new.kills.load(Ordering::SeqCst)), (0, 1), "the e-stop cuts the new output");
         // Back to preview: no kill switch left.
-        let none = output_manager::StageChange { output: None, kind: output_manager::ChangeKind::Disconnected, source: ArmSource::Ui, gen: 2, id: None };
+        let none = output_manager::StageChange { output: None, kind: output_manager::ChangeKind::Disconnected, source: ArmSource::Ui, gen: 2, id: None, projector: None };
         apply_output_change(&shared, &mut stage, &estop, &mgr, none);
         assert!(!estop.has_kill_switch());
         let calls = new.calls.lock().unwrap().clone();
