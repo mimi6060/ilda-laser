@@ -447,7 +447,36 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
     if method == Method::Post && !crate::showmode::allowed(&path) && shared.lock().unwrap().show_mode.on {
         return locked();
     }
+    // An edit (T-285): the sections it may change, before and after, make
+    // one history entry if it succeeded and changed something.
+    if let Some(sections) = (method == Method::Post).then(|| crate::history::sections_for(&path)).flatten() {
+        let _edit = crate::history::edit_lock();
+        let before = crate::history::snapshot(&shared.lock().unwrap(), sections);
+        let response = dispatch(request, shared, calibration_path, method, &path);
+        if (200..300).contains(&response.status_code().0) {
+            crate::history::record(&mut shared.lock().unwrap(), &path, before);
+        }
+        return response;
+    }
+    dispatch(request, shared, calibration_path, method, &path)
+}
+
+fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &Path, method: Method, path: &str) -> HttpResponse {
+    let path = path.to_string();
     match (method, path.as_str()) {
+        (Method::Get, "/api/history") => json_response(shared.lock().unwrap().history.view()),
+        // Undo / redo (T-285): `{}` one step, `{"to": id}` down to that
+        // entry (the history panel). Refused in show mode (an edit).
+        (Method::Post, "/api/undo") | (Method::Post, "/api/redo") => {
+            let to = match body::<serde_json::Value>(request) {
+                Ok(v) => v.get("to").and_then(serde_json::Value::as_u64),
+                Err(_) => None,
+            };
+            match crate::history::step(shared, path == "/api/redo", to) {
+                Ok(v) => json_response(v),
+                Err((code, msg)) => text(code, &msg),
+            }
+        }
         (Method::Get, p) if static_asset(p).is_some() => {
             let (body, content_type) = static_asset(p).expect("checked by the guard");
             with_type(Response::from_string(body), content_type)
@@ -2544,7 +2573,12 @@ fn project_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool,
         }
     }
     let action = path.strip_prefix("/api/project").unwrap_or("").trim_start_matches('/');
-    match crate::project::route(shared, post, action, &raw) {
+    let reply = crate::project::route(shared, post, action, &raw);
+    // Another project in memory (T-285): nothing of the previous one can be undone.
+    if post && matches!(action, "new" | "open" | "recover") && matches!(reply, Some(crate::project::Reply::Json(_))) {
+        shared.lock().unwrap().history.clear();
+    }
+    match reply {
         Some(crate::project::Reply::Json(v)) => json_response(v),
         Some(crate::project::Reply::Text(code, t)) => text(code, &t),
         None => text(404, "not found"),
@@ -2958,32 +2992,55 @@ fn venue_view(s: &Shared) -> serde_json::Value {
 /// drives (adding or removing one that drives an output) is 409 while
 /// armed. An output already driven by the main projector is 409 too.
 fn set_venue(venue: crate::venue::Venue, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
-    if let Err(e) = venue.validate() {
-        return text(400, &e.to_string());
-    }
-    let next = venue.sanitized();
     let mut s = shared.lock().unwrap();
-    let s = &mut *s;
+    match apply_venue(&mut s, venue) {
+        Ok(()) => json_response(venue_view(&s)),
+        Err(VenueRefusal::Armed) => with_status(json_response(json!({ "error": VENUE_ARMED_FR, "armed": true })), 409),
+        Err(VenueRefusal::Other(code, msg)) => text(code, &msg),
+    }
+}
+
+const VENUE_ARMED_FR: &str = "Désarmez le laser pour changer les sorties des projecteurs";
+
+/// Why `apply_venue` refused a venue.
+pub(crate) enum VenueRefusal {
+    /// A routing change while armed (409).
+    Armed,
+    Other(u16, String),
+}
+
+impl VenueRefusal {
+    pub(crate) fn status_and_text(self) -> (u16, String) {
+        match self {
+            VenueRefusal::Armed => (409, VENUE_ARMED_FR.to_string()),
+            VenueRefusal::Other(code, msg) => (code, msg),
+        }
+    }
+}
+
+/// `set_venue` under the lock: the same checks for a manual change and
+/// an undo (history.rs, T-285).
+pub(crate) fn apply_venue(s: &mut Shared, venue: crate::venue::Venue) -> Result<(), VenueRefusal> {
+    venue.validate().map_err(|e| VenueRefusal::Other(400, e.to_string()))?;
+    let next = venue.sanitized();
     s.gate.sync_estop(&s.estop);
     if let Some(main) = s.output_mgr.selected() {
         if let Some(p) = next.extras().find(|p| p.output.as_deref() == Some(main.as_str())) {
-            return text(409, &format!("La sortie « {main} » est déjà celle du projecteur principal : choisissez-en une autre pour « {} »", p.name));
+            return Err(VenueRefusal::Other(409, format!("La sortie « {main} » est déjà celle du projecteur principal : choisissez-en une autre pour « {} »", p.name)));
         }
     }
     let routing = s.venue.get().routing_changes(&next);
     if routing && s.gate.is_armed() {
-        return with_status(json_response(json!({ "error": "Désarmez le laser pour changer les sorties des projecteurs", "armed": true })), 409);
+        return Err(VenueRefusal::Armed);
     }
-    if let Err(e) = s.venue.set(next) {
-        return text(400, &e.to_string());
-    }
+    s.venue.set(next).map_err(|e| VenueRefusal::Other(400, e.to_string()))?;
     if routing {
         let outputs: Vec<serde_json::Value> = s.venue.get().extras().map(|p| json!({ "projector": p.id, "output": p.output })).collect();
         s.gate.log().record("venue_outputs", Some("ui"), json!({ "projectors": outputs }));
     }
     s.connect_projectors(ArmSource::Ui);
     s.sync_checklist();
-    json_response(venue_view(s))
+    Ok(())
 }
 
 /// `GET /api/frames` (T-277): one entry per projector of the venue, its
@@ -3237,6 +3294,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "dmx": crate::netin::summary(s, Instant::now()),
         "project_modified": s.project.last_modified,
         "notices_last": s.notices.last(),
+        "history": s.history.summary(),
     })
 }
 
@@ -3318,7 +3376,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     s.sync_notices();
     let arm = s.gate.status(&s.estop);
     let now = s.now_s();
-    json!({
+    let mut v = json!({
         "output_lit": s.output_lit,
         "armed": arm.armed,
         "estop": arm.estop.is_some(),
@@ -3377,7 +3435,10 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         "project_modified": s.project.last_modified,
         // T-432: the newest notice's id; the page reads /api/notices when it moves.
         "notices_last": s.notices.last(),
-    })
+    });
+    // T-285: undo / redo counts and labels; `rev` moves on every change.
+    v["history"] = s.history.summary();
+    v
 }
 
 /// `POST /api/cuelist/{go,back,pause,top,goto}` (T-410), body optional:
@@ -3944,6 +4005,73 @@ mod tests {
         assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 400);
     }
 
+    /// T-285: edits are recorded, cue presses are not; undo restores a
+    /// deleted scene; show mode refuses undo; a venue undo that would
+    /// change the projectors' outputs is refused while armed, never disarms.
+    #[test]
+    fn undo_redo_and_the_history_over_the_api() {
+        let t = TestServer::start(false);
+        let undo_count = |t: &TestServer| js(&t.request("GET", "/api/state", "").1)["history"]["undo"].as_u64().unwrap();
+        let has_scene = |t: &TestServer, name: &str| t.shared.lock().unwrap().scenes.get(name).is_some();
+        assert_eq!(t.request("POST", "/api/scenes/save", r#"{"name":"Annuler test","duration_secs":4}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/scenes/delete", r#"{"name":"Annuler test"}"#).0, 200);
+        assert!(!has_scene(&t, "Annuler test"));
+        let h = js(&t.request("GET", "/api/history", "").1);
+        assert_eq!(h["undo"][0]["label"], "Scène « Annuler test » supprimée");
+        assert_eq!(h["undo"][1]["label"], "Scène « Annuler test » enregistrée");
+        let n = undo_count(&t);
+        // Playing is not editing.
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        assert_eq!(t.request("POST", "/api/cue", &format!(r#"{{"id":"{cue}"}}"#)).0, 200);
+        assert_eq!(t.request("POST", "/api/live", r#"{"brightness":0.5}"#).0 / 100, 2);
+        assert_eq!(undo_count(&t), n, "cue presses and live masters are never in the history");
+        // Undo brings the scene back; redo deletes it again.
+        let (code, body) = t.request("POST", "/api/undo", "{}");
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body)["done"][0], "Scène « Annuler test » supprimée");
+        assert!(has_scene(&t, "Annuler test"));
+        assert_eq!(js(&t.request("GET", "/api/frame", "").1)["history"]["redo"], 1);
+        assert_eq!(t.request("POST", "/api/redo", "").0, 200);
+        assert!(!has_scene(&t, "Annuler test"));
+        // Show mode: undo is an edit.
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 423);
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+        assert!(!has_scene(&t, "Annuler test"));
+        // A grid page added, then undone.
+        let pages = |t: &TestServer| js(&t.request("GET", "/api/grid", "").1)["pages"].as_array().unwrap().len();
+        let before = pages(&t);
+        assert_eq!(t.request("POST", "/api/grid/page", r#"{"action":"new","name":"Final"}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Page « Final » ajoutée");
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert_eq!(pages(&t), before);
+        // A projector driving an output: its undo would change the outputs.
+        let mut venue = js(&t.request("GET", "/api/venue", "").1)["venue"].clone();
+        venue["projectors"].as_array_mut().unwrap().push(json!({ "id": "p2", "name": "Jardin", "output": "rec" }));
+        assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 200);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.projector_outputs.insert("p2".into(), crate::venue::Installed { output: "rec".into(), name: "Rec".into(), kind: "test" });
+            s.sync_projectors();
+        }
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (code, body) = t.request("POST", "/api/undo", "{}");
+        assert_eq!(code, 409, "{body}");
+        assert!(body.contains("Désarmez"), "{body}");
+        assert!(arm_status(&t)["armed"].as_bool().unwrap(), "a refused undo never disarms");
+        assert_eq!(t.shared.lock().unwrap().venue.get().projectors.len(), 2);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert_eq!(t.shared.lock().unwrap().venue.get().projectors.len(), 1);
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap(), "and never arms");
+        // `to`: down to an entry.
+        let h = js(&t.request("GET", "/api/history", "").1);
+        let last = h["undo"].as_array().unwrap().last().unwrap()["id"].as_u64().unwrap();
+        assert_eq!(t.request("POST", "/api/undo", &format!(r#"{{"to":{last}}}"#)).0, 200);
+        assert_eq!(undo_count(&t), 0);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 409, "nothing left");
+    }
+
     /// T-258: with a (simulated) real output, arming waits for the
     /// checklist; completing it never arms; restarting it disarms.
     #[test]
@@ -4196,7 +4324,23 @@ mod tests {
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).unwrap();
         let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
-        (String::from_utf8_lossy(&raw[..split]).into_owned(), raw[split + 4..].to_vec())
+        let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+        let mut body = raw[split + 4..].to_vec();
+        // A large body (e.g. a report with the whole test run's log) comes chunked.
+        if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+            let (mut plain, mut at) = (Vec::new(), 0);
+            while let Some(eol) = body[at..].windows(2).position(|w| w == b"\r\n") {
+                let size = usize::from_str_radix(String::from_utf8_lossy(&body[at..at + eol]).trim(), 16).unwrap();
+                if size == 0 {
+                    break;
+                }
+                let start = at + eol + 2;
+                plain.extend_from_slice(&body[start..start + size]);
+                at = start + size + 2;
+            }
+            body = plain;
+        }
+        (head, body)
     }
 
     /// T-403: the diagnostic report is a zip download with the logs and

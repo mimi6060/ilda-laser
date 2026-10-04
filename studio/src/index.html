@@ -82,6 +82,28 @@
   .n-count { flex: none; font-weight: 800; font-variant-numeric: tabular-nums; }
   #noticeEmpty { padding: 10px; color: var(--muted); font-size: 12px; }
   #noticeEmpty[hidden] { display: none; }
+  /* Annuler / Rétablir / Historique (T-285), Theme (T-299) tokens. */
+  .hist { display: flex; align-items: center; gap: 2px; flex: none; align-self: center; margin-left: 8px; }
+  #wsTabs .hist button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); }
+  #wsTabs .hist button::before { content: none; }
+  .hist svg { width: 16px; height: 16px; }
+  #wsTabs .hist button:not(:disabled):hover { color: var(--text); }
+  #wsTabs .hist button:disabled { opacity: .4; cursor: default; }
+  #historyPanel { position: fixed; z-index: 30; width: min(420px, calc(100vw - 16px)); max-height: min(70vh, 560px); display: flex; flex-direction: column; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+  #historyPanel[hidden] { display: none; }
+  #historyPanel .h-head { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  #historyPanel .h-head h3 { margin: 0; font-size: 13px; }
+  #historyPanel .h-head .hint, #historyPanel .h-foot { margin: 0; font-size: 11px; color: var(--muted); }
+  #historyPanel .h-body { overflow-y: auto; padding: 4px 0; }
+  #historyPanel .h-foot { padding: 6px 10px; border-top: 1px solid var(--line); line-height: 1.35; }
+  .h-row { display: flex; gap: 8px; align-items: baseline; width: 100%; height: auto; padding: 4px 10px; border: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; font-size: 12px; line-height: 1.35; }
+  .h-row:hover { background: var(--panel); }
+  .h-row .h-time { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .h-row .h-label { flex: 1; overflow-wrap: anywhere; }
+  .h-row.redo { color: var(--muted); font-style: italic; }
+  #historyRedo:not(:empty) { border-bottom: 1px dashed var(--line); padding-bottom: 4px; margin-bottom: 4px; }
+  #historyEmpty { padding: 10px; color: var(--muted); font-size: 12px; }
+  #historyEmpty[hidden] { display: none; }
   #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 15; display: flex; flex-direction: column-reverse; gap: 8px; width: min(380px, calc(100vw - 32px)); pointer-events: none; }
   .toast { position: relative; pointer-events: auto; padding: 8px 32px 8px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); border-left: 4px solid var(--muted); box-shadow: 0 8px 24px #0008; font-size: 12px; }
   .toast.warning { border-left-color: var(--warn); }
@@ -329,6 +351,7 @@
     .view > canvas#beams, .view.both > canvas#beams { width: 100%; height: auto; aspect-ratio: 1; }
     .ws-layers { order: 2; }
     #wsHint { display: none; }
+    #wsTabs { flex-wrap: wrap; }
     header { flex-wrap: wrap; }
   }
   #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
@@ -1231,12 +1254,23 @@
   <button role="tab" data-ws-tab="creation" title="Créer du contenu (F3)">CRÉATION <kbd>F3</kbd></button>
   <button role="tab" data-ws-tab="settings" title="Calibration, sécurité, MIDI, OSC/Art-Net (F4)">RÉGLAGES <kbd>F4</kbd></button>
   <span class="hint" id="wsHint"><kbd>Espace</kbd> laser · <kbd>Échap</kbd> arrêt, dans tous les onglets · lettres = cues (LIVE)</span>
+  <!-- Annuler / Rétablir / Historique (T-285): edits only, hidden in show mode. -->
+  <div class="hist lock-edit" role="group" aria-label="Historique des modifications">
+    <button id="undoBtn" disabled aria-label="Annuler" title="Rien à annuler"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 2.5 6.5 6 10"/><path d="M2.5 6.5H10a3.5 3.5 0 0 1 0 7H7"/></svg></button>
+    <button id="redoBtn" disabled aria-label="Rétablir" title="Rien à rétablir"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3l3.5 3.5L10 10"/><path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3"/></svg></button>
+    <button id="historyBtn" aria-haspopup="true" aria-expanded="false" aria-label="Historique" title="Historique des modifications (cliquer une ligne annule jusqu'à elle)"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.6"/></svg></button>
+  </div>
   <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
 </nav>
 </div>
 <div id="noticePanel" role="dialog" aria-labelledby="noticeTitle" hidden>
   <div class="n-head"><h3 id="noticeTitle">Notifications</h3><button id="noticeClear">Tout effacer</button></div>
   <div class="n-body"><div id="noticePinned"></div><div id="noticeList"></div><div id="noticeEmpty">Aucune notification</div></div>
+</div>
+<div id="historyPanel" role="dialog" aria-labelledby="historyTitle" hidden>
+  <div class="h-head"><h3 id="historyTitle">Historique</h3><span class="hint">cliquer une modification annule jusqu'à elle</span></div>
+  <div class="h-body"><div id="historyRedo"></div><div id="historyList"></div><div id="historyEmpty">Aucune modification</div></div>
+  <div class="h-foot">Ne s'annulent pas : cues jouées, maîtres, tempo, armement, noir et réglages de sécurité. La timeline et l'éditeur de figures ont leur propre Annuler.</div>
 </div>
 <div id="toasts" aria-live="polite"></div>
 <div id="midiMenu" hidden>
@@ -3124,6 +3158,78 @@ $('noticeClear').onclick = () => {
 };
 document.addEventListener('click', e => { if (NC.open && !e.target.closest('#noticePanel, #noticeBtn')) setNoticePanel(false); });
 
+// ---------- Annuler / Rétablir / Historique (T-285) ----------
+// The history is the studio's (history.rs): every edit route records an
+// entry, with a French label. Cue presses, masters, tempo, arming, noir
+// and the safety settings are never in it. Each state brings the counts
+// (`history`); the panel reloads the list when its `rev` moves.
+const HIST = { open: false, rev: -1, busy: false };
+function showHistory(h) {
+  if (!h) return;
+  $('undoBtn').disabled = !h.undo;
+  $('redoBtn').disabled = !h.redo;
+  $('undoBtn').title = h.undo ? `Annuler : ${h.undo_label} (Cmd+Z)` : 'Rien à annuler';
+  $('redoBtn').title = h.redo ? `Rétablir : ${h.redo_label} (Cmd+Maj+Z)` : 'Rien à rétablir';
+  if (HIST.open && h.rev !== HIST.rev) drawHistory();
+}
+function historyTime(at) {
+  const d = new Date(at);
+  return isNaN(d) ? '' : d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+async function drawHistory() {
+  let h;
+  try { h = await apiJson('GET', '/api/history', undefined, { quiet: true, cache: 'no-store' }); } catch { return; }
+  HIST.rev = h.rev;
+  const row = (e, redo) => {
+    const b = document.createElement('button');
+    b.className = 'h-row' + (redo ? ' redo' : '');
+    b.dataset.hid = e.id;
+    b.title = redo ? 'Rétablir jusqu\'à cette modification' : 'Annuler jusqu\'à cette modification (incluse)';
+    const t = document.createElement('span'); t.className = 'h-time'; t.textContent = historyTime(e.at);
+    const l = document.createElement('span'); l.className = 'h-label'; l.textContent = e.label;
+    b.append(t, l);
+    b.onclick = ev => { ev.stopPropagation(); historyStep(redo ? 'redo' : 'undo', e.id); };
+    return b;
+  };
+  // Newest at the top: what was undone (greyed), then what can be undone.
+  $('historyRedo').replaceChildren(...[...h.redo].reverse().map(e => row(e, true)));
+  $('historyList').replaceChildren(...h.undo.map(e => row(e, false)));
+  $('historyEmpty').hidden = h.undo.length + h.redo.length > 0;
+}
+function setHistoryPanel(open) {
+  HIST.open = open;
+  $('historyPanel').hidden = !open;
+  $('historyBtn').setAttribute('aria-expanded', String(open));
+  if (open) {
+    const b = $('historyBtn').getBoundingClientRect();
+    $('historyPanel').style.top = Math.round(b.bottom + 6) + 'px';
+    $('historyPanel').style.left = Math.max(8, Math.min(Math.round(b.left), innerWidth - $('historyPanel').offsetWidth - 8)) + 'px';
+    drawHistory();
+  }
+}
+// One step (Cmd+Z, the buttons) or, with `to`, down to an entry (the panel).
+async function historyStep(kind, to) {
+  if (showMode) return flash(LOCKED_FR);
+  if (HIST.busy) return;
+  HIST.busy = true;
+  let j;
+  try { j = await apiJson('POST', '/api/' + kind, to === undefined ? {} : { to }, { source: 'Historique' }); } catch { /* api() said why */ } finally { HIST.busy = false; }
+  if (HIST.open) drawHistory();
+  if (!j) return;
+  try {
+    showHistory(j.history);
+    const n = j.done.length;
+    flash(`${kind === 'undo' ? 'Annulé' : 'Rétabli'} : ${j.done[n - 1]}${n > 1 ? ` (et ${n - 1} autre${n > 2 ? 's' : ''})` : ''}`);
+    // Whatever the step touched is shown again from the studio.
+    await afterOpen();
+    loadCueLists(); loadProjection(); reloadVenue();
+  } catch (e) { console.warn('historique', e); }
+}
+$('undoBtn').onclick = () => historyStep('undo');
+$('redoBtn').onclick = () => historyStep('redo');
+$('historyBtn').onclick = e => { e.stopPropagation(); setHistoryPanel(!HIST.open); };
+document.addEventListener('click', e => { if (HIST.open && !e.target.closest('#historyPanel, #historyBtn')) setHistoryPanel(false); });
+
 // The studio's own events (a write that failed, autosave, audio input).
 async function pullNotices(last) {
   if (NC.serverBusy || last === NC.serverLast) return;
@@ -3662,6 +3768,17 @@ function buildShortcuts() {
     { id: 'project.open', group: 'Projet', keys: ['o'], meta: true, shift: '*', zones: '*', typing: true, show: false,
       label: 'Ouvrir un projet',
       down: e => { if (!e.repeat) projAction('open'); } },
+    // Annuler / Rétablir (T-285): the studio's history of edits, in LIVE,
+    // CRÉATION and RÉGLAGES. TIMELINE and CRÉATION › Figures keep their own
+    // undo (below); a text field keeps the browser's.
+    { id: 'edit.undo', group: 'Édition', keys: ['z'], meta: true, zones: ['live', 'creation', 'settings'], show: true,
+      label: 'Annuler la dernière modification (hors TIMELINE et éditeur de figures)',
+      down: e => { if (!e.repeat) historyStep('undo'); } },
+    { id: 'edit.redo', group: 'Édition', keys: ['z'], meta: true, shift: true, zones: ['live', 'creation', 'settings'], show: true,
+      label: 'Rétablir la modification annulée',
+      down: e => { if (!e.repeat) historyStep('redo'); } },
+    { id: 'edit.redo.y', group: 'Édition', keys: ['y'], meta: true, shift: '*', zones: ['live', 'creation', 'settings'], show: false,
+      label: 'Rétablir', down: e => { if (!e.repeat) historyStep('redo'); } },
     // TIMELINE (T-285): undo anywhere in the workspace; the rest while the
     // timeline itself has the focus.
     { id: 'tl.undo', group: 'Timeline', keys: ['z'], meta: true, zones: ['timeline', 'tl-canvas'], show: false,
@@ -3807,7 +3924,7 @@ function shortcutConflicts(list = allShortcuts()) {
 
 // « ? » : the table, grouped. Keys shown as on this keyboard when the
 // browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
-const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Espaces de travail', 'Timeline', 'Figures', 'Aide'];
+const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Timeline', 'Figures', 'Aide'];
 const ZONE_FR = { live: 'LIVE', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES' };
 const KEY_CAPS = { Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
 const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
@@ -4280,6 +4397,7 @@ function applyState(f, at, pushed) {
   // T-432/T-433: the studio's notices and its « modified » flag.
   if (f.notices_last !== undefined && f.notices_last !== NC.serverLast) pullNotices(f.notices_last);
   takeProjectModified(f.project_modified, at);
+  showHistory(f.history);
   noticeConditions(f);
   showShownet(f.shownet);
   showAudienceMode(f.audience);
