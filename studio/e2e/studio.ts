@@ -15,7 +15,7 @@
 
 import { test as base, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -25,6 +25,17 @@ export const STUDIO_BIN = process.env.LASER_STUDIO_BIN ?? path.join(REPO_ROOT, '
 const USER_PORT = 8080;
 /** The name of the fake output (`--test-output`): never a laser. */
 export const FAKE_OUTPUT = 'Sortie de test';
+
+/**
+ * T-358: the file where this run's studios write their PIDs (one per line),
+ * set by global-setup.ts; global-teardown.ts stops any still alive.
+ */
+export const RUN_PIDS_ENV = 'LASER_STUDIO_E2E_PIDS';
+
+function recordStudio(pid: number | undefined) {
+  const file = process.env[RUN_PIDS_ENV];
+  if (file && pid) appendFileSync(file, `${pid}\n`);
+}
 
 /** A free TCP port on localhost, never the user's 8080. */
 async function freePort(): Promise<number> {
@@ -109,7 +120,10 @@ export class Studio {
     // a simulated one); --no-audio so it never opens an audio input.
     // --test-keep-awake: a fake sleep blocker, so arming or playing in a
     // test never holds a power assertion on this Mac (T-412).
-    const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio', '--test-keep-awake'];
+    // --exit-with-parent (T-358): the studio stops by itself (cleanly) if
+    // this worker dies or the data dir is deleted, so an interrupted run
+    // leaves no studio behind.
+    const args = ['--port', String(this.port), '--data-dir', this.dataDir, '--no-midi', '--no-audio', '--test-keep-awake', '--exit-with-parent', String(process.pid)];
     args.push('--test-devices', JSON.stringify(this.opts.devices ?? []));
     if (this.opts.midiTest) args.push('--midi-test');
     // The fake output (T-401), unless PONK is the output or the spec wants none.
@@ -126,6 +140,7 @@ export class Studio {
     }
     if (args.includes('--device') || !args.includes('--test-devices') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    recordStudio(this.proc.pid);
     this.proc.stdout!.on('data', d => { this.log += d; });
     this.proc.stderr!.on('data', d => { this.log += d; });
     const deadline = Date.now() + 15_000;

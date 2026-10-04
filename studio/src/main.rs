@@ -183,6 +183,12 @@ struct Cli {
     /// Testing only: the decoding time limit in ms (default 120 s).
     #[arg(long, hide = true, requires = "test_hooks")]
     test_decode_timeout_ms: Option<u64>,
+    /// Testing only (T-358): shut down cleanly, as on Ctrl+C, once the
+    /// process with this PID is no longer our parent (the test harness
+    /// died) or the data directory is gone, so an interrupted test run
+    /// leaves no studio behind.
+    #[arg(long, hide = true, value_name = "PID", conflicts_with = "device")]
+    exit_with_parent: Option<u32>,
 }
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -608,6 +614,9 @@ fn main() -> Result<()> {
         }
     })
     .context("failed to install Ctrl+C handler")?;
+    if let Some(parent) = cli.exit_with_parent {
+        spawn_orphan_watch(parent, cli.data_dir.clone(), Arc::clone(&estop), Arc::clone(&running));
+    }
 
     let engine = std::thread::spawn({
         let shared = Arc::clone(&shared);
@@ -703,6 +712,36 @@ fn main() -> Result<()> {
     }
     drop(instance_lock);
     served
+}
+
+/// T-358: why a test studio started with `--exit-with-parent` must stop,
+/// if it must: the harness that started it is gone (we were re-parented,
+/// e.g. to launchd) or its temporary data directory was deleted.
+fn orphan_reason(parent: u32, current_parent: u32, data_dir_exists: bool) -> Option<&'static str> {
+    if current_parent != parent {
+        Some("le processus parent a disparu")
+    } else if !data_dir_exists {
+        Some("le dossier de données a disparu")
+    } else {
+        None
+    }
+}
+
+/// T-358: `--exit-with-parent`: checks four times a second, and on an
+/// orphan takes the Ctrl+C path (cut, then the engine disarms, sends dark
+/// frames and closes the output). Never started for a normal launch.
+fn spawn_orphan_watch(parent: u32, data_dir: PathBuf, estop: Arc<EStop>, running: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while running.load(Ordering::SeqCst) {
+            if let Some(why) = orphan_reason(parent, std::os::unix::process::parent_id(), data_dir.is_dir()) {
+                log::warn!("Studio de test : {why}, arrêt");
+                estop.kill_output();
+                running.store(false, Ordering::SeqCst);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
 }
 
 /// The startup line of the application log: version, system, output and
@@ -1378,6 +1417,21 @@ mod tests {
     use super::*;
     use crate::scenes::Scene;
 
+    /// T-358: a test studio stops once its harness is gone or its data
+    /// directory was deleted; the option is hidden and refuses --device.
+    #[test]
+    fn a_test_studio_stops_when_orphaned() {
+        assert_eq!(orphan_reason(42, 42, true), None);
+        assert!(orphan_reason(42, 1, true).is_some(), "re-parented to launchd");
+        assert!(orphan_reason(42, 42, false).is_some(), "data directory deleted");
+        let cli = Cli::try_parse_from(["laser-studio", "--exit-with-parent", "42"]).unwrap();
+        assert_eq!(cli.exit_with_parent, Some(42));
+        assert_eq!(Cli::try_parse_from(["laser-studio"]).unwrap().exit_with_parent, None, "a normal launch never watches");
+        assert!(Cli::try_parse_from(["laser-studio", "--device", "x", "--exit-with-parent", "42"]).is_err());
+        use clap::CommandFactory;
+        assert!(Cli::command().get_arguments().any(|a| a.get_id() == "exit_with_parent" && a.is_hide_set()));
+    }
+
     /// T-258: the checklist gates arming with a real output (DAC, PONK) or
     /// its simulation, never in pure preview nor with the fake output; the
     /// edited list is kept across restarts, the ticks are not.
@@ -1812,6 +1866,8 @@ mod tests {
     /// 60 fps on its own, so the reference is measured, not assumed).
     #[test]
     fn the_engine_keeps_its_cadence_when_the_app_log_is_stuck() {
+        // T-358: it joins the engine and flood threads; a hang fails fast.
+        let _guard = test_support::time_guard("the_engine_keeps_its_cadence_when_the_app_log_is_stuck", Duration::from_secs(180));
         let app = applog::testing::install_stuck_global();
         for i in 0..2_000 {
             log::warn!("remplissage {i}");
@@ -1958,6 +2014,8 @@ mod tests {
     /// the reconnection never re-arms.
     #[test]
     fn a_lost_output_disarms_and_comes_back_disarmed() {
+        // T-358: it joins the engine thread; a hang fails fast.
+        let _guard = test_support::time_guard("a_lost_output_disarms_and_comes_back_disarmed", Duration::from_secs(180));
         let dir = std::env::temp_dir().join(format!("laser-studio-output-loss-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let devices = r#"[{"kind":"etherdream","id":"etherdream:test","name":"Ether Dream test"}]"#;

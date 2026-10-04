@@ -703,8 +703,18 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     Ok(())
 }
 
+/// T-358: a property's time limit: 3 minutes at its default case count,
+/// more when `SAFETY_CASES` asks for more cases. A hang fails fast instead
+/// of running for hours.
+fn property_guard(name: &str, cases: usize, default_cases: usize) -> test_support::TimeGuard {
+    let runs = cases.div_ceil(default_cases.max(1)).max(1) as u32;
+    test_support::time_guard(name, std::time::Duration::from_secs(180) * runs)
+}
+
 fn run_property(name: &str, property: u64, cases: usize, case: impl Fn(u64) -> Result<(), String>) {
-    for seed in seeds(property, cases) {
+    let seeds = seeds(property, cases);
+    let _guard = property_guard(name, seeds.len(), cases);
+    for seed in seeds {
         if let Err(e) = case(seed) {
             panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
         }
@@ -717,6 +727,7 @@ fn random_sessions_keep_every_output_invariant() {
     let name = "random_sessions_keep_every_output_invariant";
     let mut cov = Coverage::default();
     let seeds = seeds(1, 1000);
+    let _guard = property_guard(name, seeds.len(), 1000);
     for &seed in &seeds {
         if let Err(e) = run_case(seed, 30, &mut cov) {
             panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
@@ -964,7 +975,9 @@ fn midi_never_arms_except_the_opt_in_gesture() {
 /// the interlocks say, and nothing arms while the e-stop is latched.
 #[test]
 fn the_gate_refuses_controllers_the_system_and_a_latched_estop() {
-    for seed in seeds(4, 1000) {
+    let seeds = seeds(4, 1000);
+    let _guard = property_guard("the_gate_refuses_controllers_the_system_and_a_latched_estop", seeds.len(), 1000);
+    for seed in seeds {
         let mut rng = Rng::new(seed);
         let mut s = test_support::shared();
         let mut latched = false;
