@@ -64,6 +64,7 @@ pub fn shared() -> Shared {
         sim_now: None,
         live: live::LiveModifiers::default(),
         live_dirty: false,
+        cue_mods: Default::default(),
         palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
         scan_presets: crate::scan::ScanPresetStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scan_presets.json")),
         festival: Default::default(),

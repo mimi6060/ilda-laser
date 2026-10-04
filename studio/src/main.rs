@@ -45,6 +45,7 @@ mod ilda;
 mod ilda_library;
 mod instance;
 mod layers;
+mod levels;
 mod lfo;
 mod interlock;
 mod help;
@@ -384,6 +385,9 @@ pub struct Shared {
     /// Master live modifiers (live.rs), saved to live.json when changed.
     pub live: live::LiveModifiers,
     pub live_dirty: bool,
+    /// The cue level's working copies (levels.rs, T-144), by preset id,
+    /// for the cues on show. Memory only: a cue starts from its cell's.
+    pub cue_mods: HashMap<String, live::LiveModifiers>,
     /// User colour palettes (palettes.json).
     pub palettes: live::PaletteStore,
     /// User scan presets (scan_presets.json, T-415).
@@ -1317,6 +1321,7 @@ fn startup_state(cli: &Cli) -> Shared {
             live
         },
         live_dirty: false,
+        cue_mods: HashMap::new(),
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
         scan_presets: scan::ScanPresetStore::load_or_create(cli.data_dir.join("scan_presets.json")),
         festival: festival::Festival::load(festival::path(&cli.data_dir)),
@@ -1721,6 +1726,11 @@ struct Engine {
     event_live: HashMap<u64, live::LiveState>,
     /// Rotation state of user cues stored with master modifiers (T-405).
     cue_live: HashMap<u64, live::LiveState>,
+    /// The cue and layer levels (T-144): rotation state of each cue
+    /// instance's own level and of each layer, and the « Lissage » filters.
+    cue_level_live: HashMap<u64, live::LiveState>,
+    layer_live: [live::LiveState; layers::LAYER_COUNT],
+    smoothers: levels::Smoothers,
     /// « Figer » held (T-142): the (seconds, beats) time stood still at,
     /// and the content beat of each timeline event met while frozen.
     frozen: Option<(f64, f64)>,
@@ -1758,6 +1768,9 @@ impl Engine {
             live_state: live::LiveState::default(),
             event_live: HashMap::new(),
             cue_live: HashMap::new(),
+            cue_level_live: HashMap::new(),
+            layer_live: Default::default(),
+            smoothers: Default::default(),
             frozen: None,
             frozen_events: HashMap::new(),
             frames_since_save: 0,
@@ -1794,7 +1807,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
+        let (looks, transition_fx, show_cues, starts, (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1876,6 +1889,9 @@ impl Engine {
                 _ => None,
             };
             let (mut settings, mut live) = (calm.unwrap_or_else(|| s.settings.clone()), s.live.clone());
+            // « Lissage » (T-144): the operator's moves glide, before the
+            // modulators move the copy (an LFO is never smoothed).
+            live = self.smoothers.master.step(&live, &s.mixer.smoothing, dt);
             let time_share = s.routes.routing().time_share();
             lfo::modulate_scaled(s.lfos.list(), &s.controls, &mut settings, &mut live, mod_t, mod_beat, time_share);
             // The FX grid (T-146), on top of the LFOs, on the same copies.
@@ -1947,6 +1963,10 @@ impl Engine {
                 .filter_map(|a| Some((a.id, usercues::master_of(&s, &a.cue)?)))
                 .collect();
             cue_masters.extend(fx_cue);
+            // The cue and layer levels (T-144): working copies follow the
+            // deck, then this frame's values, smoothed.
+            levels::frame(&mut s);
+            let levels = self.smoothers.frame(&s, dt);
             let armed = s.gate.is_armed();
             let routing = Routing::read(&s, &looks, &show_cues);
             let caps = s.outputs.active_limits();
@@ -1982,7 +2002,7 @@ impl Engine {
                 })
                 .collect();
             let festival = (s.festival.colors(), s.festival.balance);
-            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
+            (looks, transition_fx, show_cues, starts, (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -2013,6 +2033,12 @@ impl Engine {
                 // evolving look would wait on its first frame for the next
                 // beat after every release, never moving on).
                 let look_hidden = looks.iter().any(|(_, i, _)| *i != 0);
+                // Cue → layer → master (T-144): the layers' rotations move
+                // once a frame, every look of a layer shares them.
+                let (cue_level_live, layer_live) = (&mut self.cue_level_live, &mut self.layer_live);
+                levels.advance_layers(layer_live, t, &clock, frozen_at, live_dt);
+                cue_level_live.retain(|id, _| levels.cues.contains_key(id));
+                let layer_live = &*layer_live;
                 animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id) || (*id == 0 && look_hidden));
                 event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
                 cue_live.retain(|id, _| cue_masters.contains_key(id));
@@ -2030,10 +2056,11 @@ impl Engine {
                         let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
                         let content_beat = if frozen { *frozen_events.entry(cue.instance).or_insert(cue.content_beat) } else { cue.content_beat };
                         let content_clock = engine::BeatClock { beat: content_beat, ..clock };
+                        let layer_speed = levels.speed(None, cue.layer);
                         let event_dt = match (fresh, cue.frozen || frozen) {
-                            (true, _) => cue.elapsed_s as f32 * live.speed.clamp(0.0, 4.0),
+                            (true, _) => cue.elapsed_s as f32 * live.speed.clamp(0.0, 4.0) * layer_speed,
                             (false, true) => 0.0,
-                            (false, false) => anim_dt,
+                            (false, false) => anim_dt * layer_speed,
                         };
                         animator.set_optimizer(scan);
                         animator.set_palette(festival_palette);
@@ -2051,6 +2078,9 @@ impl Engine {
                             st.advance(&cue.modifiers, live_dt, clock.bpm, clock.beats_per_bar);
                             points = live::apply(&points, &cue.modifiers, st, &user_palettes);
                         }
+                        // Its layer's modifiers (T-144), the event's own colour first.
+                        let coloured = cue.modifiers.color != live::ColorOverride::Normal;
+                        let points = levels.layer_stage(cue.layer, points, coloured, layer_live, &user_palettes);
                         (cue.layer, points, zones.clone())
                     })
                     .collect();
@@ -2062,16 +2092,30 @@ impl Engine {
                     });
                     animator.set_optimizer(scan);
                     animator.set_palette(festival_palette);
-                    let mut points = animator.render(settings, audio, anim_dt, &render_clock);
+                    let mut points = animator.render(settings, audio, anim_dt * levels.speed(Some(*id), *layer), &render_clock);
                     // A user cue's own master modifiers (T-405), before the
                     // master stage, like a timeline event's.
+                    let mut coloured = false;
                     if let Some(m) = cue_masters.get(id) {
                         let st = cue_live.entry(*id).or_default();
                         st.set_clock(t, clock.beat);
                         st.freeze_colours(frozen_at);
                         st.advance(m, live_dt, clock.bpm, clock.beats_per_bar);
                         points = live::apply(&points, m, st, &user_palettes);
+                        coloured = m.color != live::ColorOverride::Normal;
                     }
+                    // Then the cue level and the layer level (T-144), still
+                    // before the transitions, the mixer, the master stage
+                    // and the whole safety chain.
+                    if let Some(m) = levels.cues.get(id) {
+                        let st = cue_level_live.entry(*id).or_default();
+                        st.set_clock(t, clock.beat);
+                        st.freeze_colours(frozen_at);
+                        st.advance(m, live_dt, clock.bpm, clock.beats_per_bar);
+                        points = live::apply(&points, m, st, &user_palettes);
+                        coloured |= m.color != live::ColorOverride::Normal;
+                    }
+                    let points = levels.layer_stage(*layer, points, coloured, layer_live, &user_palettes);
                     (*id, points, (*layer, zones.clone()))
                 }).collect();
                 // Transitions between cues (T-158): fades scale colours by

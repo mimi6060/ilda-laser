@@ -1376,10 +1376,11 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 if !s.presets.iter().any(|p| p.id == req.id) {
                     return text(404, "no such preset");
                 }
-                // The program is set on its own route: the properties
-                // dialog never sends it, and keeps it.
-                let program = s.deck.slot(&req.id).program;
-                s.deck.set_slot(&req.id, CueSlot { program, ..req.slot });
+                // The program and the stored modifiers (T-144) are set on
+                // their own routes: the properties dialog never sends them,
+                // and keeps them.
+                let CueSlot { program, modifiers, .. } = s.deck.slot(&req.id);
+                s.deck.set_slot(&req.id, CueSlot { program, modifiers, ..req.slot });
                 s.deck.save();
                 ok()
             }
@@ -1400,6 +1401,29 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 s.deck.set_slot(&req.id, CueSlot { program: req.program, ..slot });
                 s.deck.save();
                 ok()
+            }
+            Err(e) => e,
+        },
+        // « Enregistrer dans le cue » (T-144): the cue level's working
+        // copy (with the master composed in when `with_master`) into the
+        // cell; `clear` empties the cell's. An edit: in the history,
+        // refused in show mode.
+        (Method::Post, "/api/cues/modifiers") => match body::<CueModifiersRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                if req.clear {
+                    if !s.presets.iter().any(|p| p.id == req.id) {
+                        return text(404, "cue inconnu");
+                    }
+                    let slot = s.deck.slot(&req.id);
+                    s.deck.set_slot(&req.id, CueSlot { modifiers: Default::default(), ..slot });
+                    s.deck.save();
+                    return ok();
+                }
+                match crate::levels::store(&mut s, &req.id, req.with_master) {
+                    Ok(()) => ok(),
+                    Err((code, why)) => text(code, &why),
+                }
             }
             Err(e) => e,
         },
@@ -2960,6 +2984,15 @@ fn scan_presets_view(s: &Shared) -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+struct CueModifiersRequest {
+    id: String,
+    #[serde(default)]
+    with_master: bool,
+    #[serde(default)]
+    clear: bool,
+}
+
+#[derive(Deserialize)]
 struct ProgramRequest {
     id: String,
     program: Option<crate::program::CueProgram>,
@@ -3676,6 +3709,13 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["fx"] = s.fx.view();
     // T-274: what is prepared (no points: those are `/api/preview-frame`).
     v["prepared"] = crate::prepared::view(s);
+    // T-144: the cue level of every cue on show (the layers' are in
+    // `layers.mixer`).
+    v["cue_mods"] = crate::levels::view(s);
+    v["levels_on"] = json!({
+        "layers": s.mixer.layers.iter().map(|l| !crate::levels::is_neutral(&l.modifiers)).collect::<Vec<_>>(),
+        "cues": s.cue_mods.values().any(|m| !crate::levels::is_neutral(m)),
+    });
     v
 }
 
@@ -4358,6 +4398,51 @@ mod tests {
         assert_eq!(t.request("POST", "/api/undo", "{}").0, 409, "nothing left");
     }
 
+    /// T-144: cue and layer modifiers over the API: level controls are
+    /// live moves (allowed in show mode, never in the history), « Enregistrer
+    /// dans le cue » is an edit (history, undo, refused in show mode), the
+    /// properties dialog keeps the stored ones, and a restart plays them.
+    #[test]
+    fn cue_and_layer_modifiers_over_the_api() {
+        let t = TestServer::start(false);
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        let control = |t: &TestServer, id: &str, v: f32| t.request("POST", "/api/control", &format!(r#"{{"id":"{id}","value":{v}}}"#)).0;
+        assert_eq!(control(&t, &format!("cue.{cue}.size"), 0.5), 403, "not playing");
+        assert_eq!(t.request("POST", "/api/cues/modifiers", &format!(r#"{{"id":"{cue}"}}"#)).0, 409);
+        assert_eq!(t.request("POST", "/api/cue", &format!(r#"{{"id":"{cue}"}}"#)).0, 200);
+        assert_eq!(control(&t, &format!("cue.{cue}.size"), 0.5), 200);
+        assert_eq!(control(&t, "layer.2.pos_x", 0.25), 200);
+        assert_eq!(control(&t, "layer.9.pos_x", 0.25), 404);
+        let state = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(state["cue_mods"][&cue]["size"], 0.5);
+        assert_eq!(state["layers"]["mixer"]["layers"][1]["modifiers"]["pos_x"], 0.25);
+        assert_eq!(state["history"]["undo"], 0, "live moves are not edits");
+        // Stored, labelled, undone, redone.
+        assert_eq!(t.request("POST", "/api/cues/modifiers", &format!(r#"{{"id":"{cue}"}}"#)).0, 200);
+        let name = t.shared.lock().unwrap().presets[0].name.clone();
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], format!("Modificateurs du cue « {name} » enregistrés"));
+        assert_eq!(t.shared.lock().unwrap().deck.slot(&cue).modifiers.size, 0.5);
+        // The properties dialog never sends them, and keeps them.
+        assert_eq!(t.request("POST", "/api/cues/slot", &format!(r#"{{"id":"{cue}","layer":2}}"#)).0, 200);
+        assert_eq!(t.shared.lock().unwrap().deck.slot(&cue).modifiers.size, 0.5);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert_eq!(t.shared.lock().unwrap().deck.slot(&cue).modifiers.size, 1.0);
+        assert_eq!(t.request("POST", "/api/redo", "{}").0, 200);
+        assert_eq!(t.shared.lock().unwrap().deck.slot(&cue).modifiers.size, 0.5);
+        // Show mode: moves allowed, storing refused.
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(control(&t, &format!("cue.{cue}.size"), 0.8), 200);
+        assert_eq!(control(&t, "smoothing.on", 1.0), 200);
+        assert_eq!(t.request("POST", "/api/cues/modifiers", &format!(r#"{{"id":"{cue}"}}"#)).0, 423);
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+        assert!(t.shared.lock().unwrap().mixer.smoothing.enabled);
+        // Cleared.
+        assert_eq!(t.request("POST", "/api/cues/modifiers", &format!(r#"{{"id":"{cue}","clear":true}}"#)).0, 200);
+        assert!(crate::levels::is_neutral(&t.shared.lock().unwrap().deck.slot(&cue).modifiers));
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap(), "nothing here arms");
+    }
+
     /// T-258: with a (simulated) real output, arming waits for the
     /// checklist; completing it never arms; restarting it disarms.
     #[test]
@@ -4823,6 +4908,7 @@ mod tests {
             ("/api/project/open", r#"{"path":"x"}"#),
             ("/api/midi/learn", r#"{"target":"master.size"}"#),
             ("/api/cues/slot", r#"{"id":"tunnels-001"}"#),
+            ("/api/cues/modifiers", r#"{"id":"tunnels-001"}"#),
             ("/api/grid", r#"{"cols":6,"rows":4}"#),
             ("/api/grid/page", r#"{"action":"new"}"#),
             ("/api/grid/move", r#"{"from":[1,0],"to":[0,null]}"#),

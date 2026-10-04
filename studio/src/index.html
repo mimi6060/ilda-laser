@@ -870,6 +870,18 @@
   /* LIVE › Direct (T-143), Theme (T-299) tokens. */
   #directTabs button { padding: 5px 4px; font-size: 12px; }
   #directTabs button[disabled] { opacity: .4; cursor: not-allowed; }
+  /* Calque / Cue (T-144), Theme (T-299) tokens. */
+  .dscope { margin-top: 6px; align-items: center; gap: 6px; }
+  .dscope label { margin: 0; display: flex; align-items: center; gap: 6px; }
+  .dscope select { min-width: 0; flex: 1; }
+  #directScopeHint { margin: 6px 0 0; color: var(--muted); }
+  #directScopeHint.ok { color: var(--ok); }
+  #directScopeHint.bad { color: var(--warn); }
+  #livePanel.scope-off section[data-panel="direct"] .dblk ~ * { opacity: .45; pointer-events: none; }
+  #directTabs button.lvl-on::after { content: ' •'; color: var(--accent); }
+  .dsmooth { margin-top: 6px; align-items: center; gap: 8px; }
+  .dsmooth input[type=range] { flex: 1; min-width: 0; }
+  .dsmooth .v { color: var(--muted); font-size: 11px; }
   .dblk { margin: 14px 0 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); }
   .dzoom { margin-top: 0; }
   .dzoom button { flex: none; width: 30px; padding: 2px 0; }
@@ -1604,11 +1616,26 @@
     </div>
     <section data-panel="direct" data-help="live-direct">
       <h2>Direct <button id="liveReset" data-ctl="master.reset" data-control="master.reset" title="master.reset : toutes les valeurs du direct reviennent au neutre" style="padding:4px 8px;font-size:11px">Tout réinitialiser</button></h2>
-      <!-- Calque / Cue: per-layer and per-cue modifiers come with T-144. -->
+      <!-- Maître / Calque / Cue (T-144): the same controls drive the master, one layer or one cue on show. -->
       <div class="seg" id="directTabs" role="tablist" aria-label="Portée du direct">
-        <button role="tab" class="active" aria-selected="true">Maître</button>
-        <button role="tab" disabled title="Modificateurs par calque : bientôt (les gradateurs des calques sont sous la grille de cues)">Calque</button>
-        <button role="tab" disabled title="Modificateurs par cue : bientôt">Cue</button>
+        <button role="tab" data-scope="master" class="active" aria-selected="true" title="Le maître : sur tout ce qui sort">Maître</button>
+        <button role="tab" data-scope="layer" aria-selected="false" title="Un calque : sur tout ce qu'il joue (cues, liste de cues, timeline)">Calque</button>
+        <button role="tab" data-scope="cue" aria-selected="false" title="Un cue en cours : sur lui seul">Cue</button>
+      </div>
+      <div class="row dscope" id="directLayerRow" hidden>
+        <label>Calque <select id="directLayer"><option value="1">Calque 1</option><option value="2">Calque 2</option><option value="3">Calque 3</option><option value="4">Calque 4</option></select></label>
+      </div>
+      <div id="directCueRow" hidden>
+        <div class="row dscope"><label>Cue <select id="directCue"></select></label></div>
+        <div class="row dscope">
+          <button id="directStore" class="lock-edit" title="Copie les réglages de ce cue dans sa case : il les reprend à chaque lancement">Enregistrer dans le cue</button>
+          <label class="check lock-edit" title="Ajoute aussi les réglages du maître (tailles multipliées, positions et angles additionnés)"><input type="checkbox" id="directStoreMaster"> avec le maître</label>
+        </div>
+      </div>
+      <div class="hint" id="directScopeHint"></div>
+      <div class="row dsmooth" title="Lissage : les curseurs glissent au lieu de sauter (tous les niveaux)">
+        <label class="check" style="margin:0"><input type="checkbox" id="smoothOn" data-control="smoothing.on"> Lissage</label>
+        <span>Inertie</span><input type="range" id="smoothInertia" min="25" max="400" value="100" data-control="smoothing.inertia" title="smoothing.inertia"><span class="v" id="smoothInertiaV"></span>
       </div>
       <div class="hint" style="margin:6px 0 0">Double-clic sur un curseur : taper une valeur · clic droit ou double-clic sur son nom : valeur neutre · Maj + glisser : réglage fin.</div>
 
@@ -4810,7 +4837,11 @@ function applyState(f, at, pushed) {
   // right after it was ticked). A pushed one skipped now is shown on the
   // next pass.
   if (pushed ? liveAnsweredAt >= liveSentAt && performance.now() - liveAnsweredAt > 100
-    : at > liveAnsweredAt && liveAnsweredAt >= liveSentAt) showLive(f.live);
+    : at > liveAnsweredAt && liveAnsweredAt >= liveSentAt) {
+    showDirectScope(f);
+    const m = scopeMods(f);
+    if (m) showLive(m);
+  }
   showLfos(f.lfos);
   showFxGrid(f.fx);
   showFestival(f.festival);
@@ -6536,10 +6567,102 @@ function showStrobe(st) {
 // (it would e.g. untick « Synchro tempo » right after it was ticked).
 let liveSentAt = 0, liveAnsweredAt = 0;
 async function postLive(body) {
+  const id = scopedId(body.id);
+  if (!id) return;
   liveSentAt = performance.now();
-  await post('/api/control', body);
+  await post('/api/control', { ...body, id });
   liveAnsweredAt = performance.now();
 }
+
+// ---------- Direct: Maître / Calque / Cue (T-144) ----------
+// The same controls drive the master, one layer (`layer.<n>.<param>`) or
+// one cue on show (`cue.<id>.<param>`). « Vitesse de balayage », « Figer »
+// and « Noir » stay the master's.
+let directScope = 'master', directLayer = 1, directCue = null, directFrame = null, directCueKey = '';
+function scopedId(id) {
+  if (!id || !id.startsWith('master.') || id === 'master.scan' || directScope === 'master') return id;
+  if (directScope === 'layer') return `layer.${directLayer}.${id.slice(7)}`;
+  return directCue ? `cue.${directCue}.${id.slice(7)}` : null;
+}
+// What the Direct panel shows: the master, the chosen layer's or cue's.
+function scopeMods(f) {
+  if (directScope === 'layer') return f.layers && f.layers.mixer.layers[directLayer - 1].modifiers;
+  if (directScope === 'cue') return directCue && f.cue_mods ? f.cue_mods[directCue] : null;
+  return f.live;
+}
+// The cues on show, newest last; the newest is chosen when ours stopped.
+function showDirectCues(f) {
+  const ids = [...new Set([...(f.cues ? f.cues.active : []), ...(f.cues ? f.cues.ending : [])].map(c => c.cue))];
+  const key = ids.join('\n');
+  if (key !== directCueKey) {
+    directCueKey = key;
+    const name = id => (presetById.get(id) || { name: id }).name;
+    $('directCue').innerHTML = ids.length ? ids.map(id => `<option value="${id.replace(/"/g, '&quot;')}"></option>`).join('') : '<option value="">Aucun cue en cours</option>';
+    [...$('directCue').options].forEach((o, i) => { if (ids.length) o.textContent = name(ids[i]); });
+  }
+  if (!ids.includes(directCue)) directCue = ids.includes(f.active_cue) ? f.active_cue : (ids[ids.length - 1] || null);
+  if (directCue && $('directCue').value !== directCue) $('directCue').value = directCue;
+  $('directCue').disabled = !ids.length;
+  $('directStore').disabled = !directCue;
+}
+function showDirectScope(f) {
+  if (!f) return;
+  directFrame = f;
+  showDirectCues(f);
+  const off = directScope === 'cue' && !directCue;
+  $('livePanel').classList.toggle('scope-off', off);
+  const hint = $('directScopeHint');
+  if (!hint.dataset.msg) {
+    hint.className = 'hint';
+    hint.textContent = directScope === 'layer' ? `Réglages du calque ${directLayer}, avant le maître.`
+      : directScope === 'cue' ? (off ? 'Aucun cue en cours : lancez un cue pour le régler.' : 'Réglages de ce cue seul, avant son calque et le maître. Ils reviennent à ceux de sa case à chaque lancement.')
+      : '';
+  }
+  const on = f.levels_on || {}, layerOn = (on.layers || []).some(Boolean), cueOn = !!on.cues;
+  document.querySelectorAll('#directTabs button').forEach(b => b.classList.toggle('lvl-on', (b.dataset.scope === 'layer' && layerOn) || (b.dataset.scope === 'cue' && cueOn)));
+  const sm = f.layers && f.layers.mixer.smoothing;
+  if (sm) {
+    setCheck('smoothOn', sm.enabled);
+    setVal('smoothInertia', Math.round(sm.mass * 100));
+    $('smoothInertiaV').textContent = `× ${sm.mass.toFixed(2)}`;
+  }
+}
+function setDirectScope(scope) {
+  directScope = scope;
+  document.querySelectorAll('#directTabs button').forEach(b => {
+    b.classList.toggle('active', b.dataset.scope === scope);
+    b.setAttribute('aria-selected', b.dataset.scope === scope ? 'true' : 'false');
+  });
+  $('directLayerRow').hidden = scope !== 'layer';
+  $('directCueRow').hidden = scope !== 'cue';
+  $('mScan').disabled = scope !== 'master';
+  delete $('directScopeHint').dataset.msg;
+  refreshDirect();
+}
+function refreshDirect() {
+  if (!directFrame) return;
+  showDirectScope(directFrame);
+  const m = scopeMods(directFrame);
+  if (m) showLive(m);
+}
+document.querySelectorAll('#directTabs button').forEach(b => b.addEventListener('click', () => setDirectScope(b.dataset.scope)));
+$('directLayer').addEventListener('change', () => { directLayer = +$('directLayer').value; refreshDirect(); });
+$('directCue').addEventListener('change', () => { directCue = $('directCue').value || null; refreshDirect(); });
+$('directStore').addEventListener('click', async () => {
+  if (!directCue) return;
+  const hint = $('directScopeHint'), name = (presetById.get(directCue) || { name: directCue }).name;
+  const r = await api('POST', '/api/cues/modifiers', { id: directCue, with_master: $('directStoreMaster').checked }, { quiet: true });
+  hint.dataset.msg = '1';
+  hint.className = 'hint ' + (r.ok ? 'ok' : 'bad');
+  hint.textContent = r.ok ? `Enregistré dans le cue « ${name} » : il les reprendra à chaque lancement.` : ((await r.text()).trim() || 'Enregistrement refusé.');
+  setTimeout(() => { delete hint.dataset.msg; refreshDirect(); }, 4000);
+  if (r.ok) loadSlots();
+});
+$('smoothOn').addEventListener('change', () => post('/api/control', { id: 'smoothing.on', value: $('smoothOn').checked ? 1 : 0 }));
+$('smoothInertia').addEventListener('input', () => {
+  $('smoothInertiaV').textContent = `× ${($('smoothInertia').value / 100).toFixed(2)}`;
+  post('/api/control', { id: 'smoothing.inertia', value: $('smoothInertia').value / 100 });
+});
 let live = null;
 const liveGet = (path) => path.split('.').reduce((o, k) => o[k], live);
 function liveSet(path, v) {
@@ -6918,7 +7041,7 @@ const COLOR_MODES = ['normal', 'fixed', 'hue', 'palette', 'rainbow', 'chase'];
 const COLOR_STEPS = [0.125, 0.25, 0.5, 1, 2, 4];
 let palettes = { builtin: [], user: [] };
 const colorMode = () => live ? COLOR_MODES.indexOf(live.color.kind) : 0;
-const control = (id, value) => post('/api/control', { id, value });
+const control = (id, value) => { const sid = scopedId(id); return sid ? post('/api/control', { id: sid, value }) : Promise.resolve(false); };
 const setColorMode = m => control('master.color.mode', m);
 function showColor(l) {
   const p = l.color_params, mode = COLOR_MODES.indexOf(l.color.kind);
@@ -7025,7 +7148,7 @@ function showTempo(t) {
   $('tempoSrc').textContent = auto ? `${FOLLOW[t.follow] || t.follow} ${Math.round(100 * (t.confidence || 0))} %` + (t.guide_bpm ? ` · guide ${t.guide_bpm.toFixed(0)}` : '') : '';
 }
 $('tempoAuto').addEventListener('click', () => post('/api/control', { id: 'tempo.auto', value: $('tempoAuto').classList.contains('active') ? 0 : 1 }));
-document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => post('/api/control', { id: b.dataset.ctl })));
+document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => { const id = scopedId(b.dataset.ctl); if (id) post('/api/control', { id }); }));
 $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm', value: +$('bpm').value }));
 
 // ---------- cues ----------
