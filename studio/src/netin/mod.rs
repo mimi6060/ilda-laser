@@ -1,48 +1,58 @@
-//! External inputs over the network (T-013): OSC and Art-Net, for a
-//! lighting console or another app. Both drive the stable control ids
-//! (controls.rs) through `controls::apply_as(…, ArmSource::Network)`, the
-//! entry point MIDI and the UI use: there is no network-only control path.
+//! External inputs over the network (T-013, T-406): OSC, Art-Net and sACN,
+//! for a lighting console or another app. Every write goes through the
+//! local gate (external.rs, T-408): `external::apply` checks the gate, the
+//! source's access and its scope, then calls `controls::apply_as`, the
+//! entry point MIDI and the UI use. There is no network-only control path.
 //!
 //! Safety:
 //! - Nothing from the network arms the laser. `transport.arm` is not an
 //!   external control and `/ls/arm` is refused by the gate (and logged);
 //!   the hold-to-run pad (`safety.hold`) is refused too, since a lost UDP
 //!   release would keep the beam on. Blackout and the emergency stop are
-//!   accepted at all times: the listener trips the e-stop latch itself,
-//!   without waiting for the engine, the queue or the `Shared` lock.
+//!   accepted at all times, gate closed or not: the listener trips the
+//!   e-stop latch itself, without waiting for the engine, the queue or the
+//!   `Shared` lock.
 //! - Off by default, listening on 127.0.0.1 by default; the operator picks
 //!   another address (a console on the LAN) in RÉGLAGES or with `--osc` /
-//!   `--artnet`. Listen only: nothing is ever sent (no ArtPollReply).
-//! - Signal loss (Art-Net is a stream): no ArtDmx for `loss.timeout_ms`
-//!   applies `loss.policy`: « neutre » (default) puts the chart's channels
-//!   back to neutral — intensity 0, size 100 %, centred, rotation stopped,
-//!   normal speed — and leaves cues, page and colour as they are; « garder »
-//!   keeps the last values; « blackout » latches the emergency stop. The
-//!   next packet takes over again with every channel; arming never
-//!   changes. OSC sends commands, not a stream, so it has nothing to lose;
-//!   pads it holds pressed are released when OSC is switched off.
+//!   `--artnet`. sACN joins its multicast groups only when the operator
+//!   ticks it, on the interface they picked. Listen only: nothing is ever
+//!   sent (no ArtPollReply, no sACN discovery).
+//! - Signal loss (Art-Net and sACN are streams): no packet for
+//!   `loss.timeout_ms` applies `loss.policy`: « neutre » (default) puts the
+//!   chart's channels back to neutral — intensity 0, size 100 %, centred,
+//!   rotation stopped, normal speed — and leaves cues, page and colour as
+//!   they are; « garder » keeps the last values; « fondu au noir » and
+//!   « noir immédiat » lower the output gain (`gain`, applied to the
+//!   master brightness before the safety stage; never a disarm, never an
+//!   arm); « blackout » latches the emergency stop. The next packet takes
+//!   over again; arming never changes. OSC sends commands, not a stream, so
+//!   it has nothing to lose; pads it holds pressed are released when OSC
+//!   is switched off or the gate closes.
 //!
 //! Threads: one listener per protocol (listener.rs) decodes datagrams and
 //! pushes them into a bounded queue (dropped when full, counted); the
 //! engine thread drains it once per frame (`frame`), applying at most the
-//! newest DMX packet and `MAX_EVENTS_PER_FRAME` OSC messages. Neither the
-//! engine nor the HTTP worker ever waits on a socket.
+//! newest packet of each universe and `MAX_EVENTS_PER_FRAME` events.
+//! Neither the engine nor the HTTP worker ever waits on a socket.
 
 pub mod artnet;
 pub mod listener;
 pub mod osc;
+pub mod patch;
+pub mod sacn;
 
-use crate::controls::{self, ControlError, ControlInput, ControlKind};
-use crate::cues::ClickMode;
+use crate::controls::{self, ControlInput, ControlKind};
+use crate::external::{self, SourceKind};
 use crate::interlock::{ArmSource, EStop};
 use crate::presets::CATEGORIES;
 use crate::Shared;
 use artnet::{Function, CHART};
 use osc::{OscArg, OscCommand, OscMessage};
+use patch::{PatchConfig, PatchState, UniverseEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashSet, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -58,13 +68,18 @@ pub const DEFAULT_BIND: &str = "127.0.0.1";
 pub const DEFAULT_OSC_PORT: u16 = 8000;
 pub const LOSS_TIMEOUT_MIN_MS: u64 = 500;
 pub const LOSS_TIMEOUT_MAX_MS: u64 = 30_000;
-/// Controls the network may never drive, even if they are external.
-const NETWORK_REFUSED: [&str; 2] = ["transport.arm", "safety.hold"];
+pub const LOSS_FADE_MAX_MS: u64 = 30_000;
+/// sACN universes listed at most.
+pub const MAX_SACN_UNIVERSES: usize = 32;
+/// Sources kept for the monitor at most, and how long a silent one stays.
+const MAX_SOURCES: usize = 64;
+const SOURCE_SHOWN: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Proto {
     Osc,
     ArtNet,
+    Sacn,
 }
 
 impl Proto {
@@ -72,6 +87,15 @@ impl Proto {
         match self {
             Proto::Osc => "OSC",
             Proto::ArtNet => "Art-Net",
+            Proto::Sacn => "sACN",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Proto::Osc => "osc",
+            Proto::ArtNet => "artnet",
+            Proto::Sacn => "sacn",
         }
     }
 }
@@ -110,22 +134,49 @@ impl Default for ArtNetConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SacnConfig {
+    pub enabled: bool,
+    /// The interface's address: 127.0.0.1 by default (unicast from this
+    /// Mac only). Multicast needs the address of the console's interface.
+    pub bind: String,
+    pub port: u16,
+    /// Join the universes' multicast groups on that interface. Off: the
+    /// console must send unicast to this Mac.
+    pub multicast: bool,
+    /// Universes listened to (the patch's universes are always accepted).
+    pub universes: Vec<u16>,
+}
+
+impl Default for SacnConfig {
+    fn default() -> Self {
+        SacnConfig { enabled: false, bind: DEFAULT_BIND.into(), port: sacn::PORT, multicast: false, universes: vec![1] }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LossPolicy {
     Hold,
     #[default]
     Neutral,
+    /// Fade the output to black over `fade_ms` (gain, not a disarm).
+    FadeOut,
+    /// Output gain to 0 at once (not a disarm).
+    Dark,
     Blackout,
 }
 
-pub const LOSS_POLICIES: [LossPolicy; 3] = [LossPolicy::Neutral, LossPolicy::Hold, LossPolicy::Blackout];
+pub const LOSS_POLICIES: [LossPolicy; 5] = [LossPolicy::Neutral, LossPolicy::Hold, LossPolicy::FadeOut, LossPolicy::Dark, LossPolicy::Blackout];
 
 impl LossPolicy {
     pub fn label_fr(self) -> &'static str {
         match self {
             LossPolicy::Hold => "garder les dernières valeurs",
             LossPolicy::Neutral => "revenir au neutre (intensité 0)",
+            LossPolicy::FadeOut => "fondu au noir",
+            LossPolicy::Dark => "noir immédiat",
             LossPolicy::Blackout => "blackout (arrêt d'urgence)",
         }
     }
@@ -136,11 +187,13 @@ impl LossPolicy {
 pub struct LossConfig {
     pub policy: LossPolicy,
     pub timeout_ms: u64,
+    /// « Fondu au noir »: its length.
+    pub fade_ms: u64,
 }
 
 impl Default for LossConfig {
     fn default() -> Self {
-        LossConfig { policy: LossPolicy::Neutral, timeout_ms: 2500 }
+        LossConfig { policy: LossPolicy::Neutral, timeout_ms: 2500, fade_ms: 2000 }
     }
 }
 
@@ -150,6 +203,9 @@ impl Default for LossConfig {
 pub struct NetInConfig {
     pub osc: OscConfig,
     pub artnet: ArtNetConfig,
+    pub sacn: SacnConfig,
+    /// The free DMX patch (patch.rs).
+    pub dmx: PatchConfig,
     pub loss: LossConfig,
 }
 
@@ -180,24 +236,66 @@ impl NetInConfig {
     pub fn validate(&self) -> Result<(), String> {
         parse_bind(&self.osc.bind, self.osc.port)?;
         parse_bind(&self.artnet.bind, self.artnet.port)?;
+        let sacn_addr = parse_bind(&self.sacn.bind, self.sacn.port)?;
         if self.artnet.universe > artnet::MAX_UNIVERSE {
             return Err(format!("univers Art-Net invalide : {} (0 à {})", self.artnet.universe, artnet::MAX_UNIVERSE));
         }
         if !(1..=artnet::MAX_ADDRESS).contains(&self.artnet.address) {
             return Err(format!("adresse DMX invalide : {} (1 à {}, {} canaux)", self.artnet.address, artnet::MAX_ADDRESS, CHART.len()));
         }
+        if self.sacn.universes.len() > MAX_SACN_UNIVERSES {
+            return Err(format!("trop d'univers sACN ({MAX_SACN_UNIVERSES} au plus)"));
+        }
+        if let Some(u) = self.sacn.universes.iter().find(|u| !(sacn::MIN_UNIVERSE..=sacn::MAX_UNIVERSE).contains(*u)) {
+            return Err(format!("univers sACN invalide : {u} (1 à {})", sacn::MAX_UNIVERSE));
+        }
+        let unicast_v4 = matches!(sacn_addr.ip(), IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified());
+        if self.sacn.multicast && !unicast_v4 {
+            return Err("multidiffusion sACN : choisissez l'adresse IPv4 de l'interface reliée à la console (ni 127.0.0.1, ni 0.0.0.0)".into());
+        }
+        self.dmx.validate()?;
         if !(LOSS_TIMEOUT_MIN_MS..=LOSS_TIMEOUT_MAX_MS).contains(&self.loss.timeout_ms) {
             return Err(format!("délai de perte du signal invalide : {} ms ({} à {} ms)", self.loss.timeout_ms, LOSS_TIMEOUT_MIN_MS, LOSS_TIMEOUT_MAX_MS));
+        }
+        if self.loss.fade_ms > LOSS_FADE_MAX_MS {
+            return Err(format!("durée du fondu invalide : {} ms (0 à {LOSS_FADE_MAX_MS} ms)", self.loss.fade_ms));
         }
         Ok(())
     }
 
     /// Where a protocol listens, if it is on.
     pub fn listen(&self, proto: Proto) -> Option<SocketAddr> {
+        let (on, bind, port) = match proto {
+            Proto::Osc => (self.osc.enabled, &self.osc.bind, self.osc.port),
+            Proto::ArtNet => (self.artnet.enabled, &self.artnet.bind, self.artnet.port),
+            Proto::Sacn => (self.sacn.enabled, &self.sacn.bind, self.sacn.port),
+        };
+        on.then(|| parse_bind(bind, port).ok()).flatten()
+    }
+
+    pub fn enabled(&self, proto: Proto) -> bool {
         match proto {
-            Proto::Osc => self.osc.enabled.then(|| parse_bind(&self.osc.bind, self.osc.port).ok()).flatten(),
-            Proto::ArtNet => self.artnet.enabled.then(|| parse_bind(&self.artnet.bind, self.artnet.port).ok()).flatten(),
+            Proto::Osc => self.osc.enabled,
+            Proto::ArtNet => self.artnet.enabled,
+            Proto::Sacn => self.sacn.enabled,
         }
+    }
+
+    /// sACN multicast: the interface and the universes to join, only when
+    /// sACN is on and the operator asked for it.
+    pub fn multicast(&self) -> Option<(Ipv4Addr, Vec<u16>)> {
+        if !(self.sacn.enabled && self.sacn.multicast) {
+            return None;
+        }
+        match parse_bind(&self.sacn.bind, self.sacn.port).ok()?.ip() {
+            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some((v4, self.sacn.universes.clone())),
+            _ => None,
+        }
+    }
+
+    /// Whether a universe is listened to by sACN.
+    pub fn sacn_wants(&self, universe: u16) -> bool {
+        self.sacn.universes.contains(&universe) || self.dmx.universes().contains(&universe)
     }
 }
 
@@ -216,15 +314,31 @@ pub struct ListenStatus {
     pub error: Option<String>,
     /// Packets accepted.
     pub packets: u64,
-    /// Not OSC / not Art-Net, or malformed.
+    /// Not OSC / not Art-Net / not sACN, or malformed.
     pub rejected: u64,
     /// Lost because the engine's queue was full.
     pub dropped: u64,
-    /// Art-Net only: packets for another universe.
+    /// Art-Net and sACN: packets for a universe nobody listens to.
     pub ignored: u64,
     pub last_from: Option<String>,
+    /// sACN: multicast groups joined.
+    pub groups: Vec<String>,
     #[serde(skip)]
     pub last_at: Option<Instant>,
+}
+
+/// A DMX source seen by a listener (the monitor).
+#[derive(Clone, Debug, Serialize)]
+pub struct DmxSource {
+    pub name: String,
+    pub protocol: &'static str,
+    pub addr: String,
+    pub priority: u8,
+    pub universe: u16,
+    /// Its data is the universe's (sACN: highest priority, newest).
+    pub active: bool,
+    #[serde(skip)]
+    pub at: Instant,
 }
 
 struct HubInner {
@@ -233,11 +347,13 @@ struct HubInner {
     path: Option<PathBuf>,
     osc: ListenStatus,
     artnet: ListenStatus,
+    sacn: ListenStatus,
+    sources: Vec<DmxSource>,
 }
 
 /// Shared with the listener threads (its own short lock, never the
-/// `Shared` one): the configuration, their status, and the e-stop latch
-/// for the blackout fast path.
+/// `Shared` one): the configuration, their status, the sources seen, and
+/// the e-stop latch for the blackout fast path.
 pub struct NetHub {
     inner: Mutex<HubInner>,
     pub estop: Arc<EStop>,
@@ -258,7 +374,15 @@ impl NetHub {
     }
 
     fn with(file: NetInConfig, cli: CliOverride, path: Option<PathBuf>, estop: Arc<EStop>) -> Self {
-        let inner = HubInner { file, cli, path, osc: ListenStatus::default(), artnet: ListenStatus::default() };
+        let inner = HubInner {
+            file,
+            cli,
+            path,
+            osc: ListenStatus::default(),
+            artnet: ListenStatus::default(),
+            sacn: ListenStatus::default(),
+            sources: Vec::new(),
+        };
         NetHub { inner: Mutex::new(inner), estop }
     }
 
@@ -319,6 +443,7 @@ impl NetHub {
         match proto {
             Proto::Osc => inner.osc.clone(),
             Proto::ArtNet => inner.artnet.clone(),
+            Proto::Sacn => inner.sacn.clone(),
         }
     }
 
@@ -327,7 +452,26 @@ impl NetHub {
         f(match proto {
             Proto::Osc => &mut inner.osc,
             Proto::ArtNet => &mut inner.artnet,
+            Proto::Sacn => &mut inner.sacn,
         });
+    }
+
+    /// Replaces what a listener knows of one universe's sources.
+    pub fn set_sources(&self, proto: Proto, universe: u16, list: Vec<DmxSource>) {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        inner.sources.retain(|s| !(s.protocol == proto.id() && s.universe == universe) && now.saturating_duration_since(s.at) <= SOURCE_SHOWN);
+        inner.sources.extend(list);
+        let n = inner.sources.len();
+        if n > MAX_SOURCES {
+            inner.sources.sort_by_key(|s| std::cmp::Reverse(s.at));
+            inner.sources.truncate(MAX_SOURCES);
+        }
+    }
+
+    /// The sources seen in the last few seconds.
+    pub fn sources(&self, now: Instant) -> Vec<DmxSource> {
+        self.lock().sources.iter().filter(|s| now.saturating_duration_since(s.at) <= SOURCE_SHOWN).cloned().collect()
     }
 }
 
@@ -337,6 +481,8 @@ pub enum NetEvent {
     Osc { from: IpAddr, msg: OscMessage, cmd: Result<OscCommand, String> },
     /// The chart's channels from one ArtDmx of our universe.
     Dmx { from: IpAddr, values: [Option<u8>; CHART.len()] },
+    /// A whole universe for the patch (Art-Net, or sACN after the merge).
+    Universe(UniverseEvent),
 }
 
 /// One line of the OSC monitor.
@@ -368,12 +514,25 @@ pub struct NetInState {
     dmx: DmxState,
     /// Momentary controls an OSC sender holds pressed.
     held: HashSet<String>,
+    /// The free patch's universes, pickup and learn.
+    pub patch: PatchState,
+    /// Output gain of the loss policies (1: nothing lost), set each frame.
+    pub gain: f32,
 }
 
 impl NetInState {
     pub fn new(hub: NetHub) -> Self {
         let (tx, rx) = sync_channel(QUEUE_LEN);
-        NetInState { hub: Arc::new(hub), tx, rx, recent: VecDeque::new(), dmx: DmxState::default(), held: HashSet::new() }
+        NetInState {
+            hub: Arc::new(hub),
+            tx,
+            rx,
+            recent: VecDeque::new(),
+            dmx: DmxState::default(),
+            held: HashSet::new(),
+            patch: PatchState::default(),
+            gain: 1.0,
+        }
     }
 
     /// For the listener threads.
@@ -382,18 +541,29 @@ impl NetInState {
     }
 }
 
-/// Once per engine frame: apply what arrived, then watch for signal loss.
+/// Once per engine frame: apply what arrived, then watch for signal loss
+/// and work out the output gain.
 pub fn frame(s: &mut Shared, now: Instant) {
+    external::sync(s);
     let cfg = s.netin.hub.effective();
     let mut dmx = None;
+    let mut universes: Vec<UniverseEvent> = Vec::new();
     for _ in 0..MAX_EVENTS_PER_FRAME {
         match s.netin.rx.try_recv() {
             Ok(NetEvent::Osc { from, msg, cmd }) if cfg.osc.enabled => osc_message(s, from, msg, cmd, now),
             // Only the newest packet counts: each one carries every channel.
             Ok(NetEvent::Dmx { from, values }) if cfg.artnet.enabled => dmx = Some((from, values)),
+            Ok(NetEvent::Universe(u)) if cfg.enabled(u.proto) => match universes.iter_mut().find(|o| o.universe == u.universe) {
+                Some(o) => *o = u,
+                None => universes.push(u),
+            },
             Ok(_) => {} // arrived just before it was switched off
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
+    }
+    // The patch first: its access channel counts for this frame's chart.
+    for u in universes {
+        patch::universe(s, &cfg, u, now);
     }
     if let Some((from, values)) = dmx {
         dmx_packet(s, from, values, now);
@@ -403,29 +573,48 @@ pub fn frame(s: &mut Shared, now: Instant) {
         s.netin.dmx = DmxState::default();
     } else if let Some(at) = s.netin.dmx.at {
         if !s.netin.dmx.lost && now.saturating_duration_since(at) > Duration::from_millis(cfg.loss.timeout_ms) {
-            signal_lost(s, cfg.loss.policy);
+            signal_lost(s, cfg.loss.policy, now);
         }
     }
-    if !cfg.osc.enabled && !s.netin.held.is_empty() {
+    patch::drop_disabled(s, &cfg);
+    patch::check_loss(s, &cfg, now);
+    if (!cfg.osc.enabled || !s.external.gate.open) && !s.netin.held.is_empty() {
         release_held(s);
     }
+    if !s.external.gate.open && !s.netin.patch.held.is_empty() {
+        patch::release_held(s);
+    }
+    s.netin.gain = gain(s, &cfg, now);
 }
 
-/// Every network write goes through here: an external caller with the
-/// network as source, minus what the network may never touch.
-fn send(s: &mut Shared, id: &str, input: ControlInput) -> Result<(), String> {
-    let desc = s.controls.get(id).ok_or_else(|| format!("contrôle inconnu : {id}"))?;
-    if !desc.external || NETWORK_REFUSED.contains(&desc.id.as_str()) {
-        return Err(format!("« {} » ne se pilote pas depuis le réseau", desc.id));
+/// The output gain of the « fondu au noir » and « noir immédiat » policies:
+/// the lowest over every lost DMX input. Only while the gate is open (a
+/// source that has no hand can't take the light away either); the next
+/// packet brings it back to 1.
+fn gain(s: &Shared, cfg: &NetInConfig, now: Instant) -> f32 {
+    if !s.external.gate.open || !matches!(cfg.loss.policy, LossPolicy::FadeOut | LossPolicy::Dark) {
+        return 1.0;
     }
-    controls::apply_as(s, id, input, ArmSource::Network).map_err(|e| match e {
-        ControlError::Unknown(id) => format!("contrôle inconnu : {id}"),
-        ControlError::Refused(why) => why.to_string(),
-    })
+    let timeout = Duration::from_millis(cfg.loss.timeout_ms);
+    let chart = s.netin.dmx.lost.then_some(s.netin.dmx.at).flatten();
+    let feeds = patch::lost(s).map(|(_, f)| f.at);
+    chart
+        .into_iter()
+        .chain(feeds)
+        .map(|at| match cfg.loss.policy {
+            LossPolicy::FadeOut if cfg.loss.fade_ms > 0 => {
+                let faded = now.saturating_duration_since(at + timeout).as_secs_f32() / (cfg.loss.fade_ms as f32 / 1000.0);
+                (1.0 - faded).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        })
+        .fold(1.0, f32::min)
 }
 
 fn osc_message(s: &mut Shared, from: IpAddr, msg: OscMessage, cmd: Result<OscCommand, String>, now: Instant) {
-    let error = cmd.and_then(|c| osc_command(s, c)).err();
+    let client = from.to_string();
+    external::touch(s, SourceKind::Osc, &client, now);
+    let error = cmd.and_then(|c| osc_command(s, &client, c, now)).err();
     if let Some(e) = &error {
         log::debug!("OSC {} : {e}", msg.address);
     }
@@ -436,48 +625,56 @@ fn osc_message(s: &mut Shared, from: IpAddr, msg: OscMessage, cmd: Result<OscCom
     recent.push_back(OscLog { at: now, from, address: msg.address, args: msg.args, error });
 }
 
-fn osc_command(s: &mut Shared, cmd: OscCommand) -> Result<(), String> {
+fn refused(id: &str, why: external::Refusal) -> String {
+    match why {
+        external::Refusal::Unknown => format!("contrôle inconnu : {id}"),
+        external::Refusal::Forbidden => format!("« {id} » ne se pilote pas depuis le réseau"),
+        other => other.label_fr().to_string(),
+    }
+}
+
+fn osc_command(s: &mut Shared, client: &str, cmd: OscCommand, now: Instant) -> Result<(), String> {
     match cmd {
         OscCommand::Control { id, input } => {
-            let desc = s.controls.get(&id).ok_or_else(|| format!("contrôle inconnu : {id}"))?;
-            let canonical = desc.id.clone();
-            let momentary = desc.kind == ControlKind::Momentary;
-            send(s, &id, input)?;
-            if momentary {
+            let desc = s.controls.get(&id).cloned();
+            external::apply(s, SourceKind::Osc, client, &id, input, now).map_err(|why| refused(&id, why))?;
+            if let Some(desc) = desc.filter(|d| d.kind == ControlKind::Momentary) {
                 let pressed = matches!(input, ControlInput::Value(v) | ControlInput::Norm(v) if v >= 0.5);
                 if pressed {
-                    s.netin.held.insert(canonical);
+                    s.netin.held.insert(desc.id);
                 } else {
-                    s.netin.held.remove(&canonical);
+                    s.netin.held.remove(&desc.id);
                 }
             }
             Ok(())
         }
-        OscCommand::PlayCue(id) => {
-            if controls::press_cue_from(s, &id, Some(ClickMode::Restart), true, Some(ArmSource::Network.id())) {
-                Ok(())
-            } else {
-                Err(format!("cue inconnu : {id}"))
-            }
-        }
-        OscCommand::StopCues => send(s, "cue.stop_all", ControlInput::Value(1.0)),
+        OscCommand::PlayCue(id) => match external::play_cue(s, SourceKind::Osc, client, &id, now) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!("cue inconnu : {id}")),
+            Err(why) => Err(why.label_fr().to_string()),
+        },
+        OscCommand::StopCues => external::apply(s, SourceKind::Osc, client, "cue.stop_all", ControlInput::Value(1.0), now).map_err(|why| refused("cue.stop_all", why)),
         OscCommand::Blackout => {
-            s.emergency_stop(ArmSource::Network);
+            s.emergency_stop(ArmSource::Osc);
             Ok(())
         }
         OscCommand::Arm => {
             // Through the gate, which refuses the network and logs it.
-            let _ = s.gate.request_arm(ArmSource::Network);
+            let _ = s.gate.request_arm(ArmSource::Osc);
             Err("refusé : l'armement ne se fait jamais depuis le réseau".into())
+        }
+        OscCommand::Access(on) => {
+            external::set_access(s, SourceKind::Osc, client, on, now);
+            Ok(())
         }
         OscCommand::Ping => Ok(()),
     }
 }
 
-/// OSC was switched off: the pads it held come up.
+/// OSC was switched off or the gate closed: the pads it held come up.
 fn release_held(s: &mut Shared) {
     for id in std::mem::take(&mut s.netin.held) {
-        let _ = send(s, &id, ControlInput::Value(0.0));
+        external::release(s, SourceKind::Osc, &id);
     }
 }
 
@@ -489,7 +686,7 @@ fn dmx_packet(s: &mut Shared, from: IpAddr, values: [Option<u8>; CHART.len()], n
     let fresh = d.last.is_none() || d.lost;
     if d.lost {
         log::info!("Art-Net : signal retrouvé ({from})");
-        s.gate.log().record("input_back", Some(ArmSource::Network.id()), json!({ "protocol": "artnet", "protocol_fr": "Art-Net" }));
+        s.gate.log().record("input_back", Some(ArmSource::Dmx.id()), json!({ "protocol": "artnet", "protocol_fr": "Art-Net" }));
     }
     let prev = if fresh { [None; CHART.len()] } else { d.last.unwrap_or([None; CHART.len()]) };
     (d.last, d.at, d.from, d.lost) = (Some(values), Some(now), Some(from), false);
@@ -502,68 +699,79 @@ fn dmx_packet(s: &mut Shared, from: IpAddr, values: [Option<u8>; CHART.len()], n
         }
         match ch.function {
             Function::Control { id, centred, .. } => {
-                if let Err(e) = send(s, id, artnet::input(v, centred)) {
-                    log::debug!("Art-Net {id} : {e}");
+                if let Err(why) = external::apply(s, SourceKind::Dmx, "", id, artnet::input(v, centred), now) {
+                    log::debug!("Art-Net {id} : {}", why.label_fr());
                 }
             }
             Function::Page => {
-                s.cue_page = artnet::page(v, CATEGORIES.len());
-                cue_changed = true;
+                if external::set_page(s, SourceKind::Dmx, "", artnet::page(v, CATEGORIES.len()), now).is_ok() {
+                    cue_changed = true;
+                }
             }
             Function::Cue => cue_changed = true,
             // The listener has already tripped it; same rule here.
             Function::Blackout => {
                 let was_on = prev[ch.offset].is_some_and(artnet::blackout_on);
                 if artnet::blackout_on(v) && !was_on {
-                    s.emergency_stop(ArmSource::Network);
+                    s.emergency_stop(ArmSource::Dmx);
                 }
             }
         }
     }
     if cue_changed {
-        dmx_cue(s, values[2], fresh);
+        dmx_cue(s, values[2], fresh, now);
     }
 }
 
 /// Channel 3: 0 stops the cues (not on the first packet: a console that
 /// connects with it at 0 leaves the operator's cues alone), 1–40 plays
 /// that cell of the current page from the start.
-fn dmx_cue(s: &mut Shared, value: Option<u8>, fresh: bool) {
+fn dmx_cue(s: &mut Shared, value: Option<u8>, fresh: bool, now: Instant) {
     let cells = controls::GRID_ROWS * controls::GRID_COLS;
     match value {
         Some(0) if !fresh => {
-            let _ = send(s, "cue.stop_all", ControlInput::Value(1.0));
+            let _ = external::apply(s, SourceKind::Dmx, "", "cue.stop_all", ControlInput::Value(1.0), now);
         }
         Some(v) if (1..=cells).contains(&(v as usize)) => {
             let i = v as usize - 1;
             let cell = format!("{}.{}.{}", s.cue_page + 1, i / controls::GRID_COLS + 1, i % controls::GRID_COLS + 1);
             if let Some(id) = controls::grid_cell_preset(&s.presets, &cell) {
-                controls::press_cue_from(s, &id, Some(ClickMode::Restart), true, Some(ArmSource::Network.id()));
+                let _ = external::play_cue(s, SourceKind::Dmx, "", &id, now);
             }
         }
         _ => {}
     }
 }
 
-fn signal_lost(s: &mut Shared, policy: LossPolicy) {
+fn signal_lost(s: &mut Shared, policy: LossPolicy, now: Instant) {
     s.netin.dmx.lost = true;
     log::warn!("Art-Net : signal perdu, {}", policy.label_fr());
     s.gate.log().record(
         "input_lost",
-        Some(ArmSource::Network.id()),
+        Some(ArmSource::Dmx.id()),
         json!({ "protocol": "artnet", "protocol_fr": "Art-Net", "policy": policy, "policy_fr": policy.label_fr() }),
     );
     match policy {
-        LossPolicy::Hold => {}
+        LossPolicy::Hold | LossPolicy::FadeOut | LossPolicy::Dark => {}
         LossPolicy::Neutral => {
             for ch in CHART {
                 if let Function::Control { id, neutral: Some(v), .. } = ch.function {
-                    let _ = send(s, id, ControlInput::Value(v));
+                    let _ = external::apply(s, SourceKind::Dmx, "", id, ControlInput::Value(v), now);
                 }
             }
         }
-        LossPolicy::Blackout => s.emergency_stop(ArmSource::Network),
+        LossPolicy::Blackout => s.emergency_stop(ArmSource::Dmx),
     }
+}
+
+/// A lost or recovered patch universe in the safety log.
+pub(crate) fn signal_log(s: &Shared, kind: &'static str, universe: u16, name: &str, policy: Option<LossPolicy>) {
+    let protocol_fr = format!("DMX univers {universe} ({name})");
+    let mut detail = json!({ "protocol": "dmx", "protocol_fr": protocol_fr, "universe": universe, "source": name });
+    if let Some(p) = policy {
+        (detail["policy"], detail["policy_fr"]) = (json!(p), json!(p.label_fr()));
+    }
+    s.gate.log().record(kind, Some(ArmSource::Dmx.id()), detail);
 }
 
 /// « off », « waiting » (on, nothing yet), « ok » or « lost ».
@@ -582,6 +790,73 @@ fn status_json(st: &ListenStatus, now: Instant) -> Value {
     v
 }
 
+fn sources_json(list: &[DmxSource], now: Instant) -> Vec<Value> {
+    list.iter()
+        .map(|src| {
+            let mut v = json!(src);
+            v["age_ms"] = json!(now.saturating_duration_since(src.at).as_millis() as u64);
+            v
+        })
+        .collect()
+}
+
+/// The DMX inputs in short, for `/api/state` and the top bar: on, sources,
+/// and the first lost input with its source's name.
+pub fn summary(s: &Shared, now: Instant) -> Value {
+    let cfg = s.netin.hub.effective();
+    let enabled = cfg.artnet.enabled || cfg.sacn.enabled;
+    let chart_lost = (cfg.artnet.enabled && s.netin.dmx.lost).then(|| s.netin.dmx.from.map_or_else(|| "Art-Net".to_string(), |ip| format!("Art-Net {ip}")));
+    let lost = chart_lost.or_else(|| patch::lost(s).next().map(|(u, f)| format!("{} (univers {u})", f.name)));
+    let receiving = (cfg.artnet.enabled && s.netin.dmx.at.is_some() && !s.netin.dmx.lost) || s.netin.patch.feeds.values().any(|f| !f.lost);
+    json!({
+        "enabled": enabled,
+        "receiving": receiving,
+        "sources": s.netin.hub.sources(now).len(),
+        "lost": lost.is_some(),
+        "lost_source": lost,
+        "gain": s.netin.gain,
+    })
+}
+
+/// `GET /api/dmx/monitor?universe=N`: the 512 values of a patch universe,
+/// its sources and rate.
+pub fn monitor(s: &Shared, universe: u16, now: Instant) -> Value {
+    let feed = s.netin.patch.feeds.get(&universe);
+    let values: Option<Vec<u8>> = feed.map(|f| {
+        let mut v = f.data.clone();
+        v.resize(patch::UNIVERSE_LEN, 0);
+        v
+    });
+    let sources: Vec<DmxSource> = s.netin.hub.sources(now).into_iter().filter(|src| src.universe == universe).collect();
+    json!({
+        "universe": universe,
+        "values": values,
+        "lost": feed.is_some_and(|f| f.lost),
+        "rate": feed.map_or(0.0, |f| f.rate),
+        "age_ms": feed.map(|f| now.saturating_duration_since(f.at).as_millis() as u64),
+        "protocol": feed.map(|f| f.proto.id()),
+        "source": feed.map(|f| f.name.clone()),
+        "sources": sources_json(&sources, now),
+    })
+}
+
+/// `GET /api/dmx/interfaces`: this Mac's IPv4 addresses (to pick where to
+/// listen). Reading them opens nothing.
+pub fn interfaces() -> Vec<Value> {
+    let mut list: Vec<Value> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.ip() {
+            IpAddr::V4(v4) => Some(json!({ "name": i.name, "ip": v4.to_string(), "loopback": v4.is_loopback() })),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    if !list.iter().any(|v| v["ip"] == DEFAULT_BIND) {
+        list.insert(0, json!({ "name": "lo0", "ip": DEFAULT_BIND, "loopback": true }));
+    }
+    list
+}
+
 /// `GET /api/netin`.
 pub fn view(s: &Shared, now: Instant) -> Value {
     let (file, eff, cli) = (s.netin.hub.file(), s.netin.hub.effective(), s.netin.hub.cli());
@@ -597,6 +872,20 @@ pub fn view(s: &Shared, now: Instant) -> Value {
         .iter()
         .map(|c| json!({ "channel": eff.artnet.address as usize + c.offset, "label": c.label_fr, "value": values[c.offset] }))
         .collect();
+    let universes: Vec<Value> = s
+        .netin
+        .patch
+        .feeds
+        .iter()
+        .map(|(u, f)| json!({ "universe": u, "protocol": f.proto.id(), "source": f.name, "lost": f.lost, "rate": f.rate, "age_ms": now.saturating_duration_since(f.at).as_millis() as u64 }))
+        .collect();
+    let mappable: Vec<Value> = s
+        .controls
+        .list()
+        .iter()
+        .filter(|d| patch::mappable(d))
+        .map(|d| json!({ "id": d.id, "label": d.label_fr, "group": d.group }))
+        .collect();
     json!({
         "config": file,
         "effective": eff,
@@ -608,13 +897,23 @@ pub fn view(s: &Shared, now: Instant) -> Value {
             "source": s.netin.dmx.from.map(|ip| ip.to_string()),
             "channels": channels,
         },
+        "sacn": { "status": status_json(&s.netin.hub.status(Proto::Sacn), now) },
+        "dmx": {
+            "summary": summary(s, now),
+            "universes": universes,
+            "sources": sources_json(&s.netin.hub.sources(now), now),
+            "learn": s.netin.patch.learn.as_ref().map(|l| l.control.clone()),
+            "learned": s.netin.patch.learned,
+            "controls": mappable,
+        },
         "policies": LOSS_POLICIES.iter().map(|p| json!({ "id": p, "label": p.label_fr() })).collect::<Vec<_>>(),
     })
 }
 
-/// `POST /api/netin`: a partial update (`{"osc": {"enabled": true}}`);
-/// missing fields keep their value. Returns the names of what changed;
-/// the caller saves (`NetHub::save`) once the `Shared` lock is released.
+/// `POST /api/netin` (and `/api/dmx/config`): a partial update
+/// (`{"osc": {"enabled": true}}`); missing fields keep their value. Returns
+/// the names of what changed; the caller saves (`NetHub::save`) once the
+/// `Shared` lock is released.
 pub fn update(s: &mut Shared, patch: &Value) -> Result<Vec<String>, String> {
     let Value::Object(patch) = patch else { return Err("objet JSON attendu".into()) };
     let before = s.netin.hub.file();
@@ -630,7 +929,15 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<Vec<String>, String> {
             target.insert(k.clone(), v.clone());
         }
     }
-    let cfg: NetInConfig = serde_json::from_value(merged).map_err(|e| format!("réglage invalide : {e}"))?;
+    let mut cfg: NetInConfig = serde_json::from_value(merged).map_err(|e| format!("réglage invalide : {e}"))?;
+    // Each mapping names a control DMX may drive (its canonical id).
+    for m in &mut cfg.dmx.mappings {
+        let desc = s.controls.get(&m.control).ok_or_else(|| format!("contrôle inconnu : « {} »", m.control))?;
+        if !patch::mappable(desc) {
+            return Err(format!("« {} » ne se pilote pas depuis l'extérieur", desc.id));
+        }
+        m.control = desc.id.clone();
+    }
     let changed = changed_keys(&json!(before), &json!(cfg));
     if changed.is_empty() {
         cfg.validate()?;
@@ -662,13 +969,24 @@ mod tests {
         "127.0.0.1".parse().unwrap()
     }
 
-    /// A studio whose inputs are both on (in memory, nothing bound).
+    /// Every group for every source, no access needed.
+    fn full_scope() -> crate::external::ExternalConfig {
+        let groups: Vec<String> = external::SCOPE_SETS.iter().flat_map(|set| set.groups.iter().map(|g| g.to_string())).collect();
+        crate::external::ExternalConfig {
+            scopes: SourceKind::ALL.iter().map(|&source| crate::external::SourceScope { source, groups: groups.clone(), require_access: false }).collect(),
+        }
+    }
+
+    /// A studio whose inputs are all on (in memory, nothing bound), with
+    /// the gate open on every group and no access needed.
     fn studio() -> Shared {
         let mut s = shared();
         s.netin = NetInState::new(NetHub::in_memory(Arc::clone(&s.estop)));
         let mut cfg = NetInConfig::default();
-        (cfg.osc.enabled, cfg.artnet.enabled) = (true, true);
+        (cfg.osc.enabled, cfg.artnet.enabled, cfg.sacn.enabled) = (true, true, true);
         s.netin.hub.set_file(cfg).unwrap();
+        s.external.set_config(full_scope());
+        external::set_open(&mut s, true, ArmSource::Ui).unwrap();
         s
     }
 
@@ -819,7 +1137,7 @@ mod tests {
     fn blackout_is_accepted_from_both_on_the_way_up() {
         let mut s = studio();
         osc(&mut s, "/ls/blackout", &[]);
-        assert_eq!(s.gate.status(&s.estop).estop.unwrap().source, ArmSource::Network);
+        assert_eq!(s.gate.status(&s.estop).estop.unwrap().source, ArmSource::Osc);
         let mut s = studio();
         let t0 = Instant::now();
         dmx_at(&mut s, &NEUTRAL, t0);
@@ -939,5 +1257,342 @@ mod tests {
         // A damaged or invalid file: off.
         std::fs::write(&path, r#"{"osc":{"enabled":true,"bind":"nope"}}"#).unwrap();
         assert!(!NetHub::load(path, CliOverride::default(), Arc::default()).effective().osc.enabled);
+    }
+
+    // ---------- the gate (T-408) ----------
+
+    #[test]
+    fn a_closed_gate_ignores_everything_but_the_stops() {
+        let mut s = studio();
+        external::set_open(&mut s, false, ArmSource::Ui).unwrap();
+        osc(&mut s, "/ls/norm/master.size", &[OscArg::Float(0.25)]);
+        assert_eq!(s.live.size, 1.0);
+        assert!(last_error(&s).unwrap().contains("fermées"));
+        let cue = s.presets[0].id.clone();
+        osc(&mut s, "/ls/cue/play", &[OscArg::Str(cue)]);
+        assert!(s.deck.active.is_empty());
+        let mut v = NEUTRAL;
+        v[0] = 51;
+        dmx_at(&mut s, &v, Instant::now());
+        assert_eq!(s.live.brightness, 1.0);
+        patched(&mut s, "master.perspective", false);
+        universe(&mut s, Proto::Sacn, 1, &[255], Instant::now());
+        assert_eq!(s.live.perspective, LiveModifiers::default().perspective);
+        assert!(s.external.gate.refused[&SourceKind::Osc] >= 2 && s.external.gate.refused[&SourceKind::Dmx] >= 1);
+        // The stops always pass, and close the gate.
+        osc(&mut s, "/ls/blackout", &[]);
+        assert!(s.estop.is_latched());
+        let mut s = studio();
+        osc(&mut s, "/ls/control/safety.estop", &[OscArg::Int(1)]);
+        assert!(s.estop.is_latched() && !s.external.gate.open);
+    }
+
+    #[test]
+    fn osc_access_is_per_client_and_required_by_default() {
+        let mut s = studio();
+        s.external.set_config(crate::external::ExternalConfig::default());
+        external::set_open(&mut s, true, ArmSource::Ui).unwrap();
+        osc(&mut s, "/ls/control/master.size", &[OscArg::Float(1.5)]);
+        assert!(last_error(&s).unwrap().contains("accès"));
+        osc(&mut s, "/ls/access", &[OscArg::Int(1)]);
+        osc(&mut s, "/ls/control/master.size", &[OscArg::Float(1.5)]);
+        assert_eq!(s.live.size, 1.5);
+        // Default scope: the masters only, no cue.
+        let cue = s.presets[0].id.clone();
+        osc(&mut s, "/ls/cue/play", &[OscArg::Str(cue)]);
+        assert!(last_error(&s).unwrap().contains("périmètre") && s.deck.active.is_empty());
+        osc(&mut s, "/ls/access", &[OscArg::Int(0)]);
+        osc(&mut s, "/ls/control/master.size", &[OscArg::Float(1.0)]);
+        assert_eq!(s.live.size, 1.5);
+    }
+
+    #[test]
+    fn closing_the_gate_releases_held_pads() {
+        let mut s = studio();
+        osc(&mut s, "/ls/control/master.rot.reverse", &[OscArg::Int(1)]);
+        assert!(s.live.rot_reverse);
+        external::set_open(&mut s, false, ArmSource::Ui).unwrap();
+        frame(&mut s, Instant::now());
+        assert!(!s.live.rot_reverse && s.netin.held.is_empty());
+    }
+
+    // ---------- sACN and the patch (T-406) ----------
+
+    use crate::live::LiveModifiers;
+    use patch::{DmxAddr, DmxMapping};
+
+    fn universe(s: &mut Shared, proto: Proto, universe: u16, data: &[u8], at: Instant) {
+        let ev = UniverseEvent { proto, universe, from: ip(), name: "Console".into(), data: data.to_vec() };
+        s.netin.sender().try_send(NetEvent::Universe(ev)).unwrap();
+        frame(s, at);
+    }
+
+    /// Universe 1 channel 1 → `control`.
+    fn patched(s: &mut Shared, control: &str, pickup: bool) {
+        let mut cfg = s.netin.hub.file();
+        cfg.dmx.mappings = vec![DmxMapping { control: control.into(), pickup, ..DmxMapping::default() }];
+        s.netin.hub.store(cfg).unwrap();
+    }
+
+    #[test]
+    fn artnet_and_sacn_drive_the_same_control() {
+        let mut s = studio();
+        patched(&mut s, "master.perspective", false);
+        let t0 = Instant::now();
+        universe(&mut s, Proto::ArtNet, 1, &[255], t0);
+        assert_eq!(s.live.perspective, 1.0);
+        universe(&mut s, Proto::Sacn, 1, &[0], t0);
+        assert_eq!(s.live.perspective, 0.0);
+        // Another universe: nothing.
+        universe(&mut s, Proto::Sacn, 2, &[255], t0);
+        assert_eq!(s.live.perspective, 0.0);
+        // A protocol switched off is ignored.
+        update(&mut s, &json!({ "sacn": { "enabled": false } })).unwrap();
+        universe(&mut s, Proto::Sacn, 1, &[128], t0);
+        assert_eq!(s.live.perspective, 0.0);
+        assert!(!s.gate.is_armed());
+    }
+
+    #[test]
+    fn eight_and_sixteen_bits_inverted_triggers_and_momentary() {
+        let m = |fine, invert| DmxMapping { channel: 2, fine, invert, ..DmxMapping::default() };
+        let data = [0u8, 0x80, 0x40];
+        assert_eq!(patch::read(&m(None, false), &data).unwrap().0, 0x8080);
+        assert_eq!(patch::read(&m(Some(3), false), &data).unwrap().0, 0x8040);
+        assert!((patch::read(&m(Some(3), false), &data).unwrap().1 - 0x8040 as f32 / 65535.0).abs() < 1e-6);
+        assert!((patch::read(&m(None, true), &[0, 255]).unwrap().1).abs() < 1e-6);
+        assert_eq!(patch::read(&m(Some(3), false), &[0, 1]), None, "short packet");
+
+        let mut s = studio();
+        let t0 = Instant::now();
+        // A trigger fires on the way up only.
+        patched(&mut s, "page.next", false);
+        universe(&mut s, Proto::Sacn, 1, &[200], t0);
+        assert_eq!(s.cue_page, 1);
+        universe(&mut s, Proto::Sacn, 1, &[250], t0);
+        assert_eq!(s.cue_page, 1, "still high: no second press");
+        universe(&mut s, Proto::Sacn, 1, &[0], t0);
+        universe(&mut s, Proto::Sacn, 1, &[128], t0);
+        assert_eq!(s.cue_page, 2);
+        // A momentary control follows the channel, and is released on loss.
+        patched(&mut s, "master.rot.reverse", false);
+        universe(&mut s, Proto::Sacn, 1, &[127], t0);
+        assert!(!s.live.rot_reverse);
+        universe(&mut s, Proto::Sacn, 1, &[128], t0);
+        assert!(s.live.rot_reverse);
+        universe(&mut s, Proto::Sacn, 1, &[10], t0);
+        assert!(!s.live.rot_reverse);
+        universe(&mut s, Proto::Sacn, 1, &[255], t0);
+        frame(&mut s, t0 + Duration::from_secs(3));
+        assert!(!s.live.rot_reverse, "released on signal loss");
+        // Sixteen bits, inverted.
+        let mut cfg = s.netin.hub.file();
+        cfg.dmx.mappings = vec![DmxMapping { control: "master.perspective".into(), fine: Some(2), invert: true, pickup: false, ..DmxMapping::default() }];
+        s.netin.hub.store(cfg).unwrap();
+        universe(&mut s, Proto::Sacn, 1, &[0x40, 0x00], t0 + Duration::from_secs(4));
+        assert!((s.live.perspective - (1.0 - 0x4000 as f32 / 65535.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn pickup_waits_for_the_channel_to_cross_the_screen_value() {
+        let mut s = studio();
+        patched(&mut s, "master.perspective", true);
+        let t0 = Instant::now();
+        s.live.perspective = 0.5;
+        // Far from 0.5: no jump.
+        universe(&mut s, Proto::Sacn, 1, &[20], t0);
+        assert_eq!(s.live.perspective, 0.5);
+        // Crosses it: takes over.
+        universe(&mut s, Proto::Sacn, 1, &[200], t0);
+        assert!((s.live.perspective - 200.0 / 255.0).abs() < 1e-3);
+        // The screen moves it: a still channel doesn't take it back...
+        s.live.perspective = 0.1;
+        universe(&mut s, Proto::Sacn, 1, &[200], t0);
+        universe(&mut s, Proto::Sacn, 1, &[210], t0);
+        assert_eq!(s.live.perspective, 0.1, "not crossed yet");
+        // ...until it crosses the new value.
+        universe(&mut s, Proto::Sacn, 1, &[10], t0);
+        assert!((s.live.perspective - 10.0 / 255.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_access_channel_raises_dmx_access() {
+        let mut s = studio();
+        let scopes = vec![crate::external::SourceScope { source: SourceKind::Dmx, groups: vec!["master".into()], require_access: true }];
+        s.external.set_config(crate::external::ExternalConfig { scopes });
+        let mut cfg = s.netin.hub.file();
+        cfg.dmx.mappings = vec![DmxMapping { control: "master.perspective".into(), pickup: false, ..DmxMapping::default() }];
+        cfg.dmx.access = Some(DmxAddr { universe: 1, channel: 10 });
+        s.netin.hub.store(cfg).unwrap();
+        let t0 = Instant::now();
+        let mut data = [0u8; 10];
+        data[0] = 255;
+        universe(&mut s, Proto::ArtNet, 1, &data, t0);
+        assert_eq!(s.live.perspective, LiveModifiers::default().perspective, "access low");
+        (data[0], data[9]) = (128, 128);
+        universe(&mut s, Proto::ArtNet, 1, &data, t0);
+        assert!((s.live.perspective - 128.0 / 255.0).abs() < 1e-3);
+        // The Art-Net chart obeys the same access.
+        let mut v = NEUTRAL;
+        v[0] = 51;
+        dmx_at(&mut s, &v, t0);
+        assert!((s.live.brightness - 0.2).abs() < 1e-6);
+        data[9] = 0;
+        universe(&mut s, Proto::ArtNet, 1, &data, t0);
+        v[0] = 255;
+        dmx_at(&mut s, &v, t0);
+        assert!((s.live.brightness - 0.2).abs() < 1e-6, "access dropped");
+    }
+
+    #[test]
+    fn two_sacn_sources_highest_priority_wins_end_to_end() {
+        // The merge runs in the listener; here, its verdicts feed the patch.
+        let mut m = sacn::Merger::default();
+        let t0 = Instant::now();
+        let mut s = studio();
+        patched(&mut s, "master.perspective", false);
+        let p = |cid: u8, pri, seq, v: u8| match sacn::decode(&sacn::tests::packet_from([cid; 16], 1, "x", pri, seq, 0, &[v])).unwrap() {
+            sacn::Packet::Data(d) => d,
+            _ => unreachable!(),
+        };
+        for (d, want) in [(p(1, 100, 0, 255), 1.0), (p(2, 150, 0, 0), 0.0), (p(1, 100, 1, 255), 0.0)] {
+            if m.packet(&d, "a".into(), t0) == sacn::Verdict::Take {
+                universe(&mut s, Proto::Sacn, 1, &d.slots, t0);
+            }
+            assert_eq!(s.live.perspective, want);
+        }
+    }
+
+    #[test]
+    fn fade_and_dark_policies_lower_the_gain_then_recover_without_arming() {
+        for (policy, mid) in [(LossPolicy::FadeOut, 0.5), (LossPolicy::Dark, 0.0), (LossPolicy::Hold, 1.0)] {
+            let mut s = studio();
+            update(&mut s, &json!({ "loss": { "policy": policy, "timeout_ms": 1000, "fade_ms": 2000 } })).unwrap();
+            patched(&mut s, "master.perspective", false);
+            assert!(s.request_arm(ArmSource::Ui).is_ok());
+            let t0 = Instant::now();
+            universe(&mut s, Proto::Sacn, 1, &[255], t0);
+            frame(&mut s, t0 + Duration::from_millis(900));
+            assert_eq!(s.netin.gain, 1.0);
+            frame(&mut s, t0 + Duration::from_millis(2000));
+            assert!((s.netin.gain - mid).abs() < 0.02, "{policy:?}: {}", s.netin.gain);
+            assert_eq!(summary(&s, t0)["lost_source"], "Console (univers 1)");
+            assert!(s.gate.is_armed(), "{policy:?}: no disarm");
+            frame(&mut s, t0 + Duration::from_millis(4000));
+            assert!(s.netin.gain <= mid);
+            universe(&mut s, Proto::Sacn, 1, &[255], t0 + Duration::from_secs(5));
+            assert_eq!(s.netin.gain, 1.0, "back");
+            assert_eq!(summary(&s, t0)["lost"], false);
+            // A disarmed laser stays disarmed through a loss and a return.
+            s.gate.disarm(crate::interlock::DisarmReason::User, ArmSource::Ui);
+            frame(&mut s, t0 + Duration::from_secs(8));
+            universe(&mut s, Proto::Sacn, 1, &[0], t0 + Duration::from_secs(9));
+            assert!(!s.gate.is_armed());
+        }
+        // The chart's loss counts too; a closed gate never dims.
+        let mut s = studio();
+        update(&mut s, &json!({ "loss": { "policy": "dark" } })).unwrap();
+        let t0 = Instant::now();
+        dmx_at(&mut s, &NEUTRAL, t0);
+        frame(&mut s, t0 + Duration::from_secs(3));
+        assert_eq!(s.netin.gain, 0.0);
+        external::set_open(&mut s, false, ArmSource::Ui).unwrap();
+        frame(&mut s, t0 + Duration::from_secs(4));
+        assert_eq!(s.netin.gain, 1.0);
+    }
+
+    #[test]
+    fn learn_maps_the_first_channel_that_moves() {
+        let mut s = studio();
+        assert!(patch::start_learn(&mut s, Some("transport.arm")).is_err());
+        assert!(patch::start_learn(&mut s, Some("safety.hold")).is_err());
+        patch::start_learn(&mut s, Some("live.perspective")).unwrap();
+        let t0 = Instant::now();
+        let mut data = [100u8; 16];
+        universe(&mut s, Proto::Sacn, 3, &data, t0);
+        data[4] = 105; // 5 steps: noise
+        universe(&mut s, Proto::Sacn, 3, &data, t0);
+        assert!(s.netin.patch.learn.is_some());
+        data[6] = 120;
+        universe(&mut s, Proto::Sacn, 3, &data, t0);
+        assert!(s.netin.patch.learn.is_none());
+        let m = s.netin.hub.file().dmx.mappings;
+        assert_eq!((m.len(), m[0].universe, m[0].channel, m[0].control.as_str()), (1, 3, 7, "master.perspective"));
+        assert_eq!(s.netin.patch.learned.as_ref(), Some(&m[0]));
+        patch::start_learn(&mut s, Some("master.size")).unwrap();
+        patch::start_learn(&mut s, None).unwrap();
+        assert!(s.netin.patch.learn.is_none());
+    }
+
+    #[test]
+    fn patch_settings_validate() {
+        let mut s = studio();
+        let ok = json!({ "dmx": { "mappings": [{ "universe": 2, "channel": 5, "control": "live.size" }], "access": { "universe": 2, "channel": 1 } } });
+        update(&mut s, &ok).unwrap();
+        assert_eq!(s.netin.hub.file().dmx.mappings[0].control, "master.size", "canonical id");
+        assert!(s.netin.hub.file().dmx.mappings[0].pickup, "pickup on by default");
+        for bad in [
+            json!({ "dmx": { "mappings": [{ "channel": 0, "control": "master.size" }] } }),
+            json!({ "dmx": { "mappings": [{ "channel": 513, "control": "master.size" }] } }),
+            json!({ "dmx": { "mappings": [{ "channel": 5, "fine": 5, "control": "master.size" }] } }),
+            json!({ "dmx": { "mappings": [{ "control": "transport.arm" }] } }),
+            json!({ "dmx": { "mappings": [{ "control": "safety.hold" }] } }),
+            json!({ "dmx": { "mappings": [{ "control": "nope" }] } }),
+            json!({ "dmx": { "access": { "universe": 1, "channel": 0 } } }),
+            json!({ "sacn": { "universes": [0] } }),
+            json!({ "sacn": { "universes": [64000] } }),
+            json!({ "sacn": { "multicast": true } }),
+            json!({ "sacn": { "bind": "0.0.0.0", "multicast": true } }),
+            json!({ "loss": { "fade_ms": 60000 } }),
+        ] {
+            assert!(update(&mut s, &bad).is_err(), "{bad}");
+        }
+        // The stops may be patched.
+        update(&mut s, &json!({ "dmx": { "mappings": [{ "control": "transport.blackout" }] } })).unwrap();
+        // Multicast only on a real interface address.
+        let mut c = NetInConfig::default();
+        (c.sacn.enabled, c.sacn.bind, c.sacn.multicast, c.sacn.universes) = (true, "192.168.1.20".into(), true, vec![1, 300]);
+        c.validate().unwrap();
+        assert_eq!(c.multicast(), Some(("192.168.1.20".parse().unwrap(), vec![1, 300])));
+        c.sacn.multicast = false;
+        assert_eq!(c.multicast(), None, "never joined unless asked");
+        assert_eq!(NetInConfig::default().multicast(), None);
+        assert!(!NetInConfig::default().sacn.enabled && NetInConfig::default().sacn.bind == "127.0.0.1");
+    }
+
+    /// Every control of the registry patched (even those the UI refuses),
+    /// arbitrary frames on both protocols, gate open, full scope: never an
+    /// arm, safety settings and calibration untouched.
+    #[test]
+    fn no_dmx_frame_ever_arms() {
+        let mut s = studio();
+        let (safety, calibration) = (s.safety.get(), s.calibration);
+        let ids: Vec<String> = s.controls.list().iter().map(|d| d.id.clone()).filter(|id| !external::ALWAYS.contains(&id.as_str())).collect();
+        let mut cfg = s.netin.hub.file();
+        cfg.dmx.mappings = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| DmxMapping { universe: 1 + (i / 512) as u16, channel: 1 + (i % 512) as u16, control: id.clone(), pickup: false, ..DmxMapping::default() })
+            .collect();
+        s.netin.hub.store(cfg).unwrap();
+        let t0 = Instant::now();
+        let mut rng = crate::safety_invariants::Rng::new(408);
+        for step in 0..60 {
+            let data: Vec<u8> = (0..512).map(|_| (rng.next() & 0xFF) as u8).collect();
+            let proto = if step % 2 == 0 { Proto::ArtNet } else { Proto::Sacn };
+            for u in [1, 2] {
+                universe(&mut s, proto, u, &data, t0);
+            }
+            assert!(!s.gate.is_armed(), "step {step}");
+            assert!(!s.presence.status().midi_hold, "no hold-to-run from DMX");
+        }
+        for v in [0u8, 127, 128, 255] {
+            universe(&mut s, Proto::Sacn, 1, &[v; 512], t0);
+            universe(&mut s, Proto::Sacn, 2, &[v; 512], t0);
+            assert!(!s.gate.is_armed());
+        }
+        assert_eq!(s.safety.get(), safety);
+        assert_eq!(s.calibration, calibration);
+        assert!(!s.estop.is_latched(), "no stop was patched");
     }
 }

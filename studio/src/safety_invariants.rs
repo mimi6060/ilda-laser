@@ -17,7 +17,8 @@
 //! 4. (outdoor sectors / « Ciel coupé », T-262: not implemented yet, so
 //!    not checked);
 //! 5. coordinates always finite and within -1..1;
-//! 6. no sequence of controls, MIDI or API calls arms, except the
+//! 6. no sequence of controls, MIDI, external inputs (DMX / OSC /
+//!    timecode through the gate, T-408) or API calls arms, except the
 //!    explicit user paths (UI / keyboard / API arm request, and the MIDI
 //!    opt-in gesture when the operator allowed it).
 //!
@@ -473,7 +474,17 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
             let id = rng.pick(&ids).clone();
             let external = rng.chance(0.5);
             let input = if rng.chance(0.5) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-3.0, 3.0)) };
-            let _ = controls::apply(&mut s, &id, input, external);
+            if external && rng.chance(0.3) {
+                // DMX / OSC / timecode through the gate (T-408), which the
+                // operator may have opened.
+                if rng.chance(0.5) {
+                    let _ = crate::external::set_open(&mut s, true, ArmSource::Ui);
+                }
+                let src = *rng.pick(&crate::external::SourceKind::ALL);
+                let _ = crate::external::apply(&mut s, src, "rig", &id, input, now);
+            } else {
+                let _ = controls::apply(&mut s, &id, input, external);
+            }
             return id == "transport.arm" && !external;
         }
         6 | 7 => {

@@ -55,6 +55,10 @@ test.beforeEach(async () => {
   await studio.post('/api/estop/reset', {});
   await studio.reset();
   await studio.post('/api/netin', { osc: { enabled: false, port: 0 }, artnet: { enabled: false, port: 0, universe: 0, address: 1 }, loss: { policy: 'neutral', timeout_ms: 2500 } });
+  // The external inputs gate (T-408): open, every group, no access needed.
+  const groups = ['master', 'look', 'layer', 'grid', 'cue', 'page', 'tempo', 'timeline', 'audio'];
+  await studio.post('/api/external/scopes', { scopes: ['dmx', 'osc'].map(source => ({ source, groups, require_access: false })) });
+  await studio.post('/api/external/gate', { on: true });
 });
 
 test('off by default, on localhost', async () => {
@@ -125,7 +129,7 @@ test('the blackout channel latches the emergency stop', async ({ page }) => {
   await expect.poll(async () => (await netin()).artnet.status.local).not.toBeNull();
   const local = (await netin()).artnet.status.local;
   await send(artDmx(0, [255, 0, 0, 128, 128, 128, 128, 64, 0, 0, 255]), local);
-  await expect.poll(async () => (await studio.get('/api/arm')).estop?.source).toBe('network');
+  await expect.poll(async () => (await studio.get('/api/arm')).estop?.source).toBe('dmx');
   expect(await armed()).toBe(false);
 });
 

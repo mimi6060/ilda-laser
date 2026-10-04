@@ -36,6 +36,7 @@ mod keep_awake;
 mod live;
 mod midi;
 mod netin;
+mod external;
 mod optimize;
 mod output;
 mod output_manager;
@@ -241,6 +242,9 @@ pub struct Shared {
     pub midi: midi::MidiState,
     /// OSC and Art-Net inputs (netin/, netin.json); never in a look or a project.
     pub netin: netin::NetInState,
+    /// The local gate and per-source scopes for external inputs (T-408):
+    /// the gate is memory only and closed at start; scopes in external.json.
+    pub external: external::External,
     /// Master LFO modulators (lfo.rs, lfos.json), applied every frame on
     /// top of the stored values.
     pub lfos: lfo::LfoStore,
@@ -443,6 +447,8 @@ impl Shared {
     pub fn emergency_stop(&mut self, src: interlock::ArmSource) {
         self.estop.trip(src);
         self.gate.sync_estop(&self.estop);
+        // External inputs lose the hand until the operator reopens them.
+        external::sync(self);
     }
 
     /// Seconds since startup: the time base of the tempo clock.
@@ -782,6 +788,7 @@ fn startup_state(cli: &Cli) -> Shared {
         audio_in: Arc::new(audio::AudioHub::load(&cli.data_dir, epoch, !cli.no_audio, cli.audio_device.as_deref())),
         gate,
         netin: netin::NetInState::new(netin::NetHub::load(cli.data_dir.join("netin.json"), netin_cli, Arc::clone(&estop))),
+        external: external::External::load(cli.data_dir.join("external.json")),
         estop,
         frame: Vec::new(),
         output_lit: 0,
@@ -1139,6 +1146,9 @@ impl Engine {
             // Silence with *Noir*: the master copy fades to black. Not the
             // transport blackout: nothing to release, arming untouched.
             live.brightness = live.brightness.clamp(0.0, 1.0) * reaction.gain;
+            // DMX signal lost with *Fondu au noir* / *Noir immédiat* (T-406):
+            // the same copy goes dark, before the safety stage. No disarm.
+            live.brightness *= s.netin.gain.clamp(0.0, 1.0);
             self.audio_guard.set_flash_limited(s.routes.flash_limited());
             s.audio_guard = self.audio_guard.status();
             // The looks' own reaction sees the beat counter capped too.
