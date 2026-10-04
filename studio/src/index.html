@@ -787,6 +787,22 @@
   .mus-bands .bar > div { background: linear-gradient(0deg, #22e3ff, #8b5cf6, #ff3dc8); }
   .modal .box, #cueMenu, #midiMenu, #projMenu, #figImportDlg { border-radius: 14px; border-color: #2a2f44; background: #141725; box-shadow: 0 20px 60px #000c; }
   .modal { backdrop-filter: blur(4px); }
+  /* Raccourcis (T-284): the « ? » overlay and its button in the tab bar. */
+  #wsTabs #keysBtn { align-self: center; margin-left: 8px; padding: 4px 10px; border-radius: 8px; border: 1px solid #2a2f44; font-weight: 600; letter-spacing: 0; font-size: 12px; }
+  #wsTabs #keysBtn::before { display: none; }
+  #keysHelp .box { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+  .keys-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  #keysList { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 6px 18px; margin-top: 10px; }
+  .keys-group h4 { margin: 10px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
+  .keys-group[data-group="Sécurité"] h4 { color: var(--danger); }
+  .keys-row { display: grid; grid-template-columns: 130px 1fr; gap: 2px 10px; padding: 4px 0; border-top: 1px solid #1d2133; font-size: 12px; }
+  .keys-row .caps { white-space: nowrap; color: var(--muted); }
+  .keys-row .caps kbd { margin: 0 2px; }
+  .keys-row .tags { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px; }
+  .keys-row .tag { font-size: 10px; padding: 0 6px; border-radius: 999px; border: 1px solid #2a2f44; color: var(--muted); }
+  .keys-row .tag.typing { border-color: var(--accent); color: var(--accent); }
+  .keys-row .tag.locked { border-color: var(--warn); color: var(--warn); }
+  body.show-mode .keys-row:has(.tag.locked) { opacity: .45; }
   /* ---------- Top bar (T-271) ----------
      One row of about 56 px, always on screen (#top is sticky): project,
      tempo, master, show-mode padlock, status (output, laser state, LEDs,
@@ -915,6 +931,7 @@
   <button role="tab" data-ws-tab="creation" title="Créer du contenu (F3)">CRÉATION <kbd>F3</kbd></button>
   <button role="tab" data-ws-tab="settings" title="Calibration, sécurité, MIDI, OSC/Art-Net (F4)">RÉGLAGES <kbd>F4</kbd></button>
   <span class="hint" id="wsHint"><kbd>Espace</kbd> laser · <kbd>Échap</kbd> arrêt, dans tous les onglets · lettres = cues (LIVE)</span>
+  <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
 </nav>
 </div>
 <div id="midiMenu" hidden>
@@ -926,6 +943,14 @@
   <button id="midiMenuShift">Apprendre avec Shift</button>
   <button id="midiMenuForget">Oublier MIDI</button>
   <button id="midiMenuDmx" title="Bougez ensuite un canal de la console : le premier qui bouge est affecté à ce contrôle">Apprendre DMX</button>
+</div>
+<!-- Raccourcis (T-284): built from the shortcut table. -->
+<div id="keysHelp" class="modal" role="dialog" aria-modal="true" aria-labelledby="keysTitle" hidden>
+  <div class="box">
+    <div class="keys-head"><h3 id="keysTitle">Raccourcis</h3><button id="keysClose">Fermer</button></div>
+    <div class="hint">Échap fait toujours l'arrêt d'urgence, même dans un champ texte ; les autres touches ne marchent pas pendant la saisie (sauf mention).</div>
+    <div id="keysList"></div>
+  </div>
 </div>
 <div id="projDialog" class="modal" hidden>
   <div class="box">
@@ -2513,81 +2538,329 @@ $('estopBtn').addEventListener('click', () => emergencyStop('ui'));
 // never an arm; works in show mode too (the top bar is never locked).
 $('blackoutBtn').addEventListener('click', () => setArmed(false, 'ui'));
 $('estopReset').addEventListener('click', async () => { if (await post('/api/estop/reset')) { $('estopBanner').hidden = true; } });
-document.addEventListener('keydown', e => {
-  // Before anything else, whatever has focus.
-  if (e.key === 'Escape') {
-    e.preventDefault(); pickingHoldKey = false;
-    if (shiftMod(e)) setArmed(false, 'keyboard'); else emergencyStop('keyboard');
-    // Échap also cancels a MIDI learn (after the stop, never instead of it).
-    stopLearning();
-    return;
+// ---------- keyboard shortcuts (T-284) ----------
+// ONE table drives the keydown/keyup handler and the « ? » help. Read in
+// order, the first entry that matches wins. Fields:
+//   codes: KeyboardEvent.code (by position: AZERTY « a » = QWERTY « q »),
+//   or keys: KeyboardEvent.key (a character: Cmd+Z stays on the Z of the
+//   layout, like the system's own shortcuts; Échap by key, so a remapped
+//   Caps Lock still stops).
+//   meta (Cmd or Ctrl), alt, shift: true / false (omitted) / '*' (either).
+//   Shift is shiftMod(e): a Shift that is the hold key does not count.
+//   zones: where it applies ('*' = everywhere), see shortcutZone().
+//   typing: also while a text field has the focus. show: allowed in show
+//   mode (T-283; the action itself, or the server, enforces it).
+//   down(e, i) (i = index in codes/keys): false = not for us (no
+//   preventDefault). up(e): on release, whatever the zone or modifiers.
+// The safety entries come first and only use what is defined above, so
+// Échap works even if a later part of the page failed to load.
+const SHORTCUT_ZONES = ['live', 'timeline', 'tl-canvas', 'creation', 'figures', 'settings'];
+const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas');
+const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live');
+const SAFETY_SHORTCUTS = [
+  { id: 'estop', group: 'Sécurité', keys: ['Escape'], meta: '*', alt: '*', zones: '*', typing: true, show: true,
+    label: "Arrêt d'urgence (verrouillé : réinitialiser pour réarmer) ; ferme aussi cette aide",
+    down: () => { emergencyStop('keyboard'); afterEscape(); } },
+  { id: 'disarm', group: 'Sécurité', keys: ['Escape'], shift: true, meta: '*', alt: '*', zones: '*', typing: true, show: true,
+    label: 'Désarmer (noir), sans verrouiller',
+    down: () => { setArmed(false, 'keyboard'); afterEscape(); } },
+];
+// After the stop, never instead of it: end a hold-key pick, a MIDI learn, the help.
+function afterEscape() {
+  pickingHoldKey = false;
+  try { stopLearning(); closeKeysHelp(); } catch (err) { console.warn('Échap', err); }
+}
+let restShortcuts = null;
+function buildShortcuts() {
+  return [
+    { id: 'arm', group: 'Sécurité', codes: ['Space'], meta: '*', alt: '*', shift: '*', zones: '*', show: true,
+      label: 'Armer / désarmer le laser',
+      down: e => { if (!e.repeat) toggleArmed('keyboard'); } },
+    // Hold-to-run (T-252): the key is chosen in RÉGLAGES, it works whatever
+    // has focus. Left out of the conflict test (it changes at run time; the
+    // server refuses Espace and Échap).
+    { id: 'hold', group: 'Sécurité', dynamic: true, codes: [presence.hold_key], meta: '*', alt: '*', shift: '*', zones: '*', typing: true, show: true,
+      cap: () => keyName(presence.hold_key), label: 'Homme mort : tenir pour émettre (si activé dans RÉGLAGES)',
+      when: () => presence.hold_to_run,
+      down: e => { setHold(true); if (isTyping()) return false; },
+      up: () => setHold(false) },
+    { id: 'workspace', group: 'Espaces de travail', codes: ['F1', 'F2', 'F3', 'F4'], zones: '*', typing: true, show: false,
+      cap: () => 'F1 … F4', label: 'LIVE, TIMELINE, CRÉATION, RÉGLAGES (en mode spectacle : LIVE et TIMELINE)',
+      down: (e, i) => setWorkspace(WORKSPACES[i]) },
+    { id: 'page.f', group: 'Cues et pages', codes: PAGE_FKEYS, zones: '*', typing: true, show: true,
+      cap: () => 'F5 … F12', label: 'Pages de cues 1 à 8',
+      down: (e, i) => { if (!e.repeat) selectPage(i); } },
+    { id: 'page.alt', group: 'Cues et pages', codes: ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'],
+      alt: true, zones: '*', show: true, cap: () => '1 … 9', label: 'Pages de cues 1 à 9',
+      down: (e, i) => { if (!e.repeat) selectPage(i); } },
+    // Entrée and ⌫ belong to the timeline while it has the focus (marker, delete).
+    { id: 'tempo.tap', group: 'Tempo', codes: ['Enter', 'NumpadEnter'], meta: '*', alt: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
+      label: 'Tap tempo',
+      down: () => { post('/api/control', { id: 'tempo.tap' }); } },
+    { id: 'tempo.resync', group: 'Tempo', codes: ['Backspace'], meta: '*', alt: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
+      label: 'Recaler sur le 1',
+      down: () => { post('/api/control', { id: 'tempo.resync' }); } },
+    { id: 'reverse', group: 'Direct', keys: ['<'], meta: '*', alt: '*', shift: '*', zones: ['live'], show: true,
+      label: 'Tenir : inverser la rotation',
+      down: () => { if (!reverseKey) { reverseKey = true; reverse(true); } },
+      up: () => { if (reverseKey) { reverseKey = false; reverse(false); } } },
+    // Hold S (T-103): strobe 1/4 while held. In LIVE, S is a cue letter, so Alt+S.
+    { id: 'strobe.live', group: 'Direct', codes: ['KeyS'], alt: true, zones: ['live'], show: true,
+      label: 'Tenir : stroboscope 1/4 (LIVE)',
+      down: () => holdStrobe(true), up: () => holdStrobe(false) },
+    { id: 'strobe', group: 'Direct', codes: ['KeyS'], alt: '*', zones: NOT_LIVE, show: true,
+      label: 'Tenir : stroboscope 1/4 (hors LIVE)',
+      down: () => holdStrobe(true), up: () => holdStrobe(false) },
+    // Entrées externes (T-408).
+    { id: 'gate', group: 'Direct', codes: ['KeyX'], alt: true, shift: '*', zones: '*', show: true,
+      label: 'Ouvrir / fermer les entrées externes (DMX, OSC, timecode)',
+      down: e => { if (!e.repeat) setGate(!(ext && ext.open), 'keyboard'); } },
+    // Cues utilisateur (T-405), in LIVE. Never a lone letter (cues).
+    { id: 'cue.store', group: 'Cues et pages', codes: ['KeyE'], meta: true, zones: '*', where: 'LIVE', show: false,
+      label: 'Enregistrer le look dans une case (LIVE)',
+      down: e => { if (!e.repeat && activeWs === 'live') setStoreMode(!storeMode); } },
+    { id: 'cue.update', group: 'Cues et pages', codes: ['KeyE'], meta: true, shift: true, zones: '*', where: 'LIVE', show: false,
+      label: 'Mettre à jour la cue jouée avec le look (LIVE)',
+      down: e => { if (!e.repeat && activeWs === 'live') updateCue(); } },
+    // Projet (T-286): also from a text field, like a document's Cmd+S.
+    { id: 'project.save', group: 'Projet', keys: ['s'], meta: true, shift: '*', zones: '*', typing: true, show: true,
+      label: 'Enregistrer le projet',
+      down: e => { if (!e.repeat) projAction('save'); } },
+    { id: 'project.open', group: 'Projet', keys: ['o'], meta: true, shift: '*', zones: '*', typing: true, show: false,
+      label: 'Ouvrir un projet',
+      down: e => { if (!e.repeat) projAction('open'); } },
+    // TIMELINE (T-285): undo anywhere in the workspace; the rest while the
+    // timeline itself has the focus.
+    { id: 'tl.undo', group: 'Timeline', keys: ['z'], meta: true, zones: ['timeline', 'tl-canvas'], show: false,
+      label: 'Annuler', when: () => !!TL.show, down: () => tlUndo() },
+    { id: 'tl.redo', group: 'Timeline', keys: ['z'], meta: true, shift: true, zones: ['timeline', 'tl-canvas'], show: false,
+      label: 'Rétablir', when: () => !!TL.show, down: () => tlRedo() },
+    { id: 'tl.redo.y', group: 'Timeline', keys: ['y'], meta: true, shift: '*', zones: ['timeline', 'tl-canvas'], show: false,
+      label: 'Rétablir', when: () => !!TL.show, down: () => tlRedo() },
+    { id: 'tl.marker', group: 'Timeline', codes: ['Enter', 'NumpadEnter'], alt: '*', shift: '*', zones: ['tl-canvas'], show: false,
+      label: 'Marqueur à la tête de lecture (timeline active)', down: () => tlAddMarker(tlPlayhead()) },
+    { id: 'tl.delete', group: 'Timeline', keys: ['Delete', 'Backspace'], alt: '*', shift: '*', zones: ['tl-canvas'], show: false,
+      cap: () => 'Suppr / ⌫', label: 'Supprimer la sélection (timeline active)', down: () => tlDelete() },
+    { id: 'tl.copy', group: 'Timeline', keys: ['c'], meta: true, shift: '*', zones: ['tl-canvas'], show: false,
+      label: 'Copier (timeline active)', down: () => tlCopy() },
+    { id: 'tl.paste', group: 'Timeline', keys: ['v'], meta: true, shift: '*', zones: ['tl-canvas'], show: false,
+      label: 'Coller à la tête de lecture (timeline active)', down: () => tlPaste() },
+    { id: 'tl.duplicate', group: 'Timeline', keys: ['d'], meta: true, shift: '*', zones: ['tl-canvas'], show: false,
+      label: 'Dupliquer (timeline active)', down: () => tlDuplicate() },
+    { id: 'tl.all', group: 'Timeline', keys: ['a'], meta: true, shift: '*', zones: ['tl-canvas'], show: false,
+      label: 'Tout sélectionner (timeline active)',
+      down: () => { TL.sel = new Set(tlEvents().map(v => v.e.id)); TL.need = true; } },
+    // CRÉATION › Figures (T-296).
+    { id: 'fig.undo', group: 'Figures', keys: ['z'], meta: true, zones: ['figures'], show: false,
+      label: 'Annuler', down: () => figUndo() },
+    { id: 'fig.redo', group: 'Figures', keys: ['z'], meta: true, shift: true, zones: ['figures'], show: false,
+      label: 'Rétablir', down: () => figRedo() },
+    { id: 'fig.redo.y', group: 'Figures', keys: ['y'], meta: true, shift: '*', zones: ['figures'], show: false,
+      label: 'Rétablir', down: () => figRedo() },
+    { id: 'fig.delete', group: 'Figures', keys: ['Delete'], alt: '*', shift: '*', zones: ['figures'], show: false,
+      label: 'Supprimer les points sélectionnés', down: () => deleteSelected() },
+    { id: 'help', group: 'Aide', keys: ['?'], shift: '*', zones: '*', show: true,
+      label: 'Afficher / masquer cette aide',
+      down: e => { if (!e.repeat) toggleKeysHelp(); } },
+    // Cue letters, LIVE only (T-272); Maj = flash.
+    { id: 'cue', group: 'Cues et pages', codes: CUE_CODES, shift: '*', zones: ['live'], show: true,
+      cap: cueCaps, label: 'Jouer la cue de la case (Maj : flash, tant que la touche est tenue)',
+      down: (e, i) => {
+        if (gridEditing) return;
+        // « Enregistrer dans une case »: the letter picks the cell.
+        if (storeMode) { if (!e.repeat) storeInto(i); return; }
+        const id = grid.pages[gridPage]?.cells[i] ?? null;
+        if (!id || !presetById.has(id)) return false;
+        // Auto-repeat would toggle the cue on and off while the key is held.
+        if (e.repeat || heldKeys.has(e.code)) return;
+        heldKeys.set(e.code, id);
+        cueDown(id, shiftMod(e) ? 'flash' : null);
+      },
+      up: e => {
+        const id = heldKeys.get(e.code);
+        if (id === undefined) return;
+        heldKeys.delete(e.code);
+        cueUp(id);
+      } },
+  ];
+}
+function allShortcuts() {
+  if (!restShortcuts) {
+    try { restShortcuts = buildShortcuts(); } catch (err) { console.error('raccourcis', err); return SAFETY_SHORTCUTS; }
   }
+  // The hold key follows the settings.
+  const hold = restShortcuts.find(s => s.id === 'hold');
+  if (hold) hold.codes = [presence.hold_key];
+  return SAFETY_SHORTCUTS.concat(restShortcuts);
+}
+// Where the keyboard is: the workspace, or a part of it with its own keys.
+function shortcutZone() {
+  if (activeWs === 'live') return 'live';
+  if (activeWs === 'timeline') return TL.show && document.activeElement === tlCv ? 'tl-canvas' : 'timeline';
+  if (activeWs === 'creation') return !$('figEditor').hidden && !$('figImportDlg').open ? 'figures' : 'creation';
+  return 'settings';
+}
+const modOk = (want, has) => want === '*' || !!want === has;
+// Index of the key in s.codes / s.keys, or -1.
+function shortcutKeyIndex(s, e) {
+  if (s.codes) return s.codes.indexOf(e.code);
+  return s.keys.findIndex(k => k.length === 1 ? (e.key || '').toLowerCase() === k : e.key === k);
+}
+function shortcutFor(e, list, zone, typing) {
+  for (const s of list) {
+    const i = shortcutKeyIndex(s, e);
+    if (i < 0) continue;
+    if (!modOk(s.meta, e.metaKey || e.ctrlKey) || !modOk(s.alt, e.altKey) || !modOk(s.shift, shiftMod(e))) continue;
+    if (s.zones !== '*' && (zone === null || !s.zones.includes(zone))) continue;
+    if (typing && !s.typing) continue;
+    if (s.when && !s.when()) continue;
+    return { s, i };
+  }
+  return null;
+}
+document.addEventListener('keydown', e => {
+  // Échap before anything else, whatever has focus.
+  const stop = shortcutFor(e, SAFETY_SHORTCUTS, null, false);
+  if (stop) { e.preventDefault(); stop.s.down(e, stop.i); return; }
   downCodes.add(e.code);
   if (pickingHoldKey) { e.preventDefault(); pickHoldKey(e.code); return; }
-  // Hold-to-run key (dead man): works whatever has focus.
-  if (presence.hold_to_run && e.code === presence.hold_key) { setHold(true); if (!isTyping()) e.preventDefault(); return; }
-  // F1–F4: workspaces (T-295). Display only, whatever has focus.
-  const ws = ['F1', 'F2', 'F3', 'F4'].indexOf(e.code);
-  if (ws >= 0 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) { e.preventDefault(); setWorkspace(WORKSPACES[ws]); return; }
-  // F5–F12: cue pages 1–8 (T-272), whatever has focus (F5 would reload the page).
-  const fp = PAGE_FKEYS.indexOf(e.code);
-  if (fp >= 0 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) { e.preventDefault(); if (!e.repeat) selectPage(fp); return; }
-  const typing = isTyping();
-  // Alt+1…9: cue pages 1–9 (by e.code: Alt changes e.key on a Mac).
-  if (!typing && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && /^Digit[1-9]$/.test(e.code)) {
-    e.preventDefault(); if (!e.repeat) selectPage(+e.code.slice(5) - 1); return;
-  }
-  if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
-  if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
-  if (!typing && e.key === '<' && activeWs === 'live') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
-  if (e.code === 'Space' && !typing) {
-    e.preventDefault(); if (!e.repeat) toggleArmed('keyboard'); return;
-  }
-  // Hold S (T-103): strobe 1/4 while held. In LIVE, S is a cue letter, so Alt+S.
-  if (!typing && e.code === 'KeyS' && !e.metaKey && !e.ctrlKey && !e.shiftKey && (e.altKey || activeWs !== 'live')) {
-    e.preventDefault(); holdStrobe(true); return;
-  }
-  // Entrées externes (T-408): Alt+X opens or closes the gate.
-  if (!typing && e.altKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyX') {
-    e.preventDefault(); if (!e.repeat) setGate(!(ext && ext.open), 'keyboard'); return;
-  }
-  // Cues utilisateur (T-405), in LIVE: Cmd/Ctrl+E « Enregistrer dans une
-  // case », Cmd/Ctrl+Maj+E « Mettre à jour ». Never a lone letter (cues).
-  if (!typing && (e.metaKey || e.ctrlKey) && !e.altKey && e.code === 'KeyE') {
-    e.preventDefault();
-    if (!e.repeat && activeWs === 'live') { if (e.shiftKey) updateCue(); else setStoreMode(!storeMode); }
-    return;
-  }
-  // Projet (T-286): Cmd+S enregistrer, Cmd+O ouvrir (Ctrl on other systems).
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && ['s', 'o'].includes(e.key.toLowerCase())) {
-    e.preventDefault(); if (!e.repeat) projAction(e.key.toLowerCase() === 's' ? 'save' : 'open'); return;
-  }
-  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
-  // Cue letters only in LIVE; Space, Escape, Enter and Backspace above work everywhere.
-  if (activeWs !== 'live') return;
-  // By position (e.code), so AZERTY « a » and QWERTY « q » are the same cell.
-  const i = CUE_CODES.indexOf(e.code);
-  const id = i >= 0 ? (grid.pages[gridPage]?.cells[i] ?? null) : null;
-  if (i >= 0 && gridEditing) { e.preventDefault(); return; }
-  // « Enregistrer dans une case »: the letter picks the cell.
-  if (i >= 0 && storeMode) { e.preventDefault(); if (!e.repeat) storeInto(i); return; }
-  if (id && presetById.has(id)) {
-    e.preventDefault();
-    // Auto-repeat would toggle the cue on and off while the key is held.
-    if (e.repeat || heldKeys.has(e.code)) return;
-    heldKeys.set(e.code, id);
-    cueDown(id, shiftMod(e) ? 'flash' : null);
-  }
+  const hit = shortcutFor(e, allShortcuts(), shortcutZone(), isTyping());
+  if (!hit) return;
+  if (hit.s.down(e, hit.i) !== false) e.preventDefault();
 });
 document.addEventListener('keyup', e => {
   downCodes.delete(e.code);
-  if (e.code === 'KeyS') holdStrobe(false);
-  if (e.code === presence.hold_key) setHold(false);
-  const id = heldKeys.get(e.code);
-  if (id === undefined) return;
-  heldKeys.delete(e.code);
-  cueUp(id);
+  for (const s of allShortcuts()) if (s.up && shortcutKeyIndex(s, e) >= 0) s.up(e);
 });
+// Two entries clash when one key press could match both: same key (a
+// character counts as its QWERTY and AZERTY positions), modifiers that can
+// both hold, and a zone in common. `when` conditions are not counted.
+const AZERTY_SWAP = { a: 'q', q: 'a', z: 'w', w: 'z' };
+function shortcutTokens(s) {
+  const t = new Set();
+  for (const c of s.codes || []) {
+    t.add('code:' + c);
+    const m = /^Key([A-Z])$/.exec(c);
+    if (m) { const l = m[1].toLowerCase(); t.add('key:' + l); t.add('key:' + (AZERTY_SWAP[l] || l)); }
+    if (c === 'Semicolon') t.add('key:m');
+  }
+  for (const k of s.keys || []) {
+    const l = k.toLowerCase();
+    t.add('key:' + l);
+    if (/^[a-z]$/.test(l)) {
+      t.add('code:Key' + l.toUpperCase());
+      t.add(l === 'm' ? 'code:Semicolon' : 'code:Key' + (AZERTY_SWAP[l] || l).toUpperCase());
+    } else t.add('code:' + k);
+  }
+  return t;
+}
+const modsMeet = (a, b) => a === '*' || b === '*' || !!a === !!b;
+function shortcutConflicts(list = allShortcuts()) {
+  const out = [], fixed = list.filter(s => !s.dynamic);
+  const zonesOf = s => s.zones === '*' ? SHORTCUT_ZONES : s.zones;
+  for (let a = 0; a < fixed.length; a++) {
+    for (let b = a + 1; b < fixed.length; b++) {
+      const x = fixed[a], y = fixed[b];
+      if (!['meta', 'alt', 'shift'].every(m => modsMeet(x[m], y[m]))) continue;
+      if (!zonesOf(x).some(z => zonesOf(y).includes(z))) continue;
+      const ty = shortcutTokens(y);
+      const same = [...shortcutTokens(x)].filter(k => ty.has(k));
+      if (same.length) out.push({ a: x.id, b: y.id, keys: same });
+    }
+  }
+  return out;
+}
+
+// « ? » : the table, grouped. Keys shown as on this keyboard when the
+// browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
+const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Espaces de travail', 'Timeline', 'Figures', 'Aide'];
+const ZONE_FR = { live: 'LIVE', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES' };
+const KEY_CAPS = { Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
+const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
+let keyLayout = null;
+function keyCap(code) {
+  const k = keyLayout && keyLayout.get(code);
+  if (k) return k.length === 1 ? k.toUpperCase() : k;
+  if (KEY_CAPS[code]) return KEY_CAPS[code];
+  const i = CUE_CODES.indexOf(code);
+  if (i >= 0) return CUE_KEYS[i].toUpperCase();
+  return code.replace(/^(Key|Digit)/, '');
+}
+function cueCaps() { return CUE_CODES.slice(0, 10).map(keyCap).join(' ') + ' …'; }
+function shortcutCaps(s) {
+  const parts = [];
+  if (s.meta === true) parts.push(IS_MAC ? 'Cmd' : 'Ctrl');
+  if (s.alt === true) parts.push('Alt');
+  if (s.shift === true) parts.push('Maj');
+  const main = s.cap ? s.cap() : s.codes ? keyCap(s.codes[0]) : (KEY_CAPS[s.keys[0]] || s.keys[0].toUpperCase());
+  parts.push(main);
+  return parts;
+}
+function shortcutWhere(s) {
+  if (s.where) return s.where;
+  if (s.zones === '*') return 'partout';
+  if (s.zones === NOT_TL_CANVAS) return 'partout (sauf timeline active)';
+  if (s.zones === NOT_LIVE) return 'hors LIVE';
+  if (s.zones.length === 2 && s.zones.includes('timeline') && s.zones.includes('tl-canvas')) return 'TIMELINE';
+  return s.zones.map(z => ZONE_FR[z]).join(', ');
+}
+function renderKeysHelp() {
+  const box = $('keysList');
+  box.textContent = '';
+  const list = allShortcuts();
+  for (const g of SHORTCUT_GROUPS) {
+    const rows = list.filter(s => s.group === g);
+    if (!rows.length) continue;
+    const sec = document.createElement('div');
+    sec.className = 'keys-group';
+    sec.dataset.group = g;
+    const h = document.createElement('h4');
+    h.textContent = g;
+    sec.appendChild(h);
+    for (const s of rows) {
+      const row = document.createElement('div');
+      row.className = 'keys-row';
+      row.dataset.shortcut = s.id;
+      const caps = document.createElement('span');
+      caps.className = 'caps';
+      shortcutCaps(s).forEach((c, n) => {
+        if (n) caps.append('+');
+        const k = document.createElement('kbd'); k.textContent = c; caps.appendChild(k);
+      });
+      const label = document.createElement('span');
+      label.className = 'what';
+      label.textContent = s.label;
+      const tags = document.createElement('span');
+      tags.className = 'tags';
+      const tag = (text, cls) => { const t = document.createElement('span'); t.className = 'tag ' + cls; t.textContent = text; tags.appendChild(t); };
+      tag(shortcutWhere(s), 'where');
+      if (s.typing) tag('aussi en saisie', 'typing');
+      if (!s.show) tag('verrouillé en spectacle', 'locked');
+      row.append(caps, label, tags);
+      sec.appendChild(row);
+    }
+    box.appendChild(sec);
+  }
+}
+async function openKeysHelp() {
+  renderKeysHelp();
+  $('keysHelp').hidden = false;
+  try {
+    if (!keyLayout && navigator.keyboard?.getLayoutMap) { keyLayout = await navigator.keyboard.getLayoutMap(); if (!$('keysHelp').hidden) renderKeysHelp(); }
+  } catch { /* not allowed here: AZERTY labels */ }
+}
+function closeKeysHelp() { $('keysHelp').hidden = true; }
+function toggleKeysHelp() { if ($('keysHelp').hidden) openKeysHelp(); else closeKeysHelp(); }
+$('keysBtn').addEventListener('click', toggleKeysHelp);
+$('keysClose').addEventListener('click', closeKeysHelp);
+$('keysHelp').addEventListener('click', e => { if (e.target === $('keysHelp')) closeKeysHelp(); });
+// For the e2e tests: the table and its conflicts.
+window.shortcutsDebug = {
+  list: () => allShortcuts().map(s => ({ id: s.id, group: s.group, codes: s.codes, keys: s.keys, meta: s.meta, alt: s.alt, shift: s.shift,
+    zones: s.zones, typing: !!s.typing, show: !!s.show, dynamic: !!s.dynamic })),
+  conflicts: (extra = []) => shortcutConflicts(allShortcuts().concat(extra)),
+  zone: () => shortcutZone(),
+};
 // A key or button released while the window had no focus never sends its
 // keyup: end every flash still held.
 window.addEventListener('blur', () => {
@@ -4125,7 +4398,6 @@ const reverse = on => postLive({ id: 'master.rot.reverse', value: on });
 $('rotReverse').addEventListener('pointerdown', () => reverse(true));
 ['pointerup', 'pointerleave'].forEach(ev => $('rotReverse').addEventListener(ev, () => reverse(false)));
 let reverseKey = false;
-document.addEventListener('keyup', e => { if (e.key === '<' && reverseKey) { reverseKey = false; reverse(false); } });
 
 // ---------- live colour ----------
 const COLOR_MODES = ['normal', 'fixed', 'hue', 'palette', 'rainbow', 'chase'];
@@ -5630,28 +5902,7 @@ tlCv.addEventListener('drop', e => {
   });
   tlCv.focus();
 });
-// Keys while the timeline has the focus. Entrée = marker at the playhead
-// (elsewhere it stays the tap tempo); Espace and Échap are never taken.
-tlCv.addEventListener('keydown', e => {
-  if (!TL.show || e.key === 'Escape' || e.code === 'Space') return;
-  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
-  let done = true;
-  if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !mod) tlAddMarker(tlPlayhead());
-  else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) tlDelete();
-  else if (mod && !e.altKey && k === 'c') tlCopy();
-  else if (mod && !e.altKey && k === 'v') tlPaste();
-  else if (mod && !e.altKey && k === 'd') tlDuplicate();
-  else if (mod && !e.altKey && k === 'a') { TL.sel = new Set(tlEvents().map(v => v.e.id)); TL.need = true; }
-  else done = false;
-  if (done) { e.preventDefault(); e.stopPropagation(); }
-});
-// Annuler / Rétablir anywhere in TIMELINE, except while typing.
-document.addEventListener('keydown', e => {
-  if (activeWs !== 'timeline' || isTyping() || !TL.show) return;
-  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
-  if (mod && !e.altKey && k === 'z') { e.preventDefault(); if (e.shiftKey) tlRedo(); else tlUndo(); }
-  else if (mod && !e.altKey && k === 'y') { e.preventDefault(); tlRedo(); }
-});
+// Keys of the timeline: in the shortcut table (T-284).
 new ResizeObserver(() => { TL.need = true; }).observe(tlCanvas());
 // For the e2e tests: the view and the draw time.
 window.tlDebug = { view: () => ({ t0: TL.t0, pps: TL.pps, top: TL_TOP, lane: TL_LANE, ruler: TL_RULER, mark: TL_MARK }), setView: tlSetView, stats: () => ({ drawMs: TL.drawMs, draws: TL.draws }), show: () => TL.show };
@@ -8120,15 +8371,6 @@ $('impCreate').onclick = async () => {
   await loadFigLib(); await loadPresets();
 };
 impLabels();
-
-// Cmd/Ctrl+Z, Cmd/Ctrl+Maj+Z (or Ctrl+Y), Suppr: only in the editor, never while typing.
-document.addEventListener('keydown', e => {
-  if ($('figEditor').hidden || isTyping() || $('figImportDlg').open) return;
-  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
-  if (mod && !e.altKey && k === 'z') { e.preventDefault(); if (e.shiftKey) figRedo(); else figUndo(); }
-  else if (mod && !e.altKey && k === 'y') { e.preventDefault(); figRedo(); }
-  else if (!mod && e.key === 'Delete') { e.preventDefault(); deleteSelected(); }
-});
 
 // ---------- CRÉATION › Médiathèque: ILDA files (T-011) ----------
 // The user's own .ild files: imported (parsed by the studio first, a
