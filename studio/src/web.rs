@@ -965,6 +965,7 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (method, p) if p.starts_with("/api/external") || p.starts_with("/api/dmx/") => external_route(request, shared, method, p),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         _ => text(404, "not found"),
     }
@@ -1323,6 +1324,111 @@ fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, pa
 
 /// `GET /api/project`, `POST /api/project/{new,open,save,save-as}` (T-286).
 /// Nothing here can arm, or change calibration or safety settings.
+/// `GET /api/external`: the gate, each source's scope, access and
+/// refusals, plus the DMX summary (the top bar polls it).
+fn external_view(s: &mut Shared) -> serde_json::Value {
+    let now = Instant::now();
+    let mut v = crate::external::view(s, now);
+    v["dmx"] = crate::netin::summary(s, now);
+    v
+}
+
+/// The external inputs gate (T-408) and the DMX input (T-406):
+/// - `GET /api/external`; `POST /api/external/gate` `{ "on": bool }`, only
+///   from this Mac's own page (loopback, and an on-screen source, as for
+///   arming); `POST /api/external/scopes` `{ "scopes": [...] }`.
+/// - `GET /api/dmx/interfaces`, `GET|POST /api/dmx/config` (the DMX part
+///   of `netin.json`), `GET /api/dmx/monitor?universe=N`,
+///   `POST /api/dmx/learn` `{ "control": id | null }`.
+fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Method, path: &str) -> HttpResponse {
+    match (method, path) {
+        (Method::Get, "/api/external") => json_response(external_view(&mut shared.lock().unwrap())),
+        (Method::Post, "/api/external/gate") => {
+            let local = request.remote_addr().is_some_and(|a| a.ip().is_loopback());
+            let req = match body::<serde_json::Value>(request) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let source = ArmSource::parse(req.get("source").and_then(|v| v.as_str()).unwrap_or("ui"));
+            if !local || !matches!(source, ArmSource::Ui | ArmSource::Keyboard | ArmSource::Api) {
+                return text(403, "les entrées externes ne s'ouvrent que depuis l'interface de ce Mac");
+            }
+            let mut s = shared.lock().unwrap();
+            let want = match (req.get("on").and_then(|v| v.as_bool()), req.get("toggle").and_then(|v| v.as_bool())) {
+                (Some(on), _) => on,
+                (None, Some(true)) => !s.external.gate.open,
+                _ => return text(400, "expected \"on\" or \"toggle\""),
+            };
+            match crate::external::set_open(&mut s, want, source) {
+                Ok(()) => json_response(external_view(&mut s)),
+                Err(why) => with_status(json_response(json!({ "open": false, "error": why })), 409),
+            }
+        }
+        (Method::Post, "/api/external/scopes") => match body::<serde_json::Value>(request) {
+            Ok(req) => {
+                let (result, job) = {
+                    let mut s = shared.lock().unwrap();
+                    let r = crate::external::update_scopes(&mut s, &req);
+                    (r, s.external.save_job())
+                };
+                match result {
+                    Ok(changed) => {
+                        if let (false, Some((path, cfg))) = (changed.is_empty(), job) {
+                            crate::save_json(&path, &cfg);
+                        }
+                        json_response(external_view(&mut shared.lock().unwrap()))
+                    }
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/dmx/interfaces") => json_response(json!(crate::netin::interfaces())),
+        (Method::Get, "/api/dmx/config") => {
+            let cfg = shared.lock().unwrap().netin.hub.file();
+            json_response(json!({ "artnet": cfg.artnet, "sacn": cfg.sacn, "dmx": cfg.dmx, "loss": cfg.loss }))
+        }
+        (Method::Post, "/api/dmx/config") => match body::<serde_json::Value>(request) {
+            Ok(patch) => {
+                if patch.as_object().is_some_and(|o| o.contains_key("osc")) {
+                    return text(400, "réglage inconnu : osc");
+                }
+                let (result, hub) = {
+                    let mut s = shared.lock().unwrap();
+                    (crate::netin::update(&mut s, &patch), Arc::clone(&s.netin.hub))
+                };
+                match result {
+                    Ok(changed) => {
+                        if !changed.is_empty() {
+                            hub.save();
+                        }
+                        let cfg = hub.file();
+                        json_response(json!({ "artnet": cfg.artnet, "sacn": cfg.sacn, "dmx": cfg.dmx, "loss": cfg.loss, "changed": changed }))
+                    }
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/dmx/monitor") => {
+            let universe = query_u64(request.url(), "universe").unwrap_or(1).min(u16::MAX as u64) as u16;
+            json_response(crate::netin::monitor(&shared.lock().unwrap(), universe, Instant::now()))
+        }
+        (Method::Post, "/api/dmx/learn") => match body::<serde_json::Value>(request) {
+            Ok(req) => {
+                let control = req.get("control").and_then(|v| v.as_str());
+                let mut s = shared.lock().unwrap();
+                match crate::netin::patch::start_learn(&mut s, control) {
+                    Ok(()) => json_response(json!({ "learn": s.netin.patch.learn.as_ref().map(|l| l.control.clone()) })),
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        _ => text(404, "not found"),
+    }
+}
+
 fn project_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, path: &str) -> HttpResponse {
     let mut raw = String::new();
     if post {
@@ -1568,6 +1674,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "data_warnings": data_warnings_view(s),
         "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
         "applog": s.applog.status(),
+        "external": { "open": s.external.gate.open },
+        "dmx": crate::netin::summary(s, Instant::now()),
     })
 }
 

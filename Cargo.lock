@@ -787,6 +787,7 @@ dependencies = [
  "ctrlc",
  "env_logger",
  "hound",
+ "if-addrs",
  "image",
  "jiff",
  "laser-dac",
@@ -800,6 +801,7 @@ dependencies = [
  "rtrb",
  "serde",
  "serde_json",
+ "socket2",
  "tiny_http",
 ]
 

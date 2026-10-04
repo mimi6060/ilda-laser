@@ -414,6 +414,8 @@ fn source_fr(source: Option<&str>) -> &'static str {
         Some("api") => "API",
         Some("system") => "système",
         Some("network") => "réseau",
+        Some("osc") => "OSC",
+        Some("dmx") => "DMX",
         _ => "",
     }
 }
@@ -521,6 +523,12 @@ pub fn describe(e: &SafetyEvent) -> String {
         "input_lost" => format!("Signal {} perdu — {}", str_of(d, "protocol_fr"), str_of(d, "policy_fr")),
         "input_back" => format!("Signal {} retrouvé", str_of(d, "protocol_fr")),
         "netin_settings" => format!("Entrées réseau modifiées{}", changed()),
+        "external_gate" => match (d.get("open").and_then(Value::as_bool), str_of(d, "reason")) {
+            (Some(true), _) => "Entrées externes ouvertes".into(),
+            (_, "estop") => "Entrées externes fermées par l'arrêt d'urgence".into(),
+            _ => "Entrées externes fermées".into(),
+        },
+        "external_scopes" => format!("Périmètre des entrées externes modifié{}", changed()),
         "log_overflow" => format!("{} événement(s) perdu(s) : journal saturé", d.get("lost").and_then(Value::as_u64).unwrap_or(0)),
         other => other.to_string(),
     }

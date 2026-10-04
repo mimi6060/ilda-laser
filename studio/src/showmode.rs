@@ -60,6 +60,8 @@ pub fn allowed(path: &str) -> bool {
         "/api/arm",
         "/api/heartbeat",
         "/api/lock",
+        // The external inputs gate (T-408) is a live switch, like arming.
+        "/api/external/gate",
         // Leaving a pattern is allowed; the handler refuses showing one.
         "/api/testpattern",
         "/api/data/warnings/ack",
@@ -94,7 +96,7 @@ pub fn allowed(path: &str) -> bool {
     PLAY.contains(&path) || path.starts_with("/api/test/")
 }
 
-/// Turns show mode on or off. Entering cancels a MIDI learn. Logged in
+/// Turns show mode on or off. Entering cancels a MIDI or DMX learn. Logged in
 /// the safety log; `prefs.json` is written with the lock released (other
 /// keys kept). Never arms or disarms. `source`: "ui", "keyboard", else
 /// logged as "api".
@@ -107,6 +109,7 @@ pub fn set(shared: &Mutex<Shared>, on: bool, source: &str) -> Result<()> {
         s.show_mode.on = on;
         if on {
             crate::midi::learn::cancel(&mut s);
+            s.netin.patch.learn = None;
         }
         let source = match source {
             "ui" => "ui",
@@ -130,7 +133,7 @@ mod tests {
 
     #[test]
     fn playback_and_safety_are_allowed_edits_are_not() {
-        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/lock", "/api/test/stall"] {
+        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/lock", "/api/test/stall", "/api/external/gate"] {
             assert!(allowed(p), "{p}");
         }
         for p in [
@@ -148,6 +151,10 @@ mod tests {
             "/api/project/save-as",
             "/api/midi/learn",
             "/api/midi/safety",
+            "/api/external/scopes",
+            "/api/dmx/config",
+            "/api/dmx/learn",
+            "/api/netin",
             "/api/timeline/edit",
             "/api/figures/delete",
             "/api/some/future/route",

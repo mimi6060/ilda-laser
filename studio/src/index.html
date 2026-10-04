@@ -482,6 +482,35 @@
   #dmxChart td { padding: 2px 4px; border-top: 1px solid var(--line); }
   #dmxChart td:first-child, #dmxChart td:last-child { width: 44px; color: var(--muted); }
   #dmxChart td:last-child { text-align: right; color: var(--accent); }
+  /* Entrées externes (T-408) and DMX in (T-406): Theme (T-299) tokens. */
+  #extGate { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 16px; padding: 0 6px; border-radius: 8px; font-size: 11px; line-height: 1; white-space: nowrap; color: var(--muted); }
+  #extGate::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  #extGate.open { color: var(--ok); border-color: var(--ok); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 35%, transparent); }
+  #extGate.open::before { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  #extGate .long { display: none; }
+  @media (min-width: 1800px) { #extGate .long { display: inline; } #extGate .short { display: none; } }
+  #dmxPill { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; flex: none; }
+  #dmxPill[hidden] { display: none; }
+  #dmxPill::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  #dmxPill.ok { color: var(--ok); }
+  #dmxPill.ok::before { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  #dmxPill.lost { color: var(--warn); font-weight: 700; }
+  #dmxPill.lost::before { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  #dmxLost { display: none; background: #3a2a00; color: var(--warn); border-bottom: 1px solid var(--warn); font-weight: 600; font-size: 13px; padding: 6px 12px; text-align: center; }
+  #dmxLost.on { display: block; }
+  #extTable, #dmxMaps { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+  #extTable th, #dmxMaps th { font-weight: 600; color: var(--muted); text-align: left; padding: 2px 4px; }
+  #extTable td, #dmxMaps td { padding: 3px 4px; border-top: 1px solid var(--line); vertical-align: middle; }
+  #extTable td.c, #extTable th.c, #dmxMaps td.c { text-align: center; }
+  #extTable .acc.up { color: var(--ok); font-weight: 600; }
+  #extTable .ref { color: var(--warn); font-variant-numeric: tabular-nums; }
+  #dmxMaps input[type=number] { width: 58px; }
+  #dmxMaps select { max-width: 170px; }
+  #dmxMonGrid { display: grid; grid-template-columns: repeat(16, minmax(0, 1fr)); gap: 1px; margin-top: 6px; font: 9px/1.6 ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+  #dmxMonGrid span { text-align: center; background: var(--panel-2); color: var(--muted); border-radius: 2px; }
+  #dmxMonGrid span.on { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) calc(var(--v) * 100%), var(--panel-2)); }
+  #dmxSources { font: 11px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); margin-top: 4px; }
+  #dmxSources .active { color: var(--ok); }
   .mmap button { padding: 2px 8px; font-size: 11px; }
   .mmap .h { color: var(--muted); }
   .proj { position: relative; display: flex; align-items: center; gap: 8px; }
@@ -704,9 +733,12 @@
     <div id="output">…</div>
     <span id="armInfo">Désarmé</span>
     <div class="leds">
+      <!-- Entrées externes (T-408): closed at start and after an e-stop. -->
+      <button id="extGate" aria-pressed="false" title="Entrées externes fermées : DMX, OSC et timecode ne changent rien (sauf le noir et l'arrêt d'urgence) · Alt+X"><span class="long">Entrées externes</span><span class="short">Ext.</span></button>
       <span id="presenceLed" class="led" title="Battement de l'interface : sans aucune page ouverte, le laser se désarme">Opérateur absent</span>
       <span id="engineLed" class="led ok" title="Chien de garde du moteur">Moteur</span>
       <div id="midiStatus" title="Contrôleurs MIDI : clic = RÉGLAGES › Contrôleur">MIDI : …</div>
+      <span id="dmxPill" title="Entrée DMX (Art-Net / sACN) : clic = RÉGLAGES › Entrées réseau" hidden>DMX</span>
     </div>
   </div>
   <div id="linkLost" role="alert" hidden>Connexion au moteur perdue</div>
@@ -728,6 +760,7 @@
   <button id="tpBannerExit">Quitter la mire</button></div>
 <div id="lockToast" role="status" hidden></div>
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
+<div id="dmxLost" role="alert">Signal DMX perdu</div>
 <div id="dataWarn" role="alert" hidden></div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
   <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
@@ -747,6 +780,7 @@
   <button id="midiMenuLearn">Apprendre MIDI</button>
   <button id="midiMenuShift">Apprendre avec Shift</button>
   <button id="midiMenuForget">Oublier MIDI</button>
+  <button id="midiMenuDmx" title="Bougez ensuite un canal de la console : le premier qui bouge est affecté à ce contrôle">Apprendre DMX</button>
 </div>
 <div id="projDialog" class="modal" hidden>
   <div class="box">
@@ -1624,8 +1658,18 @@
     </section>
 
     <section>
+      <details id="extPanel">
+        <summary>Entrées externes (porte et périmètres)</summary>
+        <div class="hint"><b>Le noir et l'arrêt d'urgence sont acceptés de toutes les sources, tout le temps. Rien d'externe ne peut armer le laser.</b></div>
+        <div class="hint">La porte <b>Entrées externes</b> (barre du haut, <kbd>Alt</kbd>+<kbd>X</kbd>) est fermée à chaque démarrage et après un arrêt d'urgence : seul l'opérateur la rouvre. Ouverte, chaque source n'agit que sur les groupes cochés, et seulement si son accès est levé quand « Exiger l'accès » est coché (DMX : canal d'accès ≥ 128 ; OSC : <code>/ls/access 1</code>, retombe après 10 s sans message de ce client). Le MIDI garde ses propres règles.</div>
+        <table id="extTable"></table>
+        <div class="hint sf-error" id="extError" role="alert"></div>
+      </details>
+    </section>
+
+    <section>
       <details id="netinPanel">
-        <summary>Entrées réseau (OSC, Art-Net)</summary>
+        <summary>Entrées réseau (OSC, Art-Net, sACN, DMX)</summary>
         <div class="hint">Pilotage depuis une console lumière ou une autre application. Rien de ce qui arrive par le réseau ne peut armer le laser ; le blackout et l'arrêt d'urgence sont toujours acceptés. Écoute seule : le studio n'envoie rien. Réglage de cette machine (pas du projet).</div>
         <div class="mdev">
           <div class="n">OSC</div>
@@ -1651,12 +1695,46 @@
           <table id="dmxChart"></table>
         </div>
         <div class="mdev">
-          <div class="n">Perte du signal Art-Net</div>
+          <div class="n">sACN (E1.31)</div>
+          <label class="check"><input type="checkbox" id="sacnEnabled"> Recevoir le sACN (DMX)</label>
+          <div class="ni-addr">
+            <label for="sacnBind">Interface réseau</label><label for="sacnPort">Port</label>
+            <select id="sacnBind"></select><input type="number" id="sacnPort" min="0" max="65535">
+          </div>
+          <label for="sacnUniverses">Univers écoutés (1 à 63999, séparés par des virgules)</label>
+          <input type="text" id="sacnUniverses" autocomplete="off" spellcheck="false">
+          <label class="check" title="Rejoint les groupes 239.255.x.y des univers sur l'interface choisie. Sinon, la console doit envoyer en unicast à ce Mac."><input type="checkbox" id="sacnMulticast"> Multidiffusion (sur l'interface choisie)</label>
+          <div class="ni-state" id="sacnState" role="status"></div>
+        </div>
+        <div class="mdev">
+          <div class="n">Patch DMX (Art-Net et sACN)</div>
+          <div class="hint">Un canal (ou deux en 16 bits) pilote un contrôle. Univers N = Art-Net N et sACN N. Déclencheurs : front montant au-dessus de 127. Avec la reprise, un canal ne reprend la main qu'après avoir croisé la valeur affichée. Clic droit sur un contrôle › <b>Apprendre DMX</b> pour affecter le premier canal qui bouge.</div>
+          <div class="ni-addr">
+            <label for="dmxAccessU">Canal d'accès : univers</label><label for="dmxAccessC">canal (0 = aucun)</label>
+            <input type="number" id="dmxAccessU" min="0" max="63999"><input type="number" id="dmxAccessC" min="0" max="512">
+          </div>
+          <table id="dmxMaps"></table>
+          <div class="row"><button id="dmxAdd">Ajouter une affectation</button><span class="hint" id="dmxLearnState" role="status"></span></div>
+        </div>
+        <div class="mdev">
+          <div class="n">Moniteur DMX</div>
+          <div class="ni-addr">
+            <label for="dmxMonU">Univers</label><label></label>
+            <input type="number" id="dmxMonU" min="0" max="63999" value="1"><span></span>
+          </div>
+          <div class="ni-state" id="dmxMonState" role="status"></div>
+          <div id="dmxSources"></div>
+          <div id="dmxMonGrid"></div>
+        </div>
+        <div class="mdev">
+          <div class="n">Perte du signal DMX (Art-Net, sACN)</div>
           <label for="netinPolicy">Si plus rien n'arrive</label>
           <select id="netinPolicy"></select>
           <label for="netinTimeout">Après (s)</label>
           <input type="number" id="netinTimeout" min="0.5" max="30" step="0.5">
-          <div class="hint">Le retour du signal reprend la main sur tous les canaux, sans jamais armer. Un arrêt logiciel ne remplace pas l'arrêt matériel du projecteur.</div>
+          <label for="netinFade">Durée du fondu (s)</label>
+          <input type="number" id="netinFade" min="0" max="30" step="0.5">
+          <div class="hint">Le fondu et le noir baissent la sortie (avant les étages de sécurité) sans désarmer, et seulement si les entrées externes sont ouvertes. Le retour du signal reprend la main, sans jamais armer. Un arrêt logiciel ne remplace pas l'arrêt matériel du projecteur.</div>
         </div>
         <div class="hint sf-error" id="netinError" role="alert"></div>
       </details>
@@ -2053,6 +2131,10 @@ document.addEventListener('keydown', e => {
   // Hold S (T-103): strobe 1/4 while held. In LIVE, S is a cue letter, so Alt+S.
   if (!typing && e.code === 'KeyS' && !e.metaKey && !e.ctrlKey && !e.shiftKey && (e.altKey || activeWs !== 'live')) {
     e.preventDefault(); holdStrobe(true); return;
+  }
+  // Entrées externes (T-408): Alt+X opens or closes the gate.
+  if (!typing && e.altKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyX') {
+    e.preventDefault(); if (!e.repeat) setGate(!(ext && ext.open), 'keyboard'); return;
   }
   // Projet (T-286): Cmd+S enregistrer, Cmd+O ouvrir (Ctrl on other systems).
   if ((e.metaKey || e.ctrlKey) && !e.altKey && ['s', 'o'].includes(e.key.toLowerCase())) {
@@ -5532,7 +5614,8 @@ function showNetin(n) {
   if ($('netinPolicy').options.length !== n.policies.length) {
     $('netinPolicy').replaceChildren(...n.policies.map(p => { const o = document.createElement('option'); o.value = p.id; o.textContent = p.label; return o; }));
   }
-  setField('netinPolicy', c.loss.policy); setField('netinTimeout', c.loss.timeout_ms / 1000);
+  setField('netinPolicy', c.loss.policy); setField('netinTimeout', c.loss.timeout_ms / 1000); setField('netinFade', c.loss.fade_ms / 1000);
+  showDmxInput(n);
   const [ot, oc] = niListen(n.osc.status, e.osc.enabled, n.cli.osc);
   $('oscState').textContent = ot; $('oscState').className = 'ni-state ' + oc;
   let [at, ac] = niListen(n.artnet.status, e.artnet.enabled, n.cli.artnet);
@@ -5573,6 +5656,195 @@ $('artnetUniverse').onchange = e => saveNetin({ artnet: { universe: Math.round(+
 $('artnetAddress').onchange = e => saveNetin({ artnet: { address: Math.round(+e.target.value) } });
 $('netinPolicy').onchange = e => saveNetin({ loss: { policy: e.target.value } });
 $('netinTimeout').onchange = e => saveNetin({ loss: { timeout_ms: Math.round(+e.target.value * 1000) } });
+$('netinFade').onchange = e => saveNetin({ loss: { fade_ms: Math.round(+e.target.value * 1000) } });
+
+// sACN, the free patch and the DMX monitor (T-406).
+let dmxIfaces = [], dmxMapsKey = '';
+async function loadDmxIfaces() {
+  try { const r = await fetch('/api/dmx/interfaces'); if (r.ok) dmxIfaces = await r.json(); } catch {}
+}
+function showDmxInput(n) {
+  const c = n.config, sc = c.sacn;
+  $('sacnEnabled').checked = sc.enabled;
+  const opts = [...dmxIfaces];
+  if (!opts.some(i => i.ip === sc.bind)) opts.push({ name: '?', ip: sc.bind });
+  const key = opts.map(i => i.ip).join();
+  if ($('sacnBind').dataset.key !== key) {
+    $('sacnBind').dataset.key = key;
+    $('sacnBind').replaceChildren(...opts.map(i => { const o = document.createElement('option'); o.value = i.ip; o.textContent = `${i.ip} (${i.name}${i.loopback ? ', ce Mac seulement' : ''})`; return o; }));
+  }
+  setField('sacnBind', sc.bind); setField('sacnPort', sc.port);
+  setField('sacnUniverses', sc.universes.join(', '));
+  $('sacnMulticast').checked = sc.multicast;
+  let [st, cls] = niListen(n.sacn.status, sc.enabled, false);
+  if (sc.enabled && n.sacn.status.groups.length) st += ` — multidiffusion : ${n.sacn.status.groups.join(', ')}`;
+  $('sacnState').textContent = st; $('sacnState').className = 'ni-state ' + cls;
+  const acc = c.dmx.access;
+  setField('dmxAccessU', acc ? acc.universe : 1); setField('dmxAccessC', acc ? acc.channel : 0);
+  const mk = JSON.stringify([c.dmx.mappings, n.dmx.controls.length]);
+  if (mk !== dmxMapsKey && !$('dmxMaps').contains(document.activeElement)) { dmxMapsKey = mk; renderDmxMaps(n); }
+  $('dmxLearnState').textContent = n.dmx.learn ? `Apprendre DMX : bougez un canal pour ${labelOf(n.dmx.learn)}…`
+    : n.dmx.learned ? `Appris : univers ${n.dmx.learned.universe}, canal ${n.dmx.learned.channel} → ${labelOf(n.dmx.learned.control)}` : '';
+}
+function renderDmxMaps(n) {
+  const maps = n.config.dmx.mappings;
+  const head = '<tr><th>Univers</th><th>Canal</th><th>Contrôle</th><th>Fin (16 bits)</th><th class="c">Inversé</th><th class="c">Reprise</th><th></th></tr>';
+  if (!maps.length) { $('dmxMaps').innerHTML = head + '<tr><td colspan="7" class="hint">Aucune affectation.</td></tr>'; return; }
+  const options = n.dmx.controls.map(d => `<option value="${esc(d.id)}">${esc(d.label)} · ${esc(d.id)}</option>`).join('');
+  $('dmxMaps').innerHTML = head + maps.map((m, i) => `<tr data-i="${i}">
+    <td><input type="number" data-k="universe" min="0" max="63999" value="${m.universe}" aria-label="Univers"></td>
+    <td><input type="number" data-k="channel" min="1" max="512" value="${m.channel}" aria-label="Canal"></td>
+    <td><select data-k="control" aria-label="Contrôle">${options}</select></td>
+    <td><input type="number" data-k="fine" min="0" max="512" value="${m.fine ?? ''}" placeholder="—" aria-label="Canal fin (16 bits)"></td>
+    <td class="c"><input type="checkbox" data-k="invert" ${m.invert ? 'checked' : ''} aria-label="Inversé"></td>
+    <td class="c"><input type="checkbox" data-k="pickup" ${m.pickup ? 'checked' : ''} aria-label="Reprise"></td>
+    <td><button data-del="${i}" title="Supprimer">✕</button></td></tr>`).join('');
+  $('dmxMaps').querySelectorAll('tr[data-i]').forEach(tr => { tr.querySelector('select').value = maps[+tr.dataset.i].control; });
+}
+function dmxMappings() { return JSON.parse(JSON.stringify(netin?.config.dmx.mappings || [])); }
+$('dmxMaps').addEventListener('change', e => {
+  const tr = e.target.closest('tr[data-i]'); if (!tr) return;
+  const maps = dmxMappings(), m = maps[+tr.dataset.i], k = e.target.dataset.k;
+  if (k === 'invert' || k === 'pickup') m[k] = e.target.checked;
+  else if (k === 'control') m.control = e.target.value;
+  else if (k === 'fine') m.fine = +e.target.value > 0 ? Math.round(+e.target.value) : null;
+  else m[k] = Math.round(+e.target.value);
+  dmxMapsKey = ''; e.target.blur(); saveNetin({ dmx: { mappings: maps } });
+});
+$('dmxMaps').addEventListener('click', e => {
+  const b = e.target.closest('[data-del]'); if (!b) return;
+  const maps = dmxMappings(); maps.splice(+b.dataset.del, 1);
+  dmxMapsKey = ''; b.blur(); saveNetin({ dmx: { mappings: maps } });
+});
+$('dmxAdd').onclick = () => {
+  const maps = dmxMappings(), last = maps[maps.length - 1];
+  maps.push({ universe: last ? last.universe : 1, channel: last ? Math.min(512, last.channel + 1) : 1, fine: null, control: 'master.brightness', invert: false, pickup: true });
+  dmxMapsKey = ''; saveNetin({ dmx: { mappings: maps } });
+};
+function saveAccess() {
+  const ch = Math.round(+$('dmxAccessC').value);
+  saveNetin({ dmx: { access: ch > 0 ? { universe: Math.round(+$('dmxAccessU').value), channel: ch } : null } });
+}
+$('dmxAccessU').onchange = saveAccess; $('dmxAccessC').onchange = saveAccess;
+$('sacnEnabled').onchange = e => saveNetin({ sacn: { enabled: e.target.checked } });
+$('sacnBind').onchange = e => saveNetin({ sacn: { bind: e.target.value } });
+$('sacnPort').onchange = e => saveNetin({ sacn: { port: Math.round(+e.target.value) } });
+$('sacnMulticast').onchange = e => saveNetin({ sacn: { multicast: e.target.checked } });
+$('sacnUniverses').onchange = e => saveNetin({ sacn: { universes: e.target.value.split(/[ ,;]+/).filter(Boolean).map(Number) } });
+async function loadDmxMonitor() {
+  const u = Math.round(+$('dmxMonU').value) || 0;
+  let m;
+  try { const r = await fetch('/api/dmx/monitor?universe=' + u); if (!r.ok) return; m = await r.json(); } catch { return; }
+  const grid = $('dmxMonGrid');
+  if (grid.children.length !== 512) grid.replaceChildren(...Array.from({ length: 512 }, (_, i) => { const c = document.createElement('span'); c.title = 'Canal ' + (i + 1); return c; }));
+  const vals = m.values || [];
+  for (let i = 0; i < 512; i++) {
+    const v = vals[i], c = grid.children[i];
+    c.textContent = v == null ? '·' : v;
+    c.classList.toggle('on', !!v);
+    c.style.setProperty('--v', ((v || 0) / 255).toFixed(2));
+  }
+  $('dmxMonState').textContent = !m.values ? `Univers ${u} : rien reçu (il doit figurer dans le patch ou les univers sACN)`
+    : `Univers ${u} : ${m.lost ? 'signal perdu' : 'reçu'} de ${m.source} (${m.protocol === 'sacn' ? 'sACN' : 'Art-Net'}) — ${m.rate.toFixed(1)} paquets/s`;
+  $('dmxMonState').className = 'ni-state ' + (!m.values ? '' : m.lost ? 'bad' : 'ok');
+  $('dmxSources').replaceChildren(...m.sources.map(src => {
+    const d = document.createElement('div');
+    d.textContent = `${src.active ? '● ' : '○ '}${src.name} — ${src.protocol === 'sacn' ? 'sACN' : 'Art-Net'} ${src.addr}` + (src.protocol === 'sacn' ? `, priorité ${src.priority}` : '') + `, il y a ${(src.age_ms / 1000).toFixed(1)} s`;
+    if (src.active) d.className = 'active';
+    return d;
+  }));
+}
+$('dmxMonU').onchange = loadDmxMonitor;
+$('netinPanel').addEventListener('toggle', () => { if ($('netinPanel').open) { loadDmxIfaces().then(loadNetin); loadDmxMonitor(); } });
+setInterval(() => { if (activeWs === 'settings' && $('netinPanel').open && !document.hidden) loadDmxMonitor(); }, 500);
+
+// Entrées externes (T-408): the top-bar gate, the DMX pill and banner,
+// and RÉGLAGES › Entrées externes. The gate is never saved: closed at
+// every start and after an emergency stop; nothing external can arm.
+let ext = null, extKey = '';
+function showExt(x) {
+  ext = x;
+  const b = $('extGate');
+  b.classList.toggle('open', x.open);
+  b.setAttribute('aria-pressed', String(x.open));
+  b.querySelector('.long').textContent = 'Entrées externes ' + (x.open ? 'ouvertes' : 'fermées');
+  b.querySelector('.short').textContent = 'Ext.';
+  const active = x.sources.filter(src => src.access || !src.require_access).map(src => src.label);
+  b.title = (x.open ? 'Entrées externes ouvertes' + (active.length ? ' · sources actives : ' + active.join(', ') : ' · aucun accès levé')
+    : 'Entrées externes fermées : DMX, OSC et timecode ne changent rien (sauf le noir et l\'arrêt d\'urgence)') + ' · clic ou Alt+X';
+  const d = x.dmx, pill = $('dmxPill');
+  pill.hidden = !d.enabled;
+  pill.className = d.lost ? 'lost' : d.receiving ? 'ok' : '';
+  pill.title = (d.lost ? 'Signal DMX perdu' : d.receiving ? `DMX reçu (${d.sources} source(s))` : 'DMX : en attente de données') + ' · clic = RÉGLAGES › Entrées réseau';
+  $('dmxLost').textContent = 'Signal DMX perdu — ' + (d.lost_source || '');
+  $('dmxLost').classList.toggle('on', !!d.lost);
+  if ($('extPanel').open) renderExt(x);
+}
+function renderExt(x) {
+  const key = JSON.stringify(x.sources.map(src => [src.groups, src.require_access]));
+  if (key !== extKey && !$('extTable').contains(document.activeElement)) {
+    extKey = key;
+    $('extTable').innerHTML = '<tr><th>Source</th>' + x.sets.map(set => `<th class="c">${esc(set.label)}</th>`).join('')
+      + '<th class="c">Exiger l\'accès</th><th>Accès</th><th class="c">Refusés</th></tr>'
+      + x.sources.map(src => `<tr data-src="${src.source}"><td>${esc(src.label)}</td>`
+        + x.sets.map(set => `<td class="c"><input type="checkbox" data-set="${set.id}" ${src.sets.includes(set.id) ? 'checked' : ''} aria-label="${esc(src.label)} : ${esc(set.label)}"></td>`).join('')
+        + `<td class="c"><input type="checkbox" data-access ${src.require_access ? 'checked' : ''} aria-label="${esc(src.label)} : exiger l'accès"></td>`
+        + '<td class="acc"></td><td class="c ref"></td></tr>').join('');
+  }
+  for (const src of x.sources) {
+    const tr = $('extTable').querySelector(`tr[data-src="${src.source}"]`); if (!tr) continue;
+    const acc = tr.querySelector('.acc');
+    acc.textContent = !src.require_access ? 'non exigé' : src.access ? 'levé' + (src.clients.length ? ' (' + src.clients.join(', ') + ')' : '') : 'fermé';
+    acc.classList.toggle('up', src.access || !src.require_access);
+    const ref = tr.querySelector('.ref');
+    ref.textContent = src.refused;
+    ref.title = src.last_refusal ? `Dernier : ${src.last_refusal.what} — ${src.last_refusal.why_fr}` : '';
+  }
+}
+$('extTable').addEventListener('change', async e => {
+  const tr = e.target.closest('tr[data-src]'); if (!tr || !ext) return;
+  const groups = [...tr.querySelectorAll('[data-set]:checked')].flatMap(el => ext.sets.find(set => set.id === el.dataset.set).groups);
+  const body = { scopes: [{ source: tr.dataset.src, groups, require_access: tr.querySelector('[data-access]').checked }] };
+  e.target.blur();
+  const r = await fetch('/api/external/scopes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  $('extError').textContent = r.ok ? '' : await r.text();
+  extKey = '';
+  if (r.ok) showExt(await r.json()); else loadExt();
+});
+async function loadExt() {
+  try { const r = await fetch('/api/external'); if (r.ok) showExt(await r.json()); } catch { /* studio restarting */ }
+}
+async function setGate(on, source) {
+  try {
+    const r = await fetch('/api/external/gate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on, source }) });
+    if (r.ok) return showExt(await r.json());
+    const j = await r.json().catch(() => null);
+    notify(j?.error || 'Refusé');
+  } catch {}
+  loadExt();
+}
+$('extGate').onclick = () => setGate(!(ext && ext.open), 'ui');
+$('dmxPill').onclick = () => { if (showMode) return notify(LOCKED_FR); setWorkspace('settings'); $('netinPanel').open = true; };
+$('extPanel').addEventListener('toggle', () => { if ($('extPanel').open) { extKey = ''; loadExt(); } });
+setInterval(() => { if (!document.hidden) loadExt(); }, 1000);
+loadExt();
+// Apprendre DMX (right-click menu): the first channel that moves is mapped.
+let dmxLearnTimer = null;
+async function dmxLearnWatch() {
+  clearTimeout(dmxLearnTimer);
+  try {
+    const n = await (await fetch('/api/netin')).json();
+    if (n.dmx.learn) { dmxLearnTimer = setTimeout(dmxLearnWatch, 400); return; }
+    if (n.dmx.learned) showBanner(`Appris : univers ${n.dmx.learned.universe}, canal ${n.dmx.learned.channel} → ${labelOf(n.dmx.learned.control)}`, 3000);
+  } catch {}
+}
+$('midiMenuDmx').onclick = async () => {
+  const id = menuControl; closeMidiMenu();
+  const r = await fetch('/api/dmx/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ control: id }) });
+  if (!r.ok) return notify(await r.text());
+  showBanner(`Apprendre DMX : bougez un canal de la console pour ${labelOf(id)}`, 4000);
+  dmxLearnWatch();
+};
 $('netinPanel').addEventListener('toggle', () => { if ($('netinPanel').open) loadNetin(); });
 setInterval(() => { if (activeWs === 'settings' && $('netinPanel').open && !document.hidden) loadNetin(); }, 500);
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });

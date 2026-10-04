@@ -18,6 +18,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Every source, in `to_u8` order.
+const ALL_SOURCES: [ArmSource; 8] =
+    [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System, ArmSource::Network, ArmSource::Osc, ArmSource::Dmx];
+
 /// Who asked for an arm or disarm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +33,11 @@ pub enum ArmSource {
     System,
     /// OSC or Art-Net (netin/, T-013): may stop, never arms.
     Network,
+    /// An OSC client (T-408): only as the source of a stop, for display.
+    Osc,
+    /// A DMX input, Art-Net or sACN (T-406/T-408): only as the source of a
+    /// stop, for display.
+    Dmx,
 }
 
 impl ArmSource {
@@ -41,6 +50,8 @@ impl ArmSource {
             ArmSource::Api => "api",
             ArmSource::System => "system",
             ArmSource::Network => "network",
+            ArmSource::Osc => "osc",
+            ArmSource::Dmx => "dmx",
         }
     }
 
@@ -52,6 +63,8 @@ impl ArmSource {
             ArmSource::Api => "API",
             ArmSource::System => "système",
             ArmSource::Network => "réseau (OSC/Art-Net)",
+            ArmSource::Osc => "OSC",
+            ArmSource::Dmx => "DMX",
         }
     }
 
@@ -64,6 +77,8 @@ impl ArmSource {
             "midi" => ArmSource::Midi,
             "system" => ArmSource::System,
             "network" => ArmSource::Network,
+            "osc" => ArmSource::Osc,
+            "dmx" => ArmSource::Dmx,
             _ => ArmSource::Api,
         }
     }
@@ -73,7 +88,7 @@ impl ArmSource {
     }
 
     fn from_u8(v: u8) -> Self {
-        [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System, ArmSource::Network].get(v as usize).copied().unwrap_or(ArmSource::System)
+        ALL_SOURCES.get(v as usize).copied().unwrap_or(ArmSource::System)
     }
 }
 
@@ -216,7 +231,9 @@ impl ArmGate {
     /// network (OSC, Art-Net) or the system can never arm: only a person at
     /// the UI, keyboard or API.
     pub fn request_arm(&mut self, src: ArmSource) -> Result<(), Vec<String>> {
-        if matches!(src, ArmSource::Midi | ArmSource::System | ArmSource::Network) {
+        // Only the screen, the keyboard and a local API call arm; any
+        // source added later is refused until it is listed here.
+        if !matches!(src, ArmSource::Ui | ArmSource::Keyboard | ArmSource::Api) {
             let refused = vec![format!("L'armement depuis « {} » n'est pas autorisé", src.label_fr())];
             log::warn!("Armement refusé ({}) : {}", src.label_fr(), refused.join(" ; "));
             self.log.record("arm_refused", Some(src.id()), json!({ "blocking": refused }));
@@ -405,6 +422,9 @@ pub struct EStop {
     latched: AtomicBool,
     source: AtomicU8,
     at_ms: AtomicU64,
+    /// Trips so far (latching ones), so a trip and reset between two
+    /// looks is still seen (the external inputs gate, T-408).
+    trips: AtomicU64,
     /// Disarms the output directly (DAC-level), called on every trip.
     kill: Mutex<Option<KillSwitch>>,
 }
@@ -430,6 +450,7 @@ impl EStop {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
             self.source.store(src.to_u8(), Ordering::SeqCst);
             self.at_ms.store(now, Ordering::SeqCst);
+            self.trips.fetch_add(1, Ordering::SeqCst);
         }
         self.latched.store(true, Ordering::SeqCst);
         self.kill_output();
@@ -448,6 +469,11 @@ impl EStop {
 
     pub fn is_latched(&self) -> bool {
         self.latched.load(Ordering::SeqCst)
+    }
+
+    /// How many times it latched since start-up.
+    pub fn trips(&self) -> u64 {
+        self.trips.load(Ordering::SeqCst)
     }
 
     /// Source and time (ms since the epoch) of the trip, while latched.
@@ -498,7 +524,9 @@ mod tests {
     fn midi_opt_in_still_obeys_the_estop_and_interlocks() {
         let mut gate = ArmGate::default();
         assert!(gate.request_arm(ArmSource::Midi).is_err(), "plain MIDI arming is always refused");
-        assert!(gate.request_arm(ArmSource::Network).is_err(), "OSC / Art-Net never arm");
+        for src in [ArmSource::Network, ArmSource::Osc, ArmSource::Dmx, ArmSource::System] {
+            assert!(gate.request_arm(src).is_err(), "{src:?} never arms");
+        }
         let estop = EStop::default();
         estop.trip(ArmSource::Midi);
         gate.sync_estop(&estop);
@@ -799,7 +827,8 @@ mod tests {
         assert_eq!(ArmSource::parse("ui"), ArmSource::Ui);
         assert_eq!(ArmSource::parse("whatever"), ArmSource::Api);
         assert_eq!(ArmSource::parse("network"), ArmSource::Network);
-        for s in [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System, ArmSource::Network] {
+        assert_eq!(ArmSource::parse("dmx"), ArmSource::Dmx);
+        for s in ALL_SOURCES {
             assert_eq!(ArmSource::from_u8(s.to_u8()), s);
             assert_eq!(serde_json::to_value(s).unwrap(), s.id(), "the log uses the JSON ids");
         }

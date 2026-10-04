@@ -10,6 +10,8 @@
 //! - `/ls/blackout`: blackout (latches the emergency stop).
 //! - `/ls/arm`: always refused (and logged). Nothing external arms.
 //! - `/ls/ping`: does nothing; shows as activity.
+//! - `/ls/access 1|0`: raises or lowers this client's access (T-408); it
+//!   drops by itself 10 s after the client's last message.
 //!
 //! Bundle time tags are ignored: everything runs on arrival.
 
@@ -164,6 +166,8 @@ pub enum OscCommand {
     /// Always refused; kept so the refusal is logged.
     Arm,
     Ping,
+    /// Raise (true) or lower this client's access (T-408).
+    Access(bool),
 }
 
 /// Our address space → a command. Errors are French, for the monitor.
@@ -190,6 +194,10 @@ pub fn command(msg: &OscMessage) -> Result<OscCommand, String> {
         ("blackout", "") => Ok(OscCommand::Blackout),
         ("arm", "") => Ok(OscCommand::Arm),
         ("ping", "") => Ok(OscCommand::Ping),
+        ("access", "") => {
+            let v = number().ok_or("argument 0 ou 1 attendu")?;
+            Ok(OscCommand::Access(v >= 0.5))
+        }
         _ => Err(format!("adresse inconnue : {}", msg.address)),
     }
 }
@@ -329,6 +337,9 @@ pub mod tests {
         assert_eq!(cmd("/ls/cue/play", &[OscArg::Str("tunnels-001".into())]), Ok(OscCommand::PlayCue("tunnels-001".into())));
         assert_eq!(cmd("/ls/cue/stop", &[]), Ok(OscCommand::StopCues));
         assert_eq!(cmd("/ls/ping", &[]), Ok(OscCommand::Ping));
+        assert_eq!(cmd("/ls/access", &[OscArg::Int(1)]), Ok(OscCommand::Access(true)));
+        assert_eq!(cmd("/ls/access", &[OscArg::Float(0.0)]), Ok(OscCommand::Access(false)));
+        assert_eq!(cmd("/ls/access", &[]), Ok(OscCommand::Access(true)), "no argument: a press");
     }
 
     #[test]

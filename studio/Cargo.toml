@@ -25,4 +25,6 @@ claxon = "0.4.3"
 nanomp3 = "0.1.1"
 roxmltree = "0.21"
 ponk-protocol = "0.1"  # MIT, zero dependencies: PONK wire format (T-300)
+if-addrs = "0.15"  # MIT OR BSD-3-Clause: list this Mac's interfaces for the DMX input (T-406); already in the tree via laser-dac
+socket2 = "0.5"  # MIT OR Apache-2.0: SO_REUSEADDR + multicast join for sACN (T-406); already in the tree
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
