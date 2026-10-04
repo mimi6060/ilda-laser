@@ -253,15 +253,11 @@ impl Drawing {
 }
 
 /// The pattern as the engine sends it into the safety stage: densified,
-/// then calibrated (clamped to −1..1 by the calibration).
-pub fn output_frame(p: TestPattern, brightness: f32, calibration: &crate::engine::Calibration) -> Vec<Point> {
-    crate::engine::densify(&points(p, brightness))
-        .into_iter()
-        .map(|q| {
-            let (x, y) = calibration.apply(q.x, q.y);
-            Point { x, y, ..q }
-        })
-        .collect()
+/// through the geometry of the projection zone being aligned (if any),
+/// then calibrated (clamped to −1..1 by both).
+pub fn output_frame(p: TestPattern, brightness: f32, zone: Option<&crate::projection::Geometry>, calibration: &crate::engine::Calibration) -> Vec<Point> {
+    let zone = zone.copied().unwrap_or_default();
+    zone.placer().place(&crate::engine::densify(&points(p, brightness)), calibration)
 }
 
 #[cfg(test)]
@@ -412,7 +408,7 @@ mod tests {
             let cfg = SafetySettings { zones: vec![zone.clone()], ..Default::default() };
             for cal in [Calibration { offset_x: 0.1, ..Default::default() }, Calibration::default()] {
                 for p in ALL {
-                    let frame = output_frame(p, 0.2, &cal);
+                    let frame = output_frame(p, 0.2, None, &cal);
                     let out = safety::apply(frame, 0.0, &cfg, &mut StrobeLimiter::default());
                     assert_eq!(crate::zones::blank_violations(&out, std::slice::from_ref(&zone)), 0, "{p:?} {:?}", zone.points);
                     assert!(out.iter().all(|q| (-1.0..=1.0).contains(&q.x)));

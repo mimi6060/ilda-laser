@@ -142,6 +142,8 @@ mod tests {
             "/api/scenes/save",
             "/api/scenes/delete",
             "/api/cues/slot",
+            "/api/projection",
+            "/api/projection/align",
             "/api/checklist/config",
             "/api/project/open",
             "/api/project/new",

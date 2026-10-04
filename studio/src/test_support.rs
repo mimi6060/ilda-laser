@@ -62,6 +62,7 @@ pub fn shared() -> Shared {
         safety: crate::safety::SafetyStore::in_memory(),
         strobe: Default::default(),
         outputs: crate::power::OutputStore::in_memory(),
+        projection: crate::projection::ProjectionStore::in_memory(),
         audio_guard: Default::default(),
         dwell: Default::default(),
         evolving: Vec::new(),

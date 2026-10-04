@@ -5,7 +5,8 @@
 //! simulated clock, with random actions between frames: cues, looks and
 //! live modifiers sent as an API client could send them, LFOs, audio
 //! routes and features, MIDI, the timeline, test patterns, zones, caps,
-//! calibration, arm / disarm / e-stop. A recording output captures what
+//! calibration, projection zones and their geometry (T-012, cue → zone
+//! routing included), arm / disarm / e-stop. A recording output captures what
 //! would leave for the laser. After every frame we check:
 //!
 //! 1. disarmed or e-stopped ⇒ no lit point sent (and the output is not
@@ -34,7 +35,7 @@
 //! `strobe_never_exceeds_the_burst_limit` (behaviour over time).
 
 use crate::controls::{self, ControlInput};
-use crate::cues::ClickMode;
+use crate::cues::{ClickMode, CueSlot};
 use crate::engine::{Calibration, Settings};
 use crate::interlock::ArmSource;
 use crate::midi::{self, decode::MidiMsg, MidiEvent};
@@ -42,6 +43,7 @@ use crate::output::Output;
 use crate::patterns::Point;
 use crate::power::{OutputLimits, MAIN_OUTPUT};
 use crate::presence::{Presence, PresenceSettings};
+use crate::projection::{Geometry, ProjectionConfig, ProjectionZone, Warp, MAX_ZONES, SQUARE};
 use crate::safety::{self, SafetySettings};
 use crate::zones::{self, Horizon, Zone, ZoneKind};
 use crate::{dwell, interlock, lfo, live, test_support, testpattern, timeline, Engine, Shared, FRAME_INTERVAL};
@@ -286,6 +288,69 @@ fn random_calibration(rng: &mut Rng) -> Calibration {
     }
 }
 
+/// Projection zones (T-012) as `POST /api/projection` could send them:
+/// 1 to 4 zones with any geometry the API accepts after clamping (wild
+/// values included), sometimes a 4-corner warp, sometimes an invalid
+/// quad (refused), an output that may not be the connected one.
+fn random_projection(rng: &mut Rng) -> ProjectionConfig {
+    let mut ids: Vec<u8> = (1..=MAX_ZONES).collect();
+    let n = 1 + rng.below(4);
+    let zones = (0..n)
+        .map(|_| {
+            let id = ids.remove(rng.below(ids.len()));
+            let a = |rng: &mut Rng, span: f32| if rng.chance(0.5) { 0.0 } else { rng.range(-span, span) };
+            let mut corners = SQUARE;
+            for c in &mut corners {
+                c[0] = (c[0] * rng.range(0.2, 1.0) + rng.range(-0.3, 0.3)).clamp(-1.0, 1.0);
+                c[1] = (c[1] * rng.range(0.2, 1.0) + rng.range(-0.3, 0.3)).clamp(-1.0, 1.0);
+            }
+            if rng.chance(0.1) {
+                corners.swap(1, 2); // crossed: refused by the API
+            }
+            let geometry = Geometry {
+                size_x: rng.range(0.05, 3.0),
+                size_y: rng.range(0.05, 3.0),
+                pos_x: a(rng, 1.5),
+                pos_y: a(rng, 1.5),
+                rotation_deg: a(rng, 180.0),
+                shear_x: a(rng, 1.0),
+                shear_y: a(rng, 1.0),
+                keystone_x: a(rng, 1.0),
+                keystone_y: a(rng, 1.0),
+                pincushion_x: a(rng, 0.6),
+                pincushion_y: a(rng, 0.6),
+                bow_x: a(rng, 0.6),
+                bow_y: a(rng, 0.6),
+                warp: Warp { enabled: rng.chance(0.4), corners },
+            };
+            let output = if rng.chance(0.2) { Some(rng.pick(&["test", "helios:autre"]).to_string()) } else { None };
+            ProjectionZone { id, name: format!("Z{id}"), enabled: rng.chance(0.9), output, geometry }
+        })
+        .collect::<Vec<_>>();
+    let default_zones = (0..1 + rng.below(2)).map(|_| zones[rng.below(zones.len())].id).collect();
+    ProjectionConfig { zones, default_zones }
+}
+
+/// Projection zones, cue → zone routing and the alignment zone, changed
+/// the way the API would (refusals included).
+fn random_routing(s: &mut Shared, rng: &mut Rng) {
+    match rng.below(3) {
+        0 => {
+            let _ = s.projection.set(random_projection(rng));
+        }
+        1 => {
+            let (id, _) = random_preset(s, rng);
+            let zones = (0..rng.below(3)).map(|_| rng.below(MAX_ZONES as usize + 2) as u8).collect();
+            let slot = CueSlot { zones, ..s.deck.slot(&id) };
+            s.deck.set_slot(&id, slot);
+        }
+        _ => {
+            let ids: Vec<u8> = s.projection.get().zones.iter().map(|z| z.id).collect();
+            s.projection.align = if rng.chance(0.3) { None } else { Some(*rng.pick(&ids)) };
+        }
+    }
+}
+
 fn random_preset(s: &Shared, rng: &mut Rng) -> (String, Settings) {
     let p = rng.pick(&s.presets);
     (p.id.clone(), p.settings.clone())
@@ -517,6 +582,8 @@ struct Coverage {
     lit_with_zones: usize,
     /// Frames with a lit preview below a full horizon at level 0.
     lit_with_horizon: usize,
+    /// Frames with a lit preview through a non-neutral projection zone.
+    lit_with_projection: usize,
 }
 
 /// Runs one fuzz case; `Err` describes the first broken invariant.
@@ -527,8 +594,17 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // from the seed so the case's own random stream is unchanged.
     let max_points = seed.is_multiple_of(3).then(|| 16 + (seed as usize).wrapping_mul(7919) % 600);
     let mut rig = Rig::with_max_points(s, "pipeline", seed, max_points);
+    // Projection zones and routing (T-012) from their own stream, so the
+    // case's main stream (and older replays) stays as it was.
+    let mut zrng = Rng::new(seed ^ 0x0012_0012);
+    if zrng.chance(0.7) {
+        let _ = rig.s().projection.set(random_projection(&mut zrng));
+    }
     let mut beats = 0;
     for frame in 0..frames {
+        if zrng.chance(0.15) {
+            random_routing(&mut rig.s(), &mut zrng);
+        }
         for _ in 0..rng.below(3) {
             let was = rig.s().gate.is_armed();
             let explicit = random_action(&mut rig, &mut rng, &mut beats);
@@ -571,6 +647,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         cov.sent_lit += (lit > 0) as usize;
         cov.lit_with_zones += (preview_lit && cfg.zones.iter().any(|z| z.kind == ZoneKind::Blank)) as usize;
         cov.lit_with_horizon += (preview_lit && cfg.horizon.lines && cfg.horizon.level == 0.0) as usize;
+        cov.lit_with_projection += (preview_lit && s.projection.get().zones.iter().any(|z| !z.geometry.is_identity())) as usize;
     }
     Ok(())
 }
@@ -599,6 +676,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.sent_lit) > 0.1, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
+        assert!(share(cov.lit_with_projection) > 0.2, "only {} of {} lit frames went through a projection zone", cov.lit_with_projection, cov.frames);
     }
 }
 
