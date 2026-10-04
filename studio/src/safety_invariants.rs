@@ -22,6 +22,11 @@
 //!    explicit user paths (UI / keyboard / API arm request, and the MIDI
 //!    opt-in gesture when the operator allowed it).
 //!
+//! 7. the output's colour rendering (T-414: white balance, curves, colour
+//!    delay) never lights a point that was dark, never moves or adds
+//!    points, keeps every channel within 0..1, and runs before the whole
+//!    safety stage: the caps (2) and zones (3) hold with it on.
+//!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst.
 //!
@@ -35,6 +40,7 @@
 //! assert it in `check_points` / `run_case` (every frame) or in a dedicated test like
 //! `strobe_never_exceeds_the_burst_limit` (behaviour over time).
 
+use crate::colorcal::{ChannelCurve, ColorCalibration};
 use crate::controls::{self, ControlInput};
 use crate::cues::{ClickMode, CueSlot};
 use crate::engine::{Calibration, Settings};
@@ -276,6 +282,28 @@ fn random_safety(rng: &mut Rng) -> SafetySettings {
 fn random_limits(rng: &mut Rng) -> OutputLimits {
     let c = |rng: &mut Rng| if rng.chance(0.4) { 1.0 } else { rng.f() };
     OutputLimits { max_power: c(rng), max_color: [c(rng), c(rng), c(rng)] }
+}
+
+/// An output colour rendering (T-414) as `POST /api/outputs/color` could
+/// send it: mostly in range (curves often brighter than linear, decreasing
+/// five-point curves included), sometimes wild values the store refuses.
+fn random_color(rng: &mut Rng) -> ColorCalibration {
+    let curve = |rng: &mut Rng| match rng.below(3) {
+        0 => ChannelCurve::Gamma { gamma: 1.0 },
+        1 => ChannelCurve::Gamma { gamma: rng.range(0.2, 5.0) },
+        _ => ChannelCurve::Points { out: [rng.f(), rng.f(), rng.f(), rng.f(), rng.f()] },
+    };
+    let gain = |rng: &mut Rng| if rng.chance(0.5) { 1.0 } else { rng.f() };
+    let c = ColorCalibration {
+        white_balance: [gain(rng), gain(rng), gain(rng)],
+        curve: [curve(rng), curve(rng), curve(rng)],
+        color_delay_points: rng.below(17) as i8 - 8,
+    };
+    if rng.chance(0.15) {
+        mutated(&c, rng, 0.3)
+    } else {
+        c
+    }
 }
 
 fn random_calibration(rng: &mut Rng) -> Calibration {
@@ -611,10 +639,19 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if zrng.chance(0.7) {
         let _ = rig.s().projection.set(random_projection(&mut zrng));
     }
+    // The output's colour rendering (T-414), from its own stream too;
+    // brighter settings are confirmed, as the operator could.
+    let mut crng = Rng::new(seed ^ 0x0414_0414);
+    if crng.chance(0.6) {
+        let _ = rig.s().outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), true);
+    }
     let mut beats = 0;
     for frame in 0..frames {
         if zrng.chance(0.15) {
             random_routing(&mut rig.s(), &mut zrng);
+        }
+        if crng.chance(0.05) {
+            let _ = rig.s().outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), true);
         }
         for _ in 0..rng.below(3) {
             let was = rig.s().gate.is_armed();
@@ -1033,6 +1070,129 @@ fn a_lit_point_on_a_blank_zone_edge_stays_outside() {
     let frame = vec![Point::lit(0.9, 0.0, 1.0, 1.0, 1.0), Point::lit(1.0, 0.1, 1.0, 1.0, 1.0)];
     let out = safety::apply(frame, 0.0, &cfg, &mut safety::StrobeLimiter::default());
     assert_eq!(zones::blank_violations(&out, &cfg.zones), 0, "{out:?}");
+}
+
+// ---------- output colour rendering (T-414) ----------
+
+/// Invariant 7 on one frame: `after` is `before` through the colour
+/// rendering. Same points at the same places, nothing dark lit, every
+/// channel finite within 0..1.
+fn check_colour(before: &[Point], after: &[Point]) -> Result<(), String> {
+    if before.len() != after.len() {
+        return Err(format!("{} points became {}", before.len(), after.len()));
+    }
+    for (i, (b, a)) in before.iter().zip(after).enumerate() {
+        if (a.x.to_bits(), a.y.to_bits()) != (b.x.to_bits(), b.y.to_bits()) {
+            return Err(format!("point {i} moved: ({}, {}) → ({}, {})", b.x, b.y, a.x, a.y));
+        }
+        if !b.is_lit() && a.is_lit() {
+            return Err(format!("point {i} was dark and is lit: {a:?}"));
+        }
+        if [a.r, a.g, a.b].iter().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) {
+            return Err(format!("point {i} out of 0..1: {a:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// A random frame: strokes of random colours (odd values included)
+/// joined by blanked travel, sometimes dark points inside a stroke.
+fn random_strokes(rng: &mut Rng) -> Vec<Point> {
+    let mut f = Vec::new();
+    let (mut x, mut y) = (rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+    for _ in 0..1 + rng.below(8) {
+        for _ in 0..rng.below(6) {
+            f.push(Point::blanked(x, y));
+        }
+        for _ in 0..1 + rng.below(40) {
+            x = (x + rng.range(-0.08, 0.08)).clamp(-1.0, 1.0);
+            y = (y + rng.range(-0.08, 0.08)).clamp(-1.0, 1.0);
+            let c = |rng: &mut Rng| match rng.below(12) {
+                0 => 0.0,
+                1 => 1.0,
+                2 => rng.range(-1.0, 2.0),
+                3 if rng.chance(0.1) => f32::NAN,
+                _ => rng.f(),
+            };
+            f.push(if rng.chance(0.05) { Point::blanked(x, y) } else { Point::lit(x, y, c(rng), c(rng), c(rng)) });
+        }
+    }
+    f
+}
+
+/// Invariant 7 directly, then the engine's order after it (safety stage,
+/// caps): the caps, zones and horizon still hold.
+fn run_colour_case(seed: u64) -> Result<(), String> {
+    let mut rng = Rng::new(seed);
+    let frame = random_strokes(&mut rng);
+    // Whatever the store would hold: wild values sanitised.
+    let color = random_color(&mut rng).sanitized();
+    let mut after = frame.clone();
+    color.apply(&mut after);
+    check_colour(&frame, &after).map_err(|e| format!("{e} ({color:?})"))?;
+    let cfg = random_safety(&mut rng);
+    let caps = random_limits(&mut rng);
+    let out = safety::apply(after, 0.0, &cfg, &mut safety::StrobeLimiter::default());
+    let mut out = out;
+    crate::power::cap(&mut out, &caps);
+    check_points(&out, &caps, &cfg, "colour then safety then caps")
+}
+
+#[test]
+fn output_colour_never_lights_travel_nor_gets_past_the_safety_stage() {
+    run_property("output_colour_never_lights_travel_nor_gets_past_the_safety_stage", 7, 2000, run_colour_case);
+}
+
+/// The checker must catch a colour delay that rotates colours over the
+/// whole frame (onto the travel), which is what a naive shift does.
+#[test]
+fn the_colour_check_catches_a_delay_onto_travel() {
+    let frame = vec![Point::blanked(0.0, 0.0), Point::lit(0.1, 0.0, 1.0, 0.0, 0.0), Point::lit(0.2, 0.0, 0.0, 1.0, 0.0), Point::blanked(0.3, 0.0)];
+    let mut naive = frame.clone();
+    let colours: Vec<(f32, f32, f32)> = frame.iter().map(|p| (p.r, p.g, p.b)).collect();
+    for (i, p) in naive.iter_mut().enumerate() {
+        (p.r, p.g, p.b) = colours[(i + colours.len() - 1) % colours.len()];
+    }
+    assert!(check_colour(&frame, &naive).is_err());
+    let mut ours = frame.clone();
+    ColorCalibration { color_delay_points: 1, ..Default::default() }.apply(&mut ours);
+    assert!(check_colour(&frame, &ours).is_ok());
+    assert_eq!((ours[2].r, ours[2].g), (1.0, 0.0), "shifted inside the stroke");
+}
+
+/// Through the real engine: the brightest colour rendering (full gains,
+/// a curve well above linear, the largest delay) on a white ramp under a
+/// Blank zone covering the field lights nothing; the safety gains and
+/// the caps still apply after it.
+#[test]
+fn output_colour_runs_before_zones_safety_gains_and_caps() {
+    let bright = ColorCalibration { white_balance: [1.0; 3], curve: [ChannelCurve::Gamma { gamma: 0.2 }; 3], color_delay_points: 8 };
+    let lit_frame = |safety: SafetySettings, caps: OutputLimits| -> Vec<Point> {
+        let mut s = test_support::shared();
+        s.safety.set(safety, true).unwrap();
+        s.outputs.set(MAIN_OUTPUT, Some(caps), None, false, true).unwrap();
+        s.outputs.set_color(MAIN_OUTPUT, bright, true).unwrap();
+        s.test_pattern.brightness = 1.0;
+        testpattern::select(&mut s, Some(testpattern::TestPattern::WhiteRamp));
+        let mut rig = Rig::new(s, "colour-order", 0);
+        rig.tick();
+        let frame = rig.s().frame.clone();
+        frame
+    };
+    let open = OutputLimits { max_power: 1.0, max_color: [1.0; 3] };
+    let no_horizon = Horizon { y: -1.0, ..Default::default() };
+    // Reference: lit, and brighter than the plain ramp at its first step.
+    let f = lit_frame(SafetySettings { horizon: no_horizon, ..Default::default() }, open);
+    assert!(f.iter().any(|p| p.is_lit()), "the ramp is lit");
+    assert!(f.iter().filter(|p| p.is_lit()).all(|p| p.g > 0.6), "gamma 0.2 lifts the 10 % step");
+    // A Blank zone over the whole field: nothing.
+    let all = Zone { kind: ZoneKind::Blank, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], ..Default::default() };
+    let f = lit_frame(SafetySettings { zones: vec![all], horizon: no_horizon, ..Default::default() }, open);
+    assert!(!f.iter().any(|p| p.is_lit()), "colour rendering lit a Blank zone");
+    // The safety gain (green off) and the caps (red at 30 %) after it.
+    let f = lit_frame(SafetySettings { color_gain: [1.0, 0.0, 1.0], horizon: no_horizon, ..Default::default() }, OutputLimits { max_power: 1.0, max_color: [0.3, 1.0, 1.0] });
+    assert!(f.iter().any(|p| p.is_lit()));
+    assert!(f.iter().all(|p| p.g == 0.0 && p.r <= 0.3 + 1e-6), "safety gain and cap after the colours");
 }
 
 /// A deliberate regression must be caught: without the power caps, the

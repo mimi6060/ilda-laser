@@ -14,6 +14,7 @@ mod autosave;
 mod beat;
 mod chases;
 mod checklist;
+mod colorcal;
 mod controls;
 mod cues;
 mod devices;
@@ -1082,7 +1083,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, pattern, routing) = {
+        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run.
             let hold_ok = s.sync_safety(now);
@@ -1163,7 +1164,7 @@ impl Engine {
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
             let armed = s.gate.is_armed();
             let routing = Routing::read(&s, &looks, &show_cues);
-            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits(), pattern, routing)
+            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits(), s.outputs.active_color(), pattern, routing)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1223,10 +1224,17 @@ impl Engine {
         // before the safety stage (T-353), so zones, horizon, strobe
         // limiter, static beam guard and caps all apply to the frame that
         // really goes out. Nothing after the safety stage adds light.
-        let frame = match self.stage.max_points().map(output::content_budget) {
+        let mut frame = match self.stage.max_points().map(output::content_budget) {
             Some(budget) if frame.len() > budget => output::fit_frame(&frame, budget).into_owned(),
             _ => frame,
         };
+        // The output's colour rendering (T-414): curve, white balance and
+        // colour delay, on the frame that goes out, *before* the safety
+        // stage. Channels stay within 0..1, a dark point stays dark (the
+        // delay never colours travel), and the zones, horizon, safety
+        // gains, limiter, guard and caps all apply after it. Identity:
+        // the frame is untouched.
+        color.apply(&mut frame);
         // Strobe limiter and beam horizon (T-101): on the finished,
         // calibrated frame, so no layer, live move, LFO, gate or flash can
         // get past it; the preview shows the limited frame too.

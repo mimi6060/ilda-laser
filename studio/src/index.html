@@ -499,6 +499,14 @@
   .pz-state.on { color: var(--ws-settings); font-weight: 700; }
   .pz-checks { display: flex; flex-wrap: wrap; gap: 2px 10px; }
   .pz-checks label { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 12px; }
+  /* RÉGLAGES › Couleurs de la sortie (T-414), Theme (T-299) tokens. */
+  .oc-ch { display: grid; grid-template-columns: 1fr 72px; gap: 2px 10px; align-items: start; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
+  .oc-ch h4 { margin: 0; font-size: 12px; font-weight: 600; }
+  .oc-ch h4.r { color: var(--danger); } .oc-ch h4.g { color: var(--ok); } .oc-ch h4.b { color: var(--accent); }
+  .oc-ch canvas { grid-row: span 3; width: 72px; height: 72px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); }
+  .oc-pts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+  .oc-pts input { width: 100%; box-sizing: border-box; padding: 2px; font-size: 11px; }
+  .oc-pts span { font-size: 10px; color: var(--muted); text-align: center; }
   /* RÉGLAGES › Entrées réseau (T-013): OSC and Art-Net, Theme (T-299) tokens. */
   .ni-addr { display: grid; grid-template-columns: 1fr 90px; gap: 4px 8px; align-items: end; }
   .ni-addr label { margin: 4px 0 0; }
@@ -1562,6 +1570,7 @@
         <label>Gain vert <span class="v" id="sfGainGV"></span></label><input type="range" id="sfGainG" min="0" max="1" step="0.01">
         <label>Gain bleu <span class="v" id="sfGainBV"></span></label><input type="range" id="sfGainB" min="0" max="1" step="0.01">
         <label>Niveau minimum des diodes <span class="v" id="sfMinV"></span></label><input type="range" id="sfMin" min="0" max="0.5" step="0.01">
+        <div class="hint">Sécurité : limites. Sorties : rendu des couleurs (balance des blancs, courbes et retard couleur dans RÉGLAGES › Sorties et projecteurs).</div>
         <div class="sf-sub">Garde anti-point fixe</div>
         <label for="sfDwellProfile">Garde anti-point fixe</label>
         <select id="sfDwellProfile">
@@ -1839,6 +1848,27 @@
       <label>Vert max (%) <span class="v" id="pwGreenV"></span></label><input type="range" id="pwGreen" min="0" max="100" step="1">
       <label>Bleu max (%) <span class="v" id="pwBlueV"></span></label><input type="range" id="pwBlue" min="0" max="100" step="1">
       <div class="hint">Plafond de cette sortie, appliqué en dernier à tout ce qui sort (cues, MIDI, LFO, audio, timeline) : chaque couleur est écrêtée à son maximum, puis tout est multiplié par la puissance max. Ces réglages appartiennent à cette machine (pas au projet). Baisser s'applique tout de suite ; relever demande une confirmation, laser désarmé.</div>
+      <div class="sf-sub">Couleurs de la sortie</div>
+      <div id="ocBox">
+        <div id="ocLoosen" hidden>
+          <div id="ocLoosenText"></div>
+          <div class="row"><button id="ocLoosenOk">Confirmer l'assouplissement</button><button id="ocLoosenCancel">Annuler</button></div>
+        </div>
+        <div class="hint sf-error" id="ocError"></div>
+        <div class="sf-sub" style="margin-top:4px">Balance des blancs</div>
+        <label>Rouge (%) <span class="v" id="ocWbRV"></span></label><input type="range" id="ocWbR" min="0" max="100" step="1">
+        <label>Vert (%) <span class="v" id="ocWbGV"></span></label><input type="range" id="ocWbG" min="0" max="100" step="1">
+        <label>Bleu (%) <span class="v" id="ocWbBV"></span></label><input type="range" id="ocWbB" min="0" max="100" step="1">
+        <div id="ocCurves"></div>
+        <label>Retard couleur (points) <span class="v" id="ocDelayV"></span></label><input type="range" id="ocDelay" min="-8" max="8" step="1">
+        <div class="hint" id="ocLibDelay"></div>
+        <div class="row">
+          <button id="ocTpRamp" title="Affiche la mire « Rampe de blanc » : les réglages agissent en direct">Rampe de blanc</button>
+          <button id="ocTpBlank" title="Affiche la mire « Extinction et retard couleur »">Extinction et retard couleur</button>
+          <button id="ocReset">Réinitialiser les couleurs</button>
+        </div>
+        <div class="hint">Rendu des couleurs de ce projecteur : courbe, puis balance, puis retard, avant les zones, l'horizon, les gains de sécurité et les plafonds de puissance, qui s'appliquent toujours après. Le retard décale la couleur à l'intérieur de chaque trait : un déplacement éteint reste éteint. Baisser s'applique tout de suite ; augmenter la lumière demande une confirmation. Réglages de cette machine (pas du projet), sans raccourci ni contrôle MIDI, OSC ou DMX.</div>
+      </div>
       <div class="sf-sub">Fiche projecteur</div>
       <label for="pjName">Nom / modèle</label><input type="text" id="pjName" maxlength="60" autocomplete="off">
       <label for="pjClass">Classe (IEC 60825-1)</label>
@@ -5406,6 +5436,115 @@ $('pjModel').addEventListener('change', () => {
 $('pwLoosenOk').addEventListener('click', () => { if (pwPending) saveOutputs(pwPending, true); });
 $('pwLoosenCancel').addEventListener('click', () => { pwPending = null; $('pwLoosen').hidden = true; reloadOutputs(); });
 
+// Couleurs de la sortie (T-414): white balance, a curve per colour (gamma
+// or 5 points) and the colour delay of the output. Darker applies at once;
+// brighter gets a 409 listing what would brighten, and only « Confirmer
+// l'assouplissement » sends `confirm_loosen`. Machine settings: no
+// shortcut, no MIDI/OSC/DMX control.
+const OC_CH = [['r', 'Rouge', '--danger'], ['g', 'Vert', '--ok'], ['b', 'Bleu', '--accent']];
+const OC_NODES = [0, 25, 50, 75, 100];
+let outColor = null, ocTimer = null, ocPending = null;
+$('ocCurves').innerHTML = OC_CH.map(([k, name], i) => `
+  <div class="oc-ch">
+    <h4 class="${k}">Courbe ${name.toLowerCase()}</h4>
+    <canvas id="ocGraph${i}" width="144" height="144" aria-label="Courbe ${name.toLowerCase()}"></canvas>
+    <select id="ocType${i}" aria-label="Type de courbe ${name.toLowerCase()}"><option value="gamma">Gamma</option><option value="points">5 points</option></select>
+    <div id="ocGammaRow${i}"><label>Gamma <span class="v" id="ocGammaV${i}"></span></label><input type="range" id="ocGamma${i}" min="0.2" max="5" step="0.05"></div>
+    <div id="ocPtsRow${i}" class="oc-pts" hidden>${OC_NODES.map(n => `<span>${n} %</span>`).join('')}${OC_NODES.map((n, j) =>
+      `<input type="number" id="ocPt${i}_${j}" min="0" max="100" step="1" title="Sortie pour ${n} % en entrée"${j === 0 ? ' disabled' : ''}>`).join('')}</div>
+  </div>`).join('');
+function ocEval(c, v) {
+  if (v <= 0) return 0;
+  if (c.type === 'gamma') return Math.pow(Math.min(v, 1), c.gamma);
+  const x = Math.min(v, 1) * 4, i = Math.min(3, Math.floor(x)), f = x - i;
+  return c.out[i] + (c.out[i + 1] - c.out[i]) * f;
+}
+function ocDraw(i, c) {
+  const cv = $('ocGraph' + i), g = cv.getContext('2d'), W = cv.width, H = cv.height;
+  const css = getComputedStyle(document.documentElement);
+  g.clearRect(0, 0, W, H);
+  g.strokeStyle = css.getPropertyValue('--line').trim() || '#262a3b'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, H); g.lineTo(W, 0); g.stroke();
+  g.strokeStyle = css.getPropertyValue(OC_CH[i][2]).trim() || '#fff'; g.lineWidth = 3; g.beginPath();
+  for (let k = 0; k <= 48; k++) { const v = k / 48, y = H - ocEval(c, v) * H; k ? g.lineTo(v * W, y) : g.moveTo(0, y); }
+  g.stroke();
+}
+function ocCurveFromControls(i) {
+  if ($('ocType' + i).value === 'gamma') return { type: 'gamma', gamma: Math.min(5, Math.max(0.2, +$('ocGamma' + i).value || 1)) };
+  const out = OC_NODES.map((_, j) => j === 0 ? 0 : Math.min(100, Math.max(0, +$(`ocPt${i}_${j}`).value || 0)) / 100);
+  for (let j = 1; j < 5; j++) out[j] = Math.max(out[j], out[j - 1]);
+  return { type: 'points', out };
+}
+function ocFromControls() {
+  return {
+    white_balance: ['ocWbR', 'ocWbG', 'ocWbB'].map(id => Math.min(100, Math.max(0, +$(id).value || 0)) / 100),
+    curve: [0, 1, 2].map(ocCurveFromControls),
+    color_delay_points: Math.round(+$('ocDelay').value || 0),
+  };
+}
+function showOutColor(force = false) {
+  if (!outColor) return;
+  const c = outColor.color, editing = !force && $('ocBox').contains(document.activeElement);
+  ['ocWbR', 'ocWbG', 'ocWbB'].forEach((id, i) => {
+    if (!editing) $(id).value = Math.round(c.white_balance[i] * 100);
+    $(id + 'V').textContent = $(id).value + ' %';
+  });
+  c.curve.forEach((cu, i) => {
+    if (!editing) {
+      $('ocType' + i).value = cu.type;
+      if (cu.type === 'gamma') $('ocGamma' + i).value = cu.gamma;
+      const out = cu.type === 'points' ? cu.out : OC_NODES.map(n => ocEval(cu, n / 100));
+      OC_NODES.forEach((_, j) => { $(`ocPt${i}_${j}`).value = Math.round(out[j] * 100); });
+    }
+    $('ocGammaRow' + i).hidden = $('ocType' + i).value !== 'gamma';
+    $('ocPtsRow' + i).hidden = $('ocType' + i).value !== 'points';
+    $('ocGammaV' + i).textContent = (+$('ocGamma' + i).value).toFixed(2);
+    ocDraw(i, ocCurveFromControls(i));
+  });
+  if (!editing) $('ocDelay').value = c.color_delay_points;
+  $('ocDelayV').textContent = $('ocDelay').value;
+  $('ocLibDelay').textContent = `Sur un vrai DAC, la bibliothèque laser-dac décale déjà la couleur de ${outColor.library_delay_points} points ; ce réglage s'y ajoute.`;
+}
+async function reloadOutColor() {
+  try {
+    const r = await fetch('/api/outputs/color');
+    if (r.ok) { outColor = await r.json(); showOutColor(true); }
+  } catch (e) { console.warn('/api/outputs/color', e); }
+}
+async function saveOutColor(color, confirm = false) {
+  const r = await fetch('/api/outputs/color', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(confirm ? { color, confirm_loosen: true } : { color }) });
+  $('ocError').textContent = '';
+  if (r.ok) {
+    outColor = await r.json(); ocPending = null; $('ocLoosen').hidden = true;
+    showOutColor();
+  } else if (r.status === 409) {
+    const j = await r.json();
+    ocPending = color;
+    $('ocLoosenText').textContent = "Ce réglage augmente la lumière émise. Confirmer l'assouplissement ? " + j.loosen.join(' · ');
+    $('ocLoosen').hidden = false;
+  } else {
+    const msg = await r.text();
+    await reloadOutColor();
+    $('ocError').textContent = msg;
+  }
+}
+function ocChanged() {
+  showOutColor();
+  clearTimeout(ocTimer); ocTimer = setTimeout(() => saveOutColor(ocFromControls()), 60);
+}
+['ocWbR', 'ocWbG', 'ocWbB', 'ocDelay'].forEach(id => $(id).addEventListener('input', ocChanged));
+[0, 1, 2].forEach(i => {
+  $('ocGamma' + i).addEventListener('input', ocChanged);
+  $('ocType' + i).addEventListener('change', ocChanged);
+  OC_NODES.forEach((_, j) => $(`ocPt${i}_${j}`).addEventListener('change', ocChanged));
+});
+$('ocLoosenOk').addEventListener('click', () => { if (ocPending) saveOutColor(ocPending, true); });
+$('ocLoosenCancel').addEventListener('click', () => { ocPending = null; $('ocLoosen').hidden = true; reloadOutColor(); });
+$('ocReset').addEventListener('click', () => { if (outColor) saveOutColor(outColor.defaults); });
+$('ocTpRamp').addEventListener('click', () => postTestPattern({ pattern: 'white_ramp' }));
+$('ocTpBlank').addEventListener('click', () => postTestPattern({ pattern: 'blanking' }));
+
 // Sorties (T-401, after T-303's read-only list): the studio scans only on
 // « Rechercher » (about 1.5 s, on its own thread). « Connecter » opens the
 // output on the server's own thread; every change disarms the laser and a
@@ -5674,6 +5813,7 @@ async function loadState() {
   safety = st.safety; showSafety();
   reloadSafety();
   reloadOutputs();
+  reloadOutColor();
   reloadDevices();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   showShowMode(st.lock);

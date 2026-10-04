@@ -215,6 +215,14 @@ impl Drop for FileLogOutput {
     }
 }
 
+/// The colour delay `laser-dac` applies by default to a frame session
+/// (150 µs at `pps`, in points). We keep it as it is: the output's own
+/// colour delay (T-414, `colorcal.rs`) adds to it, inside each stroke,
+/// and the UI shows both, so there is no hidden double compensation.
+pub fn library_color_delay_points(pps: u32) -> usize {
+    FrameSessionConfig::new(pps).color_delay_points
+}
+
 pub struct DacOutput {
     name: String,
     session: FrameSession,

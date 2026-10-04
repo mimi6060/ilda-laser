@@ -23,10 +23,16 @@
 //! pre-show checklist and the « Arrêt matériel non vérifié » interlock
 //! (checklist.rs).
 //!
+//! The output's colour rendering (white balance, curves, colour delay:
+//! `colorcal.rs`, T-414) lives in the same entry, key `color`. It runs
+//! before the safety stage, so the cap stays the last brightness
+//! operation and no colour setting can push a channel above it.
+//!
 //! Stored in `<data-dir>/outputs.json`, one entry per output. Lowering a
 //! cap applies on the next engine tick. Raising one needs the operator's
 //! explicit confirmation, and is refused outright while the laser is armed.
 
+use crate::colorcal::ColorCalibration;
 use crate::patterns::Point;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -149,18 +155,21 @@ impl Default for ProjectorInfo {
     }
 }
 
-/// One output: its cap and its projector.
+/// One output: its cap, its projector and its colour rendering.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
     pub id: String,
     pub limits: OutputLimits,
     pub projector: ProjectorInfo,
+    /// White balance, curves and colour delay (T-414, `colorcal.rs`).
+    /// Absent in older files: identity.
+    pub color: ColorCalibration,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
-        Self { id: MAIN_OUTPUT.into(), limits: OutputLimits::default(), projector: ProjectorInfo::default() }
+        Self { id: MAIN_OUTPUT.into(), limits: OutputLimits::default(), projector: ProjectorInfo::default(), color: ColorCalibration::default() }
     }
 }
 
@@ -366,7 +375,7 @@ impl OutputStore {
             if o.id.is_empty() || seen.iter().any(|s| s.id == o.id) {
                 continue;
             }
-            seen.push(OutputConfig { id: o.id.clone(), limits: o.limits.sanitized(), projector: o.projector.sanitized() });
+            seen.push(OutputConfig { id: o.id.clone(), limits: o.limits.sanitized(), projector: o.projector.sanitized(), color: o.color.sanitized() });
         }
         if !seen.iter().any(|o| o.id == MAIN_OUTPUT) {
             seen.insert(0, OutputConfig::default());
@@ -390,6 +399,11 @@ impl OutputStore {
     /// The caps the engine applies this frame.
     pub fn active_limits(&self) -> OutputLimits {
         self.active().limits
+    }
+
+    /// The colour rendering the engine applies this frame (T-414).
+    pub fn active_color(&self) -> ColorCalibration {
+        self.active().color
     }
 
     /// The highest brightness that can reach the active output (T-208).
@@ -445,6 +459,7 @@ impl OutputStore {
             id: id.into(),
             limits: limits.unwrap_or(current.limits),
             projector: projector.unwrap_or_else(|| current.projector.clone()),
+            color: current.color,
         };
         next.limits.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
         next.projector.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
@@ -471,6 +486,38 @@ impl OutputStore {
         }
         if current.projector != next.projector {
             log::info!("output {id}: projector sheet changed ({:?} -> {:?})", current.projector.name, next.projector.name);
+        }
+        self.file = file;
+        self.load_error = None;
+        Ok(next)
+    }
+
+    /// Changes an output's colour rendering (T-414). Darker or equal
+    /// applies at once; brighter (a gain raised, a curve giving more light
+    /// at the same input) needs `confirm_loosen`, like the safety
+    /// settings. Never above the caps: those apply after, whatever this is.
+    pub fn set_color(&mut self, id: &str, color: ColorCalibration, confirm_loosen: bool) -> std::result::Result<OutputConfig, SetError> {
+        let Some(current) = self.get(id).cloned() else {
+            return Err(SetError::Invalid(format!("Sortie inconnue : « {id} »")));
+        };
+        color.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
+        let color = color.sanitized();
+        let loosens = current.color.loosenings(&color);
+        if !loosens.is_empty() && !confirm_loosen {
+            return Err(SetError::Raises(loosens));
+        }
+        let next = OutputConfig { color, ..current.clone() };
+        let mut file = self.file.clone();
+        if let Some(slot) = file.outputs.iter_mut().find(|o| o.id == id) {
+            *slot = next.clone();
+        }
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&file).map_err(|e| SetError::Invalid(e.to_string()))?;
+            crate::datafile::replace(path, json.as_bytes()).map_err(|e| SetError::Invalid(format!("enregistrement impossible de {} : {e:#}", path.display())))?;
+        }
+        if current.color != next.color {
+            let level = if loosens.is_empty() { log::Level::Info } else { log::Level::Warn };
+            log::log!(level, "output {id}: colour rendering {:?} -> {:?}{}", current.color, next.color, if loosens.is_empty() { "" } else { " (brighter, confirmed by the operator)" });
         }
         self.file = file;
         self.load_error = None;
@@ -691,6 +738,40 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{ not json");
         let w = crate::datafile::take_pending(&dir.join(crate::datafile::QUARANTINE));
         assert!(w.len() == 1 && w[0].safety && w[0].file == "outputs.json");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// T-414: the colour rendering shares `outputs.json` (key `color`);
+    /// older files load as identity, a damaged colour entry quarantines
+    /// the file like any other damage (arming waits for the ack).
+    #[test]
+    fn output_colour_persists_beside_the_caps_and_old_files_load_as_identity() {
+        use crate::colorcal::ChannelCurve;
+        let dir = crate::datafile::tests::temp_dir("power-color");
+        let path = dir.join("outputs.json");
+        std::fs::write(&path, r#"{"outputs":[{"id":"main","limits":{"max_power":0.4}}],"connection":{}}"#).unwrap();
+        let mut st = OutputStore::load_or_create(path.clone());
+        assert!(st.load_error().is_none());
+        assert!(st.active_color().is_identity(), "no `color` key: identity");
+        let darker = ColorCalibration { white_balance: [0.7, 1.0, 1.0], curve: [ChannelCurve::Gamma { gamma: 2.2 }; 3], color_delay_points: -2 };
+        st.set_color(MAIN_OUTPUT, darker, false).unwrap();
+        let brighter = ColorCalibration { white_balance: [1.0; 3], ..darker };
+        assert!(matches!(st.set_color(MAIN_OUTPUT, brighter, false), Err(SetError::Raises(l)) if l.len() == 1));
+        assert!(matches!(st.set_color("ailleurs", darker, true), Err(SetError::Invalid(_))));
+        let st = OutputStore::load_or_create(path.clone());
+        assert_eq!((st.active_color(), st.active_limits().max_power), (darker, 0.4), "persists, caps kept");
+        // Hand-edited: a decreasing curve is straightened, a delay clamped.
+        std::fs::write(&path, r#"{"outputs":[{"id":"main","color":{"curve":[{"type":"points","out":[0.2,0.6,0.4,0.8,1]},{"type":"gamma","gamma":1},{"type":"gamma","gamma":1}],"color_delay_points":40}}]}"#).unwrap();
+        let st = OutputStore::load_or_create(path.clone());
+        assert_eq!(st.active_color().curve[0], ChannelCurve::Points { out: [0.0, 0.6, 0.6, 0.8, 1.0] });
+        assert_eq!(st.active_color().color_delay_points, crate::colorcal::MAX_DELAY);
+        // Damaged: quarantined, identity, the error reported.
+        std::fs::write(&path, r#"{"outputs":[{"id":"main","color":{"curve":"oops"}}]}"#).unwrap();
+        let st = OutputStore::load_or_create(path.clone());
+        assert!(st.active_color().is_identity());
+        assert!(st.load_error().is_some());
+        let w = crate::datafile::take_pending(&dir.join(crate::datafile::QUARANTINE));
+        assert!(w.len() == 1 && w[0].safety, "{w:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
