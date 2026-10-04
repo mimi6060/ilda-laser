@@ -453,6 +453,13 @@
   /* ShowNET (T-472): Wi-Fi pill, reminders. Theme (T-299) tokens. */
   #wifiPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .06em; color: var(--warn); border: 1px solid var(--warn); background: #3a2a00; box-shadow: 0 0 10px #ffb02055; cursor: help; }
   #wifiPill[hidden] { display: none; }
+  /* ShowNET SD card over Art-Net (T-301): the box shows nothing for this cue. */
+  #sdPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .06em; color: var(--warn); border: 1px solid var(--warn); background: #3a2a00; box-shadow: 0 0 10px #ffb02055; cursor: help; }
+  #sdPill[hidden] { display: none; }
+  #anLive { margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); font-size: 12px; color: var(--muted); }
+  #anLive[data-lit=true] { border-color: var(--ok); color: var(--ok); }
+  #anLive[data-warn=true] { border-color: var(--warn); color: var(--warn); }
+  #anLive[hidden] { display: none; }
   #clItems li .only { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--warn); margin-left: 4px; }
   /* Mode de sortie (T-255), Theme (T-299) tokens: orange = --warn. */
   #audPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .06em; color: #231800; background: var(--warn); box-shadow: 0 0 10px #ffb02088; cursor: help; }
@@ -681,6 +688,7 @@
   #output[data-kind=ponk]::before { content: 'PONK'; color: var(--violet); border-color: var(--violet); box-shadow: 0 0 8px #8b5cf655; }
   #output[data-kind=dac]::before { content: 'DAC'; color: var(--accent); border-color: var(--accent); box-shadow: 0 0 8px #22e3ff55; }
   #output[data-kind=test]::before { content: 'TEST'; color: var(--warn); border-color: var(--warn); }
+  #output[data-kind=artnet]::before { content: 'SD · ART-NET'; color: var(--ok); border-color: var(--ok); box-shadow: 0 0 8px #3ddc8455; }
   #output[data-kind=error]::before { content: 'ERREUR'; color: var(--danger); border-color: var(--danger); }
   /* Cue pages: a coloured pill per page. */
   .ws-cues { --cat: #22e3ff; }
@@ -819,6 +827,7 @@
   <div class="tb-status">
     <div id="output">…</div>
     <span id="wifiPill" role="alert" hidden>Wi-Fi</span>
+    <span id="sdPill" role="alert" hidden>SD : NOIR</span>
     <span id="audPill" role="status" hidden title="Balayage public déverrouillé : les zones Public reçoivent de la lumière atténuée. Le logiciel ne rend pas cela sûr ; il ne détecte pas une panne des galvos.">BALAYAGE PUBLIC</span>
     <span id="armInfo">Désarmé</span>
     <div class="leds">
@@ -1954,6 +1963,37 @@
       </div>
       <ul id="devList"></ul>
       <label class="check" title="Une sortie perdue est retentée après 1 s, 2 s, 4 s, 8 s puis toutes les 15 s. Elle revient toujours désarmée."><input type="checkbox" id="outAuto" checked> Reconnexion automatique</label>
+      <details id="artnetPanel">
+        <summary>ShowNET carte SD (Art-Net)</summary>
+        <div class="shownet-help">
+          <b>Le ShowNET joue lui-même les fichiers de sa carte SD</b> (voir « Carte SD ShowNET ») : le studio lui envoie seulement, par Art-Net,
+          le numéro de banque du cue à l'écran et l'intensité (maître × plafond de la sortie). Rien n'est tracé en direct : nos zones, notre
+          calibration et nos plafonds de couleur sont ceux de l'export des fichiers.<br>
+          Désarmé, Échap, noir, verrou, cue sans numéro : <b>intensité 0 et figure 0</b>, renvoyés en continu (environ 30 fois par seconde).
+          Ce que le boîtier fait si l'Art-Net s'arrête (câble, studio bloqué) n'est pas documenté : <b>l'arrêt matériel du projecteur
+          (interlock, arrêt d'urgence, clé) reste votre vraie sécurité.</b><br>
+          Firmware : un boîtier en <code>2016050502</code> peut ne pas avoir le mode Art-Net. La mise à jour se fait avec l'Admin Tool de
+          Laserworld (Windows) ; demandez d'abord à Laserworld si elle conserve vos licences. Dans l'Admin Tool : « Data source for internal
+          DMX effects » = ArtNet input, puis DIP 10 sur ON et l'adresse DMX sur DIP 1 à 9, sur un réseau avec DHCP. Ce mode exclut le streaming
+          (MadMapper) : changer les DIP se fait boîtier éteint.
+        </div>
+        <label for="anTarget">Adresse IP du boîtier (vide : sortie désactivée)</label>
+        <input type="text" id="anTarget" placeholder="192.168.1.60" autocomplete="off" spellcheck="false" title="L'adresse du ShowNET (envoi direct, port 6454). Aucune recherche sur le réseau, aucune diffusion.">
+        <div class="row">
+          <label for="anProfile">Profil</label><select id="anProfile"></select>
+          <label for="anUniverse">Univers</label><input type="number" id="anUniverse" min="0" max="32767" step="1">
+          <label for="anAddress">Adresse DMX</label><input type="number" id="anAddress" min="1" max="512" step="1">
+        </div>
+        <div class="row">
+          <label for="anZoneSide" title="Zone de sécurité du boîtier : côté et taille (canal 16 en DJ, 19 en Professionnel), valeur brute">Zone de sécurité</label><input type="number" id="anZoneSide" min="0" max="255" step="1">
+          <label for="anZoneLevel" title="Atténuation dans la zone (canal 17 en DJ, 20 en Professionnel) ; 0 = aucune">Atténuation</label><input type="number" id="anZoneLevel" min="0" max="255" step="1">
+        </div>
+        <label class="check" title="La taille du maître réduit la figure (jamais plus grande que le fichier)"><input type="checkbox" id="anFollowSize"> Suivre la taille du maître (réduction seulement)</label>
+        <div class="row"><button id="anSave">Enregistrer</button></div>
+        <div class="hint" id="anMsg" role="status"></div>
+        <div id="anLive" role="status" hidden></div>
+        <div class="hint">Une fois enregistrée, la sortie apparaît dans la liste ci-dessus : « Connecter ». Les réglages se changent sortie déconnectée.</div>
+      </details>
       <div class="hint">Connecter, changer, déconnecter ou perdre la sortie désarme le laser ; une sortie retrouvée reste désarmée : seul l'opérateur réarme. Ce désarmement est logiciel : l'arrêt d'urgence matériel du projecteur reste votre vraie sécurité. Préférez un réseau filaire. La sortie choisie est retenue pour le prochain lancement ; <code>--device &lt;id&gt;</code> en impose une pour un seul lancement.</div>
       <div class="sf-sub">Limites de sécurité</div>
       <div id="pwLoosen" hidden>
@@ -2608,6 +2648,7 @@ function draw(points) {
 const OUTPUT_TITLES = {
   ponk: 'Sortie PONK : les tracés partent vers MadMapper/MadLaser, qui pilote le ShowNET. Laser désarmé = trames vides envoyées en continu.',
   dac: 'Sortie directe vers un DAC laser (Helios USB / IDN / Ether Dream).',
+  artnet: 'Sortie ShowNET carte SD (Art-Net) : le boîtier joue lui-même les fichiers de sa carte ; le studio envoie le numéro du cue et l\'intensité. Désarmé = intensité 0 et figure 0 en continu. L\'arrêt matériel du projecteur reste la vraie sécurité.',
   test: 'Sortie de test (fichier journal, aucun laser).',
   preview: 'Aperçu seulement : rien ne part vers un laser.',
 };
@@ -2650,6 +2691,7 @@ async function previewLoop() {
       : f.output_error ? '⚠ ' + f.output_error
       : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement';
     showOutputKind(f);
+    showArtnetStatus(f.output_status);
     const n = f.points.length, fps = n ? pps / n : 0;
     $('stPoints').textContent = n;
     $('stFps').textContent = n ? fps.toFixed(1) : '–';
@@ -5934,7 +5976,7 @@ $('ocTpBlank').addEventListener('click', () => postTestPattern({ pattern: 'blank
 // « Rechercher » (about 1.5 s, on its own thread). « Connecter » opens the
 // output on the server's own thread; every change disarms the laser and a
 // lost output comes back disarmed. No shortcut and no MIDI/OSC/DMX control.
-const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN', ponk: 'PONK', test: 'Test' };
+const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN', ponk: 'PONK', artnet: 'ShowNET SD', test: 'Test' };
 const LINK_STATES = { connected: 'Connectée', connecting: 'Connexion…', lost: 'Perdue' };
 function outStateText(j) {
   const name = j.name || j.selected;
@@ -6010,6 +6052,61 @@ $('outAuto').addEventListener('change', async () => {
   const r = await fetch('/api/outputs/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_reconnect: $('outAuto').checked }) });
   if (r.ok) showDevices(await r.json());
 });
+// ShowNET SD card over Art-Net (T-301): the box's address is typed, never
+// searched for. Saved only while that output is disconnected; the box then
+// appears in the list above. Its live report comes with every frame.
+async function loadArtnet() {
+  try { showArtnet(await (await fetch('/api/outputs/artnet', { cache: 'no-store' })).json()); } catch { /* next time */ }
+}
+function showArtnet(j) {
+  const c = j.config;
+  if (!$('anProfile').children.length) {
+    for (const p of j.profiles) { const o = document.createElement('option'); o.value = p.id; o.textContent = p.label; $('anProfile').append(o); }
+  }
+  $('anTarget').value = c.target ? c.target.replace(/:6454$/, '') : '';
+  $('anProfile').value = c.profile;
+  $('anUniverse').value = c.universe;
+  $('anAddress').value = c.dmx_address;
+  $('anZoneSide').value = c.zone_side;
+  $('anZoneLevel').value = c.zone_intensity;
+  $('anFollowSize').checked = c.follow_size;
+}
+$('anSave').addEventListener('click', async () => {
+  const body = {
+    target: $('anTarget').value.trim() || null,
+    profile: $('anProfile').value,
+    universe: +$('anUniverse').value || 0,
+    dmx_address: +$('anAddress').value || 1,
+    zone_side: +$('anZoneSide').value || 0,
+    zone_intensity: +$('anZoneLevel').value || 0,
+    follow_size: $('anFollowSize').checked,
+  };
+  const r = await fetch('/api/outputs/artnet', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.ok) {
+    const j = await r.json();
+    showArtnet(j);
+    $('anMsg').textContent = j.id ? 'Enregistré : « Connecter » dans la liste ci-dessus.' : 'Sortie ShowNET carte SD désactivée.';
+    $('anMsg').classList.remove('sf-error');
+    reloadDevices();
+  } else {
+    $('anMsg').textContent = await r.text();
+    $('anMsg').classList.add('sf-error');
+  }
+});
+function showArtnetStatus(st) {
+  const on = !!st && st.kind === 'artnet';
+  const warning = on ? st.warning : null;
+  $('sdPill').hidden = !warning;
+  if (warning) $('sdPill').title = warning + ' — RÉGLAGES › Carte SD ShowNET pour lui donner un numéro.';
+  const live = $('anLive');
+  live.hidden = !on;
+  if (!on) return;
+  const lit = st.intensity > 0 && st.pattern > 0;
+  live.dataset.lit = lit; live.dataset.warn = !!warning;
+  live.textContent = (lit ? `Envoyé : figure ${String(st.pattern).padStart(3, '0')}, intensité ${st.intensity}/255`
+    : 'Envoyé : intensité 0, figure 0 (noir)') + ` · univers ${st.universe}, adresse ${st.dmx_address}`
+    + (warning ? ' — ' + warning : '') + (st.error ? ' — ' + st.error : '');
+}
 // While RÉGLAGES is shown, the state line follows connections, losses and
 // the retry countdown.
 setInterval(() => { if (activeWs === 'settings') reloadDevices(); }, 500);
@@ -6287,6 +6384,7 @@ async function loadState() {
   reloadOutputs();
   reloadOutColor();
   reloadDevices();
+  loadArtnet();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   showShowMode(st.lock);
   checklistState = st.checklist; showShownet(st.shownet); reloadChecklist();

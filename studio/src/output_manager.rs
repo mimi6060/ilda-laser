@@ -1,7 +1,8 @@
 //! Choosing, connecting and reconnecting the output from the UI (T-401).
 //!
 //! The manager lists what can be driven (the DACs of the last scan,
-//! `devices.rs`, plus the PONK target and the fake test output), opens the
+//! `devices.rs`, plus the PONK target, the ShowNET SD card box the
+//! operator typed (Art-Net, T-301) and the fake test output), opens the
 //! operator's choice on its own thread and hands it to the engine's
 //! `OutputStage` through a channel: nothing here ever runs on the engine
 //! thread or under the `Shared` lock, so a slow scan or open never delays
@@ -71,7 +72,7 @@ impl Default for OutputPrefs {
 pub struct OutputInfo {
     pub id: String,
     pub name: String,
-    /// "helios", "etherdream", "idn" (from the scan), "ponk", "test",
+    /// "helios", "etherdream", "idn" (from the scan), "ponk", "artnet", "test",
     /// "shownet" (`shownet` feature with the SDK binding installed).
     pub kind: String,
     pub state: LinkState,
@@ -476,6 +477,14 @@ pub struct RealBackend {
     /// `--ponk`'s target, else MadMapper on this Mac.
     pub ponk: SocketAddr,
     pub data_dir: PathBuf,
+    /// The ShowNET SD card box the operator typed (T-301), listed once set.
+    pub artnet: Arc<crate::artnet::ShowNetDmxStore>,
+}
+
+/// Opens the Art-Net output of `id` with the stored profile settings.
+fn open_artnet(store: &crate::artnet::ShowNetDmxStore, id: &str) -> Result<Box<dyn Output>> {
+    let target = crate::artnet::id_target(id).ok_or_else(|| anyhow::anyhow!("adresse Art-Net invalide : « {id} »"))?;
+    Ok(Box::new(crate::artnet::ShowNetDmxOutput::open(target, &store.get())?))
 }
 
 impl OutputBackend for RealBackend {
@@ -494,6 +503,7 @@ impl OutputBackend for RealBackend {
     fn fixed(&self) -> Vec<DeviceInfo> {
         #[allow(unused_mut)]
         let mut out = vec![ponk_entry(self.ponk)];
+        out.extend(self.artnet.entry());
         #[cfg(feature = "shownet")]
         if crate::shownet::installed_backend().is_some() {
             out.push(crate::shownet::fixed_entry());
@@ -508,6 +518,9 @@ impl OutputBackend for RealBackend {
         if let Some(target) = id.strip_prefix("ponk:") {
             let target = crate::ponk::parse_target(target).map_err(anyhow::Error::msg)?;
             return Ok(Box::new(crate::ponk::PonkOutput::open(target, &self.data_dir)?));
+        }
+        if id.starts_with(crate::artnet::ID_PREFIX) {
+            return open_artnet(&self.artnet, id);
         }
         Ok(Box::new(DacOutput::open(id, pps)?))
     }
@@ -525,6 +538,8 @@ pub struct FakeBackend {
     pub dropped: Arc<AtomicBool>,
     /// Successful and failed opens, for tests.
     pub opens: Arc<AtomicUsize>,
+    /// The Art-Net box (T-301): opened only towards a loopback address.
+    pub artnet: Arc<crate::artnet::ShowNetDmxStore>,
     /// A fake ShowNET box (unit tests only): opens `shownet:` ids.
     #[cfg(feature = "shownet")]
     pub shownet: Option<Arc<dyn crate::shownet::ShowNetBackend>>,
@@ -542,6 +557,7 @@ impl FakeBackend {
             data_dir,
             dropped: Arc::default(),
             opens: Arc::default(),
+            artnet: Arc::new(crate::artnet::ShowNetDmxStore::in_memory()),
             #[cfg(feature = "shownet")]
             shownet: None,
         }
@@ -558,6 +574,7 @@ impl OutputBackend for FakeBackend {
             out.push(DeviceInfo { kind: "test".into(), id: TEST_ID.into(), name: TEST_OUTPUT_NAME.into() });
         }
         out.extend(self.ponk.map(ponk_entry));
+        out.extend(self.artnet.entry());
         out
     }
     #[cfg_attr(not(feature = "shownet"), allow(unused_variables))]
@@ -573,6 +590,12 @@ impl OutputBackend for FakeBackend {
         }
         let inner: Box<dyn Output> = if let (TEST_ID, Some(path)) = (id, &self.log_file) {
             Box::new(FileLogOutput::append(path)?)
+        } else if id.starts_with(crate::artnet::ID_PREFIX) {
+            // Tests and e2e: a local receiver only, never a box.
+            match crate::artnet::id_target(id) {
+                Some(t) if t.ip().is_loopback() => open_artnet(&self.artnet, id)?,
+                _ => bail!("Art-Net vers « {id} » refusé en test (127.0.0.1 seulement)"),
+            }
         } else if let Some(target) = id.strip_prefix("ponk:").filter(|t| self.ponk.is_some_and(|p| p.to_string() == *t)) {
             Box::new(crate::ponk::PonkOutput::open(target.parse()?, &self.data_dir)?)
         } else if let Some(d) = self.devices.iter().find(|d| d.id == id) {
@@ -630,6 +653,12 @@ impl Output for Unpluggable {
     }
     fn max_points(&self) -> Option<usize> {
         self.inner.max_points()
+    }
+    fn cue_signal(&mut self, signal: &crate::output::CueSignal) {
+        self.inner.cue_signal(signal)
+    }
+    fn status(&self) -> Option<serde_json::Value> {
+        self.inner.status()
     }
     fn fault(&self) -> Option<String> {
         if self.dropped.load(Ordering::SeqCst) {
@@ -864,9 +893,9 @@ mod tests {
 
     #[test]
     fn the_real_backend_lists_the_ponk_target_without_scanning() {
-        let backend = RealBackend { ponk: crate::ponk::DEFAULT_TARGET.parse().unwrap(), data_dir: std::env::temp_dir() };
+        let backend = RealBackend { ponk: crate::ponk::DEFAULT_TARGET.parse().unwrap(), data_dir: std::env::temp_dir(), artnet: Arc::new(crate::artnet::ShowNetDmxStore::in_memory()) };
         let fixed = backend.fixed();
-        assert_eq!(fixed.len(), 1);
+        assert_eq!(fixed.len(), 1, "the Art-Net box is off by default");
         assert_eq!((fixed[0].kind.as_str(), fixed[0].id.as_str()), ("ponk", "ponk:127.0.0.1:5583"));
     }
 
@@ -908,6 +937,34 @@ mod tests {
         assert!(fake.events.lock().unwrap().iter().all(|e| !matches!(e, crate::shownet::fake::Event::Frame { pps, .. } if *pps != 100_000)), "rate capped");
         // An unknown box fails to open, without an SDK nothing does.
         assert!(FakeBackend::new(Vec::new(), None, None, std::env::temp_dir()).open("shownet:box-1", 30_000).is_err());
+    }
+
+    /// The ShowNET SD card output (T-301): listed once an address is set,
+    /// connected through the manager like any output, and in tests only
+    /// towards a loopback receiver.
+    #[test]
+    fn the_artnet_box_is_listed_once_typed_and_opens_on_loopback_only() {
+        use crate::artnet::{ShowNetDmxConfig, ShowNetDmxStore};
+        let (rx, addr) = crate::artnet::tests::receiver();
+        let store = Arc::new(ShowNetDmxStore::in_memory());
+        let mut backend = FakeBackend::new(Vec::new(), None, None, std::env::temp_dir());
+        backend.artnet = Arc::clone(&store);
+        assert!(backend.fixed().is_empty(), "off by default");
+        store.set(ShowNetDmxConfig { target: Some(addr.to_string()), ..Default::default() }).unwrap();
+        let id = format!("artnet:{addr}");
+        assert_eq!(backend.fixed().iter().map(|d| (d.kind.as_str(), d.id.as_str())).collect::<Vec<_>>(), [("artnet", id.as_str())]);
+        assert!(backend.open("artnet:192.168.129.51:6454", 30_000).is_err(), "never a real box in tests");
+        assert!(backend.open("artnet:nonsense", 30_000).is_err());
+        let list = Arc::new(DeviceList::fixed(Vec::new()));
+        let mgr = OutputManager::new(Arc::new(backend), list, &OutputPrefs::default(), 30_000);
+        mgr.select(Some(id.clone()), ArmSource::Ui);
+        drain(&mgr, Instant::now());
+        assert_eq!(mgr.state(), LinkState::Connected);
+        assert_eq!(mgr.view(Instant::now())["kind"], "artnet");
+        let change = mgr.engine_take().unwrap();
+        assert_eq!(change.output.as_ref().unwrap().name(), crate::artnet::output_name(addr));
+        let (_, d) = crate::artnet::tests::next_dmx(&rx);
+        assert_eq!((d[0], d[1]), (0, 0), "opened dark");
     }
 
     #[test]
