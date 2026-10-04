@@ -249,6 +249,14 @@ pub fn tick(shared: &Mutex<Shared>, deb: &mut Debounce, now: f64, flush: bool) -
     // Lock released: disk and serialisation from here on.
     p.timelines = shows.load_all();
     let fp = p.fingerprint();
+    {
+        // What `/api/frame` says (T-433), unless a save or an open moved
+        // the baseline meanwhile (they set it themselves).
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if s.project.saved_fingerprint() == saved {
+            s.project.last_modified = fp != saved;
+        }
+    }
     let delay = if flush { 0.0 } else { f64::from(settings.delay_s) };
     if !deb.due(&name, fp, saved, now, delay) || !write {
         return None;

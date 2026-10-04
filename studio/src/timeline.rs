@@ -667,6 +667,11 @@ impl Player {
         self.example = true;
     }
 
+    /// The loaded show's name if it has edits not saved yet (T-433).
+    pub fn unsaved(&self) -> Option<&str> {
+        self.show.as_ref().filter(|_| self.modified).map(|s| s.name.as_str())
+    }
+
     /// The loaded show is a built-in example not saved yet.
     pub fn is_example(&self) -> bool {
         self.show.is_some() && self.example

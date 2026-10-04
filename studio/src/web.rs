@@ -460,6 +460,13 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             json_response(json!({ "lines": app.tail(n), "status": app.status() }))
         }
         (Method::Get, "/api/frame") => frame(shared),
+        // Notification centre (T-432): read only, `since` = the last id seen.
+        (Method::Get, "/api/notices") => {
+            let since = query_u64(request.url(), "since").unwrap_or(0);
+            let mut s = shared.lock().unwrap();
+            s.sync_notices();
+            json_response(json!({ "notices": s.notices.since(since), "last": s.notices.last() }))
+        }
         (Method::Get, "/api/data/warnings") => {
             let mut s = shared.lock().unwrap();
             s.sync_data_warnings();
@@ -3117,6 +3124,7 @@ fn festival_view(s: &Shared) -> serde_json::Value {
 /// `GET /api/state`'s body (also `state.json` in the diagnostic report).
 fn state_json(s: &mut Shared) -> serde_json::Value {
     s.sync_data_warnings();
+    s.sync_notices();
     s.gate.sync_estop(&s.estop);
     s.sync_audience();
     let arm = s.gate.status(&s.estop);
@@ -3158,6 +3166,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "external": { "open": s.external.gate.open },
         "timecode": crate::timecode::summary(s),
         "dmx": crate::netin::summary(s, Instant::now()),
+        "project_modified": s.project.last_modified,
+        "notices_last": s.notices.last(),
     })
 }
 
@@ -3236,6 +3246,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 /// and the pushed state (`/api/events`, T-411).
 fn live_view(s: &mut Shared) -> serde_json::Value {
     s.gate.sync_estop(&s.estop);
+    s.sync_notices();
     let arm = s.gate.status(&s.estop);
     let now = s.now_s();
     json!({
@@ -3293,6 +3304,10 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         "shownet": shownet_view(s),
         // The loaded cue list (T-410); null when none.
         "cuelist": s.cue_list.view(),
+        // T-433: unsaved project changes (as last seen, every 500 ms).
+        "project_modified": s.project.last_modified,
+        // T-432: the newest notice's id; the page reads /api/notices when it moves.
+        "notices_last": s.notices.last(),
     })
 }
 
@@ -3978,6 +3993,51 @@ mod tests {
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
         let st = arm_status(&t);
         assert_eq!((st["armed"].clone(), st["source"].clone()), (json!(true), json!("keyboard")));
+    }
+
+    /// T-432/T-433: the notices since an id, their last id and the cached
+    /// « project modified » flag in the page's state; the page itself is
+    /// left with a single `fetch(` (the one in `api()`).
+    #[test]
+    fn notices_and_the_modified_flag_reach_the_page() {
+        let t = TestServer::start(false);
+        let frame = |t: &TestServer| serde_json::from_str::<serde_json::Value>(&t.request("GET", "/api/frame", "").1).unwrap();
+        let f = frame(&t);
+        assert_eq!((f["project_modified"].clone(), f["notices_last"].clone()), (json!(false), json!(0)));
+        let first = {
+            let mut s = t.shared.lock().unwrap();
+            s.project.last_modified = true;
+            let a = s.notices.push(crate::notices::Level::Warning, "Projet", "un".into(), None);
+            s.notices.push(crate::notices::Level::Error, "Audio", "deux".into(), Some("essai"));
+            a
+        };
+        let f = frame(&t);
+        assert_eq!((f["project_modified"].clone(), f["notices_last"].clone()), (json!(true), json!(2)));
+        let (code, body) = t.request("GET", &format!("/api/notices?since={first}"), "");
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["last"], 2);
+        assert_eq!(v["notices"].as_array().unwrap().len(), 1);
+        assert_eq!((v["notices"][0]["source"].clone(), v["notices"][0]["level"].clone(), v["notices"][0]["key"].clone()), (json!("Audio"), json!("error"), json!("essai")));
+        // Read only.
+        assert_ne!(t.request("POST", "/api/notices", "{}").0, 200);
+        assert_eq!(t.request("GET", "/api/project/quit-check", "").0, 200);
+    }
+
+    /// T-432: every request of the page goes through `api()`: the page
+    /// holds a single `fetch(`, inside it (the 3D module has none).
+    #[test]
+    fn the_page_fetches_only_through_api() {
+        // The heartbeat worker's source runs apart, without the page: its
+        // own fetch is the only other one.
+        let start = INDEX_HTML.find("const HB_WORKER = `").expect("heartbeat worker");
+        let end = start + INDEX_HTML[start..].find("`;").expect("end of the worker");
+        let page = format!("{}{}", &INDEX_HTML[..start], &INDEX_HTML[end..]);
+        let body = page.split("async function api(").nth(1).expect("api() in the page");
+        let api_end = body.find("\n}\n").expect("end of api()");
+        assert_eq!(page.matches("fetch(").count(), 1, "one fetch( in the page");
+        assert!(body[..api_end].contains("fetch("), "and it is in api()");
+        assert!(!BEAM3D_JS.contains("fetch("));
     }
 
     /// T-404: the pattern API shows and leaves a pattern, never arms, and

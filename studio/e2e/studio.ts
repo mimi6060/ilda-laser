@@ -321,4 +321,18 @@ export function centroid(points: Point[]) {
 }
 
 export { expect };
-export const test = base;
+/**
+ * T-433: the page asks before closing or reloading with unsaved work (a
+ * `beforeunload` dialog). Specs reload pages with a modified project, so
+ * that question is accepted by default. Other dialogs keep Playwright's
+ * default (dismissed) unless the spec listens for them itself.
+ */
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    page.on('dialog', d => {
+      if (d.type() === 'beforeunload') d.accept().catch(() => {});
+      else if (page.listenerCount('dialog') === 1) d.dismiss().catch(() => {});
+    });
+    await use(page);
+  },
+});

@@ -234,9 +234,12 @@ pub(crate) fn commit(tmp: &Path, path: &Path) -> Result<()> {
 pub fn save_json<T: Serialize>(path: &Path, value: &T) {
     match serde_json::to_vec_pretty(value) {
         Ok(json) => {
-            if let Err(e) = replace(path, &json) {
+            let result = replace(path, &json);
+            if let Err(e) = &result {
                 log::warn!("failed to save {}: {e:#}", path.display());
             }
+            // The notification centre (T-432): never waits.
+            crate::notices::report_write(path, result.map_err(|e| format!("{e:#}")));
         }
         Err(e) => log::warn!("failed to serialize {}: {e}", path.display()),
     }

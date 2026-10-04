@@ -20,7 +20,7 @@
   header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
   .arm { position: relative; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
   #armInfo { font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  #armRefused { position: absolute; top: calc(100% + 6px); right: 0; width: 280px; padding: 8px 10px; border-radius: 8px; background: var(--danger); color: #fff; font-size: 12px; box-shadow: 0 8px 24px #0008; }
+  #armRefused { position: absolute; z-index: 1; top: calc(100% + 6px); right: 0; width: 280px; padding: 8px 10px; border-radius: 8px; background: var(--danger); color: #fff; font-size: 12px; box-shadow: 0 8px 24px #0008; }
   #armRefused[hidden] { display: none; }
   #armRefused ul { margin: 4px 0 0; padding-left: 18px; }
   #estopBtn { width: 58px; height: 58px; flex: none; border-radius: 50%; border: 3px solid #fff3; background: #d0021b; color: #fff; font-weight: 800; font-size: 11px; letter-spacing: .04em; padding: 0; box-shadow: 0 0 0 3px #d0021b55; }
@@ -56,6 +56,43 @@
   #lockToast { position: fixed; top: 76px; left: 50%; transform: translateX(-50%); z-index: 40; padding: 8px 14px; border-radius: 8px;
     background: var(--panel-2); color: var(--warn); border: 1px solid var(--warn); font-weight: 600; box-shadow: 0 8px 24px #0008; }
   #lockToast[hidden] { display: none; }
+  /* Notifications (T-432): the bell in the top bar, its panel, and toasts at
+     the bottom right, under the top bar, its banners and the dialogs. */
+  #noticeBtn { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 30px; padding: 0; color: var(--muted); }
+  #noticeBtn svg { width: 17px; height: 17px; }
+  #noticeBtn[data-level="warning"] { color: var(--warn); border-color: var(--warn); }
+  #noticeBtn[data-level="error"] { color: var(--danger); border-color: var(--danger); }
+  #noticeBadge { position: absolute; top: -6px; right: -6px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 999px; font-size: 10px; font-weight: 800; line-height: 17px; text-align: center; background: var(--muted); color: var(--bg); }
+  #noticeBadge[data-level="warning"] { background: var(--warn); color: #241600; }
+  #noticeBadge[data-level="error"] { background: var(--danger); color: #fff; }
+  #noticeBadge[hidden] { display: none; }
+  #noticePanel { position: fixed; z-index: 30; width: min(460px, calc(100vw - 16px)); max-height: min(70vh, 560px); display: flex; flex-direction: column; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+  #noticePanel[hidden] { display: none; }
+  #noticePanel .n-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  #noticePanel .n-head h3 { margin: 0; flex: 1; font-size: 13px; }
+  #noticePanel .n-body { overflow-y: auto; padding: 4px 0; }
+  #noticePinned:not(:empty) { border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-bottom: 4px; }
+  .n-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 10px; font-size: 12px; line-height: 1.35; }
+  .n-row .n-level { flex: none; width: 92px; font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .n-row.error .n-level { color: var(--danger); }
+  .n-row.warning .n-level { color: var(--warn); }
+  .n-row .n-line { flex: 1; overflow-wrap: anywhere; }
+  .n-row.resolved .n-line { color: var(--muted); }
+  .n-row.pinned { background: #ffffff08; }
+  .n-count { flex: none; font-weight: 800; font-variant-numeric: tabular-nums; }
+  #noticeEmpty { padding: 10px; color: var(--muted); font-size: 12px; }
+  #noticeEmpty[hidden] { display: none; }
+  #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 15; display: flex; flex-direction: column-reverse; gap: 8px; width: min(380px, calc(100vw - 32px)); pointer-events: none; }
+  .toast { position: relative; pointer-events: auto; padding: 8px 32px 8px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); border-left: 4px solid var(--muted); box-shadow: 0 8px 24px #0008; font-size: 12px; }
+  .toast.warning { border-left-color: var(--warn); }
+  .toast.error { border-left-color: var(--danger); }
+  .toast-head { font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .toast.warning .toast-head { color: var(--warn); }
+  .toast.error .toast-head { color: var(--danger); }
+  .toast-text { margin-top: 2px; overflow-wrap: anywhere; }
+  .toast-x { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0; line-height: 1; font-size: 14px; }
+  #projAskWhat { margin: 4px 0 10px; padding-left: 18px; }
+  #projAskWhat:empty { display: none; }
   button.hold-confirm, button.hold-confirm:hover { background: linear-gradient(90deg, var(--danger) calc(var(--hold, 0) * 100%), transparent 0), var(--panel-2); }
   button.hold-confirm.holding { color: #fff; border-color: var(--danger); }
   body.show-mode #wsTabs [data-ws-tab="creation"], body.show-mode #wsTabs [data-ws-tab="settings"],
@@ -1160,6 +1197,10 @@
       <span id="dmxPill" title="Entrée DMX (Art-Net / sACN) : clic = RÉGLAGES › Entrées réseau" hidden>DMX</span>
     </div>
   </div>
+  <!-- Notifications (T-432): the list behind the bell, no shortcut. -->
+  <button id="noticeBtn" aria-haspopup="true" aria-expanded="false" aria-label="Notifications" title="Notifications">
+    <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg>
+    <span id="noticeBadge" hidden></span></button>
   <div id="linkLost" role="alert" hidden>Connexion au moteur perdue</div>
   <!-- Safety on the right edge, far from the grid: Noir and ARRÊT, then
        (at least 24 px away) the laser button. -->
@@ -1193,6 +1234,11 @@
   <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
 </nav>
 </div>
+<div id="noticePanel" role="dialog" aria-labelledby="noticeTitle" hidden>
+  <div class="n-head"><h3 id="noticeTitle">Notifications</h3><button id="noticeClear">Tout effacer</button></div>
+  <div class="n-body"><div id="noticePinned"></div><div id="noticeList"></div><div id="noticeEmpty">Aucune notification</div></div>
+</div>
+<div id="toasts" aria-live="polite"></div>
 <div id="midiMenu" hidden>
   <h3>MIDI</h3>
   <div class="hint" id="midiMenuName" style="margin:0"></div>
@@ -1254,6 +1300,7 @@
 <div id="projAsk" class="modal" hidden>
   <div class="box">
     <h3>Modifications non enregistrées : enregistrer avant ?</h3>
+    <ul id="projAskWhat"></ul>
     <div class="row"><button id="askSave">Enregistrer</button><button id="askDiscard">Ne pas enregistrer</button><button id="askCancel">Annuler</button></div>
   </div>
 </div>
@@ -2892,14 +2939,296 @@ let settings = null, calibration = null, armed = false, pps = 30000;
 const ROTATING = new Set(['finger_tunnel', 'twin_tunnel', 'sunburst']);
 const TURNS = [0.015625, 0.03125, 0.0625, 0.25, 0.5];
 
-async function post(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
-  if (!r.ok) {
-    const t = await r.text();
-    if (r.status === 423) notify(t); // show mode (T-283)
-    console.warn(path, t);
+// ---------- notification centre (T-432) ----------
+// One place where what went wrong is said, and stays readable: every
+// request goes through api(), whose refusals and failures become
+// notifications (notify): a toast at the bottom right (never over the top
+// bar or the safety banners) and a line in the list behind the bell (the
+// last 200). A condition (`key` + `sticky`: output error, studio
+// unreachable, MIDI controller lost…) stays pinned at the top of the list
+// while it lasts and resolves by itself. The safety banners keep their
+// place and priority; they are only recorded here. The studio's own events
+// (a file it could not write, autosave, audio input) come from
+// GET /api/notices when `notices_last` moves in the state. In memory only.
+// No keyboard shortcut: Échap stays the emergency stop.
+const NOTICE_MAX = 200, TOAST_MAX = 3, NOTICE_DEDUP_MS = 2000;
+const NOTICE_LEVELS = { error: 'Erreur', warning: 'Avertissement', info: 'Info' };
+const NOTICE_TOAST_MS = { error: 8000, warning: 5000, info: 4000 };
+// list: newest first; active: pinned conditions by key; toasts shown, then waiting.
+const NC = { list: [], active: new Map(), seq: 0, open: false, toasts: [], waiting: [], drawPending: false, serverLast: 0, serverBusy: false, loadedAt: Date.now() };
+
+function notify({ level = 'error', source = 'Studio', text = '', key = null, sticky = false, toast = true, at = null }) {
+  if (!NOTICE_LEVELS[level]) level = 'error';
+  text = String(text).trim().slice(0, 600) || 'erreur sans message';
+  const now = Date.now();
+  if (key && sticky) {
+    const cur = NC.active.get(key);
+    if (cur) {
+      // Still the same condition: nothing new. Changed: shown again.
+      if (cur.text === text && cur.level === level) return cur;
+      Object.assign(cur, { text, level, last: now, read: NC.open });
+      drawNoticesSoon();
+      return cur;
+    }
+  } else {
+    // The same one again within 2 s (a poll, a held key): one line, a count.
+    const dup = NC.list.find(n => !n.sticky && now - n.last < NOTICE_DEDUP_MS
+      && (key ? n.key === key : !n.key && n.source === source && n.text === text));
+    if (dup) {
+      dup.count++; dup.last = now; dup.read = NC.open;
+      toastCount(dup); drawNoticesSoon();
+      return dup;
+    }
   }
-  return r.ok;
+  const n = { id: ++NC.seq, at: at ?? now, last: now, level, source, text, key, sticky: !!(key && sticky), count: 1, read: NC.open, resolved: false };
+  NC.list.unshift(n);
+  if (n.sticky) NC.active.set(key, n);
+  // The oldest go first; a condition still on stays.
+  for (let i = NC.list.length - 1; NC.list.length > NOTICE_MAX && i >= 0; i--) {
+    if (!NC.active.has(NC.list[i].key) || NC.active.get(NC.list[i].key) !== NC.list[i]) NC.list.splice(i, 1);
+  }
+  if (toast) showToast(n);
+  drawNoticesSoon();
+  return n;
+}
+function resolveNotice(key) {
+  const n = NC.active.get(key);
+  if (!n) return;
+  NC.active.delete(key);
+  n.resolved = true;
+  dropToast(n);
+  drawNoticesSoon();
+}
+// A condition, checked with each state: pinned while `on`, resolved after.
+function noticeCondition(key, on, notice) {
+  if (on) notify({ ...notice, key, sticky: true }); else if (NC.active.has(key)) resolveNotice(key);
+}
+
+function showToast(n) {
+  if (NC.toasts.some(t => t.n === n) || NC.waiting.includes(n)) return;
+  if (NC.toasts.length >= TOAST_MAX) { NC.waiting.push(n); return; }
+  const el = document.createElement('div');
+  el.className = 'toast ' + n.level;
+  if (n.level === 'error') el.setAttribute('role', 'alert');
+  const head = document.createElement('div'); head.className = 'toast-head';
+  const count = document.createElement('span'); count.className = 'n-count';
+  head.append(`${NOTICE_LEVELS[n.level]} · ${n.source}`, count);
+  const text = document.createElement('div'); text.className = 'toast-text'; text.textContent = n.text;
+  const x = document.createElement('button'); x.className = 'toast-x'; x.textContent = '×';
+  x.title = 'Fermer'; x.setAttribute('aria-label', 'Fermer la notification');
+  const t = { n, el, count, timer: null };
+  x.onclick = () => { n.read = true; dropToast(n); drawNoticesSoon(); };
+  // Hovered: it stays.
+  el.onmouseenter = () => clearTimeout(t.timer);
+  el.onmouseleave = () => armToast(t);
+  el.append(x, head, text);
+  NC.toasts.push(t);
+  $('toasts').appendChild(el);
+  toastCount(n);
+}
+function armToast(t) {
+  clearTimeout(t.timer);
+  // A condition in error stays until closed or over.
+  if ((t.n.sticky && t.n.level === 'error') || t.el.matches(':hover')) return;
+  t.timer = setTimeout(() => dropToast(t.n), NOTICE_TOAST_MS[t.n.level]);
+}
+function toastCount(n) {
+  const t = NC.toasts.find(q => q.n === n);
+  if (!t) return;
+  t.count.textContent = n.count > 1 ? ' ×' + n.count : '';
+  armToast(t);
+}
+function dropToast(n) {
+  NC.waiting = NC.waiting.filter(w => w !== n);
+  const i = NC.toasts.findIndex(t => t.n === n);
+  if (i < 0) return;
+  clearTimeout(NC.toasts[i].timer);
+  NC.toasts[i].el.remove();
+  NC.toasts.splice(i, 1);
+  const next = NC.waiting.shift();
+  if (next) showToast(next);
+}
+
+// The bell, its count of unread lines (red with an error, orange with a
+// warning) and, open, the panel: conditions on first, then newest first.
+function drawNoticesSoon() {
+  if (NC.drawPending) return;
+  NC.drawPending = true;
+  setTimeout(() => { NC.drawPending = false; drawNotices(); }, 0);
+}
+const noticeTime = ms => new Date(ms).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+function noticeRow(n, pinned) {
+  const row = document.createElement('div');
+  row.className = `n-row ${n.level}${n.read ? '' : ' unread'}${n.resolved ? ' resolved' : ''}${pinned ? ' pinned' : ''}`;
+  row.dataset.level = n.level;
+  if (n.key) row.dataset.key = n.key;
+  const lvl = document.createElement('span'); lvl.className = 'n-level'; lvl.textContent = pinned ? 'En cours' : NOTICE_LEVELS[n.level];
+  const line = document.createElement('span'); line.className = 'n-line';
+  line.textContent = `${noticeTime(n.at)} · ${n.source} · ${n.text}` + (n.resolved ? ' (résolu)' : '');
+  const count = document.createElement('span'); count.className = 'n-count'; count.textContent = n.count > 1 ? '×' + n.count : '';
+  row.append(lvl, line, count);
+  return row;
+}
+function drawNotices() {
+  const unread = NC.list.filter(n => !n.read);
+  const on = [...NC.active.values()];
+  const worst = list => list.some(n => n.level === 'error') ? 'error' : list.some(n => n.level === 'warning') ? 'warning' : 'info';
+  const badge = $('noticeBadge'), btn = $('noticeBtn');
+  badge.hidden = !unread.length;
+  badge.textContent = unread.length > 99 ? '99+' : String(unread.length);
+  badge.dataset.level = worst(unread);
+  btn.dataset.level = on.length ? worst(on) : '';
+  btn.setAttribute('aria-label', `Notifications${unread.length ? ` : ${unread.length} non lue${unread.length > 1 ? 's' : ''}` : ''}`);
+  if (!NC.open) return;
+  const pinned = NC.list.filter(n => NC.active.get(n.key) === n);
+  $('noticePinned').replaceChildren(...pinned.map(n => noticeRow(n, true)));
+  $('noticeList').replaceChildren(...NC.list.filter(n => !pinned.includes(n)).map(n => noticeRow(n, false)));
+  $('noticeEmpty').hidden = NC.list.length > 0;
+}
+function setNoticePanel(open) {
+  NC.open = open;
+  $('noticePanel').hidden = !open;
+  $('noticeBtn').setAttribute('aria-expanded', String(open));
+  if (open) {
+    const b = $('noticeBtn').getBoundingClientRect();
+    $('noticePanel').style.top = Math.round(b.bottom + 6) + 'px';
+    $('noticePanel').style.right = Math.max(8, Math.round(innerWidth - b.right)) + 'px';
+    NC.list.forEach(n => { n.read = true; });
+  }
+  drawNotices();
+}
+$('noticeBtn').onclick = e => { e.stopPropagation(); setNoticePanel(!NC.open); };
+$('noticeClear').onclick = () => {
+  // The conditions still on stay.
+  NC.list = NC.list.filter(n => NC.active.get(n.key) === n);
+  drawNotices();
+};
+document.addEventListener('click', e => { if (NC.open && !e.target.closest('#noticePanel, #noticeBtn')) setNoticePanel(false); });
+
+// The studio's own events (a write that failed, autosave, audio input).
+async function pullNotices(last) {
+  if (NC.serverBusy || last === NC.serverLast) return;
+  if (last < NC.serverLast) NC.serverLast = 0; // the studio restarted
+  NC.serverBusy = true;
+  try {
+    const j = await apiJson('GET', '/api/notices?since=' + NC.serverLast, undefined, { quiet: true });
+    for (const s of j.notices) {
+      const key = s.key ? 'studio:' + s.key : null;
+      if (s.resolved) { if (key) resolveNotice(key); continue; }
+      const at = Date.parse(s.at) || Date.now();
+      // Older than the page: in the list, without a toast.
+      notify({ level: s.level, source: s.source, text: s.text, key, sticky: !!key, at, toast: at >= NC.loadedAt - 5000 });
+    }
+    NC.serverLast = j.last;
+  } catch { /* next state */ } finally { NC.serverBusy = false; }
+}
+
+// The one door to the studio: every request of the page goes through
+// here (the heartbeat worker excepted: it runs apart and has no page). A
+// refusal (4xx) or a failure (5xx) becomes a notification with the
+// server's text (French already); a request without any answer pins
+// « Studio injoignable » until the next answer. Options: `quiet` (true or
+// statuses): the caller shows that refusal itself (under a field), it is
+// only recorded, without a toast; `ignore` (statuses): normal flow for
+// the caller, not recorded; `source`, `cache`, `keepalive`. A body is
+// sent as JSON, except a file or bytes. Returns the Response; throws, as
+// fetch does, when nothing answered. Nothing is awaited before the
+// request leaves (the emergency stop goes through here).
+const API_SOURCES = [
+  [/^\/api\/project/, 'Projet'],
+  [/^\/api\/(timeline|shows|media\/audio|timecode)/, 'Timeline'],
+  [/^\/api\/(figures|media\/ilda|sdbank)/, 'Figures'],
+  [/^\/api\/(midi|dmx|netin|external)/, 'MIDI'],
+  [/^\/api\/(arm|estop|safety|audience|checklist|presence|heartbeat|lock|data\/warnings|outputs\/limits|outputs\/color|venue)/, 'Sécurité'],
+  [/^\/api\/audio/, 'Audio'],
+  [/^\/api\/(cue|grid|presets|scan-presets|running|scenes|playlist|palettes|festival|control|live|lfos|layers)/, 'Cues'],
+];
+const apiSource = path => (API_SOURCES.find(([re]) => re.test(path)) || [null, 'Réglages'])[1];
+async function api(method, path, body, opts = {}) {
+  const init = { method };
+  if (opts.cache) init.cache = opts.cache;
+  if (opts.keepalive) init.keepalive = true;
+  if (body !== undefined && method !== 'GET') {
+    if (body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body)) init.body = body;
+    else { init.body = typeof body === 'string' ? body : JSON.stringify(body); init.headers = { 'Content-Type': 'application/json' }; }
+  }
+  if (method !== 'GET') noteEdit(path);
+  let r;
+  try { r = await fetch(path, init); } catch (e) { apiUnreachable(); throw e; }
+  if (NC.active.has('link')) resolveNotice('link');
+  if (!r.ok && !(opts.ignore || []).includes(r.status)) apiRefused(method, path, r.clone(), opts);
+  return r;
+}
+// api() and the JSON of a good answer; throws (after saying so) otherwise.
+async function apiJson(method, path, body, opts = {}) {
+  const r = await api(method, path, body, opts);
+  if (!r.ok) throw new Error(`${path} : ${r.status}`);
+  try { return await r.json(); } catch (e) {
+    notify({ level: 'error', source: opts.source || apiSource(path), text: `réponse illisible du studio (${path.split('?')[0]})` });
+    throw e;
+  }
+}
+function apiUnreachable() {
+  noticeCondition('link', true, { level: 'error', source: 'Studio', text: 'Studio injoignable : pas de réponse du serveur' });
+}
+async function apiRefused(method, path, r, opts) {
+  let text = '';
+  try { text = (await r.text()).trim(); } catch { /* body lost */ }
+  try {
+    const j = JSON.parse(text);
+    if (j && typeof j === 'object') {
+      text = j.error || j.message
+        || (Array.isArray(j.blocking) ? 'armement impossible : ' + j.blocking.join(' ; ') : '')
+        || (Array.isArray(j.loosen) ? 'assouplissement à confirmer : ' + j.loosen.join(' · ') : '') || text;
+    }
+  } catch { /* plain text */ }
+  if (!text || text.startsWith('<')) text = `erreur ${r.status} (${method} ${path.split('?')[0]})`;
+  const source = opts.source || apiSource(path);
+  // Show mode (T-283): its own short message; recorded too.
+  if (r.status === 423) { flash(text); notify({ level: 'info', source, text, toast: false }); return; }
+  const quiet = opts.quiet === true || (Array.isArray(opts.quiet) && opts.quiet.includes(r.status));
+  notify({ level: r.status >= 500 ? 'error' : 'warning', source, text, toast: !quiet });
+}
+
+// ---------- unsaved work (T-433) ----------
+// What closing the page now would lose: the project (the studio's flag in
+// each state, `project_modified`, refreshed every 500 ms, plus a local flag
+// raised by every editing request so a reload within that time is caught),
+// the timeline editor's show, the figure being drawn and the cue program
+// being edited in CRÉATION. An autosave is not a save: the guard stays.
+const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame)/;
+const DIRTY = { editAt: -1, savedAt: 0, server: false, serverAt: 0 };
+function noteEdit(path) { if (!NOT_EDITS.test(path)) DIRTY.editAt = performance.now(); }
+function takeProjectModified(modified, at) {
+  if (modified === undefined) return;
+  DIRTY.server = !!modified; DIRTY.serverAt = at;
+}
+function projectSaved() { DIRTY.savedAt = performance.now(); DIRTY.server = false; }
+function projectDirty() {
+  if (DIRTY.server) return true;
+  // An edit the studio may not have looked at yet.
+  return DIRTY.editAt > DIRTY.savedAt && DIRTY.serverAt - DIRTY.editAt < 1500;
+}
+// What « Modifications non enregistrées » lists, as { kind, label } (kind:
+// project, timeline, figure); empty: nothing to lose. Called once the
+// page has loaded (dialogs, closing).
+function unsavedWork({ figure = true } = {}) {
+  const out = [];
+  if (projectDirty()) out.push({ kind: 'project', label: `Projet « ${project.name} »` });
+  if (lastTimeline && lastTimeline.name && lastTimeline.modified) out.push({ kind: 'timeline', label: `Show de timeline « ${lastTimeline.name} »`, example: !!lastTimeline.example });
+  if (figure && figureDirty()) out.push({ kind: 'figure', label: 'Figure en cours' });
+  if (figure && pgDirty()) out.push({ kind: 'program', label: `Programme du cue « ${pg.info ? pg.info.name : pg.id} »` });
+  return out;
+}
+window.addEventListener('beforeunload', e => {
+  if (!unsavedWork().length) return;
+  e.preventDefault();
+  e.returnValue = ''; // the browser shows its own words
+});
+
+// A POST whose refusal api() reports (show mode: its short message).
+async function post(path, body) {
+  return (await api('POST', path, body ?? {})).ok;
 }
 
 // ---------- settings <-> controls ----------
@@ -3077,8 +3406,7 @@ function lookTask(task) {
 async function sendLook() {
   for (let tries = 0; tries < 3 && pendingEdits.length; tries++) {
     const sent = pendingEdits.length;
-    const r = await fetch('/api/settings?rev=' + settingsRev,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+    const r = await api('POST', '/api/settings?rev=' + settingsRev, settings, { ignore: [409] });
     if (r.status === 409) { await loadLook(); continue; } // replaced meanwhile: replay on the new look
     pendingEdits.splice(0, sent);
     if (r.ok) settingsRev = (await r.json()).rev; else console.warn('/api/settings', await r.text());
@@ -3093,7 +3421,7 @@ function takeLook(st) {
   showSettings();
 }
 async function loadLook() {
-  takeLook(await (await fetch('/api/state')).json());
+  takeLook(await apiJson('GET', '/api/state'));
 }
 
 document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
@@ -3120,7 +3448,7 @@ const hwStopPending = () => !!(shownetState && shownetState.active && !shownetSt
 const checklistPending = () => !!(checklistState && checklistState.enforced && !checklistState.complete) || hwStopPending();
 async function sendArm(body) {
   // client_id: this page is alive, even if its first heartbeat is late.
-  const r = await fetch('/api/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, client_id: clientId }) });
+  const r = await api('POST', '/api/arm', { ...body, client_id: clientId }, { quiet: true });
   armAnsweredAt = performance.now();
   // Binary frames up to this one were published before the change (T-411).
   LINK.armSeqMin = +(r.headers.get('X-Frame-Seq') || 0);
@@ -3145,7 +3473,7 @@ function emergencyStop(source) {
   // Frames already on their way still say "armed": not shown (T-411).
   armAnsweredAt = performance.now();
   LINK.armSeqMin = (LINK.seq ?? 0) + 3;
-  fetch('/api/estop?source=' + source, { method: 'POST', keepalive: true })
+  api('POST', '/api/estop?source=' + source, undefined, { keepalive: true })
     .then(r => { const seq = +(r.headers.get('X-Frame-Seq') || 0); if (seq) LINK.armSeqMin = seq; }).catch(() => {});
   $('estopBanner').hidden = false;
 }
@@ -3215,8 +3543,9 @@ $('estopReset').addEventListener('click', async () => { if (await post('/api/est
 //   preventDefault). up(e): on release, whatever the zone or modifiers.
 // The safety entries come first and only use what is defined above, so
 // Échap works even if a later part of the page failed to load.
-const SHORTCUT_ZONES = ['live', 'timeline', 'tl-canvas', 'creation', 'figures', 'settings'];
-const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas');
+// 'ask': the « Modifications non enregistrées » question is open (T-433).
+const SHORTCUT_ZONES = ['live', 'timeline', 'tl-canvas', 'creation', 'figures', 'settings', 'ask'];
+const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas' && z !== 'ask');
 const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live');
 const SAFETY_SHORTCUTS = [
   { id: 'estop', group: 'Sécurité', keys: ['Escape'], meta: '*', alt: '*', zones: '*', typing: true, show: true,
@@ -3308,6 +3637,9 @@ function buildShortcuts() {
     { id: 'project.save', group: 'Projet', keys: ['s'], meta: true, shift: '*', zones: '*', typing: true, show: true,
       label: 'Enregistrer le projet',
       down: e => { if (!e.repeat) projAction('save'); } },
+    { id: 'project.ask.save', group: 'Projet', codes: ['Enter', 'NumpadEnter'], meta: '*', shift: '*', zones: ['ask'], typing: true, show: false,
+      label: 'Enregistrer (question « Modifications non enregistrées »)',
+      down: e => { if (!e.repeat) $('askSave').click(); } },
     { id: 'project.open', group: 'Projet', keys: ['o'], meta: true, shift: '*', zones: '*', typing: true, show: false,
       label: 'Ouvrir un projet',
       down: e => { if (!e.repeat) projAction('open'); } },
@@ -3377,6 +3709,7 @@ function allShortcuts() {
 }
 // Where the keyboard is: the workspace, or a part of it with its own keys.
 function shortcutZone() {
+  if (!$('projAsk').hidden) return 'ask';
   if (activeWs === 'live') return 'live';
   if (activeWs === 'timeline') return TL.show && document.activeElement === tlCv ? 'tl-canvas' : 'timeline';
   if (activeWs === 'creation') return !$('figEditor').hidden && !$('figImportDlg').open ? 'figures' : 'creation';
@@ -3592,7 +3925,7 @@ function shiftMod(e) {
 }
 const beatBody = gone => JSON.stringify(gone ? { client_id: clientId, gone: true }
   : { client_id: clientId, visible: document.visibilityState === 'visible', hold: holdDown });
-function beatNow() { fetch('/api/heartbeat', { method: 'POST', body: beatBody(), keepalive: true }).catch(() => {}); }
+function beatNow() { api('POST', '/api/heartbeat', beatBody(), { keepalive: true }).catch(() => {}); }
 const HB_WORKER = `let s = null, at = 0;
 onmessage = e => { s = e.data; at = Date.now(); };
 setInterval(() => {
@@ -3645,11 +3978,11 @@ function showKeepAwake(k) {
   st.title = k.error || '';
 }
 $('kaEnabled').onchange = async e => {
-  const r = await fetch('/api/keep_awake', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: e.target.checked }) });
+  const r = await api('POST', '/api/keep_awake', { enabled: e.target.checked }, { quiet: true });
   if (r.ok) showKeepAwake(await r.json()); else alert(await r.text());
 };
 async function loadPresence() {
-  const { settings } = await (await fetch('/api/presence')).json();
+  const { settings } = await apiJson('GET', '/api/presence');
   showPresenceSettings(settings);
 }
 function showPresenceSettings(st) {
@@ -3659,8 +3992,8 @@ function showPresenceSettings(st) {
   $('holdKeyLabel').textContent = keyName(st.hold_key);
 }
 async function savePresence(patch) {
-  const { settings } = await (await fetch('/api/presence')).json();
-  const r = await fetch('/api/presence', { method: 'POST', body: JSON.stringify({ ...settings, ...patch }) });
+  const { settings } = await apiJson('GET', '/api/presence');
+  const r = await api('POST', '/api/presence', { ...settings, ...patch });
   if (r.ok) showPresenceSettings(await r.json());
 }
 function pickHoldKey(code) {
@@ -3721,7 +4054,10 @@ function showOutputKind(f) {
 
 // Engine link (T-271): no new frame for more than 1 s = an orange warning in the top bar.
 let lastFrameAt = performance.now();
-setInterval(() => { $('linkLost').hidden = performance.now() - lastFrameAt <= 1000; }, 250);
+setInterval(() => {
+  $('linkLost').hidden = performance.now() - lastFrameAt <= 1000;
+  noticeCondition('engine', !$('linkLost').hidden, { level: 'warning', source: 'Studio', text: 'Connexion au moteur perdue', toast: false });
+}, 250);
 
 // ---------- pushed state and binary frames (T-411) ----------
 // The state is pushed by the studio (GET /api/events, on each change) and
@@ -3824,7 +4160,7 @@ function showPoints(points) {
 }
 async function pushFrame() {
   const fetchedAt = performance.now();
-  const r = await fetch('/api/frame.bin' + (LINK.seq === undefined ? '' : '?after=' + LINK.seq), { cache: 'no-store' });
+  const r = await api('GET', '/api/frame.bin' + (LINK.seq === undefined ? '' : '?after=' + LINK.seq), undefined, { cache: 'no-store', quiet: true });
   if (!r.ok) throw new Error('/api/frame.bin ' + r.status);
   LINK.serverVersion = +(r.headers.get('X-State-Version') || 0);
   const fr = decodeFrame(await r.arrayBuffer());
@@ -3841,7 +4177,7 @@ async function pushFrame() {
 }
 async function pollFrame() {
   const fetchedAt = performance.now();
-  const r = await fetch('/api/frame');
+  const r = await api('GET', '/api/frame');
   LINK.serverVersion = +(r.headers.get('X-State-Version') || 0);
   const f = await r.json();
   lastFrameAt = performance.now();
@@ -3899,14 +4235,14 @@ function showFestival(f) {
   ['R', 'G', 'B'].forEach((k, i) => { if (document.activeElement !== $('festGain' + k)) $('festGain' + k).value = f.balance.gains[i]; });
 }
 async function pickPalette(palette) {
-  const r = await fetch('/api/festival/palette', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ palette }) });
+  const r = await api('POST', '/api/festival/palette', { palette });
   if (r.ok) showFestival(await r.json());
 }
 async function sendFestival(patch) {
   if (!festival) return;
   festSentAt = performance.now();
   const body = { quantize: festival.quantize, balance: { ...festival.balance }, ...patch };
-  const r = await fetch('/api/festival', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/festival', body);
   if (r.ok) { festSentAt = 0; showFestival(await r.json()); }
 }
 $('festOwn').onclick = () => pickPalette(null);
@@ -3922,6 +4258,10 @@ function applyState(f, at, pushed) {
   if (!f) return;
   dwellStatus = f.dwell;
   arm = f.arm; pps = f.pps; checklistState = f.checklist;
+  // T-432/T-433: the studio's notices and its « modified » flag.
+  if (f.notices_last !== undefined && f.notices_last !== NC.serverLast) pullNotices(f.notices_last);
+  takeProjectModified(f.project_modified, at);
+  noticeConditions(f);
   showShownet(f.shownet);
   showAudienceMode(f.audience);
   // Ticked or restarted from another page, or the output became (or
@@ -3980,6 +4320,24 @@ function applyState(f, at, pushed) {
   showTimecode(f.timecode);
   showSong(f.timeline, f.timeline_audio);
   tlOnState(f.timeline, f.tempo, at);
+}
+
+// What the banners and the status line show, also recorded in the
+// notification centre (T-432). The banners keep their place: no toast for
+// what already has one (stop, MIDI, DMX, damaged files, engine link).
+function noticeConditions(f) {
+  noticeCondition('estop', !!(f.arm && f.arm.estop), { level: 'error', source: 'Sécurité', text: "Arrêt d'urgence enclenché : réinitialiser pour réarmer", toast: false });
+  const lost = f.output_state === 'lost';
+  noticeCondition('output', lost || !!f.output_error, { level: 'error', source: 'Sortie',
+    text: lost ? 'Sortie perdue : laser désarmé' + (f.output_error ? ' (' + f.output_error + ')' : '') : 'Erreur de sortie : ' + f.output_error });
+  const wifi = f.shownet && f.shownet.wifi;
+  noticeCondition('wifi', !!wifi, { level: 'warning', source: 'Sortie', text: 'La sortie ShowNET passe par le Wi-Fi : branchez un câble réseau' });
+  const scan = !!(f.audience && f.audience.scanning);
+  if (NC.audienceScan !== undefined && NC.audienceScan !== scan) {
+    notify({ level: scan ? 'warning' : 'info', source: 'Sécurité', toast: false,
+      text: scan ? 'Balayage public déverrouillé : les zones Public reçoivent de la lumière atténuée' : 'Retour au-dessus du public' });
+  }
+  NC.audienceScan = scan;
 }
 
 // ---------- 3D beam view (T-275, T-276) ----------
@@ -4076,7 +4434,7 @@ document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setV
 let showMode = false;
 const UNLOCK_HOLD_MS = 1000, CONFIRM_HOLD_MS = 800, LOCKED_FR = 'Verrouillé en mode spectacle';
 let toastTimer = null;
-function notify(text) {
+function flash(text) {
   $('lockToast').textContent = text;
   $('lockToast').hidden = false;
   clearTimeout(toastTimer);
@@ -4105,9 +4463,9 @@ function showShowMode(lock) {
 }
 async function postLock(on) {
   try {
-    const r = await fetch('/api/lock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ show_mode: on, source: 'ui' }) });
-    if (r.ok) showShowMode(await r.json()); else notify(await r.text());
-  } catch { notify('Studio injoignable'); }
+    const r = await api('POST', '/api/lock', { show_mode: on, source: 'ui' }, { quiet: true });
+    if (r.ok) showShowMode(await r.json()); else flash(await r.text());
+  } catch { flash('Studio injoignable'); }
 }
 // Press and hold `btn` for `ms` to run `done` (the button fills
 // meanwhile); let go early, or use the keyboard: only `early` (a hint).
@@ -4136,8 +4494,8 @@ function holdToRun(btn, ms, done, early, active = () => true) {
 }
 // Registered before holdToRun's own click handler, which clears `held`.
 $('lockBtn').addEventListener('click', () => { if (!showMode && !$('lockBtn').dataset.held) postLock(true); });
-holdToRun($('lockBtn'), UNLOCK_HOLD_MS, () => postLock(false), () => notify('Maintenir pour déverrouiller'), () => showMode);
-fetch('/api/lock').then(r => r.json()).then(showShowMode).catch(() => {});
+holdToRun($('lockBtn'), UNLOCK_HOLD_MS, () => postLock(false), () => flash('Maintenir pour déverrouiller'), () => showMode);
+apiJson('GET', '/api/lock').then(showShowMode).catch(() => {});
 
 // ---------- workspaces (T-295) and LIVE panel tabs (T-270) ----------
 // Pure display: switching never posts anything, so the laser, tempo and
@@ -4182,7 +4540,7 @@ document.querySelectorAll('#wsTabs [data-ws-tab]').forEach(b => b.onclick = () =
 document.querySelectorAll('#liveTabs [data-panel-tab]').forEach(b => b.onclick = () => setLivePanel(b.dataset.panelTab));
 // The MIDI status in the top bar leads to the controller settings.
 $('midiStatus').style.cursor = 'pointer';
-$('midiStatus').onclick = () => { if (showMode) return notify(LOCKED_FR); setWorkspace('settings'); $('midiPanel').open = true; };
+$('midiStatus').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('midiPanel').open = true; };
 setWorkspace(remembered(WS_KEY));
 setLivePanel(remembered(PANEL_KEY));
 { const v = remembered(STAGE_KEY); if (v === '3d' || v === 'both') setView(v); }
@@ -4328,7 +4686,7 @@ async function listenClick() {
 
 async function loadMusConfig() {
   const asked = performance.now();
-  try { musConfig = await (await fetch('/api/audio/config')).json(); } catch { return; }
+  try { musConfig = await apiJson('GET', '/api/audio/config'); } catch { return; }
   if (asked >= musSentAt) followSource(musConfig.source);
   const an = musConfig.analysis || {};
   const focus = document.activeElement;
@@ -4376,7 +4734,7 @@ function showAudioGuard(g) {
 }
 
 async function loadDevices() {
-  let r; try { r = await (await fetch('/api/audio/devices')).json(); } catch { return; }
+  let r; try { r = await apiJson('GET', '/api/audio/devices'); } catch { return; }
   const sel = $('musDevice'), cur = musConfig?.device ?? sel.value;
   const names = r.devices.map(d => d.name);
   if (cur && !names.includes(cur)) names.push(cur); // the saved one, even unplugged
@@ -4527,9 +4885,9 @@ async function musicLoop() {
       const analysisOpen = $('musAnalysis').open;
       const spectrum = analysisOpen && mus && mus.source === 'native' && musServerSrc === 'native';
       const asked = performance.now();
-      if (musTick % (spectrum ? 3 : 2) === 0) jobs.push(fetch('/api/audio/state').then(r => r.json()).then(a => showAudioState(a, asked)));
+      if (musTick % (spectrum ? 3 : 2) === 0) jobs.push(apiJson('GET', '/api/audio/state').then(a => showAudioState(a, asked)));
       if (spectrum) {
-        jobs.push(fetch('/api/audio/spectrum').then(r => r.json()).then(sp => drawSpectrum(sp.values)));
+        jobs.push(apiJson('GET', '/api/audio/spectrum').then(sp => drawSpectrum(sp.values)));
       } else if (analysisOpen) drawSpectrum(audio && (musPick || 'browser') === 'browser' ? browserSpectrum() : null);
       if (musTick % 100 === 0 && musTick && musPick === 'native') jobs.push(loadDevices());
       await Promise.all(jobs);
@@ -4583,7 +4941,7 @@ function renderScenes() {
     play.onclick = async () => { await post('/api/scenes/play', { name: sc.name }); await loadState(); };
     // Destructive (T-283): hold to confirm, never a single click.
     holdToRun(del, CONFIRM_HOLD_MS, async () => { await post('/api/scenes/delete', { name: sc.name }); await loadState(); },
-      () => notify('Maintenir pour confirmer'));
+      () => flash('Maintenir pour confirmer'));
     $('sceneList').appendChild(row);
   });
 }
@@ -4610,10 +4968,10 @@ const CQ_KINDS = [['cut', 'Coupe'], ['fade', 'Fondu'], ['fade_through_black', 'F
 const cqOpts = (list, v) => list.map(([k, l]) => `<option value="${k}"${k === v ? ' selected' : ''}>${esc(l)}</option>`).join('');
 async function loadCueLists() {
   try {
-    const v = await (await fetch('/api/cuelists', { cache: 'no-store' })).json();
+    const v = await apiJson('GET', '/api/cuelists', undefined, { cache: 'no-store' });
     cqLists = v.lists || [];
     if (!cqControls.length) {
-      const all = await (await fetch('/api/controls')).json();
+      const all = await apiJson('GET', '/api/controls');
       cqControls = (all.controls || all).filter(c => c.external && c.id !== 'transport.arm' && !c.id.startsWith('list.'));
     }
     cqPlayer = v.player;
@@ -4625,7 +4983,7 @@ function cqSave() {
   clearTimeout(cqSaveTimer);
   cqSaveTimer = setTimeout(async () => {
     if (!cqEdit) return;
-    const r = await fetch('/api/cuelists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cqEdit) });
+    const r = await api('POST', '/api/cuelists', cqEdit, { quiet: true });
     if (r.ok) {
       const v = await r.json();
       cqLists = v.lists; cqPlayer = v.player; $('cqMsg').textContent = '';
@@ -4634,7 +4992,7 @@ function cqSave() {
       if (saved && saved.steps.length === cqEdit.steps.length && saved.steps.some((st, i) => st.id !== cqEdit.steps[i].id)) { cqEdit = structuredClone(saved); renderCueList(); }
     } else {
       $('cqMsg').textContent = await r.text();
-      if (r.status === 423) notify(LOCKED_FR);
+      if (r.status === 423) flash(LOCKED_FR);
     }
   }, 250);
 }
@@ -4643,8 +5001,8 @@ function cqChanged(rerender) {
   cqSave();
 }
 async function cqAct(action, source, body = {}) {
-  const r = await fetch('/api/cuelist/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source, ...body }) });
-  if (!r.ok) { const t = await r.text(); $('cqMsg').textContent = t; notify(t); return false; }
+  const r = await api('POST', '/api/cuelist/' + action, { source, ...body }, { quiet: true });
+  if (!r.ok) { const t = await r.text(); $('cqMsg').textContent = t; flash(t); return false; }
   $('cqMsg').textContent = '';
   showCueList(await r.json());
   refreshLook();
@@ -4823,7 +5181,7 @@ $('cqSelect').onchange = async () => {
 $('cqNew').onclick = async () => {
   const name = (prompt('Nom de la nouvelle liste de cues', 'Liste ' + (cqLists.length + 1)) || '').trim();
   if (!name) return;
-  const r = await fetch('/api/cuelists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, layer: 1, wrap: false, steps: [] }) });
+  const r = await api('POST', '/api/cuelists', { name, layer: 1, wrap: false, steps: [] }, { quiet: true });
   if (!r.ok) { $('cqMsg').textContent = await r.text(); return; }
   await post('/api/cuelist/load', { name });
   await loadCueLists();
@@ -4832,14 +5190,14 @@ holdToRun($('cqDelete'), CONFIRM_HOLD_MS, async () => {
   if (!cqEdit) return;
   await post('/api/cuelists/delete', { name: cqEdit.name });
   await loadCueLists();
-}, () => notify('Maintenir pour confirmer'));
+}, () => flash('Maintenir pour confirmer'));
 $('cqLayer').onchange = () => { if (cqEdit) { cqEdit.layer = +$('cqLayer').value; cqChanged(false); } };
 $('cqWrap').onchange = () => { if (cqEdit) { cqEdit.wrap = $('cqWrap').checked; cqChanged(false); } };
-$('cqAdd').onclick = () => { if (!cqEdit) return notify('Choisissez ou créez une liste'); cqEdit.steps.push({ id: 0, label: '', source: { type: 'black' }, trigger: { type: 'go' }, delay_s: 0, fade_in_s: 1, fade_out_s: 1, transition: 'fade', keep_color: false }); cqChanged(true); };
+$('cqAdd').onclick = () => { if (!cqEdit) return flash('Choisissez ou créez une liste'); cqEdit.steps.push({ id: 0, label: '', source: { type: 'black' }, trigger: { type: 'go' }, delay_s: 0, fade_in_s: 1, fade_out_s: 1, transition: 'fade', keep_color: false }); cqChanged(true); };
 $('cqAddCue').onclick = () => {
-  if (!cqEdit) return notify('Choisissez ou créez une liste');
+  if (!cqEdit) return flash('Choisissez ou créez une liste');
   const id = deck && deck.active && deck.active.length ? deck.active[deck.active.length - 1].cue : null;
-  if (!id) return notify('Aucun cue ne joue');
+  if (!id) return flash('Aucun cue ne joue');
   cqEdit.steps.push({ id: 0, label: presetById.get(id)?.name || '', source: { type: 'cue', id }, trigger: { type: 'go' }, delay_s: 0, fade_in_s: 1, fade_out_s: 1, transition: 'fade', keep_color: false });
   cqChanged(true);
 };
@@ -4870,7 +5228,7 @@ Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
 let testPattern = null, tpTimer = null;
 async function loadTestPatterns() {
   try {
-    const r = await (await fetch('/api/testpattern')).json();
+    const r = await apiJson('GET', '/api/testpattern');
     const sel = $('tpSelect');
     for (const p of r.patterns) sel.add(new Option(p.label, p.id));
     showTestPattern(r.state);
@@ -4887,7 +5245,7 @@ function showTestPattern(tp) {
   $('tpBrightV').textContent = $('tpBright').value + ' %';
 }
 async function postTestPattern(body) {
-  const r = await fetch('/api/testpattern', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/testpattern', body);
   if (r.ok) showTestPattern((await r.json()).state); else console.warn('/api/testpattern', await r.text());
 }
 $('tpSelect').addEventListener('change', () => postTestPattern({ pattern: $('tpSelect').value || null }));
@@ -5050,13 +5408,13 @@ function takeProjection(v) {
   showProjection();
 }
 async function loadProjection() {
-  try { takeProjection(await (await fetch('/api/projection')).json()); } catch (e) { console.warn('/api/projection', e); }
+  try { takeProjection(await apiJson('GET', '/api/projection')); } catch (e) { console.warn('/api/projection', e); }
 }
 async function pzSend(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', path, body, { quiet: true });
   if (r.ok) { $('pzError').textContent = ''; takeProjection(await r.json()); return true; }
   const t = await r.text();
-  if (r.status === 423) notify(t); else $('pzError').textContent = t;
+  if (r.status === 423) flash(t); else $('pzError').textContent = t;
   await loadProjection();
   return false;
 }
@@ -5107,7 +5465,7 @@ $('pzAlign').addEventListener('click', async () => {
 $('pzPanel').addEventListener('toggle', async () => {
   if (!$('pzPanel').open) return;
   try {
-    const j = await (await fetch('/api/outputs')).json(), sel = $('pzOutput');
+    const j = await apiJson('GET', '/api/outputs'), sel = $('pzOutput');
     for (const d of j.devices || []) if (![...sel.options].some(o => o.value === d.id)) sel.add(new Option(`${d.name} (${d.id})`, d.id));
     showProjection();
   } catch { /* the select keeps what it has */ }
@@ -5238,7 +5596,7 @@ async function loadSafetyLog() {
   const day = $('slDay').value;
   let j;
   try {
-    const r = await fetch('/api/safety/log' + (day ? '?date=' + encodeURIComponent(day) : ''));
+    const r = await api('GET', '/api/safety/log' + (day ? '?date=' + encodeURIComponent(day) : ''), undefined, { quiet: true });
     if (!r.ok) { $('slError').textContent = await r.text(); return; }
     j = await r.json();
   } catch { return; }
@@ -5296,7 +5654,7 @@ setInterval(() => { if (activeWs === 'settings' && $('safetyLogPanel').open && !
 async function loadDiag() {
   let j;
   try {
-    const r = await fetch('/api/logs/tail?n=200');
+    const r = await api('GET', '/api/logs/tail?n=200');
     if (!r.ok) return;
     j = await r.json();
   } catch { return; }
@@ -5318,7 +5676,7 @@ $('diagExport').onclick = () => {
 setInterval(() => { if (activeWs === 'settings' && $('diagPanel').open && !document.hidden) loadDiag(); }, 2000);
 
 async function reloadSafety() {
-  const j = await (await fetch('/api/safety')).json();
+  const j = await apiJson('GET', '/api/safety');
   safety = j.settings; sfLoadError = j.load_error;
   showSafety(true);
 }
@@ -5326,8 +5684,7 @@ async function reloadSafety() {
 // what would be loosened, and only « Confirmer l'assouplissement » sends it.
 let sfPending = null;
 async function saveSafety(next, confirm = false) {
-  const r = await fetch('/api/safety', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(confirm ? { ...next, confirm_loosen: true } : next) });
+  const r = await api('POST', '/api/safety', confirm ? { ...next, confirm_loosen: true } : next, { quiet: true });
   if (r.ok) {
     safety = (await r.json()).settings; sfLoadError = null; sfPending = null;
     $('sfLoosen').hidden = true;
@@ -5621,7 +5978,7 @@ function showColor(l) {
   document.querySelectorAll('#chaseSpreads button').forEach(b => b.classList.toggle('active', +b.dataset.cs === cs));
 }
 async function loadPalettes() {
-  palettes = await (await fetch('/api/palettes')).json();
+  palettes = await apiJson('GET', '/api/palettes');
   const all = [...palettes.builtin, ...palettes.user];
   const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
   $('palettes').innerHTML = all.map((p, i) => `<button data-index="${i}" title="${esc(p.name)}">`
@@ -5750,7 +6107,7 @@ function pageColorOf(pg, i) {
 }
 let thumbs = {};
 async function loadPresets() {
-  const r = await (await fetch('/api/presets')).json();
+  const r = await apiJson('GET', '/api/presets');
   presets = r.presets; cueCategories = r.categories;
   presetById = new Map(presets.map(p => [p.id, p]));
   await loadGrid(false);
@@ -5760,7 +6117,7 @@ async function loadPresets() {
   if (!$('pgEditor').hidden) pgSync(); // the cue editor's lists (T-164)
 }
 async function loadThumbs() {
-  try { thumbs = await (await fetch('/api/presets/thumbs', { cache: 'no-store' })).json(); } catch { return; }
+  try { thumbs = await apiJson('GET', '/api/presets/thumbs', undefined, { cache: 'no-store' }); } catch { return; }
   document.querySelectorAll('#cues .cue').forEach(b => drawThumb(b.querySelector('canvas.th'), thumbs[b.dataset.id]));
 }
 // A thumbnail is one hex string, 5 bytes per point: x, y (0..255 = -1..1), r, g, b.
@@ -5799,7 +6156,7 @@ async function playCuePreview(b, id) {
   stopCuePreview();
   const mine = cuePreview = { b, id, timer: 0 };
   let pv;
-  try { pv = await (await fetch('/api/presets/preview?id=' + encodeURIComponent(id), { cache: 'no-store' })).json(); } catch { return; }
+  try { pv = await apiJson('GET', '/api/presets/preview?id=' + encodeURIComponent(id), undefined, { cache: 'no-store' }); } catch { return; }
   if (cuePreview !== mine || !pv.frames || !pv.frames.length) return;
   const canvas = b.querySelector('canvas.th');
   let i = 0;
@@ -5822,11 +6179,11 @@ function stopCuePreview() {
   drawThumb(p.b.querySelector('canvas.th'), thumbs[p.id]);
 }
 async function loadSlots() {
-  slots = (await (await fetch('/api/cues')).json()).slots || {};
+  slots = (await apiJson('GET', '/api/cues')).slots || {};
   renderCues();
 }
 async function loadGrid(render = true) {
-  try { applyGrid(await (await fetch('/api/grid', { cache: 'no-store' })).json(), render); } catch { /* next frame retries */ }
+  try { applyGrid(await apiJson('GET', '/api/grid', undefined, { cache: 'no-store' }), render); } catch { /* next frame retries */ }
 }
 function applyGrid(g, render = true) {
   grid = g;
@@ -5965,11 +6322,11 @@ async function dropOn(page, slot, copy = false) {
 }
 // Grid edits answer with the new grid; a refusal (full page, show mode…) is shown.
 async function gridPost(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', path, body, { quiet: true });
   if (!r.ok) {
     const t = await r.text();
     $('gridMsg').textContent = t;
-    if (r.status === 423) notify(t);
+    if (r.status === 423) flash(t);
     else if ($('gridMenu').hidden) storeMsg(t);
     return false;
   }
@@ -6001,7 +6358,7 @@ $('cuePageAdd').addEventListener('click', () => gridPost('/api/grid/pages', { op
 // clicking its button again, or once a cell is picked.
 let storeMode = false, storeCopyFrom = null;
 function setStoreMode(on) {
-  if (on && showMode) { notify(LOCKED_FR); on = false; }
+  if (on && showMode) { flash(LOCKED_FR); on = false; }
   storeMode = on;
   $('cueStore').setAttribute('aria-pressed', String(on));
   $('cues').classList.toggle('storing', on);
@@ -6020,10 +6377,10 @@ async function storeInto(i) {
   if (!pg || pg.auto) { storeMsg('Cette page suit sa bibliothèque : choisir une autre page.'); return; }
   const p = pg.cells[i] ? presetById.get(pg.cells[i]) : null;
   if (p && p.user && !confirm(`Remplacer « ${p.name} » par le look courant ?`)) return;
-  const r = await fetch('/api/cues/store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: gridPage, slot: i, ...storeBody() }) });
+  const r = await api('POST', '/api/cues/store', { page: gridPage, slot: i, ...storeBody() }, { quiet: true });
   if (!r.ok) {
     const t = await r.text();
-    if (r.status === 423) { notify(t); setStoreMode(false); return; }
+    if (r.status === 423) { flash(t); setStoreMode(false); return; }
     // A built-in cue: refused, with an editable copy offered.
     storeMsg(t, r.status === 409 ? { page: gridPage, slot: i } : null);
     return;
@@ -6035,10 +6392,10 @@ async function storeInto(i) {
   storeMsg(`Look enregistré dans « ${presetById.get(g.cue)?.name || g.cue} ».`);
 }
 async function updateCue() {
-  if (showMode) return notify(LOCKED_FR);
-  const r = await fetch('/api/cues/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(storeBody()) });
+  if (showMode) return flash(LOCKED_FR);
+  const r = await api('POST', '/api/cues/update', storeBody(), { quiet: true });
   const t = await r.text();
-  if (!r.ok) { if (r.status === 423) notify(t); else storeMsg(t); return; }
+  if (!r.ok) { if (r.status === 423) flash(t); else storeMsg(t); return; }
   await loadPresets();
   storeMsg(`« ${JSON.parse(t).name} » mis à jour avec le look courant.`);
 }
@@ -6060,7 +6417,7 @@ let pageMenuAt = null;
 function openPageMenu(i, x, y) {
   const pg = grid.pages[i];
   if (!pg || !pg.editable) return;
-  if (showMode) return notify(LOCKED_FR);
+  if (showMode) return flash(LOCKED_FR);
   pageMenuAt = i;
   $('pageMenuName').textContent = pg.name;
   const m = $('pageMenu');
@@ -6092,7 +6449,7 @@ $('gridPageRename').addEventListener('click', async () => {
   if (await gridPost('/api/grid/page', { action: 'rename', page: gridPage, name })) $('gridPageName').value = '';
 });
 holdToRun($('gridPageDelete'), CONFIRM_HOLD_MS, () => gridPost('/api/grid/page', { action: 'delete', page: gridPage }),
-  () => notify('Maintenir pour confirmer'));
+  () => flash('Maintenir pour confirmer'));
 // Released anywhere: the button may have been re-rendered (page change)
 // while it was held.
 ['pointerup', 'pointercancel'].forEach(ev => window.addEventListener(ev, () => {
@@ -6158,7 +6515,7 @@ $('cueBeatMode').addEventListener('change', () => post('/api/control', { id: 'cu
 let scanPresets = { builtin: [], user: [], default: null, effective: {}, dangling: [] }, scanRev = 0, spSel = 'graphics';
 const scanAll = () => [...scanPresets.builtin, ...scanPresets.user];
 async function loadScanPresets(v) {
-  try { scanPresets = v || await (await fetch('/api/scan-presets', { cache: 'no-store' })).json(); } catch { return; }
+  try { scanPresets = v || await apiJson('GET', '/api/scan-presets', undefined, { cache: 'no-store' }); } catch { return; }
   scanRev++;
   showScanPresets();
 }
@@ -6171,7 +6528,7 @@ function fillScanSelect(sel, none, value) {
   sel.value = value;
 }
 async function postScan(body) {
-  const r = await fetch('/api/scan-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/scan-presets', body, { quiet: true });
   if (!r.ok) { $('spMsg').textContent = await r.text(); return false; }
   await loadScanPresets(await r.json());
   return true;
@@ -6232,7 +6589,7 @@ $('spScan').addEventListener('change', () => spEdit(p => { p.scan_pct = +$('spSc
 let menuCue = null;
 let menuSlot = null;
 function openCueMenu(p, x, y, at) {
-  if (showMode) return notify(LOCKED_FR); // T-283: no cue editing
+  if (showMode) return flash(LOCKED_FR); // T-283: no cue editing
   menuCue = p.id; menuSlot = at;
   const pg = grid.pages[gridPage];
   const own = !!(pg && pg.editable && !pg.auto);
@@ -6313,7 +6670,7 @@ function pollRunning() {
   runTimer = setTimeout(pollRunning, 250);
   if (runBusy || document.hidden) return;
   runBusy = true;
-  fetch('/api/running', { cache: 'no-store' }).then(r => r.json()).then(showRunning).catch(() => {}).finally(() => { runBusy = false; });
+  apiJson('GET', '/api/running', undefined, { cache: 'no-store' }).then(showRunning).catch(() => {}).finally(() => { runBusy = false; });
 }
 function runRow(name, detail, opts = {}) {
   const row = document.createElement('div');
@@ -6373,7 +6730,7 @@ function locateCue(id, page) {
   setTimeout(() => cell.classList.remove('located'), 2000);
 }
 async function runStop(body) {
-  const r = await fetch('/api/running/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/running/stop', body, { quiet: true });
   $('runMsg').textContent = r.ok ? '' : await r.text();
   runKey = '';
   if (r.ok) refreshLook();
@@ -6405,7 +6762,7 @@ $('cueMenuDelete').onclick = () => {
 // editor (T-162) is further down.
 let shows = [], timeline = null;
 async function loadShows() {
-  try { shows = await (await fetch('/api/shows')).json(); } catch { shows = []; }
+  try { shows = await apiJson('GET', '/api/shows'); } catch { shows = []; }
   fillShowSelect($('tlShow'), 'Aucun show', timeline && timeline.name || '');
 }
 function fillShowSelect(sel, none, value) {
@@ -6529,20 +6886,20 @@ function fillTimecode(v) {
   showTimecode(v);
 }
 async function loadTimecode() {
-  try { const r = await fetch('/api/timecode'); if (r.ok) fillTimecode(await r.json()); } catch { /* studio restarting */ }
+  try { const r = await api('GET', '/api/timecode'); if (r.ok) fillTimecode(await r.json()); } catch { /* studio restarting */ }
 }
 async function setTimecode(patch) {
-  const r = await fetch('/api/timecode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+  const r = await api('POST', '/api/timecode', patch, { quiet: true });
   if (r.ok) { $('tcMsg').textContent = ''; fillTimecode(await r.json()); return; }
   const t = await r.text();
-  if (r.status === 423) notify(t); else $('tcMsg').textContent = t;
+  if (r.status === 423) flash(t); else $('tcMsg').textContent = t;
   loadTimecode();
 }
 $('tcArm').onclick = async () => {
   try {
-    const r = await fetch('/api/timecode/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: !(tcState && tcState.armed), source: 'ui' }) });
+    const r = await api('POST', '/api/timecode/arm', { on: !(tcState && tcState.armed), source: 'ui' }, { quiet: true });
     const j = await r.json().catch(() => null);
-    if (!r.ok) notify(j?.error || 'Refusé');
+    if (!r.ok) flash(j?.error || 'Refusé');
     else fillTimecode(j);
   } catch {}
 };
@@ -6569,7 +6926,7 @@ $('tcOffsetNow').onclick = () => {
   // hh:mm:ss:ff → seconds at the rate shown (drop frame: close enough
   // for a start mark; the field can be fine-tuned).
   const m = tcState && tcState.tc && tcState.tc.match(/^(\d+):(\d+):(\d+):(\d+)$/);
-  if (!m) return notify('Aucun timecode reçu');
+  if (!m) return flash('Aucun timecode reçu');
   const fps = { '24': 24, '25': 25, '29.97df': 30000 / 1001, '30': 30 }[tcState.rate] || 25;
   setTcShowOr('offset_s', Math.round(((+m[1] * 60 + +m[2]) * 60 + +m[3] + +m[4] / Math.round(fps)) * 1000) / 1000);
 };
@@ -6581,14 +6938,12 @@ $('tlShow').addEventListener('focus', loadShows);
 $('tlShow').addEventListener('change', async () => {
   $('tlMsg').textContent = '';
   // The editor's unsaved changes (T-162) would be lost.
-  if (timeline && timeline.modified && !confirm(`« ${timeline.name} » a des modifications non enregistrées : les abandonner ?`)) {
-    $('tlShow').value = timeline.name || ''; return;
-  }
+  if (!dropShowChanges()) { $('tlShow').value = (timeline && timeline.name) || ''; return; }
   if ($('tlShow').value) await post('/api/timeline/load', { name: $('tlShow').value });
   else await post('/api/timeline/stop');
 });
 $('tlPlay').onclick = async () => {
-  const r = await fetch('/api/timeline/play', { method: 'POST' });
+  const r = await api('POST', '/api/timeline/play', undefined, { quiet: true });
   $('tlMsg').textContent = r.ok ? '' : await r.text();
 };
 $('tlLoop').onclick = () => post('/api/timeline/loop', { on: !(timeline && timeline.loop) });
@@ -6607,7 +6962,7 @@ loadShows();
 // shows it.
 let songs = [], waveKey = '', waveBusy = false;
 async function loadSongs() {
-  try { songs = (await (await fetch('/api/media/audio')).json()).files; } catch { songs = []; }
+  try { songs = (await apiJson('GET', '/api/media/audio')).files; } catch { songs = []; }
   fillSongSelect();
   fillAutoSongs();
 }
@@ -6655,7 +7010,7 @@ async function drawWave(key, a, length, w) {
   if (!a || !(length > 0)) return;
   waveBusy = true;
   try {
-    const r = await fetch(`/api/timeline/waveform?from=0&to=${length}&px=${w}`);
+    const r = await api('GET', `/api/timeline/waveform?from=0&to=${length}&px=${w}`);
     if (!r.ok) return; // file missing or unreadable: not asked again until something changes
     const wave = await r.json();
     g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#3ddc84';
@@ -6671,7 +7026,7 @@ async function drawWave(key, a, length, w) {
   } catch { waveKey = ''; } finally { waveBusy = false; }
 }
 async function setSong(patch) {
-  const r = await fetch('/api/timeline/audio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+  const r = await api('POST', '/api/timeline/audio', patch, { quiet: true });
   $('tlMsg').textContent = r.ok ? '' : await r.text();
   return r.ok;
 }
@@ -6688,7 +7043,7 @@ $('tlImportFile').addEventListener('change', async () => {
   if (!f) return;
   $('tlMsg').textContent = `Import de « ${f.name} »…`;
   let r;
-  try { r = await fetch('/api/media/audio?name=' + encodeURIComponent(f.name), { method: 'POST', body: f }); }
+  try { r = await api('POST', '/api/media/audio?name=' + encodeURIComponent(f.name), f, { quiet: true }); }
   catch { $('tlMsg').textContent = 'Import impossible : studio injoignable'; return; }
   if (!r.ok) { $('tlMsg').textContent = 'Import refusé : ' + await r.text(); return; }
   const info = await r.json();
@@ -6743,15 +7098,15 @@ function showAutoJob(j) {
   else if (j.state === 'cancelled') autoMsg('Génération annulée : rien n\'a été ouvert.');
 }
 async function autoTick() {
-  try { showAutoJob(await (await fetch('/api/timeline/autoshow')).json()); } catch { /* next tick */ }
+  try { showAutoJob(await apiJson('GET', '/api/timeline/autoshow')); } catch { /* next tick */ }
 }
 async function autoStart(seed) {
   const file = $('tlAutoSong').value;
   if (!file) return;
-  if (timeline && timeline.modified && !confirm(`« ${timeline.name} » a des modifications non enregistrées : le show proposé le remplacera. Continuer ?`)) return;
+  if (!dropShowChanges('le show proposé le remplacera')) return;
   const body = seed == null ? { file } : { file, seed };
   let r;
-  try { r = await fetch('/api/timeline/autoshow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
+  try { r = await api('POST', '/api/timeline/autoshow', body, { quiet: true }); }
   catch { autoMsg('Studio injoignable', true); return; }
   if (!r.ok) { autoMsg(esc(await r.text()), true); return; }
   autoPoll = setInterval(autoTick, 250);
@@ -6764,7 +7119,7 @@ $('tlAuto').onclick = () => autoStart(null);
 $('tlAutoAgain').onclick = () => autoStart(((autoSeed || 0) + 1 + Math.floor(Math.random() * 1e6)) % 4294967296);
 $('tlAutoCancel').onclick = () => post('/api/timeline/autoshow/cancel');
 // A job started earlier (another tab, a reload) is followed too.
-fetch('/api/timeline/autoshow').then(r => r.json()).then(j => {
+apiJson('GET', '/api/timeline/autoshow').then(j => {
   if (j.state === 'running') { autoPoll = setInterval(autoTick, 250); autoButtons(true); }
 }).catch(() => {});
 
@@ -6928,7 +7283,7 @@ async function tlCommit() {
   const body = JSON.stringify({ show: TL.show });
   TL.inflight++;
   try {
-    const r = await fetch('/api/timeline/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+    const r = await api('POST', '/api/timeline/edit', body, { quiet: true });
     if (!r.ok) {
       tlMsg('Modification refusée : ' + await r.text(), true);
       TL.undo.pop();
@@ -6962,7 +7317,7 @@ function tlRedo() {
 async function tlFetch() {
   TL.fetching = true;
   try {
-    const j = await (await fetch('/api/timeline')).json();
+    const j = await apiJson('GET', '/api/timeline');
     if (TL.inflight || TL.drag) return; // an edit went out meanwhile: next frame
     const show = j.show, name = show ? show.name : null;
     if (name !== TL.name) {
@@ -7093,7 +7448,7 @@ function tlCurveAt(keys, x) {
 async function tlLoadEnvTargets() {
   if (TL.envTargets || TL.envLoading) return;
   TL.envLoading = true;
-  try { TL.envTargets = (await (await fetch('/api/lfos')).json()).targets || []; TL.headsKey = ''; TL.need = true; } catch { /* tried again later */ } finally { TL.envLoading = false; }
+  try { TL.envTargets = (await apiJson('GET', '/api/lfos')).targets || []; TL.headsKey = ''; TL.need = true; } catch { /* tried again later */ } finally { TL.envLoading = false; }
 }
 const tlEnvTarget = id => (TL.envTargets || []).find(t => t.id === id);
 const tlEnvLabel = id => { const t = tlEnvTarget(id); return t ? t.label : `${id} (inconnu, ignoré)`; };
@@ -7309,12 +7664,21 @@ $('tlEmptyNew').onclick = async () => {
   tlMsg('Nommez le show, puis Créer (ou Entrée).');
 };
 
+// Before a show replaces the one in the editor (another show, a new one,
+// an example, a proposed show): its unsaved changes (T-162) would be lost.
+// One question for all (T-433); true = go on.
+function dropShowChanges(why = 'les abandonner') {
+  const st = lastTimeline || (TL.state && { name: TL.name, modified: TL.state.modified });
+  if (!st || !st.name || !st.modified) return true;
+  return confirm(`« ${st.name} » a des modifications non enregistrées : ${why} ?`);
+}
+
 // --- built-in examples (T-124 to T-129): read-only, opened as a copy ---
 let tlExamples = null;
 async function openTlExamples() {
   $('tlExDialog').hidden = false;
   if (!tlExamples) {
-    try { tlExamples = await (await fetch('/api/timeline/examples')).json(); } catch { tlExamples = null; }
+    try { tlExamples = await apiJson('GET', '/api/timeline/examples'); } catch { tlExamples = null; }
   }
   $('tlExList').innerHTML = (tlExamples || []).map(x => `<button class="tl-ex" data-ex="${esc(x.id)}">
       <b>${esc(x.title)}</b><span class="meta">${+x.bpm} BPM conseillé · ${x.bars} mesures</span><span class="desc">${esc(x.description)}</span></button>`).join('')
@@ -7331,8 +7695,8 @@ $('tlExList').addEventListener('click', async e => {
   const b = e.target.closest('[data-ex]');
   if (!b) return;
   const x = (tlExamples || []).find(q => q.id === b.dataset.ex);
-  if (TL.state && TL.state.modified && !confirm(`« ${TL.name} » a des modifications non enregistrées : les abandonner ?`)) return;
-  const r = await fetch('/api/timeline/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ example: b.dataset.ex }) });
+  if (!dropShowChanges()) return;
+  const r = await api('POST', '/api/timeline/load', { example: b.dataset.ex }, { quiet: true });
   if (!r.ok) { tlMsg(await r.text(), true); return; }
   closeTlExamples();
   $('tlNewRow').hidden = true;
@@ -7342,8 +7706,8 @@ $('tlExList').addEventListener('click', async e => {
 async function tlNewShow() {
   const name = $('tlNewName').value.trim();
   if (!name) { tlMsg('Donnez un nom au show.', true); return; }
-  if (TL.state && TL.state.modified && !confirm(`« ${TL.name} » a des modifications non enregistrées : les abandonner ?`)) return;
-  const r = await fetch('/api/timeline/new', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, time_base: $('tlNewBase').value }) });
+  if (!dropShowChanges()) return;
+  const r = await api('POST', '/api/timeline/new', { name, time_base: $('tlNewBase').value }, { quiet: true });
   if (!r.ok) { tlMsg(await r.text(), true); return; }
   $('tlNewRow').hidden = true; $('tlNewName').value = '';
   tlMsg(`Show « ${name} » créé : glissez des cues de la bibliothèque sur les pistes.`);
@@ -7369,7 +7733,7 @@ $('tlSave').onclick = async () => {
     if (name === null) return;
     body = JSON.stringify({ name: name.trim() });
   }
-  const r = await fetch('/api/timeline/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  const r = await api('POST', '/api/timeline/save', body, { quiet: true });
   if (!r.ok) { tlMsg('Enregistrement impossible : ' + await r.text(), true); return; }
   const st = await r.json();
   TL.rev = st.rev; tlShowFlags(st);
@@ -7656,7 +8020,7 @@ function tlWaveWanted() {
   clearTimeout(tlWaveTimer);
   tlWaveTimer = setTimeout(async () => {
     try {
-      const r = await fetch(`/api/timeline/waveform?from=${TL.t0}&to=${u1}&px=${Math.max(1, Math.min(8192, W))}`);
+      const r = await api('GET', `/api/timeline/waveform?from=${TL.t0}&to=${u1}&px=${Math.max(1, Math.min(8192, W))}`);
       if (r.ok) { TL.wave = await r.json(); TL.need = true; }
     } catch { TL.waveKey = ''; }
   }, 120);
@@ -8116,7 +8480,7 @@ const lfoEsc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt
 const lfoShape = (wave, p) => ({ sine: Math.sin(2 * Math.PI * p), triangle: p < 0.25 ? 4 * p : p < 0.75 ? 2 - 4 * p : 4 * p - 4,
   square: p < 0.5 ? 1 : -1, saw_up: 2 * p - 1, saw_down: 1 - 2 * p, random: 0 })[wave];
 async function loadLfos() {
-  const r = await (await fetch('/api/lfos')).json();
+  const r = await apiJson('GET', '/api/lfos');
   lfos = r.lfos; lfoTargets = r.targets; lfoMax = r.max;
   renderLfos();
 }
@@ -8196,7 +8560,7 @@ const AR_CURVES = [['linear', 'Linéaire'], ['square', 'Carré (plus de punch)']
 let aroutes = [], arMix = 0.5, arSources = [], arTargets = [], arMax = 16, arFlicker = [];
 const arEvent = id => arSources.some(s => s.id === id && s.event);
 async function loadRoutes() {
-  const r = await (await fetch('/api/audio/routes')).json();
+  const r = await apiJson('GET', '/api/audio/routes');
   aroutes = r.routes; arMix = r.mix; arSources = r.sources; arTargets = r.targets; arMax = r.max; arFlicker = r.flicker ?? [];
   $('musPreset').value = r.preset ?? '';
   renderRoutes();
@@ -8296,7 +8660,7 @@ function showRoutes(meters) {
 // ---------- audio presets (T-239) ----------
 // One click replaces the audio routes by a ready-made set.
 async function loadAudioPresets() {
-  const r = await (await fetch('/api/audio/presets')).json();
+  const r = await apiJson('GET', '/api/audio/presets');
   const sel = $('musPreset');
   sel.innerHTML = '<option value="">Personnalisé</option>' + r.presets.map(p => `<option value="${lfoEsc(p.id)}" title="${lfoEsc(p.hint)}">${lfoEsc(p.name)}</option>`).join('');
   sel.value = r.current ?? '';
@@ -8305,8 +8669,8 @@ $('musPreset').addEventListener('change', async () => {
   const id = $('musPreset').value, hint = $('musPresetHint');
   hint.textContent = ''; hint.classList.remove('warn');
   if (!id) return; // « Personnalisé » : rien à appliquer
-  const r = await fetch('/api/audio/preset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
-  if (!r.ok) { const t = await r.text(); if (r.status === 423) notify(t); hint.textContent = t; hint.classList.add('warn'); }
+  const r = await api('POST', '/api/audio/preset', { id }, { quiet: true });
+  if (!r.ok) { const t = await r.text(); if (r.status === 423) flash(t); hint.textContent = t; hint.classList.add('warn'); }
   else {
     const v = await r.json();
     if (v.warnings?.length) { hint.textContent = v.warnings.join(' · '); hint.classList.add('warn'); }
@@ -8323,13 +8687,13 @@ const TRG_QUANT = [['off', 'Tout de suite'], ['beat', 'Au prochain temps'], ['ba
 let triggers = [], trgMax = 16, trgFired = [];
 const trgKind = v => typeof v === 'string' ? v : Object.keys(v)[0];
 async function loadTriggers() {
-  const r = await (await fetch('/api/audio/triggers')).json();
+  const r = await apiJson('GET', '/api/audio/triggers');
   triggers = r.triggers; trgMax = r.max;
   renderTriggers(); showTriggers(r.status);
 }
 async function saveTriggers() {
-  const r = await fetch('/api/audio/triggers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ triggers }) });
-  if (!r.ok) { const t = await r.text(); notify(t); await loadTriggers(); return; }
+  const r = await api('POST', '/api/audio/triggers', { triggers }, { quiet: true });
+  if (!r.ok) { const t = await r.text(); flash(t); await loadTriggers(); return; }
   const v = await r.json();
   triggers = v.triggers; renderTriggers();
 }
@@ -8404,7 +8768,7 @@ $('trgOn').addEventListener('change', async () => {
   trgOnSentAt = performance.now();
   if (!await post('/api/control', { id: 'audio.triggers.enabled', value: on ? 1 : 0 })) {
     $('trgOn').checked = !on;
-    notify('Automatisme audio impossible : arrêt d\'urgence enclenché ?');
+    flash('Automatisme audio impossible : arrêt d\'urgence enclenché ?');
   }
   trgOnAnsweredAt = performance.now();
 });
@@ -8462,7 +8826,7 @@ let pjModels = [];
 // The projector whose caps, sheet and colours are shown (T-277).
 const pwTargetId = () => $('pwTarget').value || 'main';
 async function reloadOutputs() {
-  const j = await (await fetch('/api/outputs/limits')).json();
+  const j = await apiJson('GET', '/api/outputs/limits');
   outputCfg = j.outputs.find(o => o.id === pwTargetId()) || j.outputs.find(o => o.id === j.active); pwLoadError = j.load_error;
   if (!pjModels.length && j.models) {
     pjModels = j.models;
@@ -8487,8 +8851,7 @@ function pjFromControls() {
 }
 async function saveOutputs(body, confirm = false) {
   body = { ...body, id: pwTargetId() };
-  const r = await fetch('/api/outputs/limits', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(confirm ? { ...body, confirm_loosen: true } : body) });
+  const r = await api('POST', '/api/outputs/limits', confirm ? { ...body, confirm_loosen: true } : body, { quiet: true });
   if (r.ok) {
     outputCfg = (await r.json()).output; pwLoadError = null; pwPending = null;
     $('pwLoosen').hidden = true;
@@ -8595,13 +8958,12 @@ function showOutColor(force = false) {
 }
 async function reloadOutColor() {
   try {
-    const r = await fetch('/api/outputs/color?output=' + encodeURIComponent(pwTargetId()));
+    const r = await api('GET', '/api/outputs/color?output=' + encodeURIComponent(pwTargetId()));
     if (r.ok) { outColor = await r.json(); showOutColor(true); }
   } catch (e) { console.warn('/api/outputs/color', e); }
 }
 async function saveOutColor(color, confirm = false) {
-  const r = await fetch('/api/outputs/color?output=' + encodeURIComponent(pwTargetId()), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(confirm ? { color, confirm_loosen: true } : { color }) });
+  const r = await api('POST', '/api/outputs/color?output=' + encodeURIComponent(pwTargetId()), confirm ? { color, confirm_loosen: true } : { color }, { quiet: true });
   $('ocError').textContent = '';
   if (r.ok) {
     outColor = await r.json(); ocPending = null; $('ocLoosen').hidden = true;
@@ -8699,32 +9061,32 @@ function renderDeviceList(list, j) {
   }
 }
 async function reloadDevices() {
-  try { showDevices(await (await fetch('/api/outputs')).json()); } catch { /* next try */ }
+  try { showDevices(await apiJson('GET', '/api/outputs')); } catch { /* next try */ }
 }
 async function selectOutput(id) {
-  const r = await fetch('/api/outputs/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, source: 'ui' }) });
+  const r = await api('POST', '/api/outputs/select', { id, source: 'ui' }, { quiet: true });
   if (r.ok) showDevices(await r.json());
   else { $('devStatus').textContent = await r.text(); $('devStatus').classList.add('sf-error'); }
 }
 $('devScan').addEventListener('click', async () => {
-  let j = await (await fetch('/api/outputs/scan', { method: 'POST' })).json();
+  let j = await apiJson('POST', '/api/outputs/scan');
   showDevices(j);
   for (let i = 0; j.scanning && i < 40; i++) {
     await new Promise(r => setTimeout(r, 250));
-    j = await (await fetch('/api/outputs')).json();
+    j = await apiJson('GET', '/api/outputs');
     showDevices(j);
   }
 });
 $('outDisconnect').addEventListener('click', () => selectOutput(null));
 $('outAuto').addEventListener('change', async () => {
-  const r = await fetch('/api/outputs/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_reconnect: $('outAuto').checked }) });
+  const r = await api('POST', '/api/outputs/config', { auto_reconnect: $('outAuto').checked });
   if (r.ok) showDevices(await r.json());
 });
 // ShowNET SD card over Art-Net (T-301): the box's address is typed, never
 // searched for. Saved only while that output is disconnected; the box then
 // appears in the list above. Its live report comes with every frame.
 async function loadArtnet() {
-  try { showArtnet(await (await fetch('/api/outputs/artnet', { cache: 'no-store' })).json()); } catch { /* next time */ }
+  try { showArtnet(await apiJson('GET', '/api/outputs/artnet', undefined, { cache: 'no-store' })); } catch { /* next time */ }
 }
 function showArtnet(j) {
   const c = j.config;
@@ -8749,7 +9111,7 @@ $('anSave').addEventListener('click', async () => {
     zone_intensity: +$('anZoneLevel').value || 0,
     follow_size: $('anFollowSize').checked,
   };
-  const r = await fetch('/api/outputs/artnet', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/outputs/artnet', body, { quiet: true });
   if (r.ok) {
     const j = await r.json();
     showArtnet(j);
@@ -8792,6 +9154,8 @@ function showDataWarnings(dw) {
   const list = ((dw && dw.warnings) || []).filter(w => !w.acknowledged);
   const box = $('dataWarn');
   box.hidden = !list.length;
+  noticeCondition('data', list.length > 0, { level: list.some(w => w.safety) ? 'error' : 'warning', source: 'Réglages', toast: false,
+    text: list.length === 1 ? list[0].message : `${list.length} fichiers de données illisibles, valeurs par défaut utilisées` });
   box.innerHTML = '';
   if (!list.length) return;
   const blocked = ' L\'armement est bloqué tant que vous n\'avez pas validé.';
@@ -8820,11 +9184,11 @@ function showDataWarnings(dw) {
   }
 }
 async function ackDataWarning(body) {
-  const r = await fetch('/api/data/warnings/ack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/data/warnings/ack', body);
   if (r.ok) { showDataWarnings(await r.json()); reloadSafety(); }
 }
 async function dataWarnLoop() {
-  try { showDataWarnings(await (await fetch('/api/data/warnings')).json()); } catch { /* server gone */ }
+  try { showDataWarnings(await apiJson('GET', '/api/data/warnings')); } catch { /* server gone */ }
   setTimeout(dataWarnLoop, 5000);
 }
 
@@ -8844,7 +9208,7 @@ function showAudienceMode(a) {
 }
 async function reloadAudience() {
   try {
-    const r = await fetch('/api/audience');
+    const r = await api('GET', '/api/audience');
     if (r.ok) showAudience(await r.json());
   } catch { /* server gone */ }
 }
@@ -8893,7 +9257,7 @@ $('audSeg').addEventListener('click', async e => {
   $('audError').textContent = '';
   if (b.dataset.aud === 'above') {
     audWizardOpen = false;
-    const r = await fetch('/api/audience', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'above', source: 'ui' }) });
+    const r = await api('POST', '/api/audience', { mode: 'above', source: 'ui' });
     if (r.ok) showAudience(await r.json());
   } else if (!(audienceMode && audienceMode.scanning)) {
     audWizardOpen = true; $('audPhrase').value = '';
@@ -8902,8 +9266,7 @@ $('audSeg').addEventListener('click', async e => {
 });
 $('audCancel').onclick = () => { audWizardOpen = false; $('audWizard').hidden = true; $('audPhrase').value = ''; $('audError').textContent = ''; };
 $('audUnlock').onclick = async () => {
-  const r = await fetch('/api/audience', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: 'scanning', phrase: $('audPhrase').value, source: 'ui' }) });
+  const r = await api('POST', '/api/audience', { mode: 'scanning', phrase: $('audPhrase').value, source: 'ui' }, { quiet: true });
   $('audPhrase').value = '';
   if (r.ok) { $('audError').textContent = ''; audWizardOpen = false; showAudience(await r.json()); return; }
   if (r.status === 409) {
@@ -8919,7 +9282,7 @@ setInterval(() => { if (audWizardOpen && activeWs === 'settings' && !document.hi
 const CL_WHEN = { always: 'Toujours', outdoor: 'Extérieur', audience_scan: 'Balayage du public' };
 let checklist = null, clEditing = null, clOpTimer = null;
 async function clPost(action, body) {
-  const r = await fetch('/api/checklist/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  const r = await api('POST', '/api/checklist/' + action, body ?? {}, { quiet: true });
   $('clError').textContent = '';
   if (r.ok) { showChecklist(await r.json()); return true; }
   if (r.status === 409) {
@@ -8935,7 +9298,7 @@ async function clPost(action, body) {
   return false;
 }
 async function reloadChecklist() {
-  const r = await fetch('/api/checklist');
+  const r = await api('GET', '/api/checklist');
   if (r.ok) showChecklist(await r.json());
 }
 function openChecklist() {
@@ -9053,7 +9416,7 @@ const VN_PROJ = { vnPosX: p => [p.pos_m, 0], vnPosY: p => [p.pos_m, 1], vnPosZ: 
 const VN_STATE = { connected: 'connectée', connecting: 'connexion…', lost: 'perdue', available: 'non connectée' };
 async function reloadVenue() {
   try {
-    const r = await fetch('/api/venue');
+    const r = await api('GET', '/api/venue');
     if (r.ok) applyVenue(await r.json());
   } catch (e) { console.warn('/api/venue', e); }
 }
@@ -9136,14 +9499,14 @@ async function pollFrames3d() {
   clearTimeout(vnFramesTimer);
   if (!show3d || !view3d || !venue || venue.projectors.length <= 1) return;
   try {
-    const j = await (await fetch('/api/frames', { cache: 'no-store' })).json();
+    const j = await apiJson('GET', '/api/frames', undefined, { cache: 'no-store' });
     j.frames.forEach((f, i) => { if (i > 0) view3d.setProjectorFrame(i, f.points); });
   } catch { /* next time */ }
   vnFramesTimer = setTimeout(pollFrames3d, 100);
 }
 async function saveVenue(body = venue, path = '/api/venue') {
   $('vnError').textContent = '';
-  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', path, body, { quiet: true });
   if (r.ok) { applyVenue(await r.json()); pollFrames3d(); return true; }
   const msg = r.status === 409 && (r.headers.get('content-type') || '').includes('json') ? (await r.json()).error : await r.text();
   await reloadVenue();
@@ -9184,13 +9547,13 @@ setInterval(() => { if (activeWs === 'settings' && $('venuePanel').open && !vnTi
 $('venuePanel').addEventListener('toggle', async () => {
   venueTo3d();
   if (!$('venuePanel').open) return;
-  try { vnDevices = (await (await fetch('/api/outputs')).json()).devices || []; } catch { /* keep the list */ }
+  try { vnDevices = (await apiJson('GET', '/api/outputs')).devices || []; } catch { /* keep the list */ }
   reloadVenue();
 });
 
 // ---------- boot ----------
 async function loadState() {
-  const st = await (await fetch('/api/state')).json();
+  const st = await apiJson('GET', '/api/state');
   showDataWarnings(st.data_warnings);
   safety = st.safety; showSafety();
   reloadSafety();
@@ -9232,10 +9595,10 @@ function midiNow() { clearTimeout(midiTimer); midiLoop(); }
 async function midiLoop() {
   clearTimeout(midiTimer);
   try {
-    const m = await (await fetch('/api/midi')).json();
+    const m = await apiJson('GET', '/api/midi');
     // Again when a device uses a profile we don't know yet (a learn made a « -perso » copy).
     if (!midiProfiles.length || m.devices.some(d => !midiProfiles.some(p => p.slug === d.profile))) {
-      midiProfiles = await (await fetch('/api/midi/profiles')).json();
+      midiProfiles = await apiJson('GET', '/api/midi/profiles');
       midiKey = '';
     }
     const live = m.devices.filter(d => d.connected);
@@ -9247,6 +9610,7 @@ async function midiLoop() {
     const lost = m.devices.filter(d => d.lost);
     $('midiLost').textContent = 'Contrôleur MIDI déconnecté' + (lost.length ? ' : ' + lost.map(d => d.name).join(', ') : '');
     $('midiLost').classList.toggle('on', lost.length > 0);
+    noticeCondition('midi', lost.length > 0, { level: 'warning', source: 'MIDI', text: $('midiLost').textContent, toast: false });
     if (m.safety) { $('midiAllowArm').checked = m.safety.allow_arm; $('midiBlackoutLost').checked = m.safety.blackout_on_disconnect; }
     // Only rebuild the list when something changed, so an open menu isn't reset.
     const key = JSON.stringify([m.enabled, m.devices.map(d => [d.name, d.connected, d.enabled, d.model, d.profile, d.profile_error, d.pad_colors, d.pulse_by_studio]), m.errors]);
@@ -9311,7 +9675,7 @@ function showActivity(m) {
 }
 // By port (« Exporter le profil ») or slug (« Exporter la disposition », T-210).
 async function exportProfile(port, wanted) {
-  const r = await fetch('/api/midi/profile/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(wanted ? { slug: wanted } : { port }) });
+  const r = await api('POST', '/api/midi/profile/export', wanted ? { slug: wanted } : { port }, { quiet: true });
   if (!r.ok) { showBanner(await r.text(), 5000); return; }
   const { slug, profile } = await r.json();
   const a = document.createElement('a');
@@ -9330,7 +9694,7 @@ $('midiImportFile').onchange = async e => {
   let profile;
   try { profile = JSON.parse(await file.text()); } catch (err) { showBanner(`Profil illisible : ${file.name} n'est pas un fichier JSON`, 5000); return; }
   const slug = file.name.replace(/\.json$/i, '');
-  const r = await fetch('/api/midi/profile/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile, slug, port: importPort }) });
+  const r = await api('POST', '/api/midi/profile/import', { profile, slug, port: importPort }, { quiet: true });
   if (!r.ok) { showBanner(await r.text(), 6000); return; }
   const out = await r.json();
   showBanner(`Profil importé : ${out.slug}` + (importPort ? ` (utilisé par ${importPort})` : ''), 4000);
@@ -9391,7 +9755,7 @@ function renderMidi(m) {
 // it in the port's profile. Échap cancels (and still stops the laser).
 const MODE_FR = { trigger: 'Déclencher', toggle: 'Bascule', momentary: 'Maintenu', absolute: 'Absolu', relative: 'Relatif', grid: 'Grille' };
 let controlLabels = {}, midiMaps = [], learnMode = false, learnBusy = false, seenLearn = -1, bannerTimer = null, menuControl = null;
-fetch('/api/controls').then(r => r.json()).then(list => {
+apiJson('GET', '/api/controls').then(list => {
   for (const c of (list.controls || list)) {
     controlLabels[c.id] = c.label_fr;
     if (c.kind?.type === 'continuous') controlDefaults[c.id] = c.kind.default;
@@ -9402,14 +9766,14 @@ const mapLabel = mp => mp.message + (mp.channel != null ? ` · can. ${mp.channel
 
 async function startLearn(target, shift) {
   closeMidiMenu();
-  const r = await fetch('/api/midi/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target, shift }) });
+  const r = await api('POST', '/api/midi/learn', { target, shift }, { quiet: true });
   if (!r.ok) { showBanner(await r.text(), 6000); return; }
   learnBusy = true;
   midiNow();
 }
 async function forgetMidi(target) {
   closeMidiMenu();
-  const r = await fetch('/api/midi/mapping/forget', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target }) });
+  const r = await api('POST', '/api/midi/mapping/forget', { target });
   const n = r.ok ? (await r.json()).removed : 0;
   showBanner(n ? `Affectation MIDI oubliée : ${labelOf(target)}` : `Aucune affectation MIDI pour ${labelOf(target)}`, 3000);
   midiNow();
@@ -9494,7 +9858,7 @@ function renderMappings() {
     ? `<div class="mmap"><span class="h">Message</span><span class="h">Cible</span><span class="h">Mode</span><span class="h">LED</span><span></span>${rows}</div>`
     : '<div class="hint">Aucune affectation. Clic droit sur un contrôle → « Apprendre MIDI ».</div>';
   const update = async (mp, patch) => {
-    const r = await fetch('/api/midi/mapping/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port: mp.port, index: mp.index, ...patch }) });
+    const r = await api('POST', '/api/midi/mapping/update', { port: mp.port, index: mp.index, ...patch }, { quiet: true });
     if (!r.ok) showBanner(await r.text(), 5000);
     midiNow();
   };
@@ -9536,7 +9900,7 @@ document.addEventListener('contextmenu', e => {
   // Cues keep their own menu (« Propriétés du cue »), which has the MIDI entries.
   if (!el || el.closest('#cues')) return;
   e.preventDefault(); e.stopPropagation();
-  if (showMode) return notify(LOCKED_FR); // T-283: no MIDI learn
+  if (showMode) return flash(LOCKED_FR); // T-283: no MIDI learn
   openMidiMenu(el.dataset.control, e.clientX, e.clientY);
 }, true);
 document.addEventListener('pointerdown', e => {
@@ -9583,7 +9947,7 @@ const vapcEls = () => vapc ? vapc.elements : [];
 const vapcEl = id => vapcEls().find(e => e.id === id);
 
 async function vapcLoadLayout() {
-  const l = await (await fetch('/api/midi/virtual')).json();
+  const l = await apiJson('GET', '/api/midi/virtual');
   vapcLayoutAt = Date.now();
   const key = JSON.stringify(l);
   if (key === vapcKey) return;
@@ -9597,7 +9961,7 @@ async function vapcLoop() {
   if (visible) {
     try {
       if (!vapc || Date.now() - vapcLayoutAt > 2000) await vapcLoadLayout();
-      const L = await (await fetch('/api/midi/leds')).json();
+      const L = await apiJson('GET', '/api/midi/leds');
       if (L.model !== vapc.model || L.port !== vapc.port) await vapcLoadLayout();
       vapcLeds = L;
       vapcPaint();
@@ -9725,10 +10089,10 @@ function vapcPaint() {
 }
 
 async function vapcSend(body) {
-  const r = await fetch('/api/midi/virtual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/midi/virtual', body, { quiet: !!body.learn });
   if (!r.ok) {
     const t = await r.text();
-    if (r.status === 423) notify(t);
+    if (r.status === 423) flash(t);
     else if (body.learn) showBanner(t, 5000);
     else console.warn('/api/midi/virtual', t);
   }
@@ -9832,12 +10196,12 @@ function vapcTipMove(ev) {
 // Right click: « Apprendre ici » (pick a control, the element is bound to
 // it in the profile the drawing uses) or « Retirer l'affectation ».
 async function vapcOpenMenu(e, x, y) {
-  if (showMode) return notify(LOCKED_FR); // T-283: no MIDI learn
+  if (showMode) return flash(LOCKED_FR); // T-283: no MIDI learn
   $('vapcTip').hidden = true;
   vapcMenuEl = e;
   if (!vapcTargets) {
     try {
-      const list = await (await fetch('/api/controls')).json();
+      const list = await apiJson('GET', '/api/controls');
       vapcTargets = (list.controls || list).filter(c => c.external && c.id !== 'transport.arm' && !c.id.startsWith('grid.'));
     } catch (err) { vapcTargets = []; }
   }
@@ -9868,7 +10232,7 @@ $('vapcMenuLearn').onclick = async () => {
   closeVapcMenu();
   if (!e || !v) return;
   const [target, args] = v.startsWith('grid:') ? ['grid', { slot: +v.slice(5) }] : [v, null];
-  const r = await fetch('/api/midi/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target, args, shift: $('vapcMenuShift').checked }) });
+  const r = await api('POST', '/api/midi/learn', { target, args, shift: $('vapcMenuShift').checked }, { quiet: true });
   if (!r.ok) { showBanner(await r.text(), 6000); return; }
   await vapcSend({ id: e.id, learn: true });
   midiNow();
@@ -9878,7 +10242,7 @@ async function vapcUnmap(shift) {
   const e = vapcMenuEl;
   closeVapcMenu();
   if (!e) return;
-  const r = await fetch('/api/midi/virtual/unmap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: e.id, shift }) });
+  const r = await api('POST', '/api/midi/virtual/unmap', { id: e.id, shift }, { quiet: true });
   showBanner(r.ok ? `Affectation retirée : ${e.label}${shift ? ' (Shift)' : ''}` : await r.text(), 3000);
   midiNow();
   vapcNow();
@@ -9939,10 +10303,10 @@ function showNetin(n) {
   }));
 }
 async function loadNetin() {
-  try { const r = await fetch('/api/netin'); if (r.ok) showNetin(await r.json()); } catch {}
+  try { const r = await api('GET', '/api/netin'); if (r.ok) showNetin(await r.json()); } catch {}
 }
 async function saveNetin(patch) {
-  const r = await fetch('/api/netin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+  const r = await api('POST', '/api/netin', patch, { quiet: true });
   $('netinError').textContent = r.ok ? '' : await r.text();
   if (r.ok) showNetin(await r.json()); else loadNetin();
 }
@@ -9961,7 +10325,7 @@ $('netinFade').onchange = e => saveNetin({ loss: { fade_ms: Math.round(+e.target
 // sACN, the free patch and the DMX monitor (T-406).
 let dmxIfaces = [], dmxMapsKey = '';
 async function loadDmxIfaces() {
-  try { const r = await fetch('/api/dmx/interfaces'); if (r.ok) dmxIfaces = await r.json(); } catch {}
+  try { const r = await api('GET', '/api/dmx/interfaces'); if (r.ok) dmxIfaces = await r.json(); } catch {}
 }
 function showDmxInput(n) {
   const c = n.config, sc = c.sacn;
@@ -10094,7 +10458,7 @@ $('dmxFixChart').onclick = async () => {
   const box = $('dmxFixChartBox');
   if (!box.hidden) { box.hidden = true; $('dmxFixChart').setAttribute('aria-expanded', 'false'); return; }
   let j;
-  try { const r = await fetch('/api/dmx/personality'); if (!r.ok) return; j = await r.json(); } catch { return; }
+  try { const r = await api('GET', '/api/dmx/personality'); if (!r.ok) return; j = await r.json(); } catch { return; }
   box.innerHTML = j.modes.map(m => `<h4>${esc(m.label)} (table v${j.version})</h4><table><tr><th>Canal</th><th>Nom</th><th>Défaut</th><th>Valeurs</th></tr>${
     m.channels.map(c => `<tr><td>${c.channel}</td><td>${esc(c.label)}${c.smoothed ? ' <span class="hint">(lissé)</span>' : ''}</td><td>${c.default}</td><td>${esc(c.values)}</td></tr>`).join('')}</table>`).join('');
   box.hidden = false; $('dmxFixChart').setAttribute('aria-expanded', 'true');
@@ -10109,7 +10473,7 @@ const FIX_COLORS = ['var(--accent-2)', 'var(--violet)', 'var(--warn)', 'var(--ok
 async function loadDmxMonitor() {
   const u = Math.round(+$('dmxMonU').value) || 0;
   let m;
-  try { const r = await fetch('/api/dmx/monitor?universe=' + u); if (!r.ok) return; m = await r.json(); } catch { return; }
+  try { const r = await api('GET', '/api/dmx/monitor?universe=' + u); if (!r.ok) return; m = await r.json(); } catch { return; }
   const grid = $('dmxMonGrid');
   if (grid.children.length !== 512) grid.replaceChildren(...Array.from({ length: 512 }, (_, i) => { const c = document.createElement('span'); c.title = 'Canal ' + (i + 1); return c; }));
   const vals = m.values || [];
@@ -10171,6 +10535,7 @@ function showExt(x) {
   pill.title = (d.lost ? 'Signal DMX perdu' : d.receiving ? `DMX reçu (${d.sources} source(s))` : 'DMX : en attente de données') + ' · clic = RÉGLAGES › Entrées réseau';
   $('dmxLost').textContent = 'Signal DMX perdu — ' + (d.lost_source || '');
   $('dmxLost').classList.toggle('on', !!d.lost);
+  noticeCondition('dmx', !!d.lost, { level: 'warning', source: 'MIDI', text: $('dmxLost').textContent, toast: false });
   if ($('extPanel').open) renderExt(x);
 }
 function renderExt(x) {
@@ -10199,25 +10564,25 @@ $('extTable').addEventListener('change', async e => {
   const groups = [...tr.querySelectorAll('[data-set]:checked')].flatMap(el => ext.sets.find(set => set.id === el.dataset.set).groups);
   const body = { scopes: [{ source: tr.dataset.src, groups, require_access: tr.querySelector('[data-access]').checked }] };
   e.target.blur();
-  const r = await fetch('/api/external/scopes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await api('POST', '/api/external/scopes', body, { quiet: true });
   $('extError').textContent = r.ok ? '' : await r.text();
   extKey = '';
   if (r.ok) showExt(await r.json()); else loadExt();
 });
 async function loadExt() {
-  try { const r = await fetch('/api/external'); if (r.ok) showExt(await r.json()); } catch { /* studio restarting */ }
+  try { const r = await api('GET', '/api/external'); if (r.ok) showExt(await r.json()); } catch { /* studio restarting */ }
 }
 async function setGate(on, source) {
   try {
-    const r = await fetch('/api/external/gate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on, source }) });
+    const r = await api('POST', '/api/external/gate', { on, source }, { quiet: true });
     if (r.ok) return showExt(await r.json());
     const j = await r.json().catch(() => null);
-    notify(j?.error || 'Refusé');
+    flash(j?.error || 'Refusé');
   } catch {}
   loadExt();
 }
 $('extGate').onclick = () => setGate(!(ext && ext.open), 'ui');
-$('dmxPill').onclick = () => { if (showMode) return notify(LOCKED_FR); setWorkspace('settings'); $('netinPanel').open = true; };
+$('dmxPill').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('netinPanel').open = true; };
 $('extPanel').addEventListener('toggle', () => { if ($('extPanel').open) { extKey = ''; loadExt(); } });
 setInterval(() => { if (!document.hidden) loadExt(); }, 1000);
 loadExt();
@@ -10226,15 +10591,15 @@ let dmxLearnTimer = null;
 async function dmxLearnWatch() {
   clearTimeout(dmxLearnTimer);
   try {
-    const n = await (await fetch('/api/netin')).json();
+    const n = await apiJson('GET', '/api/netin');
     if (n.dmx.learn) { dmxLearnTimer = setTimeout(dmxLearnWatch, 400); return; }
     if (n.dmx.learned) showBanner(`Appris : univers ${n.dmx.learned.universe}, canal ${n.dmx.learned.channel} → ${labelOf(n.dmx.learned.control)}`, 3000);
   } catch {}
 }
 $('midiMenuDmx').onclick = async () => {
   const id = menuControl; closeMidiMenu();
-  const r = await fetch('/api/dmx/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ control: id }) });
-  if (!r.ok) return notify(await r.text());
+  const r = await api('POST', '/api/dmx/learn', { control: id }, { quiet: true });
+  if (!r.ok) return flash(await r.text());
   showBanner(`Apprendre DMX : bougez un canal de la console pour ${labelOf(id)}`, 4000);
   dmxLearnWatch();
 };
@@ -10256,7 +10621,8 @@ function showProject() {
   $('projRecent').querySelectorAll('[data-recent]').forEach(b => b.onclick = () => { $('projMenu').hidden = true; projOpen(b.dataset.recent); });
 }
 async function loadProject() {
-  try { project = await (await fetch('/api/project')).json(); showProject(); } catch { /* studio restarting */ }
+  const at = performance.now();
+  try { project = await apiJson('GET', '/api/project'); takeProjectModified(project.modified, at); showProject(); } catch { /* studio restarting */ }
 }
 // ---------- autosave and recovery (T-287) ----------
 // The studio writes autosaves on its own thread; the page only shows the
@@ -10295,9 +10661,14 @@ $('recoverIgnore').onclick = async () => {
 $('asEnabled').onchange = e => projPost('autosave', { enabled: e.target.checked }).catch(err => alert(err.message));
 $('asDelay').addEventListener('change', e => projPost('autosave', { delay_s: Math.round(+e.target.value) || 30 }).catch(err => alert(err.message)));
 async function projPost(action, body) {
-  const r = await fetch('/api/project/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  const at = performance.now();
+  const r = await api('POST', '/api/project/' + action, body ?? {}, { quiet: true });
   if (!r.ok) throw new Error(await r.text());
-  project = await r.json(); showProject();
+  project = await r.json();
+  // Saved, opened or new: nothing unsaved any more (T-433).
+  if (['save', 'save-as', 'open', 'new'].includes(action)) projectSaved();
+  takeProjectModified(project.modified, at);
+  showProject();
   if (project.warnings?.length) alert(project.warnings.join('\n'));
 }
 // Everything a project brings back, reloaded into the page.
@@ -10305,20 +10676,59 @@ async function afterOpen() {
   await loadState(); await loadPresets(); await loadPalettes(); await loadLfos(); await loadRoutes(); await loadAudioPresets(); await loadTriggers(); await loadShows();
   if (!$('figEditor').hidden) loadFigLib();
 }
-// Unsaved changes: resolves true to go on, false to stay.
-function askUnsaved() {
-  if (!project.modified) return Promise.resolve(true);
+// Unsaved changes (T-433), before « Nouveau », « Ouvrir » and quitting:
+// one question, listing what would be lost (`what`, from unsavedWork).
+// Resolves true to go on, false to stay. « Enregistrer » saves the
+// timeline's show, then the project; a *Sans titre* project opens
+// « Enregistrer sous… » instead, and a failed save stays. Entrée =
+// « Enregistrer » (the shortcut table); Échap stays the emergency stop
+// and leaves the question open.
+function askUnsaved(what = unsavedWork({ figure: false })) {
+  if (!what.length) return Promise.resolve(true);
+  $('projAskWhat').replaceChildren(...what.map(w => { const li = document.createElement('li'); li.textContent = w.label; return li; }));
   $('projAsk').hidden = false;
+  $('askSave').focus();
   return new Promise(resolve => {
     const done = go => { $('projAsk').hidden = true; resolve(go); };
     $('askDiscard').onclick = () => done(true);
     $('askCancel').onclick = () => done(false);
     $('askSave').onclick = async () => {
-      if (!project.file) { done(false); projDialog('save-as'); return; }
-      try { await projPost('save'); done(true); } catch (e) { alert(e.message); done(false); }
+      try {
+        // The figure under its name (CRÉATION › Figures says why if it can't).
+        if (what.some(w => w.kind === 'figure') && !await saveFigure()) { done(false); return; }
+        if (what.some(w => w.kind === 'program') && !await pgSaveNow()) { done(false); return; }
+        const tl = what.find(w => w.kind === 'timeline');
+        if (tl) {
+          if (tl.example) throw new Error('Show de timeline : un exemple s\'enregistre sous un nom, avec TIMELINE › Enregistrer.');
+          const r = await api('POST', '/api/timeline/save', {}, { quiet: true });
+          if (!r.ok) throw new Error('Show de timeline : ' + await r.text());
+        }
+        // A saved show changes the project's files: the project is saved after it.
+        if (tl || what.some(w => w.kind === 'project')) {
+          if (!project.file) { done(false); projDialog('save-as'); return; }
+          await projPost('save');
+        }
+        done(true);
+      } catch (e) { alert(e.message); done(false); }
     };
   });
 }
+// Quitting the application (T-413 calls it from « Quitter »): what the
+// studio says would be lost, plus the figure being drawn here. Resolves
+// true when quitting may go on. Never holds up a stop: the studio quits
+// and disarms on a signal whatever is asked here.
+async function askBeforeQuit() {
+  let check = null;
+  try { check = await apiJson('GET', '/api/project/quit-check', undefined, { quiet: true }); } catch { /* asked from what the page knows */ }
+  if (!check) return askUnsaved(unsavedWork());
+  const what = [];
+  if (check.unsaved.includes('projet')) what.push({ kind: 'project', label: `Projet « ${check.name} »` });
+  if (check.timeline) what.push({ kind: 'timeline', label: `Show de timeline « ${check.timeline} »`, example: !!(lastTimeline && lastTimeline.example) });
+  if (figureDirty()) what.push({ kind: 'figure', label: 'Figure en cours' });
+  if (pgDirty()) what.push({ kind: 'program', label: `Programme du cue « ${pg.info ? pg.info.name : pg.id} »` });
+  return askUnsaved(what);
+}
+window.laserStudioQuitCheck = askBeforeQuit;
 function projDialog(mode) {
   projDialogMode = mode;
   $('projDlgTitle').textContent = mode === 'open' ? 'Ouvrir…' : 'Enregistrer sous…';
@@ -10346,14 +10756,14 @@ async function projDialogOk() {
   } catch (e) { $('projError').textContent = e.message; }
 }
 async function projOpen(name) {
-  if (showMode) return notify(LOCKED_FR);
+  if (showMode) return flash(LOCKED_FR);
   if (!await askUnsaved()) return;
   try { await projPost('open', { path: name }); await afterOpen(); } catch (e) { alert(e.message); }
 }
 async function projAction(kind) {
   $('projMenu').hidden = true;
   // T-283: in show mode, only « Enregistrer » (the open project, in place).
-  if (showMode && kind !== 'save') return notify(LOCKED_FR);
+  if (showMode && kind !== 'save') return flash(LOCKED_FR);
   await loadProject();
   if (kind === 'save') {
     if (!project.file) { projDialog('save-as'); return; }
@@ -10389,6 +10799,11 @@ const fe = {
   fig: newFigure(), frame: 0, tool: 'line', sel: new Set(), draft: null, drag: null,
   undo: [], redo: [], color: [0, 255, 0], lit: true, playing: null, bpm: 120, budget: 750, lib: [],
 };
+// T-433: the figure as last opened, saved or started; a drawn one that
+// differs is unsaved work (closing the page asks).
+let figBaseline = JSON.stringify(fe.fig);
+const figMarkSaved = () => { figBaseline = JSON.stringify(fe.fig); };
+const figureDirty = () => JSON.stringify(fe.fig) !== figBaseline && fe.fig.frames.some(f => f.strokes.length > 0);
 const figFrame = () => fe.fig.frames[fe.frame];
 const figStrokes = () => figFrame().strokes;
 
@@ -10568,8 +10983,7 @@ cvF.addEventListener('contextmenu', e => { if (fe.draft) { e.preventDefault(); f
 async function placeText(p) {
   const text = $('figText').value.trim();
   if (!text) return;
-  const r = await fetch('/api/figures/text', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, size: $('figTextSize').value / 100 }) });
+  const r = await api('POST', '/api/figures/text', { text, size: $('figTextSize').value / 100 });
   if (!r.ok) return;
   const { strokes } = await r.json();
   if (!strokes.length) return;
@@ -10834,7 +11248,7 @@ function showFigProps() {
 // ----- library -----
 function figMsg(text, err = false) { $('figMsg').textContent = text; $('figMsg').classList.toggle('err', err); }
 async function loadFigLib() {
-  try { fe.lib = await (await fetch('/api/figures')).json(); } catch { return; }
+  try { fe.lib = await apiJson('GET', '/api/figures'); } catch { return; }
   const box = $('figLib');
   box.innerHTML = '';
   if (!fe.lib.length) { box.innerHTML = '<div class="hint">Aucune figure enregistrée.</div>'; return; }
@@ -10854,11 +11268,12 @@ async function loadFigLib() {
   }
 }
 async function openFigure(name) {
-  const r = await fetch('/api/figures/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+  const r = await api('POST', '/api/figures/load', { name }, { quiet: true });
   if (!r.ok) { figMsg(await r.text(), true); return; }
   const fig = await r.json();
   stopFigPreview();
   figChange(() => { fe.fig = fig; fe.frame = 0; fe.sel.clear(); fe.draft = null; });
+  figMarkSaved();
   showFigProps(); figMsg(`« ${name} » ouverte.`);
 }
 async function saveFigure() {
@@ -10866,9 +11281,10 @@ async function saveFigure() {
   const name = $('figName').value.trim();
   if (!FIG_NAME_RE.test(name)) { figMsg('Nom invalide : lettres, chiffres, espaces, - et _ seulement, 64 caractères au plus.', true); $('figName').focus(); return null; }
   fe.fig.name = name;
-  const r = await fetch('/api/figures', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fe.fig) });
+  const r = await api('POST', '/api/figures', fe.fig, { quiet: true });
   if (!r.ok) { figMsg(await r.text(), true); return null; }
   const saved = await r.json();
+  figMarkSaved();
   figMsg(`« ${saved.name} » enregistrée (cue de la page Figures).`);
   await loadFigLib(); await loadPresets();
   return saved;
@@ -10882,6 +11298,7 @@ $('figPlay').onclick = async () => {
 $('figNew').onclick = () => {
   stopFigPreview();
   figChange(() => { fe.fig = newFigure(); fe.frame = 0; fe.sel.clear(); fe.draft = null; });
+  figMarkSaved();
   showFigProps(); figMsg('');
 };
 
@@ -10931,7 +11348,7 @@ async function impFetch() {
   impMsg('Analyse du fichier…');
   let r, body;
   try {
-    r = await fetch('/api/figures/import?' + impParams(), { method: 'POST', body: imp.bytes });
+    r = await api('POST', '/api/figures/import?' + impParams(), imp.bytes, { quiet: true });
     body = r.ok ? await r.json() : await r.text();
   } catch { if (seq === imp.seq) impFail('Le studio ne répond pas.'); return; }
   if (seq !== imp.seq) return; // a newer preview is on its way
@@ -11003,11 +11420,12 @@ $('impCreate').onclick = async () => {
   if (fe.lib.some(f => f.name === name) && !confirm(`Une figure « ${name} » existe déjà : la remplacer ?`)) return;
   const fig = structuredClone(imp.result.figure);
   fig.name = name;
-  const r = await fetch('/api/figures', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fig) });
+  const r = await api('POST', '/api/figures', fig, { quiet: true });
   if (!r.ok) { impMsg(await r.text(), true); return; }
   impCloseDlg();
   stopFigPreview();
   figChange(() => { fe.fig = fig; fe.frame = 0; fe.sel.clear(); fe.draft = null; });
+  figMarkSaved();
   showFigProps();
   figMsg(`« ${name} » créée depuis l'import (cue de la page Figures) : modifiable ici.`);
   await loadFigLib(); await loadPresets();
@@ -11025,7 +11443,7 @@ function ildaExpMsg(text, err = false) { $('ildaExpMsg').textContent = text; $('
 const kib = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} Ko` : `${(n / 1024 / 1024).toFixed(1)} Mo`;
 async function loadIldaLib() {
   let r;
-  try { r = await (await fetch('/api/media/ilda', { cache: 'no-store' })).json(); } catch { return; }
+  try { r = await apiJson('GET', '/api/media/ilda', undefined, { cache: 'no-store' }); } catch { return; }
   ilda.files = r.files; ilda.maxBytes = r.max_bytes;
   clearTimeout(ilda.timer);
   // Read on its own thread at start-up: look again until it is done.
@@ -11065,7 +11483,7 @@ async function ildaImport(file) {
   ildaMsg(`Lecture de « ${file.name} »…`);
   let r, body;
   try {
-    r = await fetch('/api/media/ilda?name=' + encodeURIComponent(file.name), { method: 'POST', body: file });
+    r = await api('POST', '/api/media/ilda?name=' + encodeURIComponent(file.name), file, { quiet: true });
     body = r.ok ? await r.json() : await r.text();
   } catch { ildaMsg('Le studio ne répond pas.', true); return; }
   if (!r.ok) { ildaMsg('Import impossible : ' + (body || r.status), true); return; }
@@ -11088,7 +11506,7 @@ $('ildaExport').onclick = async () => {
   const p = new URLSearchParams({ number: $('ildaNum').value, frames: $('ildaFrames').value, fps: $('ildaExpFps').value, output: $('ildaExpOut').value || 'main' });
   ildaExpMsg('Export en cours…');
   let r;
-  try { r = await fetch('/api/media/ilda/export?' + p, { cache: 'no-store' }); } catch { ildaExpMsg('Le studio ne répond pas.', true); return; }
+  try { r = await api('GET', '/api/media/ilda/export?' + p, undefined, { cache: 'no-store', quiet: true }); } catch { ildaExpMsg('Le studio ne répond pas.', true); return; }
   if (!r.ok) { ildaExpMsg('Export impossible : ' + await r.text(), true); return; }
   const blob = await r.blob(), name = ildaSdName();
   const a = document.createElement('a');
@@ -11110,11 +11528,11 @@ let sdBank = { slots: [] };
 function sdMsg(text, err = false) { $('sdMsg').textContent = text; $('sdMsg').classList.toggle('err', err); }
 async function sdRequest(path, body) {
   let r;
-  try { r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }); }
+  try { r = await api('POST', path, body ?? {}, { quiet: true }); }
   catch { sdMsg('Le studio ne répond pas.', true); return null; }
   if (!r.ok) {
     const t = await r.text();
-    if (r.status === 423) notify(t);
+    if (r.status === 423) flash(t);
     sdMsg(t, true);
     return null;
   }
@@ -11162,7 +11580,7 @@ function showSdBank(bank) {
   });
 }
 async function loadSdBank() {
-  try { showSdBank(await (await fetch('/api/sdbank', { cache: 'no-store' })).json()); } catch { /* studio stopped: kept as is */ }
+  try { showSdBank(await apiJson('GET', '/api/sdbank', undefined, { cache: 'no-store' })); } catch { /* studio stopped: kept as is */ }
 }
 // One row changed (or removed: `change` null): the whole bank is sent and
 // checked by the studio; a refused change is undone on screen.
@@ -11239,7 +11657,7 @@ function pgRefusal(status, text, what) {
 }
 async function pgPost(path, body) {
   try {
-    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await api('POST', path, body, { quiet: true });
     return { ok: r.ok, status: r.status, text: await r.text() };
   } catch { return { ok: false, status: 0, text: '' }; }
 }
@@ -11277,7 +11695,7 @@ async function pgOpen(id, force = false) {
   const seq = ++pg.loading;
   let info;
   try {
-    const r = await fetch('/api/cues/program?id=' + encodeURIComponent(id), { cache: 'no-store' });
+    const r = await api('GET', '/api/cues/program?id=' + encodeURIComponent(id), undefined, { cache: 'no-store', quiet: true });
     if (!r.ok) { if (seq === pg.loading) pgMsg('Ce cue n\'existe plus.', true); return; }
     info = await r.json();
   } catch { return; }
@@ -11659,7 +12077,7 @@ $('pgLayerAdd').onclick = async () => {
   else if (v === 'wave') content = { kind: 'wave' };
   else if (v.startsWith('cue:')) {
     try {
-      const r = await fetch('/api/cues/program?id=' + encodeURIComponent(v.slice(4)), { cache: 'no-store' });
+      const r = await api('GET', '/api/cues/program?id=' + encodeURIComponent(v.slice(4)), undefined, { cache: 'no-store' });
       if (r.ok) content = (await r.json()).content;
     } catch { /* nothing added */ }
   }
@@ -11694,18 +12112,21 @@ function pgLfoEdit(e, final) {
 $('pgLfos').addEventListener('input', e => { if (e.target.type === 'range') pgLfoEdit(e, false); });
 $('pgLfos').addEventListener('change', e => { if (e.target.type !== 'range') pgLfoEdit(e, true); });
 
-$('pgSave').onclick = async () => {
-  if (!pg.prog) return;
-  if (showMode) { pgMsg(LOCKED_FR, true); return; }
+// Saves the program on its cue; false when refused (the panel says why).
+async function pgSaveNow() {
+  if (!pg.prog) return false;
+  if (showMode) { pgMsg(LOCKED_FR, true); return false; }
   const program = JSON.parse(JSON.stringify(pg.prog));
   const r = await pgPost('/api/cues/program', { id: pg.id, program });
-  if (!r.ok) { pgMsg(pgRefusal(r.status, r.text, 'Programme refusé'), true); return; }
+  if (!r.ok) { pgMsg(pgRefusal(r.status, r.text, 'Programme refusé'), true); return false; }
   pg.saved = JSON.stringify(program);
   pg.info.own = true; pg.info.program = program;
   pgRender();
   pgMsg(`Programme enregistré sur « ${pg.info.name} » : il joue au prochain lancement du cue.`);
   loadSlots();
-};
+  return true;
+}
+$('pgSave').onclick = pgSaveNow;
 $('pgCancel').onclick = () => {
   if (!pg.prog) return;
   const was = pgDirty();
