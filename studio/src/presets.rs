@@ -133,6 +133,16 @@ impl Builder {
         rhythm(&mut settings);
         self.add("Faisceaux", format!("{label} · {color_name}"), settings);
     }
+
+    /// A beat-synced graphic (T-108) on page `category`: `steps` per beat
+    /// (the countdown), a motion over `period` beats (ring, 3D objects).
+    #[allow(clippy::too_many_arguments)]
+    fn graphic(&mut self, category: &'static str, label: &str, generator: &str, count: u32, a: f32, steps: f32, period: f32, look: Look, scale: f32) {
+        let Look(color_name, color, color_mode, color2) = look;
+        let params = GenParams { count, a, color_mode, color2, beat_sync: true, steps_per_beat: steps, period_beats: period, ..GenParams::default() };
+        let settings = Settings { content: Content::Generator { generator: generator.to_string(), params }, color, scale, ..Settings::default() };
+        self.add(category, format!("{label} · {color_name}"), settings);
+    }
 }
 
 pub fn catalog() -> Vec<Preset> {
@@ -350,6 +360,28 @@ pub fn catalog() -> Vec<Preset> {
         if let Some(p) = b.presets.last_mut() {
             p.tag = Some(tag);
         }
+    }
+
+    // Graphics (T-108), appended: countdowns and progress rings on « Texte
+    // & horloge », wireframe objects on « Géométrie » (both pages keep room
+    // on their first grid page). Research look 34: one number a bar, black
+    // on the last 1/2 beat; look 36: a turn every 2 bars.
+    const TEXT: &str = "Texte & horloge";
+    b.graphic(TEXT, "Compte à rebours 4-3-2-1", "countdown", 4, 0.0, 0.25, 4.0, SOLID_WHITE, 0.4);
+    b.graphic(TEXT, "Compte à rebours 4-3-2-1", "countdown", 4, 0.0, 0.25, 4.0, SOLID_RED, 0.4);
+    b.graphic(TEXT, "Compte à rebours 8 temps", "countdown", 8, 0.0, 1.0, 4.0, SOLID_CYAN, 0.4);
+    b.graphic(TEXT, "Anneau de progression 8 temps", "clock", 1, 0.0, 1.0, 8.0, SOLID_CYAN, 0.6);
+    b.graphic(TEXT, "Anneau de progression 16 temps", "clock", 1, 0.0, 1.0, 16.0, GREEN_RED, 0.6);
+    b.graphic(TEXT, "Anneau de progression 32 temps", "clock", 1, 0.0, 1.0, 32.0, RAINBOW, 0.6);
+    for (a, label, look) in [
+        (0.0, "Cube 3D", SOLID_CYAN),
+        (1.0, "Octaèdre 3D", SOLID_MAGENTA),
+        (2.0, "Icosaèdre 3D", SOLID_GREEN),
+        (3.0, "Pyramide 3D", SOLID_YELLOW),
+        (4.0, "Globe 3D", SOLID_BLUE),
+        (0.0, "Cube 3D", RAINBOW),
+    ] {
+        b.graphic("Géométrie", label, "wire3d", 1, a, 1.0, 8.0, look, 0.6);
     }
 
     b.presets
@@ -824,8 +856,11 @@ mod tests {
     /// The T-110 « Festival » page, after those.
     const FESTIVAL_CUES: usize = 40;
 
+    /// The T-108 graphics, after those.
+    const GRAPHIC_CUES: usize = 12;
+
     fn festival() -> Vec<Preset> {
-        catalog().into_iter().skip(LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES).collect()
+        catalog().into_iter().skip(LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES).take(FESTIVAL_CUES).collect()
     }
 
     fn generator_of(p: &Preset) -> (&str, &GenParams) {
@@ -846,7 +881,7 @@ mod tests {
         assert!(new.len() <= crate::controls::GRID_ROWS * crate::controls::GRID_COLS);
         // Only they are tagged, and every one is.
         assert!(new.iter().all(|p| p.tag.is_some()));
-        assert!(all[..all.len() - FESTIVAL_CUES].iter().all(|p| p.tag.is_none()));
+        assert!(all.iter().filter(|p| p.category != FESTIVAL).all(|p| p.tag.is_none()));
         for tag in [CueTag::Intro, CueTag::Groove, CueTag::Break, CueTag::Build, CueTag::Drop] {
             assert!(new.iter().any(|p| p.tag == Some(tag)), "a {tag:?} cue");
         }
@@ -920,6 +955,34 @@ mod tests {
             }
             assert!(lit > 0, "{} is dark", p.name);
         }
+    }
+
+    #[test]
+    fn graphic_cues_are_appended_with_room_on_their_pages() {
+        let all = catalog();
+        let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES + FESTIVAL_CUES;
+        assert_eq!(all.len(), start + GRAPHIC_CUES, "appended last");
+        let new = &all[start..];
+        assert_eq!((new[0].id.as_str(), new[6].id.as_str()), ("texte-horloge-022", "geometrie-013"));
+        for p in new {
+            let (g, params) = generator_of(p);
+            assert!(params.beat_sync && p.settings.program.is_none() && p.tag.is_none(), "{}", p.id);
+            match g {
+                "countdown" => assert!(p.category == "Texte & horloge" && [0.25, 1.0].contains(&params.steps_per_beat)),
+                "clock" => assert!(p.category == "Texte & horloge" && params.period_beats >= 8.0),
+                "wire3d" => assert!(p.category == "Géométrie" && params.period_beats == 8.0, "a turn every 2 bars"),
+                other => panic!("{other}"),
+            }
+            // On the page's first grid page: no new overflow page, so every
+            // page keeps its number.
+            let index = all.iter().filter(|q| q.category == p.category).position(|q| q.id == p.id).unwrap();
+            assert!(index < crate::controls::GRID_ROWS * crate::controls::GRID_COLS, "{}", p.id);
+        }
+        let solids: HashSet<u32> = new.iter().filter(|p| generator_of(p).0 == "wire3d").map(|p| generator_of(p).1.a as u32).collect();
+        assert_eq!(solids.len(), crate::graphics::SOLIDS, "a cue per solid");
+        // The countdown at its first bar shows 4 (in the thumbnail too).
+        let (_, p) = generator_of(&new[0]);
+        assert_eq!(crate::graphics::countdown_value(p, 1.0), Some(4));
     }
 
     #[test]
