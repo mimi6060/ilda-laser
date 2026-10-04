@@ -12,7 +12,16 @@
 //! arming until the run is completed. In pure preview there is no
 //! interlock. Completing the list never arms the laser: it only lets the
 //! operator arm it.
+//!
+//! ShowNET outputs (T-472): what the ShowNET does when the stream stops
+//! (network lost, studio frozen) is not documented, so it may hold its
+//! last frame, a static beam. When the output is a ShowNET path (PONK to
+//! MadMapper, or any output whose projector sheet says ShowNET; never a
+//! `laser-dac` DAC), three more items show, which the operator cannot
+//! delete, and the `hw_stop` interlock refuses arming until « Arrêt
+//! matériel testé » is ticked, checklist enforced or not.
 
+use crate::power::DacModel;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -26,6 +35,46 @@ pub const MAX_TEXT: usize = 400;
 pub const MAX_VALUE: usize = 200;
 pub const MAX_OPERATOR: usize = 80;
 const MAX_ID: usize = 40;
+
+/// The kind of output an item is only for (T-472).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputKind {
+    /// A ShowNET path: PONK to MadMapper (which drives the ShowNET), or an
+    /// output whose projector sheet says ShowNET (the SD card / Art-Net
+    /// and SDK paths once they exist).
+    #[serde(rename = "shownet")]
+    ShowNet,
+}
+
+impl OutputKind {
+    /// The kind of the connected output (`Output::kind`, None = preview)
+    /// with the projector sheet's interface model. A `laser-dac` DAC
+    /// (Helios, Ether Dream, IDN) never reaches a ShowNET, whatever the
+    /// sheet says; PONK always counts as one (it is how the studio reaches
+    /// the ShowNET today).
+    pub fn of(output: Option<&str>, model: DacModel) -> Option<Self> {
+        match output {
+            None | Some("dac") => None,
+            Some("ponk" | "shownet") => Some(Self::ShowNet),
+            Some(_) => (model == DacModel::ShowNet).then_some(Self::ShowNet),
+        }
+    }
+}
+
+/// Id of the ShowNET item that gates arming (`hw_stop` interlock).
+pub const HW_STOP_ITEM: &str = "shownet_hw_stop";
+
+/// The ShowNET items (T-472). Always in the list: put back if deleted.
+pub fn shownet_items() -> Vec<ChecklistItem> {
+    [
+        (HW_STOP_ITEM, "Arrêt matériel testé (interlock ou arrêt d'urgence du projecteur)"),
+        ("shownet_wired", "Liaison par câble, pas de Wi-Fi"),
+        ("shownet_exclusive", "Aucun autre logiciel connecté au boîtier"),
+    ]
+    .into_iter()
+    .map(|(id, text)| ChecklistItem { only_for: Some(OutputKind::ShowNet), ..ChecklistItem::new(id, text, ItemWhen::Always) })
+    .collect()
+}
 
 /// When an item applies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,11 +98,13 @@ pub struct ChecklistItem {
     pub needs_value: bool,
     /// The label of that value's field.
     pub value_label_fr: String,
+    /// Shown only for this kind of output (None: for every output).
+    pub only_for: Option<OutputKind>,
 }
 
 impl ChecklistItem {
     fn new(id: &str, text_fr: &str, when: ItemWhen) -> Self {
-        Self { id: id.into(), text_fr: text_fr.into(), when, needs_value: false, value_label_fr: String::new() }
+        Self { id: id.into(), text_fr: text_fr.into(), when, needs_value: false, value_label_fr: String::new(), only_for: None }
     }
 }
 
@@ -85,7 +136,7 @@ pub fn default_items() -> Vec<ChecklistItem> {
     );
     permit.needs_value = true;
     permit.value_label_fr = "Référence de l'autorisation".into();
-    vec![
+    let mut items = vec![
         ChecklistItem::new("projector", "Projecteur classé et étiqueté (IEC/EN 60825-1) ; interrupteur à clé et arrêt d'urgence matériel testés.", Always),
         ChecklistItem::new("software_estop", "Arrêt d'urgence logiciel (Échap) testé : la sortie est coupée.", Always),
         ChecklistItem::new("zones", "Zones de sécurité et horizon vérifiés sur place, avec une mire, à faible puissance.", Always),
@@ -100,7 +151,9 @@ pub fn default_items() -> Vec<ChecklistItem> {
             AudienceScan,
         ),
         ChecklistItem::new("signage", "Signalisation ou annonce au public, si le lieu l'exige.", Always),
-    ]
+    ];
+    items.extend(shownet_items());
+    items
 }
 
 /// What was ticked this session. Never saved.
@@ -122,6 +175,8 @@ pub struct Checklist {
     run: ChecklistRun,
     enforced: bool,
     load_error: Option<String>,
+    /// The kind of the connected output, for `only_for` (T-472).
+    output: Option<OutputKind>,
 }
 
 impl Checklist {
@@ -137,11 +192,11 @@ impl Checklist {
             },
             crate::datafile::Loaded::Quarantined(w) => (ChecklistConfig::default(), Some(format!("{} Liste par défaut.", w.message_fr()))),
         };
-        Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error }
+        Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error, output: None }
     }
 
     pub fn in_memory(enforced: bool) -> Self {
-        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None }
+        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None, output: None }
     }
 
     /// A real output is configured: the list gates arming.
@@ -168,7 +223,35 @@ impl Checklist {
         !self.enforced || self.is_complete()
     }
 
+    pub fn output(&self) -> Option<OutputKind> {
+        self.output
+    }
+
+    /// The connected output's kind changed (T-472). A completed run that
+    /// now misses a shown item (the ShowNET ones) starts again; returns
+    /// whether it did. Never arms.
+    pub fn set_output(&mut self, output: Option<OutputKind>) -> bool {
+        if self.output == output {
+            return false;
+        }
+        self.output = output;
+        if self.is_complete() && self.visible_items().any(|i| self.done(&i.id).is_none()) {
+            self.restart();
+            return true;
+        }
+        false
+    }
+
+    /// The `hw_stop` interlock's state: on a ShowNET output, « Arrêt
+    /// matériel testé » must be ticked, whether the list is enforced or not.
+    pub fn hw_stop_ok(&self) -> bool {
+        self.output != Some(OutputKind::ShowNet) || self.done(HW_STOP_ITEM).is_some()
+    }
+
     fn visible(&self, item: &ChecklistItem) -> bool {
+        if item.only_for.is_some_and(|k| self.output != Some(k)) {
+            return false;
+        }
         match item.when {
             ItemWhen::Always => true,
             ItemWhen::Outdoor => self.config.outdoor,
@@ -255,6 +338,7 @@ impl Checklist {
             "items": items,
             "outdoor": self.config.outdoor,
             "audience_scan": self.config.audience_scan,
+            "output": self.output,
         }))
     }
 
@@ -294,7 +378,7 @@ impl Checklist {
                 let done = self.done(&i.id);
                 json!({
                     "id": i.id, "text_fr": i.text_fr, "when": i.when, "needs_value": i.needs_value,
-                    "value_label_fr": i.value_label_fr, "visible": self.visible(i),
+                    "value_label_fr": i.value_label_fr, "only_for": i.only_for, "visible": self.visible(i),
                     "done": done.is_some(), "at": done.map(|d| ms(d.1)), "value": done.and_then(|d| d.2.clone()),
                 })
             })
@@ -309,16 +393,22 @@ impl Checklist {
             "items": items,
             "missing": self.missing(),
             "load_error": self.load_error,
+            "output": self.output,
+            "hw_stop_ok": self.hw_stop_ok(),
         })
     }
 }
 
-/// Checks a list and gives an id to the items without one.
+/// Checks a list, gives an id to the items without one and puts back the
+/// ShowNET items (T-472) if they are missing (a list saved before them, or
+/// edited): they stay for ShowNET outputs only, always shown there.
 fn normalise(mut config: ChecklistConfig) -> Result<ChecklistConfig> {
     if config.items.is_empty() {
         bail!("La liste de contrôle doit avoir au moins un élément");
     }
-    if config.items.len() > MAX_ITEMS {
+    // The ShowNET items do not count: they are put back below.
+    let required = shownet_items();
+    if config.items.iter().filter(|i| !required.iter().any(|r| r.id == i.id.trim())).count() > MAX_ITEMS {
         bail!("Liste de contrôle trop longue ({MAX_ITEMS} éléments au plus)");
     }
     let mut next = 1;
@@ -351,6 +441,15 @@ fn normalise(mut config: ChecklistConfig) -> Result<ChecklistConfig> {
                 }
             };
             config.items[index].id = id;
+        }
+    }
+    for required in required {
+        match config.items.iter_mut().find(|i| i.id == required.id) {
+            Some(item) => {
+                item.only_for = required.only_for;
+                item.when = ItemWhen::Always;
+            }
+            None => config.items.push(required),
         }
     }
     Ok(config)
@@ -466,6 +565,95 @@ mod tests {
         assert!(!again.is_complete() && !again.satisfied());
         assert_eq!(again.view()["operator"], "");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn ids(c: &Checklist) -> Vec<String> {
+        c.visible_items().map(|i| i.id.clone()).collect()
+    }
+
+    #[test]
+    fn shownet_items_show_only_for_a_shownet_output() {
+        use crate::power::DacModel::{Other, ShowNet};
+        // Helios, Ether Dream and IDN are all `laser-dac` outputs ("dac").
+        assert_eq!(OutputKind::of(Some("dac"), ShowNet), None, "a DAC never reaches a ShowNET");
+        assert_eq!(OutputKind::of(Some("dac"), Other), None);
+        assert_eq!(OutputKind::of(None, ShowNet), None, "preview");
+        assert_eq!(OutputKind::of(Some("ponk"), Other), Some(OutputKind::ShowNet));
+        assert_eq!(OutputKind::of(Some("test"), Other), None);
+        assert_eq!(OutputKind::of(Some("test"), ShowNet), Some(OutputKind::ShowNet), "declared on the sheet");
+
+        let mut c = Checklist::in_memory(true);
+        assert!(c.hw_stop_ok(), "not a ShowNET");
+        assert!(!ids(&c).iter().any(|i| i.starts_with("shownet_")));
+        c.set_output(OutputKind::of(Some("dac"), ShowNet));
+        assert_eq!(c.visible_items().count(), 8);
+        c.set_output(Some(OutputKind::ShowNet));
+        assert_eq!(c.visible_items().count(), 11);
+        assert!(ids(&c).ends_with(&["shownet_hw_stop".into(), "shownet_wired".into(), "shownet_exclusive".into()]));
+        assert!(!c.hw_stop_ok());
+        c.check("shownet_wired", true, None).unwrap();
+        assert!(!c.hw_stop_ok(), "only the hardware stop item opens it");
+        c.check(HW_STOP_ITEM, true, None).unwrap();
+        assert!(c.hw_stop_ok());
+        c.check(HW_STOP_ITEM, false, None).unwrap();
+        assert!(!c.hw_stop_ok(), "unticking closes it again");
+        // The hidden ShowNET items can't be ticked for another output.
+        c.set_output(None);
+        assert!(c.check(HW_STOP_ITEM, true, None).is_err());
+    }
+
+    #[test]
+    fn the_hw_stop_gate_holds_even_when_the_list_is_not_enforced() {
+        let mut c = Checklist::in_memory(false);
+        assert!(c.satisfied());
+        c.set_output(Some(OutputKind::ShowNet));
+        assert!(c.satisfied(), "the list itself stays optional");
+        assert!(!c.hw_stop_ok());
+        c.check(HW_STOP_ITEM, true, None).unwrap();
+        assert!(c.hw_stop_ok());
+        assert_eq!(c.view()["hw_stop_ok"], true);
+        assert_eq!(c.view()["output"], "shownet");
+    }
+
+    #[test]
+    fn a_completed_run_starts_again_when_shownet_items_appear() {
+        let mut c = Checklist::in_memory(true);
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        c.complete().unwrap();
+        assert!(!c.set_output(None), "unchanged");
+        assert!(c.set_output(Some(OutputKind::ShowNet)), "three items to tick now");
+        assert!(!c.is_complete() && !c.satisfied() && !c.hw_stop_ok());
+        tick_all(&mut c);
+        let detail = c.complete().unwrap();
+        assert_eq!(detail["items"].as_array().unwrap().len(), 11);
+        assert_eq!(detail["output"], "shownet");
+        // Leaving the ShowNET hides items: the completed run stays.
+        assert!(!c.set_output(None));
+        assert!(c.is_complete());
+    }
+
+    #[test]
+    fn the_shownet_items_cannot_be_removed_or_hidden() {
+        let mut c = Checklist::in_memory(false);
+        let mut cfg = c.config().clone();
+        cfg.items.retain(|i| i.only_for.is_none());
+        let wired = cfg.items.len();
+        cfg.items.push(ChecklistItem { when: ItemWhen::Outdoor, only_for: None, ..shownet_items()[0].clone() });
+        c.set_config(cfg, false).unwrap();
+        let items = &c.config().items;
+        assert_eq!(items.len(), wired + 3);
+        let hw = items.iter().find(|i| i.id == HW_STOP_ITEM).unwrap();
+        assert_eq!((hw.when, hw.only_for), (ItemWhen::Always, Some(OutputKind::ShowNet)));
+        // A list saved before T-472 (no ShowNET items, no `only_for`) loads with them.
+        let old: ChecklistConfig = serde_json::from_str(r#"{"items":[{"id":"a","text_fr":"x"}]}"#).unwrap();
+        let fixed = normalise(old).unwrap();
+        assert_eq!(fixed.items.len(), 4);
+        // They don't count towards the list's size limit.
+        let full = ChecklistConfig { items: (0..MAX_ITEMS).map(|n| ChecklistItem::new(&format!("i{n}"), "x", ItemWhen::Always)).collect(), ..Default::default() };
+        let full = normalise(full).unwrap();
+        assert_eq!(full.items.len(), MAX_ITEMS + 3);
+        assert!(normalise(full).is_ok(), "loads again");
     }
 
     #[test]

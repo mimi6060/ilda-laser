@@ -271,6 +271,11 @@ impl OutputManager {
         OutputPrefs { selected: st.remembered.clone(), auto_reconnect: st.auto_reconnect, pps: st.saved_pps }
     }
 
+    /// The selected output's id (None: preview only).
+    pub fn selected(&self) -> Option<String> {
+        self.status.lock().unwrap().selected.clone()
+    }
+
     pub fn state(&self) -> LinkState {
         self.status.lock().unwrap().state
     }

@@ -59,6 +59,7 @@ mod tunnels;
 mod watchdog;
 mod zones;
 mod web;
+mod wifi;
 
 #[cfg(test)]
 mod test_support;
@@ -310,6 +311,9 @@ pub struct Shared {
     /// Choosing, connecting and reconnecting the output (T-401). Its own
     /// lock: taken under this one, never the other way round.
     pub output_mgr: Arc<output_manager::OutputManager>,
+    /// Whether a ShowNET output's link is the Wi-Fi (T-472): a warning in
+    /// the top bar, nothing else.
+    pub wifi: Arc<wifi::WifiWatch>,
 }
 
 impl Shared {
@@ -404,10 +408,25 @@ impl Shared {
 
     /// Brings the `checklist` interlock in line with the checklist. Only
     /// registered when a real output is configured; never arms.
+    ///
+    /// Also the ShowNET part (T-472), from the connected output and the
+    /// projector sheet: the ShowNET items, the `hw_stop` interlock
+    /// (registered from the first ShowNET output on) and the Wi-Fi watch.
+    /// Call it after any change of output, sheet or checklist.
     pub fn sync_checklist(&mut self) {
+        let kind = checklist::OutputKind::of(self.output_kind, self.outputs.active().projector.dac_model);
+        if self.checklist.set_output(kind) {
+            self.gate.log().record("checklist_reset", Some("system"), serde_json::json!({ "reason": "shownet" }));
+        }
         if self.checklist.enforced() {
             self.gate.register(interlock::CHECKLIST, checklist::LABEL_FR, self.checklist.satisfied());
         }
+        if kind.is_some() || self.gate.has_interlock(interlock::HW_STOP) {
+            self.gate.register(interlock::HW_STOP, interlock::HW_STOP_LABEL, self.checklist.hw_stop_ok());
+        }
+        // A PONK id holds an address literal: parsed, never resolved.
+        let receiver = self.output_mgr.selected().and_then(|id| id.strip_prefix("ponk:")?.parse::<std::net::SocketAddr>().ok()).map(|a| a.ip());
+        self.wifi.set_target(kind.map(|_| wifi::Target::for_receiver(receiver)));
     }
 
     /// Trips the emergency stop and records it in the gate.
@@ -529,6 +548,7 @@ fn main() -> Result<()> {
         estop.set_kill_switch(kill);
     }
     let output_mgr = Arc::clone(&state.output_mgr);
+    let wifi_watch = Arc::clone(&state.wifi);
     let remembered = state.outputs.connection().selected.filter(|_| output.is_none());
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
@@ -537,6 +557,8 @@ fn main() -> Result<()> {
     ilda_library::spawn_load(&shared);
     // Opens, switches and reconnects outputs off the engine thread (T-401).
     let output_thread = output_mgr.spawn(Arc::clone(&running));
+    // Reads the route to a ShowNET output (T-472); a warning only.
+    let _wifi_thread = wifi_watch.spawn(Arc::clone(&running));
     if let Some(id) = remembered {
         output_mgr.select(Some(id), interlock::ArmSource::System);
     }
@@ -815,6 +837,8 @@ fn startup_state(cli: &Cli) -> Shared {
         test_stall_ms: 0,
         devices: Arc::clone(output_mgr.devices()),
         output_mgr,
+        // Simulated (no command run) whenever a test flag is given.
+        wifi: Arc::new(wifi::WifiWatch::new(cli.test_hooks || cli.test_devices.is_some() || cli.test_output.is_some())),
     };
     figures::refresh(&mut state);
     if cli.test_hooks {
@@ -882,6 +906,8 @@ fn note_output(state: &mut Shared, output: Option<&dyn Output>) {
     state.output_kind = output.map(|o| o.kind());
     state.devices.set_driving_dac(output.is_some_and(|o| o.kind() == "dac"));
     state.gate.set_output_ready(output.is_some());
+    // PONK at start-up: the ShowNET items and `hw_stop` (T-472).
+    state.sync_checklist();
 }
 
 /// Installs the output the manager hands over (T-401), on the engine
@@ -918,8 +944,9 @@ fn apply_output_change(shared: &Mutex<Shared>, stage: &mut OutputStage, estop: &
     // gates arming from now on, as with --device or --ponk (T-258).
     if described.as_ref().is_some_and(|d| matches!(d.1, "dac" | "ponk")) && !s.checklist.enforced() {
         s.checklist.enforce();
-        s.sync_checklist();
     }
+    // And the ShowNET items and `hw_stop` follow the new output (T-472).
+    s.sync_checklist();
     // Arming waits until this is the output the operator wants.
     let ok = described.is_some() && mgr.is_current(change.gen);
     s.gate.set_output_ready(ok);
@@ -1288,6 +1315,52 @@ mod tests {
     /// T-258: the checklist gates arming with a real output (DAC, PONK) or
     /// its simulation, never in pure preview nor with the fake output; the
     /// edited list is kept across restarts, the ticks are not.
+    /// T-472: a ShowNET output refuses arming until the hardware stop is
+    /// ticked, logs the refusal, and never arms by itself.
+    #[test]
+    fn a_shownet_output_waits_for_the_hardware_stop_item() {
+        let mut s = test_support::shared();
+        s.gate.set_log(safety_log::SafetyLog::default());
+        s.output_kind = Some("test");
+        s.gate.set_output_ready(true);
+        s.sync_checklist();
+        assert!(!s.gate.has_interlock(interlock::HW_STOP), "not a ShowNET: no hw_stop interlock");
+
+        // The fake output declared ShowNET on the projector sheet.
+        let sheet = s.outputs.active().projector.with_model(power::DacModel::ShowNet);
+        s.outputs.set(power::MAIN_OUTPUT, None, Some(sheet), false, false).unwrap();
+        s.sync_checklist();
+        assert!(!s.gate.interlock_ok(interlock::HW_STOP));
+        assert!(s.gate.blocking().contains(&interlock::HW_STOP_LABEL.to_string()));
+        assert!(s.gate.request_arm(interlock::ArmSource::Ui).unwrap_err().contains(&interlock::HW_STOP_LABEL.to_string()));
+        assert!(!s.gate.is_armed());
+
+        s.checklist.check(checklist::HW_STOP_ITEM, true, None).unwrap();
+        s.sync_checklist();
+        assert!(s.gate.interlock_ok(interlock::HW_STOP));
+        assert!(!s.gate.is_armed(), "ticking never arms");
+
+        // Unticking while armed disarms on the spot.
+        s.gate.register(interlock::UI_ALIVE, "ui", true);
+        assert_eq!(s.gate.blocking(), Vec::<String>::new());
+        s.gate.request_arm(interlock::ArmSource::Ui).unwrap();
+        s.checklist.check(checklist::HW_STOP_ITEM, false, None).unwrap();
+        s.sync_checklist();
+        assert!(!s.gate.is_armed());
+        assert_eq!(s.gate.status(&s.estop).last_disarm.unwrap().reason_fr, format!("Verrou : {}", interlock::HW_STOP_LABEL));
+
+        // An Ether Dream / Helios / IDN ("dac") never gets the ShowNET items.
+        s.output_kind = Some("dac");
+        s.sync_checklist();
+        assert!(s.gate.interlock_ok(interlock::HW_STOP), "held open only for a ShowNET");
+        assert!(!s.checklist.visible_items().any(|i| i.only_for.is_some()));
+        // PONK (MadMapper drives the ShowNET) always does.
+        s.output_kind = Some("ponk");
+        s.sync_checklist();
+        assert!(!s.gate.interlock_ok(interlock::HW_STOP));
+        assert_eq!(s.checklist.visible_items().filter(|i| i.only_for.is_some()).count(), 3);
+    }
+
     #[test]
     fn the_checklist_is_enforced_only_with_a_real_output() {
         let parse = |args: &[&str]| Cli::try_parse_from([&["laser-studio"][..], args].concat()).unwrap();
@@ -1318,7 +1391,7 @@ mod tests {
         assert!(!s.gate.is_armed(), "completing never arms");
         drop(s);
         let again = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
-        assert_eq!(again.checklist.config().items.len(), 1, "the edited list is kept");
+        assert_eq!(again.checklist.config().items.iter().filter(|i| i.only_for.is_none()).count(), 1, "the edited list is kept");
         assert!(!again.gate.interlock_ok(interlock::CHECKLIST), "the ticks are not");
         drop(again);
         let _ = std::fs::remove_dir_all(dir);

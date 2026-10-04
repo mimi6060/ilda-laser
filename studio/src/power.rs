@@ -17,7 +17,11 @@
 //!
 //! The projector sheet (class, power per colour, wavelengths, aperture,
 //! divergence...) is informative: T-257 (MPE / NOHD estimate) and T-263
-//! (safety sheet) read it. It never arms anything and never blocks arming.
+//! (safety sheet) read it. It never arms anything and never allows
+//! anything. Its one effect on arming can only *add* a lock: declaring
+//! the interface a ShowNET (T-472) brings the ShowNET items of the
+//! pre-show checklist and the « Arrêt matériel non vérifié » interlock
+//! (checklist.rs).
 //!
 //! Stored in `<data-dir>/outputs.json`, one entry per output. Lowering a
 //! cap applies on the next engine tick. Raising one needs the operator's
@@ -33,6 +37,45 @@ pub const MAIN_OUTPUT: &str = "main";
 
 /// The IEC 60825-1 classes the sheet accepts ("" = not filled in).
 pub const LASER_CLASSES: [&str; 8] = ["", "1", "1M", "2", "2M", "3R", "3B", "4"];
+
+/// The interface (DAC) model on the sheet (T-472). Choosing one fills its
+/// resolution and point-rate ceiling; `ShowNet` also brings the ShowNET
+/// safety reminders (checklist.rs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DacModel {
+    /// Not said, or a model without a preset.
+    #[default]
+    Other,
+    /// Laserworld ShowNET (reached through PONK → MadMapper today).
+    #[serde(rename = "shownet")]
+    ShowNet,
+}
+
+/// What choosing a model fills in.
+#[derive(Debug, Serialize)]
+pub struct ModelPreset {
+    pub model: DacModel,
+    pub label_fr: &'static str,
+    pub xy_bits: u8,
+    pub color_bits: u8,
+    /// 0 = unknown.
+    pub max_pps: u32,
+}
+
+/// The models offered in the sheet. ShowNET: 12-bit X/Y, 8 bits per
+/// colour (RGB), 100 kpps: the figures of Laserworld's current public
+/// pages (older manuals say more; plan for the lower one).
+pub const MODELS: [ModelPreset; 2] = [
+    ModelPreset { model: DacModel::Other, label_fr: "Autre / non renseignée", xy_bits: 16, color_bits: 16, max_pps: 0 },
+    ModelPreset { model: DacModel::ShowNet, label_fr: "ShowNET (Laserworld)", xy_bits: 12, color_bits: 8, max_pps: 100_000 },
+];
+
+impl DacModel {
+    pub fn preset(self) -> &'static ModelPreset {
+        MODELS.iter().find(|m| m.model == self).expect("every model has a preset")
+    }
+}
 
 /// Hard ceiling of one output.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,6 +118,14 @@ pub struct ProjectorInfo {
     pub divergence_lens: bool,
     /// Free notes (model, serial number, last measurement...).
     pub notes: String,
+    /// The interface driving the projector (T-472).
+    pub dac_model: DacModel,
+    /// Resolution of X and Y, bits.
+    pub xy_bits: u8,
+    /// Resolution of each colour, bits.
+    pub color_bits: u8,
+    /// The interface's point-rate ceiling. 0 = unknown.
+    pub max_pps: u32,
 }
 
 impl Default for ProjectorInfo {
@@ -90,6 +141,10 @@ impl Default for ProjectorInfo {
             hw_scan_fail: None,
             divergence_lens: false,
             notes: String::new(),
+            dac_model: DacModel::Other,
+            xy_bits: 16,
+            color_bits: 16,
+            max_pps: 0,
         }
     }
 }
@@ -124,6 +179,8 @@ const WAVELENGTH_NM: (u16, u16) = (0, 2_000);
 const APERTURE_MM: (f32, f32) = (0.0, 100.0);
 const DIVERGENCE_MRAD: (f32, f32) = (0.0, 100.0);
 const SCAN_ANGLE_DEG: (f32, f32) = (0.0, 180.0);
+const BITS: (u8, u8) = (1, 16);
+const MAX_PPS: u32 = 1_000_000;
 const MAX_NAME: usize = 60;
 const MAX_NOTES: usize = 1000;
 const COLOURS: [&str; 3] = ["rouge", "vert", "bleu"];
@@ -206,7 +263,22 @@ impl ProjectorInfo {
         check(self.aperture_mm, APERTURE_MM, "Diamètre de sortie (mm)")?;
         check(self.divergence_mrad, DIVERGENCE_MRAD, "Divergence (mrad)")?;
         check(self.scan_angle_deg, SCAN_ANGLE_DEG, "Angle de balayage (°)")?;
+        for (bits, what) in [(self.xy_bits, "Résolution X/Y"), (self.color_bits, "Résolution des couleurs")] {
+            if !(BITS.0..=BITS.1).contains(&bits) {
+                bail!("{what} : {bits} bits hors limites ({} à {})", BITS.0, BITS.1);
+            }
+        }
+        if self.max_pps > MAX_PPS {
+            bail!("Points par seconde max : {} hors limites (0 à {MAX_PPS})", self.max_pps);
+        }
         Ok(())
+    }
+
+    /// The sheet with `model` chosen and its preset filled in (resolution
+    /// and point rate); everything else is kept.
+    pub fn with_model(&self, model: DacModel) -> Self {
+        let p = model.preset();
+        Self { dac_model: model, xy_bits: p.xy_bits, color_bits: p.color_bits, max_pps: p.max_pps, ..self.clone() }
     }
 
     /// Clamped into range, for a file edited by hand.
@@ -223,6 +295,10 @@ impl ProjectorInfo {
             hw_scan_fail: self.hw_scan_fail,
             divergence_lens: self.divergence_lens,
             notes: self.notes.chars().take(MAX_NOTES).collect(),
+            dac_model: self.dac_model,
+            xy_bits: self.xy_bits.clamp(BITS.0, BITS.1),
+            color_bits: self.color_bits.clamp(BITS.0, BITS.1),
+            max_pps: self.max_pps.min(MAX_PPS),
         }
     }
 }
@@ -498,6 +574,31 @@ mod tests {
         assert_eq!(p.class, "4");
         assert_eq!(p.power_mw, [0.0, 500.0, 0.0]);
         assert_eq!(p.scan_angle_deg, 180.0);
+        for bad in [
+            ProjectorInfo { xy_bits: 0, ..d.clone() },
+            ProjectorInfo { color_bits: 17, ..d.clone() },
+            ProjectorInfo { max_pps: 2_000_000, ..d.clone() },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        let p = ProjectorInfo { xy_bits: 0, color_bits: 40, max_pps: u32::MAX, ..d.clone() }.sanitized();
+        assert_eq!((p.xy_bits, p.color_bits, p.max_pps), (1, 16, 1_000_000));
+    }
+
+    #[test]
+    fn the_shownet_model_fills_its_resolution_and_point_rate() {
+        let d = ProjectorInfo { name: "Projecteur 1".into(), ..Default::default() };
+        assert_eq!((d.dac_model, d.xy_bits, d.color_bits, d.max_pps), (DacModel::Other, 16, 16, 0));
+        let s = d.with_model(DacModel::ShowNet);
+        assert_eq!((s.dac_model, s.xy_bits, s.color_bits, s.max_pps), (DacModel::ShowNet, 12, 8, 100_000));
+        assert_eq!(s.name, "Projecteur 1", "the rest of the sheet is kept");
+        assert!(s.validate().is_ok());
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["dac_model"], "shownet");
+        // A sheet saved before T-472 still loads, as « other ».
+        let old: ProjectorInfo = serde_json::from_str(r#"{"name":"P","class":"3B"}"#).unwrap();
+        assert_eq!((old.dac_model, old.xy_bits, old.color_bits, old.max_pps), (DacModel::Other, 16, 16, 0));
+        assert_eq!(s.with_model(DacModel::Other).max_pps, 0);
     }
 
     #[test]

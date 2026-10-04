@@ -504,6 +504,7 @@ pub fn describe(e: &SafetyEvent) -> String {
                 "Mode spectacle désactivé".into()
             }
         }
+        "checklist_reset" if str_of(d, "reason") == "shownet" => "Liste de contrôle avant show recommencée : sortie ShowNET, nouveaux points à cocher".into(),
         "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
         "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),
         "output_select" => match d.get("id").and_then(Value::as_str) {
