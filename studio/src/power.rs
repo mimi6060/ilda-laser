@@ -158,6 +158,40 @@ impl Default for ProjectorInfo {
     }
 }
 
+/// Scan limits of one output (T-171): the scan speed range its galvos
+/// take and the points per frame it should get. The scan speed itself is
+/// the connection's (`--pps` / `connection.pps`, 30 000 by default): every
+/// output opens at that rate today.
+///
+/// Applied to the content, **before** the safety stage (`safety_chain`
+/// in main.rs): a frame above `max_points` is thinned (`fit_frame`), one
+/// below `min_points` completed (`output::pad_frame`), then the zones,
+/// horizon, limiter, static-beam guard and caps run on the result. The
+/// speed range bounds the scan presets and the live « Vitesse de
+/// balayage » (`scan::ScanLimits`). Nothing here raises a power cap.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputScan {
+    /// Slowest scan speed the galvos should be driven at, points/s.
+    pub pps_min: u32,
+    /// Fastest scan speed (galvo protection), points/s: the scan presets
+    /// and the live scan speed never trace faster than this.
+    pub pps_max: u32,
+    /// Fewest points per frame (0 = off): a shorter frame is completed.
+    pub min_points: usize,
+    /// Most points per frame (0 = no limit of its own: the layer mixer's
+    /// budget and the DAC's frame size still apply).
+    pub max_points: usize,
+    /// Frame rate aimed at, frames/s. The UI warns below 7/8 of it.
+    pub min_fps: f32,
+}
+
+impl Default for OutputScan {
+    fn default() -> Self {
+        Self { pps_min: 10_000, pps_max: 40_000, min_points: 200, max_points: 0, min_fps: 40.0 }
+    }
+}
+
 /// One output: its cap, its projector and its colour rendering.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -168,11 +202,20 @@ pub struct OutputConfig {
     /// White balance, curves and colour delay (T-414, `colorcal.rs`).
     /// Absent in older files: identity.
     pub color: ColorCalibration,
+    /// Scan speed range and points per frame (T-171). Absent in older
+    /// files: the defaults.
+    pub scan: OutputScan,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
-        Self { id: MAIN_OUTPUT.into(), limits: OutputLimits::default(), projector: ProjectorInfo::default(), color: ColorCalibration::default() }
+        Self {
+            id: MAIN_OUTPUT.into(),
+            limits: OutputLimits::default(),
+            projector: ProjectorInfo::default(),
+            color: ColorCalibration::default(),
+            scan: OutputScan::default(),
+        }
     }
 }
 
@@ -193,6 +236,12 @@ const DIVERGENCE_MRAD: (f32, f32) = (0.0, 100.0);
 const SCAN_ANGLE_DEG: (f32, f32) = (0.0, 180.0);
 const BITS: (u8, u8) = (1, 16);
 const MAX_PPS: u32 = 1_000_000;
+/// Scan speed bounds an output may declare (what DACs take, as
+/// `OutputStore::connection` clamps the rate).
+pub const SCAN_PPS: (u32, u32) = (1_000, 100_000);
+/// Points per frame bounds of `OutputScan` (the layer mixer's range).
+pub const SCAN_POINTS: (usize, usize) = (crate::layers::MIN_POINT_BUDGET, crate::layers::MAX_POINT_BUDGET);
+pub const SCAN_FPS: (f32, f32) = (1.0, 120.0);
 const MAX_NAME: usize = 60;
 const MAX_NOTES: usize = 1000;
 const COLOURS: [&str; 3] = ["rouge", "vert", "bleu"];
@@ -315,6 +364,111 @@ impl ProjectorInfo {
     }
 }
 
+impl OutputScan {
+    pub fn validate(&self) -> Result<()> {
+        let (lo, hi) = SCAN_PPS;
+        for (v, what) in [(self.pps_min, "Vitesse min"), (self.pps_max, "Vitesse max")] {
+            if !(lo..=hi).contains(&v) {
+                bail!("{what} : {v} points/s hors limites ({lo} à {hi})");
+            }
+        }
+        if self.pps_min > self.pps_max {
+            bail!("Vitesse min ({}) au-dessus de la vitesse max ({})", self.pps_min, self.pps_max);
+        }
+        if self.min_points > SCAN_POINTS.1 {
+            bail!("Points minimum : {} hors limites (0 à {})", self.min_points, SCAN_POINTS.1);
+        }
+        if self.max_points != 0 && !(SCAN_POINTS.0..=SCAN_POINTS.1).contains(&self.max_points) {
+            bail!("Points maximum : {} hors limites (0 = sans limite, ou {} à {})", self.max_points, SCAN_POINTS.0, SCAN_POINTS.1);
+        }
+        if self.max_points != 0 && self.min_points > self.max_points {
+            bail!("Points minimum ({}) au-dessus du maximum ({})", self.min_points, self.max_points);
+        }
+        check(self.min_fps, SCAN_FPS, "Images/s visées")
+    }
+
+    /// Clamped into range, for a file edited by hand. A minimum above the
+    /// maximum is brought down to it.
+    pub fn sanitized(&self) -> Self {
+        let d = Self::default();
+        let pps_max = self.pps_max.clamp(SCAN_PPS.0, SCAN_PPS.1);
+        let max_points = if self.max_points == 0 { 0 } else { self.max_points.clamp(SCAN_POINTS.0, SCAN_POINTS.1) };
+        let min_points = self.min_points.min(if max_points == 0 { SCAN_POINTS.1 } else { max_points });
+        Self { pps_min: self.pps_min.clamp(SCAN_PPS.0, pps_max), pps_max, min_points, max_points, min_fps: fix(self.min_fps, SCAN_FPS, d.min_fps) }
+    }
+
+    /// The scan speed range as a % of the output's rate `pps`, for the
+    /// scan presets and the live scan speed (`scan::ScanLimits`): tracing
+    /// at `pct` % moves the galvos like `pps × pct / 100` would. Within
+    /// the presets' 50..150 % whatever the rate.
+    pub fn scan_limits(&self, pps: u32) -> crate::scan::ScanLimits {
+        use crate::scan::{MAX_SCAN_PCT, MIN_SCAN_PCT};
+        let o = self.sanitized();
+        let pct = |v: u32| if pps == 0 { 100.0 } else { (100.0 * v as f64 / pps as f64) as f32 };
+        let max_scan_pct = pct(o.pps_max).clamp(MIN_SCAN_PCT, MAX_SCAN_PCT);
+        let min_scan_pct = pct(o.pps_min).clamp(MIN_SCAN_PCT, max_scan_pct);
+        crate::scan::ScanLimits {
+            min_scan_pct,
+            max_scan_pct,
+            min_points: o.min_points.max(SCAN_POINTS.0),
+            max_points: if o.max_points == 0 { SCAN_POINTS.1 } else { o.max_points },
+        }
+    }
+
+    /// Points per frame the output takes: what `output::fit_frame_limits`
+    /// applies before the safety stage.
+    pub fn frame_limits(&self) -> crate::output::FrameLimits {
+        let o = self.sanitized();
+        crate::output::FrameLimits { min: o.min_points, max: (o.max_points > 0).then_some(o.max_points) }
+    }
+
+    /// Below this estimated frame rate the UI warns: 7/8 of the target
+    /// (35 frames/s for the default 40).
+    pub fn alert_fps(&self) -> f32 {
+        self.sanitized().min_fps * 7.0 / 8.0
+    }
+
+    /// What does not fit together, in French, for the UI: the output's
+    /// rate outside its speed range, or above the projector sheet's
+    /// interface ceiling (`max_pps`, when known). Never clamped silently:
+    /// the operator sees it and decides.
+    pub fn warnings(&self, pps: u32, sheet: &ProjectorInfo) -> Vec<String> {
+        let o = self.sanitized();
+        let mut out = Vec::new();
+        if pps > o.pps_max {
+            out.push(format!("La sortie tourne à {pps} points/s, au-dessus de la vitesse max ({}) : le tracé est ralenti autant que possible.", o.pps_max));
+        } else if pps < o.pps_min {
+            out.push(format!("La sortie tourne à {pps} points/s, sous la vitesse min ({}).", o.pps_min));
+        }
+        if sheet.max_pps > 0 && pps > sheet.max_pps {
+            out.push(format!("{pps} points/s dépasse le maximum de l'interface sur la fiche du projecteur ({} points/s).", sheet.max_pps));
+        }
+        if sheet.max_pps > 0 && o.pps_max > sheet.max_pps {
+            out.push(format!("Vitesse max ({}) au-dessus du maximum de l'interface sur la fiche du projecteur ({} points/s).", o.pps_max, sheet.max_pps));
+        }
+        out
+    }
+
+    /// What going from `self` to `new` loosens, in French: a faster
+    /// fastest scan. Empty = only tighter or equal.
+    pub fn loosenings(&self, new: &OutputScan) -> Vec<String> {
+        let mut out = Vec::new();
+        if new.pps_max > self.pps_max {
+            out.push(format!("Vitesse max : {} → {} points/s", self.pps_max, new.pps_max));
+        }
+        out
+    }
+}
+
+/// Estimated frames per second of a frame of `points` points at `pps`.
+pub fn fps(pps: u32, points: usize) -> f32 {
+    if points == 0 {
+        0.0
+    } else {
+        pps as f32 / points as f32
+    }
+}
+
 /// Caps one frame in place (see the module docs). A channel that is not a
 /// number goes dark.
 pub fn cap(frame: &mut [Point], limits: &OutputLimits) {
@@ -378,7 +532,13 @@ impl OutputStore {
             if o.id.is_empty() || seen.iter().any(|s| s.id == o.id) {
                 continue;
             }
-            seen.push(OutputConfig { id: o.id.clone(), limits: o.limits.sanitized(), projector: o.projector.sanitized(), color: o.color.sanitized() });
+            seen.push(OutputConfig {
+                id: o.id.clone(),
+                limits: o.limits.sanitized(),
+                projector: o.projector.sanitized(),
+                color: o.color.sanitized(),
+                scan: o.scan.sanitized(),
+            });
         }
         if !seen.iter().any(|o| o.id == MAIN_OUTPUT) {
             seen.insert(0, OutputConfig::default());
@@ -486,6 +646,7 @@ impl OutputStore {
             limits: limits.unwrap_or(current.limits),
             projector: projector.unwrap_or_else(|| current.projector.clone()),
             color: current.color,
+            scan: current.scan,
         };
         next.limits.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
         next.projector.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
@@ -515,6 +676,34 @@ impl OutputStore {
         }
         self.file = file;
         self.load_error = None;
+        Ok(next)
+    }
+
+    /// Changes an output's scan limits (T-171). Tighter or equal applies at
+    /// once; a faster fastest scan (`pps_max` raised) is refused while
+    /// `armed`, like raising a cap. Out of range values are refused.
+    pub fn set_scan(&mut self, id: &str, scan: OutputScan, armed: bool) -> std::result::Result<OutputConfig, SetError> {
+        let Some(current) = self.get(id).cloned() else {
+            return Err(SetError::Invalid(format!("Sortie inconnue : « {id} »")));
+        };
+        scan.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
+        let loosens = current.scan.loosenings(&scan);
+        if !loosens.is_empty() && armed {
+            return Err(SetError::Armed(loosens));
+        }
+        let next = OutputConfig { scan, ..current.clone() };
+        let mut file = self.file.clone();
+        if let Some(slot) = file.outputs.iter_mut().find(|o| o.id == id) {
+            *slot = next.clone();
+        }
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&file).map_err(|e| SetError::Invalid(e.to_string()))?;
+            crate::datafile::replace(path, json.as_bytes()).map_err(|e| SetError::Invalid(format!("enregistrement impossible de {} : {e:#}", path.display())))?;
+        }
+        if current.scan != next.scan {
+            log::info!("output {id}: scan limits {:?} -> {:?}", current.scan, next.scan);
+        }
+        self.file = file;
         Ok(next)
     }
 
@@ -915,5 +1104,87 @@ mod tests {
             }
         }
         assert_eq!(s.outputs.active_limits(), OutputLimits::default());
+    }
+
+    #[test]
+    fn scan_limits_default_load_from_older_files_and_are_checked() {
+        let d = OutputScan::default();
+        assert_eq!((d.pps_min, d.pps_max, d.min_points, d.max_points, d.min_fps), (10_000, 40_000, 200, 0, 40.0));
+        // A file from before T-171: the defaults, and the rest kept.
+        let dir = std::env::temp_dir().join(format!("ls-outscan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("outputs.json");
+        std::fs::write(&path, r#"{"outputs":[{"id":"main","limits":{"max_power":0.2}}]}"#).unwrap();
+        let mut store = OutputStore::load_or_create(path.clone());
+        assert_eq!(store.active().scan, d);
+        assert_eq!(store.active_limits().max_power, 0.2);
+        // Saved, and back after a restart.
+        let mine = OutputScan { pps_min: 12_000, pps_max: 30_000, min_points: 150, max_points: 900, min_fps: 30.0 };
+        store.set_scan(MAIN_OUTPUT, mine, false).unwrap();
+        assert_eq!(OutputStore::load_or_create(path.clone()).active().scan, mine);
+        // Out of range or inconsistent: refused, nothing changed.
+        for bad in [
+            OutputScan { pps_min: 50_000, ..d },
+            OutputScan { pps_max: 500_000, ..d },
+            OutputScan { pps_min: 500, ..d },
+            OutputScan { max_points: 50, ..d },
+            OutputScan { min_points: 900, max_points: 500, ..d },
+            OutputScan { min_fps: f32::NAN, ..d },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+            assert!(matches!(store.set_scan(MAIN_OUTPUT, bad, false), Err(SetError::Invalid(_))));
+        }
+        assert!(matches!(store.set_scan("p9", d, false), Err(SetError::Invalid(_))));
+        assert_eq!(store.active().scan, mine);
+        // A hand-edited file is brought into range.
+        std::fs::write(&path, r#"{"outputs":[{"id":"main","scan":{"pps_min":90000,"pps_max":5,"min_points":99999,"max_points":3,"min_fps":-1}}]}"#).unwrap();
+        let s = OutputStore::load_or_create(path).active().scan;
+        assert!(s.validate().is_ok(), "{s:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_faster_scan_is_refused_while_armed_and_slower_applies() {
+        let mut store = OutputStore::in_memory();
+        let d = OutputScan::default();
+        let faster = OutputScan { pps_max: 60_000, ..d };
+        assert!(matches!(store.set_scan(MAIN_OUTPUT, faster, true), Err(SetError::Armed(_))));
+        assert_eq!(store.active().scan, d);
+        // Slower applies armed; faster applies disarmed.
+        store.set_scan(MAIN_OUTPUT, OutputScan { pps_max: 20_000, ..d }, true).unwrap();
+        store.set_scan(MAIN_OUTPUT, faster, false).unwrap();
+        assert_eq!(store.active().scan.pps_max, 60_000);
+    }
+
+    #[test]
+    fn the_scan_range_bounds_the_presets_and_warns_above_the_sheet() {
+        let d = OutputScan::default();
+        // 30 kpps, 10..40 kpps: 50 (not 33) .. 133 %.
+        let l = d.scan_limits(30_000);
+        assert_eq!(l.min_scan_pct, 50.0);
+        assert!((l.max_scan_pct - 133.333).abs() < 0.01, "{l:?}");
+        assert_eq!((l.min_points, l.max_points), (200, crate::layers::MAX_POINT_BUDGET));
+        // Running above the range: slower than as drawn.
+        assert!((d.scan_limits(80_000).max_scan_pct - 50.0).abs() < 1e-3);
+        // Running far below: within 50..150 % still.
+        assert_eq!(d.scan_limits(5_000).min_scan_pct, 150.0);
+        assert_eq!(d.scan_limits(0).max_scan_pct, 100.0);
+        // Points per frame for the engine.
+        assert_eq!(d.frame_limits(), crate::output::FrameLimits { min: 200, max: None });
+        assert_eq!(OutputScan { max_points: 600, ..d }.frame_limits().max, Some(600));
+        // Frame rate: estimate and alert (35 for 40).
+        assert_eq!(fps(30_000, 750), 40.0);
+        assert_eq!(fps(30_000, 0), 0.0);
+        assert_eq!(d.alert_fps(), 35.0);
+        // Warnings, never a silent clamp.
+        let sheet = ProjectorInfo::default();
+        assert!(d.warnings(30_000, &sheet).is_empty());
+        assert_eq!(d.warnings(50_000, &sheet).len(), 1);
+        assert_eq!(d.warnings(5_000, &sheet).len(), 1);
+        let slow_dac = ProjectorInfo { max_pps: 20_000, ..sheet };
+        let w = d.warnings(30_000, &slow_dac);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|m| m.contains("20000")));
+        assert_eq!(d.scan_limits(30_000), d.scan_limits(30_000), "the sheet never changes the limits");
     }
 }

@@ -115,11 +115,13 @@ pub fn builtin_scan_presets() -> Vec<ScanPreset> {
     ]
 }
 
-/// What the output allows a preset (T-171 will give every output its
-/// own; until then the same for all): the fastest scan and the range of
-/// the per-look point cap.
+/// What the output allows a preset and the live scan speed: the slowest
+/// and fastest scan, and the range of the per-look point cap. Each output
+/// has its own (`power::OutputScan::scan_limits`, T-171); the default is
+/// the widest (the presets' own 50..150 %).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct ScanLimits {
+    pub min_scan_pct: f32,
     pub max_scan_pct: f32,
     pub min_points: usize,
     pub max_points: usize,
@@ -127,19 +129,43 @@ pub struct ScanLimits {
 
 impl Default for ScanLimits {
     fn default() -> Self {
-        Self { max_scan_pct: MAX_SCAN_PCT, min_points: MIN_POINT_BUDGET, max_points: MAX_POINT_BUDGET }
+        Self { min_scan_pct: MIN_SCAN_PCT, max_scan_pct: MAX_SCAN_PCT, min_points: MIN_POINT_BUDGET, max_points: MAX_POINT_BUDGET }
     }
 }
 
-/// `preset` within `limits`: the scan speed no faster than the output
-/// allows (and within 50..150 %), the point cap within its range, every
+impl ScanLimits {
+    /// `pct` within these limits (and always within 50..150 %); not a
+    /// number = 100 %, within them too.
+    pub fn bound_pct(&self, pct: f32) -> f32 {
+        let max = if self.max_scan_pct.is_finite() { self.max_scan_pct.clamp(MIN_SCAN_PCT, MAX_SCAN_PCT) } else { 100.0 };
+        let min = if self.min_scan_pct.is_finite() { self.min_scan_pct.clamp(MIN_SCAN_PCT, max) } else { MIN_SCAN_PCT.min(max) };
+        if pct.is_finite() {
+            pct.clamp(min, max)
+        } else {
+            100.0f32.clamp(min, max)
+        }
+    }
+}
+
+/// The live « Vitesse de balayage » (`master.scan`, T-171), × 0.5..1.5.
+pub const MIN_MASTER_SCAN: f32 = 0.5;
+pub const MAX_MASTER_SCAN: f32 = 1.5;
+
+/// The scan limits of the output the looks are traced for (the main one;
+/// a venue's other projectors draw the same traced looks): its speed range
+/// against the rate it runs at.
+pub fn output_limits(s: &Shared) -> ScanLimits {
+    s.outputs.active().scan.scan_limits(s.pps)
+}
+
+/// `preset` within `limits`: the scan speed no faster (nor slower) than
+/// the output allows (and within 50..150 %), the point cap within its range, every
 /// optimiser value sanitised. What is drawn, and what the editor shows.
 pub fn effective(preset: &ScanPreset, limits: &ScanLimits) -> ScanPreset {
     let mut p = preset.clone();
     p.params.sanitize();
     p.params.enabled = true;
-    let max_pct = if limits.max_scan_pct.is_finite() { limits.max_scan_pct.clamp(MIN_SCAN_PCT, MAX_SCAN_PCT) } else { 100.0 };
-    p.scan_pct = if p.scan_pct.is_finite() { p.scan_pct.clamp(MIN_SCAN_PCT, max_pct) } else { 100.0f32.min(max_pct) };
+    p.scan_pct = limits.bound_pct(p.scan_pct);
     let min = limits.min_points.max(MIN_POINT_BUDGET);
     let max = limits.max_points.clamp(min, MAX_POINT_BUDGET);
     p.params.max_points = p.params.max_points.clamp(min, max);
@@ -164,7 +190,7 @@ pub fn figure_scan(look: &Settings) -> Option<&str> {
 /// cell's preset, else its figure's, else the output's default.
 pub fn for_look(s: &Shared, id: u64, look: &Settings) -> OptimizeParams {
     let slot = s.deck.find(id).and_then(|a| s.deck.slot_scan(&a.cue));
-    s.scan_presets.resolve(chosen(None, slot, figure_scan(look)), &s.mixer, &ScanLimits::default())
+    s.scan_presets.resolve(chosen(None, slot, figure_scan(look)), &s.mixer, &output_limits(s), s.live.scan)
 }
 
 /// What a timeline event draws with: its own preset, else its cue's cell's,
@@ -174,7 +200,7 @@ pub fn for_event(s: &Shared, cue: &TimelineCue, look: &Settings) -> OptimizePara
         EventSource::Cue { id } => s.deck.slot_scan(id),
         EventSource::Look { .. } => None,
     };
-    s.scan_presets.resolve(chosen(cue.scan.as_deref(), slot, figure_scan(look)), &s.mixer, &ScanLimits::default())
+    s.scan_presets.resolve(chosen(cue.scan.as_deref(), slot, figure_scan(look)), &s.mixer, &output_limits(s), s.live.scan)
 }
 
 /// User presets, saved to `scan_presets.json` on every change.
@@ -240,11 +266,33 @@ impl ScanPresetStore {
     /// The optimiser settings a look draws with: the preset it chose, else
     /// the output's default preset, else (« Auto », or a preset since
     /// deleted) the output's optimiser settings as they are.
-    pub fn resolve(&self, chosen: Option<&str>, mixer: &Mixer, limits: &ScanLimits) -> OptimizeParams {
-        chosen
-            .and_then(|id| self.find(id))
-            .or_else(|| mixer.scan_default.as_deref().and_then(|id| self.find(id)))
-            .map_or_else(|| mixer.optimizer.clone(), |p| effective(&p, limits).optimize_params())
+    ///
+    /// `master` is the live scan speed (`master.scan`, 0.5..1.5, T-171):
+    /// it scales the preset's own speed, the product bounded by the
+    /// output's limits, so 150 % never traces faster than its `pps_max`.
+    /// With « Auto » it scales the output's optimiser steps the same way
+    /// when the optimiser is on (off: nothing to scale).
+    pub fn resolve(&self, chosen: Option<&str>, mixer: &Mixer, limits: &ScanLimits, master: f32) -> OptimizeParams {
+        let master = if master.is_finite() { master.clamp(MIN_MASTER_SCAN, MAX_MASTER_SCAN) } else { 1.0 };
+        let preset = chosen.and_then(|id| self.find(id)).or_else(|| mixer.scan_default.as_deref().and_then(|id| self.find(id)));
+        match preset {
+            Some(p) => {
+                let mut e = effective(&p, limits);
+                e.scan_pct = limits.bound_pct(e.scan_pct * master);
+                e.optimize_params()
+            }
+            None => {
+                let mut o = mixer.optimizer.clone();
+                let k = limits.bound_pct(100.0 * master) / 100.0;
+                if o.enabled && k != 1.0 {
+                    o.sanitize();
+                    o.lit_step *= k;
+                    o.blank_step *= k;
+                    o.sanitize();
+                }
+                o
+            }
+        }
     }
 }
 
@@ -325,7 +373,7 @@ mod tests {
     #[test]
     fn effective_clamps_scan_speed_and_points_to_the_output_limits() {
         let fast = ScanPreset { scan_pct: 150.0, params: OptimizeParams { max_points: 50, ..Default::default() }, ..preset(GRAPHICS) };
-        let limits = ScanLimits { max_scan_pct: 110.0, min_points: 300, max_points: 800 };
+        let limits = ScanLimits { min_scan_pct: MIN_SCAN_PCT, max_scan_pct: 110.0, min_points: 300, max_points: 800 };
         let e = effective(&fast, &limits);
         assert_eq!(e.scan_pct, 110.0);
         assert_eq!(e.params.max_points, 300);
@@ -353,18 +401,18 @@ mod tests {
         let limits = ScanLimits::default();
         let auto = Mixer::default();
         // Nothing chosen, no output default: « Auto » = the mixer's optimiser (off).
-        assert_eq!(s.resolve(None, &auto, &limits), auto.optimizer);
-        assert!(!s.resolve(None, &auto, &limits).enabled);
+        assert_eq!(s.resolve(None, &auto, &limits, 1.0), auto.optimizer);
+        assert!(!s.resolve(None, &auto, &limits, 1.0).enabled);
         let beams = effective(&preset(BEAMS), &limits).optimize_params();
-        assert_eq!(s.resolve(Some(BEAMS), &auto, &limits), beams);
-        assert_eq!(s.resolve(Some("u-1"), &auto, &limits).lit_step, 0.025 * 0.8);
+        assert_eq!(s.resolve(Some(BEAMS), &auto, &limits, 1.0), beams);
+        assert_eq!(s.resolve(Some("u-1"), &auto, &limits, 1.0).lit_step, 0.025 * 0.8);
         // An unknown (deleted) preset falls back to the output default.
         let with_default = Mixer { scan_default: Some(RASTER.into()), ..Mixer::default() };
-        assert_eq!(s.resolve(Some("u-9"), &with_default, &limits), effective(&preset(RASTER), &limits).optimize_params());
-        assert_eq!(s.resolve(Some("u-9"), &auto, &limits), auto.optimizer);
+        assert_eq!(s.resolve(Some("u-9"), &with_default, &limits, 1.0), effective(&preset(RASTER), &limits).optimize_params());
+        assert_eq!(s.resolve(Some("u-9"), &auto, &limits, 1.0), auto.optimizer);
         // A deleted output default = Auto.
         let gone = Mixer { scan_default: Some("u-7".into()), ..Mixer::default() };
-        assert_eq!(s.resolve(None, &gone, &limits), gone.optimizer);
+        assert_eq!(s.resolve(None, &gone, &limits, 1.0), gone.optimizer);
     }
 
     #[test]
@@ -469,7 +517,7 @@ mod tests {
         assert!(!serde_json::to_string(&fig).unwrap().contains("scan"));
         let ev: crate::timeline::Event = serde_json::from_str(r#"{"id":3,"start":1.0,"len":4.0}"#).unwrap();
         assert_eq!(ev.scan, None);
-        assert!(!serde_json::to_string(&ev).unwrap().contains("scan"));
+        assert!(serde_json::to_value(&ev).unwrap().get("scan").is_none());
         let m: Mixer = serde_json::from_str(r#"{"point_budget":750}"#).unwrap();
         assert_eq!(m.scan_default, None);
         assert!(!serde_json::to_string(&m).unwrap().contains("scan_default"));
@@ -496,6 +544,57 @@ mod tests {
                 assert!(out.iter().all(|q| q.r == 0.0 && q.g == 0.0 && q.b == 0.0), "{}: lit at frame {i}", p.id);
             }
         }
+    }
+
+    #[test]
+    fn master_scan_at_150_never_traces_faster_than_pps_max() {
+        use crate::power::OutputScan;
+        let fast_user = ScanPreset { id: "u-1".into(), name: "Vite".into(), scan_pct: 150.0, ..preset(GRAPHICS) };
+        let s = store(vec![fast_user]);
+        let base = OptimizeParams { enabled: true, ..Default::default() }.lit_step;
+        for pps in [8_000u32, 20_000, 30_000, 40_000, 60_000] {
+            for pps_max in [15_000u32, 30_000, 40_000, 100_000] {
+                let out = OutputScan { pps_min: 1_000, pps_max, ..Default::default() };
+                let limits = out.scan_limits(pps);
+                for chosen in [Some(GRAPHICS), Some("u-1"), None] {
+                    let mixer = Mixer { optimizer: OptimizeParams { enabled: true, ..Default::default() }, ..Mixer::default() };
+                    for master in [0.5, 1.0, 1.5, 9.0, f32::NAN] {
+                        let p = s.resolve(chosen, &mixer, &limits, master);
+                        // The step scale is the scan speed: pps × k.
+                        let k = p.lit_step / base;
+                        let traced = pps as f32 * k;
+                        // Never faster than pps_max, unless even 50 % is
+                        // (the output runs at more than twice its maximum:
+                        // then as slow as a preset goes, and a warning).
+                        let bound = (pps_max as f32).max(pps as f32 * MIN_SCAN_PCT / 100.0);
+                        assert!(traced <= bound * 1.001, "pps {pps} max {pps_max} {chosen:?} ×{master}: {traced}");
+                        assert!((MIN_SCAN_PCT / 100.0 - 1e-4..=MAX_SCAN_PCT / 100.0 + 1e-4).contains(&k));
+                    }
+                }
+            }
+        }
+        // At 30 kpps with the defaults (≤ 40 kpps), 150 % is 133 %.
+        let limits = OutputScan::default().scan_limits(30_000);
+        let p = s.resolve(Some(GRAPHICS), &Mixer::default(), &limits, 1.5);
+        assert!((p.lit_step / base - 4.0 / 3.0).abs() < 1e-3, "{}", p.lit_step / base);
+        // 100 % changes nothing; Auto with the optimiser off stays off.
+        assert_eq!(s.resolve(Some(GRAPHICS), &Mixer::default(), &limits, 1.0).lit_step, base);
+        assert_eq!(s.resolve(None, &Mixer::default(), &limits, 1.5), Mixer::default().optimizer);
+    }
+
+    #[test]
+    fn the_live_scan_speed_is_a_master_control_that_reaches_the_looks() {
+        let mut s = crate::test_support::shared();
+        s.mixer.scan_default = Some(GRAPHICS.into());
+        let base = for_look(&s, 0, &Settings::default()).lit_step;
+        crate::controls::apply(&mut s, "master.scan", crate::controls::ControlInput::Norm(0.0), true).unwrap();
+        assert!((s.live.scan - MIN_MASTER_SCAN).abs() < 1e-6);
+        assert!((for_look(&s, 0, &Settings::default()).lit_step - base * 0.5).abs() < 1e-6);
+        crate::controls::apply(&mut s, "master.scan", crate::controls::ControlInput::Norm(1.0), true).unwrap();
+        let fast = for_look(&s, 0, &Settings::default()).lit_step;
+        assert!(fast > base && fast <= base * 1.5, "{fast} vs {base}");
+        // Files from before T-171 read at 100 %.
+        assert_eq!(serde_json::from_str::<crate::live::LiveModifiers>("{}").unwrap().scan, 1.0);
     }
 
     #[test]

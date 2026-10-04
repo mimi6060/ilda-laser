@@ -236,6 +236,7 @@ impl ControlRegistry {
         add("master.strobe.duty".into(), "Rapport cyclique du strobe".into(), "master", cont(STROBE_MIN_DUTY, STROBE_MAX_DUTY, st.duty, Unit::Percent), true);
         add("master.trace".into(), "Points visibles".into(), "master", cont(0.0, 1.0, m.trace, Unit::Percent), true);
         add("master.dots".into(), "Pointillés".into(), "master", cont(0.0, 1.0, m.dots, Unit::Percent), true);
+        add("master.scan".into(), "Vitesse de balayage".into(), "master", cont(crate::scan::MIN_MASTER_SCAN, crate::scan::MAX_MASTER_SCAN, m.scan, Unit::Percent), true);
         add("master.mirror".into(), "Miroir".into(), "master", ControlKind::Choice { options: MIRROR_LABELS.to_vec(), default: 0 }, true);
         add("master.prism".into(), "Prisme".into(), "master", cont(1.0, MAX_PRISM as f32, m.prism as f32, Unit::None), true);
         add("transport.freeze".into(), "Figer (maintenir)".into(), "transport", ControlKind::Momentary, true);
@@ -477,6 +478,7 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "master.strobe.duty" => set_live(s, |m| m.strobe.duty = value(input)),
         "master.trace" => set_live(s, |m| m.trace = value(input)),
         "master.dots" => set_live(s, |m| m.dots = value(input)),
+        "master.scan" => set_live(s, |m| m.scan = value(input)),
         "master.mirror" => {
             let mirror = MIRRORS[choice_index(&desc.kind, input)];
             set_live(s, |m| m.mirror = mirror)
@@ -733,6 +735,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "master.strobe.duty" => json!(s.live.strobe.duty()),
         "master.trace" => json!(s.live.trace),
         "master.dots" => json!(s.live.dots),
+        "master.scan" => json!(s.live.scan),
         "master.mirror" => json!(MIRRORS.iter().position(|&m| m == s.live.mirror).unwrap_or(0)),
         "master.prism" => json!(s.live.prism),
         "transport.freeze" => json!(s.live.freeze),
