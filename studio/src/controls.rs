@@ -1473,7 +1473,7 @@ mod tests {
         let mut cue = test_cue(true);
         cue.keys.iter_mut().for_each(|k: &mut EvolvingKey| k.params.count = 32);
         let settings = Settings { content: Content::Evolving(cue), ..Settings::default() };
-        s.presets.push(Preset { id: "test-evolving".into(), name: "Test".into(), category: "Faisceaux", settings });
+        s.presets.push(Preset { id: "test-evolving".into(), name: "Test".into(), category: "Faisceaux", settings, tag: None });
         s.deck.set_slot("test-evolving", cues::CueSlot { layer: Some(2), ..Default::default() });
         let base = cue_at(&s, 0, 0);
         assert!(press_cue(&mut s, &base, None, true));

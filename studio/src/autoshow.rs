@@ -579,7 +579,9 @@ pub struct CuePools {
     pub hit: Vec<String>,
 }
 
-const LEFT_OUT: &[&str] = &["Audio", "Texte & horloge", crate::figures::CATEGORY, crate::ilda_library::CATEGORY];
+/// Pages the auto-show doesn't draw from. « Festival » repeats looks
+/// that are already in the pools (T-110).
+const LEFT_OUT: &[&str] = &["Audio", "Texte & horloge", crate::figures::CATEGORY, crate::ilda_library::CATEGORY, crate::presets::FESTIVAL];
 
 impl CuePools {
     pub fn from_presets(presets: &[Preset]) -> Self {
@@ -1124,7 +1126,7 @@ mod tests {
         assert!(p.hit.iter().all(|id| !p.drop.contains(id)), "stabs are accents only");
         // The operator's cues and figures are never picked.
         let mut presets = catalogue.clone();
-        presets.push(Preset { id: "u-1".into(), name: "mien".into(), category: crate::usercues::CATEGORY, settings: catalogue[0].settings.clone() });
+        presets.push(Preset { id: "u-1".into(), name: "mien".into(), category: crate::usercues::CATEGORY, settings: catalogue[0].settings.clone(), tag: None });
         assert_eq!(CuePools::from_presets(&presets), p);
     }
 

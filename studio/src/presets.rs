@@ -18,11 +18,36 @@ pub struct Preset {
     pub name: String,
     pub category: &'static str,
     pub settings: Settings,
+    /// Where in a track the cue belongs (the « Festival » page, T-110):
+    /// a coloured dot on its grid cell. `None` = untagged (reads as
+    /// « Groove »).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<CueTag>,
 }
 
-/// Cue pages, in display order. The last two hold the operator's
-/// figures (`figures.rs`) and ILDA files (`ilda_library.rs`), not
-/// built-in cues.
+/// The part of a track a cue is made for (T-110).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CueTag {
+    Intro,
+    #[default]
+    Groove,
+    Break,
+    /// « Montée ».
+    Build,
+    Drop,
+}
+
+/// The « Festival » page (T-110): a curated pick of the festival
+/// generators, each in a festival palette.
+pub const FESTIVAL: &str = "Festival";
+
+/// Cue pages, in display order. Figures (`figures.rs`) and ILDA files
+/// (`ilda_library.rs`) hold the operator's libraries, not built-in cues.
+/// The last `LATE_PAGES` came later: in the default grid they go after
+/// the overflow pages of the ones above (« Abstraits 2 », « Faisceaux
+/// 2 »), so every older page keeps its number (`page.N`, F-keys, MIDI,
+/// DMX and APC page mappings).
 pub const CATEGORIES: &[&str] = &[
     "Abstraits",
     "Tunnels",
@@ -34,7 +59,11 @@ pub const CATEGORIES: &[&str] = &[
     "Texte & horloge",
     crate::figures::CATEGORY,
     crate::ilda_library::CATEGORY,
+    FESTIVAL,
 ];
+
+/// How many of the last `CATEGORIES` are appended pages (see above).
+pub const LATE_PAGES: usize = 1;
 
 const GREEN: [u8; 3] = [0, 255, 0];
 const RED: [u8; 3] = [255, 0, 0];
@@ -73,7 +102,7 @@ struct Builder {
 impl Builder {
     fn add(&mut self, category: &'static str, name: String, settings: Settings) {
         let n = self.presets.iter().filter(|p| p.category == category).count() + 1;
-        self.presets.push(Preset { id: format!("{}-{n:03}", slug(category)), name, category, settings });
+        self.presets.push(Preset { id: format!("{}-{n:03}", slug(category)), name, category, settings, tag: None });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -314,7 +343,149 @@ pub fn catalog() -> Vec<Preset> {
     b.synced("Faisceaux épais", "fat_beams", 4, 0.03, 0.4, 1.0, RED_BLUE, shape(8.0, false));
     b.synced("Faisceaux épais fins", "fat_beams", 6, 0.015, 0.25, 1.0, SOLID_CYAN, shape(8.0, false));
 
+    // The « Festival » page (T-110), appended: one click per moment of a
+    // track, each cue tagged with that moment.
+    for (tag, name, settings) in festival_cues() {
+        b.add(FESTIVAL, name.to_string(), settings);
+        if let Some(p) = b.presets.last_mut() {
+            p.tag = Some(tag);
+        }
+    }
+
     b.presets
+}
+
+/// Festival palettes (`festival::PALETTES`, T-130) by name.
+const PAL_GREEN: usize = 0;
+const PAL_WHITE: usize = 1;
+const PAL_ICE: usize = 2;
+const PAL_HARD: usize = 3;
+const PAL_AFTERLIFE: usize = 4;
+const PAL_GREEN_BLUE: usize = 5;
+const PAL_SUNSET: usize = 6;
+const PAL_POP: usize = 7;
+
+/// A « Festival » look: `generator` in tempo, in festival palette
+/// `palette` with colour mode `mode`; `tune` sets the other parameters.
+#[allow(clippy::too_many_arguments)]
+fn fest(generator: &str, count: u32, a: f32, b: f32, scale: f32, palette: usize, mode: ColorMode, tune: impl FnOnce(&mut GenParams)) -> Settings {
+    let pal = crate::festival::PALETTES[palette];
+    let mut params = GenParams { count, a, b, color_mode: mode, color2: pal.c2, beat_sync: true, ..GenParams::default() };
+    tune(&mut params);
+    Settings { content: Content::Generator { generator: generator.to_string(), params }, color: pal.c1, scale, ..Settings::default() }
+}
+
+/// The « Festival » page (T-110): 40 cues from the festival generators
+/// (T-102 to T-107), named by what they are for in a track. Starting
+/// values from the research (docs/research/festival-looks.md, section 4):
+/// sweeps of ±0.25 to ±0.45 over 1 bar (drop) to 4 bars (break), 8 to 12
+/// beams, rotations of 1/64 (glacial) to 1/4 (fast) turn per beat, chase
+/// steps of 1/2 beat (groove) to 1/4 beat (build), 0.2-beat stabs and a
+/// 1/2-beat strobe at most (the sustained-safe rate). Our own looks, with
+/// our own names: nothing taken from another product's library.
+fn festival_cues() -> Vec<(CueTag, &'static str, Settings)> {
+    use crate::beat::{Easing, GroupMode, LoopMode};
+    use ColorMode::*;
+    use CueTag::*;
+    let none = |_: &mut GenParams| ();
+    let period = |beats: f32| move |p: &mut GenParams| p.period_beats = beats;
+    let steps = |n: f32| move |p: &mut GenParams| p.steps_per_beat = n;
+    vec![
+        // Fans and sweeps (10).
+        (Intro, "Intro – éventail blanc", fest("fan", 8, 0.0, 0.25, 0.6, PAL_WHITE, Solid, none)),
+        (Drop, "Drop – éventail blanc qui pompe", fest("fan", 10, 1.0, 0.25, 0.7, PAL_WHITE, Solid, none)),
+        (Groove, "Groove – balayage vert / bleu", fest("fan_sweep", 8, 0.35, 0.3, 0.7, PAL_GREEN_BLUE, Alternate, period(8.0))),
+        (
+            Drop,
+            "Drop – balayage miroir rouge",
+            fest("fan_sweep", 10, 0.45, 0.3, 0.7, PAL_HARD, Alternate, |p| {
+                p.period_beats = 4.0;
+                p.groups = 2;
+                p.group_mode = GroupMode::Mirror;
+            }),
+        ),
+        (Break, "Break – balayage lent glacier", fest("fan_sweep", 8, 0.25, 0.35, 0.6, PAL_ICE, Gradient, period(16.0))),
+        (
+            Groove,
+            "Groove – vague de balayages pop",
+            fest("fan_sweep", 12, 0.3, 0.3, 0.7, PAL_POP, ColorChase, |p| {
+                p.period_beats = 8.0;
+                p.groups = 4;
+                p.group_mode = GroupMode::Offset;
+            }),
+        ),
+        (Build, "Montée – éventail qui se lève", fest("fan_tilt", 10, 0.0, 0.0, 0.7, PAL_SUNSET, ToWhite, period(16.0))),
+        (
+            Drop,
+            "Drop – éventail qui retombe",
+            fest("fan_tilt", 10, 0.0, 0.0, 0.7, PAL_GREEN, Solid, |p| {
+                p.period_beats = 4.0;
+                p.direction = -1;
+            }),
+        ),
+        (Groove, "Groove – vague Afterlife", fest("fan_wave", 12, 0.25, 0.35, 0.7, PAL_AFTERLIFE, Gradient, none)),
+        (Drop, "Drop – positions sur le kick", fest("positions", 8, 0.0, 0.3, 0.7, PAL_WHITE, Solid, none)),
+        // Chasers and stabs (6).
+        (Groove, "Groove – chaser vert", fest("chase_fan", 8, 0.0, 2.0, 0.7, PAL_GREEN, Solid, steps(2.0))),
+        (Build, "Montée – chaser aller-retour 1/4", fest("chase_fan", 8, 2.0, 2.0, 0.7, PAL_ICE, Alternate, steps(4.0))),
+        (Build, "Montée – remplissage rouge", fest("chase_fan", 8, 7.0, 0.0, 0.7, PAL_HARD, Solid, none)),
+        (Drop, "Drop – coups blancs sur le kick", Settings { gate: GateMode::Beat, ..fest("fan", 8, 0.0, 0.3, 0.7, PAL_WHITE, Solid, none) }),
+        (
+            Drop,
+            "Drop – coups rouges qui s'éteignent",
+            Settings { gate: GateMode::Beat, gate_decay: true, ..fest("fan", 8, 0.0, 0.3, 0.7, PAL_HARD, Solid, none) },
+        ),
+        (Build, "Montée – strobe blanc 1/2 temps", Settings { strobe_div: 2.0, ..fest("fan", 12, 0.0, 0.4, 0.7, PAL_WHITE, Solid, none) }),
+        // Crossings and the hot beam (4).
+        (Drop, "Drop – ciseaux rouge / blanc", fest("scissor", 8, 0.5, 0.3, 0.7, PAL_HARD, Solid, period(2.0))),
+        (
+            Drop,
+            "Drop – ciseaux pop flash",
+            fest("scissor", 8, 0.5, 0.3, 0.7, PAL_POP, Solid, |p| {
+                p.period_beats = 2.0;
+                p.cross_flash = true;
+            }),
+        ),
+        (Break, "Break – faisceau chaud blanc", fest("hot_beam", 1, 0.3, 0.6, 0.7, PAL_WHITE, Solid, period(16.0))),
+        (Drop, "Drop – faisceaux qui explosent", fest("bundle_burst", 10, 0.25, 0.35, 0.7, PAL_ICE, Solid, period(4.0))),
+        // Tunnels and suns (8).
+        (Break, "Break – tunnel de doigts glacier", fest("finger_tunnel", 12, 1.0 / 32.0, 0.0, 0.35, PAL_ICE, Alternate, none)),
+        (Drop, "Drop – tunnel de doigts rapide", fest("finger_tunnel", 12, 0.25, 0.0, 0.4, PAL_GREEN, Solid, none)),
+        (Groove, "Groove – tunnel de doigts pop", fest("finger_tunnel", 10, 1.0 / 16.0, 0.0, 0.4, PAL_POP, Alternate, none)),
+        (Build, "Montée – tunnel qui se ferme", fest("tunnel_pump", 1, 0.0, 1.0, 0.45, PAL_ICE, ToWhite, period(16.0))),
+        (Drop, "Drop – tunnel qui pompe", fest("tunnel_pump", 1, 0.3, 0.0, 0.35, PAL_HARD, Solid, none)),
+        (Groove, "Groove – double tunnel Afterlife", fest("twin_tunnel", 1, 1.0 / 8.0, 0.0, 0.4, PAL_AFTERLIFE, Alternate, none)),
+        (Intro, "Intro – soleil levant", fest("sunburst", 16, 1.0 / 64.0, 0.0, 0.8, PAL_SUNSET, Gradient, none)),
+        (Drop, "Drop – soleil pair / impair", fest("sunburst", 18, 1.0 / 16.0, 1.0, 0.8, PAL_WHITE, Solid, none)),
+        // Sheets (8).
+        (Break, "Break – plafond bleu", fest("ceiling", 1, 0.02, 0.15, 0.9, PAL_AFTERLIFE, Gradient, none)),
+        (Intro, "Intro – plafond vert", fest("ceiling", 1, 0.01, 0.1, 0.9, PAL_GREEN, Solid, none)),
+        (Break, "Break – aurore vert / bleu", fest("aurora", 1, 0.2, 0.35, 0.8, PAL_GREEN_BLUE, Gradient, none)),
+        (
+            Groove,
+            "Groove – lame qui bascule",
+            fest("blade", 1, 0.0, 0.3, 0.8, PAL_ICE, Solid, |p| {
+                p.period_beats = 16.0;
+                p.easing = Easing::Sine;
+            }),
+        ),
+        (Intro, "Intro – rideaux blancs", fest("curtain", 4, 0.0, 0.1, 0.7, PAL_WHITE, Solid, period(16.0))),
+        (Break, "Break – cascade glacier", fest("waterfall", 6, 0.0, 0.1, 0.8, PAL_ICE, Gradient, steps(2.0))),
+        (
+            Build,
+            "Montée – scanner qui balaie",
+            fest("scanner", 1, 0.2, 0.0, 0.8, PAL_HARD, Solid, |p| {
+                p.period_beats = 4.0;
+                p.loop_mode = LoopMode::PingPong;
+            }),
+        ),
+        (Groove, "Groove – lamelles vert / bleu", fest("slats", 10, 1.0, 0.3, 0.8, PAL_GREEN_BLUE, Alternate, steps(2.0))),
+        // Textures (4).
+        (Break, "Break – ciel étoilé", fest("starfield", 6, 0.0, 0.3, 0.7, PAL_WHITE, Solid, none)),
+        (Build, "Montée – étoiles qui s'agitent", fest("starfield", 10, 0.0, 0.1, 0.7, PAL_ICE, Solid, steps(4.0))),
+        (Drop, "Drop – éclairs blancs", fest("lightning", 8, 0.0, 0.1, 0.7, PAL_WHITE, Solid, none)),
+        (Groove, "Groove – faisceaux épais Afterlife", fest("fat_beams", 5, 0.02, 0.3, 0.7, PAL_AFTERLIFE, Alternate, period(8.0))),
+    ]
 }
 
 /// A beat-synced generator look.
@@ -641,13 +812,112 @@ mod tests {
     const CROSSING_CUES: usize = 10;
     /// The T-107 textures, after those.
     const TEXTURE_CUES: usize = 9;
+    /// The T-110 « Festival » page, after those.
+    const FESTIVAL_CUES: usize = 40;
+
+    fn festival() -> Vec<Preset> {
+        catalog().into_iter().skip(LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES).collect()
+    }
+
+    fn generator_of(p: &Preset) -> (&str, &GenParams) {
+        match &p.settings.content {
+            Content::Generator { generator, params } => (generator.as_str(), params),
+            _ => panic!("{} is not a generator", p.id),
+        }
+    }
+
+    #[test]
+    fn festival_cues_are_appended_on_their_own_page() {
+        let all = catalog();
+        let new = festival();
+        assert_eq!(new.len(), FESTIVAL_CUES);
+        assert!(new.iter().all(|p| p.category == FESTIVAL && p.settings.program.is_none()));
+        assert_eq!((new[0].id.as_str(), new[39].id.as_str()), ("festival-001", "festival-040"));
+        // One grid page (8×5) holds them all.
+        assert!(new.len() <= crate::controls::GRID_ROWS * crate::controls::GRID_COLS);
+        // Only they are tagged, and every one is.
+        assert!(new.iter().all(|p| p.tag.is_some()));
+        assert!(all[..all.len() - FESTIVAL_CUES].iter().all(|p| p.tag.is_none()));
+        for tag in [CueTag::Intro, CueTag::Groove, CueTag::Break, CueTag::Build, CueTag::Drop] {
+            assert!(new.iter().any(|p| p.tag == Some(tag)), "a {tag:?} cue");
+        }
+    }
+
+    #[test]
+    fn festival_names_are_french_unique_and_say_their_moment() {
+        let new = festival();
+        let names: HashSet<_> = new.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names.len(), new.len(), "unique names");
+        for p in &new {
+            let word = match p.tag.unwrap() {
+                CueTag::Intro => "Intro",
+                CueTag::Groove => "Groove",
+                CueTag::Break => "Break",
+                CueTag::Build => "Montée",
+                CueTag::Drop => "Drop",
+            };
+            assert!(p.name.starts_with(&format!("{word} – ")), "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn festival_cues_follow_the_requested_mix_in_tempo_and_in_palette() {
+        let new = festival();
+        let mut mix = std::collections::HashMap::new();
+        for p in &new {
+            let (g, params) = generator_of(p);
+            assert!(params.beat_sync, "{} follows the tempo", p.name);
+            // Colours from one festival palette (T-130).
+            assert!(
+                crate::festival::PALETTES.iter().any(|pal| pal.c1 == p.settings.color && pal.c2 == params.color2),
+                "{} is in a festival palette",
+                p.name
+            );
+            // Strobes stay at the sustained-safe rate (research §4.4).
+            assert!(p.settings.strobe_div <= 2.0);
+            let rhythm = p.settings.gate != GateMode::Off || p.settings.strobe_div > 0.0;
+            let family = match g {
+                "chase_fan" => "chasers",
+                _ if rhythm => "chasers",
+                "fan" | "fan_sweep" | "fan_tilt" | "fan_wave" | "positions" => "fans",
+                "scissor" | "hot_beam" | "bundle_burst" | "beam_v" => "crossings",
+                "finger_tunnel" | "tunnel_pump" | "twin_tunnel" | "sunburst" => "tunnels",
+                "ceiling" | "blade" | "curtain" | "waterfall" | "scanner" | "slats" | "aurora" | "grid" => "sheets",
+                "starfield" | "lightning" | "fat_beams" => "textures",
+                other => panic!("{other} is not a festival generator"),
+            };
+            *mix.entry(family).or_insert(0) += 1;
+        }
+        let want = [("fans", 10), ("chasers", 6), ("crossings", 4), ("tunnels", 8), ("sheets", 8), ("textures", 4)];
+        for (family, n) in want {
+            assert_eq!(mix.get(family), Some(&n), "{family}");
+        }
+    }
+
+    #[test]
+    fn every_festival_cue_draws_above_the_horizon() {
+        for p in festival() {
+            let mut lit = 0;
+            let mut a = Animator::starting_at(0.0);
+            for i in 0..120u64 {
+                let clock = BeatClock { beat: i as f64 / 30.0, ..BeatClock::default() };
+                let audio = AudioFeatures { level: 0.5, bass: 0.5, beat: i / 15, ..Default::default() };
+                let pts = a.render(&p.settings, audio, 1.0 / 60.0, &clock);
+                assert!(!pts.is_empty() && pts.len() <= 1000, "{}: {} points", p.name, pts.len());
+                for q in pts.iter().filter(|q| q.is_lit()) {
+                    assert!(q.y >= crate::fans::HORIZON - 1e-3, "{} draws at y = {}", p.name, q.y);
+                    lit += 1;
+                }
+            }
+            assert!(lit > 0, "{} is dark", p.name);
+        }
+    }
 
     #[test]
     fn texture_cues_are_appended_on_the_beams_page() {
         let all = catalog();
         let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES;
-        let new = &all[start..];
-        assert_eq!(new.len(), TEXTURE_CUES);
+        let new = &all[start..start + TEXTURE_CUES];
         assert!(new.iter().all(|p| p.category == "Faisceaux" && p.settings.program.is_none()));
         assert_eq!(new[0].id, "faisceaux-053");
         let gens: Vec<(String, GenParams)> = new

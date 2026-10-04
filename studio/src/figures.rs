@@ -196,6 +196,7 @@ pub fn preset_of(fig: &Figure) -> Preset {
         name: fig.name.clone(),
         category: CATEGORY,
         settings: Settings { content: Content::Figure(fig.clone()), scale: 1.0, ..Settings::default() },
+        tag: None,
     }
 }
 

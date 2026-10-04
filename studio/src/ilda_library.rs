@@ -170,6 +170,7 @@ pub fn preset_of(info: &IldaInfo) -> Preset {
         name,
         category: CATEGORY,
         settings: Settings { content: Content::Ilda { file: info.file.clone(), fps: DEFAULT_FPS }, scale: 1.0, ..Settings::default() },
+        tag: None,
     }
 }
 

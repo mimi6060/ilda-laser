@@ -250,7 +250,7 @@ export class Studio {
   frame() { return this.get<Frame>('/api/frame'); }
   live() { return this.get<Live>('/api/live'); }
   controlValues() { return this.get<{ values: Record<string, number | boolean>; cue_page: number; active_cue: string | null }>('/api/control-values'); }
-  presets() { return this.get<{ categories: string[]; presets: { id: string; name: string; category: string }[] }>('/api/presets'); }
+  presets() { return this.get<{ categories: string[]; presets: { id: string; name: string; category: string; tag?: string }[] }>('/api/presets'); }
 }
 
 /**
