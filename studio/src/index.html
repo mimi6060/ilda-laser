@@ -663,7 +663,27 @@
   .cue-tabs button::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--c); box-shadow: 0 0 6px var(--c); }
   .cue-tabs button.active { background: color-mix(in srgb, var(--c) 22%, #11131d); color: #fff; border-color: var(--c); box-shadow: 0 0 14px color-mix(in srgb, var(--c) 40%, transparent); }
   /* Cues: executor tiles with a picture of the look. */
-  .cues { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  /* Fixed grid (T-272): --cols columns whatever the width, each cue keeps its cell. */
+  .cues { grid-template-columns: repeat(var(--cols, 8), minmax(0, 1fr)); gap: 6px; position: relative; }
+  .cue-tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; padding-bottom: 2px; }
+  .cue-tabs button { flex: none; white-space: nowrap; }
+  .cue-tabs button kbd { font-size: 10px; padding: 0 4px; line-height: 1.4; opacity: .8; }
+  .cue-tabs button.drop, .cues .drop { outline: 2px dashed var(--accent); outline-offset: 1px; }
+  .cue-empty { position: relative; min-height: 56px; border-radius: 10px; border: 1px dashed #22263a; background: #0b0d15; opacity: .55; }
+  .cue-empty .key { position: absolute; top: 3px; right: 5px; font-size: 10px; color: var(--muted); font-family: ui-monospace, "SF Mono", monospace; }
+  .cues[data-empty]::before { content: attr(data-empty); position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; pointer-events: none; z-index: 1; }
+  .cues.editing .cue { cursor: grab; }
+  .cues.editing .cue * { pointer-events: none; }
+  .grid-menu { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-bottom: 8px; padding: 6px 8px; border: 1px solid #22263a; border-radius: 10px; background: #0b0d15; font-size: 12px; }
+  .grid-menu[hidden] { display: none; }
+  /* Narrow window: 8 columns leave no room for the picture, the name wins. */
+  @media (max-width: 900px) { .cue canvas.th { display: none; } .cue { padding-left: 8px; } }
+  .grid-menu label { display: inline-flex; gap: 4px; align-items: center; margin: 0; }
+  .grid-menu input[type=number] { width: 56px; padding: 5px; }
+  .grid-menu input[type=text] { width: 150px; padding: 5px; }
+  .grid-menu button { padding: 6px 10px; font-size: 12px; }
+  .grid-menu .sep { width: 1px; align-self: stretch; background: #22263a; }
+  #gridEdit[aria-pressed="true"], #gridMenuBtn[aria-expanded="true"] { background: #22e3ff22; color: var(--accent); border-color: #22e3ff55; }
   .cue { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 4px 8px 4px 4px; border-radius: 10px; background: linear-gradient(180deg, #171a28, #11131d);
     border-color: #262a3b; border-left: 3px solid var(--cat); overflow: hidden; }
   .cue:hover { border-color: color-mix(in srgb, var(--cat) 60%, #262a3b); border-left-color: var(--cat); box-shadow: 0 0 16px color-mix(in srgb, var(--cat) 25%, transparent); }
@@ -1093,11 +1113,25 @@
       <span class="hint" style="margin:0">Max</span>
       <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
       <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
+      <button id="gridMenuBtn" class="lock-edit" aria-expanded="false" title="Taille de grille, pages, réorganiser les cues">Pages…</button>
     </div>
-    <div class="cue-tabs" id="cueTabs"></div>
+    <div class="grid-menu lock-edit" id="gridMenu" hidden>
+      <span class="hint" style="margin:0">Taille de grille</span>
+      <label>Colonnes <input type="number" id="gridCols" min="4" max="12"></label>
+      <label>Rangées <input type="number" id="gridRows" min="2" max="8"></label>
+      <span class="sep"></span>
+      <input type="text" id="gridPageName" placeholder="Nom de la page" maxlength="40">
+      <button id="gridPageNew">Nouvelle page</button>
+      <button id="gridPageRename">Renommer la page</button>
+      <button id="gridPageDelete" class="hold-confirm" title="Supprimer la page affichée (maintenir pour confirmer)">Supprimer la page</button>
+      <span class="sep"></span>
+      <button id="gridEdit" aria-pressed="false" title="Glisser une case sur une autre case ou sur un onglet de page ; les cues ne se lancent pas pendant ce temps">Réorganiser</button>
+      <span class="hint" id="gridMsg" style="margin:0"></span>
+    </div>
+    <div class="cue-tabs" id="cueTabs" role="tablist" aria-label="Pages de cues"></div>
     <div class="cue-scroll">
       <div class="cues" id="cues"></div>
-      <div class="hint"><kbd>Maj</kbd> + lettre = flash · clic droit sur un cue = propriétés (mode, groupe, calque)</div>
+      <div class="hint"><kbd>Maj</kbd> + lettre = flash · <kbd>F5</kbd>–<kbd>F12</kbd> ou <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> = page · clic droit sur un cue = propriétés (mode, groupe, calque)<span id="gridHidden"></span></div>
     </div>
   </section>
 
@@ -1956,7 +1990,7 @@
     <button id="cueMenuShift">Apprendre avec Shift</button>
     <button id="cueMenuForget">Oublier MIDI</button>
   </div>
-  <div class="row"><button id="cueMenuClose">Fermer</button></div>
+  <div class="row"><button id="cueMenuRemove" title="Vide la case (le cue reste dans sa catégorie)">Retirer de la page</button><button id="cueMenuClose">Fermer</button></div>
 </div>
 
 <script>
@@ -2282,7 +2316,14 @@ document.addEventListener('keydown', e => {
   // F1–F4: workspaces (T-295). Display only, whatever has focus.
   const ws = ['F1', 'F2', 'F3', 'F4'].indexOf(e.code);
   if (ws >= 0 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) { e.preventDefault(); setWorkspace(WORKSPACES[ws]); return; }
+  // F5–F12: cue pages 1–8 (T-272), whatever has focus (F5 would reload the page).
+  const fp = PAGE_FKEYS.indexOf(e.code);
+  if (fp >= 0 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) { e.preventDefault(); if (!e.repeat) selectPage(fp); return; }
   const typing = isTyping();
+  // Alt+1…9: cue pages 1–9 (by e.code: Alt changes e.key on a Mac).
+  if (!typing && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && /^Digit[1-9]$/.test(e.code)) {
+    e.preventDefault(); if (!e.repeat) selectPage(+e.code.slice(5) - 1); return;
+  }
   if (!typing && (e.code === 'Enter' || e.code === 'NumpadEnter')) { e.preventDefault(); post('/api/control', { id: 'tempo.tap' }); return; }
   if (!typing && e.code === 'Backspace') { e.preventDefault(); post('/api/control', { id: 'tempo.resync' }); return; }
   if (!typing && e.key === '<' && activeWs === 'live') { e.preventDefault(); if (!reverseKey) { reverseKey = true; reverse(true); } return; }
@@ -2304,14 +2345,16 @@ document.addEventListener('keydown', e => {
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   // Cue letters only in LIVE; Space, Escape, Enter and Backspace above work everywhere.
   if (activeWs !== 'live') return;
-  const i = CUE_KEYS.indexOf(e.key.toLowerCase());
-  const page = presets.filter(p => p.category === cuePage);
-  if (i >= 0 && i < page.length) {
+  // By position (e.code), so AZERTY « a » and QWERTY « q » are the same cell.
+  const i = CUE_CODES.indexOf(e.code);
+  const id = i >= 0 ? (grid.pages[gridPage]?.cells[i] ?? null) : null;
+  if (i >= 0 && gridEditing) { e.preventDefault(); return; }
+  if (id && presetById.has(id)) {
     e.preventDefault();
     // Auto-repeat would toggle the cue on and off while the key is held.
     if (e.repeat || heldKeys.has(e.code)) return;
-    heldKeys.set(e.code, page[i].id);
-    cueDown(page[i].id, shiftMod(e) ? 'flash' : null);
+    heldKeys.set(e.code, id);
+    cueDown(id, shiftMod(e) ? 'flash' : null);
   }
 });
 document.addEventListener('keyup', e => {
@@ -2539,9 +2582,11 @@ async function previewLoop() {
     // Follow page changes made elsewhere (MIDI controller, API) - only
     // when the server's value changes, so a tab click that the server
     // hasn't processed yet isn't undone by an older frame.
+    // The grid changed elsewhere (another page, a project opened, figures).
+    if (f.grid_rev !== undefined && f.grid_rev !== grid.rev && presets.length) { grid.rev = f.grid_rev; loadGrid(); }
     if (f.cue_page !== serverPage) {
       serverPage = f.cue_page;
-      if (cueCategories[serverPage] && cueCategories[serverPage] !== cuePage) { cuePage = cueCategories[serverPage]; renderCues(); }
+      if (grid.pages[serverPage] && serverPage !== gridPage) { gridPage = serverPage; renderCues(); }
     }
     showCueDeck(f.cues);
     // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
@@ -3902,24 +3947,41 @@ document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click',
 $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm', value: +$('bpm').value }));
 
 // ---------- cues ----------
-// AZERTY rows, so each key sits where it looks like it should.
+// Cue keys by physical position (e.code), labelled as on an AZERTY Mac:
+// the key under the same finger plays the same cell on AZERTY and on
+// QWERTY (T-272). The first 26 cells of a page have a key.
 const CUE_KEYS = 'azertyuiopqsdfghjklmwxcvbn'.split('');
-let presets = [], cueCategories = [], cuePage = null, serverPage = null;
+const CUE_CODES = ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI', 'KeyO', 'KeyP',
+  'KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK', 'KeyL', 'Semicolon',
+  'KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB', 'KeyN'];
+// Page keys: F5–F12 = pages 1–8 (F1–F4 are the workspaces), Alt+1…9 = pages 1–9.
+const PAGE_FKEYS = ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'];
+let presets = [], presetById = new Map(), cueCategories = [], serverPage = null;
+// The fixed grid (GET /api/grid): size and pages as shown; `gridPage` is
+// the page on screen. `gridEditing`: « Réorganiser », cells are dragged
+// instead of played.
+let grid = { cols: 8, rows: 5, pages: [], rev: -1 }, gridPage = 0, gridEditing = false, dragFrom = null;
 // What the server says plays (from /api/frame), and the grid's cue properties.
 let deck = { active: [], shown: [], click_mode: 'toggle', multi: false, max_active: 4 }, deckKey = '', slots = {};
 const heldKeys = new Map(); // key code -> cue id, for keyup
 let pointerCue = null;      // cue id under a held mouse button / finger
 const MODE_TAGS = { toggle: 'B', flash: 'F', solo: 'S', restart: 'R' };
 
-// Theme (T-299): a colour per cue page and a small picture per cue, like
-// a desk's coloured pools. The pictures come once per catalogue load.
+// Theme (T-299): a colour per cue category and a small picture per cue,
+// like a desk's coloured pools. The pictures come once per catalogue load.
 const PAGE_COLORS = ['#22e3ff', '#8b5cf6', '#ff3dc8', '#3d9bff', '#2ee6a6', '#ffb020', '#ff5d6e', '#c4f03d', '#ff8a3d'];
-const pageColor = c => PAGE_COLORS[Math.max(0, cueCategories.indexOf(c)) % PAGE_COLORS.length];
+const catColor = c => PAGE_COLORS[Math.max(0, cueCategories.indexOf(c)) % PAGE_COLORS.length];
+// A page takes the colour of its first cue's category.
+function pageColorOf(pg, i) {
+  const p = presetById.get((pg && pg.cells.find(Boolean)) || '');
+  return p ? catColor(p.category) : PAGE_COLORS[i % PAGE_COLORS.length];
+}
 let thumbs = {};
 async function loadPresets() {
   const r = await (await fetch('/api/presets')).json();
   presets = r.presets; cueCategories = r.categories;
-  cuePage = cuePage || cueCategories[0];
+  presetById = new Map(presets.map(p => [p.id, p]));
+  await loadGrid(false);
   await loadSlots();
   loadThumbs(); // not awaited: the grid works before its pictures arrive
 }
@@ -3959,41 +4021,155 @@ async function loadSlots() {
   slots = (await (await fetch('/api/cues')).json()).slots || {};
   renderCues();
 }
+async function loadGrid(render = true) {
+  try { applyGrid(await (await fetch('/api/grid', { cache: 'no-store' })).json(), render); } catch { /* next frame retries */ }
+}
+function applyGrid(g, render = true) {
+  grid = g;
+  gridPage = Math.min(gridPage, Math.max(0, g.pages.length - 1));
+  if (document.activeElement !== $('gridCols')) $('gridCols').value = g.cols;
+  if (document.activeElement !== $('gridRows')) $('gridRows').value = g.rows;
+  if (render) renderCues();
+}
+const pageKey = i => i < PAGE_FKEYS.length ? PAGE_FKEYS[i] : i < 9 ? `Alt+${i + 1}` : '';
+function selectPage(i) {
+  if (!grid.pages[i]) return;
+  gridPage = i; renderCues();
+  post('/api/control', { id: 'page.' + (i + 1) });
+}
 function renderCues() {
   $('cueTabs').innerHTML = '';
-  for (const c of cueCategories) {
+  grid.pages.forEach((pg, i) => {
     const b = document.createElement('button');
-    const n = presets.filter(p => p.category === c).length;
-    b.textContent = `${c} (${n})`; b.classList.toggle('active', c === cuePage);
-    b.style.setProperty('--c', pageColor(c));
-    b.onclick = () => { cuePage = c; renderCues(); post('/api/control', { id: 'page.' + (cueCategories.indexOf(c) + 1) }); };
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(i === gridPage));
+    const n = pg.cells.filter(id => id && presetById.has(id)).length + pg.hidden;
+    b.innerHTML = '<span class="pn"></span>' + (pageKey(i) ? `<kbd>${pageKey(i)}</kbd>` : '');
+    b.querySelector('.pn').textContent = `${pg.name} (${n})`;
+    b.title = `page.${i + 1}` + (i < 9 ? ` · ${i < 8 ? PAGE_FKEYS[i] + ' ou ' : ''}Alt+${i + 1}` : '');
+    b.classList.toggle('active', i === gridPage);
+    b.style.setProperty('--c', pageColorOf(pg, i));
+    b.onclick = () => selectPage(i);
+    // « Réorganiser »: a cell dropped on a tab goes to that page's first empty cell.
+    b.addEventListener('dragover', e => { if (canDropOn(i)) { e.preventDefault(); b.classList.add('drop'); } });
+    b.addEventListener('dragleave', () => b.classList.remove('drop'));
+    b.addEventListener('drop', e => { e.preventDefault(); b.classList.remove('drop'); dropOn(i, null); });
     $('cueTabs').appendChild(b);
-  }
-  $('cues').innerHTML = '';
-  $('cueRegion').style.setProperty('--cat', pageColor(cuePage));
-  presets.filter(p => p.category === cuePage).forEach((p, i) => {
-    const b = document.createElement('button');
-    b.className = 'cue';
-    b.dataset.id = p.id;
-    if (i < 40) b.title = b.dataset.control = `grid.${cueCategories.indexOf(cuePage) + 1}.${Math.floor(i / 8) + 1}.${i % 8 + 1}`;
-    const slot = slots[p.id] || {};
-    const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '']
-      .filter(Boolean).join(' ');
-    b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`;
-    b.querySelector('.n').textContent = p.name;
-    drawThumb(b.querySelector('canvas.th'), thumbs[p.id]);
-    b.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      if (pointerCue) cueUp(pointerCue);
-      pointerCue = p.id;
-      cueDown(p.id, shiftMod(e) ? 'flash' : null);
-    });
-    b.addEventListener('contextmenu', e => { e.preventDefault(); openCueMenu(p, e.clientX, e.clientY); });
-    $('cues').appendChild(b);
   });
+  // The tabs scroll sideways: keep the shown page's tab in view (never the window).
+  const tabs = $('cueTabs'), act = tabs.querySelector('.active');
+  if (act) {
+    const t = tabs.getBoundingClientRect(), a = act.getBoundingClientRect();
+    if (a.left < t.left) tabs.scrollLeft -= t.left - a.left + 8;
+    else if (a.right > t.right) tabs.scrollLeft += a.right - t.right + 8;
+  }
+  const pg = grid.pages[gridPage] || { name: '', cells: [], hidden: 0, auto: false, editable: false };
+  const cues = $('cues');
+  cues.innerHTML = '';
+  cues.style.setProperty('--cols', grid.cols);
+  cues.classList.toggle('editing', gridEditing);
+  $('cueRegion').style.setProperty('--cat', pageColorOf(pg, gridPage));
+  let any = false;
+  pg.cells.forEach((id, i) => {
+    const p = id ? presetById.get(id) : null;
+    const key = CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : '';
+    let el;
+    if (!p) {
+      // An empty cell keeps its place, greyed, and plays nothing.
+      el = document.createElement('div');
+      el.className = 'cue-empty';
+      el.innerHTML = `<span class="key">${key}</span>`;
+    } else {
+      any = true;
+      el = document.createElement('button');
+      el.className = 'cue';
+      el.dataset.id = p.id;
+      el.title = el.dataset.control = `grid.${gridPage + 1}.${Math.floor(i / grid.cols) + 1}.${i % grid.cols + 1}`;
+      el.style.setProperty('--cat', catColor(p.category));
+      const slot = slots[p.id] || {};
+      const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '']
+        .filter(Boolean).join(' ');
+      el.innerHTML = `<span class="key">${key}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`;
+      el.querySelector('.n').textContent = p.name;
+      drawThumb(el.querySelector('canvas.th'), thumbs[p.id]);
+      el.addEventListener('pointerdown', e => {
+        if (e.button !== 0 || gridEditing) return;
+        e.preventDefault();
+        if (pointerCue) cueUp(pointerCue);
+        pointerCue = p.id;
+        cueDown(p.id, shiftMod(e) ? 'flash' : null);
+      });
+      el.addEventListener('contextmenu', e => { e.preventDefault(); openCueMenu(p, e.clientX, e.clientY, i); });
+      if (gridEditing && pg.editable) {
+        el.draggable = true;
+        el.addEventListener('dragstart', e => { dragFrom = { page: gridPage, slot: i }; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', p.id); });
+        el.addEventListener('dragend', () => { dragFrom = null; });
+      }
+    }
+    el.dataset.slot = i;
+    if (gridEditing) {
+      el.addEventListener('dragover', e => { if (canDropOn(gridPage)) { e.preventDefault(); el.classList.add('drop'); } });
+      el.addEventListener('dragleave', () => el.classList.remove('drop'));
+      el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('drop'); dropOn(gridPage, i); });
+    }
+    cues.appendChild(el);
+  });
+  if (any) delete cues.dataset.empty; else cues.dataset.empty = 'Page vide';
+  $('gridHidden').textContent = pg.hidden
+    ? ` · ${pg.hidden} cue${pg.hidden > 1 ? 's' : ''} de cette page hors grille : agrandir la grille pour ${pg.hidden > 1 ? 'les' : 'le'} voir` : '';
+  $('gridPageRename').disabled = $('gridPageDelete').disabled = !pg.editable;
   paintCues();
 }
+function canDropOn(page) {
+  const pg = grid.pages[page];
+  return !!(dragFrom && pg && pg.editable && !pg.auto);
+}
+async function dropOn(page, slot) {
+  if (!dragFrom) return;
+  const from = [dragFrom.page, dragFrom.slot];
+  dragFrom = null;
+  await gridPost('/api/grid/move', { from, to: [page, slot] });
+}
+// Grid edits answer with the new grid; a refusal (full page, show mode…) is shown.
+async function gridPost(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const t = await r.text();
+    $('gridMsg').textContent = t;
+    if (r.status === 423) notify(t);
+    return false;
+  }
+  $('gridMsg').textContent = '';
+  const g = await r.json();
+  if (g.page !== undefined) { gridPage = g.page; serverPage = g.page; }
+  applyGrid(g);
+  return true;
+}
+$('gridMenuBtn').addEventListener('click', () => {
+  const open = $('gridMenu').hidden;
+  $('gridMenu').hidden = !open;
+  $('gridMenuBtn').setAttribute('aria-expanded', String(open));
+  if (!open && gridEditing) setGridEditing(false);
+});
+function setGridEditing(on) {
+  gridEditing = on;
+  $('gridEdit').setAttribute('aria-pressed', String(on));
+  renderCues();
+}
+$('gridEdit').addEventListener('click', () => setGridEditing(!gridEditing));
+for (const id of ['gridCols', 'gridRows']) {
+  $(id).addEventListener('change', () => gridPost('/api/grid', { cols: +$('gridCols').value, rows: +$('gridRows').value }));
+}
+$('gridPageNew').addEventListener('click', async () => {
+  if (await gridPost('/api/grid/page', { action: 'new', name: $('gridPageName').value })) $('gridPageName').value = '';
+});
+$('gridPageRename').addEventListener('click', async () => {
+  const name = $('gridPageName').value.trim();
+  if (!name) { $('gridPageName').focus(); return; }
+  if (await gridPost('/api/grid/page', { action: 'rename', page: gridPage, name })) $('gridPageName').value = '';
+});
+holdToRun($('gridPageDelete'), CONFIRM_HOLD_MS, () => gridPost('/api/grid/page', { action: 'delete', page: gridPage }),
+  () => notify('Maintenir pour confirmer'));
 // Released anywhere: the button may have been re-rendered (page change)
 // while it was held.
 ['pointerup', 'pointercancel'].forEach(ev => window.addEventListener(ev, () => {
@@ -4037,9 +4213,12 @@ $('cueMax').addEventListener('change', () => post('/api/control', { id: 'cue.max
 
 // « Propriétés du cue » (right click): its own click mode and group.
 let menuCue = null;
-function openCueMenu(p, x, y) {
+let menuSlot = null;
+function openCueMenu(p, x, y, at) {
   if (showMode) return notify(LOCKED_FR); // T-283: no cue editing
-  menuCue = p.id;
+  menuCue = p.id; menuSlot = at;
+  const pg = grid.pages[gridPage];
+  $('cueMenuRemove').hidden = !(pg && pg.editable && !pg.auto);
   const slot = slots[p.id] || {};
   $('cueMenuName').textContent = p.name;
   $('cueMenuMode').value = slot.mode || '';
@@ -4073,6 +4252,10 @@ async function saveCueMenu() {
 }
 ['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuShow'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 $('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
+$('cueMenuRemove').onclick = async () => {
+  $('cueMenu').hidden = true; menuCue = null;
+  await gridPost('/api/grid/clear', { page: gridPage, slot: menuSlot });
+};
 document.addEventListener('pointerdown', e => { if (!$('cueMenu').hidden && !$('cueMenu').contains(e.target)) $('cueMenu').hidden = true; });
 
 // ---------- timeline (T-160) ----------

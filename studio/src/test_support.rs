@@ -18,6 +18,8 @@ pub fn shared() -> Shared {
     ));
     let presets = presets::catalog();
     let controls = controls::ControlRegistry::build(&presets);
+    let mut grid = crate::grid::CueGrid::default();
+    grid.resolve(&presets);
     let lfos = lfo::LfoStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/lfos.json"), &controls);
     let routes = crate::audio::routes::RouteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/audio_routes.json"), &controls);
     // One latch for the gate and the network listeners' blackout path.
@@ -46,6 +48,7 @@ pub fn shared() -> Shared {
         active_cue: None,
         settings_rev: 0,
         deck: cues::CueDeck::default(),
+        grid,
         look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch: Instant::now(),

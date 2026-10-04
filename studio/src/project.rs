@@ -27,6 +27,7 @@
 use crate::audio::routes::AudioRouting;
 use crate::cues::CueDeck;
 use crate::figures::Figure;
+use crate::grid::CueGrid;
 use crate::layers::Mixer;
 use crate::lfo::Modulator;
 use crate::live::{LiveModifiers, Palette};
@@ -90,6 +91,9 @@ pub struct Project {
     pub playlist: Vec<String>,
     /// Cue-grid properties (`grid.json`): click mode, multi, per-cue slots.
     pub grid: CueDeck,
+    /// Cue-grid size and pages (`pages.json`, T-272). Missing in projects
+    /// saved before T-272: they open with the default 8×5 pages.
+    pub pages: CueGrid,
     pub timelines: Vec<Show>,
     pub tempo: TempoDefaults,
     /// Master live modifiers.
@@ -118,6 +122,7 @@ impl Default for Project {
             scenes: Vec::new(),
             playlist: Vec::new(),
             grid: CueDeck::default(),
+            pages: CueGrid::default(),
             timelines: Vec::new(),
             tempo: TempoDefaults::default(),
             live: LiveModifiers::default(),
@@ -211,7 +216,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 9] = ["scenes.json", "grid.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures"];
+const WORKING_FILES: [&str; 10] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -369,6 +374,7 @@ fn check(p: &mut Project) -> Result<()> {
     p.playlist = p.scenes.iter().map(|sc| sc.name.clone()).collect();
 
     p.grid.sanitize();
+    p.pages.sanitize();
 
     let mut shows = HashSet::new();
     for show in &mut p.timelines {
@@ -422,6 +428,7 @@ pub fn snapshot(s: &Shared) -> Project {
         scenes: s.scenes.list().to_vec(),
         playlist: s.scenes.list().iter().map(|sc| sc.name.clone()).collect(),
         grid: s.deck.clone(),
+        pages: s.grid.clone(),
         tempo: TempoDefaults { bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar },
         live: s.live.clone(),
         layers: s.mixer.clone(),
@@ -442,6 +449,8 @@ fn apply(s: &mut Shared, p: &Project) {
     s.scenes.replace_in_memory(p.scenes.clone());
     s.playlist = None;
     s.deck.set_config(&p.grid);
+    // Resolved by figures::refresh below, with the project's figures.
+    s.grid.set_config(&p.pages);
     s.timeline.stop();
     let t = s.now_s();
     s.tempo.set_bpm_manual(p.tempo.bpm, t);
@@ -464,6 +473,7 @@ fn apply(s: &mut Shared, p: &Project) {
 struct WorkingPaths {
     scenes: PathBuf,
     grid: Option<PathBuf>,
+    pages: Option<PathBuf>,
     shows: PathBuf,
     lfos: PathBuf,
     routes: PathBuf,
@@ -478,6 +488,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
     WorkingPaths {
         scenes: s.scenes.path().to_path_buf(),
         grid: s.deck.path().map(Path::to_path_buf),
+        pages: s.grid.path().map(Path::to_path_buf),
         shows: s.shows.dir().to_path_buf(),
         lfos: s.lfos.path().to_path_buf(),
         routes: s.routes.path().to_path_buf(),
@@ -502,6 +513,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     put(&w.scenes, serde_json::to_vec_pretty(&p.scenes));
     if let Some(grid) = &w.grid {
         put(grid, serde_json::to_vec_pretty(&p.grid));
+    }
+    if let Some(pages) = &w.pages {
+        put(pages, serde_json::to_vec_pretty(&p.pages));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -836,6 +850,8 @@ mod tests {
         let mut s = test_support::shared();
         s.scenes = crate::scenes::SceneStore::load_or_create(dir.join("scenes.json"));
         s.deck = CueDeck::load(dir.join("grid.json"));
+        s.grid = crate::grid::CueGrid::load(dir.join("pages.json"));
+        crate::grid::refresh(&mut s);
         s.shows = crate::timeline::ShowStore::new(dir.join("shows"));
         s.lfos = crate::lfo::LfoStore::load_or_create(dir.join("lfos.json"), &s.controls);
         s.routes = crate::audio::routes::RouteStore::load_or_create(dir.join("audio_routes.json"), &s.controls);
@@ -869,6 +885,9 @@ mod tests {
             let id = s.presets[0].id.clone();
             s.deck.set_slot(&id, crate::cues::CueSlot { group: Some(2), layer: Some(3), ..Default::default() });
             s.deck.multi = true;
+            s.grid.set_size(6, 4).unwrap();
+            let presets = s.presets.clone();
+            s.grid.new_page("Rappel", &presets).unwrap();
             s.live.size = 0.5;
             s.mixer.layers[1].dimmer = 0.25;
             let t = s.now_s();
@@ -889,6 +908,7 @@ mod tests {
             s.scenes.upsert(scene("Autre", 1.0)).unwrap();
             s.scenes.remove("Intro").unwrap();
             s.deck.multi = false;
+            s.grid = crate::grid::CueGrid::load(dir.join("pages.json"));
             s.live.size = 1.5;
             let t = s.now_s();
             s.tempo.set_bpm_manual(90.0, t);
@@ -904,6 +924,10 @@ mod tests {
         assert_eq!(serde_json::to_value(&now.scenes).unwrap(), serde_json::to_value(&before.scenes).unwrap());
         assert_eq!(now.playlist, before.playlist);
         assert_eq!(serde_json::to_value(&now.grid).unwrap(), serde_json::to_value(&before.grid).unwrap());
+        assert_eq!((s.grid.cols, s.grid.rows, s.grid.view()[0].cells.len()), (6, 4, 24), "the grid size is back, resolved");
+        assert!(s.grid.view().iter().any(|p| p.name == "Rappel"));
+        let pages_on_disk: crate::grid::CueGrid = serde_json::from_str(&std::fs::read_to_string(dir.join("pages.json")).unwrap()).unwrap();
+        assert_eq!(pages_on_disk, s.grid);
         assert_eq!(now.fingerprint(), before.fingerprint(), "every section is back");
         assert_eq!(s.tempo.bpm, 128.0);
         assert_eq!(now.timelines.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Ouverture"], "the other timeline went");
@@ -938,6 +962,9 @@ mod tests {
         std::fs::write(dir.join("projects/Ancien.lsproj"), json!({ "format_version": 1, "scenes": [] }).to_string()).unwrap();
         post(&shared, &dir, "open", json!({ "path": "Ancien" })).unwrap();
         assert_eq!(shared.lock().unwrap().routes.routing(), &AudioRouting::default());
+        // ... and, from before T-272, the default 8×5 pages.
+        assert_eq!(shared.lock().unwrap().grid, crate::grid::CueGrid::default());
+        assert_eq!(shared.lock().unwrap().grid.view()[0].cells.len(), 40);
         assert!(!modified(&shared));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -981,13 +1008,13 @@ mod tests {
         let dir = temp_dir("unknown");
         let shared = studio(&dir);
         std::fs::create_dir_all(dir.join("projects")).unwrap();
-        let text = json!({ "format_version": 1, "name": "x", "venue": { "room": [10, 4, 3] }, "pages": [1, 2] }).to_string();
+        let text = json!({ "format_version": 1, "name": "x", "venue": { "room": [10, 4, 3] }, "cue_lists": [1, 2] }).to_string();
         std::fs::write(dir.join("projects/x.lsproj"), text).unwrap();
         post(&shared, &dir, "open", json!({ "path": "x" })).unwrap();
         post(&shared, &dir, "save", json!({})).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("projects/x.lsproj")).unwrap()).unwrap();
         assert_eq!(v["venue"], json!({ "room": [10, 4, 3] }));
-        assert_eq!(v["pages"], json!([1, 2]));
+        assert_eq!(v["cue_lists"], json!([1, 2]));
         assert_eq!(v["format_version"], 1);
         assert!(v["saved_at"].as_str().unwrap().ends_with('Z'));
         let _ = std::fs::remove_dir_all(dir);

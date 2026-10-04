@@ -25,7 +25,6 @@ use super::mapping::{InputKind, LedFeedback, MapMode, Mapping};
 use super::profile::Driver;
 use super::Model;
 use crate::controls::{self, ControlKind, GRID_COLS, GRID_ROWS};
-use crate::presets::CATEGORIES;
 use crate::Shared;
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -164,7 +163,7 @@ enum Look {
 struct View<'a> {
     s: &'a Shared,
     /// Cue ids of the current page, grid order.
-    page: Vec<&'a str>,
+    page: Vec<Option<&'a str>>,
     /// Playing cues: id → held (flash / solo).
     playing: HashMap<&'a str, bool>,
     /// Soft blink phase (mkII flash pads), from the tempo clock.
@@ -176,7 +175,7 @@ struct View<'a> {
 
 impl View<'_> {
     fn grid(&self, slot: usize) -> Look {
-        let Some(cue) = self.page.get(slot) else { return Look::Off };
+        let Some(Some(cue)) = self.page.get(slot) else { return Look::Off };
         match self.playing.get(cue) {
             Some(true) => Look::Flashing,
             Some(false) => Look::Playing,
@@ -296,10 +295,10 @@ pub fn render(driver: Driver, s: &Shared, port: &str, t: f64) -> LedFrame {
     }
     let beat = s.tempo.beat_at(t);
     let phase = beat.rem_euclid(1.0);
-    let category = CATEGORIES.get(s.cue_page).copied();
     let view = View {
         s,
-        page: s.presets.iter().filter(|p| Some(p.category) == category).take(GRID_ROWS * GRID_COLS).map(|p| p.id.as_str()).collect(),
+        // Pad n = the grid's cell at row n / 8, column n % 8 (dark past its size).
+        page: (0..GRID_ROWS * GRID_COLS).map(|n| s.grid.cell(s.cue_page + 1, n / GRID_COLS + 1, n % GRID_COLS + 1)).collect(),
         playing: s.deck.active.iter().fold(HashMap::new(), |mut m, a| {
             *m.entry(a.cue.as_str()).or_insert(true) &= a.held;
             m
@@ -401,8 +400,7 @@ mod tests {
     const T: f64 = 0.25;
 
     fn page_cue(s: &Shared, slot: usize) -> String {
-        let cat = CATEGORIES[s.cue_page];
-        s.presets.iter().filter(|p| p.category == cat).nth(slot).unwrap().id.clone()
+        s.grid.slot(s.cue_page, slot).unwrap().to_string()
     }
 
     fn pad(model: Model, row: u8, col: u8) -> (u8, u8) {
@@ -444,7 +442,7 @@ mod tests {
         assert_eq!(at(&f, pad(Model::Apc40, 0, 2)), Some(MK1_GREEN_BLINK));
 
         // A page with fewer than 40 cues: its empty pads are dark.
-        let small = (0..CATEGORIES.len()).find(|&p| s.presets.iter().filter(|c| c.category == CATEGORIES[p]).count() < 40);
+        let small = (0..s.grid.page_count()).find(|&p| s.grid.slot(p, 39).is_none());
         if let Some(page) = small {
             s.cue_page = page;
             let f = render(Driver::Apc40, &s, PORT, T);

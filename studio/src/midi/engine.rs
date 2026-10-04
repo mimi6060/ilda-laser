@@ -13,7 +13,7 @@ use super::mapping::{pickup_catches, Incoming, InputKind, MapMode, Mapping};
 use super::profile::{Profile, GENERIC};
 use super::safety::{self, ARM, ARM_HOLD, BLACKOUT, PLUG_GUARD};
 use super::{learn, MidiEvent};
-use crate::controls::{self, ControlInput, ControlKind, GRID_COLS, GRID_ROWS};
+use crate::controls::{self, ControlInput, ControlKind};
 use crate::Shared;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -193,7 +193,7 @@ fn handle_event(s: &mut Shared, ev: &MidiEvent) {
     }
 
     let id = if mp.mode == MapMode::Grid {
-        match grid_cell(s.cue_page, &mp.args) {
+        match grid_cell(&s.grid, s.cue_page, &mp.args) {
             Some(id) => id,
             None => return warn(s, format!("grid:{}", mp.args), format!("correspondance « grille » sans « slot » valide ({})", mp.args)),
         }
@@ -289,10 +289,10 @@ pub(super) fn seed_pickup(s: &mut Shared, port: &str, id: &str, pos: f32) {
     s.midi.map.pickup.insert((port.to_string(), id.to_string()), Pickup { prev: Some(pos), engaged: false, written: None });
 }
 
-/// "grid" slot n (row-major from the top left) on the current page.
-fn grid_cell(page: usize, args: &serde_json::Value) -> Option<String> {
+/// "grid" slot n (row-major from the top left, 8 per row) on the current page.
+fn grid_cell(grid: &crate::grid::CueGrid, page: usize, args: &serde_json::Value) -> Option<String> {
     let slot = args.get("slot")?.as_u64()? as usize;
-    (slot < GRID_ROWS * GRID_COLS).then(|| format!("grid.{}.{}.{}", page + 1, slot / GRID_COLS + 1, slot % GRID_COLS + 1))
+    controls::pad_cell(grid, page, slot)
 }
 
 fn arm_press(s: &mut Shared, ev: &MidiEvent, key: Key, shift: bool) {
@@ -1002,7 +1002,7 @@ mod tests {
             let mut slots = Vec::new();
             for mp in &p.mappings {
                 if mp.mode == MapMode::Grid {
-                    slots.push(grid_cell(0, &mp.args).unwrap_or_else(|| panic!("{slug}: bad grid args {}", mp.args)));
+                    slots.push(grid_cell(&s.grid, 0, &mp.args).unwrap_or_else(|| panic!("{slug}: bad grid args {}", mp.args)));
                     continue;
                 }
                 let d = s.controls.get(&mp.target).unwrap_or_else(|| panic!("{slug}: unknown control « {} »", mp.target));
@@ -1019,7 +1019,7 @@ mod tests {
             }
             slots.sort();
             slots.dedup();
-            assert_eq!(slots.len(), GRID_ROWS * GRID_COLS, "{slug}: every pad has its own slot");
+            assert_eq!(slots.len(), controls::GRID_ROWS * controls::GRID_COLS, "{slug}: every pad has its own slot");
             // No two mappings can answer the same message in the same layer.
             for (i, a) in p.mappings.iter().enumerate() {
                 for b in &p.mappings[i + 1..] {

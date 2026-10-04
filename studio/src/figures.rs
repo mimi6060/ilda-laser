@@ -205,7 +205,7 @@ pub fn refresh(s: &mut crate::Shared) {
     s.presets.retain(|p| p.category != CATEGORY);
     let figures: Vec<Preset> = s.figures.list().iter().map(preset_of).collect();
     s.presets.extend(figures);
-    s.controls = crate::controls::ControlRegistry::build(&s.presets);
+    crate::grid::refresh(s);
 }
 
 /// The figure library: `studio-data/figures/`, one JSON file per figure,

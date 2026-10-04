@@ -151,7 +151,7 @@ test('cue letters play cues in LIVE only', async ({ page }) => {
   for (const ws of ['timeline', 'creation', 'settings'] as Workspace[]) {
     await openWorkspace(page, ws);
     await focusPage(page);
-    await page.keyboard.press('z');
+    await page.keyboard.press('KeyW'); // AZERTY Z: 2nd cue key (T-272: by position)
     await page.keyboard.press('Shift+E'); // flash
     await page.keyboard.press('<'); // master reverse: a LIVE key too
   }
@@ -161,7 +161,7 @@ test('cue letters play cues in LIVE only', async ({ page }) => {
 
   await openWorkspace(page, 'live');
   await focusPage(page);
-  await page.keyboard.press('z');
+  await page.keyboard.press('KeyW');
   await expect.poll(activeCue).toBe(cues[1].id);
   await expect(page.locator(`#cues .cue[data-id="${cues[1].id}"]`)).toHaveClass(/active/);
 });

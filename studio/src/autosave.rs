@@ -397,6 +397,7 @@ mod tests {
         let mut s = test_support::shared();
         s.scenes = crate::scenes::SceneStore::load_or_create(dir.join("scenes.json"));
         s.deck = crate::cues::CueDeck::load(dir.join("grid.json"));
+        s.grid = crate::grid::CueGrid::load(dir.join("pages.json"));
         s.shows = crate::timeline::ShowStore::new(dir.join("shows"));
         s.lfos = crate::lfo::LfoStore::load_or_create(dir.join("lfos.json"), &s.controls);
         s.routes = crate::audio::routes::RouteStore::load_or_create(dir.join("audio_routes.json"), &s.controls);

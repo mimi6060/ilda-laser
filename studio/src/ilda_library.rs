@@ -179,7 +179,7 @@ pub fn refresh(s: &mut crate::Shared) {
     s.presets.retain(|p| p.category != CATEGORY);
     let cues: Vec<Preset> = s.ilda.list().iter().map(preset_of).collect();
     s.presets.extend(cues);
-    s.controls = crate::controls::ControlRegistry::build(&s.presets);
+    crate::grid::refresh(s);
 }
 
 /// Reads the library on its own thread (big files take a while), then
