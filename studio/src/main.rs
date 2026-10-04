@@ -47,6 +47,7 @@ mod live;
 mod menubar;
 mod midi;
 mod netin;
+mod notices;
 mod external;
 mod optimize;
 mod output;
@@ -504,6 +505,8 @@ pub struct Shared {
     pub projector_outputs: std::collections::BTreeMap<String, venue::Installed>,
     /// The other projectors' last frames (`GET /api/frames`).
     pub projector_frames: Vec<venue::ProjectorFrame>,
+    /// Notification centre (T-432): events without a request, in memory.
+    pub notices: notices::Notices,
 }
 
 impl Shared {
@@ -580,6 +583,23 @@ impl Shared {
             let clear = self.data_warnings.iter().all(|w| !w.safety || w.acknowledged);
             self.gate.register(interlock::DATA_ACK, "Fichier de sécurité abîmé : à valider", clear);
         }
+    }
+
+    /// Brings the notification centre's conditions up to date (T-432):
+    /// file writes reported since the last call, the autosave status and
+    /// the audio input. Called with the state (HTTP threads), constant time.
+    pub fn sync_notices(&mut self) {
+        notices::drain_writes(&mut self.notices);
+        let autosave = self.project.autosave.error.as_ref().map(|e| (notices::Level::Warning, format!("échec de la sauvegarde automatique : {e}")));
+        self.notices.condition("autosave", "Projet", autosave);
+        let audio = self.audio_in.status();
+        let level = match audio.state {
+            audio::CaptureState::DeviceLost => Some(notices::Level::Warning),
+            audio::CaptureState::PermissionDenied | audio::CaptureState::Error => Some(notices::Level::Error),
+            _ => None,
+        };
+        let text = if audio.message.is_empty() { "entrée audio indisponible".to_string() } else { audio.message };
+        self.notices.condition("audio", "Audio", level.map(|l| (l, text)));
     }
 
     /// The operator has seen the warning of `file` (or of every file).
@@ -1302,6 +1322,7 @@ fn startup_state(cli: &Cli) -> Shared {
         venue: venue::VenueStore::load_or_create(cli.data_dir.join("venue.json")),
         projector_outputs: Default::default(),
         projector_frames: Vec::new(),
+        notices: Default::default(),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);

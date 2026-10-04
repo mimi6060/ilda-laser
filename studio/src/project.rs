@@ -190,6 +190,10 @@ pub struct ProjectState {
     extra: Map<String, Value>,
     /// Fingerprint of the state as last opened or saved.
     saved: u64,
+    /// Whether the project differs from `saved`, as the autosave thread
+    /// last saw it (every 500 ms) or as opening and saving left it: what
+    /// `/api/frame` says (`project_modified`, T-433) without a fingerprint.
+    pub last_modified: bool,
     /// Autosave settings, status and recovery offer (autosave.rs, T-287).
     pub autosave: crate::autosave::AutosaveState,
 }
@@ -199,7 +203,7 @@ impl ProjectState {
     pub fn load(data_dir: &Path) -> Self {
         let recent_path = data_dir.join("recent.json");
         let file: RecentFile = crate::load_json(&recent_path);
-        Self { data_dir: data_dir.to_path_buf(), dir: data_dir.join("projects"), recent_path, current: file.current, recent: file.recent, extra: Map::new(), saved: 0, autosave: crate::autosave::AutosaveState::load(data_dir) }
+        Self { data_dir: data_dir.to_path_buf(), dir: data_dir.join("projects"), recent_path, current: file.current, recent: file.recent, extra: Map::new(), saved: 0, last_modified: false, autosave: crate::autosave::AutosaveState::load(data_dir) }
     }
 
     /// Fingerprint of the project as last opened or saved.
@@ -697,6 +701,7 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
     }
     let reply = match (post, action) {
         (false, "") => return Some(Reply::Json(info(shared))),
+        (false, "quit-check") => return Some(Reply::Json(json!(quit_check(shared)))),
         (true, "autosave") => match serde_json::from_str::<crate::autosave::SettingsRequest>(body) {
             Ok(req) => crate::autosave::set_settings(shared, req)
                 .map(|()| Vec::new())
@@ -775,6 +780,7 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Vec<Strin
     let mut now = snapshot(&s);
     now.timelines = p.timelines.clone();
     s.project.saved = now.fingerprint();
+    s.project.last_modified = false;
     s.project.extra = std::mem::take(&mut p.extra);
     match &name {
         Some(name) => s.project.remember(name),
@@ -798,6 +804,7 @@ fn recover(shared: &Mutex<Shared>) -> Result<Vec<String>, Reply> {
         check_lfos(&p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
         apply(&mut s, &p);
         s.project.autosave.offer = None;
+        s.project.last_modified = true;
         let file = offer.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         log::info!("Sauvegarde auto récupérée : {file}");
         s.gate.log().record("autosave_recovered", Some("ui"), serde_json::json!({ "file": file, "armed": s.gate.is_armed() }));
@@ -830,6 +837,7 @@ fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply
     log::info!("Projet enregistré : « {name} »");
     let mut s = shared.lock().unwrap();
     s.project.saved = p.fingerprint();
+    s.project.last_modified = false;
     s.project.remember(name);
     s.project.save_recent();
     Ok(Vec::new())
@@ -875,6 +883,42 @@ fn info(shared: &Mutex<Shared>) -> Value {
         "recent": recent,
         "autosave": autosave,
     })
+}
+
+/// What quitting now would lose (T-433), for `GET /api/project/quit-check`:
+/// the project changed since it was opened or saved (an autosave is not a
+/// save) and the timeline editor's show has edits not saved yet. The
+/// figure being drawn in CRÉATION lives in the page only: the page adds it.
+#[derive(Clone, Debug, Serialize)]
+pub struct QuitCheck {
+    /// Something would be lost.
+    pub modified: bool,
+    pub name: String,
+    /// *Sans titre*: « Enregistrer » needs a name first.
+    pub untitled: bool,
+    /// What: "projet", "timeline".
+    pub unsaved: Vec<&'static str>,
+    /// The timeline show with unsaved edits.
+    pub timeline: Option<String>,
+}
+
+/// See `QuitCheck`. The fingerprint is computed fresh (the timelines read
+/// from disk with the lock released), never the cached `last_modified`.
+pub fn quit_check(shared: &Mutex<Shared>) -> QuitCheck {
+    let (mut p, current, saved, shows, timeline) = {
+        let s = shared.lock().unwrap();
+        (snapshot(&s), s.project.current.clone(), s.project.saved, crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()), s.timeline.unsaved().map(str::to_string))
+    };
+    p.timelines = shows.load_all();
+    let project = p.fingerprint() != saved;
+    let mut unsaved = Vec::new();
+    if project {
+        unsaved.push("projet");
+    }
+    if timeline.is_some() {
+        unsaved.push("timeline");
+    }
+    QuitCheck { modified: !unsaved.is_empty(), name: current.clone().unwrap_or_else(|| UNTITLED.into()), untitled: current.is_none(), unsaved, timeline }
 }
 
 /// Project names in `dir`, sorted (temporary and hidden files skipped).
@@ -1343,6 +1387,46 @@ mod tests {
         assert_eq!((v["name"].as_str(), v["file"].is_null(), v["modified"].as_bool()), (Some("Sans titre"), true, Some(false)));
         let (code, _) = post(&shared, &dir, "save", json!({})).unwrap_err();
         assert_eq!(code, 409, "no file yet: Enregistrer sous…");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quit_check_follows_saves_edits_and_the_timeline_editor() {
+        let dir = temp_dir("quitcheck");
+        let shared = studio(&dir);
+        let get = |shared: &Mutex<Shared>| match route(shared, false, "quit-check", "").expect("known route") {
+            Reply::Json(v) => v,
+            Reply::Text(code, t) => panic!("{code} {t}"),
+        };
+        // Untitled and untouched: nothing to lose.
+        let q = quit_check(&shared);
+        assert!(!q.modified && q.untitled && q.unsaved.is_empty());
+        assert_eq!(q.name, UNTITLED);
+        // An edit: the project would be lost, and « Enregistrer » needs a name.
+        shared.lock().unwrap().live.size = 0.4;
+        let v = get(&shared);
+        assert_eq!((v["modified"].as_bool(), v["untitled"].as_bool()), (Some(true), Some(true)));
+        assert_eq!(v["unsaved"], json!(["projet"]));
+        // Saved: nothing again, and the cached flag for /api/frame agrees.
+        shared.lock().unwrap().project.last_modified = true;
+        post(&shared, &dir, "save-as", json!({ "path": "Mon show" })).unwrap();
+        let q = quit_check(&shared);
+        assert!(!q.modified && !q.untitled);
+        assert_eq!(q.name, "Mon show");
+        assert!(!shared.lock().unwrap().project.last_modified);
+        // A show edited in the timeline and not saved: the timeline only.
+        {
+            let mut s = shared.lock().unwrap();
+            s.timeline.load(Show { name: "Intro".into(), ..Default::default() });
+            assert!(s.timeline.unsaved().is_none(), "just loaded");
+            s.timeline.edit(Show::default());
+        }
+        let q = quit_check(&shared);
+        assert!(q.modified);
+        assert_eq!(q.unsaved, vec!["timeline"]);
+        assert_eq!(q.timeline.as_deref(), Some("Intro"));
+        shared.lock().unwrap().timeline.saved();
+        assert!(!quit_check(&shared).modified);
         let _ = std::fs::remove_dir_all(dir);
     }
 

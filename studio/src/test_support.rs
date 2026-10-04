@@ -121,6 +121,7 @@ pub fn shared() -> Shared {
         venue: crate::venue::VenueStore::in_memory(),
         projector_outputs: Default::default(),
         projector_frames: Vec::new(),
+        notices: Default::default(),
     }
 }
 
