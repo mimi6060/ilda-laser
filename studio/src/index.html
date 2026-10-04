@@ -298,6 +298,24 @@
   .mus-grid b { font-variant-numeric: tabular-nums; font-weight: 600; }
   .mus-gauge { display: flex; align-items: center; gap: 8px; }
   .mus-gauge .meter { flex: 1; margin: 0; }
+  /* Préréglages et déclencheurs audio (T-239, T-240), Theme (T-299) tokens. */
+  #musPreset { width: 100%; margin-top: 4px; }
+  #musPresetHint:empty, #trgState:empty { display: none; }
+  #musPresetHint.warn { color: var(--warn); }
+  #trgPanel { margin-top: 12px; }
+  #trgState[data-run=true] { color: var(--ok); }
+  #trgState[data-black=true] { color: var(--warn); }
+  .trg { border-top: 1px solid var(--line); padding: 8px 0 4px; }
+  .trg .row { margin-top: 6px; align-items: center; }
+  .trg .row > span { flex: 0 0 44px; font-size: 12px; color: var(--muted); }
+  .trg select { flex: 1; min-width: 0; }
+  .trg input[type=number] { flex: 0 0 64px; width: 64px; }
+  .trg .del { flex: 0 0 auto; padding: 4px 8px; }
+  .trg .count { flex: 0 0 auto; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .trg .count.hit { color: var(--accent); }
+  .trg.off { opacity: .6; }
+  #trgAdd { margin-top: 8px; }
+  .route-flicker { color: var(--warn); font-size: 11px; margin-top: 4px; }
   .mus-gauge b { min-width: 38px; text-align: right; }
   #musSection[data-section="break"] { color: #6ab0ff; }
   #musSection[data-section="buildup"] { color: var(--warn); }
@@ -1223,6 +1241,23 @@
         </div>
         <select id="musCalm" title="Scène jouée pendant le silence" hidden></select>
         <div class="hint" id="musGuard" aria-live="polite"></div>
+      </details>
+
+      <!-- T-239 : préréglages de réactivité audio (des ensembles de liens audio) -->
+      <label for="musPreset">Préréglage audio</label>
+      <select id="musPreset" class="lock-edit" title="Remplace les liens audio (LIVE › Modulateurs) par un ensemble prêt à l'emploi ; le mélange Temps ↔ Audio et le reste ne changent pas">
+        <option value="">Personnalisé</option>
+      </select>
+      <div class="hint" id="musPresetHint" aria-live="polite"></div>
+
+      <!-- T-240 : déclencheurs sur évènements audio (kick, drop, break… → cues) -->
+      <details id="trgPanel" open>
+        <summary>Déclencheurs audio</summary>
+        <div class="check" title="audio.triggers.enabled : coupé à chaque démarrage et par l'arrêt d'urgence ; n'arme jamais le laser"><input type="checkbox" id="trgOn" data-control="audio.triggers.enabled"><span>Automatisme audio</span></div>
+        <div class="hint" id="trgState" aria-live="polite"></div>
+        <div id="trgList"></div>
+        <button id="trgAdd" class="lock-edit" title="Ajouter une règle : quand un évènement arrive dans la musique, alors une action">+ Règle</button>
+        <div class="hint" id="trgHint">Quand la musique fait un kick, un drop, un break…, lancer un cue, passer au suivant, un flash ou un noir bref. Au plus une action par règle et par intervalle ; rien ne se passe sans audio. Le laser n'est jamais armé par l'audio.</div>
       </details>
 
       <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
@@ -3105,6 +3140,7 @@ async function previewLoop() {
     showRoutes(f.audio_routes);
     showStrobe(f.strobe);
     showAudioGuard(f.audio_guard);
+    showTriggers(f.audio_triggers);
     showDwell(f.dwell);
     showTestPattern(f.test_pattern);
     showShowMode(f.lock);
@@ -6230,14 +6266,17 @@ function showLfos(pos) {
 // ---------- audio routes (T-153) ----------
 // A source (band, level, kick…) → gate, curve, attack/release → a control.
 const AR_CURVES = [['linear', 'Linéaire'], ['square', 'Carré (plus de punch)'], ['sqrt', 'Racine (plus sensible)'], ['s_curve', 'En S (doux)']];
-let aroutes = [], arMix = 0.5, arSources = [], arTargets = [], arMax = 16;
+let aroutes = [], arMix = 0.5, arSources = [], arTargets = [], arMax = 16, arFlicker = [];
 const arEvent = id => arSources.some(s => s.id === id && s.event);
 async function loadRoutes() {
   const r = await (await fetch('/api/audio/routes')).json();
-  aroutes = r.routes; arMix = r.mix; arSources = r.sources; arTargets = r.targets; arMax = r.max;
+  aroutes = r.routes; arMix = r.mix; arSources = r.sources; arTargets = r.targets; arMax = r.max; arFlicker = r.flicker ?? [];
+  $('musPreset').value = r.preset ?? '';
   renderRoutes();
 }
 async function saveRoutes() {
+  // An edit by hand: the routes are no preset's any more (T-239).
+  $('musPreset').value = ''; arFlicker = [];
   if (!await post('/api/audio/routes', { mix: arMix, routes: aroutes })) await loadRoutes();
 }
 function arSpan(r, f, label, title) {
@@ -6267,6 +6306,7 @@ function renderRoutes() {
       ${arSpan(r, 'attack', 'Attaque', 'Temps de montée')}
       ${ev ? arSpan(r, 'decay', 'Déclin', 'Temps de retombée après un coup') : arSpan(r, 'release', 'Relâche', 'Temps de retombée')}
       <label class="check" style="justify-content:flex-start"><input type="checkbox" data-f="enabled"${r.enabled ? ' checked' : ''}> Actif</label>
+      ${arFlicker[i] ? '<div class="route-flicker">Aigus sur la luminosité : risque de scintillement.</div>' : ''}
     </div>`;
   }).join('');
   $('arAdd').disabled = aroutes.length >= arMax;
@@ -6323,6 +6363,140 @@ function showRoutes(meters) {
     inp.parentElement.classList.toggle('shut', m.input !== null && !m.open);
     out.style.width = Math.round(Math.min(1, Math.abs(m.value)) * 100) + '%';
     out.dataset.v = m.value.toFixed(3);
+  });
+}
+
+// ---------- audio presets (T-239) ----------
+// One click replaces the audio routes by a ready-made set.
+async function loadAudioPresets() {
+  const r = await (await fetch('/api/audio/presets')).json();
+  const sel = $('musPreset');
+  sel.innerHTML = '<option value="">Personnalisé</option>' + r.presets.map(p => `<option value="${lfoEsc(p.id)}" title="${lfoEsc(p.hint)}">${lfoEsc(p.name)}</option>`).join('');
+  sel.value = r.current ?? '';
+}
+$('musPreset').addEventListener('change', async () => {
+  const id = $('musPreset').value, hint = $('musPresetHint');
+  hint.textContent = ''; hint.classList.remove('warn');
+  if (!id) return; // « Personnalisé » : rien à appliquer
+  const r = await fetch('/api/audio/preset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+  if (!r.ok) { const t = await r.text(); if (r.status === 423) notify(t); hint.textContent = t; hint.classList.add('warn'); }
+  else {
+    const v = await r.json();
+    if (v.warnings?.length) { hint.textContent = v.warnings.join(' · '); hint.classList.add('warn'); }
+    else hint.textContent = `Préréglage « ${$('musPreset').selectedOptions[0].textContent} » appliqué : ${v.routes.length} lien(s) audio.`;
+  }
+  await loadRoutes();
+});
+
+// ---------- audio triggers (T-240) ----------
+// Rules « Quand … Alors … », the switch (audio.triggers.enabled), counts.
+const TRG_EVENTS = [['kick', 'Kick'], ['snare', 'Caisse claire'], ['drop', 'Drop'], ['break', 'Break'], ['buildup_above', 'Montée ≥'], ['silence', 'Silence'], ['every_bars', 'Toutes les N mesures']];
+const TRG_ACTIONS = [['launch_cue', 'Lancer un cue'], ['next_cue', 'Cue suivant de la page'], ['flash_cue', 'Flash d\'un cue'], ['black_hold', 'Noir bref']];
+const TRG_QUANT = [['off', 'Tout de suite'], ['beat', 'Au prochain temps'], ['bar', 'À la prochaine mesure']];
+let triggers = [], trgMax = 16, trgFired = [];
+const trgKind = v => typeof v === 'string' ? v : Object.keys(v)[0];
+async function loadTriggers() {
+  const r = await (await fetch('/api/audio/triggers')).json();
+  triggers = r.triggers; trgMax = r.max;
+  renderTriggers(); showTriggers(r.status);
+}
+async function saveTriggers() {
+  const r = await fetch('/api/audio/triggers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ triggers }) });
+  if (!r.ok) { const t = await r.text(); notify(t); await loadTriggers(); return; }
+  const v = await r.json();
+  triggers = v.triggers; renderTriggers();
+}
+function renderTriggers() {
+  const opts = (list, sel) => list.map(([v, t]) => `<option value="${lfoEsc(v)}"${String(v) === String(sel) ? ' selected' : ''}>${lfoEsc(t)}</option>`).join('');
+  const cues = presets.map(p => [p.id, p.name]);
+  $('trgList').innerHTML = triggers.map((t, i) => {
+    const ev = trgKind(t.event), act = trgKind(t.action);
+    const evVal = ev === 'buildup_above' ? `<input type="number" data-t="evval" min="5" max="100" step="5" value="${Math.round(t.event.buildup_above * 100)}" title="Seuil de montée (%)">`
+      : ev === 'every_bars' ? `<input type="number" data-t="evval" min="1" max="64" step="1" value="${t.event.every_bars}" title="Nombre de mesures">` : '';
+    const cue = act === 'launch_cue' ? t.action.launch_cue : act === 'flash_cue' ? t.action.flash_cue.id : null;
+    const beats = act === 'flash_cue' ? t.action.flash_cue.beats : act === 'black_hold' ? t.action.black_hold.beats : null;
+    const fired = trgFired[i]?.fired ?? 0;
+    return `<div class="trg${t.enabled ? '' : ' off'}" data-i="${i}">
+      <div class="row"><span>Quand</span><select data-t="event" title="Évènement de la musique">${opts(TRG_EVENTS, ev)}</select>${evVal}
+        <b class="count" data-count="${i}" title="Actions faites / limitées">${fired}</b>
+        <button class="del lock-edit" data-del="${i}" title="Supprimer cette règle">×</button></div>
+      <div class="row"><span>Alors</span><select data-t="action" title="Action">${opts(TRG_ACTIONS, act)}</select>${beats !== null ? `<input type="number" data-t="beats" min="0.25" max="${act === 'black_hold' ? 4 : 16}" step="0.25" value="${beats}" title="Durée en temps">` : ''}</div>
+      ${cue !== null ? `<div class="row"><span>Cue</span><select data-t="cue" title="Cue">${cue ? '' : '<option value="" selected>Choisir un cue…</option>'}${opts(cues, cue)}</select></div>` : ''}
+      <div class="row"><span>Intervalle</span><input type="number" data-t="interval" min="0.25" max="64" step="0.25" value="${t.min_interval_beats}" title="Intervalle min. : au plus une action par ce nombre de temps"><select data-t="quantize" title="Quand agir">${opts(TRG_QUANT, t.quantize)}</select></div>
+      <label class="check" style="justify-content:flex-start"><input type="checkbox" data-t="enabled"${t.enabled ? ' checked' : ''}> Active</label>
+    </div>`;
+  }).join('');
+  $('trgAdd').disabled = triggers.length >= trgMax;
+}
+function trgEvent(kind, old) {
+  if (kind === 'buildup_above') return { buildup_above: old?.buildup_above ?? 0.6 };
+  if (kind === 'every_bars') return { every_bars: old?.every_bars ?? 4 };
+  return kind;
+}
+function trgAction(kind, cue, beats) {
+  if (kind === 'launch_cue') return { launch_cue: cue ?? '' };
+  if (kind === 'flash_cue') return { flash_cue: { id: cue ?? '', beats: beats ?? 1 } };
+  if (kind === 'black_hold') return { black_hold: { beats: Math.min(4, beats ?? 0.5) } };
+  return kind;
+}
+const trgCue = a => a.launch_cue ?? a.flash_cue?.id;
+const trgBeats = a => a.flash_cue?.beats ?? a.black_hold?.beats;
+$('trgAdd').addEventListener('click', () => {
+  if (triggers.length >= trgMax) return;
+  // A rule with a cue to choose is saved once the cue is chosen.
+  triggers.push({ event: 'drop', action: 'next_cue', min_interval_beats: 1, quantize: 'off', enabled: true });
+  renderTriggers(); saveTriggers();
+});
+$('trgList').addEventListener('click', e => {
+  const del = e.target.dataset.del;
+  if (del === undefined) return;
+  triggers.splice(+del, 1); renderTriggers(); saveTriggers();
+});
+$('trgList').addEventListener('change', e => {
+  const box = e.target.closest('.trg');
+  if (!box) return;
+  const t = triggers[+box.dataset.i], f = e.target.dataset.t, v = e.target.value;
+  if (f === 'event') t.event = trgEvent(v, null);
+  else if (f === 'evval') t.event = typeof t.event === 'object' && 'buildup_above' in t.event ? { buildup_above: Math.max(5, Math.min(100, +v || 60)) / 100 } : { every_bars: Math.max(1, Math.min(64, Math.round(+v) || 4)) };
+  else if (f === 'action') t.action = trgAction(v, trgCue(t.action), trgBeats(t.action));
+  else if (f === 'cue') t.action = trgAction(trgKind(t.action), v, trgBeats(t.action));
+  else if (f === 'beats') t.action = trgAction(trgKind(t.action), trgCue(t.action), Math.max(0.25, +v || 1));
+  else if (f === 'interval') t.min_interval_beats = Math.max(0.25, Math.min(64, +v || 1));
+  else if (f === 'quantize') t.quantize = v;
+  else if (f === 'enabled') t.enabled = e.target.checked;
+  else return;
+  renderTriggers();
+  // Not before its cue is chosen (the server refuses an empty one).
+  if (trgCue(t.action) === '') return;
+  saveTriggers();
+});
+// Frames fetched before the switch's answer don't undo the click.
+let trgOnSentAt = 0, trgOnAnsweredAt = 0;
+$('trgOn').addEventListener('change', async () => {
+  const on = $('trgOn').checked;
+  trgOnSentAt = performance.now();
+  if (!await post('/api/control', { id: 'audio.triggers.enabled', value: on ? 1 : 0 })) {
+    $('trgOn').checked = !on;
+    notify('Automatisme audio impossible : arrêt d\'urgence enclenché ?');
+  }
+  trgOnAnsweredAt = performance.now();
+});
+// Every frame: the switch (it may move from MIDI or an e-stop), whether
+// the rules run, the black, each rule's counts.
+function showTriggers(st) {
+  if (!st) return;
+  if (trgOnAnsweredAt >= trgOnSentAt) $('trgOn').checked = st.enabled;
+  const el = $('trgState');
+  el.dataset.run = String(st.live); el.dataset.black = String(st.black);
+  el.textContent = !st.enabled ? (triggers.length ? 'Automatisme coupé : aucune règle n\'agit.' : '')
+    : st.black ? 'Noir bref en cours.'
+    : st.live ? 'Automatisme actif : les règles suivent la musique.' : 'Automatisme en attente : pas d\'audio.';
+  trgFired = st.rules ?? [];
+  trgFired.forEach((r, i) => {
+    const c = document.querySelector(`#trgList [data-count="${i}"]`);
+    if (!c) return;
+    c.textContent = r.limited ? `${r.fired} / ${r.limited}` : String(r.fired);
+    c.classList.toggle('hit', r.ago_s !== null && r.ago_s < 0.3);
   });
 }
 
@@ -7726,7 +7900,7 @@ async function projPost(action, body) {
 }
 // Everything a project brings back, reloaded into the page.
 async function afterOpen() {
-  await loadState(); await loadPresets(); await loadPalettes(); await loadLfos(); await loadRoutes(); await loadShows();
+  await loadState(); await loadPresets(); await loadPalettes(); await loadLfos(); await loadRoutes(); await loadAudioPresets(); await loadTriggers(); await loadShows();
   if (!$('figEditor').hidden) loadFigLib();
 }
 // Unsaved changes: resolves true to go on, false to stay.
@@ -8623,7 +8797,7 @@ setFigTool('line');
 showFigProps();
 setCreationTab(remembered(CTAB_KEY));
 
-loadState().then(loadTestPatterns).then(loadProjection).then(loadPresets).then(loadPalettes).then(loadLfos).then(loadRoutes).then(previewLoop);
+loadState().then(loadTestPatterns).then(loadProjection).then(loadPresets).then(loadPalettes).then(loadLfos).then(loadRoutes).then(loadAudioPresets).then(loadTriggers).then(previewLoop);
 setTimeout(dataWarnLoop, 5000);
 midiLoop();
 loadPresence().catch(() => {});
