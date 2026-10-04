@@ -9,12 +9,15 @@
 //! (« Abstraits 2 »), so `grid.<page>.<row>.<col>` and `page.N` keep
 //! meaning what they did before. The « Figures » and « ILDA » pages follow
 //! the operator's libraries: their cells are always that library's items.
+//! Pages added to the catalogue later (`presets::LATE_PAGES`: « Festival »)
+//! come after those overflow pages, and are appended once to the
+//! operator's own pages, so no page they had changes number.
 //!
 //! Saved to `studio-data/pages.json` and in the project (`pages`). A page
 //! keeps every cue it holds when the grid gets smaller: cells past the last
 //! one are kept, not shown, and come back when it grows again.
 
-use crate::presets::{Preset, CATEGORIES};
+use crate::presets::{Preset, CATEGORIES, LATE_PAGES};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -106,6 +109,11 @@ pub struct CueGrid {
     path: Option<PathBuf>,
     #[serde(skip)]
     view: Vec<PageView>,
+    /// The late catalogue pages (`presets::LATE_PAGES`) already given to
+    /// the operator's own pages: each is appended once, and stays deleted
+    /// if the operator deletes it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub late_pages: Vec<String>,
     /// Bumped by every `resolve`, so the page knows when to reload the grid.
     #[serde(skip)]
     pub rev: u64,
@@ -113,7 +121,7 @@ pub struct CueGrid {
 
 impl Default for CueGrid {
     fn default() -> Self {
-        Self { cols: DEFAULT_COLS, rows: DEFAULT_ROWS, pages: Vec::new(), path: None, view: Vec::new(), rev: 0 }
+        Self { cols: DEFAULT_COLS, rows: DEFAULT_ROWS, pages: Vec::new(), late_pages: Vec::new(), path: None, view: Vec::new(), rev: 0 }
     }
 }
 
@@ -129,6 +137,7 @@ impl CueGrid {
         let mut grid: CueGrid = crate::load_json(&path);
         grid.path = Some(path);
         grid.sanitize();
+        grid.add_late_pages(&crate::presets::catalog());
         grid
     }
 
@@ -176,7 +185,33 @@ impl CueGrid {
         self.cols = other.cols;
         self.rows = other.rows;
         self.pages = other.pages.clone();
+        self.late_pages = other.late_pages.clone();
         self.sanitize();
+        self.add_late_pages(&crate::presets::catalog());
+    }
+
+    /// The operator's own pages get the catalogue pages added since they
+    /// were made (« Festival », T-110), at the end, once. Default pages
+    /// already have them. Memory only; the next save keeps them.
+    pub fn add_late_pages(&mut self, presets: &[Preset]) {
+        if self.pages.is_empty() {
+            return;
+        }
+        let cap = self.capacity();
+        for &category in late_categories() {
+            if self.late_pages.iter().any(|c| c == category) {
+                continue;
+            }
+            self.late_pages.push(category.to_string());
+            if self.pages.iter().any(|p| p.name == category) {
+                continue;
+            }
+            for page in category_pages(presets, category, cap) {
+                if self.pages.len() < MAX_PAGES {
+                    self.pages.push(page);
+                }
+            }
+        }
     }
 
     /// The pages as shown, from the last `resolve`.
@@ -246,6 +281,7 @@ impl CueGrid {
     pub fn materialize(&mut self, presets: &[Preset]) {
         if self.pages.is_empty() {
             self.pages = default_pages(presets, self.capacity());
+            self.late_pages = late_categories().iter().map(|c| c.to_string()).collect();
         }
     }
 
@@ -398,21 +434,39 @@ fn clean_name(name: &str) -> Option<String> {
 /// goes on pages after the last category, so the first pages keep their
 /// numbers. Library categories follow their library.
 pub fn default_pages(presets: &[Preset], cap: usize) -> Vec<CuePage> {
+    let (early, late) = CATEGORIES.split_at(CATEGORIES.len() - LATE_PAGES);
     let mut pages = Vec::new();
     let mut extra = Vec::new();
-    for &category in CATEGORIES {
-        if is_library(category) {
-            pages.push(CuePage { name: category.to_string(), slots: Vec::new(), category: Some(category.to_string()), user: false });
-            continue;
-        }
-        let cues: Vec<Option<CueRef>> = presets.iter().filter(|p| p.category == category).map(|p| Some(CueRef::of(p))).collect();
-        let mut chunks = cues.chunks(cap.max(1));
-        pages.push(CuePage { name: category.to_string(), slots: chunks.next().unwrap_or_default().to_vec(), category: None, user: false });
-        for (n, chunk) in chunks.enumerate() {
-            extra.push(CuePage { name: format!("{category} {}", n + 2), slots: chunk.to_vec(), category: None, user: false });
-        }
+    for &category in early {
+        let mut own = category_pages(presets, category, cap).into_iter();
+        pages.extend(own.next());
+        extra.extend(own);
     }
     pages.extend(extra);
+    // Pages added later, each with its own overflow right after it.
+    for &category in late {
+        pages.extend(category_pages(presets, category, cap));
+    }
+    pages
+}
+
+/// The catalogue pages added later (`presets::LATE_PAGES`).
+fn late_categories() -> &'static [&'static str] {
+    &CATEGORIES[CATEGORIES.len() - LATE_PAGES..]
+}
+
+/// A category's pages: its first page, then « <name> 2 »… for the cues
+/// that don't fit. A library category is one page that follows it.
+fn category_pages(presets: &[Preset], category: &str, cap: usize) -> Vec<CuePage> {
+    if is_library(category) {
+        return vec![CuePage { name: category.to_string(), slots: Vec::new(), category: Some(category.to_string()), user: false }];
+    }
+    let cues: Vec<Option<CueRef>> = presets.iter().filter(|p| p.category == category).map(|p| Some(CueRef::of(p))).collect();
+    let mut chunks = cues.chunks(cap.max(1));
+    let mut pages = vec![CuePage { name: category.to_string(), slots: chunks.next().unwrap_or_default().to_vec(), category: None, user: false }];
+    for (n, chunk) in chunks.enumerate() {
+        pages.push(CuePage { name: format!("{category} {}", n + 2), slots: chunk.to_vec(), category: None, user: false });
+    }
     pages
 }
 
@@ -468,7 +522,8 @@ mod tests {
         let g = resolved(&mut g);
         let view = g.view();
         // The category pages keep their numbers (MIDI mappings, page.N).
-        for (i, cat) in CATEGORIES.iter().enumerate() {
+        let early = CATEGORIES.len() - LATE_PAGES;
+        for (i, cat) in CATEGORIES[..early].iter().enumerate() {
             assert_eq!(view[i].name, *cat);
             assert_eq!(view[i].cells.len(), 40);
         }
@@ -477,7 +532,7 @@ mod tests {
         assert_eq!(view[0].cells.iter().flatten().cloned().collect::<Vec<_>>(), abstraits[..40]);
         // The rest comes after the last category, in order.
         let more = view.iter().position(|v| v.name == "Abstraits 2").unwrap();
-        assert!(more >= CATEGORIES.len());
+        assert!(more >= early);
         assert_eq!(view[more].cells.iter().flatten().cloned().collect::<Vec<_>>(), abstraits[40..]);
         // A short page: its cues first, then empty cells.
         let tunnels = of("Tunnels");
@@ -491,6 +546,49 @@ mod tests {
         assert_eq!(g.cell(1, 6, 1), None);
         assert_eq!(g.cell(1, 1, 9), None);
         assert_eq!(g.cell(0, 1, 1), None);
+    }
+
+    #[test]
+    fn the_festival_page_comes_after_every_older_page() {
+        let mut g = CueGrid::default();
+        let names: Vec<String> = resolved(&mut g).view().iter().map(|v| v.name.clone()).collect();
+        // Pages 1 to 12 are what they were before T-110 (page.N, F-keys,
+        // MIDI, DMX and APC page mappings); « Festival » is page 13.
+        let before = ["Abstraits", "Tunnels", "Faisceaux", "Balayages", "Vagues", "Géométrie", "Audio", "Texte & horloge", "Figures", "ILDA", "Abstraits 2", "Faisceaux 2"];
+        assert_eq!(names[..before.len()], before);
+        assert_eq!(names[before.len()], crate::presets::FESTIVAL);
+        assert_eq!(g.view()[before.len()].cells.iter().flatten().cloned().collect::<Vec<_>>(), of(crate::presets::FESTIVAL));
+        assert_eq!(g.cell(13, 1, 1), Some("festival-001"));
+    }
+
+    #[test]
+    fn the_operators_pages_get_the_festival_page_once() {
+        // Pages made before T-110 (no « Festival », no `late_pages`).
+        let dir = std::env::temp_dir().join(format!("studio-grid-late-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pages.json");
+        let old = r#"{"cols":8,"rows":5,"pages":[{"name":"Mes cues","slots":[{"builtin":"tunnels-001"}]},{"name":"Figures","category":"Figures"}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let g = CueGrid::load(path.clone());
+        let names: Vec<&str> = g.pages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Mes cues", "Figures", crate::presets::FESTIVAL], "appended, the others keep their numbers");
+        assert_eq!(g.pages[2].slots.len(), 40);
+        // Saved, then loaded again: still once.
+        g.save();
+        let mut g = CueGrid::load(path.clone());
+        assert_eq!(g.pages.len(), 3);
+        // Deleted by the operator: it stays deleted.
+        g.delete_page(2, &catalog()).unwrap();
+        g.save();
+        assert_eq!(CueGrid::load(path.clone()).pages.len(), 2);
+        // The default grid has it already, and doesn't get it twice once edited.
+        let mut d = CueGrid::default();
+        d.materialize(&catalog());
+        let n = d.pages.len();
+        d.add_late_pages(&catalog());
+        assert_eq!(d.pages.len(), n);
+        assert_eq!(d.pages.iter().filter(|p| p.name == crate::presets::FESTIVAL).count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -562,7 +660,7 @@ mod tests {
         let mut g = CueGrid::default();
         let figures = CATEGORIES.iter().position(|c| *c == crate::figures::CATEGORY).unwrap();
         for i in 0..45 {
-            presets.push(Preset { id: format!("figure:F{i:02}"), name: format!("F{i:02}"), category: crate::figures::CATEGORY, settings: Default::default() });
+            presets.push(Preset { id: format!("figure:F{i:02}"), name: format!("F{i:02}"), category: crate::figures::CATEGORY, settings: Default::default(), tag: None });
         }
         g.resolve(&presets);
         assert_eq!(g.slot(figures, 0), Some("figure:F00"));

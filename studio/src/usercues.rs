@@ -305,7 +305,7 @@ impl UserCueStore {
 }
 
 fn preset_of(c: &UserCue) -> Preset {
-    Preset { id: c.id.clone(), name: c.name.clone(), category: CATEGORY, settings: c.settings.clone() }
+    Preset { id: c.id.clone(), name: c.name.clone(), category: CATEGORY, settings: c.settings.clone(), tag: None }
 }
 
 /// The user cues into `Shared::presets`, without touching the grid.

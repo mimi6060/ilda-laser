@@ -25,7 +25,11 @@ test.beforeEach(async ({ page }) => {
 test('shows one tab per page (categories first) and the first page of cues', async ({ page }) => {
   const tabs = page.locator('#cueTabs button');
   const grid = await getGrid();
-  expect(grid.pages.slice(0, catalog.categories.length).map(p => p.name)).toEqual(catalog.categories);
+  // T-110: « Festival », the last category, came later: it follows the
+  // overflow pages, so the older pages keep their numbers.
+  const early = catalog.categories.slice(0, -1);
+  expect(grid.pages.slice(0, early.length).map(p => p.name)).toEqual(early);
+  expect(grid.pages.map(p => p.name).indexOf('Festival')).toBeGreaterThan(grid.pages.map(p => p.name).indexOf('Faisceaux 2'));
   await expect(tabs).toHaveCount(grid.pages.length);
   const first = catalog.categories[0];
   await expect(tabs.first().locator('.pn')).toHaveText(`${first} (40)`);
@@ -35,7 +39,7 @@ test('shows one tab per page (categories first) and the first page of cues', asy
   // A fixed 8×5 page: 40 cells, the rest of the category on a later page.
   await expect(page.locator('#cues .cue')).toHaveCount(40);
   const more = grid.pages.findIndex(p => p.name === `${first} 2`);
-  expect(more).toBeGreaterThanOrEqual(catalog.categories.length);
+  expect(more).toBeGreaterThanOrEqual(early.length);
   expect(grid.pages[more].cells.filter(Boolean)).toEqual(pageCues(first).slice(40).map(p => p.id));
   await expect(page.locator('#cues .cue').first()).toContainText(pageCues(first)[0].name);
   await expect(page.locator('#cues .cue').first().locator('.key')).toHaveText('A');

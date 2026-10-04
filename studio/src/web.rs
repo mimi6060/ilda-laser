@@ -1146,6 +1146,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 .iter()
                 .map(|p| {
                     let mut v = json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p), "program": p.settings.program.is_some() });
+                    // The « Festival » page's moment of the track (T-110).
+                    if let Some(tag) = p.tag {
+                        v["tag"] = json!(tag);
+                    }
                     // A user cue (T-405): editable, with its cell colour.
                     if let Some(c) = s.user_cues.get(&p.id) {
                         v["user"] = json!(true);

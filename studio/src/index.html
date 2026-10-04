@@ -933,6 +933,13 @@
   .cue .tag { bottom: 3px; right: 6px; }
   /* Cue program (T-157): « ∿ » over the picture, which plays on hover. */
   .cue .prog { position: absolute; left: 6px; bottom: 3px; font-size: 14px; line-height: 1; color: var(--violet); text-shadow: 0 0 6px var(--violet); pointer-events: none; }
+  /* Moment of the track (« Festival » page, T-110): a dot by the key. */
+  .cue .ftag { position: absolute; top: 6px; right: 17px; width: 7px; height: 7px; border-radius: 50%; background: var(--t); box-shadow: 0 0 5px var(--t); pointer-events: none; }
+  .cue .ftag[data-tag="intro"] { --t: #9aa0b4; }
+  .cue .ftag[data-tag="groove"] { --t: #2ee6a6; }
+  .cue .ftag[data-tag="break"] { --t: #3d9bff; }
+  .cue .ftag[data-tag="build"] { --t: #ff8a3d; }
+  .cue .ftag[data-tag="drop"] { --t: #ff3d4f; }
   .cue.previewing canvas.th { box-shadow: 0 0 0 1px var(--violet), 0 0 10px color-mix(in srgb, var(--violet) 50%, transparent); }
   .cue.active { background: linear-gradient(90deg, color-mix(in srgb, var(--cat) 35%, #11131d), #11131d); color: #fff; border-color: var(--cat);
     box-shadow: 0 0 0 1px var(--cat), 0 0 22px color-mix(in srgb, var(--cat) 55%, transparent); }
@@ -5412,6 +5419,8 @@ const lengthIndex = l => TRANS_LENGTHS.findIndex(x => l && (x.beats === l.beats 
 const heldKeys = new Map(); // key code -> cue id, for keyup
 let pointerCue = null;      // cue id under a held mouse button / finger
 const MODE_TAGS = { toggle: 'B', flash: 'F', solo: 'S', restart: 'R' };
+// The « Festival » page's moments of a track (T-110), as the dot's tooltip.
+const TRACK_TAGS = { intro: 'Intro', groove: 'Groove', break: 'Break', build: 'Montée', drop: 'Drop' };
 
 // Theme (T-299): a colour per cue category and a small picture per cue,
 // like a desk's coloured pools. The pictures come once per catalogue load.
@@ -5575,6 +5584,11 @@ function renderCues() {
       el.innerHTML = `<span class="key">${key}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`
         + (slot.protect_stop || slot.protect_solo ? LOCK_SVG.replace('<svg', `<svg class="lock"><title>${slot.protect_stop ? 'Protégé de Tout arrêter' : ''}${slot.protect_stop && slot.protect_solo ? ' · ' : ''}${slot.protect_solo ? 'Protégé du solo' : ''}</title`) : '');
       el.querySelector('.n').textContent = p.name;
+      if (TRACK_TAGS[p.tag]) {
+        const dot = document.createElement('span');
+        dot.className = 'ftag'; dot.dataset.tag = p.tag; dot.title = TRACK_TAGS[p.tag];
+        el.appendChild(dot);
+      }
       drawThumb(el.querySelector('canvas.th'), thumbs[p.id]);
       if (p.program || slot.program) {
         // Cue program (T-157): a badge, and the picture plays it on hover.
