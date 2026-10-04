@@ -47,11 +47,15 @@ pub struct Mixer {
     /// The point optimiser (T-002), off by default: every look then goes
     /// through the classic `densify`.
     pub optimizer: OptimizeParams,
+    /// The output's default scan preset (T-415, `scan.rs`), for looks that
+    /// choose none. `None` = « Auto »: `optimizer` as it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_default: Option<String>,
 }
 
 impl Default for Mixer {
     fn default() -> Self {
-        Self { layers: Default::default(), point_budget: DEFAULT_POINT_BUDGET, optimizer: OptimizeParams::default() }
+        Self { layers: Default::default(), point_budget: DEFAULT_POINT_BUDGET, optimizer: OptimizeParams::default(), scan_default: None }
     }
 }
 

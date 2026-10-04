@@ -90,11 +90,15 @@ pub struct Figure {
     pub rate: f32,
     pub per: RateUnit,
     pub loop_mode: LoopMode,
+    /// Scan preset (T-415, `scan.rs`); `None` = the output's default. A
+    /// grid cell's or a timeline event's own preset comes first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan: Option<String>,
 }
 
 impl Default for Figure {
     fn default() -> Self {
-        Self { name: String::new(), frames: vec![FigureFrame::default()], rate: 1.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop }
+        Self { name: String::new(), frames: vec![FigureFrame::default()], rate: 1.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, scan: None }
     }
 }
 

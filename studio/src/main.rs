@@ -68,6 +68,7 @@ mod safety_log;
 mod showmode;
 #[cfg(feature = "shownet")]
 mod shownet;
+mod scan;
 mod scenes;
 mod sdbank;
 mod sheets;
@@ -369,6 +370,8 @@ pub struct Shared {
     pub live_dirty: bool,
     /// User colour palettes (palettes.json).
     pub palettes: live::PaletteStore,
+    /// User scan presets (scan_presets.json, T-415).
+    pub scan_presets: scan::ScanPresetStore,
     /// Festival palettes on show and perceived balance (T-130,
     /// festival.json; the palette on show is memory only).
     pub festival: festival::Festival,
@@ -1214,6 +1217,7 @@ fn startup_state(cli: &Cli) -> Shared {
         live: load_json(&cli.data_dir.join("live.json")),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
+        scan_presets: scan::ScanPresetStore::load_or_create(cli.data_dir.join("scan_presets.json")),
         festival: festival::Festival::load(festival::path(&cli.data_dir)),
         midi: {
             let mut m = midi::MidiState::new(!cli.no_midi || cli.midi_test, midi::profile::ProfileStore::load(cli.data_dir.join("midi")));
@@ -1670,7 +1674,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal, plans, (festival_palette, balance)) = {
+        let (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1770,6 +1774,12 @@ impl Engine {
             let pattern = testpattern::hold_timeline(&mut s);
             let show_cues = timeline_cues(&mut s, t, &clock);
             let mixer = s.mixer.clone();
+            // Scan presets (T-415): the optimiser settings each look is
+            // traced with (event > cell > figure > the output's default;
+            // « Auto » = `mixer.optimizer`), before the mixer and the
+            // whole safety chain.
+            let look_scan: Vec<optimize::OptimizeParams> = looks.iter().map(|(_, id, look)| scan::for_look(&s, *id, look)).collect();
+            let show_scan: Vec<optimize::OptimizeParams> = show_cues.iter().map(|(cue, look)| scan::for_event(&s, cue, look)).collect();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
             // User cues stored with master modifiers (T-405): theirs, per cue.
@@ -1815,7 +1825,7 @@ impl Engine {
                 })
                 .collect();
             let festival = (s.festival.colors(), s.festival.balance);
-            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal, plans, festival)
+            (looks, transition_fx, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), caps, s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1840,7 +1850,8 @@ impl Engine {
                 let mut rendered: Vec<projection::Routed> = show_cues
                     .iter()
                     .zip(&routing.show_zones)
-                    .map(|((cue, settings), zones)| {
+                    .zip(&show_scan)
+                    .map(|(((cue, settings), zones), scan)| {
                         // An event met mid-way (a seek, a timecode jump, T-409)
                         // starts with the motion it would have had playing from
                         // its start: its first step is all the time elapsed.
@@ -1852,7 +1863,7 @@ impl Engine {
                             (false, true) => 0.0,
                             (false, false) => anim_dt,
                         };
-                        animator.set_optimizer(&mixer.optimizer);
+                        animator.set_optimizer(scan);
                         animator.set_palette(festival_palette);
                         let mut points = animator.render(settings, audio, event_dt, &content_clock);
                         if cue.modifiers != live::LiveModifiers::default() {
@@ -1871,12 +1882,12 @@ impl Engine {
                     })
                     .collect();
                 // Muted layers keep animating, so they come back in motion.
-                let mut cue_looks: Vec<transition::Rendered<(u8, Vec<u8>)>> = looks.iter().zip(&routing.look_zones).map(|((layer, id, settings), zones)| {
+                let mut cue_looks: Vec<transition::Rendered<(u8, Vec<u8>)>> = looks.iter().zip(&routing.look_zones).zip(&look_scan).map(|(((layer, id, settings), zones), scan)| {
                     let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
                         Some(&beat) => Animator::starting_at(beat),
                         None => Animator::default(),
                     });
-                    animator.set_optimizer(&mixer.optimizer);
+                    animator.set_optimizer(scan);
                     animator.set_palette(festival_palette);
                     let mut points = animator.render(settings, audio, anim_dt, &clock);
                     // A user cue's own master modifiers (T-405), before the

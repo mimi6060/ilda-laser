@@ -117,6 +117,10 @@ pub struct CueSlot {
     /// « Protégé du solo »: stays shown while another cue is held in Solo.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub protect_solo: bool,
+    /// Scan preset (T-415, `scan.rs`) the cue is traced with; `None` = the
+    /// figure's, else the output's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -329,6 +333,11 @@ impl CueDeck {
 
     pub fn slot(&self, cue: &str) -> CueSlot {
         self.slots.get(cue).cloned().unwrap_or_default()
+    }
+
+    /// The scan preset set on a cue's cell (T-415), without cloning the slot.
+    pub fn slot_scan(&self, cue: &str) -> Option<&str> {
+        self.slots.get(cue).and_then(|s| s.scan.as_deref())
     }
 
     /// The program set on `cue` from the grid, if any.

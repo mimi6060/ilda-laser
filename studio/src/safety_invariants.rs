@@ -623,6 +623,7 @@ fn one_event_show(s: &Shared, rng: &mut Rng, cue: &str) -> timeline::Show {
         source: timeline::EventSource::Cue { id: cue.into() },
         modifiers: if rng.chance(0.5) { mutated(&live::LiveModifiers::default(), rng, 0.2) } else { Default::default() },
         envelopes: if rng.chance(0.5) { random_envelopes(rng, &targets, &every) } else { Vec::new() },
+        scan: random_scan_id(rng),
         ..Default::default()
     };
     let mut tracks = vec![timeline::Track { layer, events: vec![event], ..Default::default() }];
@@ -633,6 +634,30 @@ fn one_event_show(s: &Shared, rng: &mut Rng, cue: &str) -> timeline::Show {
         tracks.push(timeline::Track { kind: timeline::TrackKind::Bus, layer, events: vec![bus], ..Default::default() });
     }
     timeline::Show { name: "fuzz".into(), tracks, ..Default::default() }
+}
+
+/// A scan preset id (T-415): built-in, user, deleted, empty, or none.
+fn random_scan_id(rng: &mut Rng) -> Option<String> {
+    const IDS: [&str; 7] = ["beams", "graphics", "raster", "u-1", "u-2", "u-404", ""];
+    rng.chance(0.6).then(|| rng.pick(&IDS).to_string())
+}
+
+/// Scan presets (T-415): user presets with any values (validated or not:
+/// `scan::effective` must bound them either way), a preset on any cell,
+/// the output's default.
+fn random_scan(s: &mut Shared, rng: &mut Rng) {
+    if rng.chance(0.5) {
+        let base = crate::scan::ScanPreset { id: "u-1".into(), name: "Fuzz".into(), ..Default::default() };
+        let mut user = vec![mutated(&base, rng, 0.5), crate::scan::ScanPreset { id: "u-2".into(), scan_pct: rng.range(-100.0, 400.0), ..mutated(&base, rng, 0.8) }];
+        if rng.chance(0.5) {
+            let _ = crate::scan::validate(&mut user);
+        }
+        s.scan_presets.replace_in_memory(user);
+    }
+    let (id, _) = random_preset(s, rng);
+    let slot = CueSlot { scan: random_scan_id(rng), ..s.deck.slot(&id) };
+    s.deck.set_slot(&id, slot);
+    s.mixer.scan_default = random_scan_id(rng);
 }
 
 const PATTERNS: [testpattern::TestPattern; 7] = [
@@ -786,6 +811,9 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
             s.tempo.set_bpm_manual(bpm, t);
             s.mixer = mutated(&s.mixer.clone(), rng, 0.2);
             s.mixer_dirty = true;
+            if rng.chance(0.5) {
+                random_scan(&mut s, rng);
+            }
         }
         _ => {
             if s.presence.enforced {
