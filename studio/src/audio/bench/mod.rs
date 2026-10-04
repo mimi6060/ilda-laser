@@ -39,7 +39,7 @@
 //! ```
 
 mod metrics;
-mod signals;
+pub(crate) mod signals;
 
 use super::analysis::{Analyzer, HOP};
 use super::bpm::DetectState;

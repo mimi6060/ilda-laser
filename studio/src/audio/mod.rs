@@ -24,7 +24,7 @@
 
 pub mod analysis;
 #[cfg(test)]
-mod bench;
+pub(crate) mod bench;
 pub mod bpm;
 pub mod capture;
 pub mod decode;

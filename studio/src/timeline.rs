@@ -570,6 +570,13 @@ impl Player {
         self.modified = false;
     }
 
+    /// A show the studio made (T-167, autoshow.rs): loaded like `load`,
+    /// but not on disk yet (*Enregistrer* writes it).
+    pub fn load_unsaved(&mut self, show: Show) {
+        self.load(show);
+        self.modified = true;
+    }
+
     /// The editor's change (T-162): the loaded show's tracks, markers,
     /// tempo map and loop region are replaced; its name, time base and
     /// song are kept. Playback carries on where it is: events that stay

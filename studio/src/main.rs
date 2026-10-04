@@ -17,6 +17,7 @@ mod beat;
 mod chases;
 mod checklist;
 mod colorcal;
+mod autoshow;
 mod controls;
 mod crossings;
 mod cues;
@@ -319,6 +320,9 @@ pub struct Shared {
     pub user_cues: usercues::UserCueStore,
     /// The user's songs, `studio-data/media/audio/` (T-161).
     pub media: Arc<audio::media::MediaStore>,
+    /// « Générer un show depuis le morceau » (autoshow.rs, T-167): the
+    /// job runs on its own thread, with its own lock.
+    pub autoshow: Arc<autoshow::AutoShow>,
     /// The user's ILDA files, `studio-data/media/ilda/` (T-011), read on
     /// their own thread at start-up (`ilda_library::spawn_load`).
     pub ilda: Arc<ilda_library::IldaLibrary>,
@@ -1010,6 +1014,7 @@ fn startup_state(cli: &Cli) -> Shared {
             cli.test_hooks,
             cli.test_decode_timeout_ms.map_or(audio::isolate::DECODE_TIMEOUT, Duration::from_millis),
         ))),
+        autoshow: Default::default(),
         ilda: Arc::new(ilda_library::IldaLibrary::new(&cli.data_dir)),
         song: Arc::new(audio::playback::SongHub::new(epoch, !cli.no_audio)),
         song_sync: Default::default(),

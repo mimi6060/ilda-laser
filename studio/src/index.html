@@ -384,6 +384,13 @@
   #tlWaveHead { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--accent); }
   #tlWaveEmpty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--muted); pointer-events: none; }
   #tlWaveEmpty[hidden] { display: none; }
+  .tl-auto { margin-bottom: 6px; }
+  #tlAutoSong { max-width: 220px; padding: 5px; }
+  #tlAutoProg { width: 140px; height: 8px; accent-color: var(--ws-timeline); }
+  #tlAutoProg[hidden] { display: none; }
+  #tlAutoMsg { margin: 0; }
+  #tlAutoMsg.err { color: var(--warn); }
+  #tlAutoMsg b { color: var(--ws-timeline); font-weight: 600; }
   #cueMenu { position: fixed; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 220px; box-shadow: 0 8px 24px #0008; }
   #cueMenu[hidden] { display: none; }
   #cueMenu h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
@@ -1420,6 +1427,15 @@
           <span class="hint" id="tlSongStatus"></span>
         </div>
         <div class="tl-wave" id="tlWaveBox" title="Forme d'onde : cliquer pour se placer"><canvas id="tlWave"></canvas><div id="tlWaveEmpty">Pas de morceau</div><div id="tlWaveHead"></div></div>
+      </div>
+      <div class="cue-bar tl-auto lock-edit" id="tlAutoRow">
+        <span class="tl-track">Show auto</span>
+        <select id="tlAutoSong" title="Morceau à analyser (studio-data/media/audio)"><option value="">Aucun morceau</option></select>
+        <button id="tlAuto" title="Analyse le morceau (tempo, temps, sections : intro, couplet, montée, drop, pause, fin) et propose un show à retoucher, ouvert sans être enregistré. Ne touche jamais au laser.">Générer un show depuis le morceau</button>
+        <progress id="tlAutoProg" max="1" value="0" hidden></progress>
+        <button id="tlAutoCancel" hidden>Annuler</button>
+        <button id="tlAutoAgain" hidden title="Même morceau, autres cues (nouvelle graine)">Autre proposition</button>
+        <span class="hint" id="tlAutoMsg"></span>
       </div>
       <div class="tl-bar" id="tlBar" title="Cliquer pour se placer"><div class="region" id="tlRegion" hidden></div><div id="tlHead"></div></div>
       <div class="hint" id="tlMsg"></div>
@@ -5284,6 +5300,7 @@ let songs = [], waveKey = '', waveBusy = false;
 async function loadSongs() {
   try { songs = (await (await fetch('/api/media/audio')).json()).files; } catch { songs = []; }
   fillSongSelect();
+  fillAutoSongs();
 }
 function fillSongSelect() {
   const cur = timeline && timeline.audio ? timeline.audio.file : '';
@@ -5375,6 +5392,72 @@ $('tlImportFile').addEventListener('change', async () => {
 });
 $('tlWaveBox').addEventListener('click', e => seekFromClick($('tlWaveBox'), e));
 loadSongs();
+
+// ---------- show from the song (T-167) ----------
+// The studio decodes and analyses the song on its own thread (tempo,
+// beats, sections) and opens a proposed show, unsaved; the page starts,
+// follows and cancels the job. Same song = same proposal; « Autre
+// proposition » asks for another seed.
+let autoPoll = null, autoSeed = null;
+const AUTO_KIND = { intro: 'intro', verse: 'couplet', buildup: 'montée', drop: 'drop', break: 'pause', outro: 'fin' };
+function fillAutoSongs() {
+  const sel = $('tlAutoSong');
+  const cur = sel.value || (timeline && timeline.audio ? timeline.audio.file : '') || (songs[0] ? songs[0].file : '');
+  sel.innerHTML = '<option value="">Aucun morceau</option>' + songs.map(s => `<option>${esc(s.file)}</option>`).join('');
+  sel.value = songs.some(s => s.file === cur) ? cur : '';
+  autoButtons();
+}
+function autoButtons(running = !!autoPoll) {
+  $('tlAuto').disabled = running || !$('tlAutoSong').value;
+  $('tlAutoSong').disabled = running;
+  $('tlAutoCancel').hidden = !running;
+  $('tlAutoProg').hidden = !running;
+  if (running) $('tlAutoAgain').hidden = true;
+}
+function autoMsg(html, err = false) { $('tlAutoMsg').innerHTML = html; $('tlAutoMsg').classList.toggle('err', err); }
+function showAutoJob(j) {
+  if (j.state === 'running') {
+    $('tlAutoProg').value = j.step === 'analyse' ? j.progress : 0;
+    autoMsg(`${esc(j.step)}${j.step === 'analyse' ? ' · ' + Math.round(j.progress * 100) + ' %' : ''}…`);
+    return;
+  }
+  clearInterval(autoPoll); autoPoll = null; autoButtons(false);
+  if (j.state === 'done') {
+    const a = j.analysis, n = {};
+    a.sections.forEach(s => { n[s.kind] = (n[s.kind] || 0) + 1; });
+    const parts = Object.keys(AUTO_KIND).filter(k => n[k]).map(k => `${n[k]} ${AUTO_KIND[k]}`).join(', ');
+    autoSeed = j.seed;
+    autoMsg(`Show <b>« ${esc(j.show)} »</b> proposé, non enregistré : ${a.bpm.toFixed(1).replace('.', ',')} BPM${a.confidence < 0.2 ? ' (tempo incertain)' : ''} · ${parts} · graine ${j.seed}. Retouchez-le puis Enregistrer.`);
+    $('tlAutoAgain').hidden = false;
+    loadShows();
+  } else if (j.state === 'failed') autoMsg('Génération impossible : ' + esc(j.message), true);
+  else if (j.state === 'cancelled') autoMsg('Génération annulée : rien n\'a été ouvert.');
+}
+async function autoTick() {
+  try { showAutoJob(await (await fetch('/api/timeline/autoshow')).json()); } catch { /* next tick */ }
+}
+async function autoStart(seed) {
+  const file = $('tlAutoSong').value;
+  if (!file) return;
+  if (timeline && timeline.modified && !confirm(`« ${timeline.name} » a des modifications non enregistrées : le show proposé le remplacera. Continuer ?`)) return;
+  const body = seed == null ? { file } : { file, seed };
+  let r;
+  try { r = await fetch('/api/timeline/autoshow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
+  catch { autoMsg('Studio injoignable', true); return; }
+  if (!r.ok) { autoMsg(esc(await r.text()), true); return; }
+  autoPoll = setInterval(autoTick, 250);
+  autoButtons(true);
+  showAutoJob(await r.json());
+}
+$('tlAutoSong').addEventListener('focus', loadSongs);
+$('tlAutoSong').addEventListener('change', () => { $('tlAutoAgain').hidden = true; autoButtons(); });
+$('tlAuto').onclick = () => autoStart(null);
+$('tlAutoAgain').onclick = () => autoStart(((autoSeed || 0) + 1 + Math.floor(Math.random() * 1e6)) % 4294967296);
+$('tlAutoCancel').onclick = () => post('/api/timeline/autoshow/cancel');
+// A job started earlier (another tab, a reload) is followed too.
+fetch('/api/timeline/autoshow').then(r => r.json()).then(j => {
+  if (j.state === 'running') { autoPoll = setInterval(autoTick, 250); autoButtons(true); }
+}).catch(() => {});
 
 // ---------- timeline editor (T-162) ----------
 // The page keeps a mirror of the loaded show (`TL.show`), edits it, and
