@@ -1262,6 +1262,66 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        // CRÉATION › Cue évolutif (T-164): what the editor opens on - the
+        // cue's program (the cell's, else its look's), its main content
+        // (also how a catalogue cue becomes an inner layer), the length
+        // without a program, and what curves and LFOs may move.
+        (Method::Get, "/api/cues/program") => {
+            let Some(id) = query_str(request.url(), "id") else { return text(400, "expected ?id=<cue>") };
+            let s = shared.lock().unwrap();
+            let Some(p) = s.presets.iter().find(|p| p.id == id) else { return text(404, "no such preset") };
+            let own = s.deck.program(&id).is_some();
+            let program = s.deck.program(&id).or(p.settings.program.as_ref());
+            let targets: Vec<_> = crate::program::TARGETS.iter().map(|&(id, min, max, default)| json!({ "id": id, "min": min, "max": max, "default": default })).collect();
+            json_response(json!({
+                "id": p.id, "name": p.name, "category": p.category, "user": s.user_cues.get(&p.id).is_some(),
+                "program": program, "own": own,
+                "content": p.settings.content,
+                "content_beats": crate::program::CueProgram::default().length(&p.settings.content),
+                "targets": targets,
+                "spin_targets": ["rot_x.speed", "rot_y.speed", "rot_z.speed"],
+                "max": { "layers": crate::program::MAX_LAYERS, "lanes": crate::program::MAX_LANES, "keys": crate::program::MAX_KEYS, "lfos": crate::program::MAX_LFOS },
+            }))
+        }
+        // The editor's live preview (T-164): cue `id` played with an unsaved
+        // program at the current tempo. Display only, like the hover
+        // preview: nothing is stored, nothing reaches the output.
+        (Method::Post, "/api/cues/program/preview") => match body::<ProgramRequest>(request) {
+            Ok(req) => {
+                if let Some(Err(e)) = req.program.as_ref().map(crate::program::CueProgram::validate) {
+                    return text(400, &e.to_string());
+                }
+                let (mut look, bpm, beats_per_bar) = {
+                    let s = shared.lock().unwrap();
+                    let Some(p) = s.presets.iter().find(|p| p.id == req.id) else { return text(404, "no such preset") };
+                    (p.settings.clone(), s.tempo.bpm, s.tempo.beats_per_bar)
+                };
+                look.program = req.program;
+                json_response(json!(crate::presets::preview_with(&look, bpm, beats_per_bar, crate::presets::EDITOR_PREVIEW_FRAMES, 0.125)))
+            }
+            Err(e) => e,
+        },
+        // « Enregistrer dans une case » (T-164): a new user cue of cue `id`'s
+        // look with the program, in the first free cell of a user page.
+        (Method::Post, "/api/cues/program/store") => match body::<ProgramRequest>(request) {
+            Ok(req) => {
+                let Some(program) = req.program else { return text(400, "programme vide") };
+                if let Err(e) = program.validate() {
+                    return text(400, &e.to_string());
+                }
+                let mut s = shared.lock().unwrap();
+                match crate::usercues::store_program(&mut s, &req.id, program) {
+                    Ok((id, page, slot)) => {
+                        let mut g = grid_json(&s);
+                        g["cue"] = json!(id);
+                        g["cell"] = json!([page, slot]);
+                        json_response(g)
+                    }
+                    Err((code, msg)) => text(code, &msg),
+                }
+            }
+            Err(e) => e,
+        },
         // The cue grid's size and pages (T-272). Every POST is an edit: locked in show mode.
         (Method::Get, "/api/grid") => json_response(grid_json(&shared.lock().unwrap())),
         (Method::Post, "/api/grid") => match body::<GridRequest>(request) {
@@ -4133,6 +4193,8 @@ mod tests {
             ("/api/grid/edit", r#"{"op":"delete","from":[0,0]}"#),
             ("/api/cues/store", r#"{"page":0,"slot":0}"#),
             ("/api/cues/update", "{}"),
+            ("/api/cues/program", r#"{"id":"tunnels-001","program":{}}"#),
+            ("/api/cues/program/store", r#"{"id":"tunnels-001","program":{}}"#),
             ("/api/timeline/edit", "{}"),
             ("/api/timeline/autoshow", r#"{"file":"x.wav"}"#),
         ] {
@@ -5404,6 +5466,72 @@ mod tests {
         // `null` removes it.
         assert_eq!(set("tunnels-001", &serde_json::Value::Null).0, 200);
         assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["program"], serde_json::Value::Null);
+    }
+
+    /// T-164: the cue editor opens a cue's program, previews unsaved edits
+    /// without storing or playing anything, and stores a program into a
+    /// new user cue. Never arms.
+    #[test]
+    fn the_cue_editor_reads_previews_and_stores_programs() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        // A built-in program cue: the look's own; a plain cue: none.
+        let (code, body) = t.request("GET", "/api/cues/program?id=vagues-028", "");
+        let v = js(&body);
+        assert_eq!((code, v["own"].clone(), v["program"]["play"].clone()), (200, json!(false), json!("ping_pong")));
+        assert_eq!(v["targets"].as_array().unwrap().len(), crate::program::TARGETS.len());
+        let v = js(&t.request("GET", "/api/cues/program?id=tunnels-001", "").1);
+        assert_eq!((v["program"].clone(), v["content_beats"].clone(), v["content"]["kind"].clone()), (serde_json::Value::Null, json!(16.0), json!("generator")));
+        assert_eq!(t.request("GET", "/api/cues/program?id=nope", "").0, 404);
+
+        // Preview: a size curve changes the pictures; nothing is stored.
+        // A long answer comes chunked: undo the chunking.
+        let dechunk = |raw: String| -> String {
+            if raw.starts_with('{') || raw.is_empty() {
+                return raw;
+            }
+            let (mut rest, mut out) = (raw.as_str(), String::new());
+            while let Some((size, tail)) = rest.split_once("\r\n") {
+                let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+                if n == 0 || tail.len() < n {
+                    break;
+                }
+                out.push_str(&tail[..n]);
+                rest = tail[n..].trim_start_matches("\r\n");
+            }
+            out
+        };
+        let preview = |program: serde_json::Value| {
+            let (code, body) = t.request("POST", "/api/cues/program/preview", &json!({ "id": "tunnels-001", "program": program }).to_string());
+            (code, if code == 200 { dechunk(body) } else { body })
+        };
+        let size = |a: f32, b: f32| json!({ "length_beats": 4, "lanes": [{ "target": "size", "keys": [{ "beat": 0, "value": a }, { "beat": 4, "value": b }] }] });
+        let (code, small) = preview(size(0.1, 0.1));
+        assert_eq!(code, 200);
+        let small = js(&small);
+        assert_eq!((small["step_beats"].clone(), small["frames"].as_array().unwrap().len()), (json!(0.125), 32));
+        let big = js(&preview(size(1.0, 1.0)).1);
+        assert_ne!(small["frames"], big["frames"]);
+        let (code, text) = preview(json!({ "lanes": [{ "target": "trace" }] }));
+        assert!(code == 400 && text.contains("n'est pas un paramètre du cue"), "{code} {text}");
+        assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["program"], serde_json::Value::Null);
+
+        // Saved on the cue, then read back as its own.
+        assert_eq!(t.request("POST", "/api/cues/program", &json!({ "id": "tunnels-001", "program": size(0.2, 1.0) }).to_string()).0, 200);
+        let v = js(&t.request("GET", "/api/cues/program?id=tunnels-001", "").1);
+        assert_eq!((v["own"].clone(), v["program"]["lanes"][0]["keys"][1]["value"].clone()), (json!(true), json!(1.0)));
+
+        // « Enregistrer dans une case »: a user cue with the program in its look.
+        let (code, body) = t.request("POST", "/api/cues/program/store", &json!({ "id": "tunnels-001", "program": size(0.5, 0.75) }).to_string());
+        assert_eq!(code, 200, "{body}");
+        let g = js(&body);
+        let id = g["cue"].as_str().unwrap().to_string();
+        assert_eq!(g["page"], g["cell"][0]);
+        let v = js(&t.request("GET", &format!("/api/cues/program?id={id}"), "").1);
+        assert_eq!((v["own"].clone(), v["user"].clone(), v["program"]["lanes"][0]["keys"][0]["value"].clone()), (json!(false), json!(true), json!(0.5)));
+        assert_eq!(t.request("POST", "/api/cues/program/store", r#"{"id":"tunnels-001","program":null}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/cues/program/store", r#"{"id":"nope","program":{}}"#).0, 404);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     /// T-272: the grid's size and pages through the API, and the grid

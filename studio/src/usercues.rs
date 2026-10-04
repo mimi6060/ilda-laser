@@ -20,6 +20,7 @@ use crate::engine::{Content, Settings};
 use crate::grid::CueRef;
 use crate::live::LiveModifiers;
 use crate::presets::Preset;
+use crate::program::CueProgram;
 use crate::Shared;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -440,6 +441,41 @@ fn cell_cue(s: &Shared, (page, slot): (usize, usize)) -> Result<String, Refusal>
     s.grid.slot(page, slot).map(str::to_string).ok_or_else(|| bad("case vide"))
 }
 
+/// The first user page with an empty cell; a new « Mes cues » page if none.
+fn first_user_page(grid: &mut crate::grid::CueGrid, presets: &[Preset]) -> Result<(usize, Option<usize>), Refusal> {
+    match grid.pages.iter().position(|pg| pg.user && pg.category.is_none()).filter(|&n| grid.first_empty(n).is_some()) {
+        Some(n) => Ok((n, None)),
+        None => Ok((grid.new_page(DEFAULT_PAGE, presets).map_err(bad)?, None)),
+    }
+}
+
+/// CRÉATION › Cue évolutif (T-164) « Enregistrer dans une case » : a new
+/// user cue made of cue `source`'s look with `program` baked in, into the
+/// first free cell of a user page (made if none), which is then shown. The
+/// copy gets the source's cell properties (not its program: it has its
+/// own) and, from a user cue, its colour and stored master. Returns the new
+/// cue's id and its cell (page, slot).
+pub fn store_program(s: &mut Shared, source: &str, program: CueProgram) -> Result<(String, usize, usize), Refusal> {
+    let p = s.presets.iter().find(|p| p.id == source).ok_or_else(|| (404, "cue inconnu".to_string()))?;
+    let mut look = p.settings.clone();
+    look.program = Some(program);
+    let name = p.name.clone();
+    let mut grid = s.grid.clone();
+    grid.materialize(&s.presets);
+    let to = first_user_page(&mut grid, &s.presets)?;
+    let (page, slot) = target(&grid, to)?;
+    let mut cues = s.user_cues.clone();
+    let src = cues.get(source).cloned();
+    let id = cues.create(Some(&name), src.as_ref().map(|c| c.color), look, src.and_then(|c| c.master)).map_err(bad)?;
+    grid.put(page, slot, Some(CueRef::User(id.clone()))).map_err(bad)?;
+    commit(s, cues, grid)?;
+    let props = s.deck.slot(source);
+    s.deck.set_slot(&id, CueSlot { program: None, ..props });
+    s.deck.save();
+    s.cue_page = page.min(s.grid.page_count() - 1);
+    Ok((id, page, slot))
+}
+
 /// The cell a copy goes to: `to`'s slot, else the page's first empty one.
 fn target(grid: &crate::grid::CueGrid, (page, slot): (usize, Option<usize>)) -> Result<(usize, usize), Refusal> {
     let pg = grid.pages.get(page).ok_or_else(|| bad("page inconnue"))?;
@@ -491,10 +527,7 @@ pub fn edit(s: &mut Shared, op: GridEdit) -> Result<Option<usize>, Refusal> {
             let p = s.presets.iter().find(|p| p.id == id).ok_or_else(|| bad("cue inconnu"))?;
             let to = match to {
                 Some(to) => to,
-                None => match grid.pages.iter().position(|pg| pg.user && pg.category.is_none()).filter(|&n| grid.first_empty(n).is_some()) {
-                    Some(n) => (n, None),
-                    None => (grid.new_page(DEFAULT_PAGE, &s.presets).map_err(bad)?, None),
-                },
+                None => first_user_page(&mut grid, &s.presets)?,
             };
             let (page, slot) = target(&grid, to)?;
             let new = match cues.get(&id) {
@@ -808,5 +841,26 @@ mod tests {
         // The built-in cue is untouched.
         assert_eq!(s.grid.slot(1, 0), Some(tunnel.id.as_str()));
         assert_eq!(s.presets.iter().find(|p| p.id == tunnel.id).unwrap().settings, tunnel.settings);
+    }
+
+    #[test]
+    fn a_program_is_stored_into_a_new_user_cue_and_the_source_is_untouched() {
+        let mut s = crate::test_support::shared();
+        let tunnel = catalog().into_iter().find(|p| p.category == "Tunnels").unwrap();
+        s.deck.set_slot(&tunnel.id, CueSlot { layer: Some(3), ..CueSlot::default() });
+        let program = CueProgram { length_beats: Some(8.0), ..CueProgram::default() };
+        let (id, page, slot) = store_program(&mut s, &tunnel.id, program.clone()).unwrap();
+        assert_eq!(s.grid.view()[page].name, DEFAULT_PAGE);
+        assert_eq!((s.grid.slot(page, slot), s.cue_page), (Some(id.as_str()), page));
+        let c = s.user_cues.get(&id).unwrap();
+        assert_eq!((c.name.as_str(), c.settings.program.as_ref()), (tunnel.name.as_str(), Some(&program)));
+        assert_eq!(c.settings.content, tunnel.settings.content);
+        // The cell's properties come along, the program is in the look.
+        assert_eq!((s.deck.slot(&id).layer, s.deck.slot(&id).program), (Some(3), None));
+        assert_eq!(s.presets.iter().find(|p| p.id == tunnel.id).unwrap().settings, tunnel.settings);
+        // The next one goes into the next free cell; an unknown cue is refused.
+        let (_, page2, slot2) = store_program(&mut s, &id, program.clone()).unwrap();
+        assert_eq!((page2, slot2), (page, slot + 1));
+        assert_eq!(store_program(&mut s, "nope", program).unwrap_err().0, 404);
     }
 }
