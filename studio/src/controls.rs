@@ -695,6 +695,14 @@ pub fn press_cue_from(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: b
     true
 }
 
+/// Stops every instance of cue `id` (a user cue just deleted, T-405),
+/// keeping the live look in step like any other deck change.
+pub fn stop_cue(s: &mut Shared, id: &str) {
+    if s.deck.active.iter().any(|a| a.cue == id) {
+        with_deck(s, |deck, _| deck.active.retain(|a| a.cue != id));
+    }
+}
+
 /// Run a change on the deck, keeping `Shared::settings` the live look of
 /// the newest cue (see cues.rs), and parking the manual look while cues
 /// play.

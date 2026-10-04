@@ -65,6 +65,7 @@ mod tempo;
 mod testpattern;
 mod timeline;
 mod tunnels;
+mod usercues;
 mod watchdog;
 mod zones;
 mod web;
@@ -294,6 +295,9 @@ pub struct Shared {
     /// The operator's figures (figures.rs, `studio-data/figures/`), also
     /// the cues of the « Figures » page.
     pub figures: figures::FigureStore,
+    /// The operator's own cues (usercues.rs, T-405, `user_cues.json`):
+    /// looks stored into grid cells, also in `presets`.
+    pub user_cues: usercues::UserCueStore,
     /// The user's songs, `studio-data/media/audio/` (T-161).
     pub media: Arc<audio::media::MediaStore>,
     /// The user's ILDA files, `studio-data/media/ilda/` (T-011), read on
@@ -960,6 +964,7 @@ fn startup_state(cli: &Cli) -> Shared {
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
         figures: figures::FigureStore::load(cli.data_dir.join("figures")),
+        user_cues: usercues::UserCueStore::load_or_create(cli.data_dir.join("user_cues.json")),
         media: Arc::new(audio::media::MediaStore::new(&cli.data_dir).isolated(audio::isolate::Isolation::child(
             &cli.data_dir,
             cli.test_hooks,
@@ -984,6 +989,7 @@ fn startup_state(cli: &Cli) -> Shared {
         // Simulated (no command run) whenever a test flag is given.
         wifi: Arc::new(wifi::WifiWatch::new(cli.test_hooks || cli.test_devices.is_some() || cli.test_output.is_some())),
     };
+    usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
     if cli.test_hooks {
         state.project.autosave.allow_test_delays();
@@ -1150,6 +1156,8 @@ struct Engine {
     live_state: live::LiveState,
     /// Rotation state of timeline events with their own modifiers.
     event_live: HashMap<u64, live::LiveState>,
+    /// Rotation state of user cues stored with master modifiers (T-405).
+    cue_live: HashMap<u64, live::LiveState>,
     frames_since_save: u32,
     last: Instant,
     /// If this thread panics, unwinding drops the stage: dark frame + disarm.
@@ -1180,6 +1188,7 @@ impl Engine {
             animators: HashMap::new(),
             live_state: live::LiveState::default(),
             event_live: HashMap::new(),
+            cue_live: HashMap::new(),
             frames_since_save: 0,
             last: Instant::now(),
             stage: OutputStage::new(output),
@@ -1207,7 +1216,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing) = {
+        let (looks, show_cues, starts, cue_masters, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, color, pattern, routing) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1288,9 +1297,12 @@ impl Engine {
             let mixer = s.mixer.clone();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
+            // User cues stored with master modifiers (T-405): theirs, per cue.
+            let cue_masters: HashMap<u64, live::LiveModifiers> =
+                s.deck.active.iter().filter_map(|a| Some((a.id, usercues::master_of(&s, &a.cue)?))).collect();
             let armed = s.gate.is_armed();
             let routing = Routing::read(&s, &looks, &show_cues);
-            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), s.outputs.active_limits(), s.outputs.active_color(), pattern, routing)
+            (looks, show_cues, starts, cue_masters, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), s.outputs.active_limits(), s.outputs.active_color(), pattern, routing)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1302,9 +1314,10 @@ impl Engine {
             Some((p, brightness)) => (testpattern::output_frame(p, brightness, routing.align.as_ref(), &calibration), layers::MixReport::default(), Vec::new()),
             None => {
                 let anim_dt = dt * live.speed.clamp(0.0, 4.0);
-                let (animators, event_live) = (&mut self.animators, &mut self.event_live);
+                let (animators, event_live, cue_live) = (&mut self.animators, &mut self.event_live, &mut self.cue_live);
                 animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id));
                 event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
+                cue_live.retain(|id, _| cue_masters.contains_key(id));
                 // Timeline events first (under the cues played by hand on the same
                 // layer), each on its own content clock; paused or held ones freeze.
                 let mut rendered: Vec<projection::Routed> = show_cues
@@ -1332,7 +1345,16 @@ impl Engine {
                         None => Animator::default(),
                     });
                     animator.set_optimizer(&mixer.optimizer);
-                    (*layer, animator.render(settings, audio, anim_dt, &clock), zones.clone())
+                    let mut points = animator.render(settings, audio, anim_dt, &clock);
+                    // A user cue's own master modifiers (T-405), before the
+                    // master stage, like a timeline event's.
+                    if let Some(m) = cue_masters.get(id) {
+                        let st = cue_live.entry(*id).or_default();
+                        st.set_clock(t, clock.beat);
+                        st.advance(m, dt, clock.bpm, clock.beats_per_bar);
+                        points = live::apply(&points, m, st, &user_palettes);
+                    }
+                    (*layer, points, zones.clone())
                 }));
                 let evolving: Vec<(u64, evolving::Progress)> =
                     looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();

@@ -830,7 +830,16 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             let list: Vec<_> = s
                 .presets
                 .iter()
-                .map(|p| json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p), "program": p.settings.program.is_some() }))
+                .map(|p| {
+                    let mut v = json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p), "program": p.settings.program.is_some() });
+                    // A user cue (T-405): editable, with its cell colour.
+                    if let Some(c) = s.user_cues.get(&p.id) {
+                        v["user"] = json!(true);
+                        v["color"] = json!(c.color);
+                        v["master"] = json!(c.master.is_some());
+                    }
+                    v
+                })
                 .collect();
             json_response(json!({ "categories": CATEGORIES, "presets": list }))
         }
@@ -923,6 +932,55 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 "delete" => g.delete_page(req.page.unwrap_or(usize::MAX), presets).map(|()| None),
                 other => anyhow::bail!("action inconnue : « {other} »"),
             }),
+            Err(e) => e,
+        },
+        // T-405: user pages, the cell menu and drag and drop on the grid.
+        (Method::Post, "/api/grid/pages") => match body::<GridPagesRequest>(request) {
+            Ok(req) => grid_edit(shared, |g, presets| match req.op.as_str() {
+                "add" => g.new_page(req.name.as_deref().unwrap_or(""), presets).map(Some),
+                "rename" => g.rename_page(req.page.unwrap_or(usize::MAX), req.name.as_deref().unwrap_or(""), presets).map(|()| None),
+                "delete" => g.delete_page(req.page.unwrap_or(usize::MAX), presets).map(|()| None),
+                other => anyhow::bail!("opération inconnue : « {other} »"),
+            }),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/grid/edit") => match body::<crate::usercues::GridEdit>(request) {
+            Ok(op) => {
+                let mut s = shared.lock().unwrap();
+                match crate::usercues::edit(&mut s, op) {
+                    Ok(_) => json_response(grid_json(&s)),
+                    Err((code, msg)) => text(code, &msg),
+                }
+            }
+            Err(e) => e,
+        },
+        // « Enregistrer dans une case » / « Mettre à jour » (T-405): the
+        // current look into a user cue. A built-in cue is refused (409).
+        (Method::Post, "/api/cues/store") => match body::<StoreRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match crate::usercues::store(&mut s, req.page, req.slot, req.name.as_deref(), req.filter, req.with_master) {
+                    Ok(id) => {
+                        let mut g = grid_json(&s);
+                        g["cue"] = json!(id);
+                        json_response(g)
+                    }
+                    Err((code, msg)) => text(code, &msg),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/cues/update") => match body::<UpdateRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match crate::usercues::update(&mut s, req.id.as_deref(), req.filter, req.with_master) {
+                    Ok(id) => {
+                        let name = s.user_cues.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+                        json_response(json!({ "id": id, "name": name }))
+                    }
+                    Err((code, msg)) => text(code, &msg),
+                }
+            }
             Err(e) => e,
         },
         (Method::Post, "/api/grid/move") => match body::<GridMoveRequest>(request) {
@@ -1836,6 +1894,36 @@ struct GridPageRequest {
     action: String,
     page: Option<usize>,
     name: Option<String>,
+}
+
+/// `POST /api/grid/pages` (T-405): `add`, `rename`, `delete`.
+#[derive(Deserialize)]
+struct GridPagesRequest {
+    op: String,
+    page: Option<usize>,
+    name: Option<String>,
+}
+
+/// `POST /api/cues/store`.
+#[derive(Deserialize)]
+struct StoreRequest {
+    page: usize,
+    slot: usize,
+    name: Option<String>,
+    #[serde(default)]
+    filter: crate::usercues::StoreFilter,
+    #[serde(default)]
+    with_master: bool,
+}
+
+/// `POST /api/cues/update`: `id` absent = the newest playing user cue.
+#[derive(Deserialize)]
+struct UpdateRequest {
+    id: Option<String>,
+    #[serde(default)]
+    filter: crate::usercues::StoreFilter,
+    #[serde(default)]
+    with_master: bool,
 }
 
 /// `POST /api/grid/move`: (page, cell) → (page, cell or the first empty one).
@@ -3016,6 +3104,10 @@ mod tests {
             ("/api/grid/page", r#"{"action":"new"}"#),
             ("/api/grid/move", r#"{"from":[1,0],"to":[0,null]}"#),
             ("/api/grid/clear", r#"{"page":0,"slot":0}"#),
+            ("/api/grid/pages", r#"{"op":"add"}"#),
+            ("/api/grid/edit", r#"{"op":"delete","from":[0,0]}"#),
+            ("/api/cues/store", r#"{"page":0,"slot":0}"#),
+            ("/api/cues/update", "{}"),
             ("/api/timeline/edit", "{}"),
         ] {
             let (code, text) = t.request("POST", path, body);
@@ -4119,5 +4211,70 @@ mod tests {
         let g = js(&t.request("POST", "/api/grid", r#"{"cols":8,"rows":5,"pages":[]}"#).1);
         assert_eq!((g["default"].as_bool(), g["pages"][0]["cells"].as_array().unwrap().len()), (Some(true), 40));
         assert!(!t.shared.lock().unwrap().gate.is_armed());
+    }
+
+    /// T-405: store the look into a cell, update it, edit the grid; the
+    /// built-in cues are refused with 409.
+    #[test]
+    fn user_cues_are_stored_updated_and_edited_through_the_api() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        let (code, body) = t.request("POST", "/api/grid/pages", r#"{"op":"add","name":"Mes looks"}"#);
+        assert_eq!(code, 200, "{body}");
+        let g = js(&body);
+        let n = g["page"].as_u64().unwrap() as usize;
+        assert_eq!((g["pages"][n]["name"].as_str(), g["pages"][n]["user"].as_bool()), (Some("Mes looks"), Some(true)));
+        t.shared.lock().unwrap().settings = Settings { color: [255, 0, 255], scale: 0.3, ..Settings::default() };
+
+        let (code, body) = t.request("POST", "/api/cues/store", &format!(r#"{{"page":{n},"slot":2,"name":"Intro","filter":"all","with_master":true}}"#));
+        assert_eq!(code, 200, "{body}");
+        let g = js(&body);
+        assert_eq!(g["cue"], "u-1");
+        assert_eq!(g["pages"][n]["cells"][2], "u-1");
+        // Listed with its colour, and its cell properties can be set.
+        let presets = js(&t.request("GET", "/api/presets", "").1);
+        let p = presets["presets"].as_array().unwrap().iter().find(|p| p["id"] == "u-1").unwrap().clone();
+        assert_eq!((p["name"].as_str(), p["user"].as_bool(), p["color"].clone(), p["master"].as_bool()), (Some("Intro"), Some(true), json!([255, 0, 255]), Some(true)));
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"u-1","layer":2}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["u-1"]["layer"], 2);
+        // It plays from its cell like any cue.
+        assert_eq!(t.request("POST", "/api/control", &format!(r#"{{"id":"grid.{}.1.3"}}"#, n + 1)).0, 200);
+        assert_eq!(t.shared.lock().unwrap().active_cue.as_deref(), Some("u-1"));
+
+        // « Mettre à jour »: the playing user cue, through the filter.
+        t.shared.lock().unwrap().settings.scale = 0.9;
+        t.shared.lock().unwrap().settings.color = [0, 255, 0];
+        let (code, body) = t.request("POST", "/api/cues/update", r#"{"filter":"geometry_only"}"#);
+        assert_eq!((code, js(&body)["id"].as_str()), (200, Some("u-1")));
+        let cue = t.shared.lock().unwrap().user_cues.get("u-1").unwrap().clone();
+        assert_eq!((cue.settings.scale, cue.settings.color), (0.9, [255, 0, 255]));
+        assert_eq!(t.request("POST", "/api/cues/update", r#"{"id":"tunnels-001"}"#).0, 409);
+
+        // A built-in cue can't be stored onto.
+        let (code, text) = t.request("POST", "/api/cues/store", r#"{"page":1,"slot":0}"#);
+        assert_eq!((code, text.as_str()), (409, crate::usercues::BUILTIN_REFUSED));
+        assert_eq!(t.request("POST", "/api/cues/store", r#"{"page":1,"slot":0,"filter":"sideways"}"#).0, 400);
+
+        // Grid edits: copy to another page, rename, colour, swap, delete.
+        let m = js(&t.request("POST", "/api/grid/pages", r#"{"op":"add"}"#).1)["page"].as_u64().unwrap() as usize;
+        let g = js(&t.request("POST", "/api/grid/edit", &format!(r#"{{"op":"copy","from":[{n},2],"to":[{m},null]}}"#)).1);
+        assert_eq!(g["pages"][m]["cells"][0], "u-2");
+        assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["u-2"]["layer"], 2, "the copy keeps the properties");
+        assert_eq!(t.request("POST", "/api/grid/edit", &format!(r#"{{"op":"rename","from":[{m},0],"name":"Copie"}}"#)).0, 200);
+        assert_eq!(t.request("POST", "/api/grid/edit", &format!(r#"{{"op":"color","from":[{m},0],"color":[1,2,3]}}"#)).0, 200);
+        assert_eq!(t.shared.lock().unwrap().user_cues.get("u-2").unwrap().name, "Copie");
+        assert_eq!(t.request("POST", "/api/grid/edit", r#"{"op":"rename","from":[1,0],"name":"X"}"#).0, 409);
+        let g = js(&t.request("POST", "/api/grid/edit", r#"{"op":"copy_to_user","from":[1,0]}"#).1);
+        let mine = g["page"].as_u64().unwrap() as usize;
+        assert!(g["pages"][mine]["user"].as_bool().unwrap());
+        assert_eq!(t.request("POST", "/api/grid/edit", &format!(r#"{{"op":"swap","from":[{n},2],"to":[{m},0]}}"#)).0, 200);
+        let g = js(&t.request("GET", "/api/grid", "").1);
+        assert_eq!((g["pages"][n]["cells"][2].as_str(), g["pages"][m]["cells"][0].as_str()), (Some("u-2"), Some("u-1")));
+        assert_eq!(t.request("POST", "/api/grid/edit", &format!(r#"{{"op":"delete","from":[{m},0]}}"#)).0, 200);
+        assert!(t.shared.lock().unwrap().user_cues.get("u-1").is_none());
+        assert_eq!(t.request("POST", "/api/grid/edit", r#"{"op":"explode","from":[0,0]}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/grid/pages", &format!(r#"{{"op":"rename","page":{m},"name":"B"}}"#)).0, 200);
+        assert_eq!(t.request("POST", "/api/grid/pages", &format!(r#"{{"op":"delete","page":{m}}}"#)).0, 200);
+        assert!(!t.shared.lock().unwrap().gate.is_armed(), "nothing here arms");
     }
 }

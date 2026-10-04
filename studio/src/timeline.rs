@@ -936,7 +936,7 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
 
 /// Event modifiers into the ranges of the master controls (non-finite →
 /// neutral), so no show file or edit can push the geometry far off.
-fn sanitize_modifiers(m: &mut LiveModifiers) {
+pub(crate) fn sanitize_modifiers(m: &mut LiveModifiers) {
     let d = LiveModifiers::default();
     let fix = |v: f32, lo: f32, hi: f32, def: f32| if v.is_finite() { v.clamp(lo, hi) } else { def };
     m.brightness = fix(m.brightness, 0.0, 1.0, d.brightness);

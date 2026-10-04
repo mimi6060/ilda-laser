@@ -699,6 +699,27 @@
   .cues[data-empty]::before { content: attr(data-empty); position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; pointer-events: none; z-index: 1; }
   .cues.editing .cue { cursor: grab; }
   .cues.editing .cue * { pointer-events: none; }
+  /* « Enregistrer dans une case » (T-405): the grid blinks until a cell is picked. */
+  .cues.storing .cue, .cues.storing .cue-empty { cursor: copy; animation: storeBlink 1s ease-in-out infinite; }
+  .cues.storing .cue-empty { opacity: .9; }
+  @keyframes storeBlink { 50% { box-shadow: 0 0 0 2px var(--accent-2), 0 0 14px color-mix(in srgb, var(--accent-2) 50%, transparent); } }
+  #cueStore[aria-pressed="true"] { background: #ff3dc822; color: var(--accent-2); border-color: #ff3dc855; }
+  .cue-bar select { width: auto; padding: 5px; font-size: 12px; }
+  .cue-bar label { display: inline-flex; gap: 4px; align-items: center; margin: 0; font-size: 12px; color: var(--muted); }
+  .cue-bar label input { width: auto; padding: 0; }
+  #cueStoreMsg { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; font-size: 12px; color: var(--warn); }
+  #cueStoreMsg[hidden] { display: none; }
+  #cueStoreMsg button { padding: 4px 10px; font-size: 12px; }
+  .cue-tabs-row { display: flex; gap: 6px; align-items: flex-start; margin-bottom: 8px; }
+  .cue-tabs-row .cue-tabs { flex: 1; min-width: 0; margin-bottom: 0; }
+  #cuePageAdd { flex: none; border-radius: 999px; padding: 6px 12px; font-size: 12px; white-space: nowrap; }
+  #pageMenu { position: fixed; z-index: 5; background: #141725; border: 1px solid #2a2f44; border-radius: 14px; padding: 10px 12px; width: 220px; box-shadow: 0 20px 60px #000c; }
+  #pageMenu[hidden] { display: none; }
+  #pageMenu h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+  #pageMenu button { display: block; width: 100%; text-align: left; margin-top: 4px; }
+  #cueMenuUser[hidden] { display: none; }
+  #cueMenuUser .row input[type=text] { flex: 1; min-width: 0; }
+  #cueMenuUser .row input[type=color] { flex: none; width: 40px; padding: 0; }
   .grid-menu { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-bottom: 8px; padding: 6px 8px; border: 1px solid #22263a; border-radius: 10px; background: #0b0d15; font-size: 12px; }
   .grid-menu[hidden] { display: none; }
   /* Narrow window: 8 columns leave no room for the picture, the name wins. */
@@ -1180,6 +1201,12 @@
       <span class="hint" style="margin:0">Max</span>
       <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
       <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
+      <button id="cueStore" class="lock-edit" aria-pressed="false" title="Enregistrer le look courant dans une case (Cmd/Ctrl+E) : activer, puis cliquer la case. Recliquer pour annuler.">Enregistrer dans une case</button>
+      <button id="cueUpdate" class="lock-edit" title="Réenregistrer le look courant dans le cue utilisateur en cours (Cmd/Ctrl+Maj+E)">Mettre à jour</button>
+      <select id="cueStoreFilter" class="lock-edit" title="Ce que l'enregistrement prend du look courant">
+        <option value="all">Tout</option><option value="color_only">Couleur seulement</option><option value="geometry_only">Géométrie seulement</option>
+      </select>
+      <label class="lock-edit" title="Enregistre aussi les modificateurs maîtres du moment (taille, position, rotation, couleur) avec le cue"><input type="checkbox" id="cueStoreMaster"> Avec les modificateurs maîtres</label>
       <button id="gridMenuBtn" class="lock-edit" aria-expanded="false" title="Taille de grille, pages, réorganiser les cues">Pages…</button>
     </div>
     <div class="grid-menu lock-edit" id="gridMenu" hidden>
@@ -1195,7 +1222,11 @@
       <button id="gridEdit" aria-pressed="false" title="Glisser une case sur une autre case ou sur un onglet de page ; les cues ne se lancent pas pendant ce temps">Réorganiser</button>
       <span class="hint" id="gridMsg" style="margin:0"></span>
     </div>
-    <div class="cue-tabs" id="cueTabs" role="tablist" aria-label="Pages de cues"></div>
+    <div id="cueStoreMsg" class="lock-edit" hidden><span id="cueStoreText"></span><button id="cueStoreCopy" hidden>Copier vers une page utilisateur</button></div>
+    <div class="cue-tabs-row">
+      <div class="cue-tabs" id="cueTabs" role="tablist" aria-label="Pages de cues"></div>
+      <button id="cuePageAdd" class="lock-edit" title="Nouvelle page utilisateur (clic droit sur une page : renommer, supprimer)">+ Page</button>
+    </div>
     <div class="cue-scroll">
       <div class="cues" id="cues"></div>
       <div class="hint"><kbd>Maj</kbd> + lettre = flash · <kbd>F5</kbd>–<kbd>F12</kbd> ou <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> = page · clic droit sur un cue = propriétés (mode, groupe, calque)<span id="gridHidden"></span></div>
@@ -2047,6 +2078,11 @@
   </div>
 </main>
 
+<div id="pageMenu" hidden>
+  <h3 id="pageMenuName"></h3>
+  <button id="pageMenuRename">Renommer la page</button>
+  <button id="pageMenuDelete">Supprimer la page</button>
+</div>
 <div id="cueMenu" hidden>
   <h3>Propriétés du cue</h3>
   <div class="hint" id="cueMenuName" style="margin:0"></div>
@@ -2069,6 +2105,15 @@
   <select id="cueMenuShow"><option value="">Aucun</option></select>
   <label>Zones de projection (aucune = zones par défaut)</label>
   <div id="cueMenuZones" class="pz-checks"></div>
+  <div id="cueMenuUser" class="lock-edit" hidden>
+    <label for="cueMenuNameInput">Nom et couleur de la case</label>
+    <div class="row"><input type="text" id="cueMenuNameInput" maxlength="40" title="Renommer le cue"><input type="color" id="cueMenuColor" title="Couleur de la case"></div>
+  </div>
+  <div class="row lock-edit">
+    <button id="cueMenuCopy" title="Copie dans la première case vide de cette page">Copier</button>
+    <button id="cueMenuToUser" title="Fait une copie modifiable de ce cue sur une page utilisateur">Copier vers une page utilisateur</button>
+    <button id="cueMenuDelete" title="Supprime ce cue utilisateur (confirmation)">Supprimer</button>
+  </div>
   <div class="midi" id="cueMenuMidi">
     <button id="cueMenuLearn">Apprendre MIDI</button>
     <button id="cueMenuShift">Apprendre avec Shift</button>
@@ -2422,6 +2467,13 @@ document.addEventListener('keydown', e => {
   if (!typing && e.altKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyX') {
     e.preventDefault(); if (!e.repeat) setGate(!(ext && ext.open), 'keyboard'); return;
   }
+  // Cues utilisateur (T-405), in LIVE: Cmd/Ctrl+E « Enregistrer dans une
+  // case », Cmd/Ctrl+Maj+E « Mettre à jour ». Never a lone letter (cues).
+  if (!typing && (e.metaKey || e.ctrlKey) && !e.altKey && e.code === 'KeyE') {
+    e.preventDefault();
+    if (!e.repeat && activeWs === 'live') { if (e.shiftKey) updateCue(); else setStoreMode(!storeMode); }
+    return;
+  }
   // Projet (T-286): Cmd+S enregistrer, Cmd+O ouvrir (Ctrl on other systems).
   if ((e.metaKey || e.ctrlKey) && !e.altKey && ['s', 'o'].includes(e.key.toLowerCase())) {
     e.preventDefault(); if (!e.repeat) projAction(e.key.toLowerCase() === 's' ? 'save' : 'open'); return;
@@ -2433,6 +2485,8 @@ document.addEventListener('keydown', e => {
   const i = CUE_CODES.indexOf(e.code);
   const id = i >= 0 ? (grid.pages[gridPage]?.cells[i] ?? null) : null;
   if (i >= 0 && gridEditing) { e.preventDefault(); return; }
+  // « Enregistrer dans une case »: the letter picks the cell.
+  if (i >= 0 && storeMode) { e.preventDefault(); if (!e.repeat) storeInto(i); return; }
   if (id && presetById.has(id)) {
     e.preventDefault();
     // Auto-repeat would toggle the cue on and off while the key is held.
@@ -2784,8 +2838,9 @@ function showShowMode(lock) {
   // Only what plays stays on screen.
   if (activeWs === 'creation' || activeWs === 'settings') setWorkspace('live');
   setLivePanel('direct');
-  ['cueMenu', 'midiMenu', 'projMenu', 'projDialog'].forEach(id => { $(id).hidden = true; });
+  ['cueMenu', 'pageMenu', 'midiMenu', 'projMenu', 'projDialog'].forEach(id => { $(id).hidden = true; });
   stopLearning();
+  setStoreMode(false);
 }
 async function postLock(on) {
   try {
@@ -4238,7 +4293,9 @@ function renderCues() {
     // « Réorganiser »: a cell dropped on a tab goes to that page's first empty cell.
     b.addEventListener('dragover', e => { if (canDropOn(i)) { e.preventDefault(); b.classList.add('drop'); } });
     b.addEventListener('dragleave', () => b.classList.remove('drop'));
-    b.addEventListener('drop', e => { e.preventDefault(); b.classList.remove('drop'); dropOn(i, null); });
+    b.addEventListener('drop', e => { e.preventDefault(); b.classList.remove('drop'); dropOn(i, null, e.altKey); });
+    // T-405: right click = rename or delete the page.
+    b.addEventListener('contextmenu', e => { e.preventDefault(); openPageMenu(i, e.clientX, e.clientY); });
     $('cueTabs').appendChild(b);
   });
   // The tabs scroll sideways: keep the shown page's tab in view (never the window).
@@ -4253,6 +4310,7 @@ function renderCues() {
   cues.innerHTML = '';
   cues.style.setProperty('--cols', grid.cols);
   cues.classList.toggle('editing', gridEditing);
+  cues.classList.toggle('storing', storeMode);
   $('cueRegion').style.setProperty('--cat', pageColorOf(pg, gridPage));
   let any = false;
   pg.cells.forEach((id, i) => {
@@ -4264,13 +4322,16 @@ function renderCues() {
       el = document.createElement('div');
       el.className = 'cue-empty';
       el.innerHTML = `<span class="key">${key}</span>`;
+      el.addEventListener('pointerdown', e => { if (storeMode && e.button === 0) { e.preventDefault(); storeInto(i); } });
     } else {
       any = true;
       el = document.createElement('button');
       el.className = 'cue';
       el.dataset.id = p.id;
       el.title = el.dataset.control = `grid.${gridPage + 1}.${Math.floor(i / grid.cols) + 1}.${i % grid.cols + 1}`;
-      el.style.setProperty('--cat', catColor(p.category));
+      // A user cue (T-405) has its own colour band.
+      el.style.setProperty('--cat', p.user && p.color ? hex(p.color) : catColor(p.category));
+      el.classList.toggle('user', !!p.user);
       const slot = slots[p.id] || {};
       const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '']
         .filter(Boolean).join(' ');
@@ -4288,7 +4349,9 @@ function renderCues() {
         el.addEventListener('pointerleave', () => stopCuePreview());
       }
       el.addEventListener('pointerdown', e => {
-        if (e.button !== 0 || gridEditing) return;
+        if (e.button !== 0) return;
+        if (storeMode) { e.preventDefault(); storeInto(i); return; }
+        if (gridEditing) return;
         e.preventDefault();
         if (pointerCue) cueUp(pointerCue);
         pointerCue = p.id;
@@ -4297,7 +4360,7 @@ function renderCues() {
       el.addEventListener('contextmenu', e => { e.preventDefault(); openCueMenu(p, e.clientX, e.clientY, i); });
       if (gridEditing && pg.editable) {
         el.draggable = true;
-        el.addEventListener('dragstart', e => { dragFrom = { page: gridPage, slot: i }; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', p.id); });
+        el.addEventListener('dragstart', e => { dragFrom = { page: gridPage, slot: i }; e.dataTransfer.effectAllowed = 'copyMove'; e.dataTransfer.setData('text/plain', p.id); });
         el.addEventListener('dragend', () => { dragFrom = null; });
       }
     }
@@ -4305,7 +4368,7 @@ function renderCues() {
     if (gridEditing) {
       el.addEventListener('dragover', e => { if (canDropOn(gridPage)) { e.preventDefault(); el.classList.add('drop'); } });
       el.addEventListener('dragleave', () => el.classList.remove('drop'));
-      el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('drop'); dropOn(gridPage, i); });
+      el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('drop'); dropOn(gridPage, i, e.altKey); });
     }
     cues.appendChild(el);
   });
@@ -4319,11 +4382,15 @@ function canDropOn(page) {
   const pg = grid.pages[page];
   return !!(dragFrom && pg && pg.editable && !pg.auto);
 }
-async function dropOn(page, slot) {
+// Dropped: moved; with Alt, copied (a user cue gets a copy of its own);
+// onto a cue, the two swap (T-405).
+async function dropOn(page, slot, copy = false) {
   if (!dragFrom) return;
   const from = [dragFrom.page, dragFrom.slot];
   dragFrom = null;
-  await gridPost('/api/grid/move', { from, to: [page, slot] });
+  const onto = slot !== null && grid.pages[page]?.cells[slot];
+  const op = copy ? { op: 'copy', from, to: [page, slot] } : onto ? { op: 'swap', from, to: [page, slot] } : { op: 'move', from, to: [page, slot] };
+  if (await gridPost('/api/grid/edit', op) && copy) await loadPresets();
 }
 // Grid edits answer with the new grid; a refusal (full page, show mode…) is shown.
 async function gridPost(path, body) {
@@ -4332,6 +4399,7 @@ async function gridPost(path, body) {
     const t = await r.text();
     $('gridMsg').textContent = t;
     if (r.status === 423) notify(t);
+    else if ($('gridMenu').hidden) storeMsg(t);
     return false;
   }
   $('gridMsg').textContent = '';
@@ -4355,6 +4423,95 @@ $('gridEdit').addEventListener('click', () => setGridEditing(!gridEditing));
 for (const id of ['gridCols', 'gridRows']) {
   $(id).addEventListener('change', () => gridPost('/api/grid', { cols: +$('gridCols').value, rows: +$('gridRows').value }));
 }
+$('cuePageAdd').addEventListener('click', () => gridPost('/api/grid/pages', { op: 'add' }));
+
+// « Enregistrer dans une case » / « Mettre à jour » (T-405): the current
+// look into a user cue. Échap stays the emergency stop: the mode ends by
+// clicking its button again, or once a cell is picked.
+let storeMode = false, storeCopyFrom = null;
+function setStoreMode(on) {
+  if (on && showMode) { notify(LOCKED_FR); on = false; }
+  storeMode = on;
+  $('cueStore').setAttribute('aria-pressed', String(on));
+  $('cues').classList.toggle('storing', on);
+  if (on) storeMsg('Cliquer la case où enregistrer le look courant (ou recliquer « Enregistrer dans une case » pour annuler).');
+  else if (!storeCopyFrom) $('cueStoreMsg').hidden = true;
+}
+function storeMsg(text, copyFrom = null) {
+  storeCopyFrom = copyFrom;
+  $('cueStoreText').textContent = text;
+  $('cueStoreCopy').hidden = !copyFrom;
+  $('cueStoreMsg').hidden = !text;
+}
+const storeBody = () => ({ filter: $('cueStoreFilter').value, with_master: $('cueStoreMaster').checked });
+async function storeInto(i) {
+  const pg = grid.pages[gridPage];
+  if (!pg || pg.auto) { storeMsg('Cette page suit sa bibliothèque : choisir une autre page.'); return; }
+  const p = pg.cells[i] ? presetById.get(pg.cells[i]) : null;
+  if (p && p.user && !confirm(`Remplacer « ${p.name} » par le look courant ?`)) return;
+  const r = await fetch('/api/cues/store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: gridPage, slot: i, ...storeBody() }) });
+  if (!r.ok) {
+    const t = await r.text();
+    if (r.status === 423) { notify(t); setStoreMode(false); return; }
+    // A built-in cue: refused, with an editable copy offered.
+    storeMsg(t, r.status === 409 ? { page: gridPage, slot: i } : null);
+    return;
+  }
+  const g = await r.json();
+  storeCopyFrom = null;
+  setStoreMode(false);
+  await loadPresets();
+  storeMsg(`Look enregistré dans « ${presetById.get(g.cue)?.name || g.cue} ».`);
+}
+async function updateCue() {
+  if (showMode) return notify(LOCKED_FR);
+  const r = await fetch('/api/cues/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(storeBody()) });
+  const t = await r.text();
+  if (!r.ok) { if (r.status === 423) notify(t); else storeMsg(t); return; }
+  await loadPresets();
+  storeMsg(`« ${JSON.parse(t).name} » mis à jour avec le look courant.`);
+}
+$('cueStore').addEventListener('click', () => setStoreMode(!storeMode));
+$('cueUpdate').addEventListener('click', updateCue);
+$('cueStoreCopy').addEventListener('click', async () => {
+  const at = storeCopyFrom;
+  if (!at) return;
+  storeCopyFrom = null;
+  setStoreMode(false);
+  if (await gridPost('/api/grid/edit', { op: 'copy_to_user', from: [at.page, at.slot] })) {
+    await loadPresets();
+    storeMsg(`Copie modifiable créée sur la page « ${grid.pages[gridPage]?.name || ''} ».`);
+  }
+});
+
+// Right click on a page tab (T-405): rename or delete it.
+let pageMenuAt = null;
+function openPageMenu(i, x, y) {
+  const pg = grid.pages[i];
+  if (!pg || !pg.editable) return;
+  if (showMode) return notify(LOCKED_FR);
+  pageMenuAt = i;
+  $('pageMenuName').textContent = pg.name;
+  const m = $('pageMenu');
+  m.hidden = false;
+  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 8)) + 'px';
+}
+$('pageMenuRename').addEventListener('click', async () => {
+  $('pageMenu').hidden = true;
+  const pg = grid.pages[pageMenuAt];
+  if (!pg) return;
+  const name = prompt('Nom de la page', pg.name);
+  if (name && name.trim()) await gridPost('/api/grid/pages', { op: 'rename', page: pageMenuAt, name });
+});
+$('pageMenuDelete').addEventListener('click', async () => {
+  $('pageMenu').hidden = true;
+  const pg = grid.pages[pageMenuAt];
+  if (!pg || !confirm(`Supprimer la page « ${pg.name} » ?`)) return;
+  if (await gridPost('/api/grid/pages', { op: 'delete', page: pageMenuAt })) await loadPresets();
+});
+document.addEventListener('pointerdown', e => { if (!$('pageMenu').hidden && !$('pageMenu').contains(e.target)) $('pageMenu').hidden = true; });
+
 $('gridPageNew').addEventListener('click', async () => {
   if (await gridPost('/api/grid/page', { action: 'new', name: $('gridPageName').value })) $('gridPageName').value = '';
 });
@@ -4413,7 +4570,18 @@ function openCueMenu(p, x, y, at) {
   if (showMode) return notify(LOCKED_FR); // T-283: no cue editing
   menuCue = p.id; menuSlot = at;
   const pg = grid.pages[gridPage];
-  $('cueMenuRemove').hidden = !(pg && pg.editable && !pg.auto);
+  const own = !!(pg && pg.editable && !pg.auto);
+  // T-405: a user cue is renamed, recoloured or deleted; a built-in one is
+  // only taken off the page, or copied into an editable user cue.
+  $('cueMenuRemove').hidden = !own || !!p.user;
+  $('cueMenuDelete').hidden = !own || !p.user;
+  $('cueMenuCopy').hidden = !own;
+  $('cueMenuToUser').hidden = !!p.user;
+  $('cueMenuUser').hidden = !p.user;
+  if (p.user) {
+    $('cueMenuNameInput').value = p.name;
+    $('cueMenuColor').value = hex(p.color || [0, 255, 0]);
+  }
   const slot = slots[p.id] || {};
   $('cueMenuName').textContent = p.name;
   $('cueMenuMode').value = slot.mode || '';
@@ -4452,6 +4620,18 @@ $('cueMenuRemove').onclick = async () => {
   await gridPost('/api/grid/clear', { page: gridPage, slot: menuSlot });
 };
 document.addEventListener('pointerdown', e => { if (!$('cueMenu').hidden && !$('cueMenu').contains(e.target)) $('cueMenu').hidden = true; });
+// T-405: the cell's own cue, by its place on the page.
+const cellEdit = async body => { if (await gridPost('/api/grid/edit', { from: [gridPage, menuSlot], ...body })) await loadPresets(); };
+$('cueMenuNameInput').addEventListener('change', () => { const name = $('cueMenuNameInput').value.trim(); if (name) cellEdit({ op: 'rename', name }); });
+$('cueMenuNameInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('cueMenuNameInput').blur(); } });
+$('cueMenuColor').addEventListener('change', () => cellEdit({ op: 'color', color: rgb($('cueMenuColor').value) }));
+$('cueMenuCopy').onclick = () => { $('cueMenu').hidden = true; cellEdit({ op: 'copy', to: [gridPage, null] }); };
+$('cueMenuToUser').onclick = () => { $('cueMenu').hidden = true; cellEdit({ op: 'copy_to_user' }); };
+$('cueMenuDelete').onclick = () => {
+  const p = presetById.get(menuCue);
+  $('cueMenu').hidden = true;
+  if (confirm(`Supprimer le cue « ${p ? p.name : ''} » ?`)) cellEdit({ op: 'delete' });
+};
 
 // ---------- timeline (T-160) ----------
 // Load / play / pause / stop a saved show and follow its playhead. The

@@ -46,7 +46,8 @@ impl CueRef {
         }
     }
 
-    fn of(p: &Preset) -> Self {
+    /// How a cell refers to `p`: user (library) or built-in.
+    pub fn of(p: &Preset) -> Self {
         if is_library(p.category) {
             CueRef::User(p.id.clone())
         } else {
@@ -70,6 +71,10 @@ pub struct CuePage {
     /// in order, and `slots` is unused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// A page the operator made (« Nouvelle page », T-405), after the
+    /// built-in ones: where « Copier vers une page utilisateur » goes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub user: bool,
 }
 
 /// A page as shown: the cue id in each cell of the current grid.
@@ -86,6 +91,8 @@ pub struct PageView {
     /// False for the extra pages of a library longer than one page: they
     /// exist only on screen and can't be renamed or deleted.
     pub editable: bool,
+    /// A page the operator made (T-405).
+    pub user: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -225,7 +232,9 @@ impl CueGrid {
                     .map(|s| s.as_ref().filter(|r| known.contains_key(r.id())).map(|r| r.id().to_string()))
                     .collect();
                 let hidden = page.slots.iter().skip(cap).filter(|s| s.is_some()).count();
-                view.push(page_view(&page.name, &cells[..cells.len().min(cap)], cap, hidden, false, true));
+                let mut v = page_view(&page.name, &cells[..cells.len().min(cap)], cap, hidden, false, true);
+                v.user = page.user;
+                view.push(v);
             }
         }
         view.extend(extra);
@@ -234,7 +243,7 @@ impl CueGrid {
     }
 
     /// The default pages become the operator's own, before an edit.
-    fn materialize(&mut self, presets: &[Preset]) {
+    pub fn materialize(&mut self, presets: &[Preset]) {
         if self.pages.is_empty() {
             self.pages = default_pages(presets, self.capacity());
         }
@@ -259,8 +268,35 @@ impl CueGrid {
             bail!("{MAX_PAGES} pages au plus");
         }
         let name = clean_name(name).unwrap_or_else(|| format!("Page {}", self.pages.len() + 1));
-        self.pages.push(CuePage { name, ..CuePage::default() });
+        self.pages.push(CuePage { name, user: true, ..CuePage::default() });
         Ok(self.pages.len() - 1)
+    }
+
+    /// The first empty cell of one of the operator's pages, within the grid.
+    /// Call after `materialize`.
+    pub fn first_empty(&self, page: usize) -> Option<usize> {
+        let p = self.pages.get(page)?;
+        (0..self.capacity()).find(|&i| p.slots.get(i).is_none_or(|s| s.is_none()))
+    }
+
+    /// Puts `cue` in a cell of one of the operator's pages (T-405). Call
+    /// after `materialize`.
+    pub fn put(&mut self, page: usize, slot: usize, cue: Option<CueRef>) -> Result<()> {
+        let cap = self.capacity();
+        let p = self.pages.get_mut(page).ok_or_else(|| anyhow::anyhow!("page inconnue"))?;
+        if p.category.is_some() {
+            bail!("la page « {} » suit sa bibliothèque", p.name);
+        }
+        if slot >= cap {
+            bail!("case hors de la grille");
+        }
+        set_slot(p, slot, cue);
+        Ok(())
+    }
+
+    /// Whether a cell of the operator's pages holds `id` (hidden ones too).
+    pub fn references(&self, id: &str) -> bool {
+        self.pages.iter().flat_map(|p| &p.slots).flatten().any(|r| r.id() == id)
     }
 
     /// « Renommer la page ».
@@ -350,7 +386,7 @@ fn set_slot(page: &mut CuePage, slot: usize, cue: Option<CueRef>) {
 fn page_view(name: &str, cells: &[Option<String>], cap: usize, hidden: usize, auto: bool, editable: bool) -> PageView {
     let mut cells = cells.to_vec();
     cells.resize(cap, None);
-    PageView { name: name.to_string(), cells, hidden, auto, editable }
+    PageView { name: name.to_string(), cells, hidden, auto, editable, user: false }
 }
 
 fn clean_name(name: &str) -> Option<String> {
@@ -366,14 +402,14 @@ pub fn default_pages(presets: &[Preset], cap: usize) -> Vec<CuePage> {
     let mut extra = Vec::new();
     for &category in CATEGORIES {
         if is_library(category) {
-            pages.push(CuePage { name: category.to_string(), slots: Vec::new(), category: Some(category.to_string()) });
+            pages.push(CuePage { name: category.to_string(), slots: Vec::new(), category: Some(category.to_string()), user: false });
             continue;
         }
         let cues: Vec<Option<CueRef>> = presets.iter().filter(|p| p.category == category).map(|p| Some(CueRef::of(p))).collect();
         let mut chunks = cues.chunks(cap.max(1));
-        pages.push(CuePage { name: category.to_string(), slots: chunks.next().unwrap_or_default().to_vec(), category: None });
+        pages.push(CuePage { name: category.to_string(), slots: chunks.next().unwrap_or_default().to_vec(), category: None, user: false });
         for (n, chunk) in chunks.enumerate() {
-            extra.push(CuePage { name: format!("{category} {}", n + 2), slots: chunk.to_vec(), category: None });
+            extra.push(CuePage { name: format!("{category} {}", n + 2), slots: chunk.to_vec(), category: None, user: false });
         }
     }
     pages.extend(extra);
@@ -416,7 +452,7 @@ mod tests {
     #[test]
     fn round_trips_and_sanitizes() {
         let mut g = CueGrid { cols: 30, rows: 0, ..CueGrid::default() };
-        g.pages = vec![CuePage { name: "  ".into(), slots: vec![Some(CueRef::User("figure:Logo".into())), None, None], category: None }];
+        g.pages = vec![CuePage { name: "  ".into(), slots: vec![Some(CueRef::User("figure:Logo".into())), None, None], category: None, user: false }];
         g.sanitize();
         assert_eq!((g.cols, g.rows), (MAX_COLS, MIN_ROWS));
         assert_eq!(g.pages[0].name, "Page 1");

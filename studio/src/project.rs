@@ -1,7 +1,7 @@
 //! Project files (T-286): one `.lsproj` file holds a whole show - scenes
 //! and playlist, cue-grid properties, timelines, default tempo, master
-//! live modifiers, layers, LFOs, audio routes (T-153), user palettes, MIDI mappings and the
-//! figure library (T-296) - as
+//! live modifiers, layers, LFOs, audio routes (T-153), user palettes, MIDI mappings, the
+//! figure library (T-296) and the user cues (T-405) - as
 //! pretty-printed, versioned JSON in `<data-dir>/projects/`.
 //!
 //! The data directory's own files (`scenes.json`, `grid.json`, `shows/`…)
@@ -35,6 +35,7 @@ use crate::midi::profile::{valid_slug, Profile, ProfileStore};
 use crate::scenes::Scene;
 use crate::tempo::{MAX_BPM, MIN_BPM};
 use crate::timeline::{valid_show_name, Show};
+use crate::usercues::UserCue;
 use crate::Shared;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -108,6 +109,9 @@ pub struct Project {
     /// The figure library (`figures/`). Missing in projects saved before
     /// T-296: they open with no figures.
     pub figures: Vec<Figure>,
+    /// The operator's own cues (`user_cues.json`, T-405). Missing in
+    /// projects saved before T-405: they open with none.
+    pub user_cues: Vec<UserCue>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -132,6 +136,7 @@ impl Default for Project {
             palettes: Vec::new(),
             midi: MidiSection::default(),
             figures: Vec::new(),
+            user_cues: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -216,7 +221,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 10] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures"];
+const WORKING_FILES: [&str; 11] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -397,6 +402,7 @@ fn check(p: &mut Project) -> Result<()> {
         }
     }
     p.figures.sort_by(|a, b| a.name.cmp(&b.name));
+    crate::usercues::validate(&mut p.user_cues)?;
 
     let bpm = if p.tempo.bpm.is_finite() { p.tempo.bpm } else { 120.0 };
     p.tempo = TempoDefaults { bpm: bpm.clamp(MIN_BPM, MAX_BPM), beats_per_bar: p.tempo.beats_per_bar.clamp(1, 16) };
@@ -437,6 +443,7 @@ pub fn snapshot(s: &Shared) -> Project {
         palettes: s.palettes.list().to_vec(),
         midi: MidiSection { profiles: s.midi.store.user_profiles().clone() },
         figures: s.figures.list().to_vec(),
+        user_cues: s.user_cues.list().to_vec(),
         ..Project::default()
     }
 }
@@ -462,6 +469,8 @@ fn apply(s: &mut Shared, p: &Project) {
     s.palettes.replace_in_memory(p.palettes.clone());
     s.midi.store.replace_user_in_memory(p.midi.profiles.clone());
     s.figures.replace_in_memory(p.figures.clone());
+    s.user_cues.replace_in_memory(p.user_cues.clone());
+    crate::usercues::sync_presets(s);
     crate::figures::refresh(s);
     // Saved below, not by the engine thread.
     s.live_dirty = false;
@@ -480,6 +489,8 @@ struct WorkingPaths {
     palettes: PathBuf,
     midi: Option<PathBuf>,
     figures: Option<PathBuf>,
+    /// `user_cues.json` and its content (with the id counter) as opened.
+    user_cues: Option<(PathBuf, Vec<u8>)>,
     live: PathBuf,
     layers: PathBuf,
 }
@@ -495,6 +506,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         palettes: s.palettes.path().to_path_buf(),
         midi: s.midi.store.dir().map(|d| d.join("profiles")),
         figures: s.figures.dir().map(Path::to_path_buf),
+        user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.file_bytes().unwrap_or_default())),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
     }
@@ -516,6 +528,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(pages) = &w.pages {
         put(pages, serde_json::to_vec_pretty(&p.pages));
+    }
+    if let Some((path, bytes)) = &w.user_cues {
+        put(path, Ok(bytes.clone()));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -858,6 +873,7 @@ mod tests {
         s.palettes = crate::live::PaletteStore::load_or_create(dir.join("palettes.json"));
         s.midi.store = ProfileStore::load(dir.join("midi"));
         s.figures = crate::figures::FigureStore::load(dir.join("figures"));
+        s.user_cues = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));
         s.project = ProjectState::load(dir);
         startup(&mut s);
         Mutex::new(s)
@@ -966,6 +982,61 @@ mod tests {
         assert_eq!(shared.lock().unwrap().grid, crate::grid::CueGrid::default());
         assert_eq!(shared.lock().unwrap().grid.view()[0].cells.len(), 40);
         assert!(!modified(&shared));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-405: user cues and the cells holding them come back with the
+    /// project; a project from before them opens with none.
+    #[test]
+    fn user_cues_are_saved_in_the_project_and_old_projects_still_open() {
+        let dir = temp_dir("usercues");
+        let shared = studio(&dir);
+        let look = Settings { color: [255, 0, 255], scale: 0.4, ..Settings::default() };
+        let (page, id) = {
+            let mut s = shared.lock().unwrap();
+            let mut g = s.grid.clone();
+            let page = g.new_page("Mes looks", &s.presets).unwrap();
+            s.grid = g;
+            crate::usercues::refresh(&mut s);
+            s.settings = look.clone();
+            let id = crate::usercues::store(&mut s, page, 0, Some("Intro"), crate::usercues::StoreFilter::All, false).unwrap();
+            (page, id)
+        };
+        assert!(modified(&shared), "a stored cue is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Avec cues" })).unwrap();
+        // Through the file: parse → same cues.
+        let p = read(&dir.join("projects/Avec cues.lsproj")).unwrap();
+        assert_eq!(p.user_cues.len(), 1);
+        assert_eq!((p.user_cues[0].id.as_str(), &p.user_cues[0].settings), (id.as_str(), &look));
+        {
+            let mut s = shared.lock().unwrap();
+            crate::usercues::edit(&mut s, crate::usercues::GridEdit::Delete { from: (page, 0) }).unwrap();
+            assert!(s.user_cues.list().is_empty());
+        }
+        post(&shared, &dir, "open", json!({ "path": "Avec cues" })).unwrap();
+        {
+            let mut s = shared.lock().unwrap();
+            assert_eq!(s.user_cues.get(&id).unwrap().settings, look, "reopened identical");
+            assert_eq!(s.grid.slot(page, 0), Some(id.as_str()), "its cell plays it again");
+            assert!(crate::controls::press_cue(&mut s, &id, None, true));
+            // Ids are never given twice, even after the project brought u-1 back.
+            let next = s.user_cues.clone().create(None, None, Settings::default(), None).unwrap();
+            assert_ne!(next, id);
+        }
+        assert!(dir.join("user_cues.json").is_file(), "the working copy is the project's");
+        let back = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));
+        assert_eq!(back.list().len(), 1);
+        // A damaged section is refused, nothing changes.
+        std::fs::write(dir.join("projects/Mauvais.lsproj"), json!({ "format_version": 1, "user_cues": [{ "id": "tunnels-001" }] }).to_string()).unwrap();
+        assert_eq!(post(&shared, &dir, "open", json!({ "path": "Mauvais" })).unwrap_err().0, 400);
+        assert_eq!(shared.lock().unwrap().user_cues.list().len(), 1);
+        // A project from before T-405 opens with no user cues.
+        std::fs::write(dir.join("projects/ancien.lsproj"), json!({ "format_version": 1, "name": "ancien" }).to_string()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "ancien" })).unwrap();
+        let s = shared.lock().unwrap();
+        assert!(s.user_cues.list().is_empty());
+        assert!(!s.presets.iter().any(|p| p.category == crate::usercues::CATEGORY));
+        drop(s);
         let _ = std::fs::remove_dir_all(dir);
     }
 

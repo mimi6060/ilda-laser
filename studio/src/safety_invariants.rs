@@ -1417,3 +1417,43 @@ fn the_caps_check_catches_an_uncapped_frame() {
     assert!(check_points(&capped, &caps, &cfg, "capped").is_ok());
 }
 
+/// T-405: a user cue stored with master modifiers draws through them (its
+/// own copy, before the master stage), and the safety stage still applies
+/// after: its frame never gets past the horizon.
+#[test]
+fn a_user_cues_own_master_applies_before_the_safety_stage() {
+    let frame_of = |master: Option<live::LiveModifiers>, horizon: Option<f32>| -> Vec<Point> {
+        let mut s = test_support::shared();
+        let y = horizon.unwrap_or(-1.0);
+        s.safety.set(SafetySettings { horizon: Horizon { y, lines: true, ramp: 0.0, level: 0.0 }, ..Default::default() }, true).unwrap();
+        let mut g = s.grid.clone();
+        let page = g.new_page("Mes looks", &s.presets).unwrap();
+        s.grid = g;
+        crate::usercues::refresh(&mut s);
+        s.settings = Settings { content: crate::engine::Content::Shape { shape: "square".into() }, scale: 0.8, rotation_speed: 0.0, ..Settings::default() };
+        s.live = master.clone().unwrap_or_default();
+        let id = crate::usercues::store(&mut s, page, 0, None, crate::usercues::StoreFilter::All, master.is_some()).unwrap();
+        // Back to a neutral master: only the cue's own copy moves it.
+        s.live = live::LiveModifiers::default();
+        s.settings = Settings::default();
+        assert!(controls::press_cue(&mut s, &id, None, true));
+        let mut rig = Rig::new(s, "user-cue-master", 0);
+        for _ in 0..3 {
+            rig.tick();
+        }
+        assert!(!rig.s().gate.is_armed(), "never armed");
+        let frame = rig.s().frame.clone();
+        frame
+    };
+    let lit = |f: &[Point]| f.iter().filter(|p| p.r + p.g + p.b > 0.0).cloned().collect::<Vec<_>>();
+    let extent = |f: &[Point]| lit(f).iter().fold(0.0f32, |m, p| m.max(p.x.abs()));
+    let plain = frame_of(None, None);
+    let small = frame_of(Some(live::LiveModifiers { size: 0.5, ..Default::default() }), None);
+    assert!(extent(&plain) > 0.7, "{}", extent(&plain));
+    assert!((extent(&small) - extent(&plain) * 0.5).abs() < 0.05, "{} vs {}", extent(&small), extent(&plain));
+    // Moved down by its own master, it is cut by the horizon all the same.
+    let low = frame_of(Some(live::LiveModifiers { pos_y: -0.5, ..Default::default() }), Some(0.0));
+    assert!(!lit(&low).is_empty());
+    assert!(lit(&low).iter().all(|p| p.y >= -1e-3), "a lit point below the horizon");
+}
+
