@@ -22,6 +22,7 @@
 //! Flashes never wait. *Mode beat*: every N beats, each layer shows the
 //! next of its latched cues.
 
+use crate::controls::ControlSource;
 use crate::engine::Settings;
 use crate::layers::LAYER_COUNT;
 use crate::program::CueProgram;
@@ -108,6 +109,14 @@ pub struct CueSlot {
     /// The cue's own transition (T-158), instead of the grid's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
+    /// « Protégé de Tout arrêter » (T-423): `cue.stop_all`, « Arrêter les
+    /// cues » and « Tout arrêter » leave it playing. Its own « Arrêter »
+    /// stops it; the e-stop, blackout and disarm cut it like everything.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub protect_stop: bool,
+    /// « Protégé du solo »: stays shown while another cue is held in Solo.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub protect_solo: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,6 +141,8 @@ pub struct ActiveCue {
     pub settings: Settings,
     /// Fading (or morphing) in (*Démarrage*); `None` once playing.
     pub fade: Option<Fade>,
+    /// Who started it (« En cours »), set by `controls::press_cue_as`.
+    pub source: ControlSource,
 }
 
 impl ActiveCue {
@@ -164,6 +175,8 @@ pub struct PendingLaunch {
     pub at_beat: f64,
     /// The look it starts with, taken at the press.
     pub settings: Settings,
+    /// Who pressed it (« En cours »), handed to the cue when it starts.
+    pub source: ControlSource,
 }
 
 /// The playing cues plus the grid's trigger settings. Saved to
@@ -389,7 +402,7 @@ impl CueDeck {
     /// A latched start: now, or on the next quantised boundary.
     fn launch(&mut self, cue: &str, mode: ClickMode, at: At, settings: Settings) {
         match self.quantize.boundary(at.beat, at.beats_per_bar) {
-            Some(b) if b > at.beat => self.pending.push(PendingLaunch { cue: cue.to_string(), mode, at_beat: b, settings }),
+            Some(b) if b > at.beat => self.pending.push(PendingLaunch { cue: cue.to_string(), mode, at_beat: b, settings, source: ControlSource::Ui }),
             // On the boundary or just after it: at once, counting from it.
             Some(b) => self.begin(cue, mode, at.at_beat(b), settings),
             None => self.begin(cue, mode, at, settings),
@@ -419,7 +432,12 @@ impl CueDeck {
         let (due, wait): (Vec<PendingLaunch>, Vec<PendingLaunch>) = std::mem::take(&mut self.pending).into_iter().partition(|p| p.at_beat <= at.beat);
         self.pending = wait;
         for p in due {
+            let first = self.next_id;
             self.begin(&p.cue, p.mode, at.at_beat(p.at_beat), p.settings);
+            // Credited to whoever pressed it, not to the clock.
+            for a in self.active.iter_mut().filter(|a| a.id >= first) {
+                a.source = p.source;
+            }
         }
         true
     }
@@ -436,7 +454,7 @@ impl CueDeck {
         self.active.retain(|a| !a.held);
     }
 
-    /// Everything stops at once: no fade, nothing waiting.
+    /// Everything stops, protected cues included (a scene shown by hand).
     pub fn stop_all(&mut self) {
         self.active.clear();
         self.ending.clear();
@@ -458,6 +476,22 @@ impl CueDeck {
         for a in &mut self.active {
             a.fade = None;
         }
+    }
+
+    /// `cue.stop_all`, « Arrêter les cues », « Tout arrêter » (T-423): every
+    /// cue but those protected from « Tout arrêter » stops at once, with
+    /// its fade-out and its waiting launch. Protected cues keep all three.
+    pub fn stop_unprotected(&mut self) {
+        let slots = &self.slots;
+        let kept = |cue: &str| slots.get(cue).is_some_and(|s| s.protect_stop);
+        self.active.retain(|a| kept(&a.cue));
+        self.ending.retain(|e| kept(&e.cue.cue));
+        self.pending.retain(|p| kept(&p.cue));
+    }
+
+    /// Whether `cue` stays shown while another cue is held in Solo.
+    fn solo_proof(&self, cue: &str) -> bool {
+        self.slots.get(cue).is_some_and(|s| s.protect_solo)
     }
 
     /// « Vider » a layer: every cue on it stops at once, held ones included.
@@ -553,6 +587,7 @@ impl CueDeck {
             solo,
             settings,
             fade,
+            source: ControlSource::Ui,
         });
         self.enforce_limit(Some(at));
     }
@@ -570,11 +605,12 @@ impl CueDeck {
     }
 
     /// The cues that actually reach the output, oldest first: held solo
-    /// cues hide everything else; a held flash hides the latched cues of
-    /// its group; in beat mode, each layer shows one of its latched cues.
+    /// cues hide everything else but the cues protected from the solo; a
+    /// held flash hides the latched cues of its group; in beat mode, each
+    /// layer shows one of its latched cues.
     pub fn visible(&self) -> Vec<&ActiveCue> {
         if self.active.iter().any(|a| a.held && a.solo) {
-            return self.active.iter().filter(|a| a.held && a.solo).collect();
+            return self.active.iter().filter(|a| (a.held && a.solo) || self.solo_proof(&a.cue)).collect();
         }
         let flashed_groups: Vec<u8> = self.active.iter().filter(|a| a.held).filter_map(|a| a.group).collect();
         let shown: Vec<&ActiveCue> = self.active.iter().filter(|a| a.held || !a.group.is_some_and(|g| flashed_groups.contains(&g))).collect();
@@ -1314,5 +1350,83 @@ mod tests {
         deck.save();
         assert!(path.exists());
         crate::datafile::tests::check_kept(&dir, "grid.json", false);
+    }
+
+    /// T-423: « Tout arrêter » leaves protected cues; `stop_all` (a scene
+    /// shown by hand) stops everything.
+    #[test]
+    fn stop_unprotected_keeps_protected_cues() {
+        let mut d = deck(true);
+        d.set_slot("keep", CueSlot { protect_stop: true, ..Default::default() });
+        for cue in ["a", "keep", "b"] {
+            press(&mut d, cue);
+        }
+        d.stop_unprotected();
+        assert_eq!(playing(&d), ["keep"]);
+        d.stop_unprotected();
+        assert_eq!(playing(&d), ["keep"]);
+        d.stop_all();
+        assert!(playing(&d).is_empty());
+        // Without any protection, everything stops.
+        let mut d = deck(true);
+        press(&mut d, "a");
+        press(&mut d, "b");
+        d.stop_unprotected();
+        assert!(playing(&d).is_empty());
+    }
+
+    /// With transitions (T-158/T-159): unprotected cues lose their fade-out
+    /// and their waiting launch too; protected ones keep theirs. The e-stop
+    /// path (`cut_transitions`) still drops everything waiting or fading.
+    #[test]
+    fn stop_unprotected_drops_fades_and_waits_of_unprotected_cues_only() {
+        let mut d = CueDeck { quantize: Quantize::Beat, ..with(TransitionKind::Fade, 4.0) };
+        d.set_slot("p", CueSlot { protect_stop: true, ..Default::default() });
+        d.set_slot("q", CueSlot { protect_stop: true, layer: Some(2), ..Default::default() });
+        d.set_slot("w", CueSlot { layer: Some(2), ..Default::default() });
+        d.press("a", None, at(0.0, 0.0), Settings::default);
+        d.press("p", None, at(1.0, 2.0), Settings::default); // a fades out under p
+        d.press("x", None, at(1.2, 2.4), Settings::default); // waits for beat 3
+        d.press("q", None, at(1.2, 2.4), Settings::default);
+        d.press("w", None, at(1.3, 2.6), Settings::default);
+        assert_eq!(d.ending.iter().map(|e| e.cue.cue.as_str()).collect::<Vec<_>>(), ["a"]);
+        assert_eq!(d.pending.iter().map(|p| p.cue.as_str()).collect::<Vec<_>>(), ["x", "q", "w"]);
+        d.stop_unprotected();
+        assert_eq!(playing(&d), ["p"]);
+        assert!(d.ending.is_empty(), "a's fade-out goes with it");
+        assert_eq!(d.pending.iter().map(|p| p.cue.as_str()).collect::<Vec<_>>(), ["q"], "only the protected launch still waits");
+        // p fading out (replaced by another cue) keeps its fade-out.
+        d.press("p2", None, at(2.0, 4.0), Settings::default);
+        d.fire_due(at(2.0, 4.0));
+        assert!(d.ending.iter().any(|e| e.cue.cue == "p"));
+        d.stop_unprotected();
+        assert!(d.ending.iter().any(|e| e.cue.cue == "p"));
+        d.cut_transitions();
+        assert!(d.ending.is_empty() && d.pending.is_empty());
+    }
+
+    #[test]
+    fn a_solo_proof_cue_stays_shown_under_a_held_solo() {
+        let mut d = deck(true);
+        d.set_slot("bg", CueSlot { protect_solo: true, ..Default::default() });
+        press(&mut d, "a");
+        press(&mut d, "bg");
+        press_as(&mut d, "s", ClickMode::Solo);
+        assert_eq!(shown(&d), ["bg", "s"]);
+        d.release("s", At::default());
+        assert_eq!(shown(&d), ["a", "bg"]);
+    }
+
+    #[test]
+    fn a_grid_without_the_protection_flags_loads_with_both_off() {
+        let old: CueDeck = serde_json::from_str(r#"{"slots":{"a":{"layer":2}}}"#).unwrap();
+        let slot = old.slot("a");
+        assert!(!slot.protect_stop && !slot.protect_solo);
+        // Off flags aren't written; on ones come back.
+        assert!(!serde_json::to_string(&old).unwrap().contains("protect"));
+        let mut d = deck(false);
+        d.set_slot("a", CueSlot { protect_stop: true, protect_solo: true, ..Default::default() });
+        let back: CueDeck = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(back.slot("a").protect_stop && back.slot("a").protect_solo);
     }
 }

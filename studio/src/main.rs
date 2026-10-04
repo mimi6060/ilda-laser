@@ -51,6 +51,7 @@ mod ponk;
 mod power;
 mod presence;
 mod presets;
+mod running;
 mod program;
 mod project;
 mod projection;
@@ -350,6 +351,9 @@ pub struct Shared {
     /// A pending simulated stall (ms): the engine sleeps this long while
     /// holding the lock, the worst case for the watchdog.
     pub test_stall_ms: u64,
+    /// Who last changed each control, and when (T-423, « En cours »).
+    /// Memory only.
+    pub touches: std::collections::HashMap<String, controls::Touch>,
     /// The DACs the last scan found (devices.rs). The scan never opens one.
     pub devices: Arc<devices::DeviceList>,
     /// Choosing, connecting and reconnecting the output (T-401). Its own
@@ -1013,6 +1017,7 @@ fn startup_state(cli: &Cli) -> Shared {
         audience: Default::default(),
         test_hooks: cli.test_hooks,
         test_stall_ms: 0,
+        touches: Default::default(),
         devices: Arc::clone(output_mgr.devices()),
         output_mgr,
         // Simulated (no command run) whenever a test flag is given.

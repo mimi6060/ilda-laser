@@ -77,6 +77,8 @@ pub fn allowed(path: &str) -> bool {
         "/api/playlist/start",
         "/api/playlist/stop",
         "/api/presets/play",
+        // « En cours » (T-423): stop buttons, playback only.
+        "/api/running/stop",
         "/api/audio",
         "/api/audio/tempo/new_track",
         "/api/timeline/load",
