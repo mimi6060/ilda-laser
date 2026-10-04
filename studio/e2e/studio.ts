@@ -220,6 +220,17 @@ export class Studio {
     }
     if (await this.post('/api/checklist/complete') !== 200) throw new Error('checklist not completed');
   }
+  /**
+   * T-255: with a real output, arming also waits until the operator said
+   * where the audience is. Adds a « Public » zone along the bottom edge
+   * (blanked outside audience scanning), as the Sécurité panel would.
+   */
+  async declareAudience() {
+    const { settings } = await this.get('/api/safety');
+    if (settings.zones.some((z: { audience: boolean }) => z.audience)) return;
+    settings.zones.push({ id: 0, name: 'Public', kind: 'blank', level: 0, points: [[-1, -1], [1, -1], [1, -0.95], [-1, -0.95]], audience: true });
+    if (await this.post('/api/safety', settings) !== 200) throw new Error('Public zone refused');
+  }
   state() { return this.get('/api/state'); }
   frame() { return this.get<Frame>('/api/frame'); }
   live() { return this.get<Live>('/api/live'); }

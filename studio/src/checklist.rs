@@ -2,6 +2,11 @@
 //! show on a real laser (key switch and hardware e-stop, zones, power caps,
 //! permits...), never a statement of legal compliance.
 //!
+//! Audience scanning (T-255): « Balayage public » unlocks only with the
+//! « Balayage du public » flag on and its items ticked in a completed run
+//! (`AUDIENCE_ITEMS`: irradiance measured, hardware attenuation); a
+//! restarted or edited list ends that mode (`audience.rs`).
+//!
 //! The list itself (items, outdoor / audience-scanning flags) is kept in
 //! `<data-dir>/checklist.json` and survives restarts. What was ticked is
 //! the *run*: in memory only, so every start of the studio begins with an
@@ -147,13 +152,32 @@ pub fn default_items() -> Vec<ChecklistItem> {
         permit,
         ChecklistItem::new(
             "audience_scan",
-            "Irradiance mesurée au point le plus proche du public ; lentille de divergence ou atténuation matérielle ; protection matérielle contre l'arrêt du balayage.",
+            "Protection matérielle contre l'arrêt du balayage (scan-fail) testée ; évaluation des risques faite par une personne qualifiée.",
             AudienceScan,
         ),
         ChecklistItem::new("signage", "Signalisation ou annonce au public, si le lieu l'exige.", Always),
     ];
+    items.extend(audience_items());
     items.extend(shownet_items());
     items
+}
+
+/// Ids of the audience scanning items the unlock of « Balayage public »
+/// needs ticked (T-255, `audience.rs`).
+pub const AUDIENCE_ITEMS: [&str; 2] = ["audience_irradiance", "audience_attenuation"];
+
+/// The audience scanning items (T-255). Always in the list: put back if
+/// deleted, shown when the show scans the audience.
+pub fn audience_items() -> Vec<ChecklistItem> {
+    let mut irradiance = ChecklistItem::new(
+        AUDIENCE_ITEMS[0],
+        "Mesure d'irradiance faite au point le plus proche du public, toutes couleurs à pleine puissance de show, sous l'exposition maximale permise.",
+        ItemWhen::AudienceScan,
+    );
+    irradiance.needs_value = true;
+    irradiance.value_label_fr = "Valeur mesurée (mW/cm²)".into();
+    let attenuation = ChecklistItem::new(AUDIENCE_ITEMS[1], "Lentille de divergence ou atténuation matérielle en place sur le projecteur.", ItemWhen::AudienceScan);
+    vec![irradiance, attenuation]
 }
 
 /// What was ticked this session. Never saved.
@@ -265,6 +289,11 @@ impl Checklist {
 
     fn done(&self, id: &str) -> Option<&(String, SystemTime, Option<String>)> {
         self.run.done.iter().find(|(d, _, _)| d == id)
+    }
+
+    /// The item `id` is ticked in this run.
+    pub fn is_done(&self, id: &str) -> bool {
+        self.done(id).is_some()
     }
 
     fn not_completed(&self) -> Result<()> {
@@ -400,14 +429,16 @@ impl Checklist {
 }
 
 /// Checks a list, gives an id to the items without one and puts back the
-/// ShowNET items (T-472) if they are missing (a list saved before them, or
-/// edited): they stay for ShowNET outputs only, always shown there.
+/// ShowNET items (T-472) and the audience items (T-255) if they are
+/// missing (a list saved before them, or edited): the ShowNET ones stay for
+/// ShowNET outputs only, always shown there; the audience ones show when
+/// the show scans the audience.
 fn normalise(mut config: ChecklistConfig) -> Result<ChecklistConfig> {
     if config.items.is_empty() {
         bail!("La liste de contrôle doit avoir au moins un élément");
     }
-    // The ShowNET items do not count: they are put back below.
-    let required = shownet_items();
+    // The ShowNET and audience items do not count: they are put back below.
+    let required: Vec<ChecklistItem> = audience_items().into_iter().chain(shownet_items()).collect();
     if config.items.iter().filter(|i| !required.iter().any(|r| r.id == i.id.trim())).count() > MAX_ITEMS {
         bail!("Liste de contrôle trop longue ({MAX_ITEMS} éléments au plus)");
     }
@@ -447,7 +478,13 @@ fn normalise(mut config: ChecklistConfig) -> Result<ChecklistConfig> {
         match config.items.iter_mut().find(|i| i.id == required.id) {
             Some(item) => {
                 item.only_for = required.only_for;
-                item.when = ItemWhen::Always;
+                item.when = required.when;
+                if required.needs_value {
+                    item.needs_value = true;
+                    if item.value_label_fr.is_empty() {
+                        item.value_label_fr = required.value_label_fr;
+                    }
+                }
             }
             None => config.items.push(required),
         }
@@ -647,13 +684,32 @@ mod tests {
         assert_eq!((hw.when, hw.only_for), (ItemWhen::Always, Some(OutputKind::ShowNet)));
         // A list saved before T-472 (no ShowNET items, no `only_for`) loads with them.
         let old: ChecklistConfig = serde_json::from_str(r#"{"items":[{"id":"a","text_fr":"x"}]}"#).unwrap();
+        // And with the two audience scanning items (T-255).
         let fixed = normalise(old).unwrap();
-        assert_eq!(fixed.items.len(), 4);
+        assert_eq!(fixed.items.len(), 6);
+        assert!(AUDIENCE_ITEMS.iter().all(|id| fixed.items.iter().any(|i| i.id == *id && i.when == ItemWhen::AudienceScan)));
         // They don't count towards the list's size limit.
         let full = ChecklistConfig { items: (0..MAX_ITEMS).map(|n| ChecklistItem::new(&format!("i{n}"), "x", ItemWhen::Always)).collect(), ..Default::default() };
         let full = normalise(full).unwrap();
-        assert_eq!(full.items.len(), MAX_ITEMS + 3);
+        assert_eq!(full.items.len(), MAX_ITEMS + 5);
         assert!(normalise(full).is_ok(), "loads again");
+    }
+
+    /// T-255: the audience items stay, keep their kind and their measured
+    /// value, and only show when the show scans the audience.
+    #[test]
+    fn the_audience_items_stay_and_need_the_measure() {
+        let mut c = Checklist::in_memory(false);
+        assert!(!c.visible_items().any(|i| AUDIENCE_ITEMS.contains(&i.id.as_str())), "hidden by default");
+        let mut cfg = c.config().clone();
+        cfg.items.retain(|i| !AUDIENCE_ITEMS.contains(&i.id.as_str()));
+        cfg.audience_scan = true;
+        c.set_config(cfg, false).unwrap();
+        let irradiance = c.config().items.iter().find(|i| i.id == AUDIENCE_ITEMS[0]).unwrap().clone();
+        assert!(irradiance.needs_value && irradiance.when == ItemWhen::AudienceScan);
+        assert!(c.check(AUDIENCE_ITEMS[0], true, None).is_err(), "the measured value is needed");
+        c.check(AUDIENCE_ITEMS[0], true, Some("2.1")).unwrap();
+        assert!(c.is_done(AUDIENCE_ITEMS[0]) && !c.is_done(AUDIENCE_ITEMS[1]));
     }
 
     #[test]

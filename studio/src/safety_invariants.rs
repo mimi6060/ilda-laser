@@ -25,7 +25,14 @@
 //! 7. the output's colour rendering (T-414: white balance, curves, colour
 //!    delay) never lights a point that was dark, never moves or adds
 //!    points, keeps every channel within 0..1, and runs before the whole
-//!    safety stage: the caps (2) and zones (3) hold with it on.
+//!    safety stage: the caps (2) and zones (3) hold with it on;
+//! 8. audience scanning off (the default, T-255): nothing lit in a
+//!    « Public » zone nor on a segment crossing one, whatever its kind;
+//! 9. audience scanning on: no lit sample in a Public zone brighter than
+//!    the zone's level allows (through the minimum diode level and caps);
+//! 10. audience scanning starts only from the explicit unlock (never from
+//!     an action, a frame or a refused unlock), an unlock never arms, and
+//!     no frame runs it with the e-stop latched.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst.
@@ -53,7 +60,7 @@ use crate::presence::{Presence, PresenceSettings};
 use crate::projection::{Geometry, ProjectionConfig, ProjectionZone, Warp, MAX_ZONES, SQUARE};
 use crate::safety::{self, SafetySettings};
 use crate::zones::{self, Horizon, Zone, ZoneKind};
-use crate::{dwell, interlock, lfo, live, program, test_support, testpattern, timeline, Engine, Shared, FRAME_INTERVAL};
+use crate::{audience, dwell, interlock, lfo, live, program, test_support, testpattern, timeline, Engine, Shared, FRAME_INTERVAL};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -258,6 +265,7 @@ fn random_safety(rng: &mut Rng) -> SafetySettings {
             kind: if rng.chance(0.6) { ZoneKind::Blank } else { ZoneKind::Dim },
             level: rng.f(),
             points: random_polygon(rng),
+            audience: false,
         })
         .collect();
     let horizon = Horizon {
@@ -652,6 +660,85 @@ fn check_points(frame: &[Point], caps: &OutputLimits, cfg: &SafetySettings, what
     Ok(())
 }
 
+/// Invariants 8 and 9 on a frame. Audience scanning off: nothing lit in a
+/// Public zone nor through one, whatever its kind. On: a lit sample in a
+/// Public zone is at most the zone's level, raised by the minimum diode
+/// level, under the caps' global power.
+fn check_public(frame: &[Point], caps: &OutputLimits, cfg: &SafetySettings, scanning: bool, what: &str) -> Result<(), String> {
+    if !scanning {
+        let public: Vec<Zone> = cfg.zones.iter().filter(|z| z.audience).map(|z| Zone { kind: ZoneKind::Blank, ..z.clone() }).collect();
+        let v = zones::blank_violations(frame, &public);
+        if v > 0 {
+            return Err(format!("{what}: {v} lit samples/segments in a Public zone, audience scanning off"));
+        }
+        return Ok(());
+    }
+    let caps = caps.sanitized();
+    let min = cfg.min_diode_level.clamp(0.0, 0.5);
+    for z in cfg.zones.iter().filter(|z| z.audience) {
+        let area = zones::AudienceArea::new(std::slice::from_ref(z));
+        let bound = (min + z.factor() * (1.0 - min)) * caps.max_power + 1e-4;
+        for (i, p) in frame.iter().enumerate().filter(|(_, p)| p.is_lit() && area.covers(p.x, p.y)) {
+            let peak = p.r.max(p.g).max(p.b);
+            if peak > bound {
+                return Err(format!("{what}: point {i} at ({}, {}) = {peak} in Public zone « {} » (level {}, bound {bound})", p.x, p.y, z.name, z.level));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Marks some of the current zones « Public » (T-255), sometimes adds a
+/// Dim Public zone, as `POST /api/safety` could (Dim levels within the cap).
+fn mark_public(s: &mut Shared, rng: &mut Rng) {
+    let mut cfg = s.safety.get();
+    if cfg.zones.len() < zones::MAX_ZONES && (cfg.zones.is_empty() || rng.chance(0.4)) {
+        let id = cfg.zones.iter().map(|z| z.id).max().unwrap_or(0) + 1;
+        cfg.zones.push(Zone { id, name: format!("Public {id}"), kind: ZoneKind::Dim, level: rng.range(0.0, audience::MAX_AUDIENCE_LEVEL), points: random_polygon(rng), audience: true });
+    }
+    for z in &mut cfg.zones {
+        if rng.chance(0.5) {
+            z.audience = true;
+        }
+        if z.audience {
+            z.level = z.level.min(audience::MAX_AUDIENCE_LEVEL);
+        }
+    }
+    s.safety.set(cfg, true).expect("valid Public zones");
+}
+
+/// Every condition of the audience scanning unlock met (T-255): a Dim
+/// Public zone, the strict guard, a complete sheet with a hardware
+/// scan-fail, the checklist with its audience items, hold-to-run.
+fn prepare_scanning(s: &mut Shared, rng: &mut Rng) {
+    mark_public(s, rng);
+    let mut cfg = s.safety.get();
+    if !cfg.zones.iter().any(|z| z.audience && z.kind == ZoneKind::Dim) {
+        // mark_public leaves at least one zone: make one a Dim Public zone.
+        let i = cfg.zones.iter().position(|z| z.audience).unwrap_or(0);
+        let z = &mut cfg.zones[i];
+        z.audience = true;
+        z.kind = ZoneKind::Dim;
+        z.level = z.level.min(audience::MAX_AUDIENCE_LEVEL);
+    }
+    cfg.dwell.profile = dwell::DwellProfile::Strict;
+    s.safety.set(cfg, true).expect("valid settings");
+    let sheet = crate::power::ProjectorInfo { name: "P".into(), power_mw: [100.0; 3], divergence_mrad: 2.0, hw_scan_fail: Some(true), ..Default::default() };
+    s.outputs.set(MAIN_OUTPUT, None, Some(sheet), false, true).expect("valid sheet");
+    let mut list = s.checklist.config().clone();
+    list.audience_scan = true;
+    let armed = s.gate.is_armed();
+    if s.checklist.set_config(list, armed).is_ok() {
+        let _ = s.checklist.set_operator("fuzz");
+        let ids: Vec<String> = s.checklist.visible_items().map(|i| i.id.clone()).collect();
+        for id in ids {
+            let _ = s.checklist.check(&id, true, Some("1"));
+        }
+        let _ = s.checklist.complete();
+    }
+    s.presence.settings.hold_to_run = true;
+}
+
 /// How much light the fuzz really exercised, so a generator that stops
 /// lighting anything can't make the checks pass vacuously.
 #[derive(Default)]
@@ -665,6 +752,9 @@ struct Coverage {
     lit_with_horizon: usize,
     /// Frames with a lit preview through a non-neutral projection zone.
     lit_with_projection: usize,
+    /// Frames with a lit preview and a Public zone, scanning off / on.
+    lit_with_public_above: usize,
+    lit_with_public_scanning: usize,
 }
 
 /// Runs one fuzz case; `Err` describes the first broken invariant.
@@ -688,6 +778,16 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if crng.chance(0.6) {
         let _ = rig.s().outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), false, true);
     }
+    // Public zones and audience scanning (T-255), also from their own stream.
+    let mut arng = Rng::new(seed ^ 0x0255_0255);
+    if arng.chance(0.6) {
+        mark_public(&mut rig.s(), &mut arng);
+    }
+    if arng.chance(0.4) {
+        let mut s = rig.s();
+        prepare_scanning(&mut s, &mut arng);
+        s.unlock_audience_scanning(audience::PHRASE, ArmSource::Ui).map_err(|e| format!("setup: unlock refused: {e:?}"))?;
+    }
     let mut beats = 0;
     for frame in 0..frames {
         if zrng.chance(0.15) {
@@ -698,25 +798,68 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             let armed = s.gate.is_armed();
             let _ = s.outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), armed, true);
         }
+        if arng.chance(0.08) {
+            let mut s = rig.s();
+            match arng.below(4) {
+                0 => mark_public(&mut s, &mut arng),
+                1 => prepare_scanning(&mut s, &mut arng),
+                2 => s.end_audience_scanning("user", ArmSource::Ui, &[]),
+                _ => {
+                    // The unlock, with the right phrase or not: refused while
+                    // armed or with a condition missing, and it never arms.
+                    let (was_armed, was_scanning) = (s.gate.is_armed(), s.audience.is_scanning());
+                    let phrase = if arng.chance(0.7) { audience::PHRASE } else { "je prends" };
+                    let r = s.unlock_audience_scanning(phrase, ArmSource::Ui);
+                    if s.gate.is_armed() != was_armed {
+                        return Err(format!("frame {frame}: the audience unlock changed the arming"));
+                    }
+                    if r.is_err() && s.audience.is_scanning() != was_scanning {
+                        return Err(format!("frame {frame}: a refused unlock changed the audience mode"));
+                    }
+                    if r.is_ok() && was_armed {
+                        return Err(format!("frame {frame}: audience scanning unlocked while armed"));
+                    }
+                }
+            }
+        }
         for _ in 0..rng.below(3) {
-            let was = rig.s().gate.is_armed();
+            let (was, was_scanning) = {
+                let s = rig.s();
+                (s.gate.is_armed(), s.audience.is_scanning())
+            };
             let explicit = random_action(&mut rig, &mut rng, &mut beats);
             let is = rig.s().gate.is_armed();
             if is && !was && !explicit {
                 return Err(format!("frame {frame}: armed by a non-arming action"));
             }
+            if rig.s().audience.is_scanning() && !was_scanning {
+                return Err(format!("frame {frame}: audience scanning started by an action"));
+            }
         }
         // The fuzz's pages never hold the hold-to-run key; the controller
         // pad (`safety.hold`) may be pressed by a random control.
-        let (may_emit, caps, cfg, held) = {
+        let (may_emit, caps, held, scanning_before) = {
             let s = rig.s();
-            (s.gate.is_armed() && !s.estop.is_latched(), s.outputs.active_limits(), s.safety.get(), s.presence.status().midi_hold)
+            (s.gate.is_armed() && !s.estop.is_latched(), s.outputs.active_limits(), s.presence.status().midi_hold, s.audience.is_scanning())
         };
         let armed_before = rig.s().gate.is_armed();
         rig.tick();
         if rig.s().gate.is_armed() && !armed_before {
             return Err(format!("frame {frame}: the engine frame armed the laser"));
         }
+        // The frame ran in the mode it ends in: the engine only ever ends
+        // audience scanning, at its top (invariants 8 to 10).
+        let (scanning, cfg) = {
+            let s = rig.s();
+            if s.audience.is_scanning() && !scanning_before {
+                return Err(format!("frame {frame}: the engine frame started audience scanning"));
+            }
+            if s.audience.is_scanning() && s.estop.is_latched() {
+                return Err(format!("frame {frame}: audience scanning with the e-stop latched"));
+            }
+            // The saved settings: the checks don't trust `audience::effective`.
+            (s.audience.is_scanning(), s.safety.get())
+        };
         let w = rig.wire.lock().unwrap();
         let lit = w.last.iter().filter(|p| p.is_lit()).count();
         if lit > 0 && !may_emit {
@@ -729,13 +872,18 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             return Err(format!("frame {frame}: {lit} lit points with hold-to-run not held"));
         }
         check_points(&w.last, &caps, &cfg, &format!("frame {frame}, sent"))?;
+        check_public(&w.last, &caps, &cfg, scanning, &format!("frame {frame}, sent"))?;
         if let Some(max) = max_points.filter(|&m| w.last.len() > m) {
             return Err(format!("frame {frame}: {} points sent to an output that takes {max}", w.last.len()));
         }
         drop(w);
         let s = rig.s();
         check_points(&s.frame, &caps, &cfg, &format!("frame {frame}, preview"))?;
+        check_public(&s.frame, &caps, &cfg, scanning, &format!("frame {frame}, preview"))?;
         let preview_lit = s.frame.iter().any(|p| p.is_lit());
+        let public = cfg.zones.iter().any(|z| z.audience);
+        cov.lit_with_public_above += (preview_lit && public && !scanning) as usize;
+        cov.lit_with_public_scanning += (preview_lit && public && scanning) as usize;
         cov.frames += 1;
         cov.sent_lit += (lit > 0) as usize;
         cov.lit_with_zones += (preview_lit && cfg.zones.iter().any(|z| z.kind == ZoneKind::Blank)) as usize;
@@ -753,7 +901,7 @@ fn run_property(name: &str, property: u64, cases: usize, case: impl Fn(u64) -> R
     }
 }
 
-/// Invariants 1, 2, 3, 5 and 6 over random sessions.
+/// Invariants 1, 2, 3, 5, 6 and 8 to 10 over random sessions.
 #[test]
 fn random_sessions_keep_every_output_invariant() {
     let name = "random_sessions_keep_every_output_invariant";
@@ -766,10 +914,13 @@ fn random_sessions_keep_every_output_invariant() {
     }
     if seeds.len() > 100 {
         let share = |n: usize| n as f64 / cov.frames as f64;
+        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning));
         assert!(share(cov.sent_lit) > 0.1, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
         assert!(share(cov.lit_with_projection) > 0.2, "only {} of {} lit frames went through a projection zone", cov.lit_with_projection, cov.frames);
+        assert!(share(cov.lit_with_public_above) > 0.1, "only {} of {} lit frames had a Public zone, scanning off", cov.lit_with_public_above, cov.frames);
+        assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
     }
 }
 

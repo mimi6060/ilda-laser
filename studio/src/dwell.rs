@@ -25,10 +25,12 @@
 //!   `cap × window` concentrates more than the cap in a cell.
 //! - **Profiles.** `Strict`: size check and `max_cell_dose` (0.25)
 //!   everywhere. `Beams` (default): static beams above the horizon are
-//!   allowed but capped at `max_cell_dose_beams` (0.6); below the horizon,
-//!   where the audience is, the strict rules apply (T-255 will add real
-//!   audience zones). `Off`: no effect, **only while the output is
-//!   disarmed** (preview); armed, it acts as `Beams`.
+//!   allowed but capped at `max_cell_dose_beams` (0.6); where the audience
+//!   is - below the horizon and in the « Public » zones (T-255,
+//!   `StrictArea`) - the strict rules apply. `Off`: no effect, **only
+//!   while the output is disarmed** (preview); armed, it acts as `Beams`.
+//!   Audience scanning mode always runs the guard as `Strict`
+//!   (`audience::effective`).
 //!
 //! The dose is measured on the guard's input, so the attenuation does not
 //! feed back into the measurement (no oscillation), and an attenuation can
@@ -42,6 +44,7 @@
 //! circuit in the projector can catch that.
 
 use crate::patterns::Point;
+use crate::zones::{AudienceArea, Zone};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -206,6 +209,37 @@ pub struct DwellStatus {
     pub points_dimmed: usize,
 }
 
+/// Where the `Beams` profile applies the strict rules: below the horizon
+/// and inside the « Public » zones (T-255).
+pub struct StrictArea {
+    horizon_y: f32,
+    audience: AudienceArea,
+    /// The horizon and the Public zones' vertices, to know when the cells
+    /// must be worked out again.
+    key: Vec<f32>,
+}
+
+impl StrictArea {
+    pub fn new(horizon_y: f32, zones: &[Zone]) -> Self {
+        let mut key = vec![horizon_y];
+        for z in zones.iter().filter(|z| z.audience) {
+            key.push(f32::MAX);
+            key.extend(z.points.iter().flatten());
+        }
+        Self { horizon_y, audience: AudienceArea::new(zones), key }
+    }
+
+    /// Only the horizon.
+    #[cfg(test)]
+    pub fn below(horizon_y: f32) -> Self {
+        Self::new(horizon_y, &[])
+    }
+
+    fn covers(&self, x: f32, y: f32) -> bool {
+        y < self.horizon_y || (!self.audience.is_empty() && self.audience.covers(x, y))
+    }
+}
+
 /// The guard's state: the sliding window of per-cell doses and the
 /// attenuations, which rise back slowly.
 #[derive(Default)]
@@ -220,6 +254,10 @@ pub struct DwellState {
     extent_factor: f32,
     last_t: Option<f64>,
     scratch: Vec<f32>,
+    /// Per cell: under the strict rules in the `Beams` profile, for the
+    /// area `strict_key` describes.
+    strict: Vec<bool>,
+    strict_key: Vec<f32>,
     status: DwellStatus,
 }
 
@@ -260,14 +298,32 @@ impl DwellState {
         self.extent_factor = 1.0;
     }
 
+    /// Works out which cells touch the strict area (cached until the area
+    /// or the grid changes). A cell partly in a Public zone is strict.
+    fn strict_cells(&mut self, area: &StrictArea) {
+        let g = self.grid;
+        if self.strict.len() == g * g && self.strict_key == area.key {
+            return;
+        }
+        let h = 2.0 / g as f32;
+        self.strict = (0..g * g)
+            .map(|c| {
+                let (x0, y0) = (-1.0 + (c % g) as f32 * h, -1.0 + (c / g) as f32 * h);
+                y0 < area.horizon_y || (!area.audience.is_empty() && area.audience.overlaps_rect(x0, y0, x0 + h, y0 + h))
+            })
+            .collect();
+        self.strict_key = area.key.clone();
+    }
+
     /// Takes the frame about to go out at time `t` (seconds, monotonic)
     /// and returns it dimmed where it concentrates too much light.
-    /// `horizon_y`: below it the strict rules apply in the `Beams` profile.
-    pub fn apply(&mut self, mut frame: Vec<Point>, t: f64, cfg: &DwellGuard, horizon_y: f32, armed: bool) -> Vec<Point> {
+    /// `area`: where the strict rules apply in the `Beams` profile.
+    pub fn apply(&mut self, mut frame: Vec<Point>, t: f64, cfg: &DwellGuard, area: &StrictArea, armed: bool) -> Vec<Point> {
         let cfg = cfg.sanitized();
         if self.grid != cfg.grid as usize || self.sum.is_empty() {
             self.reset(cfg.grid as usize);
         }
+        self.strict_cells(area);
         let g = self.grid;
         let dt = self.last_t.map_or(1.0 / 60.0, |last| (t - last).clamp(0.0, 0.1)) as f32;
         self.last_t = Some(t);
@@ -285,7 +341,7 @@ impl DwellState {
                 continue;
             }
             any_lit = true;
-            lit_below |= p.y < horizon_y;
+            lit_below = lit_below || area.covers(p.x, p.y);
             lo = [lo[0].min(p.x), lo[1].min(p.y)];
             hi = [hi[0].max(p.x), hi[1].max(p.y)];
             let c = self.cell_of(p);
@@ -318,7 +374,6 @@ impl DwellState {
 
         let profile = if cfg.profile == DwellProfile::Off && armed { DwellProfile::Beams } else { cfg.profile };
         let rise = dt * RISE_PER_S;
-        let cell_h = 2.0 / g as f32;
         let mut max_dose = 0.0f32;
         let mut cells = Vec::new();
         for (c, (&s, f)) in self.sum.iter().zip(self.factor.iter_mut()).enumerate() {
@@ -327,8 +382,7 @@ impl DwellState {
             let target = if profile == DwellProfile::Off || d <= 0.0 {
                 1.0
             } else {
-                let bottom = -1.0 + (c / g) as f32 * cell_h;
-                let strict = profile == DwellProfile::Strict || bottom < horizon_y;
+                let strict = profile == DwellProfile::Strict || self.strict[c];
                 let cap = if strict { cfg.max_cell_dose } else { cfg.max_cell_dose_beams };
                 (capped_dose(d, cap) / d).min(1.0)
             };
@@ -339,7 +393,8 @@ impl DwellState {
         }
 
         // Minimum size: strict everywhere, or wherever something is lit
-        // below the horizon; the whole frame fades between min and min/2.
+        // below the horizon or in a Public zone; the whole frame fades
+        // between min and min/2.
         let size_applies = any_lit && (profile == DwellProfile::Strict || (profile == DwellProfile::Beams && lit_below));
         let half = cfg.min_extent * 0.5;
         let extent_target = if size_applies { ((extent - half) / half).clamp(0.0, 1.0) } else { 1.0 };
@@ -397,7 +452,7 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..(secs * FPS) as usize {
             let t = i as f64 / FPS;
-            out.push((t, st.apply(frame(t), t, cfg, 0.0, armed)));
+            out.push((t, st.apply(frame(t), t, cfg, &StrictArea::below(0.0), armed)));
         }
         (out, st)
     }
@@ -442,6 +497,40 @@ mod tests {
         // Below the horizon it is the audience's side: strict.
         let (out, _) = run(|_| spot(0.0, -0.5, 500), 1.0, &cfg(DwellProfile::Beams), true);
         assert!(out.iter().all(|(_, f)| max_level(f) == 0.0));
+    }
+
+    /// T-255: a Public zone above the horizon is the audience's side too.
+    #[test]
+    fn a_beam_in_a_public_zone_gets_the_strict_rules_in_beams() {
+        let public = Zone { kind: crate::zones::ZoneKind::Dim, level: 0.3, points: vec![[-0.2, 0.4], [0.2, 0.4], [0.2, 0.6], [-0.2, 0.6]], audience: true, ..Default::default() };
+        let area = StrictArea::new(0.0, std::slice::from_ref(&public));
+        let run_in = |x: f32, y: f32| {
+            let mut st = DwellState::default();
+            let mut last = Vec::new();
+            for i in 0..60 {
+                let t = i as f64 / FPS;
+                last = st.apply(spot(x, y, 500), t, &cfg(DwellProfile::Beams), &area, true);
+            }
+            max_level(&last)
+        };
+        assert_eq!(run_in(0.0, 0.5), 0.0, "a static beam in the Public zone goes dark");
+        assert!(run_in(0.6, 0.5) > 0.2, "beside it, the beams cap only");
+        // Not Public: the same zone changes nothing for the guard.
+        let other = StrictArea::new(0.0, &[Zone { audience: false, ..public.clone() }]);
+        let mut st = DwellState::default();
+        let mut last = Vec::new();
+        for i in 0..60 {
+            last = st.apply(spot(0.0, 0.5, 500), i as f64 / FPS, &cfg(DwellProfile::Beams), &other, true);
+        }
+        assert!(max_level(&last) > 0.2);
+        // A cell partly in the zone is strict (the zone's edge cuts it).
+        let mut st = DwellState::default();
+        st.apply(spot(0.0, 0.5, 10), 0.0, &cfg(DwellProfile::Beams), &area, true);
+        let g = st.grid;
+        let cell = |x: f32, y: f32| ((((y + 1.0) * 0.5 * g as f32) as usize).min(g - 1)) * g + (((x + 1.0) * 0.5 * g as f32) as usize).min(g - 1);
+        assert!(st.strict[cell(0.21, 0.5)], "the cell holding the edge x = 0.2");
+        assert!(!st.strict[cell(0.5, 0.5)]);
+        assert!(st.strict[cell(0.5, -0.5)], "below the horizon");
     }
 
     #[test]
@@ -659,12 +748,12 @@ mod tests {
         let mut st = DwellState::default();
         let c = cfg(DwellProfile::Strict);
         for i in 0..30 {
-            st.apply(frame.clone(), i as f64 / FPS, &c, 0.0, true);
+            st.apply(frame.clone(), i as f64 / FPS, &c, &StrictArea::below(0.0), true);
         }
         let n = 200;
         let start = std::time::Instant::now();
         for i in 0..n {
-            std::hint::black_box(st.apply(frame.clone(), (30 + i) as f64 / FPS, &c, 0.0, true));
+            std::hint::black_box(st.apply(frame.clone(), (30 + i) as f64 / FPS, &c, &StrictArea::below(0.0), true));
         }
         let per = start.elapsed().as_secs_f64() * 1000.0 / n as f64;
         eprintln!("dwell guard: {per:.4} ms per 2000-point frame");

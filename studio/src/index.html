@@ -454,6 +454,20 @@
   #wifiPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .06em; color: var(--warn); border: 1px solid var(--warn); background: #3a2a00; box-shadow: 0 0 10px #ffb02055; cursor: help; }
   #wifiPill[hidden] { display: none; }
   #clItems li .only { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--warn); margin-left: 4px; }
+  /* Mode de sortie (T-255), Theme (T-299) tokens: orange = --warn. */
+  #audPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .06em; color: #231800; background: var(--warn); box-shadow: 0 0 10px #ffb02088; cursor: help; }
+  #stage.aud-scan #preview, #stage.aud-scan #beams { outline: 3px solid var(--warn); outline-offset: -3px; box-shadow: 0 0 18px #ffb02055; }
+  #audSeg button.active { background: var(--panel-2); color: var(--accent); border-color: var(--accent); }
+  #audSeg button.active[data-aud=scanning] { color: #231800; background: var(--warn); border-color: var(--warn); }
+  .aud-steps { list-style: none; padding: 0; margin: 6px 0; }
+  .aud-steps li { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .aud-steps .mark { flex: none; width: 1.2em; font-weight: 800; }
+  .aud-steps li.ok .mark { color: var(--ok); }
+  .aud-steps li.bad .mark { color: var(--danger); }
+  .aud-steps .txt { flex: 1; }
+  .aud-steps .detail { display: block; color: var(--muted); }
+  .aud-steps button { flex: none; padding: 2px 8px; font-size: 11px; }
+  .sfzone .zaudl { margin: 0; white-space: nowrap; }
   .shownet-help { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warn); border-radius: 6px; background: var(--panel-2); font-size: 12px; }
   .shownet-help[hidden] { display: none; }
   .shownet-help b { color: var(--warn); }
@@ -794,6 +808,7 @@
   <div class="tb-status">
     <div id="output">…</div>
     <span id="wifiPill" role="alert" hidden>Wi-Fi</span>
+    <span id="audPill" role="status" hidden title="Balayage public déverrouillé : les zones Public reçoivent de la lumière atténuée. Le logiciel ne rend pas cela sûr ; il ne détecte pas une panne des galvos.">BALAYAGE PUBLIC</span>
     <span id="armInfo">Désarmé</span>
     <div class="leds">
       <!-- Entrées externes (T-408): closed at start and after an e-stop. -->
@@ -1584,6 +1599,23 @@
     <section>
       <details id="safetyPanel">
         <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span><span id="dwellLed" title="Garde anti-point fixe">Garde active</span></summary>
+        <div class="sf-sub">Mode de sortie</div>
+        <div class="seg" id="audSeg" role="group" aria-label="Mode de sortie">
+          <button data-aud="above" class="active">Au-dessus du public</button>
+          <button data-aud="scanning">Balayage public</button>
+        </div>
+        <div class="hint" id="audInfo"></div>
+        <div id="audWizard" hidden>
+          <div class="shownet-help"><b>Le logiciel ne rend pas le balayage du public sûr : il oblige seulement à passer par ces étapes.</b>
+            Le logiciel ne détecte pas une panne des galvos : un miroir bloqué fait un faisceau fixe, que seul un système anti-défaut de balayage matériel coupe à temps.
+            Le balayage du public demande une évaluation par une personne qualifiée, une mesure de l'irradiance au point le plus proche du public et des protections matérielles (atténuation, divergence). Le cadre légal reste de votre responsabilité.</div>
+          <ol class="aud-steps" id="audSteps"></ol>
+          <label for="audPhrase" style="display:block">Tapez « <span id="audPhraseText">JE PRENDS LA RESPONSABILITÉ</span> »</label>
+          <input type="text" id="audPhrase" autocomplete="off" spellcheck="false">
+          <div class="hint sf-error" id="audError" role="alert"></div>
+          <div class="row"><button id="audUnlock" disabled>Déverrouiller le balayage public</button><button id="audCancel">Annuler</button></div>
+          <div class="hint">Laser désarmé pour déverrouiller, puis réarmez. Le mode prend fin au redémarrage du studio, à l'arrêt d'urgence, à tout désarmement que vous n'avez pas demandé et dès qu'une condition n'est plus remplie.</div>
+        </div>
         <div id="sfLoosen" hidden>
           <div id="sfLoosenText"></div>
           <div class="row"><button id="sfLoosenOk">Confirmer l'assouplissement</button><button id="sfLoosenCancel">Annuler</button></div>
@@ -1601,7 +1633,7 @@
         <div class="row"><button id="sfZoneAdd">Ajouter une zone</button>
           <label class="check" style="margin:0"><input type="checkbox" id="sfOverlay" checked> Afficher sur l'aperçu</label></div>
         <div class="hint" id="sfDrawHint" hidden>Cliquez les sommets sur l'aperçu 2D, puis « Terminer ».</div>
-        <div class="hint">Masquer : rien n'est allumé dans la zone, même un trait qui la traverse. Atténuer : luminosité réduite au pourcentage indiqué. Coordonnées de sortie, de -1 à 1 (y vers le haut).</div>
+        <div class="hint">Masquer : rien n'est allumé dans la zone, même un trait qui la traverse. Atténuer : luminosité réduite au pourcentage indiqué. Public : là où se trouve le public ; hors « Balayage public », rien n'y est allumé, quel que soit le type ; une zone Public atténuée garde 50 % au plus (10 % recommandé). Coordonnées de sortie, de -1 à 1 (y vers le haut).</div>
         <div class="sf-sub">Couleurs</div>
         <label>Gain rouge <span class="v" id="sfGainRV"></span></label><input type="range" id="sfGainR" min="0" max="1" step="0.01">
         <label>Gain vert <span class="v" id="sfGainGV"></span></label><input type="range" id="sfGainG" min="0" max="1" step="0.01">
@@ -1618,7 +1650,7 @@
         <label>Taille minimum (%) <span class="v" id="sfDwellMinV"></span></label><input type="range" id="sfDwellMin" min="2" max="50" step="1">
         <label>Plafond par case, strict (%) <span class="v" id="sfDwellCapV"></span></label><input type="range" id="sfDwellCap" min="5" max="50" step="1">
         <label>Plafond par case, faisceaux (%) <span class="v" id="sfDwellBeamsV"></span></label><input type="range" id="sfDwellBeams" min="10" max="80" step="1">
-        <div class="hint">Atténue puis éteint ce qui concentre trop de lumière au même endroit : une figure plus petite que la taille minimum (taille 0, zoom, effet figé), ou une case de la grille (32 × 32) qui reste allumée trop longtemps sur 250 ms (point fixe, balayage trop lent, coins). En Faisceaux, les règles strictes s'appliquent sous l'horizon. Les cases concernées sont en orange sur l'aperçu.</div>
+        <div class="hint">Atténue puis éteint ce qui concentre trop de lumière au même endroit : une figure plus petite que la taille minimum (taille 0, zoom, effet figé), ou une case de la grille (32 × 32) qui reste allumée trop longtemps sur 250 ms (point fixe, balayage trop lent, coins). En Faisceaux, les règles strictes s'appliquent sous l'horizon et dans les zones Public ; en balayage public, partout. Les cases concernées sont en orange sur l'aperçu.</div>
         <div class="hint sf-warn" id="sfDwellWarn">⚠ Cette garde ne protège pas contre une panne de scanner : si un miroir se bloque, le logiciel ne le voit pas (aucun retour de position depuis l'interface). Seul un circuit « scan-fail » matériel dans le projecteur peut couper le faisceau à temps.</div>
         <div class="hint" id="dwellInfo"></div>
         <div class="hint">Ces réglages appartiennent à cette machine (pas au projet). Resserrer s'applique tout de suite ; assouplir (zone supprimée ou déplacée, horizon abaissé, gain augmenté…) demande une confirmation.</div>
@@ -2558,6 +2590,7 @@ async function previewLoop() {
     if (fetchedAt > armAnsweredAt) armed = f.armed;
     arm = f.arm; pps = f.pps; checklistState = f.checklist;
     showShownet(f.shownet);
+    showAudienceMode(f.audience);
     // Ticked or restarted from another page, or the output became (or
     // stopped being) a ShowNET: refresh the list.
     if (checklist && f.checklist && f.checklist.complete !== checklist.complete) reloadChecklist();
@@ -3533,6 +3566,7 @@ function renderZones() {
         <select class="zkind" title="Masquer : rien d'allumé dedans · Atténuer : luminosité réduite">
           <option value="blank">Masquer</option><option value="dim">Atténuer</option></select>
         <input type="number" class="zlevel" min="0" max="100" step="5" title="Luminosité gardée dans la zone (%)">
+        <label class="check zaudl" title="Zone Public : là où se trouve le public. Hors balayage public, rien n'y est allumé."><input type="checkbox" class="zaud"> Public</label>
       </div>
       <div class="row">
         <input type="text" class="zpts" title="Sommets : x y ; x y ; … (de -1 à 1, y vers le haut)">
@@ -3546,6 +3580,7 @@ function renderZones() {
     row.querySelector('.zkind').value = z.kind;
     row.querySelector('.zlevel').value = Math.round(z.level * 100);
     row.querySelector('.zlevel').hidden = z.kind !== 'dim';
+    row.querySelector('.zaud').checked = !!z.audience;
     row.querySelector('.zpts').value = fmtPts(z.points);
   });
 }
@@ -3560,6 +3595,9 @@ function sfFromControls() {
     z.name = row.querySelector('.zname').value;
     z.kind = row.querySelector('.zkind').value;
     z.level = Math.min(100, Math.max(0, +row.querySelector('.zlevel').value || 0)) / 100;
+    z.audience = row.querySelector('.zaud').checked;
+    // A Public zone keeps 50 % at most (T-255).
+    if (z.audience) z.level = Math.min(z.level, 0.5);
     const pts = parsePts(row.querySelector('.zpts').value);
     if (pts) z.points = pts;
   });
@@ -3573,7 +3611,7 @@ const SL_GROUPS = {
   locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_reset', 'checklist_edit', 'show_mode', 'input_lost', 'input_back'],
   limiter: ['limiter'],
   play: ['cue', 'scene', 'show'],
-  settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings'],
+  settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings', 'audience_mode'],
   studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow', 'output_select', 'output'],
 };
 let slLog = null;
@@ -3675,6 +3713,7 @@ async function saveSafety(next, confirm = false) {
     safety = (await r.json()).settings; sfLoadError = null; sfPending = null;
     $('sfLoosen').hidden = true;
     showSafety();
+    reloadAudience(); // Public zones: the interlock hint and the wizard (T-255)
   } else if (r.status === 409) {
     const j = await r.json();
     sfPending = next;
@@ -3756,7 +3795,12 @@ function drawSafetyOverlay(W, H, px) {
     if (fill) { g.fillStyle = fill; g.fill(); }
     g.strokeStyle = stroke; g.lineWidth = 2; g.stroke();
   };
-  for (const z of safety.zones) poly(z.points, z.kind === 'dim' ? 'rgba(255,120,60,0.16)' : 'rgba(255,40,40,0.28)', 'rgba(255,77,79,0.9)');
+  // Public zones (T-255) in orange: blanked unless audience scanning is on.
+  const scanning = !!(audienceMode && audienceMode.scanning);
+  for (const z of safety.zones) {
+    const dim = z.kind === 'dim' && (!z.audience || scanning);
+    poly(z.points, dim ? 'rgba(255,120,60,0.16)' : 'rgba(255,40,40,0.28)', z.audience ? 'rgba(255,176,32,0.95)' : 'rgba(255,77,79,0.9)');
+  }
   // Cells the static beam guard is dimming (orange, stronger = darker).
   if (dwellStatus && dwellStatus.cells.length) {
     const step = 2 / dwellStatus.grid;
@@ -3774,6 +3818,8 @@ function drawSafetyOverlay(W, H, px) {
 }
 /** The static beam guard (T-256) on the last frame (the overlay draws its cells). */
 let dwellStatus = null;
+// The audience mode (T-255) from /api/frame: Public zones drawn blanked unless scanning.
+let audienceMode = null;
 function showDwell(d) {
   if (!d) return;
   $('dwellLed').classList.toggle('on', d.active);
@@ -5913,6 +5959,93 @@ async function dataWarnLoop() {
   setTimeout(dataWarnLoop, 5000);
 }
 
+// ---------- mode de sortie (T-255) ----------
+// « Au-dessus du public » is the default and comes back on every start.
+// « Balayage public » opens a step-by-step wizard: every condition with a
+// green tick or a red cross and a link to its setting, then the phrase.
+let audience = null, audWizardOpen = false;
+function showAudienceMode(a) {
+  const was = audienceMode && audienceMode.scanning;
+  audienceMode = a || null;
+  const on = !!(a && a.scanning);
+  $('audPill').hidden = !on;
+  $('stage').classList.toggle('aud-scan', on);
+  $('audSeg').querySelectorAll('button').forEach(b => b.classList.toggle('active', (b.dataset.aud === 'scanning') === on));
+  if (!!was !== on) { reloadAudience(); if (lastPoints && show2d) draw(lastPoints); }
+}
+async function reloadAudience() {
+  try {
+    const r = await fetch('/api/audience');
+    if (r.ok) showAudience(await r.json());
+  } catch { /* server gone */ }
+}
+function showAudience(a) {
+  audience = a;
+  showAudienceMode({ mode: a.mode, scanning: a.scanning, since: a.since });
+  $('audInfo').textContent = a.scanning
+    ? `Balayage public depuis ${clock(a.since)} : les zones Public reçoivent leur lumière atténuée. Le logiciel ne détecte pas une panne des galvos.`
+    : 'Au-dessus du public : rien n\'est allumé dans les zones Public.'
+      + (a.protected ? '' : ' ⚠ Aucune zone Public ni horizon complet : avec une vraie sortie, l\'armement est refusé.');
+  $('audPhraseText').textContent = a.phrase;
+  if (a.scanning) audWizardOpen = false;
+  $('audWizard').hidden = !audWizardOpen;
+  const ol = $('audSteps');
+  ol.innerHTML = '';
+  for (const c of a.conditions) {
+    const li = document.createElement('li');
+    li.className = c.ok ? 'ok' : 'bad';
+    li.dataset.cond = c.id;
+    const mark = document.createElement('span'); mark.className = 'mark'; mark.textContent = c.ok ? '✓' : '✗';
+    mark.setAttribute('aria-label', c.ok ? 'rempli' : 'manquant');
+    const txt = document.createElement('span'); txt.className = 'txt'; txt.textContent = c.label_fr;
+    const detail = document.createElement('span'); detail.className = 'detail'; detail.textContent = c.detail_fr;
+    txt.append(detail);
+    const go = document.createElement('button'); go.textContent = 'Régler'; go.onclick = () => audGoTo(c.link);
+    li.append(mark, txt, go);
+    ol.append(li);
+  }
+  const ready = a.conditions.every(c => c.ok);
+  $('audUnlock').disabled = !ready || a.armed;
+  $('audUnlock').title = a.armed ? 'Désarmez le laser d\'abord' : ready ? '' : 'Conditions non remplies';
+}
+/** Opens the setting a condition links to. */
+function audGoTo(id) {
+  const el = $(id);
+  if (!el) return;
+  setWorkspace('settings');
+  const d = el.tagName === 'DETAILS' ? el : el.closest('details');
+  if (d) d.open = true;
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (el.focus && el.tagName !== 'DETAILS') el.focus({ preventScroll: true });
+}
+$('audSeg').addEventListener('click', async e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  $('audError').textContent = '';
+  if (b.dataset.aud === 'above') {
+    audWizardOpen = false;
+    const r = await fetch('/api/audience', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'above', source: 'ui' }) });
+    if (r.ok) showAudience(await r.json());
+  } else if (!(audienceMode && audienceMode.scanning)) {
+    audWizardOpen = true; $('audPhrase').value = '';
+    await reloadAudience();
+  }
+});
+$('audCancel').onclick = () => { audWizardOpen = false; $('audWizard').hidden = true; $('audPhrase').value = ''; $('audError').textContent = ''; };
+$('audUnlock').onclick = async () => {
+  const r = await fetch('/api/audience', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'scanning', phrase: $('audPhrase').value, source: 'ui' }) });
+  $('audPhrase').value = '';
+  if (r.ok) { $('audError').textContent = ''; audWizardOpen = false; showAudience(await r.json()); return; }
+  if (r.status === 409) {
+    const j = await r.json();
+    showAudience(j);
+    $('audError').textContent = j.error + (j.missing ? ' : ' + j.missing.join(' · ') : '');
+  } else $('audError').textContent = await r.text();
+};
+// While the wizard is open its ticks follow the settings changed elsewhere.
+setInterval(() => { if (audWizardOpen && activeWs === 'settings' && !document.hidden) reloadAudience(); }, 1000);
+
 // ---------- avant le show (T-258) ----------
 const CL_WHEN = { always: 'Toujours', outdoor: 'Extérieur', audience_scan: 'Balayage du public' };
 let checklist = null, clEditing = null, clOpTimer = null;
@@ -6053,6 +6186,7 @@ async function loadState() {
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   showShowMode(st.lock);
   checklistState = st.checklist; showShownet(st.shownet); reloadChecklist();
+  showAudienceMode(st.audience); reloadAudience();
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');
   }

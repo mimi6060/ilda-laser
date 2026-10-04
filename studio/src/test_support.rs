@@ -94,6 +94,7 @@ pub fn shared() -> Shared {
         data_warnings: Vec::new(),
         // Pure preview: the checklist never blocks unit tests.
         checklist: crate::checklist::Checklist::in_memory(false),
+        audience: Default::default(),
         test_hooks: false,
         test_stall_ms: 0,
         // Never a real scan in unit tests, never a real output.

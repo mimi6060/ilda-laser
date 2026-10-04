@@ -25,7 +25,7 @@
 
 use crate::colorcal::ColorCalibration;
 use crate::datafile;
-use crate::dwell::DwellState;
+use crate::dwell::{DwellState, StrictArea};
 use crate::engine::{Animator, AudioFeatures, BeatClock, Calibration, Content, Settings};
 use crate::ilda::{self, IldaFrame};
 use crate::patterns::Point;
@@ -367,9 +367,11 @@ pub struct ExportSafety {
 
 impl ExportSafety {
     /// The chain of output `output`. Unknown: refused, never a looser default.
+    /// A file outlives the session: it never bakes audience scanning in,
+    /// its Public zones are blanked (T-255).
     pub fn of(s: &crate::Shared, output: &str) -> Result<Self> {
         let Some(o) = s.outputs.get(output) else { bail!("sortie inconnue : {output}") };
-        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: s.safety.get(), limits: o.limits, color: o.color })
+        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: crate::audience::effective(&s.safety.get(), false), limits: o.limits, color: o.color })
     }
 }
 
@@ -463,13 +465,14 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
     let at = |lap: usize, i: usize| (lap * frames + i) as f64 * dt as f64;
     let mut limiter = StrobeLimiter::default();
     let mut dwell = DwellState::default();
+    let area = StrictArea::new(cfg.horizon.y, &cfg.zones);
     let mut out = Vec::with_capacity(frames);
     for lap in 0..laps {
         for (i, points) in raw.iter().enumerate() {
             let mut frame = points.clone();
             chain.color.apply(&mut frame);
             let frame = safety::apply(frame, at(lap, i), cfg, &mut limiter);
-            let mut frame = dwell.apply(frame, at(lap, i), &cfg.dwell, cfg.horizon.y, true);
+            let mut frame = dwell.apply(frame, at(lap, i), &cfg.dwell, &area, true);
             power::cap(&mut frame, &chain.limits);
             floor_to_file_steps(&mut frame);
             if lap + 1 == laps {
@@ -716,7 +719,7 @@ mod tests {
     }
 
     fn zone(kind: crate::zones::ZoneKind, points: &[[f32; 2]]) -> crate::zones::Zone {
-        crate::zones::Zone { id: 1, name: "z".into(), kind, level: 0.3, points: points.to_vec() }
+        crate::zones::Zone { id: 1, name: "z".into(), kind, level: 0.3, points: points.to_vec(), audience: false }
     }
 
     /// A big circle turning, lit all around the field.
