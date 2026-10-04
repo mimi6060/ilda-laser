@@ -130,7 +130,7 @@
   .tl-lib-item { flex: none; padding: 4px 6px; font-size: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); cursor: grab; user-select: none; -webkit-user-select: none;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tl-lib-item .d { color: var(--muted); font-size: 10px; margin-left: 4px; }
-  #tlTracks { grid-area: tracks; display: grid; grid-template-columns: 180px minmax(0, 1fr); align-items: start; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
+  #tlTracks { grid-area: tracks; display: grid; grid-template-columns: 230px minmax(0, 1fr); align-items: start; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
     border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
   #tlHeads { display: flex; flex-direction: column; border-right: 1px solid var(--line); }
   #tlHeads .top { display: flex; align-items: flex-end; padding: 4px 6px; font-size: 11px; color: var(--muted); box-sizing: border-box; }
@@ -138,6 +138,11 @@
   .tl-head input[type=text] { flex: 1; min-width: 0; padding: 2px 4px; font-size: 11px; border-radius: 4px; }
   .tl-head select { flex: none; width: auto; padding: 1px; font-size: 11px; border-radius: 4px; }
   .tl-head button { flex: none; padding: 1px 4px; font-size: 11px; }
+  .tl-head button.active { border-color: var(--ws-timeline); color: var(--ws-timeline); }
+  /* Envelope lane under a track (T-163). */
+  .tl-envhead { flex-wrap: wrap; align-content: center; border-top-style: dashed; padding-left: 14px; background: var(--panel); }
+  .tl-envhead select[data-f="envt"] { flex: 1 1 100px; min-width: 0; }
+  .tl-envhead .lbl { font-size: 10px; color: var(--ws-timeline); letter-spacing: .04em; text-transform: uppercase; }
   #tlCanvas { display: block; width: 100%; aspect-ratio: auto; border: 0; border-radius: 0; background: transparent; touch-action: none; outline: none; }
   #tlCanvas:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
   main[data-ws-active="creation"] { grid-template-columns: minmax(0, 1fr) 440px; }
@@ -1531,7 +1536,7 @@
         </div>
       </div>
       <div id="tlHeads"></div>
-      <canvas id="tlCanvas" tabindex="0" title="Glisser : déplacer · bords : durée · Alt+glisser : dupliquer · Maj+clic : sélection · règle : clic = se placer, glisser = boucle, double-clic = sans boucle · double-clic sur la ligne des marqueurs : marqueur"></canvas>
+      <canvas id="tlCanvas" tabindex="0" title="Glisser : déplacer · bords : durée · Alt+glisser : dupliquer · Maj+clic : sélection · règle : clic = se placer, glisser = boucle, double-clic = sans boucle · double-clic sur la ligne des marqueurs : marqueur · ligne d'enveloppe (∿) : double-clic = nœud, glisser = déplacer, clic droit = supprimer"></canvas>
     </div>
   </section>
 
@@ -5652,9 +5657,12 @@ const TL = {
   snap: remembered('laserStudio.tlSnap') || 'strong', follow: true,
   t0: 0, pps: 40, drag: null, drop: null, need: true,
   inflight: 0, fetching: false, drawMs: 0, draws: 0, libFor: null, headsKey: '',
+  // Envelope lanes (T-163): track index → the parameter shown under it;
+  // the mode new envelopes get there; the targets (GET /api/lfos); hover.
+  env: {}, envMode: {}, envTargets: null, hover: null,
 };
 const TL_RULER = 30, TL_MARK = 18, TL_WAVE = 40, TL_LANE = 34, TL_TOP = TL_RULER + TL_MARK + TL_WAVE;
-const TL_UNDO = 50, TL_MIN_LEN = 0.01, TL_SNAP_PX = 8;
+const TL_UNDO = 50, TL_MIN_LEN = 0.01, TL_SNAP_PX = 8, TL_ENV = 48, TL_ENV_PAD = 6;
 const TL_LAYER_COLORS = ['#3ddc84', '#4da3ff', '#ffb020', '#e062ff'];
 const TL_MARK_COLORS = [[255, 176, 32], [77, 163, 255], [224, 98, 255], [61, 220, 132], [255, 77, 79]];
 const tlSeconds = () => !TL.show || TL.show.time_base !== 'beats';
@@ -5709,7 +5717,15 @@ const tlCanvas = () => $('tlCanvas');
 const tlW = () => tlCanvas().clientWidth || 1;
 const tlUToX = u => (u - TL.t0) * TL.pps;
 const tlXToU = x => TL.t0 + x / TL.pps;
-const tlLaneY = i => TL_TOP + i * TL_LANE;
+// Lanes have their own height: a track with an open envelope lane is taller.
+const tlEnvOf = ti => (TL.show && TL.show.tracks[ti] && TL.env[ti]) || null;
+const tlLaneH = ti => TL_LANE + (tlEnvOf(ti) ? TL_ENV : 0);
+function tlLaneY(i) {
+  if (!TL.show) return TL_TOP + i * TL_LANE;
+  let y = TL_TOP;
+  for (let k = 0; k < i && k < TL.show.tracks.length; k++) y += tlLaneH(k);
+  return y + Math.max(0, i - TL.show.tracks.length) * TL_LANE;
+}
 function tlSetView(t0, pps) {
   TL.fitPending = false;
   TL.pps = Math.max(0.5, Math.min(2000, pps));
@@ -5800,6 +5816,8 @@ async function tlCommit() {
     // The server's copy (ids, sorting) unless the page changed meanwhile.
     if (TL.inflight === 1 && !TL.drag && JSON.stringify(TL.show) === body) TL.show = j.show;
     tlShowFlags(j.state);
+    // Envelopes on a parameter no envelope may drive: kept, ignored at playback (T-163).
+    if (j.warnings && j.warnings.length) tlMsg(j.warnings.join(' · '), true);
   } catch { tlMsg('Studio injoignable : modification non envoyée', true); TL.rev = -1; }
   finally { TL.inflight--; TL.need = true; }
 }
@@ -5827,6 +5845,7 @@ async function tlFetch() {
       TL.undo = []; TL.redo = []; TL.sel.clear(); TL.marker = -1;
       TL.name = name; TL.show = show; TL.state = j.state;
       TL.fitPending = true; // once the canvas has its width
+      tlEnvAuto();
     } else {
       TL.show = show;
     }
@@ -5918,12 +5937,169 @@ function tlDefaultLen(id, start) {
   return Math.max(TL_MIN_LEN, tlUAtBar(tlBarAt(start) + 4) - start);
 }
 
+// --- envelopes (T-163): a curve on a control per event, in a lane under the track ---
+// Keys are { at (show units from the event start), value, ease }; the studio
+// evaluates them (program::curve_at) on the frame's copies, before the
+// master live stage and the safety chain. Here they are only drawn and edited.
+const TL_MAX_ENVS = 16, TL_MAX_ENV_KEYS = 64;
+const TL_EASES = [['linear', 'Linéaire'], ['smooth', 'Douce'], ['ease_in', 'Accélère'], ['ease_out', 'Ralentit'], ['step', 'Palier']];
+const tlEaseFr = e => (TL_EASES.find(x => x[0] === e) || TL_EASES[0])[1];
+// The cue programs' easing (evolving.rs, KeyEase::apply), for drawing.
+function tlEase(ease, u) {
+  u = Math.max(0, Math.min(1, u));
+  switch (ease) {
+    case 'step': return 0;
+    case 'ease_in': return u * u;
+    case 'ease_out': return 1 - (1 - u) * (1 - u);
+    case 'smooth': return u * u * (3 - 2 * u);
+    default: return u;
+  }
+}
+function tlCurveAt(keys, x) {
+  const k = keys.filter(q => Number.isFinite(q.at) && Number.isFinite(q.value)).sort((a, b) => a.at - b.at);
+  if (!k.length) return null;
+  if (x <= k[0].at) return k[0].value;
+  if (x >= k[k.length - 1].at) return k[k.length - 1].value;
+  let i = 0;
+  while (i + 1 < k.length && k[i + 1].at <= x) i++;
+  const a = k[i], b = k[i + 1];
+  return a.value + (b.value - a.value) * tlEase(a.ease || 'linear', (x - a.at) / (b.at - a.at));
+}
+// What an envelope may drive: the controls LFOs may move (never arm, safety, calibration, zones, outputs).
+async function tlLoadEnvTargets() {
+  if (TL.envTargets || TL.envLoading) return;
+  TL.envLoading = true;
+  try { TL.envTargets = (await (await fetch('/api/lfos')).json()).targets || []; TL.headsKey = ''; TL.need = true; } catch { /* tried again later */ } finally { TL.envLoading = false; }
+}
+const tlEnvTarget = id => (TL.envTargets || []).find(t => t.id === id);
+const tlEnvLabel = id => { const t = tlEnvTarget(id); return t ? t.label : `${id} (inconnu, ignoré)`; };
+// Value range of a lane: the control's (Absolu), or a factor ×0 to ×2 (Relatif).
+function tlEnvRange(id, mode) {
+  if (mode === 'relative') return [0, 2];
+  const t = tlEnvTarget(id);
+  return t ? [t.min, t.max] : [0, 1];
+}
+const tlEnvFind = (e, id) => (e.envelopes || []).find(v => v.target === id) || null;
+// The mode of a parameter on a track: its envelopes', else the one chosen for new ones.
+function tlEnvModeOf(ti, id) {
+  for (const e of TL.show.tracks[ti].events) { const v = tlEnvFind(e, id); if (v) return v.mode || 'absolute'; }
+  return TL.envMode[ti] || 'absolute';
+}
+function tlEnvGeom(ti) {
+  const id = tlEnvOf(ti), mode = tlEnvModeOf(ti, id), [min, max] = tlEnvRange(id, mode);
+  const top = tlLaneY(ti) + TL_LANE, y0 = top + TL_ENV_PAD, y1 = top + TL_ENV - TL_ENV_PAD, span = max - min || 1;
+  return {
+    id, mode, min, max, y0, y1,
+    vy: v => y1 - (Math.max(min, Math.min(max, v)) - min) / span * (y1 - y0),
+    yv: y => min + (y1 - Math.max(y0, Math.min(y1, y))) / (y1 - y0) * span,
+  };
+}
+const tlFmtV = v => v == null ? '' : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+// The node of the shown envelope under (x, y) on track ti: { e, env, k }.
+function tlEnvKeyAt(ti, x, y) {
+  const g = tlEnvGeom(ti);
+  let best = null, dist = 7;
+  for (const e of TL.show.tracks[ti].events) {
+    const env = tlEnvFind(e, g.id);
+    if (!env) continue;
+    for (const k of env.keys) {
+      const d = Math.hypot(tlUToX(e.start + k.at) - x, g.vy(k.value) - y);
+      if (d < dist) { dist = d; best = { e, env, k }; }
+    }
+  }
+  return best;
+}
+function tlEnvEventAt(ti, x) {
+  const t = TL.show.tracks[ti];
+  for (let i = t.events.length - 1; i >= 0; i--) {
+    const e = t.events[i];
+    if (x >= tlUToX(e.start) && x <= tlUToX(e.start + e.len)) return e;
+  }
+  return null;
+}
+// Double-click in the lane: a node there (the envelope is made if needed).
+function tlEnvAddKey(ti, x, y) {
+  const e = tlEnvEventAt(ti, x);
+  if (!e) { tlMsg('Enveloppe : double-cliquez au-dessus d\'un événement de la piste.', true); return; }
+  const g = tlEnvGeom(ti);
+  let full = false;
+  tlChange(() => {
+    e.envelopes = e.envelopes || [];
+    let env = tlEnvFind(e, g.id);
+    if (!env) {
+      if (e.envelopes.length >= TL_MAX_ENVS) { full = true; return; }
+      env = { target: g.id, mode: g.mode, keys: [] };
+      e.envelopes.push(env);
+    }
+    if (env.keys.length >= TL_MAX_ENV_KEYS) { full = true; return; }
+    const at = Math.max(0, Math.min(e.len, tlSnapU(tlXToU(x)) - e.start));
+    env.keys.push({ at, value: +g.yv(y).toFixed(4), ease: 'linear' });
+    env.keys.sort((a, b) => a.at - b.at);
+  });
+  if (full) tlMsg(`Enveloppe : ${TL_MAX_ENVS} enveloppes par événement et ${TL_MAX_ENV_KEYS} nœuds par enveloppe au plus.`, true);
+}
+function tlEnvDelKey(hit) {
+  tlChange(() => {
+    hit.env.keys.splice(hit.env.keys.indexOf(hit.k), 1);
+    if (!hit.env.keys.length) hit.e.envelopes.splice(hit.e.envelopes.indexOf(hit.env), 1);
+  });
+}
+function tlEnvCycleEase(hit) {
+  tlChange(() => {
+    const i = TL_EASES.findIndex(x => x[0] === (hit.k.ease || 'linear'));
+    hit.k.ease = TL_EASES[(i + 1) % TL_EASES.length][0];
+  });
+  tlMsg(`Courbe du nœud : ${tlEaseFr(hit.k.ease)}`);
+}
+// Show or hide the lane of a track (`id` null: hidden; the envelopes stay).
+function tlEnvOpen(ti, id) {
+  if (id) TL.env[ti] = id; else delete TL.env[ti];
+  TL.headsKey = ''; TL.need = true;
+  if (id) tlMsg('Enveloppe : double-clic ajoute un nœud (sur un nœud : change sa courbe), glisser le déplace, clic droit le supprime.');
+}
+// The parameter a lane opens on: the track's first envelope, else the dimmer.
+function tlEnvDefault(ti) {
+  for (const e of TL.show.tracks[ti].events) if (e.envelopes && e.envelopes.length) return e.envelopes[0].target;
+  return 'master.brightness';
+}
+// A show just loaded: lanes open on bus tracks and on tracks with envelopes.
+function tlEnvAuto() {
+  TL.env = {}; TL.envMode = {}; TL.hover = null;
+  if (TL.show) TL.show.tracks.forEach((t, i) => {
+    if (t.kind === 'bus' || t.events.some(e => e.envelopes && e.envelopes.length)) TL.env[i] = tlEnvDefault(i);
+  });
+}
+// A track deleted: the lanes below it move up.
+function tlEnvShift(removed) {
+  const shift = m => Object.fromEntries(Object.entries(m).filter(([k]) => +k !== removed).map(([k, v]) => [+k > removed ? +k - 1 : +k, v]));
+  TL.env = shift(TL.env); TL.envMode = shift(TL.envMode);
+}
+// Double-click on a bus track: a bus event of 4 bars (it plays nothing; its envelopes act on the whole layer).
+function tlBusAdd(ti, x) {
+  const start = tlSnapU(tlXToU(x));
+  tlChange(() => {
+    const ev = { id: tlNextId(), start, len: Math.max(TL_MIN_LEN, tlUAtBar(tlBarAt(start) + 4) - start), source: { kind: 'cue', id: '' }, envelopes: [] };
+    TL.show.tracks[ti].events.push(ev);
+    TL.sel = new Set([ev.id]);
+  });
+}
+function tlEnvOptions(cur) {
+  const list = TL.envTargets || [];
+  const groups = [...new Set(list.map(t => t.group || ''))];
+  let html = list.some(t => t.id === cur) ? '' : `<option value="${esc(cur)}" selected>${esc(tlEnvLabel(cur))}</option>`;
+  for (const gr of groups) {
+    html += `<optgroup label="${esc(gr || 'Autres')}">` + list.filter(t => (t.group || '') === gr).map(t => `<option value="${esc(t.id)}"${t.id === cur ? ' selected' : ''}>${esc(t.label)}</option>`).join('') + '</optgroup>';
+  }
+  return html;
+}
+
 // --- track heads (DOM, aligned with the canvas lanes) ---
 function tlHeads() {
   const tracks = TL.show ? TL.show.tracks : [];
-  const key = TL.show ? JSON.stringify(tracks.map(t => [t.name, t.layer, t.mute, t.solo])) : 'empty';
+  if (TL.show && !TL.envTargets) tlLoadEnvTargets();
+  const key = TL.show ? JSON.stringify([tracks.map((t, i) => [t.name, t.layer, t.mute, t.solo, t.kind, TL.env[i] || '', TL.env[i] ? tlEnvModeOf(i, TL.env[i]) : '']), !!TL.envTargets]) : 'empty';
   const c = tlCanvas();
-  const h = TL_TOP + Math.max(1, TL.show ? tracks.length : TL_EMPTY_TRACKS) * TL_LANE;
+  const h = TL.show ? (tracks.length ? tlLaneY(tracks.length) : TL_TOP + TL_LANE) : TL_TOP + TL_EMPTY_TRACKS * TL_LANE;
   if (c.style.height !== h + 'px') { c.style.height = h + 'px'; TL.need = true; }
   $('tlEmpty').hidden = !!TL.show;
   if (key === TL.headsKey && $('tlHeads').childElementCount) return;
@@ -5939,17 +6115,38 @@ function tlHeads() {
     <div class="tl-head" data-ti="${i}" style="height:${TL_LANE}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
       <input type="text" value="${esc(t.name)}" maxlength="64" data-f="name" title="Nom de la piste">
       <select data-f="layer" title="Calque">${[1, 2, 3, 4].map(n => `<option value="${n}"${n === t.layer ? ' selected' : ''}>C${n}</option>`).join('')}</select>
+      <select data-f="kind" title="Cues : la piste joue des cues · Bus : ses enveloppes agissent sur toutes les pistes de son calque">
+        <option value="cues"${t.kind !== 'bus' ? ' selected' : ''}>Cues</option><option value="bus"${t.kind === 'bus' ? ' selected' : ''}>Bus</option></select>
       <button data-f="mute" class="${t.mute ? 'active' : ''}" title="Muet">M</button>
       <button data-f="solo" class="${t.solo ? 'active' : ''}" title="Solo">S</button>
+      <button data-f="env" class="${TL.env[i] ? 'active' : ''}" title="+ Enveloppe : une ligne sous la piste pour dessiner un paramètre (taille, rotation, luminosité…)">∿</button>
       <button data-f="del" title="Supprimer la piste (Annuler la rétablit)">✕</button>
-    </div>`).join('');
+    </div>${TL.env[i] ? `
+    <div class="tl-head tl-envhead" data-ti="${i}" style="height:${TL_ENV}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
+      <span class="lbl">Env.</span>
+      <select data-f="envt" title="Paramètre de l'enveloppe (ceux qu'un LFO peut moduler)">${tlEnvOptions(TL.env[i])}</select>
+      <select data-f="envm" title="Absolu : la courbe remplace la valeur · Relatif : elle la multiplie (×0 à ×2). Une luminosité ne fait que baisser.">
+        <option value="absolute"${tlEnvModeOf(i, TL.env[i]) === 'absolute' ? ' selected' : ''}>Absolu</option><option value="relative"${tlEnvModeOf(i, TL.env[i]) === 'relative' ? ' selected' : ''}>Relatif</option></select>
+      <button data-f="envx" title="Masquer la ligne (les enveloppes restent)">✕</button>
+    </div>` : ''}`).join('');
 }
 $('tlHeads').addEventListener('change', e => {
   const head = e.target.closest('.tl-head');
   if (!head || !TL.show) return;
-  const t = TL.show.tracks[+head.dataset.ti];
-  if (e.target.dataset.f === 'name') tlChange(() => { t.name = e.target.value.slice(0, 64); });
-  if (e.target.dataset.f === 'layer') tlChange(() => { t.layer = +e.target.value; });
+  const ti = +head.dataset.ti, t = TL.show.tracks[ti], f = e.target.dataset.f, v = e.target.value;
+  if (f === 'name') tlChange(() => { t.name = v.slice(0, 64); });
+  if (f === 'layer') tlChange(() => { t.layer = +v; });
+  if (f === 'kind') {
+    tlChange(() => { t.kind = v; });
+    if (v === 'bus' && !TL.env[ti]) tlEnvOpen(ti, tlEnvDefault(ti));
+    if (v === 'bus') tlMsg('Piste bus : double-cliquez sur la piste pour y poser un événement, puis dessinez ses enveloppes : elles agissent sur toutes les pistes du calque.');
+  }
+  if (f === 'envt') tlEnvOpen(ti, v);
+  if (f === 'envm') {
+    TL.envMode[ti] = v;
+    tlChange(() => { for (const ev of t.events) { const env = tlEnvFind(ev, TL.env[ti]); if (env) env.mode = v; } });
+    TL.headsKey = ''; TL.need = true;
+  }
   e.target.blur();
 });
 $('tlHeads').addEventListener('click', e => {
@@ -5958,7 +6155,10 @@ $('tlHeads').addEventListener('click', e => {
   const i = +head.dataset.ti, t = TL.show.tracks[i];
   if (b.dataset.f === 'mute') tlChange(() => { t.mute = !t.mute; });
   if (b.dataset.f === 'solo') tlChange(() => { t.solo = !t.solo; });
-  if (b.dataset.f === 'del') tlChange(() => { TL.show.tracks.splice(i, 1); TL.sel.clear(); });
+  if (b.dataset.f === 'del') { tlChange(() => { TL.show.tracks.splice(i, 1); TL.sel.clear(); }); tlEnvShift(i); TL.headsKey = ''; }
+  // The heads are drawn again only when none has the focus.
+  if (b.dataset.f === 'env') { b.blur(); tlEnvOpen(i, TL.env[i] ? null : tlEnvDefault(i)); }
+  if (b.dataset.f === 'envx') { b.blur(); tlEnvOpen(i, null); }
 });
 $('tlAddTrack').onclick = () => tlChange(() => {
   const n = TL.show.tracks.length;
@@ -6160,7 +6360,7 @@ function tlDraw() {
   if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
   const g = c.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (!tlColors) { const cs = getComputedStyle(document.documentElement); tlColors = { line: cs.getPropertyValue('--line').trim(), muted: cs.getPropertyValue('--muted').trim(), accent: cs.getPropertyValue('--accent').trim(), text: cs.getPropertyValue('--text').trim(), panel: cs.getPropertyValue('--panel').trim() }; }
+  if (!tlColors) { const cs = getComputedStyle(document.documentElement); tlColors = { line: cs.getPropertyValue('--line').trim(), muted: cs.getPropertyValue('--muted').trim(), accent: cs.getPropertyValue('--accent').trim(), text: cs.getPropertyValue('--text').trim(), panel: cs.getPropertyValue('--panel').trim(), tl: cs.getPropertyValue('--ws-timeline').trim() || '#3d9bff' }; }
   const C = tlColors;
   g.clearRect(0, 0, W, H);
   g.font = '11px system-ui, sans-serif';
@@ -6168,7 +6368,7 @@ function tlDraw() {
   const u0 = TL.t0, u1 = tlXToU(W);
   // Lanes (with no show: the empty tracks of the empty state).
   const lanes = TL.show ? TL.show.tracks.length : TL_EMPTY_TRACKS;
-  for (let i = 0; i < lanes; i++) { g.fillStyle = i % 2 ? '#ffffff05' : '#00000030'; g.fillRect(0, tlLaneY(i), W, TL_LANE); }
+  for (let i = 0; i < lanes; i++) { g.fillStyle = i % 2 ? '#ffffff05' : '#00000030'; g.fillRect(0, tlLaneY(i), W, TL.show ? tlLaneH(i) : TL_LANE); }
   g.fillStyle = C.panel; g.fillRect(0, 0, W, TL_RULER);
   // Grid: bars bright, beats faint, labels in the ruler (bars on top, seconds below).
   const grid = tlGrid();
@@ -6216,22 +6416,67 @@ function tlDraw() {
   // Events.
   const active = new Set(TL.state ? TL.state.active : []);
   TL.show.tracks.forEach((t, ti) => {
-    const y = tlLaneY(ti) + 3, h = TL_LANE - 6, col = TL_LAYER_COLORS[(t.layer - 1) % 4];
+    const y = tlLaneY(ti) + 3, h = TL_LANE - 6, col = TL_LAYER_COLORS[(t.layer - 1) % 4], bus = t.kind === 'bus';
     for (const e of t.events) {
       const x0 = tlUToX(e.start), x1 = tlUToX(e.start + e.len);
       if (x1 < 0 || x0 > W) continue;
       const sel = TL.sel.has(e.id);
-      g.globalAlpha = t.mute ? 0.35 : active.has(e.id) ? 1 : 0.75;
+      // A bus event plays nothing: outlined; its envelopes act on the layer.
+      g.globalAlpha = bus ? (t.mute ? 0.12 : 0.25) : t.mute ? 0.35 : active.has(e.id) ? 1 : 0.75;
       g.fillStyle = col; g.fillRect(x0, y, Math.max(2, x1 - x0), h);
       g.globalAlpha = 1;
+      if (bus) { g.strokeStyle = col; g.setLineDash([4, 3]); g.strokeRect(x0 + 0.5, y + 0.5, Math.max(2, x1 - x0) - 1, h - 1); g.setLineDash([]); }
       if (sel) { g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x0 + 1, y + 1, Math.max(2, x1 - x0) - 2, h - 2); g.lineWidth = 1; }
       if (x1 - x0 > 24) {
         g.save(); g.beginPath(); g.rect(x0, y, x1 - x0, h); g.clip();
-        g.fillStyle = '#06120b'; g.fillText(tlEventName(e), Math.max(x0, 0) + 4, y + h / 2);
+        g.fillStyle = bus ? C.text : '#06120b'; g.fillText(bus ? `Bus · calque ${t.layer}` : tlEventName(e), Math.max(x0, 0) + 4, y + h / 2);
         g.restore();
       }
     }
   });
+  // Envelope lanes (T-163): each event's curve on the lane's parameter, its nodes, the value under the mouse.
+  TL.show.tracks.forEach((t, ti) => {
+    const id = tlEnvOf(ti);
+    if (!id) return;
+    const eg = tlEnvGeom(ti), top = tlLaneY(ti) + TL_LANE, col = TL_LAYER_COLORS[(t.layer - 1) % 4];
+    g.fillStyle = '#00000038'; g.fillRect(0, top, W, TL_ENV);
+    g.strokeStyle = C.line; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(0, top + 0.5); g.lineTo(W, top + 0.5); g.stroke(); g.setLineDash([]);
+    for (const e of t.events) {
+      const x0 = tlUToX(e.start), x1 = tlUToX(e.start + e.len);
+      if (x1 < 0 || x0 > W) continue;
+      g.fillStyle = col; g.globalAlpha = 0.1; g.fillRect(x0, top + 2, x1 - x0, TL_ENV - 4); g.globalAlpha = 1;
+      const env = tlEnvFind(e, id);
+      if (!env || !env.keys.length) continue;
+      const a = Math.max(x0, 0), b = Math.min(x1, W);
+      g.strokeStyle = C.tl; g.lineWidth = 1.5; g.beginPath();
+      for (let px = a; ; px = Math.min(b, px + 2)) {
+        const py = eg.vy(tlCurveAt(env.keys, tlXToU(px) - e.start));
+        if (px === a) g.moveTo(px, py); else g.lineTo(px, py);
+        if (px >= b) break;
+      }
+      g.stroke(); g.lineWidth = 1;
+      for (const k of env.keys) {
+        const kx = tlUToX(e.start + k.at), ky = eg.vy(k.value);
+        if (kx < -4 || kx > W + 4) continue;
+        g.fillStyle = TL.drag && TL.drag.kind === 'envkey' && TL.drag.k === k ? C.text : C.tl;
+        g.fillRect(kx - 3.5, ky - 3.5, 7, 7);
+      }
+    }
+    g.fillStyle = C.muted;
+    g.fillText(`${tlEnvLabel(id)} · ${eg.mode === 'relative' ? `Relatif ×${eg.min}…×${eg.max}` : `Absolu ${tlFmtV(eg.min)}…${tlFmtV(eg.max)}`}`, 4, top + 9);
+  });
+  const hv = TL.hover;
+  if (hv && tlEnvOf(hv.ti)) {
+    const d = TL.drag && TL.drag.kind === 'envkey' ? TL.drag : null;
+    const hit = d || tlEnvKeyAt(hv.ti, hv.x, hv.y), e = hit ? hit.e : tlEnvEventAt(hv.ti, hv.x);
+    const env = e && tlEnvFind(e, tlEnvOf(hv.ti));
+    const text = hit ? `${tlFmtV(hit.k.value)} · ${tlEaseFr(hit.k.ease)}` : env && env.keys.length ? tlFmtV(tlCurveAt(env.keys, tlXToU(hv.x) - e.start)) : '';
+    if (text) {
+      const tw = g.measureText(text).width + 8, tx = Math.min(W - tw - 2, hv.x + 10), ty = Math.max(2, hv.y - 20);
+      g.fillStyle = C.panel; g.fillRect(tx, ty, tw, 16); g.strokeStyle = C.tl; g.strokeRect(tx + 0.5, ty + 0.5, tw - 1, 15);
+      g.fillStyle = C.text; g.fillText(text, tx + 4, ty + 8);
+    }
+  }
   // Drop preview.
   if (TL.drop) {
     const x0 = tlUToX(TL.drop.start), x1 = tlUToX(TL.drop.start + TL.drop.len);
@@ -6293,7 +6538,14 @@ function tlLoop() {
 
 // --- mouse: select, move, resize, duplicate, markers, loop region, seek ---
 function tlLocal(e) { const b = tlCanvas().getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; }
-function tlTrackAt(y) { return Math.floor((y - TL_TOP) / TL_LANE); }
+function tlTrackAt(y) {
+  if (!TL.show || y < TL_TOP) return Math.floor((y - TL_TOP) / TL_LANE);
+  let top = TL_TOP;
+  for (let i = 0; i < TL.show.tracks.length; i++) { const h = tlLaneH(i); if (y < top + h) return i; top += h; }
+  return TL.show.tracks.length + Math.floor((y - top) / TL_LANE);
+}
+// In the envelope lane of track `ti` (below its events).
+const tlInEnv = (ti, y) => !!tlEnvOf(ti) && y >= tlLaneY(ti) + TL_LANE && y < tlLaneY(ti) + tlLaneH(ti);
 function tlEventAt(ti, x) {
   const t = TL.show && TL.show.tracks[ti];
   if (!t) return null;
@@ -6340,6 +6592,11 @@ tlCv.addEventListener('pointerdown', e => {
     }
   } else if (y < TL_TOP) {
     TL.drag = { kind: 'seek', x0: x, u0: u };
+  } else if (tlInEnv(tlTrackAt(y), y)) {
+    // Envelope lane: grab a node (double-click adds one, right click deletes it).
+    const ti = tlTrackAt(y), hit = tlEnvKeyAt(ti, x, y);
+    TL.drag = hit ? { kind: 'envkey', ti, ...hit, at0: hit.k.at, before, x0: x, y0: y } : null;
+    TL.marker = -1; tlMarkRow();
   } else {
     const ti = tlTrackAt(y), hit = tlEventAt(ti, x);
     if (hit) {
@@ -6369,7 +6626,12 @@ tlCv.addEventListener('pointerdown', e => {
 });
 tlCv.addEventListener('pointermove', e => {
   const { x, y } = tlLocal(e), d = TL.drag;
+  // The value under the mouse in an envelope lane (and while dragging a node).
+  const envTi = TL.show && y >= TL_TOP ? tlTrackAt(y) : -1;
+  const hover = d && d.kind === 'envkey' ? { ti: d.ti, x, y } : envTi >= 0 && tlInEnv(envTi, y) ? { ti: envTi, x, y } : null;
+  if (hover || TL.hover) { TL.hover = hover; TL.need = true; }
   if (!d) {
+    if (hover) { tlCv.style.cursor = tlEnvKeyAt(hover.ti, x, y) ? 'move' : 'crosshair'; return; }
     const hit = TL.show && y >= TL_TOP ? tlEventAt(tlTrackAt(y), x) : null;
     const r = TL.show && TL.show.loop_region;
     const onEdge = r && y < TL_RULER && (Math.abs(tlUToX(r[0]) - x) < 6 || Math.abs(tlUToX(r[1]) - x) < 6);
@@ -6377,6 +6639,15 @@ tlCv.addEventListener('pointermove', e => {
     return;
   }
   if (Math.abs(x - d.x0) > 2) d.moved = true;
+  if (d.kind === 'envkey') {
+    // Within its event; its time keeps still until the mouse really moves sideways.
+    if (Math.abs(y - d.y0) > 2) d.moved = true;
+    const u = TL.snap === 'off' ? tlXToU(x) : tlSnapU(tlXToU(x));
+    d.k.at = Math.abs(x - d.x0) > 2 ? Math.max(0, Math.min(d.e.len, u - d.e.start)) : d.at0;
+    d.k.value = +tlEnvGeom(d.ti).yv(y).toFixed(4);
+    TL.need = true;
+    return;
+  }
   const du = (x - d.x0) / TL.pps;
   if (d.kind === 'move') {
     const skip = new Set(d.orig.map(o => o.e.id));
@@ -6427,6 +6698,13 @@ function tlPointerUp(e) {
   TL.drag = null;
   if (d.kind === 'ruler' && !d.moved) tlSeek(d.u0);
   else if (d.kind === 'seek' && !d.moved) tlSeek(d.u0);
+  else if (d.kind === 'envkey') {
+    if (d.moved) {
+      d.env.keys.sort((a, b) => a.at - b.at);
+      tlPushUndo(d.before);
+      tlCommit();
+    }
+  }
   else if (['move', 'resize', 'marker', 'loop', 'ruler'].includes(d.kind)) {
     if (d.kind === 'ruler' && TL.show.loop_region && TL.show.loop_region[1] - TL.show.loop_region[0] < 1e-6) TL.show.loop_region = null;
     if (d.moved) {
@@ -6446,6 +6724,15 @@ tlCv.addEventListener('dblclick', e => {
   const { x, y } = tlLocal(e);
   if (y < TL_RULER) tlChange(() => { TL.show.loop_region = null; });
   else if (y < TL_RULER + TL_MARK && tlMarkerAt(x) < 0) tlAddMarker(tlSnapU(tlXToU(x)));
+  else if (y >= TL_TOP) {
+    const ti = tlTrackAt(y), t = TL.show.tracks[ti];
+    if (!t) return;
+    if (tlInEnv(ti, y)) {
+      // Envelope lane: a node here; on a node, its next curve.
+      const hit = tlEnvKeyAt(ti, x, y);
+      if (hit) tlEnvCycleEase(hit); else tlEnvAddKey(ti, x, y);
+    } else if (t.kind === 'bus' && !tlEventAt(ti, x)) tlBusAdd(ti, x);
+  }
 });
 // Molette: zoom around the cursor; Maj+molette or horizontal swipe: scroll.
 tlCv.addEventListener('wheel', e => {
@@ -6462,7 +6749,7 @@ tlCv.addEventListener('wheel', e => {
 // Drag from the library.
 function tlDropAt(e) {
   const { x, y } = tlLocal(e), ti = tlTrackAt(y);
-  if (!TL.show || !TL.dragCue || y < TL_TOP || ti < 0 || ti >= TL.show.tracks.length) return null;
+  if (!TL.show || !TL.dragCue || y < TL_TOP || ti < 0 || ti >= TL.show.tracks.length || TL.show.tracks[ti].kind === 'bus') return null;
   const start = tlSnapU(tlXToU(x));
   return { ti, start, len: tlDefaultLen(TL.dragCue, start), id: TL.dragCue };
 }
@@ -6487,7 +6774,22 @@ tlCv.addEventListener('drop', e => {
 // Keys of the timeline: in the shortcut table (T-284).
 new ResizeObserver(() => { TL.need = true; }).observe(tlCanvas());
 // For the e2e tests: the view and the draw time.
-window.tlDebug = { view: () => ({ t0: TL.t0, pps: TL.pps, top: TL_TOP, lane: TL_LANE, ruler: TL_RULER, mark: TL_MARK }), setView: tlSetView, stats: () => ({ drawMs: TL.drawMs, draws: TL.draws }), show: () => TL.show };
+// Clic droit in an envelope lane: deletes the node under the mouse.
+tlCv.addEventListener('contextmenu', e => {
+  if (!TL.show) return;
+  const { x, y } = tlLocal(e), ti = tlTrackAt(y);
+  if (y < TL_TOP || !tlInEnv(ti, y)) return;
+  e.preventDefault();
+  const hit = tlEnvKeyAt(ti, x, y);
+  if (hit) tlEnvDelKey(hit);
+});
+tlCv.addEventListener('pointerleave', () => { if (TL.hover && !TL.drag) { TL.hover = null; TL.need = true; } });
+window.tlDebug = {
+  view: () => ({ t0: TL.t0, pps: TL.pps, top: TL_TOP, lane: TL_LANE, ruler: TL_RULER, mark: TL_MARK }), setView: tlSetView, stats: () => ({ drawMs: TL.drawMs, draws: TL.draws }), show: () => TL.show,
+  // Envelope lanes (T-163): the top of a track's lane, and the value ↔ y mapping of its envelope lane.
+  laneY: ti => tlLaneY(ti),
+  env: ti => { if (!tlEnvOf(ti)) return null; const g = tlEnvGeom(ti); return { id: g.id, mode: g.mode, min: g.min, max: g.max, y0: g.y0, y1: g.y1 }; },
+};
 requestAnimationFrame(tlLoop);
 
 // ---------- layers ----------

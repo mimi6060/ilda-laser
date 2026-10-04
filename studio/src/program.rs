@@ -123,6 +123,25 @@ fn ease_area(ease: KeyEase, u: f32) -> f64 {
     }
 }
 
+/// A keyed curve at `x`: `keys` are (position, value, ease), finite and
+/// sorted by position. The first key's value before it, the last's after
+/// it, eased towards the next key in between. `None` without keys. The one
+/// curve evaluation of the studio: cue programs (T-157) and the timeline's
+/// envelopes (T-163) both go through it.
+pub fn curve_at(keys: &[(f64, f32, KeyEase)], x: f64) -> Option<f32> {
+    let (first, last) = (keys.first()?, keys.last()?);
+    if x <= first.0 {
+        return Some(first.1);
+    }
+    if x >= last.0 {
+        return Some(last.1);
+    }
+    let i = keys.iter().rposition(|k| k.0 <= x)?;
+    let (k, next) = (keys[i], keys[i + 1]);
+    let u = ((x - k.0) / (next.0 - k.0)) as f32;
+    Some(k.1 + (next.1 - k.1) * k.2.apply(u))
+}
+
 impl Lane {
     /// Finite keys by beat (on a tie, list order).
     fn sorted(&self) -> Vec<&Key> {
@@ -131,22 +150,10 @@ impl Lane {
         keys
     }
 
-    /// The curve at beat `b`: the first key's value before it, the last's
-    /// after it, eased in between. `None` without keys.
+    /// The curve at beat `b`: see `curve_at`. `None` without keys.
     pub fn value_at(&self, b: f64) -> Option<f32> {
-        let keys = self.sorted();
-        let (first, last) = (keys.first()?, keys.last()?);
-        let b = b as f32;
-        if b <= first.beat {
-            return Some(first.value);
-        }
-        if b >= last.beat {
-            return Some(last.value);
-        }
-        let i = keys.iter().rposition(|k| k.beat <= b)?;
-        let (k, next) = (keys[i], keys[i + 1]);
-        let u = (b - k.beat) / (next.beat - k.beat);
-        Some(k.value + (next.value - k.value) * k.ease.apply(u))
+        let keys: Vec<(f64, f32, KeyEase)> = self.sorted().iter().map(|k| (k.beat as f64, k.value, k.ease)).collect();
+        curve_at(&keys, b)
     }
 
     /// ∫ of the curve from beat 0 to `x` (value × beats), exact for every ease.

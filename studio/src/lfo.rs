@@ -258,6 +258,31 @@ pub fn offset(id: &str, (min, max): (f32, f32), delta: f32, settings: &mut Setti
     id.starts_with("master.color.")
 }
 
+/// Sets one allowed control from a timeline envelope (T-163) on the
+/// engine's copies: `value` replaces the base (`relative` false) or
+/// multiplies it (`relative` true), clamped to `range` (what `modulatable`
+/// returned) and, like every modulation source, never above the base on a
+/// brightness control: an envelope only dims. An id outside the allow-list
+/// or a non-finite value does nothing. Returns true for a colour target:
+/// call `recolor_live` once after the last one.
+pub fn envelope(id: &str, (min, max): (f32, f32), relative: bool, value: f32, settings: &mut Settings, live: &mut LiveModifiers) -> bool {
+    let Some(slot) = slot(id, settings, live) else { return false };
+    if !value.is_finite() {
+        return false;
+    }
+    let base = slot.get();
+    let mut v = if relative { base * value } else { value };
+    if !v.is_finite() {
+        return false;
+    }
+    v = v.clamp(min, max);
+    if is_brightness(id) {
+        v = v.min(base);
+    }
+    slot.set(v);
+    id.starts_with("master.color.")
+}
+
 /// Rebuilds the active colour override from the (modulated) colour params.
 pub fn recolor_live(live: &mut LiveModifiers) {
     live.color = live.color_params.build(live.color.mode_index());

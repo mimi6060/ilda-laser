@@ -1963,6 +1963,21 @@ fn song_view(s: &Shared) -> serde_json::Value {
     v
 }
 
+/// Envelope targets of the loaded show that no envelope may drive (an
+/// unknown id, or a control outside the LFO allow-list, T-163): ignored at
+/// playback, logged here, and returned to the editor in French.
+fn envelope_warnings(s: &Shared) -> Vec<String> {
+    let Some(show) = s.timeline.show.as_ref() else { return Vec::new() };
+    show.unknown_envelope_targets(|id| crate::lfo::modulatable(&s.controls, id).is_some())
+        .into_iter()
+        .map(|id| {
+            let msg = format!("enveloppe ignorée : « {} » n'est pas un paramètre modulable", id.chars().take(40).collect::<String>());
+            log::warn!("{msg}");
+            msg
+        })
+        .collect()
+}
+
 /// `POST /api/timeline/{load,play,pause,stop,seek,loop}` (transport) and
 /// `{new,edit,save}` (the editor, T-162). Nothing here can arm the laser.
 fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &str) -> HttpResponse {
@@ -1994,6 +2009,7 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
                 (None, None) => return text(400, "expected \"name\", \"show\" or \"example\""),
             };
             s.timeline.load(show);
+            envelope_warnings(&s);
         }
         "play" => {
             if let Err(why) = controls::timeline_play(&mut s) {
@@ -2040,7 +2056,8 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
                 return text(400, &format!("{e:#}"));
             }
             s.timeline.edit(show);
-            return json_response(json!({ "state": s.timeline.state(&c), "show": s.timeline.show }));
+            let warnings = envelope_warnings(&s);
+            return json_response(json!({ "state": s.timeline.state(&c), "show": s.timeline.show, "warnings": warnings }));
         }
         "save" => {
             let st = &mut *s;
@@ -4202,7 +4219,23 @@ mod tests {
         let r = json(&body);
         assert_eq!((r["state"]["playing"].as_bool(), r["state"]["modified"].as_bool()), (Some(true), Some(true)));
         assert!(r["show"]["tracks"][0]["events"][0]["id"].as_u64().unwrap() > 0, "ids given by the server");
+        assert_eq!(r["warnings"], json!([]));
         assert_eq!(t.shared.lock().unwrap().shows.load("Editeur web").unwrap().end(), 0.0, "not saved yet");
+
+        // Envelopes (T-163): a bus event needs no cue; an unknown target is
+        // accepted with a warning (ignored at playback), never armed.
+        let mut with_env = show.clone();
+        with_env["tracks"][0]["events"][0]["envelopes"] = json!([{ "target": "look.size", "keys": [{ "at": 0, "value": 0.5, "ease": "smooth" }] }]);
+        with_env["tracks"][1]["kind"] = json!("bus");
+        with_env["tracks"][1]["events"] = json!([{ "start": 0, "len": 1, "envelopes": [{ "target": "transport.arm", "mode": "relative", "keys": [{ "at": 0, "value": 1 }] }] }]);
+        let (status, body) = t.request("POST", "/api/timeline/edit", &json!({ "show": with_env }).to_string());
+        assert_eq!(status, 200, "{body}");
+        let r = json(&body);
+        assert_eq!(r["warnings"].as_array().unwrap().len(), 1);
+        assert!(r["warnings"][0].as_str().unwrap().contains("transport.arm"));
+        assert_eq!(r["show"]["tracks"][0]["events"][0]["envelopes"][0]["keys"][0]["ease"], "smooth");
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+        assert_eq!(t.request("POST", "/api/timeline/edit", &json!({ "show": show }).to_string()).0, 200);
 
         let (status, body) = t.request("POST", "/api/timeline/save", "{}");
         assert_eq!((status, json(&body)["modified"].as_bool()), (200, Some(false)));

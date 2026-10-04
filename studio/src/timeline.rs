@@ -15,7 +15,9 @@
 //! gate as the cues played by hand. It never touches the arm state; an
 //! emergency stop halts it (see `main.rs`).
 
+use crate::controls::ControlRegistry;
 use crate::engine::Settings;
+use crate::evolving::KeyEase;
 use crate::layers::LAYER_COUNT;
 use crate::live::LiveModifiers;
 use crate::presets::Preset;
@@ -195,38 +197,66 @@ pub struct Transition {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvMode {
-    /// The envelope's value replaces the parameter.
+    /// *Absolu*: the envelope's value replaces the parameter.
     #[default]
     Absolute,
-    /// The envelope's value multiplies the parameter.
+    /// *Relatif*: the envelope's value multiplies the parameter.
     Relative,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Curve {
-    #[default]
-    Linear,
-    Step,
-    Smooth,
-}
-
-/// An envelope node, `at` relative to the event start, in show units.
+/// An envelope node, `at` relative to the event start, in show units,
+/// eased towards the next node with the cue programs' easing (T-157).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Key {
     pub at: f64,
     pub value: f32,
-    pub curve: Curve,
+    /// Named `curve` before T-163 (linear / step / smooth, still read).
+    #[serde(alias = "curve")]
+    pub ease: KeyEase,
 }
 
-/// A parameter automation (control id) - stored now, evaluated by T-163.
+/// Envelopes on one event, and nodes on one envelope.
+pub const MAX_ENVELOPES: usize = 16;
+pub const MAX_ENV_KEYS: usize = crate::program::MAX_KEYS;
+
+/// A parameter automation (T-163): the control `target` (a control id
+/// that LFOs may move, `lfo::modulatable`) follows the curve through
+/// `keys` while its event plays. On a cue track it acts on the event's
+/// look and modifiers; on a *Bus* track, on every event of the layer.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Envelope {
     pub target: String,
     pub mode: EnvMode,
     pub keys: Vec<Key>,
+}
+
+impl Envelope {
+    /// The value `local` show units after the event start (see
+    /// `program::curve_at`); `None` without nodes.
+    pub fn value_at(&self, local: f64) -> Option<f32> {
+        let keys: Vec<(f64, f32, KeyEase)> = self.keys.iter().map(|k| (k.at, k.value, k.ease)).collect();
+        crate::program::curve_at(&keys, local)
+    }
+
+    /// Finite nodes only, at 0 or later, sorted, at most `MAX_ENV_KEYS`.
+    fn sanitize(&mut self) {
+        self.keys.retain(|k| k.at.is_finite() && k.value.is_finite());
+        for k in &mut self.keys {
+            k.at = k.at.max(0.0);
+        }
+        self.keys.sort_by(|a, b| a.at.total_cmp(&b.at));
+        self.keys.truncate(MAX_ENV_KEYS);
+    }
+}
+
+/// One envelope's value this frame, for the engine (`apply_envelopes`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvValue {
+    pub target: String,
+    pub mode: EnvMode,
+    pub value: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -330,6 +360,8 @@ impl Show {
                 e.len = finite(e.len);
                 e.offset_beats = finite(e.offset_beats);
                 sanitize_modifiers(&mut e.modifiers);
+                e.envelopes.truncate(MAX_ENVELOPES);
+                e.envelopes.iter_mut().for_each(Envelope::sanitize);
                 if e.id == 0 || !seen.insert(e.id) {
                     e.id = next_id;
                     seen.insert(next_id);
@@ -367,23 +399,52 @@ impl Show {
         if self.markers.iter().any(|m| m.name.chars().count() > MAX_LABEL) {
             bail!("nom de marqueur trop long ({} caractères au plus)", MAX_LABEL);
         }
-        for e in self.tracks.iter().flat_map(|t| &t.events) {
+        for (track, e) in self.tracks.iter().flat_map(|t| t.events.iter().map(move |e| (t, e))) {
             if !(e.start.is_finite() && e.len.is_finite() && e.start >= 0.0 && e.len > 0.0) {
                 bail!("événement {} : début ou durée invalide", e.id);
             }
-            if let EventSource::Cue { id } = &e.source {
+            // A bus event plays nothing: its source is never read.
+            if let (TrackKind::Cues, EventSource::Cue { id }) = (track.kind, &e.source) {
                 if id.is_empty() || id.len() > MAX_CUE_ID || !known(id) {
                     bail!("cue inconnu : {}", id.chars().take(40).collect::<String>());
+                }
+            }
+            if e.envelopes.len() > MAX_ENVELOPES {
+                bail!("événement {} : {} enveloppes au plus", e.id, MAX_ENVELOPES);
+            }
+            for env in &e.envelopes {
+                if env.target.chars().count() > MAX_LABEL {
+                    bail!("enveloppe : paramètre trop long ({} caractères au plus)", MAX_LABEL);
+                }
+                if env.keys.len() > MAX_ENV_KEYS {
+                    bail!("enveloppe « {} » : {} nœuds au plus", env.target, MAX_ENV_KEYS);
+                }
+                if env.keys.iter().any(|k| !k.at.is_finite() || !k.value.is_finite() || k.at < 0.0) {
+                    bail!("enveloppe « {} » : nœud invalide", env.target);
                 }
             }
         }
         Ok(())
     }
 
-    /// Cue ids used by the show's events.
+    /// Envelope targets that no envelope may drive (`allowed` false: an
+    /// unknown id, or a control outside the modulation allow-list), once
+    /// each. They are kept in the file but ignored at playback (T-163).
+    pub fn unknown_envelope_targets(&self, allowed: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for env in self.tracks.iter().flat_map(|t| &t.events).flat_map(|e| &e.envelopes) {
+            if !allowed(&env.target) && !out.contains(&env.target) {
+                out.push(env.target.clone());
+            }
+        }
+        out
+    }
+
+    /// Cue ids used by the show's events (bus tracks play none).
     pub fn cue_ids(&self) -> std::collections::HashSet<&str> {
         self.tracks
             .iter()
+            .filter(|t| t.kind == TrackKind::Cues)
             .flat_map(|t| &t.events)
             .filter_map(|e| match &e.source {
                 EventSource::Cue { id } => Some(id.as_str()),
@@ -498,6 +559,9 @@ pub struct TimelineCue {
     /// Paused, or held after its end: the animation doesn't advance.
     pub frozen: bool,
     pub modifiers: LiveModifiers,
+    /// Envelope values this frame (T-163): the event's own, then the bus
+    /// envelopes of its layer, in that order (`apply_envelopes`).
+    pub envelopes: Vec<EnvValue>,
 }
 
 struct Instance {
@@ -890,10 +954,46 @@ fn ramp(x: f64, from: f64, len: f64) -> f64 {
     }
 }
 
+/// Where an event's own length ends (*Garder* and *Continuer* run on to
+/// the next event of the track, or the end of the show).
+fn base_end(e: &Event, next_start: Option<f64>, show_end: f64) -> f64 {
+    match e.end {
+        EndAction::Stop => e.start + e.len,
+        EndAction::Hold | EndAction::Continue => next_start.unwrap_or(show_end).max(e.start + e.len),
+    }
+}
+
+/// Values at `pos` of `e`'s envelopes (non-empty ones), appended to `out`.
+fn envelope_values(e: &Event, pos: f64, out: &mut Vec<EnvValue>) {
+    for env in &e.envelopes {
+        if let Some(value) = env.value_at(pos - e.start) {
+            out.push(EnvValue { target: env.target.clone(), mode: env.mode, value });
+        }
+    }
+}
+
+/// The envelopes of the unmuted bus tracks at `pos`, per layer (index
+/// layer - 1). A bus event's envelopes act from its start to its end
+/// (*Garder* / *Continuer*: until the next bus event of the track).
+fn bus_envelopes(show: &Show, pos: f64, show_end: f64) -> [Vec<EnvValue>; LAYER_COUNT] {
+    let mut out: [Vec<EnvValue>; LAYER_COUNT] = Default::default();
+    for track in show.tracks.iter().filter(|t| t.kind == TrackKind::Bus && !t.mute) {
+        let layer = (track.layer.clamp(1, LAYER_COUNT as u8) - 1) as usize;
+        for (i, e) in track.events.iter().enumerate() {
+            let end = base_end(e, track.events.get(i + 1).map(|n| n.start), show_end);
+            if pos >= e.start && pos < end {
+                envelope_values(e, pos, &mut out[layer]);
+            }
+        }
+    }
+    out
+}
+
 /// Every event of an audible cue track active at `pos`.
 fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Active> {
     let show_end = show.end();
     let any_solo = show.tracks.iter().any(|t| t.solo && t.kind == TrackKind::Cues);
+    let bus = bus_envelopes(show, pos, show_end);
     let mut out = Vec::new();
     for track in &show.tracks {
         if track.kind != TrackKind::Cues || track.mute || (any_solo && !track.solo) {
@@ -902,10 +1002,7 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
         let events = &track.events;
         for (i, e) in events.iter().enumerate() {
             let next_start = events.get(i + 1).map(|n| n.start);
-            let base_end = match e.end {
-                EndAction::Stop => e.start + e.len,
-                EndAction::Hold | EndAction::Continue => next_start.unwrap_or(show_end).max(e.start + e.len),
-            };
+            let base_end = base_end(e, next_start, show_end);
             // Transition to the next event: (effective end, fade-out window).
             let (end, fade_out_from) = match (e.to_next, next_start) {
                 (Some(t), Some(ns)) if t.kind != TransitionKind::Cut => {
@@ -944,6 +1041,9 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
                     local_c * 60.0 / c.bpm.max(1.0) * NOMINAL_BPM / 60.0
                 }
             };
+            let mut envelopes = Vec::new();
+            envelope_values(e, pos, &mut envelopes);
+            envelopes.extend(bus[(track.layer.clamp(1, LAYER_COUNT as u8) - 1) as usize].iter().cloned());
             out.push(Active {
                 cue: TimelineCue {
                     instance: 0,
@@ -954,6 +1054,7 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
                     content_beat: content + e.offset_beats,
                     frozen: frozen_all || held,
                     modifiers: e.modifiers.clone(),
+                    envelopes,
                 },
                 accumulate_seconds,
                 seconds_estimate: local_c * 60.0 / c.bpm.max(1.0),
@@ -991,6 +1092,24 @@ pub fn look_of(cue: &TimelineCue, presets: &[Preset]) -> Option<Settings> {
     };
     settings.brightness = (settings.brightness * cue.gain).clamp(0.0, 1.0);
     Some(settings)
+}
+
+/// Applies an event's envelope values (T-163) to the engine's per-frame
+/// copies of its look and of its own modifiers, before the master live
+/// stage, calibration and the whole safety chain. Only controls LFOs may
+/// move (`lfo::modulatable`: never arm, safety, calibration, zones,
+/// outputs or caps), through `lfo::envelope`, so a brightness envelope
+/// only dims; an unknown or forbidden target is skipped (the editor and
+/// the load warn about it). In order: the event's envelopes, then its bus's.
+pub fn apply_envelopes(values: &[EnvValue], reg: &ControlRegistry, look: &mut Settings, modifiers: &mut LiveModifiers) {
+    let mut recolor = false;
+    for v in values {
+        let Some(range) = crate::lfo::modulatable(reg, &v.target) else { continue };
+        recolor |= crate::lfo::envelope(&v.target, range, v.mode == EnvMode::Relative, v.value, look, modifiers);
+    }
+    if recolor {
+        crate::lfo::recolor_live(modifiers);
+    }
 }
 
 /// A show as listed by `GET /api/shows`.
@@ -1396,6 +1515,7 @@ mod tests {
             content_beat: 0.0,
             frozen: false,
             modifiers: LiveModifiers::default(),
+            envelopes: Vec::new(),
         };
         let s = look_of(&c, &presets).unwrap();
         assert!((s.brightness - presets[0].settings.brightness * 0.5).abs() < 1e-6);
@@ -1565,5 +1685,150 @@ mod tests {
         assert!(store.load("Mon show").is_err());
         store.save(&Show { name: "Mon show".into(), ..Default::default() }).unwrap();
         crate::datafile::tests::check_kept(&dir, "shows/Mon show.json", false);
+    }
+
+    fn reg() -> ControlRegistry {
+        ControlRegistry::build(&crate::presets::catalog())
+    }
+
+    fn env(target: &str, mode: EnvMode, keys: &[(f64, f32)]) -> Envelope {
+        Envelope { target: target.into(), mode, keys: keys.iter().map(|&(at, value)| Key { at, value, ease: KeyEase::Linear }).collect() }
+    }
+
+    /// The look and modifiers of the first event playing at `t`, through its envelopes.
+    fn rendered(p: &mut Player, t: f64, base: &Settings) -> Vec<(u64, Settings, LiveModifiers)> {
+        p.frame(&clock(t))
+            .into_iter()
+            .map(|cue| {
+                let (mut look, mut m) = (base.clone(), cue.modifiers.clone());
+                apply_envelopes(&cue.envelopes, &reg(), &mut look, &mut m);
+                (cue.event, look, m)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_brightness_envelope_one_to_zero_over_four_beats_is_half_at_two() {
+        let mut e = event(1, 0.0, 8.0);
+        e.envelopes = vec![env("look.brightness", EnvMode::Absolute, &[(0.0, 1.0), (4.0, 0.0)])];
+        let mut p = player(show(TimeBase::Beats, vec![e]));
+        p.play(&clock(0.0));
+        let base = Settings { brightness: 1.0, ..Default::default() };
+        // clock(t): 2 beats a second.
+        for (t, want) in [(0.0, 1.0), (0.5, 0.75), (1.0, 0.5), (2.0, 0.0), (3.0, 0.0)] {
+            let got = rendered(&mut p, t, &base)[0].1.brightness;
+            assert!((got - want).abs() < 1e-5, "beat {}: {got}", t * 2.0);
+        }
+        // Stopped: no event, no envelope.
+        p.stop();
+        assert!(p.frame(&clock(4.0)).is_empty());
+    }
+
+    #[test]
+    fn absolute_and_relative_modes_and_eases() {
+        let base = Settings { scale: 0.8, brightness: 0.6, ..Default::default() };
+        let one = |envelope: Envelope| {
+            let mut e = event(1, 0.0, 10.0);
+            e.envelopes = vec![envelope];
+            let mut p = player(show(TimeBase::Seconds, vec![e]));
+            p.play(&clock(0.0));
+            rendered(&mut p, 1.0, &base).remove(0)
+        };
+        let (_, look, _) = one(env("look.size", EnvMode::Absolute, &[(0.0, 0.5)]));
+        assert!((look.scale - 0.5).abs() < 1e-6, "absolute replaces");
+        let (_, look, _) = one(env("look.size", EnvMode::Relative, &[(0.0, 0.5)]));
+        assert!((look.scale - 0.4).abs() < 1e-6, "relative multiplies");
+        // Brightness only dims, in both modes.
+        let (_, look, _) = one(env("look.brightness", EnvMode::Absolute, &[(0.0, 1.0)]));
+        assert!((look.brightness - 0.6).abs() < 1e-6);
+        let (_, look, _) = one(env("look.brightness", EnvMode::Relative, &[(0.0, 3.0)]));
+        assert!((look.brightness - 0.6).abs() < 1e-6);
+        let (_, _, m) = one(env("master.brightness", EnvMode::Relative, &[(0.0, 0.5)]));
+        assert!((m.brightness - 0.5).abs() < 1e-6, "an event's own dimmer");
+        // Out of range: clamped to the control's range.
+        let (_, _, m) = one(env("master.size", EnvMode::Absolute, &[(0.0, 50.0)]));
+        assert!(m.size <= 2.0);
+        // The cue programs' easing: a step holds until the next node.
+        let mut stepped = env("look.size", EnvMode::Absolute, &[(0.0, 0.2), (2.0, 1.0)]);
+        stepped.keys[0].ease = KeyEase::Step;
+        let (_, look, _) = one(stepped);
+        assert!((look.scale - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_bus_envelope_acts_on_every_track_of_its_layer() {
+        let mut s = show(TimeBase::Seconds, vec![event(1, 0.0, 10.0)]);
+        s.tracks[0].layer = 2;
+        s.tracks.push(Track { layer: 2, events: vec![event(2, 0.0, 10.0)], ..Default::default() });
+        s.tracks.push(Track { layer: 1, events: vec![event(3, 0.0, 10.0)], ..Default::default() });
+        let mut bus_event = Event { id: 4, start: 0.0, len: 4.0, ..Default::default() };
+        bus_event.envelopes = vec![env("master.brightness", EnvMode::Absolute, &[(0.0, 0.25)])];
+        s.tracks.push(Track { kind: TrackKind::Bus, layer: 2, events: vec![bus_event], ..Default::default() });
+        s.sanitize();
+        assert!(s.validate_edit(|id| id == "c").is_ok(), "a bus event needs no cue");
+        assert!(!s.cue_ids().contains(""));
+        let mut p = player(s.clone());
+        p.play(&clock(0.0));
+        let base = Settings::default();
+        let mut got: Vec<(u64, f32)> = rendered(&mut p, 1.0, &base).into_iter().map(|(id, _, m)| (id, m.brightness)).collect();
+        got.sort_by_key(|g| g.0);
+        assert_eq!(got, vec![(1, 0.25), (2, 0.25), (3, 1.0)], "layer 2 only; the bus plays nothing itself");
+        // After the bus event: back to the event's own value.
+        assert!(rendered(&mut p, 5.0, &base).iter().all(|(_, _, m)| m.brightness == 1.0));
+        // A muted bus does nothing.
+        s.tracks[3].mute = true;
+        let mut p = player(s);
+        p.play(&clock(0.0));
+        assert!(rendered(&mut p, 1.0, &base).iter().all(|(_, _, m)| m.brightness == 1.0));
+    }
+
+    #[test]
+    fn an_unknown_or_forbidden_target_is_ignored_without_panic() {
+        let mut e = event(1, 0.0, 10.0);
+        e.envelopes = vec![
+            env("nope.nothing", EnvMode::Absolute, &[(0.0, 1.0)]),
+            env("transport.arm", EnvMode::Absolute, &[(0.0, 1.0)]),
+            env("tempo.bpm", EnvMode::Absolute, &[(0.0, 200.0)]),
+            env("layer.1.dimmer", EnvMode::Absolute, &[(0.0, 0.0)]),
+            env("look.size", EnvMode::Absolute, &[(0.0, 0.5)]),
+        ];
+        let s = show(TimeBase::Seconds, vec![e]);
+        let r = reg();
+        let unknown = s.unknown_envelope_targets(|id| crate::lfo::modulatable(&r, id).is_some());
+        assert_eq!(unknown, vec!["nope.nothing", "transport.arm", "tempo.bpm", "layer.1.dimmer"]);
+        let mut p = player(s);
+        p.play(&clock(0.0));
+        let (_, look, m) = rendered(&mut p, 1.0, &Settings::default()).remove(0);
+        assert!((look.scale - 0.5).abs() < 1e-6, "the allowed one still plays");
+        assert_eq!(m, LiveModifiers::default());
+    }
+
+    #[test]
+    fn envelopes_are_sanitized_validated_and_old_files_still_load() {
+        // Before T-163 a node had `curve` (linear / step / smooth).
+        let old = r#"{"tracks":[{"events":[{"id":1,"start":0,"len":4,"source":{"kind":"cue","id":"c"},
+            "envelopes":[{"target":"look.size","mode":"relative","keys":[{"at":2,"value":0.5,"curve":"step"},{"at":1,"value":0.1,"curve":"smooth"}]}]}]}]}"#;
+        let mut s: Show = serde_json::from_str(old).unwrap();
+        s.sanitize();
+        let keys = &s.tracks[0].events[0].envelopes[0].keys;
+        assert_eq!(keys.iter().map(|k| (k.at, k.ease)).collect::<Vec<_>>(), vec![(1.0, KeyEase::Smooth), (2.0, KeyEase::Step)], "sorted");
+        // Without envelopes at all: an empty list.
+        let none: Show = serde_json::from_str(r#"{"tracks":[{"events":[{"id":1}]}]}"#).unwrap();
+        assert!(none.tracks[0].events[0].envelopes.is_empty());
+        // Bad numbers are dropped on load, refused from the editor.
+        let mut e = event(1, 0.0, 4.0);
+        e.envelopes = vec![env("look.size", EnvMode::Absolute, &[(f64::NAN, 1.0), (-2.0, 0.5), (1.0, f32::INFINITY)])];
+        let mut bad = Show { tracks: vec![Track { events: vec![e], ..Default::default() }], ..Default::default() };
+        assert!(bad.validate_edit(|_| true).is_err());
+        bad.sanitize();
+        assert_eq!(bad.tracks[0].events[0].envelopes[0].keys, vec![Key { at: 0.0, value: 0.5, ease: KeyEase::Linear }]);
+        let mut many = event(1, 0.0, 4.0);
+        many.envelopes = vec![env("look.size", EnvMode::Absolute, &[(0.0, 1.0)]); MAX_ENVELOPES + 1];
+        let many = Show { tracks: vec![Track { events: vec![many], ..Default::default() }], ..Default::default() };
+        assert!(many.validate_edit(|_| true).is_err());
+        let mut long = event(1, 0.0, 4.0);
+        long.envelopes = vec![env("look.size", EnvMode::Absolute, &vec![(0.0, 1.0); MAX_ENV_KEYS + 1])];
+        let long = Show { tracks: vec![Track { events: vec![long], ..Default::default() }], ..Default::default() };
+        assert!(long.validate_edit(|_| true).is_err());
     }
 }
