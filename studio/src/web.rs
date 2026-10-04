@@ -850,6 +850,37 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        // The cue grid's size and pages (T-272). Every POST is an edit: locked in show mode.
+        (Method::Get, "/api/grid") => json_response(grid_json(&shared.lock().unwrap())),
+        (Method::Post, "/api/grid") => match body::<GridRequest>(request) {
+            Ok(req) => grid_edit(shared, |g, _| {
+                // An empty list = back to the default pages.
+                if let Some(pages) = req.pages {
+                    g.pages = pages;
+                }
+                g.set_size(req.cols.unwrap_or(g.cols), req.rows.unwrap_or(g.rows))?;
+                g.sanitize();
+                Ok(None)
+            }),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/grid/page") => match body::<GridPageRequest>(request) {
+            Ok(req) => grid_edit(shared, |g, presets| match req.action.as_str() {
+                "new" => g.new_page(req.name.as_deref().unwrap_or(""), presets).map(Some),
+                "rename" => g.rename_page(req.page.unwrap_or(usize::MAX), req.name.as_deref().unwrap_or(""), presets).map(|()| None),
+                "delete" => g.delete_page(req.page.unwrap_or(usize::MAX), presets).map(|()| None),
+                other => anyhow::bail!("action inconnue : « {other} »"),
+            }),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/grid/move") => match body::<GridMoveRequest>(request) {
+            Ok(req) => grid_edit(shared, |g, presets| g.move_cell(req.from, req.to, presets).map(|()| None)),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/grid/clear") => match body::<GridCellRequest>(request) {
+            Ok(req) => grid_edit(shared, |g, presets| g.clear_cell(req.page, req.slot, presets).map(|()| None)),
+            Err(e) => e,
+        },
         (Method::Get, "/api/layers") => json_response(json!(shared.lock().unwrap().mixer)),
         (Method::Post, "/api/layers") => match body::<crate::layers::Mixer>(request) {
             Ok(mut mixer) => {
@@ -1739,6 +1770,70 @@ fn projection_view(s: &Shared) -> serde_json::Value {
     json!({ "config": s.projection.get(), "align": s.projection.align, "max_zones": crate::projection::MAX_ZONES })
 }
 
+/// `POST /api/grid`: a new size, and/or every page at once (`[]` = the defaults).
+#[derive(Deserialize)]
+struct GridRequest {
+    cols: Option<u8>,
+    rows: Option<u8>,
+    pages: Option<Vec<crate::grid::CuePage>>,
+}
+
+/// `POST /api/grid/page`: « Nouvelle page », « Renommer la page », delete.
+#[derive(Deserialize)]
+struct GridPageRequest {
+    action: String,
+    page: Option<usize>,
+    name: Option<String>,
+}
+
+/// `POST /api/grid/move`: (page, cell) → (page, cell or the first empty one).
+#[derive(Deserialize)]
+struct GridMoveRequest {
+    from: (usize, usize),
+    to: (usize, Option<usize>),
+}
+
+#[derive(Deserialize)]
+struct GridCellRequest {
+    page: usize,
+    slot: usize,
+}
+
+/// The grid as the page draws it: size, pages as shown, current page.
+fn grid_json(s: &Shared) -> serde_json::Value {
+    let g = &s.grid;
+    json!({
+        "cols": g.cols,
+        "rows": g.rows,
+        "default": g.is_default(),
+        "rev": g.rev,
+        "page": s.cue_page,
+        "pages": g.view(),
+        "limits": { "cols": [crate::grid::MIN_COLS, crate::grid::MAX_COLS], "rows": [crate::grid::MIN_ROWS, crate::grid::MAX_ROWS] },
+    })
+}
+
+/// Runs a grid edit; on success, resolves the grid again, rebuilds the
+/// grid controls, saves `pages.json` and answers with the new grid. `Some(n)`
+/// from the edit shows page n.
+fn grid_edit(shared: &Mutex<Shared>, edit: impl FnOnce(&mut crate::grid::CueGrid, &[crate::presets::Preset]) -> anyhow::Result<Option<usize>>) -> HttpResponse {
+    let mut guard = shared.lock().unwrap();
+    let s = &mut *guard;
+    let mut grid = s.grid.clone();
+    match edit(&mut grid, &s.presets) {
+        Ok(show) => {
+            s.grid = grid;
+            if let Some(n) = show {
+                s.cue_page = n;
+            }
+            crate::grid::refresh(s);
+            s.grid.save();
+            json_response(grid_json(s))
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
 #[derive(Deserialize)]
 struct SlotRequest {
     id: String,
@@ -2066,6 +2161,7 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
         "pps": s.pps,
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "cue_page": s.cue_page,
+        "grid_rev": s.grid.rev,
         "active_cue": s.active_cue,
         "settings_rev": s.settings_rev,
         "cues": {
@@ -2776,6 +2872,10 @@ mod tests {
             ("/api/project/open", r#"{"path":"x"}"#),
             ("/api/midi/learn", r#"{"target":"master.size"}"#),
             ("/api/cues/slot", r#"{"id":"tunnels-001"}"#),
+            ("/api/grid", r#"{"cols":6,"rows":4}"#),
+            ("/api/grid/page", r#"{"action":"new"}"#),
+            ("/api/grid/move", r#"{"from":[1,0],"to":[0,null]}"#),
+            ("/api/grid/clear", r#"{"page":0,"slot":0}"#),
             ("/api/timeline/edit", "{}"),
         ] {
             let (code, text) = t.request("POST", path, body);
@@ -3841,6 +3941,43 @@ mod tests {
         // `null` removes it.
         assert_eq!(set("tunnels-001", &serde_json::Value::Null).0, 200);
         assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["program"], serde_json::Value::Null);
+    }
+
+    /// T-272: the grid's size and pages through the API, and the grid
+    /// controls following them.
+    #[test]
+    fn the_cue_grid_api_resizes_and_edits_pages() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        let g = js(&t.request("GET", "/api/grid", "").1);
+        assert_eq!((g["cols"].as_u64(), g["rows"].as_u64(), g["default"].as_bool()), (Some(8), Some(5), Some(true)));
+        assert_eq!(g["pages"][1]["name"], "Tunnels");
+        assert_eq!(g["pages"][1]["cells"].as_array().unwrap().len(), 40);
+        assert_eq!(g["pages"][1]["cells"][0], "tunnels-001");
+
+        let g = js(&t.request("POST", "/api/grid", r#"{"cols":6,"rows":4}"#).1);
+        assert_eq!(g["pages"][1]["cells"].as_array().unwrap().len(), 24);
+        assert_eq!(g["pages"][1]["cells"][0], "tunnels-001");
+        assert_eq!(t.request("POST", "/api/grid", r#"{"cols":3}"#).0, 400);
+        assert!(t.shared.lock().unwrap().controls.get("grid.2.4.5").is_some(), "Tunnels: 23 cues");
+        assert!(t.shared.lock().unwrap().controls.get("grid.2.1.7").is_none(), "6 columns");
+
+        // A new page is shown; a cue dragged onto it plays from its cell.
+        let g = js(&t.request("POST", "/api/grid/page", r#"{"action":"new","name":"Final"}"#).1);
+        let n = g["page"].as_u64().unwrap() as usize;
+        assert_eq!(g["pages"][n]["name"], "Final");
+        assert_eq!(g["default"], false);
+        assert_eq!(t.request("POST", "/api/grid/move", &format!(r#"{{"from":[1,0],"to":[{n},5]}}"#)).0, 200);
+        assert_eq!(t.request("POST", "/api/control", &format!(r#"{{"id":"grid.{}.1.6"}}"#, n + 1)).0, 200);
+        assert_eq!(t.shared.lock().unwrap().active_cue.as_deref(), Some("tunnels-001"));
+        assert_eq!(t.request("POST", "/api/grid/page", &format!(r#"{{"action":"rename","page":{n},"name":" "}}"#)).0, 400);
+        assert_eq!(t.request("POST", "/api/grid/page", r#"{"action":"explode"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/grid/clear", &format!(r#"{{"page":{n},"slot":5}}"#)).0, 200);
+        assert!(t.shared.lock().unwrap().controls.get(&format!("grid.{}.1.6", n + 1)).is_none());
+        assert_eq!(t.request("POST", "/api/grid/page", &format!(r#"{{"action":"delete","page":{n}}}"#)).0, 200);
+        // Back to the default 8×5 pages.
+        let g = js(&t.request("POST", "/api/grid", r#"{"cols":8,"rows":5,"pages":[]}"#).1);
+        assert_eq!((g["default"].as_bool(), g["pages"][0]["cells"].as_array().unwrap().len()), (Some(true), 40));
         assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 }

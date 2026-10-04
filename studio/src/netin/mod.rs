@@ -44,7 +44,6 @@ pub mod sacn;
 use crate::controls::{self, ControlInput, ControlKind};
 use crate::external::{self, SourceKind};
 use crate::interlock::{ArmSource, EStop};
-use crate::presets::CATEGORIES;
 use crate::Shared;
 use artnet::{Function, CHART};
 use osc::{OscArg, OscCommand, OscMessage};
@@ -704,7 +703,7 @@ fn dmx_packet(s: &mut Shared, from: IpAddr, values: [Option<u8>; CHART.len()], n
                 }
             }
             Function::Page => {
-                if external::set_page(s, SourceKind::Dmx, "", artnet::page(v, CATEGORIES.len()), now).is_ok() {
+                if external::set_page(s, SourceKind::Dmx, "", artnet::page(v, s.grid.page_count()), now).is_ok() {
                     cue_changed = true;
                 }
             }
@@ -735,7 +734,7 @@ fn dmx_cue(s: &mut Shared, value: Option<u8>, fresh: bool, now: Instant) {
         Some(v) if (1..=cells).contains(&(v as usize)) => {
             let i = v as usize - 1;
             let cell = format!("{}.{}.{}", s.cue_page + 1, i / controls::GRID_COLS + 1, i % controls::GRID_COLS + 1);
-            if let Some(id) = controls::grid_cell_preset(&s.presets, &cell) {
+            if let Some(id) = controls::grid_cell_preset(&s.grid, &cell) {
                 let _ = external::play_cue(s, SourceKind::Dmx, "", &id, now);
             }
         }
@@ -1070,11 +1069,11 @@ mod tests {
         let mut v = NEUTRAL;
         v[2] = 3;
         dmx_at(&mut s, &v, t0);
-        let want = controls::grid_cell_preset(&s.presets, "1.1.3").unwrap();
+        let want = controls::grid_cell_preset(&s.grid, "1.1.3").unwrap();
         assert_eq!(s.active_cue.as_deref(), Some(want.as_str()));
         v[1] = 255; // last page
         dmx_at(&mut s, &v, t0);
-        assert_eq!(s.cue_page, CATEGORIES.len() - 1);
+        assert_eq!(s.cue_page, s.grid.page_count() - 1);
         v[2] = 0;
         dmx_at(&mut s, &v, t0);
         assert!(s.deck.active.is_empty());

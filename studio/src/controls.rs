@@ -8,6 +8,7 @@
 
 use crate::cues::{self, ClickMode, CueDeck, CLICK_MODES, CLICK_MODE_LABELS};
 use crate::engine::Settings;
+use crate::grid::CueGrid;
 use crate::interlock::{ArmSource, DisarmReason};
 use crate::layers::{Layer, LAYER_COUNT};
 use crate::presets::{Preset, CATEGORIES};
@@ -21,7 +22,9 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 
-/// Size of one cue-grid page: 5 rows x 8 columns, the APC40 clip grid.
+/// A controller's pad grid: 5 rows x 8 columns, the APC40 clip grid (and
+/// the default cue grid, grid.rs). Pad n is the cell at row n / 8, column
+/// n % 8 of the cue grid, whatever the grid's size.
 pub const GRID_ROWS: usize = 5;
 pub const GRID_COLS: usize = 8;
 
@@ -81,7 +84,15 @@ pub struct ControlRegistry {
 }
 
 impl ControlRegistry {
+    /// The registry with the default cue grid (8x5, pages from the categories).
     pub fn build(presets: &[Preset]) -> Self {
+        let mut grid = CueGrid::default();
+        grid.resolve(presets);
+        Self::build_for(presets, &grid)
+    }
+
+    /// `grid` must be resolved against `presets` (grid::refresh).
+    pub fn build_for(presets: &[Preset], grid: &CueGrid) -> Self {
         let mut descs = Vec::new();
         let mut add = |id: String, label_fr: String, group: &'static str, kind: ControlKind, external: bool| {
             descs.push(ControlDesc { id, label_fr, group, kind, external });
@@ -170,7 +181,10 @@ impl ControlRegistry {
 
         add("page.next".into(), "Page de cues suivante".into(), "page", ControlKind::Trigger, true);
         add("page.prev".into(), "Page de cues précédente".into(), "page", ControlKind::Trigger, true);
-        for (i, name) in CATEGORIES.iter().enumerate() {
+        // At least one per category, so saved mappings to page.N stay known
+        // when the operator has fewer pages (selecting a missing page does nothing).
+        for i in 0..grid.view().len().max(CATEGORIES.len()) {
+            let name = grid.view().get(i).map_or_else(|| format!("{}", i + 1), |p| p.name.clone());
             add(format!("page.{}", i + 1), format!("Page {name}"), "page", ControlKind::Trigger, true);
         }
 
@@ -195,11 +209,13 @@ impl ControlRegistry {
 
         // Momentary: pad down (value 1) presses, pad up (value 0) releases -
         // what flash and solo need. Toggle/restart cues ignore the release.
-        for (page, category) in CATEGORIES.iter().enumerate() {
-            let cues: Vec<&Preset> = presets.iter().filter(|p| p.category == *category).collect();
-            for (i, cue) in cues.iter().take(GRID_ROWS * GRID_COLS).enumerate() {
-                let (row, col) = (i / GRID_COLS + 1, i % GRID_COLS + 1);
-                add(format!("grid.{}.{row}.{col}", page + 1), cue.name.clone(), "grid", ControlKind::Momentary, true);
+        let names: HashMap<&str, &str> = presets.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
+        let cols = grid.cols as usize;
+        for (page, view) in grid.view().iter().enumerate() {
+            for (i, cue) in view.cells.iter().enumerate() {
+                let Some(name) = cue.as_deref().and_then(|id| names.get(id)) else { continue };
+                let (row, col) = (i / cols + 1, i % cols + 1);
+                add(format!("grid.{}.{row}.{col}", page + 1), name.to_string(), "grid", ControlKind::Momentary, true);
             }
         }
 
@@ -388,8 +404,8 @@ pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -
             s.deck.save();
         }
         "cue.stop_all" => with_deck(s, |d, _| d.stop_all()),
-        "page.next" => s.cue_page = (s.cue_page + 1) % CATEGORIES.len(),
-        "page.prev" => s.cue_page = (s.cue_page + CATEGORIES.len() - 1) % CATEGORIES.len(),
+        "page.next" => s.cue_page = (s.cue_page + 1) % s.grid.page_count(),
+        "page.prev" => s.cue_page = (s.cue_page + s.grid.page_count() - 1) % s.grid.page_count(),
         other => {
             if let Some(rest) = other.strip_prefix("master.rot_") {
                 let axis = match &rest[..1] {
@@ -415,9 +431,11 @@ pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -
                 return Ok(());
             }
             if let Some(n) = other.strip_prefix("page.").and_then(|n| n.parse::<usize>().ok()) {
-                s.cue_page = n - 1;
+                if (1..=s.grid.page_count()).contains(&n) {
+                    s.cue_page = n - 1;
+                }
             } else if let Some(cell) = other.strip_prefix("grid.") {
-                let preset_id = grid_cell_preset(&s.presets, cell).ok_or_else(|| ControlError::Unknown(id.to_string()))?;
+                let preset_id = grid_cell_preset(&s.grid, cell).ok_or_else(|| ControlError::Unknown(id.to_string()))?;
                 press_cue_from(s, &preset_id, None, truthy(input), Some(src.id()));
             } else {
                 return Err(ControlError::Unknown(id.to_string()));
@@ -541,25 +559,26 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         }
         id => {
             // Grid cells light up while their cue (or show) plays (LED feedback).
-            let cue = grid_cell_preset(&s.presets, id.strip_prefix("grid.")?)?;
+            let cue = grid_cell_preset(&s.grid, id.strip_prefix("grid.")?)?;
             json!(s.deck.active.iter().any(|a| a.cue == cue) || show_cue_playing(s, &cue))
         }
     })
 }
 
-/// "<page>.<row>.<col>" → the preset in that grid cell.
-pub(crate) fn grid_cell_preset(presets: &[Preset], cell: &str) -> Option<String> {
+/// "<page>.<row>.<col>" (1-based, in the cue grid's current size) → the
+/// preset in that cell.
+pub(crate) fn grid_cell_preset(grid: &CueGrid, cell: &str) -> Option<String> {
     let parts: Vec<usize> = cell.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
     let [page, row, col] = parts[..] else { return None };
-    if !(1..=GRID_ROWS).contains(&row) || !(1..=GRID_COLS).contains(&col) {
-        return None;
-    }
-    let category = CATEGORIES.get(page.checked_sub(1)?)?;
-    presets
-        .iter()
-        .filter(|p| p.category == *category)
-        .nth((row - 1) * GRID_COLS + (col - 1))
-        .map(|p| p.id.clone())
+    grid.cell(page, row, col).map(str::to_string)
+}
+
+/// Controller pad `slot` (0..40, row-major over 8 columns) → the cell id
+/// `grid.<page>.<row>.<col>` of page `page` (0-based), if the grid has
+/// that cell.
+pub fn pad_cell(grid: &CueGrid, page: usize, slot: usize) -> Option<String> {
+    let (row, col) = (slot / GRID_COLS + 1, slot % GRID_COLS + 1);
+    (slot < GRID_ROWS * GRID_COLS && row <= grid.rows as usize && col <= grid.cols as usize).then(|| format!("grid.{}.{row}.{col}", page + 1))
 }
 
 /// A cue's look as it starts: the preset, but with the operator's
@@ -919,7 +938,7 @@ mod tests {
     fn pages_wrap_around() {
         let mut s = shared();
         apply(&mut s, "page.prev", ControlInput::Value(1.0), true).unwrap();
-        assert_eq!(s.cue_page, CATEGORIES.len() - 1);
+        assert_eq!(s.cue_page, s.grid.page_count() - 1);
         apply(&mut s, "page.next", ControlInput::Value(1.0), true).unwrap();
         assert_eq!(s.cue_page, 0);
         apply(&mut s, "page.3", ControlInput::Value(1.0), true).unwrap();

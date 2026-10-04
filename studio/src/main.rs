@@ -27,6 +27,7 @@ mod figure_import;
 mod figures;
 mod font;
 mod generators;
+mod grid;
 mod ilda;
 mod ilda_library;
 mod instance;
@@ -220,7 +221,7 @@ pub struct Shared {
     pub playlist: Option<Playlist>,
     pub presets: Vec<presets::Preset>,
     pub controls: controls::ControlRegistry,
-    /// Cue-grid page shown in the UI and on MIDI grids (0-based category index).
+    /// Cue-grid page shown in the UI and on MIDI grids (0-based, in `grid.view()`).
     pub cue_page: usize,
     /// Id of the newest playing cue, for highlighting and LED feedback.
     pub active_cue: Option<String>,
@@ -229,6 +230,8 @@ pub struct Shared {
     pub settings_rev: u64,
     /// Playing cues and the grid's trigger settings (cues.rs).
     pub deck: cues::CueDeck,
+    /// The cue grid's size and pages (grid.rs, pages.json).
+    pub grid: grid::CueGrid,
     /// Whether `settings` is shown when no cue plays: on for a scene, the
     /// playlist or a look edited by hand; off once the last cue is stopped.
     pub look_on: bool,
@@ -808,6 +811,7 @@ fn startup_state(cli: &Cli) -> Shared {
         active_cue: None,
         settings_rev: 0,
         deck: cues::CueDeck::load(cli.data_dir.join("grid.json")),
+        grid: grid::CueGrid::load(cli.data_dir.join("pages.json")),
         look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch,

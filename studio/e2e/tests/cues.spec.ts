@@ -1,5 +1,6 @@
 // Cue grid: page tabs, clicking a cue, AZERTY cue keys, and pages changed
-// from outside the UI (MIDI / API) showing up in it.
+// from outside the UI (MIDI / API) showing up in it. T-272: a fixed 8×5
+// grid with empty cells, pages on F5–F12 / Alt+1…9, cue keys by e.code.
 import { test, expect, useStudio, openUi, reveal, focusPage } from '../studio';
 
 const studio = useStudio();
@@ -7,22 +8,35 @@ let catalog: Awaited<ReturnType<typeof studio.presets>>;
 const pageCues = (category: string) => catalog.presets.filter(p => p.category === category);
 const activeCue = async () => (await studio.controlValues()).active_cue;
 const cuePage = async () => (await studio.controlValues()).cue_page; // 1-based
+type Grid = { cols: number; rows: number; default: boolean; page: number; pages: { name: string; cells: (string | null)[]; hidden: number }[] };
+const getGrid = () => studio.get<Grid>('/api/grid');
+// The first pages are the categories, in order, each holding its first 40 cues.
+const tab = (page: import('@playwright/test').Page, i: number) => page.locator('#cueTabs button').nth(i);
 
 test.beforeAll(async () => { catalog = await studio.presets(); });
 
 test.beforeEach(async ({ page }) => {
   await studio.reset();
+  await studio.post('/api/grid', { cols: 8, rows: 5, pages: [] });
   await studio.post('/api/control', { id: 'page.1' });
   await openUi(page, studio);
 });
 
-test('shows one tab per category and the first page of cues', async ({ page }) => {
+test('shows one tab per page (categories first) and the first page of cues', async ({ page }) => {
   const tabs = page.locator('#cueTabs button');
-  await expect(tabs).toHaveCount(catalog.categories.length);
+  const grid = await getGrid();
+  expect(grid.pages.slice(0, catalog.categories.length).map(p => p.name)).toEqual(catalog.categories);
+  await expect(tabs).toHaveCount(grid.pages.length);
   const first = catalog.categories[0];
-  await expect(tabs.first()).toHaveText(`${first} (${pageCues(first).length})`);
+  await expect(tabs.first().locator('.pn')).toHaveText(`${first} (40)`);
+  await expect(tabs.first().locator('kbd')).toHaveText('F5');
+  await expect(tabs.nth(8).locator('kbd')).toHaveText('Alt+9');
   await expect(tabs.first()).toHaveClass(/active/);
-  await expect(page.locator('#cues .cue')).toHaveCount(pageCues(first).length);
+  // A fixed 8×5 page: 40 cells, the rest of the category on a later page.
+  await expect(page.locator('#cues .cue')).toHaveCount(40);
+  const more = grid.pages.findIndex(p => p.name === `${first} 2`);
+  expect(more).toBeGreaterThanOrEqual(catalog.categories.length);
+  expect(grid.pages[more].cells.filter(Boolean)).toEqual(pageCues(first).slice(40).map(p => p.id));
   await expect(page.locator('#cues .cue').first()).toContainText(pageCues(first)[0].name);
   await expect(page.locator('#cues .cue').first().locator('.key')).toHaveText('A');
 });
@@ -52,34 +66,156 @@ test('a cue keeps the operator\'s look brightness', async ({ page }) => {
 test('a page tab shows that page, and a click plays that page\'s cue', async ({ page }) => {
   const category = catalog.categories[2];
   const cues = pageCues(category);
-  const tab = page.locator('#cueTabs button', { hasText: category });
-  await tab.click();
-  await expect(page.locator('#cueTabs button', { hasText: category })).toHaveClass(/active/);
+  await tab(page, 2).click();
+  await expect(tab(page, 2)).toHaveClass(/active/);
   await expect.poll(cuePage).toBe(3);
-  await expect(page.locator('#cues .cue')).toHaveCount(cues.length);
+  await expect(page.locator('#cues .cue')).toHaveCount(Math.min(40, cues.length));
   await expect(page.locator('#cues .cue').first()).toContainText(cues[0].name);
 
   await page.locator('#cues .cue').nth(4).click();
   await expect.poll(activeCue).toBe(cues[4].id);
   await expect(page.locator('#cues .cue').nth(4)).toHaveClass(/active/);
   // The page stays where the operator put it.
-  await expect(page.locator('#cueTabs button', { hasText: category })).toHaveClass(/active/);
+  await expect(tab(page, 2)).toHaveClass(/active/);
   expect(await cuePage()).toBe(3);
 });
 
-test('an AZERTY key plays the matching cue of the current page', async ({ page }) => {
+test('a cue key plays the cell under the same finger of the current page', async ({ page }) => {
   const category = catalog.categories[1];
   const cues = pageCues(category);
-  await page.locator('#cueTabs button', { hasText: category }).click();
+  await tab(page, 1).click();
   await expect.poll(cuePage).toBe(2);
   await focusPage(page);
 
-  await page.keyboard.press('z'); // 2nd key on the AZERTY row
+  // Playwright types on a QWERTY layout: W is where the AZERTY Z is (2nd key).
+  await page.keyboard.press('KeyW');
   await expect.poll(activeCue).toBe(cues[1].id);
   await expect(page.locator(`#cues .cue[data-id="${cues[1].id}"]`)).toHaveClass(/active/);
+  await expect(page.locator('#cues .cue').nth(1).locator('.key')).toHaveText('Z');
 
-  await page.keyboard.press('q'); // first key of the second row = 11th cue
+  await page.keyboard.press('KeyA'); // first key of the second row (AZERTY Q) = 11th cue
   await expect.poll(activeCue).toBe(cues[10].id);
+});
+
+test('T-272: AZERTY « a » and QWERTY « q » (same e.code KeyQ) play the same cell', async ({ page }) => {
+  const cues = pageCues(catalog.categories[0]);
+  await focusPage(page);
+  const press = (key: string) => page.evaluate(k => {
+    for (const type of ['keydown', 'keyup']) document.dispatchEvent(new KeyboardEvent(type, { key: k, code: 'KeyQ', bubbles: true }));
+  }, key);
+  await press('a'); // AZERTY
+  await expect.poll(activeCue).toBe(cues[0].id);
+  await press('a'); // toggles it off
+  await expect.poll(activeCue).toBeNull();
+  await press('q'); // QWERTY
+  await expect.poll(activeCue).toBe(cues[0].id);
+});
+
+test('T-272: F6 and Alt+2 show page 2; F1–F4 still switch workspaces', async ({ page }) => {
+  await focusPage(page);
+  await page.keyboard.press('F6');
+  await expect.poll(cuePage).toBe(2);
+  await expect(tab(page, 1)).toHaveClass(/active/);
+  await page.keyboard.press('F5');
+  await expect.poll(cuePage).toBe(1);
+  await page.keyboard.press('Alt+Digit2');
+  await expect.poll(cuePage).toBe(2);
+  await expect(tab(page, 1)).toHaveClass(/active/);
+  // Letters now play page 2's cues.
+  await page.keyboard.press('KeyQ');
+  await expect.poll(activeCue).toBe(pageCues(catalog.categories[1])[0].id);
+  await page.keyboard.press('F2');
+  await expect(page.locator('#wsTabs [data-ws-tab="timeline"]')).toHaveClass(/active/);
+  expect(await cuePage()).toBe(2);
+  await page.keyboard.press('F1');
+  await expect(page.locator('#wsTabs [data-ws-tab="live"]')).toHaveClass(/active/);
+});
+
+test('T-272: the grid stays 8×5 at any width; empty cells keep their place and do nothing', async ({ page }) => {
+  const cues = pageCues(catalog.categories[1]); // Tunnels: fewer than 40
+  expect(cues.length).toBeLessThan(40);
+  await tab(page, 1).click();
+  for (const width of [1440, 1100]) {
+    await page.setViewportSize({ width, height: 900 });
+    const cells = page.locator('#cues > *');
+    await expect(cells).toHaveCount(40);
+    const tops = await cells.evaluateAll(els => els.map(e => Math.round(e.getBoundingClientRect().top)));
+    expect(new Set(tops).size, `${width}px`).toBe(5);
+  }
+  await expect(page.locator('#cues .cue-empty')).toHaveCount(40 - cues.length);
+  const empty = page.locator('#cues .cue-empty').first();
+  await empty.click({ force: true });
+  await page.waitForTimeout(200);
+  expect(await activeCue()).toBeNull();
+  // The key of an empty cell plays nothing either (cell 40 has no key; cell 26 = N).
+  await focusPage(page);
+  if (cues.length < 26) {
+    await page.keyboard.press('KeyN');
+    await page.waitForTimeout(200);
+    expect(await activeCue()).toBeNull();
+  }
+});
+
+test('T-272: a 6×4 grid keeps the cues in order and is saved', async ({ page }) => {
+  await page.locator('#gridMenuBtn').click();
+  await page.locator('#gridCols').fill('6');
+  await page.locator('#gridCols').press('Tab');
+  await page.locator('#gridRows').fill('4');
+  await page.locator('#gridRows').press('Tab');
+  await expect.poll(async () => { const g = await getGrid(); return [g.cols, g.rows]; }).toEqual([6, 4]);
+  await expect(page.locator('#cues > *')).toHaveCount(24);
+  const first = pageCues(catalog.categories[0]);
+  const shown = await page.locator('#cues .cue').evaluateAll(els => els.map(e => (e as HTMLElement).dataset.id));
+  expect(shown).toEqual(first.slice(0, 24).map(p => p.id));
+  // Every cue of the category is still on a page, in order.
+  const grid = await getGrid();
+  const all = grid.pages.flatMap(p => p.cells).filter(id => first.some(c => c.id === id));
+  expect(all).toEqual(first.map(p => p.id));
+  // Saved: a reload shows the same size.
+  await page.reload();
+  await openUi(page, studio);
+  await expect(page.locator('#cues > *')).toHaveCount(24);
+});
+
+test('T-272: a new page is empty, a cue dragged onto it plays from there', async ({ page }) => {
+  await page.locator('#gridMenuBtn').click();
+  await page.locator('#gridPageName').fill('Final');
+  await page.locator('#gridPageNew').click();
+  const active = page.locator('#cueTabs button.active');
+  await expect(active.locator('.pn')).toHaveText('Final (0)');
+  await expect(page.locator('#cues')).toHaveAttribute('data-empty', 'Page vide');
+  await expect(page.locator('#cues .cue-empty')).toHaveCount(40);
+  const final = (await getGrid()).pages.findIndex(p => p.name === 'Final');
+  // « Réorganiser »: drag the first cue of page 1 onto the Final tab.
+  await tab(page, 0).click();
+  await page.locator('#gridEdit').click();
+  const cue = pageCues(catalog.categories[0])[0];
+  await page.locator(`#cues .cue[data-id="${cue.id}"]`).dragTo(tab(page, final));
+  await expect.poll(async () => (await getGrid()).pages[final].cells[0]).toBe(cue.id);
+  // While editing, a click doesn't play.
+  expect(await activeCue()).toBeNull();
+  await page.locator('#gridEdit').click();
+  await tab(page, final).click();
+  await page.locator(`#cues .cue[data-id="${cue.id}"]`).click();
+  await expect.poll(activeCue).toBe(cue.id);
+  // Renamed, then removed from the page through « Propriétés du cue ».
+  await page.locator('#gridPageName').fill('Rappel');
+  await page.locator('#gridPageRename').click();
+  await expect(page.locator('#cueTabs button.active .pn')).toHaveText('Rappel (1)');
+  await page.locator(`#cues .cue[data-id="${cue.id}"]`).click({ button: 'right' });
+  await page.locator('#cueMenuRemove').click();
+  await expect(page.locator('#cues .cue')).toHaveCount(0);
+});
+
+test('T-272: in show mode the grid can\'t be edited but pages still change', async ({ page }) => {
+  expect(await studio.post('/api/lock', { show_mode: true })).toBe(200);
+  await expect(page.locator('#gridMenuBtn')).toBeHidden();
+  expect(await studio.post('/api/grid', { cols: 6, rows: 4 })).toBe(423);
+  expect(await studio.post('/api/grid/page', { action: 'new' })).toBe(423);
+  await focusPage(page);
+  await page.keyboard.press('F7');
+  await expect.poll(cuePage).toBe(3);
+  expect(await studio.post('/api/lock', { show_mode: false })).toBe(200);
 });
 
 test('cue keys are ignored while typing in a text field', async ({ page }) => {
@@ -160,7 +296,7 @@ test('T-293: a cue played through the API updates the Effet panel', async ({ pag
 test('a page changed from outside (MIDI/API) shows up in the UI', async ({ page }) => {
   const category = catalog.categories[4];
   expect(await studio.post('/api/control', { id: 'page.5' })).toBe(200);
-  await expect(page.locator('#cueTabs button', { hasText: category })).toHaveClass(/active/);
+  await expect(tab(page, 4)).toHaveClass(/active/);
   await expect(page.locator('#cues .cue').first()).toContainText(pageCues(category)[0].name);
 
   // And a grid cell played from outside is highlighted.

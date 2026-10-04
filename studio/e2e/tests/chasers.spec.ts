@@ -22,7 +22,9 @@ test('a chaser cue lights another beam half a beat later', async ({ page }) => {
   const catalog = await studio.presets();
   const cue = catalog.presets.find(p => p.name === 'Chaser → · vert')!;
   expect(cue.category).toBe('Faisceaux');
-  await page.locator('#cueTabs button', { hasText: 'Faisceaux' }).click();
+  // The page holding it (T-272: a category longer than a page continues on another one).
+  const grid = await studio.get<{ pages: { cells: (string | null)[] }[] }>('/api/grid');
+  await page.locator('#cueTabs button').nth(grid.pages.findIndex(p => p.cells.includes(cue.id))).click();
   await page.locator(`#cues .cue[data-id="${cue.id}"]`).click();
   await expect.poll(async () => (await studio.controlValues()).active_cue).toBe(cue.id);
   await expect.poll(async () => (await studio.frame()).points.filter(isLit).length).toBeGreaterThan(0);
