@@ -25,6 +25,12 @@
 //!
 //! Either way a failure is a French error for the UI and the studio (and
 //! the laser) carries on.
+//!
+//! A child never outlives its studio (T-359): the studio passes its own PID
+//! (`--exit-with-parent`) and the child exits as soon as it has another
+//! parent, or once its own time limit has passed, whatever happens to the
+//! studio; on a clean shutdown the studio kills and reaps the children
+//! still running (`stop_children`).
 
 use super::decode::{self, Decoded, WaveformPeaks, MAX_SECONDS, PEAK_BLOCK};
 use super::media;
@@ -34,11 +40,15 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Longest a decode may take (a 30 min MP3 takes a few seconds in a
 /// release build): past it the child is killed and the file refused.
 pub const DECODE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How much longer than the studio's limit a child waits before it stops
+/// by itself (`child_must_exit`): normally the studio kills it first.
+pub const CHILD_GRACE: Duration = Duration::from_secs(1);
 /// First bytes of every reply on the child's stdout.
 const MAGIC: &[u8; 8] = b"LSDECOD1";
 /// Longest error message a child may send back.
@@ -95,11 +105,14 @@ impl Isolation {
             Isolation::Child { exe, data_dir, test_hooks, timeout } => {
                 let mut cmd = Command::new(exe);
                 cmd.arg("--decode").arg(name).arg("--data-dir").arg(data_dir);
+                // T-359: the child stops if this studio dies.
+                cmd.arg("--exit-with-parent").arg(std::process::id().to_string());
                 if want == Want::Peaks {
                     cmd.arg("--decode-peaks");
                 }
                 if *test_hooks {
-                    cmd.arg("--test-hooks");
+                    // The child's own limit follows the test limit.
+                    cmd.arg("--test-hooks").arg("--test-decode-timeout-ms").arg(timeout.as_millis().to_string());
                 }
                 run_child(cmd, want, *timeout)
             }
@@ -275,25 +288,80 @@ fn expect_end(r: &mut impl Read) -> Result<()> {
     }
 }
 
+/// The decoder children running now, so that a clean shutdown can stop
+/// them (`stop_children`). Each one leaves the list once reaped.
+static CHILDREN: Mutex<Vec<Arc<Mutex<Child>>>> = Mutex::new(Vec::new());
+/// Set by `stop_children`: no new child after it.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// T-359: the studio stops cleanly: kills and reaps every decoder child
+/// still running (their requests get an error) and starts no new one.
+pub fn stop_children() {
+    let children = {
+        let mut list = CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
+        STOPPED.store(true, Ordering::SeqCst);
+        std::mem::take(&mut *list)
+    };
+    for child in children {
+        let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+        // Already reaped: `kill` sends nothing (no PID reuse).
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// One child in `CHILDREN`, removed however `run_child` ends.
+struct Registered(Arc<Mutex<Child>>);
+
+impl Registered {
+    fn spawn(cmd: &mut Command) -> Result<Self> {
+        let mut list = CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
+        if STOPPED.load(Ordering::SeqCst) {
+            bail!("le studio s'arrête : décodage annulé");
+        }
+        let child = Arc::new(Mutex::new(cmd.spawn().context("impossible de lancer le décodeur")?));
+        list.push(Arc::clone(&child));
+        Ok(Self(child))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Child> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        CHILDREN.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| !Arc::ptr_eq(c, &self.0));
+    }
+}
+
+/// T-359: the `--decode` child stops by itself when the studio that started
+/// it is gone (`orphan` says why, as `--exit-with-parent` does) or once
+/// its own time limit (the studio's plus `CHILD_GRACE`) has passed.
+pub fn child_must_exit(orphan: Option<&'static str>, elapsed: Duration, timeout: Duration) -> Option<&'static str> {
+    orphan.or_else(|| (elapsed > timeout + CHILD_GRACE).then_some("délai de décodage dépassé"))
+}
+
 /// Runs a decoder child and reads its reply, killing it after `timeout`.
 /// Whatever the child does (crash, garbage, silence, hang), the result is
 /// a reply or a French error; it never panics and never waits longer.
 pub fn run_child(mut cmd: Command, want: Want, timeout: Duration) -> Result<Reply> {
     let deadline = Instant::now() + timeout;
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("impossible de lancer le décodeur")?;
-    let stdout = child.stdout.take().expect("stdout is piped");
+    let child = Registered::spawn(cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit()))?;
+    let stdout = child.lock().stdout.take().expect("stdout is piped");
     let (tx, rx) = std::sync::mpsc::channel();
     let reader = std::thread::Builder::new().name("decode-reply".into()).spawn(move || {
         let _ = tx.send(read_reply(&mut BufReader::new(stdout), want));
     });
     if let Err(e) = reader {
+        let mut child = child.lock();
         let _ = child.kill();
         let _ = child.wait();
         return Err(e).context("impossible de lire le décodeur");
     }
     let reply = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
     // The reply is in (or it's too late): the child must be gone by the deadline.
-    let status = wait_or_kill(&mut child, deadline);
+    let status = wait_or_kill(&child, deadline);
     match (reply, status) {
         (Ok(Ok(Ok(reply))), Some(status)) if status.success() => Ok(reply),
         (Ok(Ok(Err(message))), _) => Err(anyhow!(message)),
@@ -311,11 +379,16 @@ pub fn run_child(mut cmd: Command, want: Want, timeout: Duration) -> Result<Repl
 }
 
 /// Waits for the child until `deadline`, then kills it. `None`: killed.
-fn wait_or_kill(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+/// Locks the child only for each check, so `stop_children` can step in.
+fn wait_or_kill(child: &Registered, deadline: Instant) -> Option<ExitStatus> {
     loop {
+        let mut child = child.lock();
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) if Instant::now() < deadline => {
+                drop(child);
+                std::thread::sleep(Duration::from_millis(5));
+            }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -511,6 +584,14 @@ mod tests {
 
     /// The contained thread: a decoder panic is an error for the caller,
     /// the thread is marked for the global hook, and the caller's is not.
+    #[test]
+    fn the_child_stops_without_its_studio_or_past_its_limit() {
+        let limit = Duration::from_secs(2);
+        assert_eq!(child_must_exit(None, Duration::from_millis(2_500), limit), None, "the studio kills it first");
+        assert_eq!(child_must_exit(None, limit + CHILD_GRACE + Duration::from_millis(1), limit), Some("délai de décodage dépassé"));
+        assert_eq!(child_must_exit(Some("le processus parent a disparu"), Duration::ZERO, limit), Some("le processus parent a disparu"));
+    }
+
     #[test]
     fn a_contained_panic_is_an_error() {
         let dir = temp_media("contained");

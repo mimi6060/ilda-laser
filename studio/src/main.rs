@@ -214,7 +214,8 @@ struct Cli {
     /// Testing only (T-358): shut down cleanly, as on Ctrl+C, once the
     /// process with this PID is no longer our parent (the test harness
     /// died) or the data directory is gone, so an interrupted test run
-    /// leaves no studio behind.
+    /// leaves no studio behind. Also given by the studio to its `--decode`
+    /// children (T-359), which exit at once when it is gone.
     #[arg(long, hide = true, value_name = "PID", conflicts_with = "device")]
     exit_with_parent: Option<u32>,
     /// Application mode (the macOS app, T-413): data in
@@ -798,6 +799,9 @@ fn main() -> Result<()> {
         // nothing but one file read and a reply on stdout. It never opens
         // the application log (T-403).
         env_logger::init();
+        // T-359: never outlive the studio, nor the time limit.
+        let timeout = cli.test_decode_timeout_ms.map_or(audio::isolate::DECODE_TIMEOUT, Duration::from_millis);
+        spawn_decode_watch(cli.exit_with_parent.unwrap_or_else(std::os::unix::process::parent_id), cli.data_dir.clone(), timeout);
         let want = if cli.decode_peaks { audio::isolate::Want::Peaks } else { audio::isolate::Want::Samples };
         std::process::exit(audio::isolate::child_main(&cli.data_dir, name, want, cli.test_hooks));
     }
@@ -1020,6 +1024,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let served = web::run(&addr, shared, estop, cli.data_dir.join("calibration.json"), Arc::clone(&running));
 
     running.store(false, Ordering::SeqCst);
+    // No audio decoder child left behind (T-359).
+    audio::isolate::stop_children();
     // The engine closes the output; don't wait forever if it is stuck (the
     // kill switch has already cut a real DAC).
     let deadline = Instant::now() + SHUTDOWN_WAIT;
@@ -1099,6 +1105,21 @@ fn spawn_orphan_watch(parent: u32, data_dir: PathBuf, estop: Arc<EStop>, running
             }
             std::thread::sleep(Duration::from_millis(250));
         }
+    });
+}
+
+/// T-359: the `--decode` child's watch: checks four times a second and
+/// ends the process at once (there is no output to close) when the studio
+/// `parent` is gone or the time limit has passed.
+fn spawn_decode_watch(parent: u32, data_dir: PathBuf, timeout: Duration) {
+    let started = Instant::now();
+    std::thread::spawn(move || loop {
+        let orphan = orphan_reason(parent, std::os::unix::process::parent_id(), data_dir.is_dir());
+        if let Some(why) = audio::isolate::child_must_exit(orphan, started.elapsed(), timeout) {
+            eprintln!("--decode: {why}, arrêt");
+            std::process::exit(3);
+        }
+        std::thread::sleep(Duration::from_millis(250));
     });
 }
 
