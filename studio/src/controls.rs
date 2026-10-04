@@ -19,9 +19,99 @@ use crate::live::{
 };
 use crate::tempo;
 use crate::Shared;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+
+/// Who last drove a control or started a cue (« En cours », T-423). For
+/// display only: what a source may do is decided by `ArmSource` and the
+/// `external` flag, never by this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlSource {
+    #[default]
+    Ui,
+    Keyboard,
+    Midi,
+    Dmx,
+    Osc,
+    Timeline,
+    /// Audio triggers (T-240).
+    Audio,
+    /// Macros (T-425) and remotes (T-428) will set these.
+    Macro,
+    Remote,
+    Api,
+    /// OSC or Art-Net through the older network inputs (netin/).
+    Network,
+    System,
+}
+
+impl ControlSource {
+    pub fn label_fr(self) -> &'static str {
+        match self {
+            ControlSource::Ui => "Interface",
+            ControlSource::Keyboard => "Clavier",
+            ControlSource::Midi => "MIDI",
+            ControlSource::Dmx => "DMX",
+            ControlSource::Osc => "OSC",
+            ControlSource::Timeline => "Timeline",
+            ControlSource::Audio => "Audio",
+            ControlSource::Macro => "Macro",
+            ControlSource::Remote => "Télécommande",
+            ControlSource::Api => "API",
+            ControlSource::Network => "Réseau",
+            ControlSource::System => "Système",
+        }
+    }
+
+    /// From a safety-log source id (`ArmSource::id`); unknown or none = the UI.
+    pub fn from_id(id: Option<&str>) -> Self {
+        match id {
+            Some("keyboard") => ControlSource::Keyboard,
+            Some("midi") => ControlSource::Midi,
+            Some("dmx") => ControlSource::Dmx,
+            Some("osc") => ControlSource::Osc,
+            Some("api") => ControlSource::Api,
+            Some("network") => ControlSource::Network,
+            Some("system") => ControlSource::System,
+            Some("audio") => ControlSource::Audio,
+            _ => ControlSource::Ui,
+        }
+    }
+}
+
+impl From<ArmSource> for ControlSource {
+    fn from(src: ArmSource) -> Self {
+        match src {
+            ArmSource::Ui => ControlSource::Ui,
+            ArmSource::Keyboard => ControlSource::Keyboard,
+            ArmSource::Midi => ControlSource::Midi,
+            ArmSource::Api => ControlSource::Api,
+            ArmSource::System => ControlSource::System,
+            ArmSource::Network => ControlSource::Network,
+            ArmSource::Osc => ControlSource::Osc,
+            ArmSource::Dmx => ControlSource::Dmx,
+        }
+    }
+}
+
+impl From<crate::external::SourceKind> for ControlSource {
+    fn from(kind: crate::external::SourceKind) -> Self {
+        match kind {
+            crate::external::SourceKind::Dmx => ControlSource::Dmx,
+            crate::external::SourceKind::Osc => ControlSource::Osc,
+            crate::external::SourceKind::Timecode => ControlSource::Timeline,
+        }
+    }
+}
+
+/// The last change of a control: who, and when (seconds since `epoch`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Touch {
+    pub source: ControlSource,
+    pub at_s: f64,
+}
 
 /// A controller's pad grid: 5 rows x 8 columns, the APC40 clip grid (and
 /// the default cue grid, grid.rs). Pad n is the cell at row n / 8, column
@@ -209,6 +299,9 @@ impl ControlRegistry {
         add("cue.transition_length".into(), "Durée de transition".into(), "cue", choice(&LENGTH_LABELS, 2), true);
         add("cue.quantize".into(), "Quantification du lancement".into(), "cue", choice(&QUANTIZE_LABELS, 0), true);
         add("cue.beat_mode".into(), "Mode beat (change de cue tous les N temps)".into(), "cue", choice(&BEAT_EVERY_LABELS, 0), true);
+        // « Tout arrêter » (T-423): unprotected cues, the timeline and the
+        // playlist. Never the arm state, the modulators or the masters.
+        add("running.stop_all".into(), "Tout arrêter".into(), "running", ControlKind::Trigger, true);
 
         for n in 1..=LAYER_COUNT {
             add(format!("layer.{n}.dimmer"), format!("Gradateur calque {n}"), "layer", cont(0.0, 1.0, 1.0, Unit::Percent), true);
@@ -272,6 +365,29 @@ pub fn apply(s: &mut Shared, id: &str, input: ControlInput, from_external: bool)
 /// source is what the safety log records for a stop or a cue.
 pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -> Result<(), ControlError> {
     let from_external = !matches!(src, ArmSource::Ui | ArmSource::Keyboard | ArmSource::Api);
+    apply_checked(s, id, input, from_external, src, src.into())
+}
+
+/// The page's generic control route (`POST /api/control`): checked like a
+/// controller (nothing that arms), but recorded as `source` - « Interface ».
+pub fn apply_from(s: &mut Shared, id: &str, input: ControlInput, source: ControlSource) -> Result<(), ControlError> {
+    apply_checked(s, id, input, true, ArmSource::Ui, source)
+}
+
+/// `from_external` decides what may be driven, `src` is what the safety
+/// log records, `source` what « En cours » shows.
+fn apply_checked(s: &mut Shared, id: &str, input: ControlInput, from_external: bool, src: ArmSource, source: ControlSource) -> Result<(), ControlError> {
+    let r = apply_inner(s, id, input, from_external, src, source);
+    if r.is_ok() {
+        if let Some(desc) = s.controls.get(id) {
+            let touch = Touch { source, at_s: s.now_s() };
+            s.touches.insert(desc.id.clone(), touch);
+        }
+    }
+    r
+}
+
+fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: bool, src: ArmSource, source: ControlSource) -> Result<(), ControlError> {
     let desc = s.controls.get(id).cloned().ok_or_else(|| ControlError::Unknown(id.to_string()))?;
     if from_external && !desc.external {
         return Err(ControlError::Refused("ce contrôle ne peut pas être piloté depuis un contrôleur externe"));
@@ -414,7 +530,8 @@ pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -
             with_deck(s, |d, _| d.set_max_active(value(input).round() as u8));
             s.deck.save();
         }
-        "cue.stop_all" => with_deck(s, |d, _| d.stop_all()),
+        "cue.stop_all" => stop_cues(s),
+        "running.stop_all" => stop_running(s),
         "cue.transition" => {
             s.deck.transition.kind = TRANSITION_KINDS[choice_index(&desc.kind, input)];
             s.deck.save();
@@ -471,7 +588,7 @@ pub fn apply_as(s: &mut Shared, id: &str, input: ControlInput, src: ArmSource) -
                 }
             } else if let Some(cell) = other.strip_prefix("grid.") {
                 let preset_id = grid_cell_preset(&s.grid, cell).ok_or_else(|| ControlError::Unknown(id.to_string()))?;
-                press_cue_from(s, &preset_id, None, truthy(input), Some(src.id()));
+                press_cue_as(s, &preset_id, None, truthy(input), Some(src.id()), source);
             } else {
                 return Err(ControlError::Unknown(id.to_string()));
             }
@@ -705,13 +822,23 @@ pub fn press_cue(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool) 
 /// is logged (T-259).
 pub fn press_cue_from(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>) -> bool {
     let now = s.now_s();
-    press_cue_at(s, id, mode, down, src, now)
+    press_cue_full(s, id, mode, down, src, ControlSource::from_id(src), now)
+}
+
+/// `press_cue_from`, crediting the cues it starts to `source` (« En cours »).
+pub fn press_cue_as(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, source: ControlSource) -> bool {
+    let now = s.now_s();
+    press_cue_full(s, id, mode, down, src, source, now)
 }
 
 /// `press_cue_from` at `t` on the studio clock: the engine's frame time,
 /// for the audio triggers (T-240), so a press made on a quantised
 /// boundary is on it for the deck too (no second wait).
 pub fn press_cue_at(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, t: f64) -> bool {
+    press_cue_full(s, id, mode, down, src, ControlSource::from_id(src), t)
+}
+
+fn press_cue_full(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, source: ControlSource, t: f64) -> bool {
     if !s.presets.iter().any(|p| p.id == id) {
         return false;
     }
@@ -730,6 +857,13 @@ pub fn press_cue_at(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: boo
             deck.release(id, at);
         }
     });
+    for a in s.deck.active.iter_mut().filter(|a| a.id >= first_new) {
+        a.source = source;
+    }
+    // A quantised launch (T-159) keeps its source until it starts.
+    for p in s.deck.pending.iter_mut().filter(|p| p.cue == id) {
+        p.source = source;
+    }
     started(s, first_new, mode, src);
     true
 }
@@ -742,6 +876,45 @@ pub fn stop_cue(s: &mut Shared, id: &str) {
     } else {
         s.deck.forget(id);
     }
+}
+
+/// Stops the one playing instance `instance` (« En cours » › Arrêter),
+/// protected or not. False if it isn't playing any more.
+pub fn stop_instance(s: &mut Shared, instance: u64) -> bool {
+    // Fading out (T-158): its fade ends now.
+    if s.deck.ending.iter().any(|e| e.cue.id == instance) {
+        s.deck.ending.retain(|e| e.cue.id != instance);
+        return true;
+    }
+    if !s.deck.active.iter().any(|a| a.id == instance) {
+        return false;
+    }
+    with_deck(s, |deck, _| deck.active.retain(|a| a.id != instance));
+    true
+}
+
+/// Cancels the quantised launch of `cue` waiting for its beat (T-159).
+/// False if none waits.
+pub fn stop_pending(s: &mut Shared, cue: &str) -> bool {
+    let before = s.deck.pending.len();
+    s.deck.pending.retain(|p| p.cue != cue);
+    s.deck.pending.len() != before
+}
+
+/// `cue.stop_all` and « Arrêter les cues »: every cue but the ones
+/// protected from « Tout arrêter ». The e-stop doesn't come through here:
+/// it cuts the output stage, whatever plays.
+pub fn stop_cues(s: &mut Shared) {
+    with_deck(s, |d, _| d.stop_unprotected());
+}
+
+/// « Tout arrêter » (`running.stop_all`): unprotected cues, the timeline
+/// and the playlist. Leaves the arm state, the modulators, the audio links
+/// and the masters alone.
+pub fn stop_running(s: &mut Shared) {
+    stop_cues(s);
+    s.timeline.stop();
+    s.playlist = None;
 }
 
 /// Run a change on the deck, keeping `Shared::settings` the live look of

@@ -105,6 +105,7 @@ pub fn shared() -> Shared {
         audience: Default::default(),
         test_hooks: false,
         test_stall_ms: 0,
+        touches: Default::default(),
         // Never a real scan in unit tests, never a real output.
         devices: std::sync::Arc::clone(output_mgr.devices()),
         output_mgr,

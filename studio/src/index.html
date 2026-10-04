@@ -59,7 +59,8 @@
   button.hold-confirm, button.hold-confirm:hover { background: linear-gradient(90deg, var(--danger) calc(var(--hold, 0) * 100%), transparent 0), var(--panel-2); }
   button.hold-confirm.holding { color: #fff; border-color: var(--danger); }
   body.show-mode #wsTabs [data-ws-tab="creation"], body.show-mode #wsTabs [data-ws-tab="settings"],
-  body.show-mode #liveTabs [data-panel-tab]:not([data-panel-tab="direct"]), body.show-mode #livePanel [data-panel]:not([data-panel="direct"]),
+  body.show-mode #liveTabs [data-panel-tab]:not([data-panel-tab="direct"]):not([data-panel-tab="running"]),
+  body.show-mode #livePanel [data-panel]:not([data-panel="direct"]):not([data-panel="running"]),
   body.show-mode #tlEditor, body.show-mode .lock-edit, body.show-mode #palettes .del,
   body.show-mode #projMenu [data-proj="new"], body.show-mode #projMenu [data-proj="open"], body.show-mode #projMenu [data-proj="save-as"],
   body.show-mode #projMenu .sub, body.show-mode #projRecent { display: none !important; }
@@ -253,6 +254,24 @@
   .lfo canvas { width: 72px; height: 30px; aspect-ratio: auto; border-radius: 4px; flex: 0 0 72px; }
   .lfo .del { flex: 0 0 auto; padding: 4px 8px; }
   .lfo input[type=number] { max-width: 70px; }
+  /* « En cours » (T-423), Theme (T-299) tokens. */
+  .ptabs .run-count { display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 4px; border-radius: 8px; background: var(--ws-live); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; }
+  .ptabs .run-count[hidden] { display: none; }
+  #runPanel h3 { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin: 12px 0 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  #runPanel h3 button, #runPanel .run-row button { flex: none; padding: 3px 8px; font-size: 11px; }
+  #runAll { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  .run-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); font-size: 12px; min-width: 0; }
+  .run-row .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-row .d { flex: none; color: var(--muted); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .run-row .src { flex: none; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); font-size: 10px; }
+  .run-row.dim .n { opacity: .6; }
+  .run-row.warn .d { color: var(--warn); }
+  #runPanel .run-row button.n { flex: 1; min-width: 0; padding: 0; border: 0; background: none; text-align: left; font-size: 12px; color: var(--accent); cursor: pointer; }
+  #liveTabs [data-panel-tab="running"] { white-space: nowrap; }
+  .run-row svg, .cue .lock { width: 11px; height: 11px; flex: none; }
+  .run-empty { padding: 4px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  .cue .lock { position: absolute; top: 5px; left: 6px; color: var(--warn); pointer-events: none; }
+  .cue.located { outline: 2px solid var(--ws-live); outline-offset: 2px; }
   .aroute .meters { flex: 0 0 72px; display: flex; flex-direction: column; gap: 3px; }
   .aroute .meter { margin-top: 0; height: 6px; }
   .aroute .meter.out > div { background: #3ddc84; }
@@ -1052,6 +1071,7 @@
       <button role="tab" data-panel-tab="lfo">Modulateurs</button>
       <button role="tab" data-panel-tab="music">Musique</button>
       <button role="tab" data-panel-tab="scenes">Scènes</button>
+      <button role="tab" data-panel-tab="running" title="Ce qui joue, qui le pilote, tout arrêter">En cours<span class="run-count" id="runCount" hidden></span></button>
     </div>
     <section data-panel="direct">
       <h2>Direct <button id="liveReset" data-ctl="master.reset" data-control="master.reset" title="master.reset : toutes les valeurs du direct reviennent au neutre" style="padding:4px 8px;font-size:11px">Tout réinitialiser</button></h2>
@@ -1270,6 +1290,24 @@
       <div class="check"><input type="checkbox" id="aColor"><span>Change de couleur à chaque beat</span></div>
     </section>
 
+    <!-- « En cours » (T-423): what plays, who drove it, the stop buttons. -->
+    <section data-panel="running" id="runPanel">
+      <h2>En cours <button id="runAll" data-control="running.stop_all" title="running.stop_all : arrête les cues (sauf protégés), la timeline et la playlist. Ne désarme pas : l'arrêt d'urgence reste Échap.">Tout arrêter</button></h2>
+      <h3>Cues <button data-run-stop="cues" title="Tous les cues sauf ceux « Protégé de Tout arrêter »">Arrêter les cues</button></h3>
+      <div id="runCues"></div>
+      <h3>Timeline <button data-run-stop="timeline">Arrêter la timeline</button></h3>
+      <div id="runTimeline"></div>
+      <h3>Modulateurs <button data-run-stop="lfos" title="Désactive les LFO, sans en supprimer aucun">Couper les modulateurs</button></h3>
+      <div id="runLfos"></div>
+      <h3>Liens audio <button data-run-stop="audio" title="Désactive les liens audio, sans en supprimer aucun">Couper les liens audio</button></h3>
+      <div id="runAudio"></div>
+      <h3>Maîtres <button data-run-stop="masters">Remettre les maîtres à zéro</button></h3>
+      <div id="runMasters"></div>
+      <h3>État</h3>
+      <div id="runStatus"></div>
+      <div class="hint" id="runMsg" role="status"></div>
+    </section>
+
     <section data-panel="scenes">
       <h2>Scènes</h2>
       <div class="row">
@@ -1300,7 +1338,7 @@
       </div>
       <span class="hint" style="margin:0">Max</span>
       <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
-      <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all">Tout arrêter</button>
+      <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all : tous les cues sauf ceux « Protégé de Tout arrêter »">Arrêter les cues</button>
       <span class="sep"></span>
       <label title="cue.transition : comment un cue remplace le précédent (le Flash reste immédiat)">Transition
         <select id="cueTransition" data-control="cue.transition">
@@ -2278,6 +2316,8 @@
   <select id="cueMenuShow"><option value="">Aucun</option></select>
   <label>Zones de projection (aucune = zones par défaut)</label>
   <div id="cueMenuZones" class="pz-checks"></div>
+  <label class="check" title="« Arrêter les cues » et « Tout arrêter » le laissent jouer ; l'arrêt d'urgence coupe tout"><input type="checkbox" id="cueMenuProtStop"> Protégé de Tout arrêter</label>
+  <label class="check" title="Reste affiché quand un autre cue est tenu en mode Solo"><input type="checkbox" id="cueMenuProtSolo"> Protégé du solo</label>
   <div id="cueMenuUser" class="lock-edit" hidden>
     <label for="cueMenuNameInput">Nom et couleur de la case</label>
     <div class="row"><input type="text" id="cueMenuNameInput" maxlength="40" title="Renommer le cue"><input type="color" id="cueMenuColor" title="Couleur de la case"></div>
@@ -3156,6 +3196,7 @@ async function previewLoop() {
     showCueDeck(f.cues);
     // A cell « en attente » (T-159) blinks with the beat.
     if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
+    showRunCount(f);
     // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
     // control); our own requests update settingsRev themselves.
     if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
@@ -3263,9 +3304,9 @@ function showShowMode(lock) {
   $('lockBtn').title = on ? 'Mode spectacle actif : maintenir pour déverrouiller (1 s)'
     : "Mode spectacle : verrouiller l'édition (cues, maîtres, tempo, noir et laser restent actifs)";
   if (!on) return;
-  // Only what plays stays on screen.
+  // Only what plays stays on screen (« En cours » is playback too).
   if (activeWs === 'creation' || activeWs === 'settings') setWorkspace('live');
-  setLivePanel('direct');
+  if (!$('runPanel') || $('runPanel').hidden) setLivePanel('direct');
   ['cueMenu', 'pageMenu', 'midiMenu', 'projMenu', 'projDialog'].forEach(id => { $(id).hidden = true; });
   stopLearning();
   setStoreMode(false);
@@ -3327,6 +3368,7 @@ function setWorkspace(ws) {
     b.setAttribute('aria-selected', String(b.dataset.wsTab === ws));
   });
   remember(WS_KEY, ws);
+  if (ws === 'live') setTimeout(pollRunning, 0); // « En cours » polls only while on screen
   // RÉGLAGES › Carte SD ShowNET (T-302): cue names may have changed.
   if (ws === 'settings') setTimeout(loadSdBank, 0);
   // CRÉATION › Figures shows the editor (T-296); set up at the end of the script.
@@ -3334,13 +3376,14 @@ function setWorkspace(ws) {
 }
 function setLivePanel(name) {
   const tabs = [...document.querySelectorAll('#liveTabs [data-panel-tab]')];
-  if (!tabs.some(b => b.dataset.panelTab === name) || showMode) name = 'direct';
+  if (!tabs.some(b => b.dataset.panelTab === name) || (showMode && name !== 'running')) name = 'direct';
   tabs.forEach(b => {
     b.classList.toggle('active', b.dataset.panelTab === name);
     b.setAttribute('aria-selected', String(b.dataset.panelTab === name));
   });
   document.querySelectorAll('#livePanel [data-panel]').forEach(el => { el.hidden = el.dataset.panel !== name; });
   remember(PANEL_KEY, name);
+  if (name === 'running') setTimeout(pollRunning, 0); // after the script has run
 }
 document.querySelectorAll('#wsTabs [data-ws-tab]').forEach(b => b.onclick = () => setWorkspace(b.dataset.wsTab));
 document.querySelectorAll('#liveTabs [data-panel-tab]').forEach(b => b.onclick = () => setLivePanel(b.dataset.panelTab));
@@ -4766,7 +4809,8 @@ function renderCues() {
       const slot = slots[p.id] || {};
       const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '', slot.transition ? 'T' : '']
         .filter(Boolean).join(' ');
-      el.innerHTML = `<span class="key">${key}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`;
+      el.innerHTML = `<span class="key">${key}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`
+        + (slot.protect_stop || slot.protect_solo ? LOCK_SVG.replace('<svg', `<svg class="lock"><title>${slot.protect_stop ? 'Protégé de Tout arrêter' : ''}${slot.protect_stop && slot.protect_solo ? ' · ' : ''}${slot.protect_solo ? 'Protégé du solo' : ''}</title`) : '');
       el.querySelector('.n').textContent = p.name;
       drawThumb(el.querySelector('canvas.th'), thumbs[p.id]);
       if (p.program || slot.program) {
@@ -5040,6 +5084,8 @@ function openCueMenu(p, x, y, at) {
   const li = lengthIndex((slot.transition || deck.transition || {}).length);
   $('cueMenuTransLen').value = String(li >= 0 ? li : 2);
   $('cueMenuTransLen').disabled = !slot.transition;
+  $('cueMenuProtStop').checked = !!slot.protect_stop;
+  $('cueMenuProtSolo').checked = !!slot.protect_solo;
   fillShowSelect($('cueMenuShow'), 'Aucun', slot.show || '');
   // Projection zones (T-012): none ticked = the default zones.
   $('cueMenuZones').replaceChildren(...(proj ? proj.zones : []).map(z => {
@@ -5067,10 +5113,93 @@ async function saveCueMenu() {
   const own = slots[menuCue] && slots[menuCue].transition;
   const transition = kind ? { kind, length: TRANS_LENGTHS[+$('cueMenuTransLen').value], in_flash: !!(own && own.in_flash) } : null;
   $('cueMenuTransLen').disabled = !kind;
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition });
+  const protect_stop = $('cueMenuProtStop').checked, protect_solo = $('cueMenuProtSolo').checked;
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo });
   await loadSlots();
 }
-['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+
+// ---------- « En cours » (T-423) ----------
+// The tab's count comes with every frame (cues playing + 1 for a running
+// timeline); the panel itself reads GET /api/running 4 times a second,
+// only while it is on screen.
+const LOCK_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>';
+function showRunCount(f) {
+  const n = ((f.cues && f.cues.active) || []).length + (f.timeline && (f.timeline.playing || f.timeline.paused) ? 1 : 0);
+  const b = $('runCount');
+  b.hidden = !n;
+  b.textContent = n;
+}
+let runTimer = 0, runBusy = false;
+function pollRunning() {
+  clearTimeout(runTimer);
+  if ($('runPanel').hidden || activeWs !== 'live') return;
+  runTimer = setTimeout(pollRunning, 250);
+  if (runBusy || document.hidden) return;
+  runBusy = true;
+  fetch('/api/running', { cache: 'no-store' }).then(r => r.json()).then(showRunning).catch(() => {}).finally(() => { runBusy = false; });
+}
+function runRow(name, detail, opts = {}) {
+  const row = document.createElement('div');
+  row.className = 'run-row' + (opts.dim ? ' dim' : '') + (opts.warn ? ' warn' : '');
+  const n = document.createElement(opts.onName ? 'button' : 'span');
+  n.className = 'n'; n.textContent = name;
+  if (opts.onName) { n.title = opts.nameTitle || ''; n.onclick = opts.onName; }
+  row.appendChild(n);
+  if (opts.lock) row.insertAdjacentHTML('beforeend', LOCK_SVG.replace('<svg', `<svg><title>${opts.lock}</title`));
+  if (detail) { const d = document.createElement('span'); d.className = 'd'; d.textContent = detail; row.appendChild(d); }
+  if (opts.source) { const s = document.createElement('span'); s.className = 'src'; s.textContent = opts.source; s.title = 'Source du dernier changement'; row.appendChild(s); }
+  if (opts.stop) { const b = document.createElement('button'); b.textContent = opts.stopLabel || 'Arrêter'; b.onclick = opts.stop; row.appendChild(b); }
+  return row;
+}
+function fillRun(id, rows) {
+  const box = $(id);
+  if (!rows.length) { const e = document.createElement('div'); e.className = 'run-empty'; e.textContent = 'Rien ne joue'; rows = [e]; }
+  box.replaceChildren(...rows);
+}
+let runKey = '';
+function showRunning(r) {
+  const key = JSON.stringify(r);
+  if (key === runKey) return;
+  runKey = key;
+  // Phases (T-158/T-159): « en attente » of its beat, « démarrage », « en fondu ».
+  const phase = c => c.phase === 'playing' ? '' : c.phase_label + (c.progress != null ? ` ${Math.round(c.progress * 100)} %` : '');
+  fillRun('runCues', r.cues.map(c => runRow(c.name,
+    [phase(c), c.page ? 'p. ' + c.page : '', 'C' + c.layer, c.mode_label].filter(Boolean).join(' · '),
+    { source: c.source_label, dim: !c.shown,
+      lock: c.protect_stop ? 'Protégé de Tout arrêter' : c.protect_solo ? 'Protégé du solo' : '',
+      nameTitle: c.page ? `Afficher la page ${c.page_name || c.page}` : '',
+      onName: c.page ? () => locateCue(c.cue, c.page - 1) : null,
+      stop: () => runStop(c.instance == null ? { kind: 'pending', cue: c.cue } : { kind: 'cue', instance: c.instance }) })));
+  const t = r.timeline, rows = [];
+  if (t) rows.push(runRow(t.name || 'Show', `${t.playing ? (t.waiting ? 'attend la mesure' : 'lecture') : 'pause'} · ${t.time_base === 'beats' ? t.position.toFixed(1) + ' temps' : fmtTime(t.position)}`,
+    { source: 'Timeline', stop: () => runStop({ kind: 'timeline' }) }));
+  if (r.playlist) rows.push(runRow('Playlist', r.playlist.scene || '', { stop: () => runStop({ kind: 'timeline' }) }));
+  fillRun('runTimeline', rows);
+  fillRun('runLfos', r.lfos.map(m => runRow(m.target_label, `${m.wave_label} · ${m.rate}`, { stop: () => runStop({ kind: 'lfo', index: m.index }), stopLabel: 'Couper' })));
+  fillRun('runAudio', r.audio_links.map(a => runRow(a.target_label, a.source_label, { stop: () => runStop({ kind: 'audio_link', index: a.index }), stopLabel: 'Couper' })));
+  const fmt = v => typeof v === 'boolean' ? (v ? 'oui' : 'non') : typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : v;
+  fillRun('runMasters', r.masters.map(m => runRow(m.label, `${fmt(m.value)} (neutre ${fmt(m.default)})`, { source: m.source_label || '' })));
+  $('runStatus').replaceChildren(...r.status.map(x => runRow(x.label, x.value, { warn: x.warn })));
+}
+// Show a cue's page and ring its cell, without playing it.
+function locateCue(id, page) {
+  if (page !== gridPage) selectPage(page);
+  const cell = document.querySelector(`#cues .cue[data-id="${CSS.escape(id)}"]`);
+  if (!cell) return;
+  cell.classList.add('located');
+  cell.scrollIntoView({ block: 'nearest' });
+  setTimeout(() => cell.classList.remove('located'), 2000);
+}
+async function runStop(body) {
+  const r = await fetch('/api/running/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  $('runMsg').textContent = r.ok ? '' : await r.text();
+  runKey = '';
+  if (r.ok) refreshLook();
+  pollRunning();
+}
+document.querySelectorAll('#runPanel [data-run-stop]').forEach(b => { b.onclick = () => runStop({ kind: b.dataset.runStop }); });
+$('runAll').onclick = () => runStop({ kind: 'all' });
 $('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
 $('cueMenuRemove').onclick = async () => {
   $('cueMenu').hidden = true; menuCue = null;

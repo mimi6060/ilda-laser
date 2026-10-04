@@ -1011,8 +1011,20 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         (Method::Post, "/api/live") => match body::<crate::live::LiveModifiers>(request) {
             Ok(live) => {
                 let mut s = shared.lock().unwrap();
+                let s = &mut *s;
+                // The masters this whole object changes are the page's (T-423).
+                let masters = |s: &Shared| -> Vec<(String, Option<serde_json::Value>)> {
+                    s.controls.list().iter().filter(|d| d.group == "master").map(|d| (d.id.clone(), controls::current(s, d))).collect()
+                };
+                let before = masters(s);
                 s.live = live;
                 s.live_dirty = true;
+                let at_s = s.now_s();
+                for ((id, was), (_, now)) in before.into_iter().zip(masters(s)) {
+                    if was != now {
+                        s.touches.insert(id, controls::Touch { source: controls::ControlSource::Ui, at_s });
+                    }
+                }
                 ok()
             }
             Err(e) => e,
@@ -1150,12 +1162,22 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 };
                 // Treated like a controller: arming stays on /api/arm (the laser
                 // button and Space), never on the generic control endpoint.
-                match controls::apply(&mut shared.lock().unwrap(), &req.id, input, true) {
+                // « En cours » credits the change to the page (T-423).
+                match controls::apply_from(&mut shared.lock().unwrap(), &req.id, input, controls::ControlSource::Ui) {
                     Ok(()) => ok(),
                     Err(controls::ControlError::Unknown(id)) => text(404, &format!("contrôle inconnu : {id}")),
                     Err(controls::ControlError::Refused(why)) => text(403, why),
                 }
             }
+            Err(e) => e,
+        },
+        // « En cours » (T-423): what plays and who drove it; the stop buttons.
+        (Method::Get, "/api/running") => json_response(crate::running::snapshot(&shared.lock().unwrap())),
+        (Method::Post, "/api/running/stop") => match body::<crate::running::StopRequest>(request) {
+            Ok(req) => match crate::running::stop(&mut shared.lock().unwrap(), &req) {
+                Ok(()) => ok(),
+                Err(why) => text(400, &why),
+            },
             Err(e) => e,
         },
         (Method::Post, "/api/playlist/stop") => {
@@ -3279,6 +3301,17 @@ mod tests {
         assert_eq!(t.request("POST", "/api/cue", r#"{"id":"tunnels-001"}"#).0, 200);
         assert_eq!(t.request("POST", "/api/control", r#"{"id":"master.brightness","value":0.2}"#).0, 200);
         assert_eq!(t.request("POST", "/api/control", r#"{"id":"tempo.tap"}"#).0, 200);
+        // « En cours » (T-423): reading and stopping are playback.
+        let (code, body) = t.request("GET", "/api/running", "");
+        let running: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(running["cues"][0]["source_label"], "Interface", "{body}");
+        assert_eq!(running["masters"][0]["id"], "master.brightness", "{body}");
+        assert_eq!(running["masters"][0]["source_label"], "Interface", "{body}");
+        assert_eq!(t.request("POST", "/api/running/stop", r#"{"kind":"all"}"#).0, 200);
+        assert!(t.shared.lock().unwrap().deck.active.is_empty());
+        assert_eq!(t.request("POST", "/api/running/stop", r#"{"kind":"cue","instance":999}"#).0, 400);
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap());
         assert_eq!(t.request("POST", "/api/testpattern", r#"{"pattern":null}"#).0, 200);
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":false,"source":"keyboard"}"#).0, 200);
