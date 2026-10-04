@@ -1437,15 +1437,29 @@ impl Engine {
                     .iter()
                     .zip(&routing.show_zones)
                     .map(|((cue, settings), zones)| {
+                        // An event met mid-way (a seek, a timecode jump, T-409)
+                        // starts with the motion it would have had playing from
+                        // its start: its first step is all the time elapsed.
+                        let fresh = !animators.contains_key(&cue.instance);
                         let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
                         let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
-                        let event_dt = if cue.frozen { 0.0 } else { anim_dt };
+                        let event_dt = match (fresh, cue.frozen) {
+                            (true, _) => cue.elapsed_s as f32 * live.speed.clamp(0.0, 4.0),
+                            (false, true) => 0.0,
+                            (false, false) => anim_dt,
+                        };
                         animator.set_optimizer(&mixer.optimizer);
                         let mut points = animator.render(settings, audio, event_dt, &content_clock);
                         if cue.modifiers != live::LiveModifiers::default() {
+                            let fresh = !event_live.contains_key(&cue.instance);
                             let st = event_live.entry(cue.instance).or_default();
                             st.set_clock(t, clock.beat);
-                            st.advance(&cue.modifiers, if cue.frozen { 0.0 } else { dt }, clock.bpm, clock.beats_per_bar);
+                            let live_dt = match (fresh, cue.frozen) {
+                                (true, _) => cue.elapsed_s as f32,
+                                (false, true) => 0.0,
+                                (false, false) => dt,
+                            };
+                            st.advance(&cue.modifiers, live_dt, clock.bpm, clock.beats_per_bar);
                             points = live::apply(&points, &cue.modifiers, st, &user_palettes);
                         }
                         (cue.layer, points, zones.clone())

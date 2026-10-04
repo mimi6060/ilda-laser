@@ -2,6 +2,9 @@
 //! specification) and our own channel chart, the « remote chart » a
 //! lighting console patches as one fixture.
 //!
+//! ArtTimeCode (OpTimeCode, T-409) is decoded by timecode/artnet.rs and
+//! handed to the timecode chase, never to a control.
+//!
 //! Listen only: we never answer an ArtPoll nor send anything, so a console
 //! has to send to this Mac's address (unicast) or broadcast on its own.
 
@@ -23,6 +26,8 @@ const MIN_PROT_VER: u16 = 14;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Packet {
     Dmx { universe: u16, data: Vec<u8> },
+    /// ArtTimeCode (T-409): the time a show controller sends.
+    TimeCode { tc: crate::timecode::Tc, rate: crate::timecode::Rate },
     /// Any other Art-Net packet (ArtPoll, ArtSync…): ignored.
     Other(u16),
 }
@@ -33,6 +38,10 @@ pub fn decode(p: &[u8]) -> Result<Packet, &'static str> {
         return Err("pas un paquet Art-Net");
     }
     let op = u16::from_le_bytes([p[8], p[9]]);
+    if op == crate::timecode::artnet::OP_TIMECODE {
+        let (tc, rate) = crate::timecode::artnet::decode(p)?;
+        return Ok(Packet::TimeCode { tc, rate });
+    }
     if op != OP_DMX {
         return Ok(Packet::Other(op));
     }
@@ -153,6 +162,15 @@ pub mod tests {
         let mut p = art_dmx(0x7FFF, &[0, 0]);
         p[15] |= 0x80;
         assert!(matches!(decode(&p), Ok(Packet::Dmx { universe: 0x7FFF, .. })));
+    }
+
+    #[test]
+    fn decodes_art_timecode() {
+        use crate::timecode::{artnet::encode, Rate, Tc};
+        let tc = Tc { h: 1, m: 0, s: 59, f: 29 };
+        assert_eq!(decode(&encode(tc, Rate::F2997Df)), Ok(Packet::TimeCode { tc, rate: Rate::F2997Df }));
+        let short = encode(tc, Rate::F30);
+        assert!(decode(&short[..18]).is_err(), "truncated ArtTimeCode");
     }
 
     #[test]

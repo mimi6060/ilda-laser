@@ -752,6 +752,7 @@ pub fn generate(a: &Analysis, pools: &CuePools, name: &str, file: &str, seed: u6
         ],
         markers,
         loop_region: None,
+        timecode: None,
     };
     for (k, e) in show.tracks.iter_mut().flat_map(|t| t.events.iter_mut()).enumerate() {
         e.id = k as u64 + 1;

@@ -350,6 +350,22 @@ struct HubInner {
     artnet: ListenStatus,
     sacn: ListenStatus,
     sources: Vec<DmxSource>,
+    timecode: TimecodeIn,
+}
+
+/// ArtTimeCode readings received (`TIMECODE_QUEUE` newest at most).
+pub type TimecodeReading = (crate::timecode::Tc, crate::timecode::Rate, Instant);
+const TIMECODE_QUEUE: usize = 64;
+
+/// Art-Net timecode (T-409), set by the engine each frame: wanted only
+/// while the timecode source is Art-Net and TC-IN is armed. `bind`: where
+/// to listen when the Art-Net chart is off (with it on, its socket
+/// carries the timecode too).
+#[derive(Default)]
+struct TimecodeIn {
+    wanted: bool,
+    bind: Option<SocketAddr>,
+    queue: VecDeque<TimecodeReading>,
 }
 
 /// Shared with the listener threads (its own short lock, never the
@@ -383,6 +399,7 @@ impl NetHub {
             artnet: ListenStatus::default(),
             sacn: ListenStatus::default(),
             sources: Vec::new(),
+            timecode: TimecodeIn::default(),
         };
         NetHub { inner: Mutex::new(inner), estop }
     }
@@ -418,6 +435,47 @@ impl NetHub {
         self.store(cfg)?;
         self.save();
         Ok(())
+    }
+
+    /// Where a listener binds: its own settings, and for Art-Net the
+    /// timecode's address when only the timecode wants it (T-409).
+    pub fn listen_addr(&self, cfg: &NetInConfig, proto: Proto) -> Option<SocketAddr> {
+        let own = cfg.listen(proto);
+        if proto != Proto::ArtNet || own.is_some() {
+            return own;
+        }
+        let tc = &self.lock().timecode;
+        tc.bind.filter(|_| tc.wanted)
+    }
+
+    /// The engine says whether Art-Net timecode is wanted, and where to
+    /// listen for it without the chart. Not wanted: what waits is dropped.
+    pub fn set_timecode(&self, wanted: bool, bind: Option<SocketAddr>) {
+        let mut inner = self.lock();
+        let tc = &mut inner.timecode;
+        (tc.wanted, tc.bind) = (wanted, bind);
+        if !wanted {
+            tc.queue.clear();
+        }
+    }
+
+    /// A listener received an ArtTimeCode: kept if wanted (false: ignored).
+    pub fn push_timecode(&self, reading: TimecodeReading) -> bool {
+        let mut inner = self.lock();
+        let tc = &mut inner.timecode;
+        if !tc.wanted {
+            return false;
+        }
+        if tc.queue.len() >= TIMECODE_QUEUE {
+            tc.queue.pop_front();
+        }
+        tc.queue.push_back(reading);
+        true
+    }
+
+    /// The timecode readings received since the last call, oldest first.
+    pub fn take_timecode(&self) -> Vec<TimecodeReading> {
+        self.lock().timecode.queue.drain(..).collect()
     }
 
     /// Validates and keeps new settings (the listeners follow at once);

@@ -803,6 +803,24 @@ mod tests {
             .fold(0.0, f32::max)
     }
 
+    /// T-409: an animator created mid-event and stepped once by all the
+    /// time elapsed draws what one stepped frame by frame draws (the
+    /// engine does that for a timeline event met by a seek).
+    #[test]
+    fn one_long_step_draws_what_many_small_ones_draw() {
+        let s = Settings { rotation_speed: 37.0, ..Settings::default() };
+        let clock = BeatClock::default();
+        let mut steady = Animator::starting_at(0.0);
+        let mut pts = Vec::new();
+        for _ in 0..150 {
+            pts = steady.render(&s, AudioFeatures::default(), 1.0 / 60.0, &clock);
+        }
+        let mut primed = Animator::starting_at(0.0);
+        let once = primed.render(&s, AudioFeatures::default(), 150.0 / 60.0, &clock);
+        assert_eq!(pts.len(), once.len());
+        assert!(pts.iter().zip(&once).all(|(a, b)| (a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3));
+    }
+
     #[test]
     fn densify_limits_step_size() {
         let square = patterns::square(0.8, 1.0, 1.0, 1.0);

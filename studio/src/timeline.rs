@@ -323,6 +323,9 @@ pub struct Show {
     pub markers: Vec<Marker>,
     /// Region played by *Boucle*, in show units; `None` = the whole show.
     pub loop_region: Option<(f64, f64)>,
+    /// Its own incoming timecode (T-409): source, rate and offset; `None`
+    /// follows the global settings (older shows have none).
+    pub timecode: Option<crate::timecode::ShowTimecode>,
 }
 
 impl Show {
@@ -376,6 +379,10 @@ impl Show {
             a.offset_s = if a.offset_s.is_finite() { a.offset_s.clamp(-MAX_AUDIO_OFFSET_S, MAX_AUDIO_OFFSET_S) } else { 0.0 };
             a.gain = if a.gain.is_finite() { a.gain.clamp(0.0, 1.0) } else { 1.0 };
             a.duration_s = finite(a.duration_s);
+        }
+        if let Some(tc) = &mut self.timecode {
+            let max = crate::timecode::MAX_OFFSET_S;
+            tc.offset_s = if tc.offset_s.is_finite() { tc.offset_s.clamp(-max, max) } else { 0.0 };
         }
     }
 
@@ -562,6 +569,11 @@ pub struct TimelineCue {
     /// Envelope values this frame (T-163): the event's own, then the bus
     /// envelopes of its layer, in that order (`apply_envelopes`).
     pub envelopes: Vec<EnvValue>,
+    /// Seconds of content played since the event started (held events
+    /// stop counting at their end). An animator created mid-event (a seek,
+    /// a timecode jump) starts there, as if played from the event's start
+    /// (T-409).
+    pub elapsed_s: f64,
 }
 
 struct Instance {
@@ -662,8 +674,8 @@ impl Player {
     }
 
     /// The editor's change (T-162): the loaded show's tracks, markers,
-    /// tempo map and loop region are replaced; its name, time base and
-    /// song are kept. Playback carries on where it is: events that stay
+    /// tempo map and loop region are replaced; its name, time base, song
+    /// and timecode settings (T-409) are kept. Playback carries on where it is: events that stay
     /// under the playhead keep their animation, others start or stop as
     /// if the playhead had reached them. False without a loaded show.
     pub fn edit(&mut self, mut show: Show) -> bool {
@@ -671,6 +683,7 @@ impl Player {
         show.name = cur.name.clone();
         show.time_base = cur.time_base;
         show.audio = cur.audio.take();
+        show.timecode = cur.timecode.take();
         show.sanitize();
         *cur = show;
         self.rev += 1;
@@ -1075,6 +1088,10 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
                     frozen: frozen_all || held,
                     modifiers: e.modifiers.clone(),
                     envelopes,
+                    elapsed_s: match show.time_base {
+                        TimeBase::Seconds => local_c,
+                        TimeBase::Beats => local_c * 60.0 / c.bpm.max(1.0),
+                    },
                 },
                 accumulate_seconds,
                 seconds_estimate: local_c * 60.0 / c.bpm.max(1.0),
@@ -1523,6 +1540,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A random Secondes show: a tempo map, tracks of events with fades,
+    /// transitions, end actions, time modes and envelopes.
+    fn random_show(rng: &mut crate::safety_invariants::Rng) -> Show {
+        let dur = |rng: &mut crate::safety_invariants::Rng| if rng.chance(0.5) { Dur::Seconds(rng.range(0.0, 2.0) as f64) } else { Dur::Beats(rng.range(0.0, 4.0) as f64) };
+        let tempo_map = (0..1 + rng.below(3)).map(|i| TempoPoint { at_s: if i == 0 { 0.0 } else { rng.range(1.0, 30.0) as f64 }, bpm: rng.range(70.0, 180.0), beats_per_bar: 3 + rng.below(2) as u8 }).collect();
+        let mut id = 0;
+        let tracks = (0..1 + rng.below(3))
+            .map(|k| {
+                let events = (0..1 + rng.below(6))
+                    .map(|_| {
+                        id += 1;
+                        Event {
+                            id,
+                            start: rng.range(0.0, 30.0) as f64,
+                            len: rng.range(0.5, 8.0) as f64,
+                            source: cue("c"),
+                            time: *rng.pick(&[TimeMode::Beats, TimeMode::Seconds, TimeMode::Fit]),
+                            offset_beats: rng.range(0.0, 2.0) as f64,
+                            end: *rng.pick(&[EndAction::Stop, EndAction::Hold, EndAction::Continue]),
+                            fade_in: dur(rng),
+                            fade_out: dur(rng),
+                            to_next: rng.chance(0.5).then(|| Transition { kind: *rng.pick(&[TransitionKind::Cut, TransitionKind::Fade, TransitionKind::FadeThroughBlack]), length: dur(rng) }),
+                            envelopes: vec![Envelope { target: "master.size".into(), mode: EnvMode::Absolute, keys: vec![Key { at: 0.0, value: rng.f(), ..Default::default() }, Key { at: rng.range(0.5, 6.0) as f64, value: rng.f(), ..Default::default() }] }],
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+                Track { name: format!("Piste {k}"), layer: 1 + k as u8, events, ..Default::default() }
+            })
+            .collect();
+        let mut s = Show { name: "p".into(), time_base: TimeBase::Seconds, tempo_map, tracks, ..Default::default() };
+        s.sanitize();
+        s
+    }
+
+    /// What a frame draws, without the animator ids (new after a seek).
+    fn drawn(mut cues: Vec<TimelineCue>) -> Vec<TimelineCue> {
+        cues.iter_mut().for_each(|c| c.instance = 0);
+        cues.sort_by_key(|c| c.event);
+        cues
+    }
+
+    /// T-409: seeking to `t` (a timecode jump) gives the frame playing
+    /// from 0 to `t` gives: same events, fades, content clock, envelopes
+    /// and time elapsed in each event (the animators start from it).
+    #[test]
+    fn seeking_to_t_draws_what_playing_to_t_draws() {
+        let mut rng = crate::safety_invariants::Rng::new(409);
+        let mut checked = 0;
+        for _ in 0..40 {
+            let s = random_show(&mut rng);
+            let end = s.end();
+            let mut played = player(s.clone());
+            played.play(&clock(0.0));
+            let mut t = 0.0;
+            for _ in 0..3 {
+                let target = t + rng.range(0.1, 12.0) as f64;
+                if target >= end {
+                    break;
+                }
+                while t + 1.0 / 60.0 < target {
+                    t += 1.0 / 60.0;
+                    played.frame(&clock(t));
+                }
+                t = target;
+                let a = drawn(played.frame(&clock(t)));
+                // Another player, another clock: seek there, then play.
+                let mut sought = player(s.clone());
+                let c = clock(1000.0 + t);
+                sought.seek(t, &c);
+                sought.play(&c);
+                let b = drawn(sought.frame(&c));
+                assert_eq!(a.len(), b.len(), "t = {t}");
+                for (x, y) in a.iter().zip(&b) {
+                    assert_eq!((x.event, x.layer, x.frozen, &x.source, &x.modifiers), (y.event, y.layer, y.frozen, &y.source, &y.modifiers));
+                    assert!((x.gain - y.gain).abs() < 1e-4, "gain at {t}: {} vs {}", x.gain, y.gain);
+                    assert!((x.content_beat - y.content_beat).abs() < 1e-4, "content at {t}");
+                    assert!((x.elapsed_s - y.elapsed_s).abs() < 1e-4, "elapsed at {t}");
+                    assert_eq!(x.envelopes.len(), y.envelopes.len());
+                    for (e, f) in x.envelopes.iter().zip(&y.envelopes) {
+                        assert!(e.target == f.target && (e.value - f.value).abs() < 1e-4, "envelope at {t}");
+                    }
+                }
+                checked += a.len();
+            }
+        }
+        assert!(checked > 20, "{checked} events compared");
+    }
+
     #[test]
     fn look_of_applies_the_fade_and_skips_unknown_cues() {
         let presets = crate::presets::catalog();
@@ -1536,6 +1642,7 @@ mod tests {
             frozen: false,
             modifiers: LiveModifiers::default(),
             envelopes: Vec::new(),
+            elapsed_s: 0.0,
         };
         let s = look_of(&c, &presets).unwrap();
         assert!((s.brightness - presets[0].settings.brightness * 0.5).abs() < 1e-6);
