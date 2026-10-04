@@ -71,7 +71,8 @@ impl Default for OutputPrefs {
 pub struct OutputInfo {
     pub id: String,
     pub name: String,
-    /// "helios", "etherdream", "idn" (from the scan), "ponk", "test".
+    /// "helios", "etherdream", "idn" (from the scan), "ponk", "test",
+    /// "shownet" (`shownet` feature with the SDK binding installed).
     pub kind: String,
     pub state: LinkState,
     pub error: Option<String>,
@@ -469,6 +470,8 @@ fn ponk_entry(target: SocketAddr) -> DeviceInfo {
 }
 
 /// The real outputs: DACs through `laser-dac`, and PONK to MadMapper.
+/// With the `shownet` feature, also the ShowNET boxes of the installed SDK
+/// binding (`shownet.rs`); none without it.
 pub struct RealBackend {
     /// `--ponk`'s target, else MadMapper on this Mac.
     pub ponk: SocketAddr,
@@ -477,12 +480,31 @@ pub struct RealBackend {
 
 impl OutputBackend for RealBackend {
     fn scan(&self, scope: Scope) -> Result<Vec<DeviceInfo>> {
-        crate::devices::scan_dacs(scope)
+        #[allow(unused_mut)]
+        let mut found = crate::devices::scan_dacs(scope)?;
+        #[cfg(feature = "shownet")]
+        if let Some(backend) = crate::shownet::installed_backend() {
+            match crate::shownet::scan(&*backend) {
+                Ok(boxes) => found.extend(boxes),
+                Err(e) => log::warn!("Recherche des ShowNET impossible : {e:#}"),
+            }
+        }
+        Ok(found)
     }
     fn fixed(&self) -> Vec<DeviceInfo> {
-        vec![ponk_entry(self.ponk)]
+        #[allow(unused_mut)]
+        let mut out = vec![ponk_entry(self.ponk)];
+        #[cfg(feature = "shownet")]
+        if crate::shownet::installed_backend().is_some() {
+            out.push(crate::shownet::fixed_entry());
+        }
+        out
     }
     fn open(&self, id: &str, pps: u32) -> Result<Box<dyn Output>> {
+        #[cfg(feature = "shownet")]
+        if id.starts_with(crate::shownet::ID_PREFIX) {
+            return crate::shownet::open_id(crate::shownet::installed_backend().as_deref(), id, pps);
+        }
         if let Some(target) = id.strip_prefix("ponk:") {
             let target = crate::ponk::parse_target(target).map_err(anyhow::Error::msg)?;
             return Ok(Box::new(crate::ponk::PonkOutput::open(target, &self.data_dir)?));
@@ -503,6 +525,9 @@ pub struct FakeBackend {
     pub dropped: Arc<AtomicBool>,
     /// Successful and failed opens, for tests.
     pub opens: Arc<AtomicUsize>,
+    /// A fake ShowNET box (unit tests only): opens `shownet:` ids.
+    #[cfg(feature = "shownet")]
+    pub shownet: Option<Arc<dyn crate::shownet::ShowNetBackend>>,
 }
 
 /// The id of the `--test-output` entry.
@@ -510,7 +535,16 @@ pub const TEST_ID: &str = "test";
 
 impl FakeBackend {
     pub fn new(devices: Vec<DeviceInfo>, log_file: Option<PathBuf>, ponk: Option<SocketAddr>, data_dir: PathBuf) -> Self {
-        Self { devices, log_file, ponk, data_dir, dropped: Arc::default(), opens: Arc::default() }
+        Self {
+            devices,
+            log_file,
+            ponk,
+            data_dir,
+            dropped: Arc::default(),
+            opens: Arc::default(),
+            #[cfg(feature = "shownet")]
+            shownet: None,
+        }
     }
 }
 
@@ -526,10 +560,16 @@ impl OutputBackend for FakeBackend {
         out.extend(self.ponk.map(ponk_entry));
         out
     }
-    fn open(&self, id: &str, _pps: u32) -> Result<Box<dyn Output>> {
+    #[cfg_attr(not(feature = "shownet"), allow(unused_variables))]
+    fn open(&self, id: &str, pps: u32) -> Result<Box<dyn Output>> {
         self.opens.fetch_add(1, Ordering::SeqCst);
         if self.dropped.load(Ordering::SeqCst) {
             bail!("{id} injoignable (simulation)");
+        }
+        #[cfg(feature = "shownet")]
+        if let Some(shownet) = self.shownet.as_ref().filter(|_| id.starts_with(crate::shownet::ID_PREFIX)) {
+            let inner = crate::shownet::open_id(Some(&**shownet), id, pps)?;
+            return Ok(Box::new(Unpluggable { inner, dropped: Arc::clone(&self.dropped) }));
         }
         let inner: Box<dyn Output> = if let (TEST_ID, Some(path)) = (id, &self.log_file) {
             Box::new(FileLogOutput::append(path)?)
@@ -828,6 +868,46 @@ mod tests {
         let fixed = backend.fixed();
         assert_eq!(fixed.len(), 1);
         assert_eq!((fixed[0].kind.as_str(), fixed[0].id.as_str()), ("ponk", "ponk:127.0.0.1:5583"));
+    }
+
+    /// A ShowNET output goes through the manager like any other (T-471):
+    /// opened on its thread, handed over disarmed, reported lost when the
+    /// box goes away. Its kind is what the checklist (T-472) looks at.
+    #[cfg(feature = "shownet")]
+    #[test]
+    fn a_shownet_output_connects_and_is_lost_like_a_dac() {
+        use crate::interlock::EStop;
+        use crate::output::OutputStage;
+        let fake = crate::shownet::fake::FakeShowNet::new(&[("box-1", 100_000)]);
+        let mut backend = FakeBackend::new(Vec::new(), None, None, std::env::temp_dir());
+        backend.shownet = Some(Arc::new(fake.clone()));
+        let list = Arc::new(DeviceList::fixed(Vec::new()));
+        let mgr = OutputManager::new(Arc::new(backend), list, &OutputPrefs::default(), 150_000);
+        let t0 = Instant::now();
+        mgr.select(Some("shownet:box-1".into()), ArmSource::Ui);
+        drain(&mgr, t0);
+        assert_eq!(mgr.state(), LinkState::Connected);
+        assert_eq!(mgr.view(t0)["kind"], "shownet");
+        let change = mgr.engine_take().unwrap();
+        let mut stage = OutputStage::new(change.output);
+        assert!(stage.kill_switch().is_some(), "the e-stop can reach it");
+        let estop = EStop::default();
+        let lit = [Point::lit(0.0, 0.0, 1.0, 1.0, 1.0)];
+        assert_eq!(stage.emit(&lit, true, true, &estop).lit, 1);
+        fake.lost.store(true, Ordering::SeqCst);
+        stage.emit(&lit, true, true, &estop);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while stage.fault().is_none() {
+            assert!(Instant::now() < deadline, "loss reported");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        mgr.report_lost(change.gen, stage.fault().unwrap());
+        drain(&mgr, t0);
+        assert_eq!(mgr.state(), LinkState::Lost);
+        drop(stage.replace(None));
+        assert!(fake.events.lock().unwrap().iter().all(|e| !matches!(e, crate::shownet::fake::Event::Frame { pps, .. } if *pps != 100_000)), "rate capped");
+        // An unknown box fails to open, without an SDK nothing does.
+        assert!(FakeBackend::new(Vec::new(), None, None, std::env::temp_dir()).open("shownet:box-1", 30_000).is_err());
     }
 
     #[test]
