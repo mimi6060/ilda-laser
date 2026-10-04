@@ -24,10 +24,22 @@
 //!     new energy above 150 Hz and is a real share of the mix;
 //!   - snare: a 150 Hz–5 kHz onset whose new energy is spread across the
 //!     500 Hz–5 kHz bins (a noise burst, not a note's harmonics), is not
-//!     just a kick's leakage (1–5 kHz share) and is not hat-like;
+//!     just a kick's leakage (1–5 kHz share) and is not hat-like. Under a
+//!     loud noise layer (a build-up's riser) a snare barely moves the
+//!     log flux of the bins it shares with the noise, nor their spread;
+//!     so a **burst** also counts: the band powers of 1–5 kHz *and*
+//!     5–15 kHz both jump (dB over the frame two hops back, the
+//!     smaller of the two peak-picked like a flux). Summed over many bins,
+//!     a band's power flickers far less than its bins do, and noise seldom
+//!     lifts both bands at once; a note lifts the lower one, a hat the
+//!     upper one. The leakage and hat-like rules still apply;
 //!   - hi-hat: a 5–15 kHz onset whose new energy per bin is ≥ 6 dB above
 //!     the new energy per bin in 1–2 kHz ("little energy below 2 kHz";
-//!     lower is left out so a kick under the hat doesn't hide it).
+//!     lower is left out so a kick under the hat doesn't hide it), or, for
+//!     a hat played with a kick or a snare (whose noise covers 1–15 kHz),
+//!     whose new energy per bin at the very top (12–20 kHz, where a hat is
+//!     brightest and a snare already falls) is ≥ 2.3 dB above that in
+//!     1–5 kHz. The snare under it is still reported.
 //!
 //!   A peak the rules turn down does not start the refractory period.
 //!
@@ -61,13 +73,14 @@ const ODF_HIGH: usize = 3;
 const ODF_BANDS_HZ: [(f32, f32); ODF_COUNT] = [(0.0, f32::MAX), (40.0, 150.0), (150.0, 5_000.0), (5_000.0, 15_000.0)];
 
 /// Bands whose power is tracked for the rules.
-const POWER_COUNT: usize = 5;
+const POWER_COUNT: usize = 6;
 const P_LOW: usize = 0;
 const P_LOWMID: usize = 1;
 const P_HIGH: usize = 2;
 const P_ABOVE_LOW: usize = 3;
 const P_CRACK: usize = 4;
-const POWER_BANDS_HZ: [(f32, f32); POWER_COUNT] = [(40.0, 150.0), (1_000.0, 2_000.0), (5_000.0, 15_000.0), (150.0, 15_000.0), (1_000.0, 5_000.0)];
+const P_TOP: usize = 5;
+const POWER_BANDS_HZ: [(f32, f32); POWER_COUNT] = [(40.0, 150.0), (1_000.0, 2_000.0), (5_000.0, 15_000.0), (150.0, 15_000.0), (1_000.0, 5_000.0), (12_000.0, 20_000.0)];
 /// Where a snare's noise is looked for.
 const SPREAD_BAND_HZ: (f32, f32) = (500.0, 5_000.0);
 
@@ -115,6 +128,19 @@ const SPREAD_FLOOR: f32 = 1.0e-3;
 /// (6 dB); a band must also rise by `MIN_RISE_DB` to count at all.
 const HAT_RATIO: f32 = 4.0;
 const MIN_RISE_DB: f32 = 3.0;
+/// A hat in the mix (with a kick or a snare): new energy per bin in
+/// 12–20 kHz ≥ this × that in 1–5 kHz (2.3 dB). White noise reads 1 ± 0.3
+/// at most; a hat under an equally loud white snare about 2.
+const HAT_TILT: f32 = 1.7;
+/// Burst: its threshold over the recent mean, in dB per unit of `delta`
+/// (1.6 dB at the default 0.1). Two stationary noise bands flicker by
+/// about 1 dB, rarely both at once (T-244 bench: 1.4 dB lets brown noise
+/// through, 2 dB loses the end of the roll under the riser).
+const BURST_DB_PER_DELTA: f32 = 16.0;
+/// Band powers under this per bin (−80 dBFS, the knee of the log
+/// compression) don't count in a burst: digital near-silence flickers by
+/// many dB.
+const BURST_FLOOR_PER_BIN: f32 = 1.0e-8;
 
 /// Operator settings; `analysis.onsets` in `audio.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -281,6 +307,8 @@ pub struct OnsetDetector {
     /// the other.
     logs: Vec<f32>,
     pickers: [Picker; ODF_COUNT],
+    /// Peak picking on the burst function (see the snare).
+    burst_picker: Picker,
     history: [HopInfo; HISTORY],
     /// The whole-spectrum ODF of the last 8 s, by hop number modulo the
     /// length (for the tempo estimation, T-233).
@@ -310,6 +338,7 @@ impl OnsetDetector {
             spread_bins: Bins::new(SPREAD_BAND_HZ.0, SPREAD_BAND_HZ.1, hz_per_bin, bins),
             logs: vec![0.0; (LAG + 1) * bins],
             pickers: std::array::from_fn(|_| Picker::new(hop_s)),
+            burst_picker: Picker::new(hop_s),
             history: [HopInfo::default(); HISTORY],
             odf: vec![0.0; odf_len.max(1)],
             flux: [0.0; ODF_COUNT],
@@ -424,13 +453,19 @@ impl OnsetDetector {
             let refractory = if i == ODF_LOW { kick_spacing } else { spacing };
             fired[i] = picker.push(n, v, delta, lookahead, refractory, decay);
         }
+        let burst = self.burst(n);
+        let burst = self.burst_picker.push(n, burst, BURST_DB_PER_DELTA * delta, lookahead, spacing, decay);
         if !silent {
-            let kinds = [
-                fired[ODF_FULL],
-                fired[ODF_LOW].filter(|&(c, _)| self.is_kick(c, n)),
-                fired[ODF_MID].filter(|&(c, _)| self.is_snare(c, n)),
-                fired[ODF_HIGH].filter(|&(c, _)| self.is_hat(c, n)),
-            ];
+            // A snare from the mid-band flux, else from a burst; either
+            // starts both refractory periods (one snare, not two).
+            let snare = match fired[ODF_MID].filter(|&(c, _)| self.is_snare(c, n)) {
+                Some(hit) => Some(hit),
+                None => burst.filter(|&(c, _)| self.is_masked_snare(c, n)).map(|(c, _)| (c, self.pickers[ODF_MID].at(c))),
+            };
+            if let Some((c, _)) = snare {
+                self.burst_picker.last = Some(c);
+            }
+            let kinds = [fired[ODF_FULL], fired[ODF_LOW].filter(|&(c, _)| self.is_kick(c, n)), snare, fired[ODF_HIGH].filter(|&(c, _)| self.is_hat(c, n))];
             for (i, kind) in kinds.into_iter().enumerate() {
                 let Some((c, v)) = kind else { continue };
                 let s = self.pickers[i].accept(c, v);
@@ -467,6 +502,21 @@ impl OnsetDetector {
         (c..=n).map(|j| self.info(j).power[b]).fold(0.0f32, f32::max)
     }
 
+    /// The burst function at hop `n`: the smaller of the 1–5 kHz and
+    /// 5–15 kHz power jumps (dB over the frame `LAG` hops back, like the
+    /// flux: a hat's own rise is over by the time a fluctuation of the
+    /// other band could complete it), ≥ 0.
+    fn burst(&self, n: u64) -> f32 {
+        let jump = |b: usize| {
+            let floor = BURST_FLOOR_PER_BIN * self.power_bins[b].len() as f32;
+            match n.checked_sub(LAG as u64) {
+                Some(r) if self.power_bins[b].len() > 0 => db_ratio(self.info(n).power[b] + floor, self.info(r).power[b] + floor),
+                _ => 0.0,
+            }
+        };
+        jump(P_CRACK).min(jump(P_HIGH)).max(0.0)
+    }
+
     fn is_kick(&self, c: u64, n: u64) -> bool {
         let (low, _) = self.rise(P_LOW, c, n);
         let (above, _) = self.rise(P_ABOVE_LOW, c, n);
@@ -489,13 +539,27 @@ impl OnsetDetector {
 
     fn is_snare(&self, c: u64, n: u64) -> bool {
         let spread = (c..=n).map(|j| self.info(j).spread).fold(0.0f32, f32::max);
-        let (crack, _) = self.rise(P_CRACK, c, n);
-        let (low, _) = self.rise(P_LOW, c, n);
-        spread >= SNARE_SPREAD && crack >= SNARE_SHARE * low && self.hat_like(c, n) != Some(true)
+        spread >= SNARE_SPREAD && self.is_masked_snare(c, n)
     }
 
+    /// A burst is a snare unless it is a kick's leakage or hat-like.
+    fn is_masked_snare(&self, c: u64, n: u64) -> bool {
+        let (crack, _) = self.rise(P_CRACK, c, n);
+        let (low, _) = self.rise(P_LOW, c, n);
+        crack >= SNARE_SHARE * low && self.hat_like(c, n) != Some(true)
+    }
+
+    /// A hat alone (hat-like), or one in the mix: the 12–20 kHz new energy
+    /// per bin stands `HAT_TILT` over the flat 1–5 kHz one.
     fn is_hat(&self, c: u64, n: u64) -> bool {
-        self.hat_like(c, n) == Some(true)
+        match self.hat_like(c, n) {
+            None => false,
+            Some(true) => true,
+            Some(false) => {
+                let per_bin = |b: usize| self.rise(b, c, n).0 / self.power_bins[b].len().max(1) as f32;
+                self.power_bins[P_TOP].len() > 0 && per_bin(P_TOP) >= HAT_TILT * per_bin(P_CRACK)
+            }
+        }
     }
 }
 
@@ -750,6 +814,45 @@ pub(crate) mod tests {
         let hits: Vec<(f64, Hit)> = (0..16).map(|b| (0.3 + b as f64 * BEAT, Hit::Kick)).collect();
         let e = detect(&render(8.0, &hits, bass));
         assert!(f_measure(&times(&hits, Hit::Kick), &e.kick, 0.05) >= 0.95, "{:?}", e.kick);
+    }
+
+    /// T-357: a hat struck with a snare (or a kick) is a hat too, and the
+    /// snare under it is still a snare.
+    #[test]
+    fn a_hat_played_with_a_snare_or_a_kick_is_heard() {
+        for (with, name) in [(Hit::Snare, "snare"), (Hit::Kick, "kick")] {
+            let hits: Vec<(f64, Hit)> = (0..8).flat_map(|b| [(0.3 + b as f64 * BEAT, Hit::Hat), (0.3 + b as f64 * BEAT, with)]).collect();
+            let e = detect(&render(4.5, &hits, |i| 0.001 * noise(i, 5)));
+            let hats = times(&hits, Hit::Hat);
+            assert!(f_measure(&hats, &e.hat, 0.05) >= 0.85, "hat with a {name}: {:?}", e.hat);
+            let other = if with == Hit::Snare { &e.snare } else { &e.kick };
+            assert!(f_measure(&times(&hits, with), other, 0.05) >= 0.95, "the {name} is still there: {e:?}");
+        }
+    }
+
+    /// T-357: snares under a noise layer as loud as them in 1-15 kHz (a
+    /// build-up's riser) are still snares; the noise alone is not.
+    #[test]
+    fn snares_under_a_loud_noise_layer_are_heard() {
+        // Noise high-passed at ~1 kHz (one pole), like a riser.
+        let riser: Vec<f32> = {
+            let (a, mut hp, mut prev) = ((-2.0 * PI * 1_000.0 / RATE as f32).exp(), 0.0f32, 0.0f32);
+            (0..8 * RATE as usize)
+                .map(|i| {
+                    let x = noise(i, 21);
+                    hp = a * (hp + x - prev);
+                    prev = x;
+                    0.3 * hp
+                })
+                .collect()
+        };
+        let hits: Vec<(f64, Hit)> = (0..24).map(|k| (0.5 + k as f64 * BEAT / 2.0, Hit::Snare)).collect();
+        let e = detect(&render(8.0, &hits, |i| riser[i]));
+        let f = f_measure(&times(&hits, Hit::Snare), &e.snare, 0.05);
+        assert!(f >= 0.9, "snare F {f}: {:?}", e.snare);
+        assert!(e.kick.is_empty() && e.hat.is_empty(), "{e:?}");
+        let alone = detect(&riser);
+        assert!(alone.snare.iter().all(|&t| t < 0.3), "the riser alone: {:?}", alone.snare);
     }
 
     #[test]
