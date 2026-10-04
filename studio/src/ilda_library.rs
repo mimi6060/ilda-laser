@@ -809,7 +809,7 @@ mod tests {
     fn the_export_carries_the_output_colour_rendering() {
         let mut s = crate::test_support::shared();
         let color = ColorCalibration { white_balance: [0.0; 3], ..Default::default() };
-        s.outputs.set_color(power::MAIN_OUTPUT, color, false).unwrap();
+        s.outputs.set_color(power::MAIN_OUTPUT, color, false, false).unwrap();
         assert_eq!(ExportSafety::of(&s, power::MAIN_OUTPUT).unwrap().color, color);
         assert!(export_look(&white_circle(), 2, 25.0, 120.0, &open_chain()).is_ok());
         let e = export_look(&white_circle(), 2, 25.0, 120.0, &ExportSafety { color, ..open_chain() }).unwrap_err().to_string();

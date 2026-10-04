@@ -493,16 +493,21 @@ impl OutputStore {
     }
 
     /// Changes an output's colour rendering (T-414). Darker or equal
-    /// applies at once; brighter (a gain raised, a curve giving more light
-    /// at the same input) needs `confirm_loosen`, like the safety
-    /// settings. Never above the caps: those apply after, whatever this is.
-    pub fn set_color(&mut self, id: &str, color: ColorCalibration, confirm_loosen: bool) -> std::result::Result<OutputConfig, SetError> {
+    /// applies at once, armed or not. Brighter (a gain raised, a curve
+    /// giving more light at the same input) is treated like raising a cap:
+    /// refused while `armed` (whatever `confirm_loosen` says), and
+    /// otherwise needs `confirm_loosen`. Never above the caps: those apply
+    /// after, whatever this is.
+    pub fn set_color(&mut self, id: &str, color: ColorCalibration, armed: bool, confirm_loosen: bool) -> std::result::Result<OutputConfig, SetError> {
         let Some(current) = self.get(id).cloned() else {
             return Err(SetError::Invalid(format!("Sortie inconnue : « {id} »")));
         };
         color.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
         let color = color.sanitized();
         let loosens = current.color.loosenings(&color);
+        if !loosens.is_empty() && armed {
+            return Err(SetError::Armed(loosens));
+        }
         if !loosens.is_empty() && !confirm_loosen {
             return Err(SetError::Raises(loosens));
         }
@@ -754,10 +759,16 @@ mod tests {
         assert!(st.load_error().is_none());
         assert!(st.active_color().is_identity(), "no `color` key: identity");
         let darker = ColorCalibration { white_balance: [0.7, 1.0, 1.0], curve: [ChannelCurve::Gamma { gamma: 2.2 }; 3], color_delay_points: -2 };
-        st.set_color(MAIN_OUTPUT, darker, false).unwrap();
+        st.set_color(MAIN_OUTPUT, darker, false, false).unwrap();
         let brighter = ColorCalibration { white_balance: [1.0; 3], ..darker };
-        assert!(matches!(st.set_color(MAIN_OUTPUT, brighter, false), Err(SetError::Raises(l)) if l.len() == 1));
-        assert!(matches!(st.set_color("ailleurs", darker, true), Err(SetError::Invalid(_))));
+        assert!(matches!(st.set_color(MAIN_OUTPUT, brighter, false, false), Err(SetError::Raises(l)) if l.len() == 1));
+        assert!(matches!(st.set_color("ailleurs", darker, false, true), Err(SetError::Invalid(_))));
+        // Armed: brighter is refused even confirmed; darker still applies.
+        assert!(matches!(st.set_color(MAIN_OUTPUT, brighter, true, true), Err(SetError::Armed(l)) if l.len() == 1));
+        assert_eq!(st.active_color(), darker, "unchanged");
+        let dimmer = ColorCalibration { white_balance: [0.5, 1.0, 1.0], ..darker };
+        st.set_color(MAIN_OUTPUT, dimmer, true, false).unwrap();
+        st.set_color(MAIN_OUTPUT, darker, false, true).unwrap();
         let st = OutputStore::load_or_create(path.clone());
         assert_eq!((st.active_color(), st.active_limits().max_power), (darker, 0.4), "persists, caps kept");
         // Hand-edited: a decreasing curve is straightened, a delay clamped.

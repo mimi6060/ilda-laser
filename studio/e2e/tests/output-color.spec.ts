@@ -98,7 +98,7 @@ test('a colour delay shifts the colour along the strokes and never lights the tr
   expect(shifted).toBeGreaterThan(0);
 });
 
-test('raising the white balance asks for confirmation; the caps still apply after it', async ({ page }) => {
+test('raising the white balance asks for confirmation, never while armed; the caps still apply after it', async ({ page }) => {
   expect(await studio.post('/api/outputs/color', { color: { ...IDENTITY, white_balance: [1, 0.5, 1] } })).toBe(200);
   await page.reload();
   await openColours(page);
@@ -114,6 +114,24 @@ test('raising the white balance asks for confirmation; the caps still apply afte
   await page.locator('#ocWbG').fill('100');
   await page.locator('#ocLoosenOk').click();
   await expect.poll(async () => (await colour()).white_balance[1]).toBeCloseTo(1, 5);
+  // Armed (preview only: no output): brighter refused even confirmed, the
+  // UI says why; dimming still applies.
+  expect(await studio.post('/api/outputs/color', { color: { ...IDENTITY, white_balance: [1, 0.4, 1] } })).toBe(200);
+  await page.reload();
+  await openColours(page);
+  expect(await studio.post('/api/arm', { on: true })).toBe(200);
+  try {
+    expect(await studio.post('/api/outputs/color', { color: IDENTITY, confirm_loosen: true })).toBe(409);
+    await page.locator('#ocWbG').fill('90');
+    await expect(page.locator('#ocError')).toContainText("Désarmez avant d'augmenter les couleurs");
+    await expect(page.locator('#ocLoosen')).toBeHidden();
+    await expect(page.locator('#ocWbGV')).toHaveText('40 %');
+    expect(await studio.post('/api/outputs/color', { color: { ...IDENTITY, white_balance: [1, 0.3, 1] } })).toBe(200);
+  } finally {
+    await studio.post('/api/arm', { on: false });
+  }
+  expect((await colour()).white_balance[1]).toBeCloseTo(0.3, 5);
+  expect(await studio.post('/api/outputs/color', { color: IDENTITY, confirm_loosen: true })).toBe(200);
   // A 30 % cap on green comes after the colours: green never above 0.3.
   expect(await studio.post('/api/outputs/limits', { limits: { max_power: 1, max_color: [1, 0.3, 1] } })).toBe(200);
   await expect.poll(async () => Math.max(...(await points()).map(p => p[3]))).toBeLessThanOrEqual(0.3 + 1e-4);

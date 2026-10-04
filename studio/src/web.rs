@@ -594,8 +594,10 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         // missing field of `color` is its identity value. Darker or equal
         // applies at once; brighter is 409 `{error, loosen}` without
         // `"confirm_loosen": true` (sent only by the operator's
-        // confirmation in the UI). The caps still apply after it. Refused
-        // in show mode (not on the allow-list).
+        // confirmation in the UI), and 409 `{error, loosen, armed: true}`
+        // while the laser is armed, confirmed or not (like raising a cap).
+        // The caps still apply after it. Refused in show mode (not on the
+        // allow-list).
         (Method::Post, "/api/outputs/color") => {
             let id = match color_output(request.url(), &shared.lock().unwrap()) {
                 Ok(id) => id,
@@ -604,19 +606,26 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             match body::<ColorBody>(request) {
                 Ok(b) => {
                     let mut s = shared.lock().unwrap();
+                    let s = &mut *s;
+                    s.gate.sync_estop(&s.estop);
+                    let armed = s.gate.is_armed();
                     let before = s.outputs.get(&id).map(|o| o.color);
-                    match s.outputs.set_color(&id, b.color, b.confirm_loosen) {
+                    match s.outputs.set_color(&id, b.color, armed, b.confirm_loosen) {
                         Ok(out) => {
                             if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out.color)) {
                                 change["output"] = json!(id);
                                 change["confirmed_loosen"] = json!(b.confirm_loosen);
                                 s.gate.log().record("output_color", Some("ui"), change);
                             }
-                            json_response(color_view(&s, &id))
+                            json_response(color_view(s, &id))
                         }
                         Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
-                        Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) => with_status(
+                        Err(crate::power::SetError::Raises(list)) => with_status(
                             json_response(json!({ "error": "Ce réglage augmente la lumière émise : confirmation requise", "loosen": list })),
+                            409,
+                        ),
+                        Err(crate::power::SetError::Armed(list)) => with_status(
+                            json_response(json!({ "error": "Désarmez avant d'augmenter les couleurs", "loosen": list, "armed": true })),
                             409,
                         ),
                     }
@@ -3539,6 +3548,17 @@ mod tests {
         assert_eq!(js(&reply)["loosen"][0], "Balance rouge : 80 % → 100 %");
         assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 0.8);
         let confirmed = format!(r#"{{"confirm_loosen":true,"color":{{"white_balance":[1,1,1],{curves}}}}}"#);
+        // Armed: brighter refused even confirmed, darker still applies.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (code, reply) = t.request("POST", "/api/outputs/color", &confirmed);
+        assert_eq!(code, 409, "{reply}");
+        assert_eq!((js(&reply)["armed"].as_bool(), js(&reply)["error"].as_str()), (Some(true), Some("Désarmez avant d'augmenter les couleurs")));
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 0.8);
+        let dimmer = format!(r#"{{"color":{{"white_balance":[0.6,1,1],{curves}}}}}"#);
+        assert_eq!(t.request("POST", "/api/outputs/color", &dimmer).0, 200);
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 0.6);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        // Disarmed and confirmed: applied.
         assert_eq!(t.request("POST", "/api/outputs/color", &confirmed).0, 200);
         assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 1.0);
         // Out of range or malformed: 400, nothing changed.

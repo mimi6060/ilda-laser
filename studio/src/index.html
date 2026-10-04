@@ -1867,7 +1867,7 @@
           <button id="ocTpBlank" title="Affiche la mire « Extinction et retard couleur »">Extinction et retard couleur</button>
           <button id="ocReset">Réinitialiser les couleurs</button>
         </div>
-        <div class="hint">Rendu des couleurs de ce projecteur : courbe, puis balance, puis retard, avant les zones, l'horizon, les gains de sécurité et les plafonds de puissance, qui s'appliquent toujours après. Le retard décale la couleur à l'intérieur de chaque trait : un déplacement éteint reste éteint. Baisser s'applique tout de suite ; augmenter la lumière demande une confirmation. Réglages de cette machine (pas du projet), sans raccourci ni contrôle MIDI, OSC ou DMX.</div>
+        <div class="hint">Rendu des couleurs de ce projecteur : courbe, puis balance, puis retard, avant les zones, l'horizon, les gains de sécurité et les plafonds de puissance, qui s'appliquent toujours après. Le retard décale la couleur à l'intérieur de chaque trait : un déplacement éteint reste éteint. Baisser s'applique tout de suite ; augmenter la lumière demande une confirmation, laser désarmé. Réglages de cette machine (pas du projet), sans raccourci ni contrôle MIDI, OSC ou DMX.</div>
       </div>
       <div class="sf-sub">Fiche projecteur</div>
       <label for="pjName">Nom / modèle</label><input type="text" id="pjName" maxlength="60" autocomplete="off">
@@ -5520,6 +5520,13 @@ async function saveOutColor(color, confirm = false) {
     showOutColor();
   } else if (r.status === 409) {
     const j = await r.json();
+    if (j.armed) {
+      // Armed: brighter is refused outright, like raising a power cap.
+      ocPending = null; $('ocLoosen').hidden = true;
+      await reloadOutColor();
+      $('ocError').textContent = j.error + ' (' + j.loosen.join(' · ') + ')';
+      return;
+    }
     ocPending = color;
     $('ocLoosenText').textContent = "Ce réglage augmente la lumière émise. Confirmer l'assouplissement ? " + j.loosen.join(' · ');
     $('ocLoosen').hidden = false;

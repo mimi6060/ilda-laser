@@ -640,10 +640,11 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         let _ = rig.s().projection.set(random_projection(&mut zrng));
     }
     // The output's colour rendering (T-414), from its own stream too;
-    // brighter settings are confirmed, as the operator could.
+    // brighter settings are confirmed, as the operator could (refused
+    // while armed: that's the store's rule).
     let mut crng = Rng::new(seed ^ 0x0414_0414);
     if crng.chance(0.6) {
-        let _ = rig.s().outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), true);
+        let _ = rig.s().outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), false, true);
     }
     let mut beats = 0;
     for frame in 0..frames {
@@ -651,7 +652,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             random_routing(&mut rig.s(), &mut zrng);
         }
         if crng.chance(0.05) {
-            let _ = rig.s().outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), true);
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            let _ = s.outputs.set_color(MAIN_OUTPUT, random_color(&mut crng), armed, true);
         }
         for _ in 0..rng.below(3) {
             let was = rig.s().gate.is_armed();
@@ -1171,7 +1174,7 @@ fn output_colour_runs_before_zones_safety_gains_and_caps() {
         let mut s = test_support::shared();
         s.safety.set(safety, true).unwrap();
         s.outputs.set(MAIN_OUTPUT, Some(caps), None, false, true).unwrap();
-        s.outputs.set_color(MAIN_OUTPUT, bright, true).unwrap();
+        s.outputs.set_color(MAIN_OUTPUT, bright, false, true).unwrap();
         s.test_pattern.brightness = 1.0;
         testpattern::select(&mut s, Some(testpattern::TestPattern::WhiteRamp));
         let mut rig = Rig::new(s, "colour-order", 0);
