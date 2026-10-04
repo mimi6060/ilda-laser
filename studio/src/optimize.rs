@@ -134,6 +134,10 @@ impl Optimizer {
         self.params.sanitize();
     }
 
+    pub fn params(&self) -> &OptimizeParams {
+        &self.params
+    }
+
     /// One look's raw points → the points the galvos draw. A look with
     /// nothing lit (a closed gate, a dark strobe slot) keeps the classic
     /// `densify` path, so its frame stays exactly what it was.

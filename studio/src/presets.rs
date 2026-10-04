@@ -5,7 +5,11 @@
 //! so ids stay stable as long as the lists below only grow at the end.
 
 use crate::engine::{Animator, AudioFeatures, AudioReact, BeatClock, Content, GateMode, Settings};
+use crate::evolving::{EvolvingCue, EvolvingKey, KeyEase};
 use crate::generators::{ColorMode, GenParams};
+use crate::lfo::{Modulator, Wave};
+use crate::live::Rate;
+use crate::program::{CueProgram, Key, Lane, PlayMode};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -266,7 +270,81 @@ pub fn catalog() -> Vec<Preset> {
     b.synced("Positions temps + contretemps", "positions", 8, 0.0, 0.3, 2.0, SOLID_MAGENTA, |s| s.gate = GateMode::BeatAndOffbeat);
     b.synced("Strobe 1/2 temps", "fan", 12, 0.0, 0.4, 1.0, SOLID_WHITE, |s| s.strobe_div = 2.0);
 
+    // Cue programs (T-157), appended: a cue as a mini-timeline. Our own
+    // settings, on pages with free grid cells.
+    for (category, name, settings) in program_cues() {
+        b.add(category, name.to_string(), settings);
+    }
+
     b.presets
+}
+
+/// A beat-synced generator look.
+fn synced_look(generator: &str, count: u32, a: f32, b: f32, color: [u8; 3], scale: f32) -> Settings {
+    let params = GenParams { count, a, b, beat_sync: true, ..GenParams::default() };
+    Settings { content: Content::Generator { generator: generator.to_string(), params }, color, scale, ..Settings::default() }
+}
+
+/// A curve: (beat, value, ease) keys.
+fn lane(target: &str, keys: &[(f32, f32, KeyEase)]) -> Lane {
+    Lane { target: target.to_string(), keys: keys.iter().map(|&(beat, value, ease)| Key { beat, value, ease }).collect() }
+}
+
+/// The three example cue programs (T-157).
+fn program_cues() -> Vec<(&'static str, &'static str, Settings)> {
+    use KeyEase::*;
+    // A tunnel with a cone of dots breathing inside it (an inner layer
+    // with its own keys), spinning up over 8 beats and back down.
+    let cone = |at_beats: f32, scale: f32| EvolvingKey {
+        at_beats,
+        generator: "beam_circle".into(),
+        params: GenParams { count: 8, ..GenParams::default() },
+        color: MAGENTA,
+        scale,
+        ease: Smooth,
+        ..EvolvingKey::default()
+    };
+    let tunnel = Settings {
+        program: Some(CueProgram {
+            length_beats: Some(16.0),
+            play: PlayMode::Loop,
+            layers: vec![Content::Evolving(EvolvingCue { length_beats: 16.0, looped: true, keys: vec![cone(0.0, 0.25), cone(8.0, 0.45)], ..EvolvingCue::default() })],
+            lanes: vec![lane("rot_z.speed", &[(0.0, 0.0, EaseIn), (8.0, 120.0, EaseOut), (16.0, 0.0, Linear)])],
+            lfos: vec![Modulator { target: "size".into(), wave: Wave::Sine, rate: Rate::Beats(4.0), depth: 0.05, ..Modulator::default() }],
+        }),
+        ..synced_look("tunnel", 6, 0.0, 0.0, CYAN, 0.7)
+    };
+    // A sheet that fades in low and rises over 16 beats, then holds.
+    let sheet = Settings {
+        program: Some(CueProgram {
+            length_beats: Some(16.0),
+            play: PlayMode::Once,
+            lanes: vec![
+                lane("pos_y", &[(0.0, -0.4, Smooth), (16.0, 0.1, Linear)]),
+                lane("size", &[(0.0, 0.6, Linear), (16.0, 1.0, Linear)]),
+                lane("brightness", &[(0.0, 0.3, EaseIn), (4.0, 1.0, Linear)]),
+            ],
+            ..CueProgram::default()
+        }),
+        ..synced_look("liquid_sky", 1, 0.0, 0.6, GREEN, 0.8)
+    };
+    // A helix whose hue goes green → magenta and back, with a 1/2-beat
+    // strobe on the turn-around and a slow 3D sway.
+    let helix = Settings {
+        program: Some(CueProgram {
+            length_beats: Some(8.0),
+            play: PlayMode::PingPong,
+            lanes: vec![lane("color.hue", &[(0.0, 120.0, Linear), (8.0, 300.0, Linear)]), lane("strobe.div", &[(0.0, 0.0, Step), (6.0, 2.0, Step)])],
+            lfos: vec![Modulator { target: "rot_y.angle".into(), wave: Wave::Triangle, rate: Rate::Beats(8.0), depth: 0.15, ..Modulator::default() }],
+            ..CueProgram::default()
+        }),
+        ..synced_look("helix", 2, 1.5, 0.0, GREEN, 0.7)
+    };
+    vec![
+        ("Tunnels", "Tunnel + cône qui tourne · programme", tunnel),
+        ("Balayages", "Nappe qui monte · une fois", sheet),
+        ("Vagues", "Hélice teinte + strobe · aller-retour", helix),
+    ]
 }
 
 
@@ -305,6 +383,11 @@ pub fn thumbnail(settings: &Settings) -> String {
         let clock = BeatClock { beat: i as f64 / 30.0, ..BeatClock::default() };
         points = animator.render(settings, audio, 1.0 / 60.0, &clock);
     }
+    pack(&points)
+}
+
+/// Points → a thumbnail string (see `thumbnail`).
+fn pack(points: &[crate::patterns::Point]) -> String {
     let step = points.len().div_ceil(THUMB_POINTS).max(1);
     let pos = |v: f32| ((v.clamp(-1.0, 1.0) + 1.0) * 127.5).round() as u8;
     let col = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -314,6 +397,36 @@ pub fn thumbnail(settings: &Settings) -> String {
         .flat_map(|p| [pos(p.x), pos(p.y), col(p.r), col(p.g), col(p.b)])
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// Most pictures in a hover preview.
+const PREVIEW_FRAMES: usize = 64;
+
+/// The cue grid's hover preview (T-157): the look played from its launch,
+/// one thumbnail every `step_beats`, for the UI to play at the tempo.
+#[derive(Clone, Debug, Serialize)]
+pub struct Preview {
+    pub step_beats: f64,
+    pub frames: Vec<String>,
+}
+
+/// A look over its program's length (4 beats without a program) at `bpm`.
+/// Display only: it never reaches the output.
+pub fn preview(settings: &Settings, bpm: f64, beats_per_bar: u8) -> Preview {
+    let bpm = if bpm.is_finite() { bpm.clamp(20.0, 400.0) } else { 120.0 };
+    let len = settings.program.as_ref().map_or(4.0, |p| p.length(&settings.content));
+    let step = (len / PREVIEW_FRAMES as f64).max(0.25);
+    let count = ((len / step).round() as usize).clamp(1, PREVIEW_FRAMES);
+    let dt = (step * 60.0 / bpm) as f32;
+    let audio = AudioFeatures { level: 0.6, bass: 0.6, ..AudioFeatures::default() };
+    let mut animator = Animator::starting_at(0.0);
+    let frames = (0..count)
+        .map(|i| {
+            let clock = BeatClock { beat: i as f64 * step, bpm, beats_per_bar };
+            pack(&animator.render(settings, audio, if i == 0 { 0.0 } else { dt }, &clock))
+        })
+        .collect();
+    Preview { step_beats: step, frames }
 }
 
 #[cfg(test)]
@@ -482,12 +595,45 @@ mod tests {
     /// Cues that existed before the festival cues (T-103 on): the golden
     /// digests cover them; later cues are only ever appended.
     const LEGACY_CUES: usize = 202;
+    /// The T-103 rhythm cues, right after them.
+    const RHYTHM_CUES: usize = 11;
+
+    #[test]
+    fn program_cues_are_appended_after_the_rhythm_cues() {
+        let all = catalog();
+        let new = &all[LEGACY_CUES + RHYTHM_CUES..];
+        assert_eq!(new.len(), 3);
+        assert!(new.iter().all(|p| p.settings.program.as_ref().is_some_and(|p| p.validate().is_ok())));
+        assert_eq!(new.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["tunnels-024", "balayages-017", "vagues-028"]);
+        let plays: Vec<PlayMode> = new.iter().map(|p| p.settings.program.as_ref().unwrap().play).collect();
+        assert_eq!(plays, [PlayMode::Loop, PlayMode::Once, PlayMode::PingPong]);
+        assert!(new.iter().any(|p| !p.settings.program.as_ref().unwrap().layers.is_empty()), "one has an inner layer");
+        // Older cues have no program.
+        assert!(all[..LEGACY_CUES + RHYTHM_CUES].iter().all(|p| p.settings.program.is_none()));
+        // Each fits a grid page, so it has a pad (`grid.<page>.<row>.<col>`).
+        for p in new {
+            let index = all.iter().filter(|q| q.category == p.category).position(|q| q.id == p.id).unwrap();
+            assert!(index < crate::controls::GRID_ROWS * crate::controls::GRID_COLS, "{}", p.id);
+        }
+    }
+
+    #[test]
+    fn a_preview_plays_the_program_over_its_length() {
+        let all = catalog();
+        let helix = all.iter().find(|p| p.id == "vagues-028").unwrap();
+        let pv = preview(&helix.settings, 120.0, 4);
+        assert_eq!((pv.step_beats, pv.frames.len()), (0.25, 32), "8 beats, a picture every 1/4 beat");
+        assert!(pv.frames.iter().any(|f| f.is_empty() || f.as_bytes().chunks(10).all(|c| &c[4..] == b"000000")), "a dark strobe slot");
+        assert!(pv.frames.windows(2).any(|w| w[0] != w[1]), "it moves");
+        assert_eq!(preview(&helix.settings, 120.0, 4).frames, pv.frames, "the same every time");
+        let plain = preview(&all[0].settings, 120.0, 4);
+        assert_eq!(plain.frames.len(), 16, "4 beats without a program");
+    }
 
     #[test]
     fn rhythm_cues_are_appended_on_the_beams_page() {
         let all = catalog();
-        let new = &all[LEGACY_CUES..];
-        assert!(new.len() >= 11);
+        let new = &all[LEGACY_CUES..LEGACY_CUES + RHYTHM_CUES];
         assert!(new.iter().all(|p| p.category == "Faisceaux"));
         // Numbered after the page's 31 older cues.
         assert_eq!(new[0].id, "faisceaux-032");

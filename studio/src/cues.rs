@@ -13,6 +13,7 @@
 
 use crate::engine::Settings;
 use crate::layers::LAYER_COUNT;
+use crate::program::CueProgram;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,10 @@ pub struct CueSlot {
     /// default zones.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub zones: Vec<u8>,
+    /// A cue program (T-157) set on this cue (`POST /api/cues/program`):
+    /// replaces the cue's own when it starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<CueProgram>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -166,6 +171,7 @@ impl CueDeck {
             slot.zones.retain(|z| (1..=crate::projection::MAX_ZONES).contains(z));
             slot.zones.sort_unstable();
             slot.zones.dedup();
+            slot.program = slot.program.take().filter(|p| p.validate().is_ok());
         }
         self.slots.retain(|_, slot| *slot != CueSlot::default());
     }
@@ -182,6 +188,19 @@ impl CueDeck {
 
     pub fn slot(&self, cue: &str) -> CueSlot {
         self.slots.get(cue).cloned().unwrap_or_default()
+    }
+
+    /// The program set on `cue` from the grid, if any.
+    pub fn program(&self, cue: &str) -> Option<&CueProgram> {
+        self.slots.get(cue)?.program.as_ref()
+    }
+
+    /// `look` as cue `cue` plays it: with the grid's program when it has one.
+    pub fn with_program(&self, cue: &str, mut look: Settings) -> Settings {
+        if let Some(p) = self.program(cue) {
+            look.program = Some(p.clone());
+        }
+        look
     }
 
     /// The mode a press on `cue` uses: its own, else the deck's.
@@ -584,6 +603,24 @@ mod tests {
         // A grid.json from before T-012: no zones, the default zones.
         let old: CueDeck = serde_json::from_str(r#"{"slots":{"a":{"layer":2}}}"#).unwrap();
         assert!(old.slot("a").zones.is_empty());
+    }
+
+    #[test]
+    fn a_cue_program_is_saved_with_the_grid_and_plays_with_the_cue() {
+        let mut d = deck(false);
+        let program = CueProgram { layers: vec![crate::engine::Content::Wave], ..Default::default() };
+        d.set_slot("a", CueSlot { program: Some(program.clone()), ..Default::default() });
+        let back: CueDeck = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.program("a"), Some(&program));
+        assert_eq!(back.with_program("a", Settings::default()).program, Some(program));
+        assert_eq!(back.with_program("b", Settings::default()).program, None);
+        // A grid.json from before T-157 has none; one that isn't valid any
+        // more is dropped.
+        let old: CueDeck = serde_json::from_str(r#"{"slots":{"a":{"layer":2}}}"#).unwrap();
+        assert_eq!(old.program("a"), None);
+        let bad = CueProgram { lanes: vec![crate::program::Lane { target: "nope".into(), keys: Vec::new() }], ..Default::default() };
+        d.set_slot("c", CueSlot { program: Some(bad), ..Default::default() });
+        assert!(!d.slots.contains_key("c"));
     }
 
     #[test]

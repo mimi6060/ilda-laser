@@ -11,6 +11,7 @@ use crate::font;
 use crate::generators::{self, GenCtx, GenParams};
 use crate::optimize::{OptimizeParams, Optimizer};
 use crate::patterns::{self, Point};
+use crate::program::{self, CueProgram, PlayMode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -104,6 +105,11 @@ pub struct Settings {
     pub strobe_div: f32,
     /// Fraction of each strobe slot that is lit (`STROBE_DUTY` range).
     pub strobe_duty: f32,
+    /// A cue program (T-157, `program.rs`): inner layers, curves and LFOs
+    /// on the cue's own modifiers. `None` = the look as it is (and as it
+    /// was saved before programs existed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<CueProgram>,
 }
 
 /// When a look's beat gate opens.
@@ -164,6 +170,7 @@ impl Default for Settings {
             gate_decay: false,
             strobe_div: 0.0,
             strobe_duty: 0.4,
+            program: None,
         }
     }
 }
@@ -424,6 +431,10 @@ pub struct Animator {
     /// The point optimiser (T-002) when the output has it on; `None` =
     /// the classic `densify`.
     optimizer: Option<Optimizer>,
+    /// One animator per inner layer of a cue program (T-157), each
+    /// counting from the program's zero, so every layer keeps its own
+    /// motion, in phase with the curves.
+    program_layers: Vec<Animator>,
 }
 
 impl Animator {
@@ -456,7 +467,20 @@ impl Animator {
     }
 
     pub fn render(&mut self, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock) -> Vec<Point> {
-        let points = match &s.content {
+        let points = match &s.program {
+            Some(program) => self.render_program(program, s, audio, dt, clock),
+            None => {
+                self.program_layers.clear();
+                self.render_content(s, audio, dt, clock)
+            }
+        };
+        self.rendered = true;
+        points
+    }
+
+    /// The look's content alone (what a cue without a program draws).
+    fn render_content(&mut self, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock) -> Vec<Point> {
+        match &s.content {
             Content::Evolving(cue) => self.render_evolving(cue, s, audio, dt, clock),
             _ => {
                 self.evolving = None;
@@ -464,9 +488,53 @@ impl Animator {
                 let beat_pos = self.beat_pos(clock);
                 self.render_look(s, audio, dt, clock, beat_pos)
             }
+        }
+    }
+
+    /// A cue program (T-157): the content, then the inner layers (same
+    /// look, their own content), joined by blanked travel, then the cue's
+    /// own curves and LFOs at its local beat - the evolving content's
+    /// (quantized launch) when there is one, else the look's `beat_pos`.
+    fn render_program(&mut self, program: &CueProgram, s: &Settings, audio: AudioFeatures, dt: f32, clock: &BeatClock) -> Vec<Point> {
+        let main = self.render_content(s, audio, dt, clock);
+        let raw = match (&s.content, &self.evolving) {
+            (Content::Evolving(_), Some((_, launch))) => clock.beat - launch,
+            _ => self.beat_pos(clock),
         };
-        self.rendered = true;
-        points
+        let len = program.length(&s.content);
+        if !matches!(s.content, Content::Evolving(_)) {
+            let looped = program.play != PlayMode::Once;
+            self.progress = Some(evolving::Progress {
+                pos: program.local(raw, len),
+                length: len,
+                looped,
+                ended: !looped && raw >= len,
+                pass: if looped && raw > 0.0 { (raw / len).floor() as u64 } else { 0 },
+                beats_per_bar: clock.beats_per_bar,
+                ..Default::default()
+            });
+        }
+        // Inner layers count from the program's own zero, so their keys
+        // are in phase with the curves.
+        let layers = &program.layers[..program.layers.len().min(program::MAX_LAYERS)];
+        let origin = clock.beat - raw;
+        self.program_layers.truncate(layers.len());
+        self.program_layers.resize_with(layers.len(), || Animator::starting_at(origin));
+        let opt = self.optimizer.as_ref().map(|o| o.params().clone());
+        let mut looks = vec![main];
+        for (layer, content) in self.program_layers.iter_mut().zip(layers) {
+            match &opt {
+                Some(params) => layer.set_optimizer(params),
+                None => layer.optimizer = None,
+            }
+            let look = Settings { content: content.clone(), program: None, ..s.clone() };
+            looks.push(layer.render(&look, audio, dt, clock));
+        }
+        let points = if looks.len() == 1 { looks.pop().unwrap_or_default() } else { join_looks(looks, opt.as_ref()) };
+        match program.modifiers(raw, len, clock.bpm) {
+            Some(mods) => mods.apply(points, raw),
+            None => points,
+        }
     }
 
     /// An evolving cue: sample its keys at its local beat and draw that
@@ -1191,6 +1259,81 @@ mod tests {
         assert_eq!((n.level, n.bands.high, n.kick, n.drop, n.beat, n.silent), (0.0, 0.0, 4, 2, 3, true));
         let bad = AudioFeatures { level: f32::NAN, bands: Bands { mid: -2.0, ..Default::default() }, bpm: f32::INFINITY, t: f64::NAN, ..Default::default() }.sanitized();
         assert_eq!((bad.level, bad.bands.mid, bad.bpm, bad.t), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    fn programmed(s: Settings, program: CueProgram) -> Settings {
+        Settings { program: Some(program), ..s }
+    }
+
+    fn circle(scale: f32, color: [u8; 3]) -> Settings {
+        Settings { content: Content::Shape { shape: "circle".into() }, scale, color, brightness: 1.0, ..Default::default() }
+    }
+
+    #[test]
+    fn an_empty_program_draws_the_look_as_it_is() {
+        for s in [synced("fan", GenParams::default()), evolving(crate::evolving::test_cue(true)), circle(0.5, [0, 255, 0])] {
+            let p = programmed(s.clone(), CueProgram::default());
+            for beat in [0.0, 3.3, 9.75, 21.0] {
+                assert_eq!(frame_at(&p, 1.0, beat, 120.0), frame_at(&s, 1.0, beat, 120.0), "{:?} at {beat}", s.content);
+            }
+        }
+    }
+
+    #[test]
+    fn a_size_curve_scales_the_cue_frame() {
+        use crate::evolving::KeyEase;
+        use crate::program::{Key, Lane};
+        // Size 0.2 → 1.0, linear over 16 beats: 0.6 at beat 8.
+        let keys = vec![Key { beat: 0.0, value: 0.2, ease: KeyEase::Linear }, Key { beat: 16.0, value: 1.0, ease: KeyEase::Linear }];
+        let s = programmed(circle(0.5, [0, 255, 0]), CueProgram { lanes: vec![Lane { target: "size".into(), keys }], ..Default::default() });
+        let extent = |pts: &[Point]| pts.iter().map(|p| p.x.abs()).fold(0.0, f32::max);
+        let base = extent(&frame_at(&circle(0.5, [0, 255, 0]), 0.0, 8.0, 120.0));
+        assert!((extent(&frame_at(&s, 0.0, 8.0, 120.0)) / base - 0.6).abs() < 1e-3);
+        // The UI's progress bar follows the program.
+        let mut a = Animator::starting_at(0.0);
+        a.render(&s, AudioFeatures::default(), 0.016, &BeatClock { beat: 20.0, ..Default::default() });
+        let p = a.progress().unwrap();
+        assert_eq!((p.pos, p.length, p.pass, p.looped), (4.0, 16.0, 1, true));
+    }
+
+    #[test]
+    fn inner_layers_follow_the_content_with_blanked_travel() {
+        use crate::evolving::{EvolvingCue, EvolvingKey};
+        let main = circle(0.2, [255, 0, 0]);
+        let fan = Content::Evolving(EvolvingCue { keys: vec![EvolvingKey { color: [0, 0, 255], ..Default::default() }], ..Default::default() });
+        let s = programmed(main.clone(), CueProgram { layers: vec![fan.clone()], ..Default::default() });
+        let frame = frame_at(&s, 0.0, 2.5, 120.0);
+        let alone = frame_at(&main, 0.0, 2.5, 120.0);
+        let layer = frame_at(&Settings { content: fan, ..main }, 0.0, 2.5, 120.0);
+        assert_eq!(&frame[..alone.len()], &alone[..], "the content first");
+        assert_eq!(&frame[frame.len() - layer.len()..], &layer[..], "then the layer");
+        let travel = &frame[alone.len()..frame.len() - layer.len()];
+        assert!(travel.len() >= 2 && travel.iter().all(|p| !p.is_lit()), "joined by blanked travel");
+        assert!(frame.iter().any(|p| p.r > 0.5) && frame.iter().any(|p| p.b > 0.5));
+    }
+
+    #[test]
+    fn two_launches_at_the_same_local_beat_give_the_same_frame() {
+        let programs: Vec<_> = crate::presets::catalog().into_iter().filter(|p| p.settings.program.is_some()).collect();
+        assert_eq!(programs.len(), 3);
+        for p in programs {
+            // Launched at beat 2, then at beat 42 (same place in a bar).
+            for after in [0.5, 5.5, 13.25, 30.0] {
+                let a = frame_at(&p.settings, 2.0, 2.0 + after, 128.0);
+                assert!(!a.is_empty(), "{}", p.id);
+                assert_eq!(a, frame_at(&p.settings, 42.0, 42.0 + after, 128.0), "{} at {after}", p.id);
+            }
+        }
+    }
+
+    #[test]
+    fn looks_without_a_program_save_as_before() {
+        let s: Settings = serde_json::from_str(r#"{"content":{"kind":"wave"},"brightness":0.7}"#).unwrap();
+        assert_eq!(s.program, None);
+        assert!(!serde_json::to_string(&s).unwrap().contains("program"));
+        let p = programmed(s, CueProgram { play: crate::program::PlayMode::PingPong, layers: vec![Content::Wave], ..Default::default() });
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 
     fn a_frame(s: &Settings, audio: AudioFeatures) -> Vec<Point> {
