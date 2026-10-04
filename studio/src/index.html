@@ -59,8 +59,8 @@
   button.hold-confirm, button.hold-confirm:hover { background: linear-gradient(90deg, var(--danger) calc(var(--hold, 0) * 100%), transparent 0), var(--panel-2); }
   button.hold-confirm.holding { color: #fff; border-color: var(--danger); }
   body.show-mode #wsTabs [data-ws-tab="creation"], body.show-mode #wsTabs [data-ws-tab="settings"],
-  body.show-mode #liveTabs [data-panel-tab]:not([data-panel-tab="direct"]):not([data-panel-tab="running"]),
-  body.show-mode #livePanel [data-panel]:not([data-panel="direct"]):not([data-panel="running"]),
+  body.show-mode #liveTabs [data-panel-tab]:not([data-panel-tab="direct"]):not([data-panel-tab="running"]):not([data-panel-tab="cuelist"]),
+  body.show-mode #livePanel [data-panel]:not([data-panel="direct"]):not([data-panel="running"]):not([data-panel="cuelist"]),
   body.show-mode #tlEditor, body.show-mode .lock-edit, body.show-mode #palettes .del,
   body.show-mode #projMenu [data-proj="new"], body.show-mode #projMenu [data-proj="open"], body.show-mode #projMenu [data-proj="save-as"],
   body.show-mode #projMenu .sub, body.show-mode #projRecent { display: none !important; }
@@ -276,6 +276,35 @@
   .lfo canvas { width: 72px; height: 30px; aspect-ratio: auto; border-radius: 4px; flex: 0 0 72px; }
   .lfo .del { flex: 0 0 auto; padding: 4px 8px; }
   .lfo input[type=number] { max-width: 70px; }
+  /* Liste de cues (T-410), Theme (T-299) tokens. */
+  #cqPanel .cq-status { margin-top: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-height: 17px; }
+  #cqPanel .cq-status b { color: var(--text); }
+  #cqPanel .cq-status .paused { color: var(--warn); font-weight: 700; }
+  #cqPanel .cq-bar { height: 4px; margin-top: 4px; border-radius: 2px; background: var(--panel-2); overflow: hidden; }
+  #cqPanel .cq-bar > div { height: 100%; width: 0; background: var(--accent); }
+  #cqPanel .cq-transport { display: flex; gap: 8px; margin-top: 8px; }
+  #cqPanel .cq-go { flex: 2; min-height: 64px; font-size: 26px; font-weight: 800; letter-spacing: .1em; border: 2px solid var(--ok); color: var(--ok); background: var(--panel-2); border-radius: 10px; }
+  #cqPanel .cq-go:hover { background: var(--ok); color: var(--bg); }
+  #cqPanel .cq-side { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  #cqPanel .cq-side button { flex: 1; padding: 3px 6px; font-size: 12px; }
+  #cqPanel .cq-side button.on { border-color: var(--warn); color: var(--warn); }
+  #cqSteps { margin-top: 8px; }
+  .cq-step { border-top: 1px solid var(--line); padding: 5px 0 5px 4px; border-left: 3px solid transparent; font-size: 12px; }
+  .cq-step.current { border-left-color: var(--accent); background: var(--panel-2); }
+  .cq-step.next { border-left-color: var(--muted); }
+  .cq-step.waiting { border-left-color: var(--warn); }
+  .cq-step.drag-over { box-shadow: inset 0 2px 0 var(--accent); }
+  .cq-step .cq-line { display: flex; gap: 4px; align-items: center; margin-top: 3px; min-width: 0; }
+  .cq-step .cq-line > * { min-width: 0; }
+  .cq-step input, .cq-step select { padding: 2px 4px; font-size: 11px; }
+  .cq-step input[type=number] { width: 52px; flex: none; }
+  .cq-step .cq-n { flex: none; width: 26px; padding: 2px 0; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .cq-step .cq-label { flex: 1; }
+  .cq-step .cq-src { flex: 1.3; }
+  .cq-step .cq-t { flex: none; color: var(--muted); font-size: 10px; }
+  .cq-step button.cq-b { flex: none; padding: 2px 6px; font-size: 11px; }
+  .cq-step .cq-more[hidden] { display: none; }
+  .cq-step label.chk { display: flex; gap: 3px; align-items: center; flex: none; font-size: 11px; color: var(--muted); }
   /* « En cours » (T-423), Theme (T-299) tokens. */
   .ptabs .run-count { display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 4px; border-radius: 8px; background: var(--ws-live); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; }
   .ptabs .run-count[hidden] { display: none; }
@@ -1108,6 +1137,7 @@
       <button role="tab" data-panel-tab="lfo">Modulateurs</button>
       <button role="tab" data-panel-tab="music">Musique</button>
       <button role="tab" data-panel-tab="scenes">Scènes</button>
+      <button role="tab" data-panel-tab="cuelist" title="Liste de cues : une séquence de pas, GO pour passer au suivant">Liste de cues</button>
       <button role="tab" data-panel-tab="running" title="Ce qui joue, qui le pilote, tout arrêter">En cours<span class="run-count" id="runCount" hidden></span></button>
     </div>
     <section data-panel="direct">
@@ -1357,6 +1387,40 @@
         <button id="plStart">▶ Playlist</button>
         <button id="plStop">■ Stop</button>
       </div>
+    </section>
+    <!-- Liste de cues (T-410): a sequence of steps played with GO. -->
+    <section data-panel="cuelist" id="cqPanel">
+      <h2>Liste de cues</h2>
+      <div class="row">
+        <select id="cqSelect" title="La liste chargée (GO joue ses pas)"></select>
+        <button id="cqNew" class="lock-edit" style="flex:0" title="Nouvelle liste de cues">+ Liste</button>
+        <button id="cqDelete" class="hold-confirm lock-edit" style="flex:0" title="Supprimer la liste chargée (maintenir pour confirmer)">✕</button>
+      </div>
+      <div class="cq-status" id="cqStatus" role="status">Aucune liste chargée</div>
+      <div class="cq-bar" title="Fondu ou délai en cours"><div id="cqProgress"></div></div>
+      <div class="cq-transport">
+        <button id="cqGo" class="cq-go" data-control="list.go" title="list.go : pas suivant (Page suivante, Alt+Entrée). En pause : reprend. Pendant un fondu : le termine, puis passe au suivant.">GO</button>
+        <div class="cq-side">
+          <button id="cqBack" data-control="list.back" title="list.back : pas précédent, avec le fondu du pas quitté (Page précédente)">Retour</button>
+          <button id="cqPause" data-control="list.pause" title="list.pause : fige le fondu ou le délai ; GO reprend (Alt+P)">Pause</button>
+          <button id="cqTop" data-control="list.top" title="list.top : avant le premier pas, la liste sort au noir (Début)">Début</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="hint" style="margin:0;flex:none">Aller au pas</span>
+        <input type="number" id="cqGotoN" min="1" value="1" style="max-width:70px">
+        <button id="cqGoto" style="flex:0">Aller à</button>
+      </div>
+      <div class="row lock-edit">
+        <label style="flex:none">Calque <select id="cqLayer"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+        <label style="flex:none"><input type="checkbox" id="cqWrap"> Boucler (après le dernier pas, GO revient au premier)</label>
+      </div>
+      <div id="cqSteps"></div>
+      <div class="row lock-edit">
+        <button id="cqAdd">+ Ajouter un pas</button>
+        <button id="cqAddCue" title="Un pas qui joue le cue en cours (le plus récent)">Ajouter le cue en cours</button>
+      </div>
+      <div class="hint" id="cqMsg" role="status"></div>
     </section>
   </div>
 
@@ -2764,12 +2828,29 @@ function buildShortcuts() {
       alt: true, zones: '*', show: true, cap: () => '1 … 9', label: 'Pages de cues 1 à 9',
       down: (e, i) => { if (!e.repeat) selectPage(i); } },
     // Entrée and ⌫ belong to the timeline while it has the focus (marker, delete).
-    { id: 'tempo.tap', group: 'Tempo', codes: ['Enter', 'NumpadEnter'], meta: '*', alt: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
+    { id: 'tempo.tap', group: 'Tempo', codes: ['Enter', 'NumpadEnter'], meta: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
       label: 'Tap tempo',
       down: () => { post('/api/control', { id: 'tempo.tap' }); } },
     { id: 'tempo.resync', group: 'Tempo', codes: ['Backspace'], meta: '*', alt: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
       label: 'Recaler sur le 1',
       down: () => { post('/api/control', { id: 'tempo.resync' }); } },
+    // Liste de cues (T-410), LIVE, once a list is loaded. Presentation
+    // remotes send Page suivante / Page précédente. Espace stays the arming.
+    { id: 'list.go', group: 'Liste de cues', codes: ['PageDown'], zones: ['live'], show: true,
+      label: 'GO : pas suivant (télécommande de présentation)', when: () => !!cqPlayer,
+      down: e => { if (!e.repeat) cqAct('go', 'keyboard'); } },
+    { id: 'list.go.alt', group: 'Liste de cues', codes: ['Enter', 'NumpadEnter'], alt: true, zones: ['live'], show: true,
+      label: 'GO (claviers sans touche Page suivante)', when: () => !!cqPlayer,
+      down: e => { if (!e.repeat) cqAct('go', 'keyboard'); } },
+    { id: 'list.back', group: 'Liste de cues', codes: ['PageUp'], zones: ['live'], show: true,
+      label: 'Retour : pas précédent', when: () => !!cqPlayer,
+      down: e => { if (!e.repeat) cqAct('back', 'keyboard'); } },
+    { id: 'list.top', group: 'Liste de cues', codes: ['Home'], zones: ['live'], show: true,
+      label: 'Début : avant le premier pas, sortie au noir', when: () => !!cqPlayer,
+      down: e => { if (!e.repeat) cqAct('top', 'keyboard'); } },
+    { id: 'list.pause', group: 'Liste de cues', codes: ['KeyP'], alt: true, zones: ['live'], show: true,
+      label: 'Pause de la liste (GO reprend)', when: () => !!cqPlayer,
+      down: e => { if (!e.repeat) cqAct('pause', 'keyboard'); } },
     { id: 'reverse', group: 'Direct', keys: ['<'], meta: '*', alt: '*', shift: '*', zones: ['live'], show: true,
       label: 'Tenir : inverser la rotation',
       down: () => { if (!reverseKey) { reverseKey = true; reverse(true); } },
@@ -2943,9 +3024,9 @@ function shortcutConflicts(list = allShortcuts()) {
 
 // « ? » : the table, grouped. Keys shown as on this keyboard when the
 // browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
-const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Espaces de travail', 'Timeline', 'Figures', 'Aide'];
+const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Espaces de travail', 'Timeline', 'Figures', 'Aide'];
 const ZONE_FR = { live: 'LIVE', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES' };
-const KEY_CAPS = { Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
+const KEY_CAPS = { Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
 const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
 let keyLayout = null;
 function keyCap(code) {
@@ -3392,6 +3473,7 @@ function applyState(f, at, pushed) {
     if (grid.pages[serverPage] && serverPage !== gridPage) { gridPage = serverPage; renderCues(); }
   }
   showCueDeck(f.cues);
+  showCueList(f.cuelist);
   // A cell « en attente » (T-159) blinks with the beat.
   if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
   showRunCount(f);
@@ -3499,10 +3581,13 @@ function showShowMode(lock) {
   $('lockLabel').textContent = on ? 'Verrouillé' : 'Mode spectacle';
   $('lockBtn').title = on ? 'Mode spectacle actif : maintenir pour déverrouiller (1 s)'
     : "Mode spectacle : verrouiller l'édition (cues, maîtres, tempo, noir et laser restent actifs)";
+  // The cue list's steps: read-only in show mode (GO stays).
+  if (!on && $('cqPanel') && !$('cqPanel').hidden) renderCueList();
   if (!on) return;
   // Only what plays stays on screen (« En cours » is playback too).
   if (activeWs === 'creation' || activeWs === 'settings') setWorkspace('live');
-  if (!$('runPanel') || $('runPanel').hidden) setLivePanel('direct');
+  if ((!$('runPanel') || $('runPanel').hidden) && (!$('cqPanel') || $('cqPanel').hidden)) setLivePanel('direct');
+  else if ($('cqPanel') && !$('cqPanel').hidden) renderCueList();
   ['cueMenu', 'pageMenu', 'midiMenu', 'projMenu', 'projDialog'].forEach(id => { $(id).hidden = true; });
   stopLearning();
   setStoreMode(false);
@@ -3572,7 +3657,7 @@ function setWorkspace(ws) {
 }
 function setLivePanel(name) {
   const tabs = [...document.querySelectorAll('#liveTabs [data-panel-tab]')];
-  if (!tabs.some(b => b.dataset.panelTab === name) || (showMode && name !== 'running')) name = 'direct';
+  if (!tabs.some(b => b.dataset.panelTab === name) || (showMode && name !== 'running' && name !== 'cuelist')) name = 'direct';
   tabs.forEach(b => {
     b.classList.toggle('active', b.dataset.panelTab === name);
     b.setAttribute('aria-selected', String(b.dataset.panelTab === name));
@@ -3580,6 +3665,7 @@ function setLivePanel(name) {
   document.querySelectorAll('#livePanel [data-panel]').forEach(el => { el.hidden = el.dataset.panel !== name; });
   remember(PANEL_KEY, name);
   if (name === 'running') setTimeout(pollRunning, 0); // after the script has run
+  if (name === 'cuelist') setTimeout(loadCueLists, 0);
 }
 document.querySelectorAll('#wsTabs [data-ws-tab]').forEach(b => b.onclick = () => setWorkspace(b.dataset.wsTab));
 document.querySelectorAll('#liveTabs [data-panel-tab]').forEach(b => b.onclick = () => setLivePanel(b.dataset.panelTab));
@@ -4001,6 +4087,256 @@ $('sceneSave').onclick = async () => {
   await loadState();
 };
 $('plStart').onclick = () => post('/api/playlist/start');
+
+// ---------- Liste de cues (T-410) ----------
+// GET /api/cuelists for the saved lists; where the loaded one is comes
+// with every state (`cuelist`). Edits are saved whole (POST /api/cuelists),
+// a moment after the last change; show mode hides them (Go stays).
+let cqLists = [], cqPlayer = null, cqEdit = null, cqSaveTimer = 0, cqKey = '', cqControls = [];
+const CQ_TRIGGERS = [['go', 'Go'], ['after', 'Après n s'], ['follow', 'À la suite'], ['beats', 'Sur le temps (tous les n temps)'], ['audio', 'Sur événement audio']];
+const CQ_EVENTS = { kick: 'Grosse caisse', snare: 'Caisse claire', hat: 'Charleston', drop: 'Drop', beat: 'Temps', onset: 'Attaque' };
+const CQ_KINDS = [['cut', 'Coupe'], ['fade', 'Fondu'], ['fade_through_black', 'Fondu au noir'], ['morph', 'Morph']];
+const cqOpts = (list, v) => list.map(([k, l]) => `<option value="${k}"${k === v ? ' selected' : ''}>${esc(l)}</option>`).join('');
+async function loadCueLists() {
+  try {
+    const v = await (await fetch('/api/cuelists', { cache: 'no-store' })).json();
+    cqLists = v.lists || [];
+    if (!cqControls.length) {
+      const all = await (await fetch('/api/controls')).json();
+      cqControls = (all.controls || all).filter(c => c.external && c.id !== 'transport.arm' && !c.id.startsWith('list.'));
+    }
+    cqPlayer = v.player;
+  } catch { return; }
+  cqEdit = cqPlayer ? structuredClone(cqLists.find(l => l.name === cqPlayer.name) || null) : null;
+  renderCueList();
+}
+function cqSave() {
+  clearTimeout(cqSaveTimer);
+  cqSaveTimer = setTimeout(async () => {
+    if (!cqEdit) return;
+    const r = await fetch('/api/cuelists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cqEdit) });
+    if (r.ok) {
+      const v = await r.json();
+      cqLists = v.lists; cqPlayer = v.player; $('cqMsg').textContent = '';
+      // The server numbers new steps: take its copy.
+      const saved = cqLists.find(l => l.name === cqEdit.name);
+      if (saved && saved.steps.length === cqEdit.steps.length && saved.steps.some((st, i) => st.id !== cqEdit.steps[i].id)) { cqEdit = structuredClone(saved); renderCueList(); }
+    } else {
+      $('cqMsg').textContent = await r.text();
+      if (r.status === 423) notify(LOCKED_FR);
+    }
+  }, 250);
+}
+function cqChanged(rerender) {
+  if (rerender) renderCueList();
+  cqSave();
+}
+async function cqAct(action, source, body = {}) {
+  const r = await fetch('/api/cuelist/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source, ...body }) });
+  if (!r.ok) { const t = await r.text(); $('cqMsg').textContent = t; notify(t); return false; }
+  $('cqMsg').textContent = '';
+  showCueList(await r.json());
+  refreshLook();
+  return true;
+}
+function cqSourceOptions(src) {
+  const v = src.type === 'cue' ? 'cue:' + src.id : src.type === 'scene' ? 'scene:' + src.name : 'black';
+  let html = `<option value="black">Noir</option>`;
+  let known = v === 'black';
+  for (const cat of cueCategories.length ? cueCategories : [...new Set(presets.map(p => p.category))]) {
+    const items = presets.filter(p => p.category === cat);
+    if (!items.length) continue;
+    html += `<optgroup label="${esc(cat)}">` + items.map(p => { const k = 'cue:' + p.id; known ||= k === v; return `<option value="${esc(k)}"${k === v ? ' selected' : ''}>${esc(p.name)}</option>`; }).join('') + '</optgroup>';
+  }
+  if (scenes.length) html += '<optgroup label="Scènes">' + scenes.map(sc => { const k = 'scene:' + sc.name; known ||= k === v; return `<option value="${esc(k)}"${k === v ? ' selected' : ''}>${esc(sc.name)}</option>`; }).join('') + '</optgroup>';
+  if (!known) html += `<option value="${esc(v)}" selected>${esc(v.replace(/^\w+:/, ''))} (introuvable)</option>`;
+  return html;
+}
+function cqStepSourceName(src) {
+  if (src.type === 'cue') return presetById.get(src.id)?.name || src.id;
+  if (src.type === 'scene') return 'Scène ' + src.name;
+  return 'Noir';
+}
+function cqStepRow(st, i) {
+  const row = document.createElement('div');
+  row.className = 'cq-step'; row.dataset.index = i;
+  const ro = showMode ? ' disabled' : '';
+  const trig = st.trigger || { type: 'go' };
+  const n = trig.type === 'after' ? trig.s : trig.type === 'beats' ? trig.n : '';
+  const sp = st.split;
+  row.innerHTML = `<div class="cq-line">
+      <button class="cq-n cq-b" title="Aller à ce pas">${i + 1}</button>
+      <input class="cq-label" placeholder="Libellé" maxlength="80"${ro}>
+      <select class="cq-src" title="Ce que le pas montre"${ro}>${cqSourceOptions(st.source || { type: 'black' })}</select>
+    </div>
+    <div class="cq-line">
+      <select class="cq-trig" title="Déclencheur"${ro}>${cqOpts(CQ_TRIGGERS, trig.type)}</select>
+      <input type="number" class="cq-trig-n" min="${trig.type === 'beats' ? 1 : 0}" step="${trig.type === 'beats' ? 1 : 0.1}" title="${trig.type === 'beats' ? 'Tous les n temps' : 'Secondes après le départ du pas précédent'}"${ro}${trig.type === 'after' || trig.type === 'beats' ? '' : ' hidden'}>
+      <select class="cq-trig-ev" title="Événement audio"${ro}${trig.type === 'audio' ? '' : ' hidden'}>${cqOpts(Object.entries(CQ_EVENTS), trig.event || 'kick')}</select>
+      <span class="cq-t">délai</span><input type="number" class="cq-delay" min="0" step="0.1" title="Délai (s) entre le déclencheur et le départ"${ro}>
+    </div>
+    <div class="cq-line">
+      <span class="cq-t">entrée</span><input type="number" class="cq-in" min="0" step="0.1" title="Fondu d'entrée (s)"${ro}>
+      <span class="cq-t">sortie</span><input type="number" class="cq-out" min="0" step="0.1" title="Fondu de sortie (s), quand le pas suivant arrive"${ro}>
+      <select class="cq-kind" title="Transition depuis le pas précédent (depuis le noir : toujours un fondu)"${ro}>${cqOpts(CQ_KINDS, st.transition || 'fade')}</select>
+      <button class="cq-b cq-more-btn" title="Temps séparés, couleur, contrôle déclenché">⋯</button>
+      <button class="cq-b cq-dup lock-edit" title="Dupliquer">⧉</button>
+      <button class="cq-b cq-del lock-edit" title="Supprimer ce pas">✕</button>
+    </div>
+    <div class="cq-more" hidden>
+      <div class="cq-line">
+        <label class="chk"><input type="checkbox" class="cq-split"${sp ? ' checked' : ''}${ro}> Temps séparés</label>
+        <span class="cq-t">géom.</span><input type="number" class="cq-sg" min="0" step="0.1"${ro}>
+        <span class="cq-t">coul.</span><input type="number" class="cq-sc" min="0" step="0.1"${ro}>
+        <span class="cq-t">lum.</span><input type="number" class="cq-sb" min="0" step="0.1"${ro}>
+      </div>
+      <div class="cq-line">
+        <label class="chk"><input type="checkbox" class="cq-keep"${st.keep_color ? ' checked' : ''}${ro}> Garder la couleur du pas précédent</label>
+      </div>
+      <div class="cq-line">
+        <span class="cq-t">au départ</span>
+        <select class="cq-fire" title="Contrôle déclenché au départ du pas (jamais l'armement)"${ro}><option value="">Aucun contrôle</option>${cqControls.map(c => `<option value="${esc(c.id)}"${st.fire && st.fire.control === c.id ? ' selected' : ''}>${esc(c.label_fr)}</option>`).join('')}</select>
+        <input type="number" class="cq-fire-v" step="0.1" title="Valeur"${ro}>
+      </div>
+    </div>`;
+  const q = c => row.querySelector(c);
+  q('.cq-label').value = st.label || '';
+  if (n !== '') q('.cq-trig-n').value = n;
+  q('.cq-delay').value = st.delay_s || 0;
+  q('.cq-in').value = st.fade_in_s || 0;
+  q('.cq-out').value = st.fade_out_s || 0;
+  q('.cq-sg').value = sp ? sp.geometry_s : st.fade_in_s || 0;
+  q('.cq-sc').value = sp ? sp.color_s : st.fade_in_s || 0;
+  q('.cq-sb').value = sp ? sp.brightness_s : st.fade_in_s || 0;
+  ['.cq-sg', '.cq-sc', '.cq-sb'].forEach(c => { q(c).disabled = showMode || !sp; });
+  q('.cq-fire-v').value = st.fire ? st.fire.value : 1;
+  q('.cq-n').onclick = () => cqAct('goto', 'ui', { step: i });
+  q('.cq-more-btn').onclick = () => { q('.cq-more').hidden = !q('.cq-more').hidden; };
+  if (showMode) return row;
+  const num = c => Math.max(0, +q(c).value || 0);
+  q('.cq-label').onchange = () => { st.label = q('.cq-label').value.trim(); cqChanged(false); };
+  q('.cq-src').onchange = () => {
+    const v = q('.cq-src').value;
+    st.source = v === 'black' ? { type: 'black' } : v.startsWith('scene:') ? { type: 'scene', name: v.slice(6) } : { type: 'cue', id: v.slice(4) };
+    cqChanged(false);
+  };
+  q('.cq-trig').onchange = () => {
+    const t = q('.cq-trig').value;
+    st.trigger = t === 'after' ? { type: 'after', s: 2 } : t === 'beats' ? { type: 'beats', n: 4 } : t === 'audio' ? { type: 'audio', event: 'kick' } : { type: t };
+    cqChanged(true);
+  };
+  q('.cq-trig-n').onchange = () => {
+    if (st.trigger.type === 'after') st.trigger.s = num('.cq-trig-n');
+    else if (st.trigger.type === 'beats') st.trigger.n = Math.max(1, Math.round(num('.cq-trig-n')));
+    cqChanged(false);
+  };
+  q('.cq-trig-ev').onchange = () => { st.trigger.event = q('.cq-trig-ev').value; cqChanged(false); };
+  q('.cq-delay').onchange = () => { st.delay_s = num('.cq-delay'); cqChanged(false); };
+  q('.cq-in').onchange = () => { st.fade_in_s = num('.cq-in'); cqChanged(false); };
+  q('.cq-out').onchange = () => { st.fade_out_s = num('.cq-out'); cqChanged(false); };
+  q('.cq-kind').onchange = () => { st.transition = q('.cq-kind').value; cqChanged(false); };
+  const split = () => { st.split = q('.cq-split').checked ? { geometry_s: num('.cq-sg'), color_s: num('.cq-sc'), brightness_s: num('.cq-sb') } : null; if (!st.split) delete st.split; };
+  q('.cq-split').onchange = () => { split(); ['.cq-sg', '.cq-sc', '.cq-sb'].forEach(c => { q(c).disabled = !st.split; }); cqChanged(false); };
+  ['.cq-sg', '.cq-sc', '.cq-sb'].forEach(c => { q(c).onchange = () => { split(); cqChanged(false); }; });
+  q('.cq-keep').onchange = () => { st.keep_color = q('.cq-keep').checked; cqChanged(false); };
+  const fire = () => { const c = q('.cq-fire').value; if (c) st.fire = { control: c, value: +q('.cq-fire-v').value || 0 }; else delete st.fire; cqChanged(false); };
+  q('.cq-fire').onchange = fire; q('.cq-fire-v').onchange = fire;
+  q('.cq-dup').onclick = () => { cqEdit.steps.splice(i + 1, 0, { ...structuredClone(st), id: 0 }); cqChanged(true); };
+  q('.cq-del').onclick = () => { cqEdit.steps.splice(i, 1); cqChanged(true); };
+  // Drag to reorder.
+  row.draggable = true;
+  row.addEventListener('dragstart', e => { if (e.target.closest('input, select')) { e.preventDefault(); return; } e.dataTransfer.setData('text/x-cq-step', String(i)); });
+  row.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('text/x-cq-step')) { e.preventDefault(); row.classList.add('drag-over'); } });
+  row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+  row.addEventListener('drop', e => {
+    e.preventDefault(); row.classList.remove('drag-over');
+    const from = +e.dataTransfer.getData('text/x-cq-step');
+    if (Number.isNaN(from) || from === i) return;
+    const [moved] = cqEdit.steps.splice(from, 1);
+    cqEdit.steps.splice(i, 0, moved);
+    cqChanged(true);
+  });
+  return row;
+}
+function renderCueList() {
+  const sel = $('cqSelect');
+  const name = cqPlayer ? cqPlayer.name : '';
+  sel.innerHTML = `<option value="">${cqLists.length ? '— choisir une liste —' : 'Aucune liste'}</option>` + cqLists.map(l => `<option${l.name === name ? ' selected' : ''}>${esc(l.name)}</option>`).join('');
+  $('cqLayer').value = String(cqEdit ? cqEdit.layer : 1);
+  $('cqWrap').checked = !!(cqEdit && cqEdit.wrap);
+  const box = $('cqSteps');
+  if (!cqEdit) {
+    box.innerHTML = '<div class="hint">' + (cqLists.length ? 'Choisissez une liste pour la jouer.' : 'Créez une liste (« + Liste »), ajoutez des pas, puis GO.') + '</div>';
+  } else if (!cqEdit.steps.length) {
+    box.innerHTML = '<div class="hint">Liste vide : « + Ajouter un pas ».</div>';
+  } else {
+    box.replaceChildren(...cqEdit.steps.map(cqStepRow));
+  }
+  cqKey = '';
+  showCueList(cqPlayer);
+}
+function showCueList(v) {
+  cqPlayer = v || null;
+  const key = JSON.stringify(v);
+  if (key === cqKey) return;
+  cqKey = key;
+  if (!$('cqPanel') || $('cqPanel').hidden) return;
+  if ((v ? v.name : null) !== (cqEdit ? cqEdit.name : null)) {
+    // Loaded from elsewhere (another page, a project): follow it.
+    cqEdit = v ? structuredClone(cqLists.find(l => l.name === v.name) || null) : null;
+    if (v && !cqEdit) { loadCueLists(); return; }
+    renderCueList();
+    return;
+  }
+  const st = $('cqStatus');
+  if (!v) { st.textContent = 'Aucune liste chargée'; $('cqProgress').style.width = '0'; return; }
+  const ph = v.phase || {};
+  const where = v.index == null ? 'Début' : `Pas <b>${v.index + 1}</b>/${v.steps}${v.label ? ' · ' + esc(v.label) : ''}`;
+  const state = v.paused ? '<span class="paused">PAUSE</span>' : ph.phase === 'fading' ? 'fondu' : ph.phase === 'delay' ? `délai ${ph.left_s.toFixed(1)} s` : '';
+  const next = v.next != null ? `suivant : ${v.next + 1}${v.next_label ? ' ' + esc(v.next_label) : ''}${v.next_trigger && v.next_trigger.type !== 'go' ? ' (auto)' : ''}` : v.waiting != null ? '' : 'fin de liste';
+  st.innerHTML = [where, state, next].filter(Boolean).join(' · ');
+  $('cqProgress').style.width = (v.progress != null ? Math.round(v.progress * 100) : 0) + '%';
+  $('cqPause').classList.toggle('on', !!v.paused);
+  document.querySelectorAll('#cqSteps .cq-step').forEach(r => {
+    const i = +r.dataset.index;
+    r.classList.toggle('current', i === v.index);
+    r.classList.toggle('waiting', i === v.waiting);
+    r.classList.toggle('next', i === v.next && i !== v.index);
+  });
+}
+$('cqSelect').onchange = async () => {
+  const name = $('cqSelect').value;
+  if (!name) return;
+  if (await post('/api/cuelist/load', { name })) await loadCueLists();
+};
+$('cqNew').onclick = async () => {
+  const name = (prompt('Nom de la nouvelle liste de cues', 'Liste ' + (cqLists.length + 1)) || '').trim();
+  if (!name) return;
+  const r = await fetch('/api/cuelists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, layer: 1, wrap: false, steps: [] }) });
+  if (!r.ok) { $('cqMsg').textContent = await r.text(); return; }
+  await post('/api/cuelist/load', { name });
+  await loadCueLists();
+};
+holdToRun($('cqDelete'), CONFIRM_HOLD_MS, async () => {
+  if (!cqEdit) return;
+  await post('/api/cuelists/delete', { name: cqEdit.name });
+  await loadCueLists();
+}, () => notify('Maintenir pour confirmer'));
+$('cqLayer').onchange = () => { if (cqEdit) { cqEdit.layer = +$('cqLayer').value; cqChanged(false); } };
+$('cqWrap').onchange = () => { if (cqEdit) { cqEdit.wrap = $('cqWrap').checked; cqChanged(false); } };
+$('cqAdd').onclick = () => { if (!cqEdit) return notify('Choisissez ou créez une liste'); cqEdit.steps.push({ id: 0, label: '', source: { type: 'black' }, trigger: { type: 'go' }, delay_s: 0, fade_in_s: 1, fade_out_s: 1, transition: 'fade', keep_color: false }); cqChanged(true); };
+$('cqAddCue').onclick = () => {
+  if (!cqEdit) return notify('Choisissez ou créez une liste');
+  const id = deck && deck.active && deck.active.length ? deck.active[deck.active.length - 1].cue : null;
+  if (!id) return notify('Aucun cue ne joue');
+  cqEdit.steps.push({ id: 0, label: presetById.get(id)?.name || '', source: { type: 'cue', id }, trigger: { type: 'go' }, delay_s: 0, fade_in_s: 1, fade_out_s: 1, transition: 'fade', keep_color: false });
+  cqChanged(true);
+};
+$('cqGo').onclick = () => cqAct('go', 'ui');
+$('cqBack').onclick = () => cqAct('back', 'ui');
+$('cqPause').onclick = () => cqAct('pause', 'ui');
+$('cqTop').onclick = () => cqAct('top', 'ui');
+$('cqGoto').onclick = () => cqAct('goto', 'ui', { step: Math.max(0, (+$('cqGotoN').value || 1) - 1) });
 $('plStop').onclick = () => post('/api/playlist/stop');
 
 // ---------- calibration ----------
@@ -5321,7 +5657,8 @@ async function saveCueMenu() {
 // only while it is on screen.
 const LOCK_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>';
 function showRunCount(f) {
-  const n = ((f.cues && f.cues.active) || []).length + (f.timeline && (f.timeline.playing || f.timeline.paused) ? 1 : 0);
+  const n = ((f.cues && f.cues.active) || []).length + (f.timeline && (f.timeline.playing || f.timeline.paused) ? 1 : 0)
+    + (f.cuelist && (f.cuelist.index != null || f.cuelist.waiting != null) ? 1 : 0);
   const b = $('runCount');
   b.hidden = !n;
   b.textContent = n;
@@ -5371,6 +5708,11 @@ function showRunning(r) {
   if (t) rows.push(runRow(t.name || 'Show', `${t.playing ? (t.waiting ? 'attend la mesure' : 'lecture') : 'pause'} · ${t.time_base === 'beats' ? t.position.toFixed(1) + ' temps' : fmtTime(t.position)}`,
     { source: 'Timeline', stop: () => runStop({ kind: 'timeline' }) }));
   if (r.playlist) rows.push(runRow('Playlist', r.playlist.scene || '', { stop: () => runStop({ kind: 'timeline' }) }));
+  // The cue list (T-410): its step, phase and who drove it; Arrêter = Début.
+  const cl = r.cuelist;
+  if (cl) rows.push(runRow('Liste « ' + cl.name + ' »', [cl.index != null ? `pas ${cl.index + 1}/${cl.steps}${cl.label ? ' ' + cl.label : ''}` : '',
+    cl.paused ? 'pause' : cl.phase.phase === 'fading' ? `fondu ${Math.round(cl.phase.t * 100)} %` : cl.phase.phase === 'delay' ? 'délai' : '',
+    'C' + cl.layer].filter(Boolean).join(' · '), { source: cl.source_label, stop: () => runStop({ kind: 'cuelist' }) }));
   fillRun('runTimeline', rows);
   fillRun('runLfos', r.lfos.map(m => runRow(m.target_label, `${m.wave_label} · ${m.rate}`, { stop: () => runStop({ kind: 'lfo', index: m.index }), stopLabel: 'Couper' })));
   fillRun('runAudio', r.audio_links.map(a => runRow(a.target_label, a.source_label, { stop: () => runStop({ kind: 'audio_link', index: a.index }), stopLabel: 'Couper' })));

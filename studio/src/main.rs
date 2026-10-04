@@ -21,6 +21,7 @@ mod autoshow;
 mod controls;
 mod crossings;
 mod cues;
+mod cuelist;
 mod devices;
 mod dmx;
 mod datafile;
@@ -258,6 +259,11 @@ pub struct Shared {
     pub deck: cues::CueDeck,
     /// The cue grid's size and pages (grid.rs, pages.json).
     pub grid: grid::CueGrid,
+    /// Saved cue lists (cuelist.rs, T-410, `cuelists.json`).
+    pub cue_lists: cuelist::CueListStore,
+    /// The loaded cue list and where it is. Memory only: every start is
+    /// at *Début*, nothing loaded.
+    pub cue_list: cuelist::ListPlayer,
     /// Whether `settings` is shown when no cue plays: on for a scene, the
     /// playlist or a look edited by hand; off once the last cue is stopped.
     pub look_on: bool,
@@ -581,6 +587,8 @@ impl Shared {
         self.estop.trip(src);
         // Fades end and waiting cues are dropped at once (T-158 / T-159).
         self.deck.cut_transitions();
+        // The cue list pauses; it never starts again by itself (T-410).
+        self.cue_list.halt();
         self.gate.sync_estop(&self.estop);
         // External inputs lose the hand until the operator reopens them,
         // and so does the audio automation (T-240).
@@ -982,6 +990,8 @@ fn startup_state(cli: &Cli) -> Shared {
         settings_rev: 0,
         deck: cues::CueDeck::load(cli.data_dir.join("grid.json")),
         grid: grid::CueGrid::load(cli.data_dir.join("pages.json")),
+        cue_lists: cuelist::CueListStore::load_or_create(cli.data_dir.join("cuelists.json")),
+        cue_list: Default::default(),
         look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch,
@@ -1359,10 +1369,16 @@ impl Engine {
             s.audio_guard = self.audio_guard.status();
             // The looks' own reaction sees the beat counter capped too.
             let audio = reaction.visual;
-            let looks = cues::layered_looks(&s.deck, &settings, s.look_on);
+            // The cue list (T-410): on its own clock, paused by the e-stop.
+            // Its steps join the looks under the cues played by hand, its
+            // fades the transitions: same layers, same safety chain.
+            cuelist::frame(&mut s, dt as f64, clock.beat, &audio);
+            let mut looks = s.cue_list.looks();
+            looks.extend(cues::layered_looks(&s.deck, &settings, s.look_on));
             // Fades and morphs between cues (T-158): applied to the
             // rendered looks, before the mixer and the safety chain.
-            let transition_fx = s.deck.transition_fx(t);
+            let mut transition_fx = s.deck.transition_fx(t);
+            transition_fx.extend(s.cue_list.fx());
             // A test pattern (T-404) holds the timeline paused and stands
             // in for the whole look; the cues wait in the deck.
             let pattern = testpattern::hold_timeline(&mut s);

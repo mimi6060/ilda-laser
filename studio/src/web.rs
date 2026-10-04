@@ -1448,6 +1448,34 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             },
             Err(e) => e,
         },
+        // Cue lists (T-410): editing (locked in show mode) and the transport.
+        (Method::Get, "/api/cuelists") => json_response(crate::cuelist::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/cuelists") => match body::<crate::cuelist::CueList>(request) {
+            Ok(list) => {
+                let mut s = shared.lock().unwrap();
+                match crate::cuelist::save(&mut s, list) {
+                    Ok(()) => json_response(crate::cuelist::view(&s)),
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/cuelists/delete") => match body::<NameRequest>(request) {
+            Ok(req) => match crate::cuelist::delete(&mut shared.lock().unwrap(), &req.name) {
+                Ok(true) => ok(),
+                Ok(false) => text(404, "liste de cues inconnue"),
+                Err(e) => text(500, &format!("{e:#}")),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, "/api/cuelist/load") => match body::<NameRequest>(request) {
+            Ok(req) => match crate::cuelist::load(&mut shared.lock().unwrap(), &req.name) {
+                Ok(()) => ok(),
+                Err(why) => text(404, why),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, p) if p.starts_with("/api/cuelist/") => cuelist_transport(request, shared, &p["/api/cuelist/".len()..]),
         (Method::Post, "/api/playlist/stop") => {
             shared.lock().unwrap().playlist = None;
             ok()
@@ -2810,7 +2838,48 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         "checklist": { "enforced": s.checklist.enforced(), "complete": s.checklist.is_complete() },
         "audience": s.audience.view(),
         "shownet": shownet_view(s),
+        // The loaded cue list (T-410); null when none.
+        "cuelist": s.cue_list.view(),
     })
+}
+
+/// `POST /api/cuelist/{go,back,pause,top,goto}` (T-410), body optional:
+/// `{ "source": "keyboard" }` (« En cours »), `{ "step": n }` (0-based)
+/// for `goto`. Playback only: allowed in show mode, never arms; Go waits
+/// for an e-stop reset.
+fn cuelist_transport(request: &mut Request, shared: &Mutex<Shared>, action: &str) -> HttpResponse {
+    let mut raw = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut raw) {
+        return text(400, &format!("unreadable body: {e}"));
+    }
+    let req: serde_json::Value = if raw.trim().is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => return text(400, &format!("invalid JSON: {e}")),
+        }
+    };
+    let source = match req.get("source").and_then(|v| v.as_str()) {
+        Some("keyboard") => controls::ControlSource::Keyboard,
+        _ => controls::ControlSource::Ui,
+    };
+    let mut s = shared.lock().unwrap();
+    let r = match action {
+        "go" => crate::cuelist::go(&mut s, source),
+        "back" => crate::cuelist::back(&mut s, source),
+        "pause" => crate::cuelist::pause(&mut s, source),
+        "top" => crate::cuelist::top(&mut s, source),
+        "goto" => match req.get("step").and_then(|v| v.as_u64()) {
+            Some(step) => crate::cuelist::goto(&mut s, step as usize, source),
+            None => Err("pas manquant"),
+        },
+        _ => return text(404, "not found"),
+    };
+    match r {
+        Ok(()) => json_response(s.cue_list.view()),
+        Err(why) => text(409, why),
+    }
 }
 
 /// The ShowNET reminders (T-472), in `/api/state` and every frame: whether

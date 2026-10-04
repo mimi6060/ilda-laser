@@ -77,6 +77,13 @@ pub fn allowed(path: &str) -> bool {
         "/api/playlist/start",
         "/api/playlist/stop",
         "/api/presets/play",
+        // The cue list's transport (T-410); saving lists is an edit.
+        "/api/cuelist/load",
+        "/api/cuelist/go",
+        "/api/cuelist/back",
+        "/api/cuelist/pause",
+        "/api/cuelist/top",
+        "/api/cuelist/goto",
         // « En cours » (T-423): stop buttons, playback only.
         "/api/running/stop",
         "/api/audio",
@@ -137,7 +144,7 @@ mod tests {
 
     #[test]
     fn playback_and_safety_are_allowed_edits_are_not() {
-        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/lock", "/api/test/stall", "/api/external/gate"] {
+        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/cuelist/go", "/api/cuelist/goto", "/api/lock", "/api/test/stall", "/api/external/gate"] {
             assert!(allowed(p), "{p}");
         }
         for p in [
@@ -166,6 +173,8 @@ mod tests {
             "/api/netin",
             "/api/timeline/edit",
             "/api/figures/delete",
+            "/api/cuelists",
+            "/api/cuelists/delete",
             "/api/some/future/route",
         ] {
             assert!(!allowed(p), "{p}");

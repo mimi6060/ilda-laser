@@ -1,7 +1,7 @@
 //! Project files (T-286): one `.lsproj` file holds a whole show - scenes
 //! and playlist, cue-grid properties, timelines, default tempo, master
 //! live modifiers, layers, LFOs, audio routes (T-153), user palettes, MIDI mappings, the
-//! figure library (T-296) and the user cues (T-405) - as
+//! figure library (T-296), the user cues (T-405) and the cue lists (T-410) - as
 //! pretty-printed, versioned JSON in `<data-dir>/projects/`.
 //!
 //! The data directory's own files (`scenes.json`, `grid.json`, `shows/`…)
@@ -25,6 +25,7 @@
 //! the state out, or to swap the checked state in.
 
 use crate::audio::routes::AudioRouting;
+use crate::cuelist::CueList;
 use crate::cues::CueDeck;
 use crate::figures::Figure;
 use crate::grid::CueGrid;
@@ -112,6 +113,10 @@ pub struct Project {
     /// The operator's own cues (`user_cues.json`, T-405). Missing in
     /// projects saved before T-405: they open with none.
     pub user_cues: Vec<UserCue>,
+    /// Cue lists with « Go » (`cuelists.json`, T-410). Missing in projects
+    /// saved before T-410: they open with none.
+    #[serde(rename = "cuelists")]
+    pub cue_lists: Vec<CueList>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -137,6 +142,7 @@ impl Default for Project {
             midi: MidiSection::default(),
             figures: Vec::new(),
             user_cues: Vec::new(),
+            cue_lists: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -221,7 +227,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 11] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json"];
+const WORKING_FILES: [&str; 12] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -403,6 +409,16 @@ fn check(p: &mut Project) -> Result<()> {
     }
     p.figures.sort_by(|a, b| a.name.cmp(&b.name));
     crate::usercues::validate(&mut p.user_cues)?;
+    let mut lists = HashSet::new();
+    for l in &mut p.cue_lists {
+        l.sanitize();
+        if !crate::timeline::valid_show_name(&l.name) {
+            bail!("nom de liste de cues invalide : « {} » ({NAME_RULE})", l.name);
+        }
+        if !lists.insert(l.name.clone()) {
+            bail!("liste de cues en double : « {} »", l.name);
+        }
+    }
 
     let bpm = if p.tempo.bpm.is_finite() { p.tempo.bpm } else { 120.0 };
     p.tempo = TempoDefaults { bpm: bpm.clamp(MIN_BPM, MAX_BPM), beats_per_bar: p.tempo.beats_per_bar.clamp(1, 16) };
@@ -421,9 +437,13 @@ fn check(p: &mut Project) -> Result<()> {
 }
 
 /// LFO and audio route targets must be controls that exist and can be
-/// modulated; route sources must be known analysis values or events.
+/// modulated; route sources must be known analysis values or events; the
+/// controls cue list steps fire must be allowed (never `transport.arm`).
 fn check_lfos(p: &Project, reg: &crate::controls::ControlRegistry) -> Result<()> {
     crate::lfo::validate(&p.lfos, reg).map_err(|e| anyhow::anyhow!("LFO : {e}"))?;
+    for l in &p.cue_lists {
+        l.validate(reg).map_err(|e| anyhow::anyhow!("liste de cues « {} » : {e:#}", l.name))?;
+    }
     crate::audio::routes::validate(&p.audio_routes, reg).map_err(|e| anyhow::anyhow!("liens audio : {e}"))
 }
 
@@ -444,6 +464,7 @@ pub fn snapshot(s: &Shared) -> Project {
         midi: MidiSection { profiles: s.midi.store.user_profiles().clone() },
         figures: s.figures.list().to_vec(),
         user_cues: s.user_cues.list().to_vec(),
+        cue_lists: s.cue_lists.list().to_vec(),
         ..Project::default()
     }
 }
@@ -470,6 +491,15 @@ fn apply(s: &mut Shared, p: &Project) {
     s.midi.store.replace_user_in_memory(p.midi.profiles.clone());
     s.figures.replace_in_memory(p.figures.clone());
     s.user_cues.replace_in_memory(p.user_cues.clone());
+    s.cue_lists.replace_in_memory(p.cue_lists.clone());
+    // The loaded list follows its new version, or goes (another project).
+    match s.cue_list.list.as_ref().and_then(|l| s.cue_lists.get(&l.name)).cloned() {
+        Some(l) => {
+            s.cue_list.top();
+            s.cue_list.refresh(&l);
+        }
+        None => s.cue_list.unload(),
+    }
     crate::usercues::sync_presets(s);
     crate::figures::refresh(s);
     // Saved below, not by the engine thread.
@@ -491,6 +521,7 @@ struct WorkingPaths {
     figures: Option<PathBuf>,
     /// `user_cues.json` and its content (with the id counter) as opened.
     user_cues: Option<(PathBuf, Vec<u8>)>,
+    cue_lists: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
 }
@@ -507,6 +538,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         midi: s.midi.store.dir().map(|d| d.join("profiles")),
         figures: s.figures.dir().map(Path::to_path_buf),
         user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.file_bytes().unwrap_or_default())),
+        cue_lists: s.cue_lists.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
     }
@@ -531,6 +563,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some((path, bytes)) = &w.user_cues {
         put(path, Ok(bytes.clone()));
+    }
+    if let Some(path) = &w.cue_lists {
+        put(path, serde_json::to_vec_pretty(&p.cue_lists));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -874,6 +909,7 @@ mod tests {
         s.midi.store = ProfileStore::load(dir.join("midi"));
         s.figures = crate::figures::FigureStore::load(dir.join("figures"));
         s.user_cues = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));
+        s.cue_lists = crate::cuelist::CueListStore::load_or_create(dir.join("cuelists.json"));
         s.project = ProjectState::load(dir);
         startup(&mut s);
         Mutex::new(s)
@@ -987,6 +1023,53 @@ mod tests {
 
     /// T-405: user cues and the cells holding them come back with the
     /// project; a project from before them opens with none.
+    /// T-410: cue lists come back with the project, identical; a project
+    /// from before them opens with none; a list firing `transport.arm` is
+    /// refused and nothing changes.
+    #[test]
+    fn cue_lists_are_saved_in_the_project_and_old_projects_still_open() {
+        use crate::cuelist::{CueList, SplitTiming, Step, StepAction, StepSource, StepTrigger};
+        let dir = temp_dir("cuelists");
+        let shared = studio(&dir);
+        let list = {
+            let mut s = shared.lock().unwrap();
+            let steps = vec![
+                Step { label: "Ouverture".into(), source: StepSource::Cue { id: s.presets[0].id.clone() }, fade_in_s: 2.0, ..Step::default() },
+                Step {
+                    source: StepSource::Black,
+                    trigger: StepTrigger::Beats { n: 4 },
+                    split: Some(SplitTiming { geometry_s: 1.0, color_s: 3.0, brightness_s: 0.5 }),
+                    fire: Some(StepAction { control: "tempo.resync".into(), value: 1.0 }),
+                    ..Step::default()
+                },
+            ];
+            crate::cuelist::save(&mut s, CueList { name: "Acte 1".into(), layer: 2, wrap: true, steps }).unwrap();
+            crate::cuelist::load(&mut s, "Acte 1").unwrap();
+            s.cue_lists.get("Acte 1").unwrap().clone()
+        };
+        assert!(modified(&shared), "a cue list is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Avec listes" })).unwrap();
+        assert_eq!(read(&dir.join("projects/Avec listes.lsproj")).unwrap().cue_lists, std::slice::from_ref(&list));
+        // Another project without lists: the loaded list goes.
+        std::fs::write(dir.join("projects/ancien.lsproj"), json!({ "format_version": 1, "name": "ancien" }).to_string()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "ancien" })).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            assert!(s.cue_lists.list().is_empty());
+            assert!(s.cue_list.list.is_none());
+        }
+        post(&shared, &dir, "open", json!({ "path": "Avec listes" })).unwrap();
+        assert_eq!(shared.lock().unwrap().cue_lists.list(), std::slice::from_ref(&list), "reopened identical");
+        let on_disk = crate::cuelist::CueListStore::load_or_create(dir.join("cuelists.json"));
+        assert_eq!(on_disk.list(), [list], "the working copy is the project's");
+        // A step firing the arm control is refused, nothing changes.
+        let bad = json!({ "format_version": 1, "cuelists": [{ "name": "X", "steps": [{ "fire": { "control": "transport.arm" } }] }] });
+        std::fs::write(dir.join("projects/Mauvais.lsproj"), bad.to_string()).unwrap();
+        assert_eq!(post(&shared, &dir, "open", json!({ "path": "Mauvais" })).unwrap_err().0, 400);
+        assert_eq!(shared.lock().unwrap().cue_lists.list()[0].name, "Acte 1");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn user_cues_are_saved_in_the_project_and_old_projects_still_open() {
         let dir = temp_dir("usercues");

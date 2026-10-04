@@ -18,13 +18,14 @@ use crate::Shared;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// `GET /api/running`. Cheap: a walk over the deck, the two small stores
+/// `GET /api/running`. Cheap: a walk over the deck, the cue list, the two small stores
 /// and the master/layer controls (a few dozen), under the lock already held.
 pub fn snapshot(s: &Shared) -> Value {
     json!({
         "cues": cues(s),
         "timeline": timeline(s),
         "playlist": playlist(s),
+        "cuelist": cuelist(s),
         "lfos": lfos(s),
         "audio_links": audio_links(s),
         "masters": masters(s),
@@ -152,6 +153,15 @@ fn timeline(s: &Shared) -> Value {
         "time_base": st.time_base,
         "loop": st.loop_on,
     })
+}
+
+/// The loaded cue list (T-410) while a step is on show or waits for its
+/// delay; `null` otherwise (loaded but at *Début*, or none).
+fn cuelist(s: &Shared) -> Value {
+    if !s.cue_list.is_active() {
+        return Value::Null;
+    }
+    s.cue_list.view()
 }
 
 fn playlist(s: &Shared) -> Value {
@@ -319,6 +329,8 @@ pub fn stop(s: &mut Shared, req: &StopRequest) -> Result<(), String> {
             }
         }
         "cues" => controls::stop_cues(s),
+        // The cue list back to *Début* (T-410).
+        "cuelist" => s.cue_list.top(),
         "timeline" => {
             s.timeline.stop();
             s.playlist = None;
@@ -395,6 +407,25 @@ mod tests {
         assert_eq!(snap["cues"], json!([]));
         assert_eq!(snap["timeline"], Value::Null);
         assert_eq!(snap["masters"], json!([]), "every master and layer control starts at its default");
+        assert_eq!(snap["cuelist"], Value::Null);
+    }
+
+    /// T-410: the playing cue list is listed, with who drove it, and its
+    /// stop button takes it back to « Début ».
+    #[test]
+    fn the_playing_cue_list_is_listed_and_stopped() {
+        use crate::cuelist::{CueList, Step, StepSource};
+        let mut s = shared();
+        let step = Step { label: "Intro".into(), source: StepSource::Cue { id: s.presets[0].id.clone() }, ..Step::default() };
+        crate::cuelist::save(&mut s, CueList { name: "Acte".into(), steps: vec![step], ..CueList::default() }).unwrap();
+        crate::cuelist::load(&mut s, "Acte").unwrap();
+        assert_eq!(snapshot(&s)["cuelist"], Value::Null, "loaded at Début: nothing plays");
+        apply(&mut s, "list.go", ControlInput::Value(1.0), true).unwrap();
+        let row = &snapshot(&s)["cuelist"];
+        assert_eq!((row["name"].as_str(), row["index"].as_u64(), row["label"].as_str()), (Some("Acte"), Some(0), Some("Intro")));
+        assert_eq!(row["source_label"], "MIDI");
+        stop(&mut s, &StopRequest { cue: None, kind: "cuelist".into(), instance: None, index: None }).unwrap();
+        assert_eq!(snapshot(&s)["cuelist"], Value::Null);
     }
 
     #[test]

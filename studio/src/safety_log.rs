@@ -478,6 +478,10 @@ pub fn describe(e: &SafetyEvent) -> String {
         }
         "cue" => format!("Cue lancé (armé) : {}", str_of(d, "name")),
         "show" => format!("Show lancé (armé) : {}", str_of(d, "name")),
+        "cuelist_step" => {
+            let step = d.get("step").and_then(Value::as_u64).unwrap_or(0);
+            format!("Liste de cues (armé) : {} › pas {step} {}", str_of(d, "name"), str_of(d, "label")).trim_end().to_string()
+        }
         "scene" => format!("Scène lancée (armé) : {}", str_of(d, "name")),
         "safety_settings" => format!("Réglages de sécurité modifiés{}", changed()),
         "presence_settings" => format!("Réglages de présence modifiés{}", changed()),
