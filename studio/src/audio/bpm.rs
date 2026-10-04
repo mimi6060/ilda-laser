@@ -14,7 +14,9 @@
 //!   tempo change wins in a couple of seconds), is autocorrelated through
 //!   an FFT. Each period τ between 60/250 and 60/40 s (0.1-frame steps) is
 //!   scored by a harmonic comb, `A(τ) + ½A(2τ) + ⅓A(3τ) + ¼A(4τ)`, times a
-//!   log-Gaussian tempo prior centred on 125 BPM (σ = 1 octave; a *guide*
+//!   log-Gaussian tempo prior centred on 125 BPM (σ = 0.8 octave, so the
+//!   90–180 range is preferred: a 96 BPM breakbeat whose eighth hats make
+//!   192 almost as good reads 96; a *guide*
 //!   tap narrows it to ±3 % around the guide). The best period is refined
 //!   by parabolic interpolation.
 //! - **Octave errors**: the comb only rewards a period whose multiples
@@ -25,12 +27,16 @@
 //!   groove with off-beat hats reads 140, see the tests). Then a
 //!   hysteresis: a new estimate within ±4 % of the current tempo is
 //!   followed at once (a DJ nudging the pitch, 124 → 128), anything else
-//!   must win for 2 s, and a ×2 / ÷2 jump for 4 s.
+//!   must win for 2 s, and a ×2 / ÷2 jump for 4 s once the tempo has been
+//!   locked (2 s before: the first estimates, on 3 s of sound, often pick
+//!   the wrong octave).
 //! - **Confidence** 0..1 = pulse clarity (the comb's normalised
 //!   autocorrelation at the chosen period) × peak-to-average of the score
 //!   × *presence* (the ODF's variance over the last 2 s against the whole
 //!   window: a break without drums empties it long before its old drums
-//!   leave the window) × stability of the last 4 estimates.
+//!   leave the window) × stability of the last 4 estimates, folded into
+//!   one octave: a groove whose raw estimate flips between 90 and 180 has
+//!   a steady pulse, and the hysteresis keeps the octave followed.
 //! - **Beats**: the causal dynamic-programming tracker of Ellis 2007 made
 //!   online as in Stark et al. 2009. Every ODF frame, the cumulative score
 //!   `C(n) = (1 − α)·O(n) + α·max_{d ∈ [P/2, 2P]} W(d)·C(n − d)`, with a
@@ -42,8 +48,9 @@
 //!   (parabolic interpolation, sub-frame) and reported (`beat_time`), and
 //!   `next_beat = beat_time + 60 / bpm`. Beats keep coming through a break.
 //! - **States**: *NoInput* while `silent`; *Checking* until the
-//!   confidence has stayed ≥ 0.6 for 2 s (*Guided* instead while a guide
-//!   is set); *Locked*; *Coasting* once a locked estimate's confidence
+//!   confidence has stayed ≥ 0.6 for 2 s and no other tempo is challenging
+//!   the one followed (*Guided* instead while a guide is set); *Locked*;
+//!   *Coasting* once a locked estimate's confidence
 //!   falls under 0.4 (a break: the BPM is held and beats keep being
 //!   predicted) until it is back ≥ 0.6 for 2 s. More than 3 s of silence,
 //!   or *Nouveau morceau*, forgets everything but the last BPM shown.
@@ -78,7 +85,8 @@ const PRESENCE_S: f64 = 2.0;
 pub const MIN_BPM: f32 = 40.0;
 pub const MAX_BPM: f32 = 250.0;
 const PRIOR_BPM: f32 = 125.0;
-const PRIOR_OCTAVES: f32 = 1.0;
+/// σ of the prior, in octaves (1 until T-356: a 96 BPM breakbeat read 192).
+const PRIOR_OCTAVES: f32 = 0.8;
 /// A guide tap's prior: ±3 % (one σ).
 const GUIDE_SIGMA: f32 = 0.03;
 /// Harmonic comb: A(τ), A(2τ), A(3τ), A(4τ).
@@ -156,6 +164,14 @@ fn ramp(x: f32, (lo, hi): (f32, f32)) -> f32 {
 
 fn octave_distance(a: f32, b: f32) -> f32 {
     (a / b).ln().abs()
+}
+
+/// `bpm` doubled or halved into the octave around `around` (within ×/÷ √2).
+fn fold_octave(bpm: f32, around: f32) -> f32 {
+    if !(bpm > 0.0 && around > 0.0) {
+        return bpm;
+    }
+    bpm * 2f32.powf(-(bpm / around).log2().round())
 }
 
 pub struct BpmTracker {
@@ -610,8 +626,11 @@ impl BpmTracker {
                 self.raw.rotate_right(1);
                 self.raw[0] = bpm;
                 self.raw_count = (self.raw_count + 1).min(STABILITY_N);
+                // Folded into the octave of the newest one: an estimate
+                // flipping between the tempo and its double is still a
+                // steady pulse (the hysteresis in `follow` keeps one).
                 let last = &self.raw[..self.raw_count];
-                let (lo, hi) = last.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &b| (lo.min(b), hi.max(b)));
+                let (lo, hi) = last.iter().map(|&b| fold_octave(b, bpm)).fold((f32::MAX, f32::MIN), |(lo, hi), b| (lo.min(b), hi.max(b)));
                 let spread = (hi - lo) / (0.5 * (hi + lo));
                 (1.0 - ramp(spread, STABILITY_MAP)) * self.raw_count as f32 / STABILITY_N as f32
             }
@@ -628,10 +647,11 @@ impl BpmTracker {
             self.pending = None;
         }
 
-        // States.
+        // States. Not locked while another tempo is challenging the one
+        // followed: it would lock on the octave about to be dropped.
         if confidence >= LOCK_CONFIDENCE {
             let since = *self.good_since.get_or_insert(now);
-            if now - since >= LOCK_HOLD_S - 1e-6 || self.out.state == DetectState::Locked {
+            if (now - since >= LOCK_HOLD_S - 1e-6 && self.pending.is_none()) || self.out.state == DetectState::Locked {
                 self.out.state = DetectState::Locked;
                 self.ever_locked = true;
             } else {
@@ -668,7 +688,7 @@ impl BpmTracker {
             };
             self.pending = Some((bpm, since));
             let octave = near(bpm, track * 2.0, FOLLOW_RATIO) || near(bpm, track / 2.0, FOLLOW_RATIO);
-            let need = if octave { OCTAVE_SWITCH_S } else { SWITCH_S };
+            let need = if octave && self.ever_locked { OCTAVE_SWITCH_S } else { SWITCH_S };
             if now - since >= need - 1e-6 {
                 self.track = Some(bpm);
                 self.pending = None;
@@ -807,6 +827,38 @@ mod tests {
                 assert!(worst_error(&est, bpm, lock) < 0.5, "groove {bpm}: off by {}", worst_error(&est, bpm, lock));
             }
         }
+    }
+
+    #[test]
+    fn octaves_fold_around_a_tempo() {
+        assert_eq!(fold_octave(180.0, 90.0), 90.0);
+        assert_eq!(fold_octave(45.0, 90.0), 90.0);
+        assert_eq!(fold_octave(192.0, 97.0), 96.0);
+        assert_eq!(fold_octave(120.0, 90.0), 120.0, "within a half octave: kept");
+        assert_eq!(fold_octave(0.0, 90.0), 0.0);
+    }
+
+    /// T-356: a broken beat (kicks on 1, the "and" of 2 and of 3; snare on
+    /// 2 and 4; eighth hats) at 96 reads 96, not the eighths' 192, and locks.
+    #[test]
+    fn a_96_breakbeat_reads_96_and_locks() {
+        let b = beats(96.0, 0.1, 16.0);
+        let p = 60.0 / 96.0;
+        let mut hits = Vec::new();
+        for (k, &t) in b.iter().enumerate() {
+            for step in [0usize, 6, 10].into_iter().filter(|s| s / 4 == k % 4) {
+                hits.push((t + (step % 4) as f64 * p / 4.0, Hit::Kick));
+            }
+            if k % 2 == 1 {
+                hits.push((t, Hit::Snare));
+            }
+            hits.extend([(t, Hit::Hat), (t + p / 2.0, Hit::Hat)]);
+        }
+        let est = track(&render_at(RATE, 16.0, &hits, bed));
+        let lock = first(&est, DetectState::Locked).expect("locked");
+        assert!(lock < 8.0, "locked after {lock} s");
+        assert!(worst_error(&est, 96.0, lock) < 0.5, "locked on {:?}", at(&est, lock));
+        assert!(est.iter().filter(|e| e.0 >= lock).all(|e| e.1.state == DetectState::Locked));
     }
 
     #[test]

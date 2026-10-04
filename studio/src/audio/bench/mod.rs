@@ -628,19 +628,22 @@ fn corpus(dir: &Path) -> Result<Vec<Case>> {
 /// 2026-10-04 (develop at ff67bf1; the numbers are in the comments and in
 /// docs/prs/audio-bench.md). Floors sit a little under it, ceilings a
 /// little over, so float noise across machines passes and a real
-/// regression doesn't. Known weaknesses are recorded as they are (e.g.
-/// `never_locked: 1`): tighten the limit when the analysis gets better.
+/// regression doesn't. Known weaknesses are recorded as they are:
+/// tighten the limit when the analysis gets better. Raised by T-356 (the
+/// 90 BPM groove and the 96 BPM breakbeat lock) and T-357 (a hat with a
+/// kick or a snare, the snare roll under the riser); the comments give the
+/// numbers then.
 const STEADY: Limits = Limits {
     onset_f: Some(0.98),       // 0.997
     kick_f: Some(0.98),        // 1.000
     snare_f: Some(0.95),       // 0.983
-    hat_f: Some(0.75),         // 0.806: a hat under a snare is never reported
+    hat_f: Some(0.94),         // 0.973 (0.806 before T-357)
     bpm_acc1: Some(0.97),      // 1.000
     bpm_acc2: Some(0.97),      // 1.000
-    locked_share: Some(0.80),  // 0.833: the 90 BPM groove never locks
+    locked_share: Some(0.97),  // 1.000 (0.833 before T-356: groove_90 never locked)
     beat_f: Some(0.95),        // 0.993
-    lock_time_max_s: Some(7.5), // 6.39 (mean 6.00)
-    never_locked: Some(1.0),   // 1 (groove_90)
+    lock_time_max_s: Some(7.5), // 6.39 (mean 5.99)
+    never_locked: Some(0.0),   // 0
     latency_ms: Some(22.0),    // 18.0
     latency_max_ms: Some(28.0), // 23.2
     onset_latency_ms: Some(20.0), // 16.2
@@ -653,7 +656,7 @@ const CHANGES: Limits = Limits {
     onset_f: Some(0.98),       // 0.996
     kick_f: Some(0.98),        // 1.000
     snare_f: Some(0.94),       // 0.977
-    hat_f: Some(0.75),         // 0.801
+    hat_f: Some(0.93),         // 0.958 (0.801)
     bpm_acc1: Some(0.97),      // 1.000
     bpm_acc2: Some(0.97),      // 1.000
     locked_share: Some(0.95),  // 1.000
@@ -672,23 +675,23 @@ const HARD: Limits = Limits {
     onset_f: Some(0.97),       // 0.991
     kick_f: Some(0.97),        // 1.000
     snare_f: Some(0.93),       // 0.965
-    hat_f: Some(0.70),         // 0.767
-    bpm_acc1: Some(0.45),      // 0.500: the 96 BPM breakbeat reads 192
+    hat_f: Some(0.93),         // 0.958 (0.767)
+    bpm_acc1: Some(0.97),      // 1.000 (0.500: the 96 BPM breakbeat read 192...)
     bpm_acc2: Some(0.97),      // 1.000
-    locked_share: Some(0.45),  // 0.500: ... and never locks
-    beat_f: Some(0.78),        // 0.833
-    lock_time_max_s: Some(7.5), // 6.41
-    never_locked: Some(1.0),   // 1 (breakbeat_96)
+    locked_share: Some(0.95),  // 1.000 (0.500: ... and never locked)
+    beat_f: Some(0.95),        // 1.000 (0.833)
+    lock_time_max_s: Some(7.5), // 6.41 (mean 6.16)
+    never_locked: Some(0.0),   // 0
     latency_ms: Some(22.0),    // 17.3
     latency_max_ms: Some(28.0), // 21.3
     ..NO_LIMITS
 };
 
 const ARRANGEMENT: Limits = Limits {
-    onset_f: Some(0.91),      // 0.940: the 16th snare roll under the riser
+    onset_f: Some(0.91),      // 0.940: the roll under the riser, any onset
     kick_f: Some(0.97),       // 1.000
-    snare_f: Some(0.72),      // 0.767: same
-    hat_f: Some(0.75),        // 0.806
+    snare_f: Some(0.90),      // 0.912 (0.767): 11 of the 16 roll snares, the last 16ths lost in the riser
+    hat_f: Some(0.92),        // 0.947 (0.806)
     bpm_acc1: Some(0.97),     // 1.000
     bpm_acc2: Some(0.97),     // 1.000
     locked_share: Some(0.95), // 1.000 (coasting through the break)
