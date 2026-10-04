@@ -19,6 +19,10 @@ struct Studio {
 
 impl Studio {
     fn start(tag: &str) -> Self {
+        Self::start_with(tag, &[])
+    }
+
+    fn start_with(tag: &str, extra: &[&str]) -> Self {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         assert_ne!(port, 8080, "never the user's instance");
         let dir = std::env::temp_dir().join(format!("laser-studio-shutdown-{tag}-{}", std::process::id()));
@@ -29,6 +33,7 @@ impl Studio {
             .arg(&dir)
             .arg("--test-output")
             .arg(&log)
+            .args(extra)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -101,9 +106,14 @@ impl Studio {
         files.iter().map(|f| std::fs::read_to_string(f).unwrap_or_default()).collect()
     }
 
-    fn signal_and_wait_with_logs(mut self, signal: &str) -> (Vec<String>, Vec<String>, String) {
+    fn signal_and_wait_with_logs(self, signal: &str) -> (Vec<String>, Vec<String>, String) {
         let status = Command::new("kill").args([signal, &self.child.id().to_string()]).status().unwrap();
         assert!(status.success());
+        self.wait_with_logs(signal)
+    }
+
+    /// Waits for a clean exit (`why` names the cause for the message).
+    fn wait_with_logs(mut self, why: &str) -> (Vec<String>, Vec<String>, String) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(code) = self.child.try_wait().unwrap() {
@@ -112,7 +122,7 @@ impl Studio {
             }
             if Instant::now() > deadline {
                 let _ = self.child.kill();
-                panic!("studio did not exit after {signal}");
+                panic!("studio did not exit after {why}");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -163,4 +173,39 @@ fn the_application_log_has_the_start_the_arming_and_the_stop() {
         assert!(lines[i].get(..29).is_some_and(|ts| ts.as_bytes()[10] == b'T' && ts.as_bytes()[19] == b'.'), "{}", lines[i]);
     }
     assert!(!app.contains(&dir), "no data-dir path in the log");
+}
+
+/// T-413: « Quitter Laser Studio » in the menu-bar item of the application
+/// takes the same path as SIGTERM. The native item can't be clicked by a
+/// test: the hidden hook runs the same action.
+#[test]
+fn quitting_from_the_menu_bar_disarms_sends_dark_frames_and_closes_the_output() {
+    let studio = Studio::start_with("menu", &["--app", "--no-open", "--test-hooks"]);
+    let (status, menu) = studio.request("GET", "/api/test/menu", "").unwrap();
+    assert_eq!(status, 200, "{menu}");
+    assert!(menu.contains("Désarmé — "), "starts disarmed: {menu}");
+    assert!(menu.contains("Quitter Laser Studio") && menu.contains(r#""action":"estop""#), "{menu}");
+    assert!(!menu.contains(r#""action":"arm"#), "nothing arms: {menu}");
+    studio.arm();
+    let (_, menu) = studio.request("GET", "/api/test/menu", "").unwrap();
+    assert!(menu.contains("ARMÉ") && menu.contains(r#""icon":"armed""#), "{menu}");
+    assert_eq!(studio.request("POST", "/api/test/menu?action=arm", "").unwrap().0, 400, "no arming entry");
+    assert_eq!(studio.request("POST", "/api/test/menu?action=quit", "").unwrap().0, 200);
+    let (log, safety, _) = studio.wait_with_logs("Quitter");
+    assert_clean_shutdown(&log);
+    assert_eq!(safety, ["app_start", "presence", "arm", "disarm", "app_stop"]);
+}
+
+/// T-413: « Arrêt » in the menu latches the emergency stop, like Escape;
+/// the menu shows it.
+#[test]
+fn the_menu_bar_stop_latches_the_emergency_stop() {
+    let studio = Studio::start_with("menu-estop", &["--app", "--no-open", "--test-hooks"]);
+    studio.arm();
+    assert_eq!(studio.request("POST", "/api/test/menu?action=estop", "").unwrap().0, 200);
+    let (_, state) = studio.request("GET", "/api/state", "").unwrap();
+    assert!(state.contains(r#""armed":false"#), "{state}");
+    let (_, menu) = studio.request("GET", "/api/test/menu", "").unwrap();
+    assert!(menu.contains("Arrêt d'urgence") && menu.contains(r#""icon":"stopped""#), "{menu}");
+    studio.signal_and_wait("-TERM");
 }

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Laser Studio.app (T-413). @VERSION@ is replaced by build_app.sh with
+     the version in studio/Cargo.toml. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>fr</string>
+	<key>CFBundleName</key>
+	<string>Laser Studio</string>
+	<key>CFBundleDisplayName</key>
+	<string>Laser Studio</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.ilda-laser.laser-studio</string>
+	<key>CFBundleExecutable</key>
+	<string>laser-studio</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<!-- A menu-bar application: no Dock icon, no main window; the
+	     interface opens in the browser. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- Native audio capture (T-242): macOS asks once, with this text. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Laser Studio écoute l'entrée audio (micro ou carte son) pour synchroniser le show laser sur la musique : tempo, battements et niveaux. Le son n'est ni enregistré ni envoyé ailleurs.</string>
+	<!-- Laser controllers on the local network (Ether Dream, IDN). -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Laser Studio recherche et pilote les contrôleurs laser de votre réseau local.</string>
+</dict>
+</plist>
