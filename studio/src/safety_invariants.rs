@@ -53,7 +53,7 @@ use crate::presence::{Presence, PresenceSettings};
 use crate::projection::{Geometry, ProjectionConfig, ProjectionZone, Warp, MAX_ZONES, SQUARE};
 use crate::safety::{self, SafetySettings};
 use crate::zones::{self, Horizon, Zone, ZoneKind};
-use crate::{dwell, interlock, lfo, live, test_support, testpattern, timeline, Engine, Shared, FRAME_INTERVAL};
+use crate::{dwell, interlock, lfo, live, program, test_support, testpattern, timeline, Engine, Shared, FRAME_INTERVAL};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -370,13 +370,55 @@ fn random_routing(s: &mut Shared, rng: &mut Rng) {
         1 => {
             let (id, _) = random_preset(s, rng);
             let zones = (0..rng.below(3)).map(|_| rng.below(MAX_ZONES as usize + 2) as u8).collect();
-            let slot = CueSlot { zones, ..s.deck.slot(&id) };
+            let old = s.deck.slot(&id);
+            // A cue program (T-157) as `POST /api/cues/program` takes it:
+            // values out of range on purpose, clamped at render.
+            let program = if rng.chance(0.4) { Some(random_program(s, rng)) } else { old.program.clone() };
+            let slot = CueSlot { zones, program, ..old };
             s.deck.set_slot(&id, slot);
         }
         _ => {
             let ids: Vec<u8> = s.projection.get().zones.iter().map(|z| z.id).collect();
             s.projection.align = if rng.chance(0.3) { None } else { Some(*rng.pick(&ids)) };
         }
+    }
+}
+
+/// Inner layers from other cues, curves and LFOs on random targets with
+/// values well past their ranges, any play mode.
+fn random_program(s: &Shared, rng: &mut Rng) -> program::CueProgram {
+    use crate::evolving::KeyEase;
+    let eases = [KeyEase::Step, KeyEase::Linear, KeyEase::EaseIn, KeyEase::EaseOut, KeyEase::Smooth];
+    let plays = [program::PlayMode::Loop, program::PlayMode::Once, program::PlayMode::PingPong];
+    let targets: Vec<&str> = program::TARGETS.iter().map(|t| t.0).collect();
+    let mut lanes: Vec<program::Lane> = Vec::new();
+    for _ in 0..rng.below(5) {
+        let target = rng.pick(&targets).to_string();
+        if lanes.iter().any(|l| l.target == target) {
+            continue;
+        }
+        let keys = (0..rng.below(5))
+            .map(|_| program::Key { beat: rng.range(0.0, 20.0), value: rng.range(-1000.0, 1000.0), ease: *rng.pick(&eases) })
+            .collect();
+        lanes.push(program::Lane { target, keys });
+    }
+    let lfo_targets: Vec<&str> = targets.iter().copied().filter(|t| !t.ends_with(".speed")).collect();
+    let lfos = (0..rng.below(3))
+        .map(|_| lfo::Modulator {
+            target: rng.pick(&lfo_targets).to_string(),
+            rate: if rng.chance(0.5) { live::Rate::Hz(rng.range(0.1, 25.0)) } else { live::Rate::Beats(rng.range(0.125, 8.0)) },
+            depth: rng.range(0.0, 3.0),
+            offset: rng.range(-3.0, 3.0),
+            ..Default::default()
+        })
+        .collect();
+    let layers = (0..rng.below(program::MAX_LAYERS + 1)).map(|_| random_preset(s, rng).1.content).collect();
+    program::CueProgram {
+        length_beats: if rng.chance(0.5) { Some(rng.range(0.1, 64.0)) } else { None },
+        play: *rng.pick(&plays),
+        layers,
+        lanes,
+        lfos,
     }
 }
 

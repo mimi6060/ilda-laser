@@ -566,7 +566,7 @@ pub(crate) fn grid_cell_preset(presets: &[Preset], cell: &str) -> Option<String>
 /// brightness, and the operator's music settings unless the cue is built
 /// around the music.
 fn cue_settings(s: &Shared, id: &str) -> Option<Settings> {
-    let mut settings = s.presets.iter().find(|p| p.id == id)?.settings.clone();
+    let mut settings = s.deck.with_program(id, s.presets.iter().find(|p| p.id == id)?.settings.clone());
     settings.brightness = s.settings.brightness;
     if !settings.audio.enabled {
         settings.audio = s.settings.audio.clone();

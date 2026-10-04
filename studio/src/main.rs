@@ -46,6 +46,7 @@ mod ponk;
 mod power;
 mod presence;
 mod presets;
+mod program;
 mod project;
 mod projection;
 mod safety;
@@ -1346,7 +1347,19 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
     }
     let song = Arc::clone(&s.song);
     s.song_sync.sync(&song, &mut s.timeline, &c);
-    s.timeline.frame(&c).into_iter().filter_map(|cue| timeline::look_of(&cue, &s.presets).map(|look| (cue, look))).collect()
+    // A cue event plays the cue's grid program too (T-157).
+    let with_program = |cue: &timeline::TimelineCue, look: Settings| match &cue.source {
+        timeline::EventSource::Cue { id } => s.deck.with_program(id, look),
+        timeline::EventSource::Look { .. } => look,
+    };
+    s.timeline
+        .frame(&c)
+        .into_iter()
+        .filter_map(|cue| {
+            let look = with_program(&cue, timeline::look_of(&cue, &s.presets)?);
+            Some((cue, look))
+        })
+        .collect()
 }
 
 fn advance_playlist(s: &mut Shared) {

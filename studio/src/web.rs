@@ -768,16 +768,33 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
         (Method::Get, "/api/presets") => {
             let s = shared.lock().unwrap();
             // `beats`: an evolving cue's length, the timeline editor's default event length (T-162).
-            let beats = |p: &crate::presets::Preset| match &p.settings.content {
-                crate::engine::Content::Evolving(e) => Some(e.length_beats),
+            let beats = |p: &crate::presets::Preset| match (&p.settings.program, &p.settings.content) {
+                (Some(program), content) => Some(program.length(content) as f32),
+                (None, crate::engine::Content::Evolving(e)) => Some(e.length_beats),
                 _ => None,
             };
-            let list: Vec<_> = s.presets.iter().map(|p| json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p) })).collect();
+            // `program`: the cue has a program of its own (T-157; the grid's
+            // programs are in `/api/cues`).
+            let list: Vec<_> = s
+                .presets
+                .iter()
+                .map(|p| json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p), "program": p.settings.program.is_some() }))
+                .collect();
             json_response(json!({ "categories": CATEGORIES, "presets": list }))
         }
         (Method::Get, "/api/presets/thumbs") => {
             let presets: Vec<_> = shared.lock().unwrap().presets.iter().map(|p| (p.id.clone(), p.settings.clone())).collect();
             json_response(json!(cue_thumbnails(&presets)))
+        }
+        // Hover preview of a cue (T-157): its program at the current tempo.
+        (Method::Get, "/api/presets/preview") => {
+            let Some(id) = query_str(request.url(), "id") else { return text(400, "expected ?id=<cue>") };
+            let (look, bpm, beats_per_bar) = {
+                let s = shared.lock().unwrap();
+                let Some(p) = s.presets.iter().find(|p| p.id == id) else { return text(404, "no such preset") };
+                (s.deck.with_program(&id, p.settings.clone()), s.tempo.bpm, s.tempo.beats_per_bar)
+            };
+            json_response(json!(crate::presets::preview(&look, bpm, beats_per_bar)))
         }
         (Method::Post, "/api/presets/play") => match body::<IdRequest>(request) {
             Ok(req) => {
@@ -806,7 +823,28 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
                 if !s.presets.iter().any(|p| p.id == req.id) {
                     return text(404, "no such preset");
                 }
-                s.deck.set_slot(&req.id, req.slot);
+                // The program is set on its own route: the properties
+                // dialog never sends it, and keeps it.
+                let program = s.deck.slot(&req.id).program;
+                s.deck.set_slot(&req.id, CueSlot { program, ..req.slot });
+                s.deck.save();
+                ok()
+            }
+            Err(e) => e,
+        },
+        // A cue program (T-157) on a cue of the grid: `null` removes it.
+        // Takes effect at the cue's next start.
+        (Method::Post, "/api/cues/program") => match body::<ProgramRequest>(request) {
+            Ok(req) => {
+                if let Some(Err(e)) = req.program.as_ref().map(crate::program::CueProgram::validate) {
+                    return text(400, &e.to_string());
+                }
+                let mut s = shared.lock().unwrap();
+                if !s.presets.iter().any(|p| p.id == req.id) {
+                    return text(404, "no such preset");
+                }
+                let slot = s.deck.slot(&req.id);
+                s.deck.set_slot(&req.id, CueSlot { program: req.program, ..slot });
                 s.deck.save();
                 ok()
             }
@@ -1706,6 +1744,12 @@ struct SlotRequest {
     id: String,
     #[serde(flatten)]
     slot: CueSlot,
+}
+
+#[derive(Deserialize)]
+struct ProgramRequest {
+    id: String,
+    program: Option<crate::program::CueProgram>,
 }
 
 #[derive(Deserialize)]
@@ -3760,5 +3804,43 @@ mod tests {
         // A cue's zones go through « Propriétés du cue ».
         assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-001","zones":[2,1,1,12]}"#).0, 200);
         assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["zones"], json!([1, 2]));
+    }
+
+    #[test]
+    fn cue_programs_are_set_kept_previewed_and_never_arm() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        let program = json!({ "play": "ping_pong", "layers": [{ "kind": "wave" }],
+            "lanes": [{ "target": "size", "keys": [{ "beat": 0, "value": 0.2 }, { "beat": 16, "value": 1.0 }] }] });
+        let set = |id: &str, program: &serde_json::Value| t.request("POST", "/api/cues/program", &json!({ "id": id, "program": program }).to_string());
+        assert_eq!(set("tunnels-001", &program).0, 200);
+        let slot = &js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"];
+        assert_eq!(slot["program"]["play"], "ping_pong");
+        // The properties dialog doesn't send it, and keeps it.
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-001","layer":2}"#).0, 200);
+        let slot = &js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"];
+        assert_eq!((slot["layer"].clone(), slot["program"]["lanes"][0]["target"].clone()), (json!(2), json!("size")));
+        // Refused: unknown target, too many layers, unknown cue.
+        let (code, text) = set("tunnels-001", &json!({ "lanes": [{ "target": "trace" }] }));
+        assert_eq!(code, 400, "{text}");
+        assert!(text.contains("trace"));
+        assert_eq!(set("tunnels-001", &json!({ "layers": vec![json!({ "kind": "wave" }); 5] })).0, 400);
+        assert_eq!(set("nope", &program).0, 404);
+        // The cue plays with it.
+        assert_eq!(t.request("POST", "/api/cue", r#"{"id":"tunnels-001","down":true}"#).0, 200);
+        assert!(t.shared.lock().unwrap().settings.program.is_some());
+        // The grid's badge and hover preview.
+        let presets = js(&t.request("GET", "/api/presets", "").1);
+        let entry = |id: &str| presets["presets"].as_array().unwrap().iter().find(|p| p["id"] == id).unwrap().clone();
+        assert_eq!((entry("vagues-028")["program"].clone(), entry("vagues-028")["beats"].clone()), (json!(true), json!(8.0)));
+        assert_eq!(entry("tunnels-001")["program"], json!(false));
+        // (A long, chunked answer: the frames are checked in presets.rs.)
+        let (code, body) = t.request("GET", "/api/presets/preview?id=tunnels-001", "");
+        assert!(code == 200 && body.contains(r#""step_beats":0.25"#), "{code}");
+        assert_eq!(t.request("GET", "/api/presets/preview?id=nope", "").0, 404);
+        // `null` removes it.
+        assert_eq!(set("tunnels-001", &serde_json::Value::Null).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["program"], serde_json::Value::Null);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 }

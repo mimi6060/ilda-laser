@@ -671,6 +671,9 @@
   .cue .n { flex: 1; min-width: 0; padding-right: 10px; font-weight: 600; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .cue .key { top: 3px; right: 5px; font-family: ui-monospace, "SF Mono", monospace; }
   .cue .tag { bottom: 3px; right: 6px; }
+  /* Cue program (T-157): « ∿ » over the picture, which plays on hover. */
+  .cue .prog { position: absolute; left: 6px; bottom: 3px; font-size: 14px; line-height: 1; color: var(--violet); text-shadow: 0 0 6px var(--violet); pointer-events: none; }
+  .cue.previewing canvas.th { box-shadow: 0 0 0 1px var(--violet), 0 0 10px color-mix(in srgb, var(--violet) 50%, transparent); }
   .cue.active { background: linear-gradient(90deg, color-mix(in srgb, var(--cat) 35%, #11131d), #11131d); color: #fff; border-color: var(--cat);
     box-shadow: 0 0 0 1px var(--cat), 0 0 22px color-mix(in srgb, var(--cat) 55%, transparent); }
   .cue.active .key, .cue.active .tag { color: #fff; }
@@ -3876,8 +3879,9 @@ function showEvolving(list) {
   $('evoPos').textContent = `${pos.toFixed(1)} / ${+len.toFixed(2)} temps`;
   $('evoFill').style.width = Math.min(100, 100 * pos / len) + '%';
   $('evoTicks').style.backgroundSize = (100 * (e.beats_per_bar || 4) / len) + '% 100%';
-  $('evoState').textContent = e.waiting ? 'attend le temps' : e.ended ? 'fin (dernière clé)'
-    : `clé ${e.key + 1}/${e.keys}` + (e.loop ? ` · boucle ${e.pass + 1}` : '');
+  // A cue program (T-157) without evolving content has no keys.
+  $('evoState').textContent = e.waiting ? 'attend le temps' : e.ended ? (e.keys ? 'fin (dernière clé)' : 'fin (dernière valeur)')
+    : (e.keys ? `clé ${e.key + 1}/${e.keys}` : 'programme') + (e.loop ? ` · boucle ${e.pass + 1}` : '');
 }
 
 function showTempo(t) {
@@ -3955,11 +3959,42 @@ function drawThumb(c, hex) {
     }
   }
 }
+// Hover preview of a cue program (T-157): the pictures of its length
+// (GET /api/presets/preview), played in the cue's picture at the tempo.
+// Display only, nothing goes to the laser.
+let cuePreview = null; // { b, id, timer }
+async function playCuePreview(b, id) {
+  stopCuePreview();
+  const mine = cuePreview = { b, id, timer: 0 };
+  let pv;
+  try { pv = await (await fetch('/api/presets/preview?id=' + encodeURIComponent(id), { cache: 'no-store' })).json(); } catch { return; }
+  if (cuePreview !== mine || !pv.frames || !pv.frames.length) return;
+  const canvas = b.querySelector('canvas.th');
+  let i = 0;
+  const step = () => {
+    if (cuePreview !== mine) return;
+    drawThumb(canvas, pv.frames[i]);
+    i = (i + 1) % pv.frames.length;
+    const bpm = +$('bpm').value || 120;
+    mine.timer = setTimeout(step, 1000 * pv.step_beats * 60 / Math.max(20, bpm));
+  };
+  b.classList.add('previewing');
+  step();
+}
+function stopCuePreview() {
+  const p = cuePreview;
+  cuePreview = null;
+  if (!p) return;
+  clearTimeout(p.timer);
+  p.b.classList.remove('previewing');
+  drawThumb(p.b.querySelector('canvas.th'), thumbs[p.id]);
+}
 async function loadSlots() {
   slots = (await (await fetch('/api/cues')).json()).slots || {};
   renderCues();
 }
 function renderCues() {
+  stopCuePreview(); // its button is about to go
   $('cueTabs').innerHTML = '';
   for (const c of cueCategories) {
     const b = document.createElement('button');
@@ -3982,6 +4017,16 @@ function renderCues() {
     b.innerHTML = `<span class="key">${CUE_KEYS[i] ? CUE_KEYS[i].toUpperCase() : ''}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`;
     b.querySelector('.n').textContent = p.name;
     drawThumb(b.querySelector('canvas.th'), thumbs[p.id]);
+    if (p.program || slot.program) {
+      // Cue program (T-157): a badge, and the picture plays it on hover.
+      const badge = document.createElement('span');
+      badge.className = 'prog'; badge.textContent = '∿';
+      badge.title = 'Cue évolutif : programme (couches, courbes, LFO). Survol : aperçu au tempo.';
+      b.appendChild(badge);
+      b.classList.add('has-program');
+      b.addEventListener('pointerenter', () => playCuePreview(b, p.id));
+      b.addEventListener('pointerleave', () => stopCuePreview());
+    }
     b.addEventListener('pointerdown', e => {
       if (e.button !== 0) return;
       e.preventDefault();
