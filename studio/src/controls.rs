@@ -1000,7 +1000,7 @@ mod tests {
         apply(&mut s, "cue.multi", ControlInput::Value(1.0), true).unwrap();
         apply(&mut s, "grid.1.1.1", ControlInput::Value(1.0), true).unwrap();
         apply(&mut s, "look.size", ControlInput::Value(0.77), true).unwrap();
-        s.deck.set_slot(&cue_at(&s, 0, 1), cues::CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None, show: None });
+        s.deck.set_slot(&cue_at(&s, 0, 1), cues::CueSlot { mode: Some(ClickMode::Flash), group: None, layer: None, show: None, ..Default::default() });
         apply(&mut s, "grid.1.1.2", ControlInput::Norm(1.0), true).unwrap();
         assert_eq!(s.active_cue, Some(cue_at(&s, 0, 1)));
         assert_eq!(cues::looks(&s.deck, &s.settings, s.look_on).len(), 2);

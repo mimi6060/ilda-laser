@@ -623,6 +623,29 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/projection") => json_response(projection_view(&shared.lock().unwrap())),
+        (Method::Post, "/api/projection") => match body::<crate::projection::ProjectionConfig>(request) {
+            Ok(cfg) => {
+                let mut s = shared.lock().unwrap();
+                match s.projection.set(cfg) {
+                    Ok(()) => json_response(projection_view(&s)),
+                    Err(e) => text(400, &e.to_string()),
+                }
+            }
+            Err(e) => e,
+        },
+        // « Aligner » : the test pattern goes through this zone's geometry.
+        (Method::Post, "/api/projection/align") => match body::<AlignRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                if req.zone.is_some_and(|id| s.projection.get().zone(id).is_none()) {
+                    return text(404, "zone inconnue");
+                }
+                s.projection.align = req.zone;
+                json_response(projection_view(&s))
+            }
+            Err(e) => e,
+        },
         (Method::Post, "/api/scenes/save") => match body::<SaveScene>(request) {
             Ok(req) if !req.name.trim().is_empty() => {
                 let mut s = shared.lock().unwrap();
@@ -1365,6 +1388,16 @@ fn yes() -> bool {
 }
 
 #[derive(Deserialize)]
+struct AlignRequest {
+    zone: Option<u8>,
+}
+
+/// `GET /api/projection`.
+fn projection_view(s: &Shared) -> serde_json::Value {
+    json!({ "config": s.projection.get(), "align": s.projection.align, "max_zones": crate::projection::MAX_ZONES })
+}
+
+#[derive(Deserialize)]
 struct SlotRequest {
     id: String,
     #[serde(flatten)]
@@ -1542,6 +1575,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "settings": s.settings,
         "settings_rev": s.settings_rev,
         "calibration": s.calibration,
+        "projection": s.projection.get(),
         "safety": s.safety.get(),
         "output_limits": s.outputs.active_limits(),
         "max_brightness_effective": s.outputs.max_brightness_effective(),
@@ -1603,6 +1637,7 @@ fn diagnostic_report(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
             "safety": s.safety.get(),
             "presence": s.presence.settings,
             "calibration": s.calibration,
+            "projection": s.projection.get(),
             "outputs": s.outputs.list(),
             "midi_safety": s.midi.store.devices.safety,
         });
@@ -2329,6 +2364,8 @@ mod tests {
             ("/api/scenes/save", r#"{"name":"Autre"}"#),
             ("/api/settings", "{}"),
             ("/api/calibration", r#"{"offset_x":0.5}"#),
+            ("/api/projection", r#"{"zones":[{"id":1,"geometry":{"keystone_x":0.3}}]}"#),
+            ("/api/projection/align", r#"{"zone":1}"#),
             ("/api/safety", r#"{"strobe_max_hz":3}"#),
             ("/api/outputs/limits", r#"{"limits":{"max_power":0.3}}"#),
             ("/api/presence", "{}"),
@@ -2346,6 +2383,7 @@ mod tests {
         }
         assert_eq!(t.shared.lock().unwrap().scenes.list().len(), 1, "the scene is still there");
         assert_eq!(t.shared.lock().unwrap().calibration.offset_x, 0.0);
+        assert_eq!(t.shared.lock().unwrap().projection.get(), &crate::projection::ProjectionConfig::default());
         assert_eq!(t.shared.lock().unwrap().test_pattern.active, None);
 
         // Reading is never locked.
@@ -3211,5 +3249,49 @@ mod tests {
         t.request("POST", "/api/estop/reset", "");
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
         assert!(t.shared.lock().unwrap().gate.is_armed());
+    }
+
+    #[test]
+    fn projection_zones_are_validated_saved_and_never_arm() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        let v = js(&t.request("GET", "/api/projection", "").1);
+        assert_eq!(v["config"]["zones"].as_array().unwrap().len(), 1);
+        assert_eq!(v["config"]["default_zones"], json!([1]));
+        assert_eq!(v["align"], serde_json::Value::Null);
+
+        let two = json!({
+            "zones": [
+                { "id": 1, "name": "Gauche", "geometry": { "size_x": 0.5, "pos_x": -0.5 } },
+                { "id": 2, "name": "Droite", "geometry": { "size_x": 9.0, "pos_x": 0.5,
+                  "warp": { "enabled": true, "corners": [[-0.8, -0.9], [0.7, -0.6], [0.9, 0.8], [-0.6, 0.5]] } } }
+            ],
+            "default_zones": [1, 2]
+        });
+        let (code, body) = t.request("POST", "/api/projection", &two.to_string());
+        assert_eq!(code, 200, "{body}");
+        let v = js(&body);
+        assert_eq!(v["config"]["zones"][1]["geometry"]["size_x"], 2.0, "clamped");
+        assert_eq!(v["config"]["default_zones"], json!([1, 2]));
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["projection"]["zones"][0]["name"], "Gauche");
+
+        // A crossed warp, duplicate ids, no zone: refused, nothing changed.
+        let crossed = json!({ "zones": [{ "id": 1, "geometry": { "warp": { "enabled": true, "corners": [[-1, -1], [1, 1], [1, -1], [-1, 1]] } } }] });
+        for bad in [crossed, json!({ "zones": [{ "id": 2 }, { "id": 2 }] }), json!({ "zones": [] }), json!({ "zones": [{ "id": 9 }] })] {
+            let (code, text) = t.request("POST", "/api/projection", &bad.to_string());
+            assert_eq!(code, 400, "{bad} → {text}");
+        }
+        assert_eq!(t.shared.lock().unwrap().projection.get().zones.len(), 2);
+
+        assert_eq!(t.request("POST", "/api/projection/align", r#"{"zone":5}"#).0, 404);
+        assert_eq!(js(&t.request("POST", "/api/projection/align", r#"{"zone":2}"#).1)["align"], 2);
+        // Removing the aligned zone ends the alignment.
+        let one = json!({ "zones": [{ "id": 1 }] });
+        assert_eq!(js(&t.request("POST", "/api/projection", &one.to_string()).1)["align"], serde_json::Value::Null);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+
+        // A cue's zones go through « Propriétés du cue ».
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-001","zones":[2,1,1,12]}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["zones"], json!([1, 2]));
     }
 }

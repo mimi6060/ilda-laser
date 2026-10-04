@@ -45,6 +45,7 @@ mod power;
 mod presence;
 mod presets;
 mod project;
+mod projection;
 mod safety;
 #[cfg(test)]
 mod safety_invariants;
@@ -255,6 +256,9 @@ pub struct Shared {
     /// Per-output power caps and projector sheets (power.rs,
     /// outputs.json). Machine settings: never in a look or a project.
     pub outputs: power::OutputStore,
+    /// Projection zones and their geometric correction (projection.rs,
+    /// projection.json). Machine settings, like the calibration.
+    pub projection: projection::ProjectionStore,
     /// What the audio guard did on the last frame (T-245).
     pub audio_guard: audio::safety::GuardStatus,
     /// What the static beam guard (dwell.rs) did on the last frame.
@@ -789,6 +793,7 @@ fn startup_state(cli: &Cli) -> Shared {
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
         outputs,
+        projection: projection::ProjectionStore::load_or_create(cli.data_dir.join("projection.json")),
         audio_guard: audio::safety::GuardStatus::default(),
         dwell: dwell::DwellStatus::default(),
         evolving: Vec::new(),
@@ -1036,7 +1041,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
-        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, pattern) = {
+        let (looks, show_cues, starts, clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, caps, pattern, routing) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run.
             let hold_ok = s.sync_safety(now);
@@ -1113,7 +1118,8 @@ impl Engine {
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
             let armed = s.gate.is_armed();
-            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits(), pattern)
+            let routing = Routing::read(&s, &looks, &show_cues);
+            (looks, show_cues, starts, clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.safety.get(), s.outputs.active_limits(), pattern, routing)
         };
 
         self.live_state.advance(&live, dt, clock.bpm, clock.beats_per_bar);
@@ -1121,7 +1127,8 @@ impl Engine {
             // The pattern alone, densified and calibrated, without live
             // modifiers (exact geometry). The cue animators are left as
             // they are, so the cues carry on where they were afterwards.
-            Some((p, brightness)) => (testpattern::output_frame(p, brightness, &calibration), layers::MixReport::default(), Vec::new()),
+            // While aligning a projection zone, through that zone's geometry.
+            Some((p, brightness)) => (testpattern::output_frame(p, brightness, routing.align.as_ref(), &calibration), layers::MixReport::default(), Vec::new()),
             None => {
                 let anim_dt = dt * live.speed.clamp(0.0, 4.0);
                 let (animators, event_live) = (&mut self.animators, &mut self.event_live);
@@ -1129,9 +1136,10 @@ impl Engine {
                 event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
                 // Timeline events first (under the cues played by hand on the same
                 // layer), each on its own content clock; paused or held ones freeze.
-                let mut rendered: Vec<(u8, Vec<Point>)> = show_cues
+                let mut rendered: Vec<projection::Routed> = show_cues
                     .iter()
-                    .map(|(cue, settings)| {
+                    .zip(&routing.show_zones)
+                    .map(|((cue, settings), zones)| {
                         let animator = animators.entry(cue.instance).or_insert_with(|| Animator::starting_at(0.0));
                         let content_clock = engine::BeatClock { beat: cue.content_beat, ..clock };
                         let event_dt = if cue.frozen { 0.0 } else { anim_dt };
@@ -1143,29 +1151,27 @@ impl Engine {
                             st.advance(&cue.modifiers, if cue.frozen { 0.0 } else { dt }, clock.bpm, clock.beats_per_bar);
                             points = live::apply(&points, &cue.modifiers, st, &user_palettes);
                         }
-                        (cue.layer, points)
+                        (cue.layer, points, zones.clone())
                     })
                     .collect();
                 // Muted layers keep animating, so they come back in motion.
-                rendered.extend(looks.iter().map(|(layer, id, settings)| {
+                rendered.extend(looks.iter().zip(&routing.look_zones).map(|((layer, id, settings), zones)| {
                     let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
                         Some(&beat) => Animator::starting_at(beat),
                         None => Animator::default(),
                     });
                     animator.set_optimizer(&mixer.optimizer);
-                    (*layer, animator.render(settings, audio, anim_dt, &clock))
+                    (*layer, animator.render(settings, audio, anim_dt, &clock), zones.clone())
                 }));
                 let evolving: Vec<(u64, evolving::Progress)> =
                     looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();
-                // Layers 1 → 4 with their dimmers, within the point budget.
-                let (look, mix) = layers::mix(rendered, &mixer);
-                let frame: Vec<Point> = live::apply(&look, &live, &self.live_state, &user_palettes)
-                    .into_iter()
-                    .map(|p| {
-                        let (x, y) = calibration.apply(p.x, p.y);
-                        Point { x, y, ..p }
-                    })
-                    .collect();
+                // Per projection zone (T-012): layers 1 → 4 with their
+                // dimmers within the zone's share of the point budget, the
+                // master live controls, then the zone's geometry and the
+                // calibration (both clamp to -1..1). Zones are joined by
+                // blanked travel; one neutral zone is the plain path.
+                let finish = |look: &[Point]| live::apply(look, &live, &self.live_state, &user_palettes);
+                let (frame, mix) = projection::render(rendered, &routing.config, routing.output.as_deref(), &mixer, finish, &calibration);
                 (frame, mix, evolving)
             }
         };
@@ -1246,6 +1252,41 @@ pub use datafile::save_json;
 /// stop halts the timeline (it never resumes by itself), and so its song;
 /// otherwise the song tells the timeline where it is (T-161) and its
 /// events join the cues, through the same mix, live stage and gate.
+/// Where this frame's looks go (T-012), read under the lock: each look's
+/// projection zones (empty = the default zones), the zone settings, the
+/// connected output and the zone a test pattern is aligned through.
+struct Routing {
+    look_zones: Vec<Vec<u8>>,
+    show_zones: Vec<Vec<u8>>,
+    config: projection::ProjectionConfig,
+    output: Option<String>,
+    align: Option<projection::Geometry>,
+}
+
+impl Routing {
+    fn read(s: &Shared, looks: &[(u8, u64, Settings)], show_cues: &[(timeline::TimelineCue, Settings)]) -> Self {
+        let of_cue = |cue: &str| s.deck.slot(cue).zones;
+        let look_zones = looks
+            .iter()
+            .map(|(_, id, _)| s.deck.active.iter().find(|a| a.id == *id).map(|a| of_cue(&a.cue)).unwrap_or_default())
+            .collect();
+        let show_zones = show_cues
+            .iter()
+            .map(|(cue, _)| match &cue.source {
+                timeline::EventSource::Cue { id } => of_cue(id),
+                timeline::EventSource::Look { .. } => Vec::new(),
+            })
+            .collect();
+        Self {
+            look_zones,
+            show_zones,
+            config: s.projection.get().clone(),
+            output: s.output_mgr.prefs().selected,
+            align: s.projection.align_geometry(),
+        }
+    }
+}
+
 fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(timeline::TimelineCue, Settings)> {
     let c = timeline::Clock { t, beat: clock.beat, bpm: clock.bpm, beats_per_bar: clock.beats_per_bar };
     if s.estop.is_latched() {
@@ -1940,7 +1981,7 @@ mod tests {
     /// settings, and arming stays refused until the operator acknowledged it.
     #[test]
     fn a_damaged_safety_file_blocks_arming_until_acknowledged() {
-        for rel in ["safety.json", "calibration.json", "outputs.json", "presence.json", "audio.json", "midi/devices.json"] {
+        for rel in ["safety.json", "calibration.json", "projection.json", "outputs.json", "presence.json", "audio.json", "midi/devices.json"] {
             let (dir, _) = datafile::tests::with_damaged(&format!("startup-{}", rel.replace('/', "-")), rel);
             let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--no-audio", "--data-dir", dir.to_str().unwrap()]).unwrap();
             let mut s = startup_state(&cli);
@@ -1954,6 +1995,7 @@ mod tests {
             // Never looser than the defaults.
             assert_eq!(s.safety.get(), if rel == "safety.json" { safety::SafetySettings::strictest() } else { safety::SafetySettings::default() });
             assert_eq!(s.outputs.active_limits(), power::OutputLimits::default());
+            assert_eq!(s.projection.get(), &projection::ProjectionConfig::default());
             if rel == "midi/devices.json" {
                 assert_eq!(s.midi.store.devices.safety, midi::safety::MidiSafety::strictest());
             }
