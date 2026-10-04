@@ -59,6 +59,8 @@ pub struct GenParams {
     pub snap: bool,
     /// What a travelling sheet (the scanner) does at the end of a pass.
     pub loop_mode: LoopMode,
+    /// `scissor`: both groups flash white for 1/8 beat as they cross.
+    pub cross_flash: bool,
 }
 
 impl Default for GenParams {
@@ -80,6 +82,7 @@ impl Default for GenParams {
             easing: Easing::Sine,
             snap: false,
             loop_mode: LoopMode::PingPong,
+            cross_flash: false,
         }
     }
 }
@@ -155,6 +158,8 @@ pub const GENERATOR_NAMES: &[&str] = &[
     "ceiling", "blade", "curtain", "waterfall", "scanner", "slats", "aurora", "grid",
     // Chasers (T-103), see `chases.rs`.
     "chase_fan",
+    // Crossings, hot beam and convergences (T-104), see `crossings.rs`.
+    "scissor", "hot_beam", "bundle_burst", "beam_v",
 ];
 
 pub struct Geometry {
@@ -457,7 +462,8 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
         _ => crate::fans::generate(name, p, ctx)
             .or_else(|| crate::tunnels::generate(name, p, ctx))
             .or_else(|| crate::sheets::generate(name, p, ctx))
-            .or_else(|| crate::chases::generate(name, p, ctx)),
+            .or_else(|| crate::chases::generate(name, p, ctx))
+            .or_else(|| crate::crossings::generate(name, p, ctx)),
     }
 }
 
