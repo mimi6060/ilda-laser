@@ -1266,6 +1266,24 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             Ok(patch) => attach_song(patch, shared),
             Err(e) => e,
         },
+        // « Générer un show depuis le morceau » (T-167): the job runs on
+        // its own thread (autoshow.rs); these only start, read or cancel it.
+        (Method::Get, "/api/timeline/autoshow") => {
+            let hub = Arc::clone(&shared.lock().unwrap().autoshow);
+            json_response(json!(hub.view()))
+        }
+        (Method::Post, "/api/timeline/autoshow") => match body::<AutoShowRequest>(request) {
+            Ok(req) => match crate::autoshow::start(shared, req.file.trim(), req.seed) {
+                Ok(view) => with_type(Response::from_string(json!(view).to_string()).with_status_code(202), "application/json"),
+                Err((code, why)) => text(code, &why),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, "/api/timeline/autoshow/cancel") => {
+            let hub = Arc::clone(&shared.lock().unwrap().autoshow);
+            hub.cancel();
+            json_response(json!(hub.view()))
+        }
         (Method::Post, p) if p.starts_with("/api/timeline/") => timeline_route(request, shared, &p["/api/timeline/".len()..]),
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
         (Method::Get, "/api/netin") => json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now())),
@@ -1693,6 +1711,14 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
         _ => return text(404, "not found"),
     }
     json_response(json!(s.timeline.state(&c)))
+}
+
+/// `POST /api/timeline/autoshow`: a song of the library, and a seed
+/// (*Autre proposition*; default: drawn from the file).
+#[derive(Deserialize)]
+struct AutoShowRequest {
+    file: String,
+    seed: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -3181,6 +3207,7 @@ mod tests {
             ("/api/cues/store", r#"{"page":0,"slot":0}"#),
             ("/api/cues/update", "{}"),
             ("/api/timeline/edit", "{}"),
+            ("/api/timeline/autoshow", r#"{"file":"x.wav"}"#),
         ] {
             let (code, text) = t.request("POST", path, body);
             assert_eq!((code, text.as_str()), (423, crate::showmode::LOCKED_FR), "{path} {body}");

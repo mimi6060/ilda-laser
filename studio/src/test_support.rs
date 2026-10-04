@@ -81,6 +81,7 @@ pub fn shared() -> Shared {
         user_cues: crate::usercues::UserCueStore::in_memory(),
         shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id())).join("shows")),
         media: std::sync::Arc::new(crate::audio::media::MediaStore::new(&std::env::temp_dir().join(format!("laser-studio-test-media-{}", std::process::id())))),
+        autoshow: Default::default(),
         // Its own folder per call: tests import in parallel.
         ilda: std::sync::Arc::new(crate::ilda_library::IldaLibrary::new(&std::env::temp_dir().join(format!(
             "laser-studio-test-ilda-{}-{}",
