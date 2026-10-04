@@ -582,6 +582,57 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/outputs/color") => {
+            let s = shared.lock().unwrap();
+            match color_output(request.url(), &s) {
+                Ok(id) => json_response(color_view(&s, &id)),
+                Err(e) => e,
+            }
+        }
+        // Colour rendering of one output (T-414), `?output=<id or index>`
+        // (default the main output). Body: `{color, confirm_loosen?}`; a
+        // missing field of `color` is its identity value. Darker or equal
+        // applies at once; brighter is 409 `{error, loosen}` without
+        // `"confirm_loosen": true` (sent only by the operator's
+        // confirmation in the UI), and 409 `{error, loosen, armed: true}`
+        // while the laser is armed, confirmed or not (like raising a cap).
+        // The caps still apply after it. Refused in show mode (not on the
+        // allow-list).
+        (Method::Post, "/api/outputs/color") => {
+            let id = match color_output(request.url(), &shared.lock().unwrap()) {
+                Ok(id) => id,
+                Err(e) => return e,
+            };
+            match body::<ColorBody>(request) {
+                Ok(b) => {
+                    let mut s = shared.lock().unwrap();
+                    let s = &mut *s;
+                    s.gate.sync_estop(&s.estop);
+                    let armed = s.gate.is_armed();
+                    let before = s.outputs.get(&id).map(|o| o.color);
+                    match s.outputs.set_color(&id, b.color, armed, b.confirm_loosen) {
+                        Ok(out) => {
+                            if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out.color)) {
+                                change["output"] = json!(id);
+                                change["confirmed_loosen"] = json!(b.confirm_loosen);
+                                s.gate.log().record("output_color", Some("ui"), change);
+                            }
+                            json_response(color_view(s, &id))
+                        }
+                        Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
+                        Err(crate::power::SetError::Raises(list)) => with_status(
+                            json_response(json!({ "error": "Ce réglage augmente la lumière émise : confirmation requise", "loosen": list })),
+                            409,
+                        ),
+                        Err(crate::power::SetError::Armed(list)) => with_status(
+                            json_response(json!({ "error": "Désarmez avant d'augmenter les couleurs", "loosen": list, "armed": true })),
+                            409,
+                        ),
+                    }
+                }
+                Err(e) => e,
+            }
+        }
         (Method::Get, "/api/testpattern") => json_response(test_pattern_view(&shared.lock().unwrap())),
         // T-404: `{"pattern": "grid" | null, "brightness": 0.2}`, both
         // optional (a missing key keeps the current value). Shows or leaves
@@ -1715,6 +1766,41 @@ struct OutputsBody {
     confirm_loosen: bool,
 }
 
+/// `POST /api/outputs/color` (T-414).
+#[derive(Deserialize)]
+struct ColorBody {
+    color: crate::colorcal::ColorCalibration,
+    #[serde(default)]
+    confirm_loosen: bool,
+}
+
+/// The output named by `?output=`: an id, or an index in the list.
+/// Absent: the main output. Unknown: 400.
+fn color_output(url: &str, s: &Shared) -> Result<String, HttpResponse> {
+    let Some(q) = query_str(url, "output") else { return Ok(crate::power::MAIN_OUTPUT.into()) };
+    let list = s.outputs.list();
+    let found = match q.parse::<usize>() {
+        Ok(i) => list.get(i),
+        Err(_) => list.iter().find(|o| o.id == q),
+    };
+    found.map(|o| o.id.clone()).ok_or_else(|| text(400, &format!("Sortie inconnue : « {q} »")))
+}
+
+/// `GET /api/outputs/color`: the colour rendering of one output, and the
+/// colour delay `laser-dac` already applies (ours adds to it).
+fn color_view(s: &Shared, id: &str) -> serde_json::Value {
+    let color = s.outputs.get(id).map(|o| o.color).unwrap_or_default();
+    json!({
+        "output": id,
+        "color": color,
+        "identity": color.is_identity(),
+        "defaults": crate::colorcal::ColorCalibration::default(),
+        "max_delay": crate::colorcal::MAX_DELAY,
+        "gamma_range": crate::colorcal::GAMMA_RANGE,
+        "library_delay_points": crate::output::library_color_delay_points(s.pps),
+    })
+}
+
 /// `POST /api/outputs/config` (T-401).
 #[derive(Deserialize)]
 struct OutputConfigBody {
@@ -2637,6 +2723,7 @@ mod tests {
             ("/api/projection/align", r#"{"zone":1}"#),
             ("/api/safety", r#"{"strobe_max_hz":3}"#),
             ("/api/outputs/limits", r#"{"limits":{"max_power":0.3}}"#),
+            ("/api/outputs/color", r#"{"color":{"white_balance":[0.5,1,1]}}"#),
             ("/api/presence", "{}"),
             ("/api/checklist/config", r#"{"defaults":true}"#),
             ("/api/testpattern", r#"{"pattern":"grid"}"#),
@@ -3434,6 +3521,61 @@ mod tests {
         // A look carrying a cap-looking field changes nothing.
         t.request("POST", "/api/settings", r#"{"brightness":1.0,"max_power":1.0}"#);
         assert_eq!(get(&t)["max_brightness_effective"].as_f64().unwrap() as f32, 0.6);
+    }
+
+    /// T-414: darker applies at once, brighter needs the confirmation
+    /// (armed or not: the caps apply after anyway), bad values are 400.
+    #[test]
+    fn output_colour_darker_at_once_brighter_only_confirmed() {
+        let t = TestServer::start(false);
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let g = js(&t.request("GET", "/api/outputs/color", "").1);
+        assert_eq!((g["output"].as_str(), g["identity"].as_bool()), (Some("main"), Some(true)));
+        assert_eq!(g["color"]["curve"][0]["type"], "gamma");
+        assert!(g["library_delay_points"].as_u64().unwrap() > 0, "laser-dac's own delay is shown");
+        assert_eq!(js(&t.request("GET", "/api/outputs/color?output=0", "").1)["output"], "main");
+        assert_eq!(t.request("GET", "/api/outputs/color?output=3", "").0, 400);
+        assert_eq!(t.request("GET", "/api/outputs/color?output=nope", "").0, 400);
+        // Darker (gain down, gamma up, a delay): applied.
+        let curves = r#""curve":[{"type":"gamma","gamma":1},{"type":"gamma","gamma":2.2},{"type":"gamma","gamma":1}],"color_delay_points":2"#;
+        let (code, reply) = t.request("POST", "/api/outputs/color", &format!(r#"{{"color":{{"white_balance":[0.8,1,1],{curves}}}}}"#));
+        assert_eq!(code, 200, "{reply}");
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().color_delay_points, 2);
+        // Brighter: 409 with the list, unchanged; confirmed: applied.
+        let brighter = format!(r#"{{"color":{{"white_balance":[1,1,1],{curves}}}}}"#);
+        let (code, reply) = t.request("POST", "/api/outputs/color", &brighter);
+        assert_eq!(code, 409, "{reply}");
+        assert_eq!(js(&reply)["loosen"][0], "Balance rouge : 80 % → 100 %");
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 0.8);
+        let confirmed = format!(r#"{{"confirm_loosen":true,"color":{{"white_balance":[1,1,1],{curves}}}}}"#);
+        // Armed: brighter refused even confirmed, darker still applies.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (code, reply) = t.request("POST", "/api/outputs/color", &confirmed);
+        assert_eq!(code, 409, "{reply}");
+        assert_eq!((js(&reply)["armed"].as_bool(), js(&reply)["error"].as_str()), (Some(true), Some("Désarmez avant d'augmenter les couleurs")));
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 0.8);
+        let dimmer = format!(r#"{{"color":{{"white_balance":[0.6,1,1],{curves}}}}}"#);
+        assert_eq!(t.request("POST", "/api/outputs/color", &dimmer).0, 200);
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 0.6);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        // Disarmed and confirmed: applied.
+        assert_eq!(t.request("POST", "/api/outputs/color", &confirmed).0, 200);
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().white_balance[0], 1.0);
+        // Out of range or malformed: 400, nothing changed.
+        for bad in [
+            r#"{"color":{"white_balance":[1.5,1,1]}}"#,
+            r#"{"color":{"color_delay_points":9}}"#,
+            r#"{"color":{"curve":[{"type":"gamma","gamma":0.1},{"type":"gamma","gamma":1},{"type":"gamma","gamma":1}]}}"#,
+            r#"{"color":{"curve":[{"type":"spline"},{"type":"gamma","gamma":1},{"type":"gamma","gamma":1}]}}"#,
+            r#"{}"#,
+        ] {
+            assert_eq!(t.request("POST", "/api/outputs/color", bad).0, 400, "{bad}");
+        }
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().color_delay_points, 2);
+        // The caps and the sheet are untouched by it, and it by them.
+        assert_eq!(t.shared.lock().unwrap().outputs.active_limits(), crate::power::OutputLimits::default());
+        assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"projector":{"name":"P"}}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().outputs.active_color().color_delay_points, 2);
     }
 
     #[test]

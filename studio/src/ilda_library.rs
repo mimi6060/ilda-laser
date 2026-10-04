@@ -23,6 +23,7 @@
 //! name (`clip`): a `Settings` value stays small and serializable (`file`
 //! and `fps`), the points are shared, never copied per frame.
 
+use crate::colorcal::ColorCalibration;
 use crate::datafile;
 use crate::dwell::DwellState;
 use crate::engine::{Animator, AudioFeatures, BeatClock, Calibration, Content, Settings};
@@ -360,13 +361,15 @@ pub struct ExportSafety {
     pub safety: SafetySettings,
     /// Power caps of `output`.
     pub limits: OutputLimits,
+    /// Colour rendering of `output` (T-414), before the safety stage.
+    pub color: ColorCalibration,
 }
 
 impl ExportSafety {
     /// The chain of output `output`. Unknown: refused, never a looser default.
     pub fn of(s: &crate::Shared, output: &str) -> Result<Self> {
         let Some(o) = s.outputs.get(output) else { bail!("sortie inconnue : {output}") };
-        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: s.safety.get(), limits: o.limits })
+        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: s.safety.get(), limits: o.limits, color: o.color })
     }
 }
 
@@ -403,7 +406,8 @@ fn floor_to_file_steps(frame: &mut [Point]) {
 /// A look as an ILDA format 5 file: `frames` images rendered `1/fps`
 /// seconds apart at `bpm`, without music or live modifiers, then put
 /// through the same output safety chain as the engine's frames (T-355):
-/// calibration, beam horizon, zones and colour calibration, strobe
+/// calibration, the output's colour rendering (T-414), beam horizon,
+/// zones and colour calibration, strobe
 /// limiter, static beam guard (as if armed: its « off » profile never
 /// applies), power caps of `chain.output`. The real functions, in the
 /// engine's order (`main.rs`, `Engine::tick`).
@@ -462,7 +466,9 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
     let mut out = Vec::with_capacity(frames);
     for lap in 0..laps {
         for (i, points) in raw.iter().enumerate() {
-            let frame = safety::apply(points.clone(), at(lap, i), cfg, &mut limiter);
+            let mut frame = points.clone();
+            chain.color.apply(&mut frame);
+            let frame = safety::apply(frame, at(lap, i), cfg, &mut limiter);
             let mut frame = dwell.apply(frame, at(lap, i), &cfg.dwell, cfg.horizon.y, true);
             power::cap(&mut frame, &chain.limits);
             floor_to_file_steps(&mut frame);
@@ -474,7 +480,7 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
     let lit_after = lit(&out);
     if lit_after == 0 {
         bail!(
-            "La chaîne de sécurité (zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de la sortie « {} ») coupe tout ce look : rien à exporter",
+            "La chaîne de sortie (couleurs de la sortie, zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de la sortie « {} ») coupe tout ce look : rien à exporter",
             chain.output
         );
     }
@@ -705,6 +711,7 @@ mod tests {
             calibration: Calibration::default(),
             safety: SafetySettings::default(),
             limits: OutputLimits { max_power: 1.0, max_color: [1.0; 3] },
+            color: ColorCalibration::default(),
         }
     }
 
@@ -793,5 +800,19 @@ mod tests {
         let s = crate::test_support::shared();
         assert_eq!(ExportSafety::of(&s, power::MAIN_OUTPUT).unwrap().limits, s.outputs.active_limits());
         assert!(ExportSafety::of(&s, "ailleurs").is_err());
+    }
+
+    /// T-414: the file carries the output's colour rendering, before the
+    /// safety stage and the caps: a balance at 0 on every colour leaves
+    /// nothing to export.
+    #[test]
+    fn the_export_carries_the_output_colour_rendering() {
+        let mut s = crate::test_support::shared();
+        let color = ColorCalibration { white_balance: [0.0; 3], ..Default::default() };
+        s.outputs.set_color(power::MAIN_OUTPUT, color, false, false).unwrap();
+        assert_eq!(ExportSafety::of(&s, power::MAIN_OUTPUT).unwrap().color, color);
+        assert!(export_look(&white_circle(), 2, 25.0, 120.0, &open_chain()).is_ok());
+        let e = export_look(&white_circle(), 2, 25.0, 120.0, &ExportSafety { color, ..open_chain() }).unwrap_err().to_string();
+        assert!(e.contains("couleurs de la sortie"), "{e}");
     }
 }
