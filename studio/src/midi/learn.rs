@@ -88,6 +88,13 @@ pub struct LearnState {
     cc_steps: HashMap<(String, u8, u8), u8>,
 }
 
+impl LearnState {
+    /// Last value seen on a CC of `port`.
+    pub fn cc_last(&self, port: &str, channel: u8, number: u8) -> Option<u8> {
+        self.cc_last.get(&(port.to_string(), channel & 0x0F, number)).copied()
+    }
+}
+
 pub type LearnError = (u16, String);
 
 /// `POST /api/midi/learn`: waits for the next message (15 s).
@@ -475,16 +482,21 @@ fn request_label(s: &Shared, r: &LearnRequest) -> String {
     s.controls.get(&r.target).map_or_else(|| r.target.clone(), |d| d.label_fr.clone())
 }
 
-/// The profile a port uses now, and its slug.
-fn profile_for(s: &Shared, port: &str) -> Option<(String, super::profile::Profile)> {
-    let slug = s.midi.devices.iter().find(|d| d.name == port).map_or(GENERIC, |d| d.profile.as_str()).to_string();
+/// The profile a port uses now, and its slug. The on-screen controller
+/// (T-210) has its own, chosen like a device's.
+pub(super) fn profile_for(s: &Shared, port: &str) -> Option<(String, super::profile::Profile)> {
+    let slug = if port == super::virt::PORT {
+        super::virt::profile_slug(s)
+    } else {
+        s.midi.devices.iter().find(|d| d.name == port).map_or(GENERIC, |d| d.profile.as_str()).to_string()
+    };
     let p = s.midi.store.get(&slug)?.clone();
     Some((slug, p))
 }
 
 /// Writes an edited profile of `port` (a built-in one goes to a new
 /// `-perso` copy, then assigned to the port). Returns the slug written.
-fn save(s: &mut Shared, port: &str, slug: &str, profile: super::profile::Profile) -> Result<String, String> {
+pub(super) fn save(s: &mut Shared, port: &str, slug: &str, profile: super::profile::Profile) -> Result<String, String> {
     let dest = s.midi.store.edit_slug(slug);
     let assign = (dest != slug).then_some(port);
     let written = s.midi.store.save_profile(assign, &dest, profile)?;

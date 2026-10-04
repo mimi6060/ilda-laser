@@ -2,6 +2,7 @@
 //! without an HTTP server. `web.rs` only reads the body and forwards.
 
 use super::learn;
+use super::virt;
 use super::mapping::{LedFeedback, MapMode, RelEncoding};
 use super::palette::PadColors;
 use super::profile::GENERIC;
@@ -131,6 +132,39 @@ fn some_led<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<LedF
 #[derive(Deserialize)]
 struct PlugRequest {
     port: String,
+}
+
+/// The on-screen controller (T-210): one element played one way.
+#[derive(Deserialize)]
+struct VirtualRequest {
+    id: String,
+    #[serde(default)]
+    down: Option<bool>,
+    #[serde(default)]
+    value: Option<u8>,
+    #[serde(default)]
+    delta: Option<i8>,
+    #[serde(default)]
+    learn: bool,
+}
+
+#[derive(Deserialize)]
+struct UnmapRequest {
+    id: String,
+    #[serde(default)]
+    shift: bool,
+}
+
+#[derive(Deserialize)]
+struct ModelRequest {
+    model: super::Model,
+}
+
+fn virt_reply(r: Result<(), virt::PressError>) -> Reply {
+    match r {
+        Ok(()) => ok(),
+        Err((code, msg)) => Reply::Text(code, msg),
+    }
 }
 
 /// Largest exported profile accepted back (bytes of JSON).
@@ -263,6 +297,30 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             Err(e) => e,
         },
         (false, "/api/midi/sent") if s.midi.sim.is_some() => Reply::Json(sent(s)),
+        // The on-screen controller (T-210): works with or without MIDI.
+        (false, "/api/midi/virtual") => Reply::Json(virt::layout(s)),
+        (false, "/api/midi/leds") => Reply::Json(virt::leds(s)),
+        (true, "/api/midi/virtual") => match parse::<VirtualRequest>(body) {
+            Ok(req) => {
+                let action = match (req.down, req.value, req.delta, req.learn) {
+                    (Some(down), None, None, false) => virt::Action::Press(down),
+                    (None, Some(v), None, false) => virt::Action::Value(v.min(127)),
+                    (None, None, Some(n), false) => virt::Action::Turn(n),
+                    (None, None, None, true) => virt::Action::Learn,
+                    _ => return Some(Reply::Text(400, "un seul de « down », « value », « delta », « learn » attendu".into())),
+                };
+                virt_reply(virt::press(s, &req.id, action, Instant::now()))
+            }
+            Err(e) => e,
+        },
+        (true, "/api/midi/virtual/unmap") => match parse::<UnmapRequest>(body) {
+            Ok(req) => virt_reply(virt::unmap(s, &req.id, req.shift)),
+            Err(e) => e,
+        },
+        (true, "/api/midi/virtual/model") => match parse::<ModelRequest>(body) {
+            Ok(req) => virt_reply(virt::set_model(s, req.model)),
+            Err(e) => e,
+        },
         _ => return None,
     })
 }
@@ -656,6 +714,33 @@ mod tests {
         let sent = sim.with_device("Pad 2000", |d| d.received.clone()).unwrap();
         assert!(sent.iter().all(|m| m.first() != Some(&0xF0) || m[..] == crate::midi::detect::DEVICE_INQUIRY), "no APC SysEx");
         assert!(!shared.lock().unwrap().gate.is_armed());
+    }
+
+    /// T-210: the on-screen controller's routes work under `--no-midi`.
+    #[test]
+    fn virtual_controller_routes() {
+        let mut s = test_support::shared();
+        let layout = json(route(&mut s, false, "/api/midi/virtual", ""));
+        assert_eq!(layout["model"], "Apc40Mk2");
+        assert!(layout["elements"].as_array().unwrap().len() > 100);
+        let first = s.grid.slot(s.cue_page, 0).unwrap().to_string();
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"pad.1.1","down":true}"#)), 200);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"pad.1.1","down":false}"#)), 200);
+        assert!(s.deck.active.iter().any(|a| a.cue == first));
+        assert!(json(route(&mut s, false, "/api/midi/leds", ""))["leds"]["note:32:0"].as_u64().unwrap() > 0);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"fader.1","value":64}"#)), 200);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"tempo","delta":-3}"#)), 200);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"fader.1","value":64,"down":true}"#)), 400, "one action");
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"fader.1"}"#)), 400);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"x","down":true}"#)), 404);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual", r#"{"id":"pad.1.1","learn":true}"#)), 409);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual/unmap", r#"{"id":"bank.1"}"#)), 404, "nothing mapped");
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual/unmap", r#"{"id":"fader.1","shift":true}"#)), 200);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual/model", r#"{"model":"Apc40"}"#)), 200);
+        assert_eq!(json(route(&mut s, false, "/api/midi/virtual", ""))["model"], "Apc40");
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual/model", r#"{"model":"Unknown"}"#)), 400);
+        assert_eq!(status(route(&mut s, true, "/api/midi/virtual/model", r#"{"model":"nope"}"#)), 400);
+        assert!(!s.gate.is_armed());
     }
 
     #[test]

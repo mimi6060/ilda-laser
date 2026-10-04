@@ -23,6 +23,7 @@ pub mod palette;
 pub mod profile;
 pub mod safety;
 pub mod testing;
+pub mod virt;
 pub mod worker;
 
 pub use decode::MidiMsg;
@@ -145,11 +146,13 @@ pub struct MidiState {
     pub sim: Option<testing::SimMidi>,
     /// MIDI learn (T-203): pending request, last result.
     pub learn: learn::LearnState,
+    /// Model of the on-screen controller while no APC is connected (T-210).
+    pub virt_model: Model,
 }
 
 impl MidiState {
     pub fn new(enabled: bool, store: profile::ProfileStore) -> Self {
-        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default(), sim: None, learn: learn::LearnState::default() }
+        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default(), sim: None, learn: learn::LearnState::default(), virt_model: Model::Apc40Mk2 }
     }
 
     pub fn device_mut(&mut self, name: &str) -> &mut MidiDevice {
