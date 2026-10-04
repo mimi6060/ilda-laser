@@ -103,3 +103,82 @@ pub fn shared() -> Shared {
         wifi: std::sync::Arc::new(crate::wifi::WifiWatch::new(true)),
     }
 }
+
+/// T-358: how much longer than its own limit a guarded test may run, from
+/// `LASER_STUDIO_TEST_TIME_SCALE` (a slow or busy machine: `4`; `0` turns
+/// every guard off, e.g. under a debugger). Default 1.
+fn time_scale() -> f64 {
+    std::env::var("LASER_STUDIO_TEST_TIME_SCALE").ok().and_then(|v| v.parse::<f64>().ok()).filter(|s| s.is_finite() && *s >= 0.0).unwrap_or(1.0)
+}
+
+/// Ends the whole test binary, with a clear message, if it is still alive
+/// after its limit. Dropping it (the test finished, passed or panicked)
+/// switches it off.
+#[must_use = "the guard only watches while it is alive"]
+pub struct TimeGuard {
+    done: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl Drop for TimeGuard {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.done;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_all();
+    }
+}
+
+/// T-358: a time limit for a long test or one that waits on a thread. The
+/// Rust test harness has none, so a hang once ran for hours: past `limit`
+/// (times `LASER_STUDIO_TEST_TIME_SCALE`) the test binary prints which test
+/// hung and exits with a failure instead of waiting forever.
+pub fn time_guard(what: &str, limit: std::time::Duration) -> TimeGuard {
+    let done = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let scale = time_scale();
+    if scale > 0.0 {
+        let limit = limit.mul_f64(scale);
+        let (what, done) = (what.to_string(), std::sync::Arc::clone(&done));
+        std::thread::spawn(move || {
+            let (lock, cv) = &*done;
+            let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let (finished, _) = cv.wait_timeout_while(guard, limit, |finished| !*finished).unwrap_or_else(|e| e.into_inner());
+            if !*finished {
+                // Straight to stderr: `eprintln!` would be captured by the
+                // test harness, and lost with the process.
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "\n*** T-358: test « {what} » still running after {limit:?}: hung? Stopping the test binary. \
+                     (LASER_STUDIO_TEST_TIME_SCALE=4 gives a busy machine more time, 0 turns the limits off) ***\n"
+                );
+                std::process::exit(101);
+            }
+        });
+    }
+    TimeGuard { done }
+}
+
+/// T-358: the whole unit-test binary normally runs in about a minute; a
+/// hang in a test without a guard of its own still stops it after this.
+pub const BINARY_LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Starts the catch-all limit of the whole test binary: its thread
+    /// outlives this test and ends the process only if the run is still
+    /// going after `BINARY_LIMIT`.
+    #[test]
+    fn the_test_binary_has_a_time_limit() {
+        std::mem::forget(time_guard("the whole unit-test binary", BINARY_LIMIT));
+    }
+
+    #[test]
+    fn a_guard_dropped_in_time_does_nothing() {
+        let guard = time_guard("a quick test", Duration::from_millis(50));
+        drop(guard);
+        std::thread::sleep(Duration::from_millis(100));
+        // Still here: the process was not stopped.
+    }
+}

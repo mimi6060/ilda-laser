@@ -2669,6 +2669,8 @@ mod tests {
         shared: Arc<Mutex<Shared>>,
         running: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
+        /// T-358: a test stuck on the server (or on its join) fails fast.
+        _guard: test_support::TimeGuard,
     }
 
     impl TestServer {
@@ -2687,7 +2689,8 @@ mod tests {
                 let calibration = std::env::temp_dir().join("laser-studio-test-unused/calibration.json");
                 move || serve(server, shared, estop, calibration, running)
             });
-            Self { addr, shared, running, thread: Some(thread) }
+            let _guard = test_support::time_guard(&format!("web API test on {addr}"), Duration::from_secs(180));
+            Self { addr, shared, running, thread: Some(thread), _guard }
         }
 
         fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {

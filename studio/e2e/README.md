@@ -22,7 +22,11 @@ The harness (`studio.ts`) only ever starts a **preview-only** studio:
 - on a free port, never 8080 (the user's instance),
 - with a fresh temporary `--data-dir` per spec file, deleted afterwards —
   never the user's `studio-data/`,
-- stopped with Ctrl+C (SIGINT) after the file, disarmed first.
+- stopped with Ctrl+C (SIGINT) after the file, disarmed first,
+- never left behind (T-358): started with the hidden `--exit-with-parent
+  <worker PID>`, it shuts down cleanly by itself within a second if its
+  Playwright worker dies or its data dir is deleted, and
+  `global-teardown.ts` stops any studio of the run still alive.
 
 ## Run
 
@@ -54,7 +58,9 @@ Failures keep a screenshot and a trace in `test-results/`
 ## Layout
 
 - `playwright.config.ts` — headless Chromium, 4 workers (one studio per spec file).
-- `global-setup.ts` — `cargo build -p laser-studio` before the run.
+- `global-setup.ts` — `cargo build -p laser-studio` before the run, and
+  the file where the run's studios record their PIDs.
+- `global-teardown.ts` — stops this run's leftover studios (T-358).
 - `studio.ts` — the harness: `useStudio({ midiTest?, files? })`, `openUi()`,
   `focusPage()`, API helpers and frame maths (`extent`, `centroid`).
 - `midi.ts` — the simulated APC40 mkII (`--midi-test`): `new Apc(studio)`

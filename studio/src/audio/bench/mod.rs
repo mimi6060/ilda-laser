@@ -352,7 +352,11 @@ fn no_pulse_cases() -> Vec<Case> {
 }
 
 /// Runs the cases on their own threads (each is independent).
+/// T-358: a hang fails fast; the cases run in parallel, so the limit
+/// follows the longest one (a debug build analyses ~20× real time).
 fn bench(cases: Vec<Case>) -> Vec<CaseResult> {
+    let longest = cases.iter().map(|c| c.signal.len() as f64 / c.rate.max(1) as f64).fold(0.0, f64::max);
+    let _guard = crate::test_support::time_guard("audio bench", std::time::Duration::from_secs_f64(120.0 + 3.0 * longest));
     std::thread::scope(|s| cases.iter().map(|c| s.spawn(move || bench_case(c))).collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect())
 }
 

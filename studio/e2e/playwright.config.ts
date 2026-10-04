@@ -6,6 +6,7 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: './tests',
   globalSetup: './global-setup.ts',
+  globalTeardown: './global-teardown.ts',
   fullyParallel: false,
   workers: process.env.CI ? 2 : 4,
   retries: 0,
