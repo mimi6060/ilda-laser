@@ -5720,12 +5720,20 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   twin_tunnel: 'Double tunnel', sunburst: 'Soleil levant',
   ceiling: 'Plafond liquide', blade: 'Lame', curtain: 'Rideaux', waterfall: 'Cascade', scanner: 'Scanner',
   slats: 'Lamelles', aurora: 'Aurore', grid: 'Grille', chase_fan: 'Chaser',
-  scissor: 'Ciseaux (X)', hot_beam: 'Faisceau chaud', bundle_burst: 'Faisceaux qui s’ouvrent', beam_v: 'V de faisceaux' };
+  scissor: 'Ciseaux (X)', hot_beam: 'Faisceau chaud', bundle_burst: 'Faisceaux qui s’ouvrent', beam_v: 'V de faisceaux',
+  starfield: 'Ciel étoilé', lightning: 'Éclairs', fat_beams: 'Faisceaux épais' };
 
 // Festival fans (T-102) and sheets (T-106): what Nombre / A / B mean for
 // each, plus how the tempo settings drive it. Old generators keep the
 // generic labels. Sheets stay above the audience (never scan it).
 const GEN_HELP = {
+  // Textures (T-107).
+  starfield: ['Étoiles (4 à 16, 4 à 10 conseillé).', 'Chute : 0 = étoiles fixes qui scintillent, 1 = pluie (unités par temps).', 'Hauteur la plus basse au-dessus du public.',
+    'Nouvelles étoiles à chaque pas (Pas par temps : 4 = 1/4 temps) ; chacune vit 1/8 à 1/4 de temps, scintille et dérive, jamais immobile. Taille = largeur du ciel.'],
+  lightning: ['Segments de l’éclair (6 à 10).', '0 = un éclair à chaque temps, 1 = à chaque mesure.', 'Hauteur du point bas au-dessus du public.',
+    'Visible 2 à 4 images puis éteint ; à tempo très rapide, un temps sur deux pour rester sous la limite du strobe.'],
+  fat_beams: ['Faisceaux (4 à 6 conseillé, 3 à 8).', 'Rayon du petit cercle (0,01 à 0,03) : épaissit le faisceau dans la fumée.', 'Hauteur au-dessus du public.',
+    'L’éventail se balance doucement sur une période. Taille = demi-largeur de l’éventail.'],
   // Crossings, hot beam and convergences (T-104).
   scissor: ['Faisceaux, en deux groupes (8 conseillé).', 'Amplitude (0,4 à 0,6) : au-dessus de 0,3, les groupes se croisent deux fois par période.',
     'Hauteur au-dessus du public.', 'Groupe gauche en couleur principale, droit en deuxième couleur (Uni ou Alterné) ; inclinés de ±15° pour lire un X. Taille = largeur des groupes.'],
@@ -5775,6 +5783,9 @@ const GEN_HELP = {
     'La grille défile d’une ligne par temps ; ← : dans l’autre sens.'],
 };
 const GEN_DEFAULTS = {
+  starfield: { count: 6, a: 0, b: 0.1, period: 4, steps: 4 },
+  lightning: { count: 8, a: 0, b: 0.1, period: 4, steps: 1 },
+  fat_beams: { count: 5, a: 0.02, b: 0.3, period: 8, steps: 1 },
   scissor: { count: 8, a: 0.5, b: 0.3, period: 2, steps: 1 },
   hot_beam: { count: 1, a: 0.3, b: 0.6, period: 16, steps: 1 },
   bundle_burst: { count: 10, a: 0.25, b: 0.35, period: 4, steps: 1 },

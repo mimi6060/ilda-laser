@@ -301,6 +301,19 @@ pub fn catalog() -> Vec<Preset> {
     b.synced("Λ de faisceaux", "beam_v", 10, 0.0, 1.0, 1.0, SOLID_WHITE, none);
     b.synced("V qui bascule", "beam_v", 10, 15.0, 0.0, 1.0, SOLID_MAGENTA, none);
 
+    // Textures (T-107), appended on the « Faisceaux » page. Values from the
+    // research (§D.30 to 32): 4 to 10 stars redrawn every 1/4 beat, a bolt
+    // on every beat, 4 to 6 fat beams of radius 0.01 to 0.03.
+    b.synced("Ciel étoilé", "starfield", 6, 0.0, 0.1, 4.0, SOLID_WHITE, none);
+    b.synced("Ciel étoilé dense", "starfield", 12, 0.0, 0.1, 4.0, SOLID_CYAN, none);
+    b.synced("Ciel étoilé lent", "starfield", 4, 0.0, 0.3, 1.0, SOLID_BLUE, none);
+    b.synced("Pluie d'étoiles", "starfield", 8, 1.0, 0.2, 4.0, CYAN_BLUE, none);
+    b.synced("Éclairs", "lightning", 8, 0.0, 0.1, 1.0, SOLID_WHITE, none);
+    b.synced("Éclairs", "lightning", 7, 0.0, 0.2, 1.0, SOLID_MAGENTA, none);
+    b.synced("Faisceaux épais", "fat_beams", 5, 0.02, 0.3, 1.0, SOLID_GREEN, shape(8.0, false));
+    b.synced("Faisceaux épais", "fat_beams", 4, 0.03, 0.4, 1.0, RED_BLUE, shape(8.0, false));
+    b.synced("Faisceaux épais fins", "fat_beams", 6, 0.015, 0.25, 1.0, SOLID_CYAN, shape(8.0, false));
+
     b.presets
 }
 
@@ -626,13 +639,45 @@ mod tests {
     const PROGRAM_CUES: usize = 3;
     /// The T-104 crossings, after those.
     const CROSSING_CUES: usize = 10;
+    /// The T-107 textures, after those.
+    const TEXTURE_CUES: usize = 9;
+
+    #[test]
+    fn texture_cues_are_appended_on_the_beams_page() {
+        let all = catalog();
+        let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES;
+        let new = &all[start..];
+        assert_eq!(new.len(), TEXTURE_CUES);
+        assert!(new.iter().all(|p| p.category == "Faisceaux" && p.settings.program.is_none()));
+        assert_eq!(new[0].id, "faisceaux-053");
+        let gens: Vec<(String, GenParams)> = new
+            .iter()
+            .map(|p| match &p.settings.content {
+                Content::Generator { generator, params } => (generator.clone(), params.clone()),
+                _ => panic!("{} is not a generator", p.id),
+            })
+            .collect();
+        assert!(gens.iter().all(|(_, p)| p.beat_sync), "they follow the tempo");
+        for name in ["starfield", "lightning", "fat_beams"] {
+            assert!(gens.iter().any(|(g, _)| g == name), "a cue for {name}");
+        }
+        // Research values: 4 to 12 stars every 1/4 beat (or every beat when
+        // slow), bolts of 6 to 10 segments on every beat, 4 to 6 fat beams
+        // of radius 0.01 to 0.03.
+        for (g, p) in &gens {
+            match g.as_str() {
+                "starfield" => assert!((4..=12).contains(&p.count) && [1.0, 4.0].contains(&p.steps_per_beat)),
+                "lightning" => assert!((6..=10).contains(&p.count) && p.a < 0.5),
+                _ => assert!((4..=6).contains(&p.count) && (0.01..=0.03).contains(&p.a)),
+            }
+        }
+    }
 
     #[test]
     fn crossing_cues_are_appended_on_the_beams_page() {
         let all = catalog();
         let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES;
-        let new = &all[start..];
-        assert_eq!(new.len(), CROSSING_CUES);
+        let new = &all[start..start + CROSSING_CUES];
         assert!(new.iter().all(|p| p.category == "Faisceaux" && p.settings.program.is_none()));
         // Numbered after the page's 42 older cues.
         assert_eq!(new[0].id, "faisceaux-043");

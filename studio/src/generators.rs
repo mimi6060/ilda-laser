@@ -160,6 +160,8 @@ pub const GENERATOR_NAMES: &[&str] = &[
     "chase_fan",
     // Crossings, hot beam and convergences (T-104), see `crossings.rs`.
     "scissor", "hot_beam", "bundle_burst", "beam_v",
+    // Textures (T-107), see `textures.rs`.
+    "starfield", "lightning", "fat_beams",
 ];
 
 pub struct Geometry {
@@ -463,7 +465,8 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
             .or_else(|| crate::tunnels::generate(name, p, ctx))
             .or_else(|| crate::sheets::generate(name, p, ctx))
             .or_else(|| crate::chases::generate(name, p, ctx))
-            .or_else(|| crate::crossings::generate(name, p, ctx)),
+            .or_else(|| crate::crossings::generate(name, p, ctx))
+            .or_else(|| crate::textures::generate(name, p, ctx)),
     }
 }
 
