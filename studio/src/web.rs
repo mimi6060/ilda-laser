@@ -1739,7 +1739,8 @@ fn external_view(s: &mut Shared) -> serde_json::Value {
 ///   arming); `POST /api/external/scopes` `{ "scopes": [...] }`.
 /// - `GET /api/dmx/interfaces`, `GET|POST /api/dmx/config` (the DMX part
 ///   of `netin.json`), `GET /api/dmx/monitor?universe=N`,
-///   `POST /api/dmx/learn` `{ "control": id | null }`.
+///   `POST /api/dmx/learn` `{ "control": id | null }`,
+///   `GET /api/dmx/personality?mode=compact|full&format=json|md|xml|gdtf`.
 fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Method, path: &str) -> HttpResponse {
     match (method, path) {
         (Method::Get, "/api/external") => json_response(external_view(&mut shared.lock().unwrap())),
@@ -1810,6 +1811,7 @@ fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/dmx/personality") => personality(request.url()),
         (Method::Get, "/api/dmx/monitor") => {
             let universe = query_u64(request.url(), "universe").unwrap_or(1).min(u16::MAX as u64) as u16;
             json_response(crate::netin::monitor(&shared.lock().unwrap(), universe, Instant::now()))
@@ -1826,6 +1828,35 @@ fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
             Err(e) => e,
         },
         _ => text(404, "not found"),
+    }
+}
+
+/// Our DMX personalities (T-407), from the tables the receiver uses:
+/// `json` (default; both modes without `mode`), `md` (the chart; the whole
+/// published document without `mode`), `xml` (the GDTF description) or
+/// `gdtf` (the fixture file to import on a console, both modes).
+fn personality(url: &str) -> HttpResponse {
+    use crate::dmx::{gdtf, personality::{self, Personality}};
+    let mode = match query_str(url, "mode").filter(|m| !m.is_empty()) {
+        Some(m) => match Personality::parse(&m) {
+            Some(p) => Some(p),
+            None => return text(400, "personnalité inconnue (compact ou full)"),
+        },
+        None => None,
+    };
+    match query_str(url, "format").as_deref().unwrap_or("json") {
+        "json" => json_response(match mode {
+            Some(m) => personality::json(m),
+            None => json!({ "version": personality::VERSION, "modes": Personality::ALL.iter().map(|m| personality::json(*m)).collect::<Vec<_>>() }),
+        }),
+        "md" => with_type(Response::from_string(personality::markdown(mode)), "text/markdown; charset=utf-8"),
+        "xml" => with_type(Response::from_string(gdtf::description_xml()), "application/xml; charset=utf-8"),
+        "gdtf" => {
+            let disposition = format!("attachment; filename=\"{}\"", gdtf::FILE_NAME);
+            let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+            with_type(Response::from_data(gdtf::gdtf()), "application/octet-stream").with_header(header)
+        }
+        _ => text(400, "format inconnu (json, md, xml ou gdtf)"),
     }
 }
 
@@ -3296,6 +3327,35 @@ mod tests {
         assert!(state["engine_ok"].is_boolean());
         assert_eq!(state["presence"]["hold_key"], "ShiftRight");
         // Changing presence settings never arms.
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    #[test]
+    fn dmx_personality_route_and_fixture_settings() {
+        let t = TestServer::start(false);
+        let js = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let both = js(&t.request("GET", "/api/dmx/personality", "").1);
+        assert_eq!(both["modes"].as_array().unwrap().len(), 2);
+        let compact = js(&t.request("GET", "/api/dmx/personality?mode=compact", "").1);
+        assert_eq!((compact["width"].as_u64(), compact["channels"][15]["key"].as_str()), (Some(16), Some("access")));
+        let (code, md) = t.request("GET", "/api/dmx/personality?mode=full&format=md", "");
+        assert_eq!(code, 200);
+        assert!(md.contains("Complet — 32 canaux") && !md.contains("Compact — 16"));
+        let (code, xml) = t.request("GET", "/api/dmx/personality?format=xml", "");
+        assert!(code == 200 && xml.contains("<GDTF DataVersion=\"1.2\">"));
+        assert_eq!(t.request("GET", "/api/dmx/personality?mode=huge", "").0, 400);
+        assert_eq!(t.request("GET", "/api/dmx/personality?format=pdf", "").0, 400);
+        // Two instances; an overlap is refused with the zone's name.
+        let ok = r#"{"dmx":{"fixtures":[{"enabled":true,"zone":1,"mode":"compact","address":1},{"enabled":false,"zone":2,"mode":"full","address":17}]}}"#;
+        assert_eq!(t.request("POST", "/api/dmx/config", ok).0, 200);
+        let bad = r#"{"dmx":{"fixtures":[{"zone":1,"address":1},{"zone":2,"mode":"full","address":10}]}}"#;
+        let (code, msg) = t.request("POST", "/api/dmx/config", bad);
+        assert_eq!(code, 400);
+        assert_eq!(msg, "Les adresses 10–41 chevauchent l'appareil de la zone « Principale ».");
+        let view = js(&t.request("GET", "/api/netin", "").1);
+        let list = &view["dmx"]["fixtures"]["list"];
+        assert_eq!((list[0]["fixture"]["address"].as_u64(), list[1]["last"].as_u64()), (Some(1), Some(48)));
+        assert_eq!(list[0]["signal"], "off", "DMX inputs are off");
         assert_eq!(arm_status(&t)["armed"], false);
     }
 

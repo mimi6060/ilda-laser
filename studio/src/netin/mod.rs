@@ -3,6 +3,8 @@
 //! local gate (external.rs, T-408): `external::apply` checks the gate, the
 //! source's access and its scope, then calls `controls::apply_as`, the
 //! entry point MIDI and the UI use. There is no network-only control path.
+//! The DMX fixture instances of the projection zones (dmx/, T-407) read the
+//! same universes (`patch::universe`) and go through the same gate.
 //!
 //! Safety:
 //! - Nothing from the network arms the laser. `transport.arm` is not an
@@ -517,6 +519,8 @@ pub struct NetInState {
     pub patch: PatchState,
     /// Output gain of the loss policies (1: nothing lost), set each frame.
     pub gain: f32,
+    /// The DMX fixture instances, one per projection zone (T-407).
+    pub fixtures: crate::dmx::fixture::FixtureState,
 }
 
 impl NetInState {
@@ -531,6 +535,7 @@ impl NetInState {
             held: HashSet::new(),
             patch: PatchState::default(),
             gain: 1.0,
+            fixtures: Default::default(),
         }
     }
 
@@ -577,6 +582,9 @@ pub fn frame(s: &mut Shared, now: Instant) {
     }
     patch::drop_disabled(s, &cfg);
     patch::check_loss(s, &cfg, now);
+    // The zones' remotes at this instant (after the losses: a lost
+    // universe's instances go neutral under « neutre »).
+    crate::dmx::fixture::tick(s, &cfg, now);
     if (!cfg.osc.enabled || !s.external.gate.open) && !s.netin.held.is_empty() {
         release_held(s);
     }
@@ -836,6 +844,7 @@ pub fn monitor(s: &Shared, universe: u16, now: Instant) -> Value {
         "protocol": feed.map(|f| f.proto.id()),
         "source": feed.map(|f| f.name.clone()),
         "sources": sources_json(&sources, now),
+        "fixtures": crate::dmx::fixture::monitor(&s.netin.hub.effective(), universe),
     })
 }
 
@@ -904,6 +913,7 @@ pub fn view(s: &Shared, now: Instant) -> Value {
             "learn": s.netin.patch.learn.as_ref().map(|l| l.control.clone()),
             "learned": s.netin.patch.learned,
             "controls": mappable,
+            "fixtures": crate::dmx::fixture::view(s, &eff),
         },
         "policies": LOSS_POLICIES.iter().map(|p| json!({ "id": p, "label": p.label_fr() })).collect::<Vec<_>>(),
     })
@@ -937,6 +947,9 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<Vec<String>, String> {
         }
         m.control = desc.id.clone();
     }
+    // The fixture instances, with the zones' names in the messages.
+    let projection = s.projection.get();
+    crate::dmx::fixture::check(&cfg.dmx.fixtures, |z| projection.zone(z).map_or_else(|| format!("Zone {z}"), |z| z.name.clone()))?;
     let changed = changed_keys(&json!(before), &json!(cfg));
     if changed.is_empty() {
         cfg.validate()?;

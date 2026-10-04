@@ -20,8 +20,9 @@
 //!    masters only).
 //!
 //! The receivers (netin/) never call `controls::apply` themselves: every
-//! external write goes through `apply`, `play_cue`, `set_page` or
-//! `release` here. MIDI keeps its own rules (T-208) and is not gated.
+//! external write goes through `apply`, `play_cue`, `set_page`,
+//! `release` or, for a DMX fixture instance (T-407), `instance_apply` and
+//! `instance_play_cue` here. MIDI keeps its own rules (T-208) and is not gated.
 //! Refusals are counted per source (the monitors show them), not logged
 //! one by one.
 
@@ -366,6 +367,52 @@ pub fn set_page(s: &mut Shared, src: SourceKind, client: &str, page: usize, now:
     count(s, src, "page", r)?;
     s.cue_page = page;
     Ok(())
+}
+
+/// Gate, access and scope for a DMX fixture instance (T-407): its own
+/// *Accès* channel is the access, and it is always required.
+fn check_instance(s: &mut Shared, group: &str, access: bool) -> Result<(), Refusal> {
+    sync(s);
+    if !s.external.gate.open {
+        return Err(Refusal::GateClosed);
+    }
+    if !access {
+        return Err(Refusal::NoAccess);
+    }
+    if !s.external.config.scope(SourceKind::Dmx).groups.iter().any(|g| g == group) {
+        return Err(Refusal::OutOfScope);
+    }
+    Ok(())
+}
+
+/// Whether an instance with its access raised may shape its zone's image
+/// (`group`: « master »). Checked every frame, so not counted.
+pub fn instance_allows(s: &mut Shared, group: &str) -> Result<(), Refusal> {
+    check_instance(s, group, true)
+}
+
+/// `apply` for a DMX fixture instance: the same rules, with the
+/// instance's access channel as the source's access.
+pub fn instance_apply(s: &mut Shared, access: bool, id: &str, input: ControlInput) -> Result<(), Refusal> {
+    let Some(desc) = s.controls.get(id).cloned() else {
+        return count(s, SourceKind::Dmx, id, Err(Refusal::Unknown));
+    };
+    let r = if ALWAYS.contains(&desc.id.as_str()) {
+        Ok(())
+    } else if forbidden(&desc) {
+        Err(Refusal::Forbidden)
+    } else {
+        check_instance(s, desc.group, access)
+    };
+    let r = r.and_then(|()| controls::apply_as(s, &desc.id, input, ArmSource::Dmx).map_err(|_| Refusal::Forbidden));
+    count(s, SourceKind::Dmx, &desc.id, r)
+}
+
+/// `play_cue` for a DMX fixture instance (the *Cues* scope).
+pub fn instance_play_cue(s: &mut Shared, access: bool, cue: &str) -> Result<bool, Refusal> {
+    let r = check_instance(s, "cue", access);
+    count(s, SourceKind::Dmx, cue, r)?;
+    Ok(controls::press_cue_from(s, cue, Some(ClickMode::Restart), true, Some(ArmSource::Dmx.id())))
 }
 
 /// Lets go of a momentary control a source held pressed. Always allowed

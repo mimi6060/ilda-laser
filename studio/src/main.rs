@@ -19,6 +19,7 @@ mod colorcal;
 mod controls;
 mod cues;
 mod devices;
+mod dmx;
 mod datafile;
 mod dwell;
 mod engine;
@@ -1363,7 +1364,13 @@ impl Engine {
                 // master live controls, then the zone's geometry and the
                 // calibration (both clamp to -1..1). Zones are joined by
                 // blanked travel; one neutral zone is the plain path.
-                let finish = |look: &[Point]| live::apply(look, &live, &self.live_state, &user_palettes);
+                // A zone patched as a DMX fixture (T-407) gets its remote on
+                // top of the master controls, still before the geometry,
+                // the calibration and the safety stage.
+                let finish = |zone: u8, look: &[Point]| match routing.remotes.iter().find(|(z, _)| *z == zone) {
+                    Some((_, remote)) => dmx::fixture::apply(look, remote, &live, &self.live_state, &user_palettes, t),
+                    None => live::apply(look, &live, &self.live_state, &user_palettes),
+                };
                 let (frame, mix) = projection::render(rendered, &routing.config, routing.output.as_deref(), &mixer, finish, &calibration);
                 (frame, mix, evolving)
             }
@@ -1463,6 +1470,8 @@ struct Routing {
     config: projection::ProjectionConfig,
     output: Option<String>,
     align: Option<projection::Geometry>,
+    /// Each zone's DMX remote this frame (T-407); none: the master only.
+    remotes: Vec<(u8, dmx::personality::ZoneRemote)>,
 }
 
 impl Routing {
@@ -1485,6 +1494,7 @@ impl Routing {
             config: s.projection.get().clone(),
             output: s.output_mgr.prefs().selected,
             align: s.projection.align_geometry(),
+            remotes: s.netin.fixtures.remotes.clone(),
         }
     }
 }
