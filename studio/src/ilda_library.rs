@@ -9,6 +9,9 @@
 //! on the import request's own thread (`web.rs`, beside the single HTTP
 //! worker) or on the start-up loader thread, never on the engine thread.
 //!
+//! An export bakes the output safety chain into the file (T-355,
+//! `export_look`): the ShowNET plays it alone, without the studio.
+//!
 //! An imported file is played as it is: its points skip `densify` (the
 //! file's author already placed its dwell and blanking), but they go
 //! through the normal cue path and the whole safety chain like any other
@@ -21,10 +24,13 @@
 //! and `fps`), the points are shared, never copied per frame.
 
 use crate::datafile;
-use crate::engine::{Animator, AudioFeatures, BeatClock, Content, Settings};
+use crate::dwell::DwellState;
+use crate::engine::{Animator, AudioFeatures, BeatClock, Calibration, Content, Settings};
 use crate::ilda::{self, IldaFrame};
 use crate::patterns::Point;
+use crate::power::{self, OutputLimits};
 use crate::presets::Preset;
+use crate::safety::{self, SafetySettings, StrobeLimiter};
 use crate::timeline::valid_show_name;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -341,11 +347,78 @@ fn info(file: &str, size: u64, clip: &Clip) -> IldaInfo {
     IldaInfo { file: file.to_string(), id: cue_id(file), size, frames: clip.frames.len(), points: clip.points() }
 }
 
+/// The output safety chain an export bakes into its file (T-355). The
+/// ShowNET plays an SD card file alone, without the studio: whatever the
+/// studio would have done to the light on its way out has to be in the
+/// file already. Copied out of `Shared` under the lock, used without it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportSafety {
+    /// The output whose caps apply (`outputs.json`).
+    pub output: String,
+    pub calibration: Calibration,
+    /// Zones, horizon, colour calibration, strobe limiter, static beam guard.
+    pub safety: SafetySettings,
+    /// Power caps of `output`.
+    pub limits: OutputLimits,
+}
+
+impl ExportSafety {
+    /// The chain of output `output`. Unknown: refused, never a looser default.
+    pub fn of(s: &crate::Shared, output: &str) -> Result<Self> {
+        let Some(o) = s.outputs.get(output) else { bail!("sortie inconnue : {output}") };
+        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: s.safety.get(), limits: o.limits })
+    }
+}
+
+/// An exported file and what the safety chain did to it.
+#[derive(Clone, Debug)]
+pub struct Exported {
+    pub bytes: Vec<u8>,
+    pub frames: usize,
+    /// Lit points before and after the safety chain (all images).
+    pub lit_before: usize,
+    pub lit_after: usize,
+}
+
+/// Laps of the images run through the chain before the one written, so
+/// the strobe limiter and the static beam guard are in the state they
+/// reach when the ShowNET loops the file: at least a whole burst and its
+/// pause (see `export_look`).
+fn warm_up_laps(frames: usize, fps: f32, cfg: &SafetySettings) -> usize {
+    let lap_s = frames as f32 / fps;
+    let need = cfg.strobe_burst_s.max(0.0) + cfg.strobe_cooldown_s.max(0.0) + 0.5;
+    ((need / lap_s).ceil() as usize).max(1)
+}
+
+/// Rounds every channel down to the 8-bit step the file stores, so the
+/// written value is never above what the chain let out (the writer itself
+/// rounds to the nearest step).
+fn floor_to_file_steps(frame: &mut [Point]) {
+    let down = |v: f32| if v.is_finite() { (v.clamp(0.0, 1.0) * 255.0 + 1e-4).floor() / 255.0 } else { 0.0 };
+    for p in frame {
+        (p.r, p.g, p.b) = (down(p.r), down(p.g), down(p.b));
+    }
+}
+
 /// A look as an ILDA format 5 file: `frames` images rendered `1/fps`
-/// seconds apart at `bpm`, without music, live modifiers, calibration or
-/// the output's safety stage (those belong to the projector it plays on).
-/// Refused when too big for the ShowNET SD card.
-pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64) -> Result<Vec<u8>> {
+/// seconds apart at `bpm`, without music or live modifiers, then put
+/// through the same output safety chain as the engine's frames (T-355):
+/// calibration, beam horizon, zones and colour calibration, strobe
+/// limiter, static beam guard (as if armed: its « off » profile never
+/// applies), power caps of `chain.output`. The real functions, in the
+/// engine's order (`main.rs`, `Engine::tick`).
+///
+/// The ShowNET loops the file: the stateful stages (strobe limiter, static
+/// beam guard) first run over the images lap after lap, long enough for a
+/// burst and its pause, and the lap written is the next one, so a strobe
+/// that is too fast stays cut across the loop. Then a fresh limiter
+/// watches the written lap looped: if it would still cut something, the
+/// export is refused. All of this assumes the ShowNET plays the file at
+/// `fps` images per second.
+///
+/// Refused when the look lights nothing, when the chain leaves nothing
+/// lit, and when the file is too big for the ShowNET SD card.
+pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain: &ExportSafety) -> Result<Exported> {
     if frames == 0 || frames > MAX_EXPORT_FRAMES {
         bail!("nombre d'images : 1 à {MAX_EXPORT_FRAMES}");
     }
@@ -355,22 +428,78 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64) -> Re
     let bpm = if bpm.is_finite() { bpm.clamp(20.0, 300.0) } else { 120.0 };
     let dt = 1.0 / fps;
     let mut animator = Animator::starting_at(0.0);
-    let mut out = Vec::with_capacity(frames);
+    let mut raw = Vec::with_capacity(frames);
     // The file's size so far (32-byte headers, 8-byte points): a look too
-    // big for the card stops here, before it is all in memory.
+    // big for the card stops here, before it is all in memory. Zone edges
+    // may add a few points: the written file is checked again.
     let mut size = 32;
     for i in 0..frames {
         let clock = BeatClock { beat: i as f64 * dt as f64 * bpm / 60.0, bpm, beats_per_bar: 4 };
-        let points = animator.render(settings, AudioFeatures::default(), if i == 0 { 0.0 } else { dt }, &clock);
+        let points: Vec<Point> = animator
+            .render(settings, AudioFeatures::default(), if i == 0 { 0.0 } else { dt }, &clock)
+            .into_iter()
+            .map(|p| {
+                let (x, y) = chain.calibration.apply(p.x, p.y);
+                Point { x, y, ..p }
+            })
+            .collect();
         size += 32 + 8 * points.len().max(1);
         ilda::check_shownet_size(size)?;
-        let mut f = IldaFrame::new(&format!("LS{i:06}"), points);
-        f.company = "LaserStd".into();
-        out.push(f);
+        raw.push(points);
     }
-    let bytes = ilda::write_format5(&out)?;
+    let lit = |frames: &[Vec<Point>]| frames.iter().flatten().filter(|p| p.is_lit()).count();
+    let lit_before = lit(&raw);
+    if lit_before == 0 {
+        bail!("Ce look n'allume rien : aucun fichier à exporter");
+    }
+
+    // The chain, lap after lap; the last lap is the file.
+    let cfg = &chain.safety;
+    let laps = warm_up_laps(frames, fps, cfg) + 1;
+    let at = |lap: usize, i: usize| (lap * frames + i) as f64 * dt as f64;
+    let mut limiter = StrobeLimiter::default();
+    let mut dwell = DwellState::default();
+    let mut out = Vec::with_capacity(frames);
+    for lap in 0..laps {
+        for (i, points) in raw.iter().enumerate() {
+            let frame = safety::apply(points.clone(), at(lap, i), cfg, &mut limiter);
+            let mut frame = dwell.apply(frame, at(lap, i), &cfg.dwell, cfg.horizon.y, true);
+            power::cap(&mut frame, &chain.limits);
+            floor_to_file_steps(&mut frame);
+            if lap + 1 == laps {
+                out.push(frame);
+            }
+        }
+    }
+    let lit_after = lit(&out);
+    if lit_after == 0 {
+        bail!(
+            "La chaîne de sécurité (zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de la sortie « {} ») coupe tout ce look : rien à exporter",
+            chain.output
+        );
+    }
+    // The file looped, seen by a limiter that knows nothing of it.
+    let mut check = StrobeLimiter::default();
+    for lap in 0..laps {
+        for (i, frame) in out.iter().enumerate() {
+            if check.would_cut(frame, at(lap, i), cfg) {
+                bail!("Ce look clignote trop vite pour tourner en boucle sur le ShowNET (limiteur de strobe) : ralentissez le strobe ou changez la durée");
+            }
+        }
+    }
+
+    let images: Vec<IldaFrame> = out
+        .into_iter()
+        .enumerate()
+        .map(|(i, points)| {
+            let mut f = IldaFrame::new(&format!("LS{i:06}"), points);
+            f.company = "LaserStd".into();
+            f
+        })
+        .collect();
+    let bytes = ilda::write_format5(&images)?;
     ilda::check_shownet_size(bytes.len())?;
-    Ok(bytes)
+    Ok(Exported { bytes, frames, lit_before, lit_after })
 }
 
 #[cfg(test)]
@@ -539,7 +668,7 @@ mod tests {
     #[test]
     fn export_is_a_valid_format5_file_read_back_by_the_reader() {
         let look = Settings { content: Content::Shape { shape: "square".into() }, rotation_speed: 90.0, brightness: 1.0, ..Settings::default() };
-        let bytes = export_look(&look, 12, 30.0, 120.0).unwrap();
+        let bytes = export_look(&look, 12, 30.0, 120.0, &open_chain()).unwrap().bytes;
         assert_eq!(bytes[7], 5, "format 5");
         let back = ilda::read(&bytes).unwrap();
         assert_eq!(back.len(), 12);
@@ -548,10 +677,10 @@ mod tests {
         assert!(back.iter().all(|f| f.points.iter().any(|p| p.is_lit())));
         // It rotates: the first and last images differ.
         assert_ne!(back[0].points, back[11].points);
-        assert!(export_look(&look, 0, 30.0, 120.0).is_err());
-        assert!(export_look(&look, MAX_EXPORT_FRAMES + 1, 30.0, 120.0).is_err());
-        assert!(export_look(&look, 10, 0.0, 120.0).is_err());
-        assert!(export_look(&look, 10, f32::NAN, 120.0).is_err());
+        assert!(export_look(&look, 0, 30.0, 120.0, &open_chain()).is_err());
+        assert!(export_look(&look, MAX_EXPORT_FRAMES + 1, 30.0, 120.0, &open_chain()).is_err());
+        assert!(export_look(&look, 10, 0.0, 120.0, &open_chain()).is_err());
+        assert!(export_look(&look, 10, f32::NAN, 120.0, &open_chain()).is_err());
     }
 
     #[test]
@@ -562,9 +691,107 @@ mod tests {
         lib.import("libtest big.ild", &ilda::write_format5(&[IldaFrame::new("big", dense)]).unwrap()).unwrap();
         let look = Settings { content: Content::Ilda { file: "libtest big.ild".into(), fps: 25.0 }, ..Settings::default() };
         // 60 000 points × 8 bytes per image: 17 images pass 8 Mo.
-        assert!(export_look(&look, 10, 25.0, 120.0).is_ok());
-        let e = export_look(&look, 40, 25.0, 120.0).unwrap_err().to_string();
+        assert!(export_look(&look, 10, 25.0, 120.0, &open_chain()).is_ok());
+        let e = export_look(&look, 40, 25.0, 120.0, &open_chain()).unwrap_err().to_string();
         assert!(e.contains("carte SD"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default safety settings with the caps wide open, so a test
+    /// sees the look itself.
+    fn open_chain() -> ExportSafety {
+        ExportSafety {
+            output: power::MAIN_OUTPUT.into(),
+            calibration: Calibration::default(),
+            safety: SafetySettings::default(),
+            limits: OutputLimits { max_power: 1.0, max_color: [1.0; 3] },
+        }
+    }
+
+    fn zone(kind: crate::zones::ZoneKind, points: &[[f32; 2]]) -> crate::zones::Zone {
+        crate::zones::Zone { id: 1, name: "z".into(), kind, level: 0.3, points: points.to_vec() }
+    }
+
+    /// A big circle turning, lit all around the field.
+    fn white_circle() -> Settings {
+        Settings { content: Content::Shape { shape: "circle".into() }, rotation_speed: 90.0, brightness: 1.0, scale: 1.0, ..Settings::default() }
+    }
+
+    #[test]
+    fn exported_files_have_nothing_lit_in_a_blank_zone_nor_above_the_caps() {
+        let blank = zone(crate::zones::ZoneKind::Blank, &[[0.0, -1.0], [1.0, -1.0], [1.0, 1.0], [0.0, 1.0]]);
+        let mut chain = open_chain();
+        chain.safety.zones = vec![blank.clone()];
+        chain.limits = OutputLimits { max_power: 0.4, max_color: [1.0, 0.5, 0.8] };
+        let got = export_look(&white_circle(), 30, 30.0, 120.0, &chain).unwrap();
+        assert!(got.lit_after > 0 && got.lit_after < got.lit_before, "{} → {}", got.lit_before, got.lit_after);
+        let back = ilda::read(&got.bytes).unwrap();
+        assert_eq!(back.len(), 30);
+        for f in &back {
+            assert_eq!(crate::zones::blank_violations(&f.points, &chain.safety.zones), 0, "{}", f.name);
+            assert!(f.points.iter().any(|p| p.is_lit() && p.x < -0.1), "the left half still shows");
+            for p in &f.points {
+                // Read back from 8-bit values: never above the cap, not even by rounding.
+                assert!(p.r <= 0.4 + 1e-6 && p.g <= 0.2 + 1e-6 && p.b <= 0.32 + 1e-6, "{p:?}");
+            }
+        }
+        // Without the chain the same look is lit on the right and brighter.
+        let open = ilda::read(&export_look(&white_circle(), 30, 30.0, 120.0, &open_chain()).unwrap().bytes).unwrap();
+        assert!(open.iter().flat_map(|f| &f.points).any(|p| p.is_lit() && p.x > 0.5 && p.r.max(p.g).max(p.b) > 0.9));
+    }
+
+    #[test]
+    fn calibration_and_horizon_are_in_the_file() {
+        let mut chain = open_chain();
+        chain.calibration = Calibration { offset_x: 0.5, scale_x: 0.25, scale_y: 0.25, ..Calibration::default() };
+        let back = ilda::read(&export_look(&white_circle(), 5, 30.0, 120.0, &chain).unwrap().bytes).unwrap();
+        for p in back.iter().flat_map(|f| &f.points).filter(|p| p.is_lit()) {
+            assert!((0.2..=0.8).contains(&p.x) && p.y.abs() <= 0.3, "{p:?}");
+        }
+        // Full horizon at 0, lines included: nothing lit below it.
+        let mut chain = open_chain();
+        chain.safety.horizon = crate::zones::Horizon { y: 0.0, lines: true, ramp: 0.0, level: 0.0 };
+        let back = ilda::read(&export_look(&white_circle(), 5, 30.0, 120.0, &chain).unwrap().bytes).unwrap();
+        assert!(back.iter().flat_map(|f| &f.points).filter(|p| p.is_lit()).all(|p| p.y >= -1e-3));
+        assert!(back.iter().flat_map(|f| &f.points).any(|p| p.is_lit()));
+    }
+
+    #[test]
+    fn an_export_the_chain_cuts_entirely_is_refused() {
+        let mut chain = open_chain();
+        chain.safety.zones = vec![zone(crate::zones::ZoneKind::Blank, &[[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])];
+        let e = export_look(&white_circle(), 10, 30.0, 120.0, &chain).unwrap_err().to_string();
+        assert!(e.contains("coupe tout"), "{e}");
+        chain.safety.zones.clear();
+        chain.limits.max_power = 0.0;
+        assert!(export_look(&white_circle(), 10, 30.0, 120.0, &chain).unwrap_err().to_string().contains("coupe tout"));
+        let dark = Settings { brightness: 0.0, ..white_circle() };
+        assert!(export_look(&dark, 10, 30.0, 120.0, &open_chain()).unwrap_err().to_string().contains("n'allume rien"));
+    }
+
+    #[test]
+    fn a_fast_strobe_is_cut_in_the_file_across_the_loop() {
+        // 8 flashes per beat at 120 BPM: 16 Hz, far above the 4 Hz default.
+        let strobe = Settings { strobe_div: 8.0, strobe_duty: 0.4, ..white_circle() };
+        let fps = 50.0;
+        let got = export_look(&strobe, 100, fps, 120.0, &open_chain()).unwrap();
+        let back = ilda::read(&got.bytes).unwrap();
+        // The file looped many times: lit / dark changes stay within the
+        // limit (the limiter holds the light through the gaps).
+        let lit: Vec<bool> = back.iter().map(|f| f.points.iter().any(|p| p.is_lit())).collect();
+        let onsets = (0..lit.len() * 4).filter(|&i| lit[i % lit.len()] && !lit[(i + lit.len() - 1) % lit.len()]).count();
+        let seconds = 4.0 * lit.len() as f32 / fps;
+        assert!(onsets as f32 <= seconds * crate::safety::DEFAULT_MAX_HZ + 1.0, "{onsets} flashes in {seconds} s");
+        // Without the limiter it would flash 16 times a second.
+        let on = |i: usize| strobe.rhythm_gain(i as f64 / fps as f64 * 2.0) > 0.0;
+        let raw = (1..100).filter(|&i| on(i) && !on(i - 1)).count();
+        assert!(raw >= 25, "{raw}");
+    }
+
+    #[test]
+    fn the_chain_of_an_unknown_output_is_refused() {
+        let s = crate::test_support::shared();
+        assert_eq!(ExportSafety::of(&s, power::MAIN_OUTPUT).unwrap().limits, s.outputs.active_limits());
+        assert!(ExportSafety::of(&s, "ailleurs").is_err());
     }
 }

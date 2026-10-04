@@ -174,6 +174,17 @@
   #ildaLib .ildaitem button { flex: none; padding: 4px 8px; }
   #ildaLib .ildaitem .del { color: var(--muted); }
   #ildaMsg.err, #ildaExpMsg.err { color: var(--danger); font-weight: 600; }
+  /* RÉGLAGES › Carte SD ShowNET (T-302), Theme (T-299) tokens. */
+  #sdTable { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  #sdTable th { text-align: left; font-weight: 600; color: var(--muted); padding: 2px 4px; }
+  #sdTable td { padding: 2px 4px; border-top: 1px solid var(--line); }
+  #sdTable td.cue { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+  #sdTable td.cue.missing { color: var(--danger); }
+  #sdTable input[type=number] { width: 64px; }
+  #sdTable button { padding: 2px 8px; color: var(--muted); }
+  #sdWarn { margin: 4px 0; padding-left: 18px; font-size: 12px; color: var(--warn); }
+  #sdWarn:empty { display: none; }
+  #sdDir { width: 100%; box-sizing: border-box; }
   .ilda-rights { margin: 6px 0 4px; padding: 8px 10px; border-left: 3px solid var(--warn); border-radius: 6px; background: var(--panel-2); color: var(--warn); font-size: 12px; }
   .stage { grid-area: stage; position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   .ws-panel { grid-area: panel; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; padding-right: 2px; }
@@ -1281,13 +1292,16 @@
       <div class="row" style="margin-top:2px">
         <input type="number" id="ildaNum" min="1" max="229" step="1" value="1">
         <input type="number" id="ildaFrames" min="1" max="3600" step="1" value="60">
-        <input type="number" id="ildaExpFps" min="1" max="100" step="1" value="30">
+        <input type="number" id="ildaExpFps" min="1" max="100" step="1" value="50">
       </div>
+      <label for="ildaExpOut">Sécurité appliquée au fichier (sortie)</label>
+      <select id="ildaExpOut" class="sd-output"><option value="main">main</option></select>
       <div class="row"><button id="ildaExport" class="primary">Exporter 001.ild</button></div>
       <div id="ildaExpMsg" class="hint" role="status"></div>
-      <div class="ilda-rights">Le fichier exporté sort de la chaîne de sécurité du studio : le ShowNET le joue tel quel, sans les zones,
-        le limiteur de strobe ni les plafonds de puissance. Essayez-le d'abord à faible puissance, et gardez l'arrêt d'urgence matériel
-        (clé, interlock) à portée de main.</div>
+      <div class="ilda-rights">La chaîne de sécurité de la sortie choisie est inscrite dans le fichier : calibration, zones, horizon,
+        limiteur de strobe (prévu pour une lecture à ce nombre d'images/s), garde anti-point fixe, plafonds de puissance. Mais le ShowNET
+        le joue seul, sans le studio : il peut ajouter ses propres effets en mode DMX. Essayez-le d'abord à faible puissance, et gardez
+        l'arrêt d'urgence matériel (clé, interlock) à portée de main : c'est lui la vraie sécurité.</div>
     </section>
 
     <!-- Figures (T-296) : propriétés, bibliothèque, animation -->
@@ -1702,6 +1716,35 @@
       <label class="check"><input type="checkbox" id="pjLens"> Lentille de divergence</label>
       <label for="pjNotes">Notes</label><textarea id="pjNotes" maxlength="1000" rows="3"></textarea>
       <div class="hint">Informative : sert aux estimations d'exposition et à la fiche de sécurité. 0 = inconnu.</div>
+    </section>
+
+    <!-- Carte SD ShowNET (T-302) : banque de cues numérotés, export d'un dossier prêt à copier -->
+    <section id="sdBankPanel">
+      <h2>Carte SD ShowNET</h2>
+      <div class="hint">Le ShowNET joue seul les fichiers <b>001.ild</b> à <b>229.ild</b> de sa carte microSD, choisis par DMX / Art-Net
+        (valeur du canal figure). 000 et 230 à 255 sont réservés. Chaque cue est rendu à <span id="sdFps">50</span> images/s, puis bouclé.</div>
+      <table id="sdTable">
+        <thead><tr><th>N°</th><th>Cue</th><th>Durée (s)</th><th></th></tr></thead>
+        <tbody id="sdRows"></tbody>
+      </table>
+      <div class="hint" id="sdEmpty">Banque vide : lancez un cue, puis « Ajouter le cue courant ».</div>
+      <div class="row">
+        <button id="sdAdd" title="Ajoute le dernier cue lancé, au premier numéro libre">Ajouter le cue courant</button>
+        <button id="sdRenumber" title="Renumérote 001, 002… dans l'ordre du tableau">Numéroter automatiquement</button>
+      </div>
+      <label for="sdOutput">Sécurité appliquée aux fichiers (sortie)</label>
+      <select id="sdOutput" class="sd-output"><option value="main">main</option></select>
+      <label for="sdDir">Dossier d'export (sur ce Mac)</label>
+      <input type="text" id="sdDir" placeholder="~/Desktop/carte-shownet" autocomplete="off" spellcheck="false">
+      <div class="row"><button id="sdExport" class="primary">Exporter vers un dossier…</button></div>
+      <div id="sdMsg" class="hint" role="status"></div>
+      <ul id="sdWarn"></ul>
+      <div class="hint">Copiez les fichiers à la racine de la carte microSD (lecteur de carte du Mac). <code>banque.json</code> liste
+        quel numéro joue quel cue. Les fichiers de plus de 6 Mo passent par un lecteur de carte, pas par l'Admin Tool ; 8 Mo au plus.</div>
+      <div class="ilda-rights">Chaque fichier contient déjà la chaîne de sécurité de la sortie choisie (calibration, zones, horizon,
+        limiteur de strobe, garde anti-point fixe, plafonds) ; un cue qu'elle coupe entièrement est refusé. Mais le ShowNET joue la carte
+        seul, sans le studio, et peut ajouter ses propres effets en mode DMX : l'arrêt d'urgence matériel (clé, interlock) reste votre
+        vraie sécurité. N'exportez que vos propres looks.</div>
     </section>
   </div>
 </main>
@@ -2468,6 +2511,8 @@ function setWorkspace(ws) {
     b.setAttribute('aria-selected', String(b.dataset.wsTab === ws));
   });
   remember(WS_KEY, ws);
+  // RÉGLAGES › Carte SD ShowNET (T-302): cue names may have changed.
+  if (ws === 'settings') setTimeout(loadSdBank, 0);
   // CRÉATION › Figures shows the editor (T-296); set up at the end of the script.
   if ($('workspace').dataset.ctab) syncFigView();
 }
@@ -6426,7 +6471,7 @@ const ildaSdName = () => String(Math.trunc(+$('ildaNum').value) || 0).padStart(3
 function showIldaSdName() { $('ildaExport').textContent = `Exporter ${ildaSdName()}`; }
 $('ildaNum').addEventListener('input', showIldaSdName);
 $('ildaExport').onclick = async () => {
-  const p = new URLSearchParams({ number: $('ildaNum').value, frames: $('ildaFrames').value, fps: $('ildaExpFps').value });
+  const p = new URLSearchParams({ number: $('ildaNum').value, frames: $('ildaFrames').value, fps: $('ildaExpFps').value, output: $('ildaExpOut').value || 'main' });
   ildaExpMsg('Export en cours…');
   let r;
   try { r = await fetch('/api/media/ilda/export?' + p, { cache: 'no-store' }); } catch { ildaExpMsg('Le studio ne répond pas.', true); return; }
@@ -6436,9 +6481,108 @@ $('ildaExport').onclick = async () => {
   a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-  ildaExpMsg(`${name} exporté (${kib(blob.size)}). À copier sur la carte SD du ShowNET.`);
+  ildaExpMsg(`${name} exporté (${kib(blob.size)}), sécurité de la sortie « ${p.get('output')} » incluse. À copier sur la carte SD du ShowNET.`
+    + (blob.size > 6 * 1024 * 1024 ? ' Plus de 6 Mo : passez par un lecteur de carte.' : ''));
 };
 showIldaSdName();
+
+// ---------- RÉGLAGES › Carte SD ShowNET (T-302) ----------
+// Which cue the ShowNET plays for which number (001-229), and the export
+// of the whole bank into a folder ready to copy to the card. Every file
+// carries the safety chain of the chosen output (T-355). Nothing here
+// arms the laser or talks to the ShowNET.
+const SD_DIR_KEY = 'laserStudio.sdDir';
+let sdBank = { slots: [] };
+function sdMsg(text, err = false) { $('sdMsg').textContent = text; $('sdMsg').classList.toggle('err', err); }
+async function sdRequest(path, body) {
+  let r;
+  try { r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }); }
+  catch { sdMsg('Le studio ne répond pas.', true); return null; }
+  if (!r.ok) {
+    const t = await r.text();
+    if (r.status === 423) notify(t);
+    sdMsg(t, true);
+    return null;
+  }
+  return r.json();
+}
+function fillOutputs(sel, outputs) {
+  const keep = sel.value;
+  sel.innerHTML = '';
+  for (const o of outputs) {
+    const opt = document.createElement('option');
+    opt.value = o.id;
+    opt.textContent = `${o.name ? o.name + ' (' + o.id + ')' : o.id} · puissance max ${Math.round(o.max_power * 100)} %`;
+    sel.appendChild(opt);
+  }
+  if (outputs.some(o => o.id === keep)) sel.value = keep;
+}
+function showSdBank(bank) {
+  sdBank = bank;
+  $('sdFps').textContent = bank.fps;
+  document.querySelectorAll('.sd-output').forEach(sel => fillOutputs(sel, bank.outputs));
+  const rows = $('sdRows');
+  rows.innerHTML = '';
+  $('sdEmpty').hidden = bank.slots.length > 0;
+  bank.slots.forEach((s, i) => {
+    const tr = document.createElement('tr'); tr.dataset.number = s.number;
+    const num = document.createElement('input');
+    Object.assign(num, { type: 'number', min: bank.first, max: bank.last, step: 1, value: s.number, title: `Fichier ${s.file}` });
+    num.className = 'sd-num';
+    num.onchange = () => saveSdBank(i, { number: Math.trunc(+num.value) });
+    const cue = document.createElement('td'); cue.className = 'cue' + (s.name == null ? ' missing' : '');
+    cue.textContent = s.name ?? `${s.cue_id} (introuvable)`; cue.title = s.cue_id;
+    const secs = document.createElement('input');
+    Object.assign(secs, { type: 'number', min: bank.min_seconds, max: bank.max_seconds, step: 0.1, value: s.seconds });
+    secs.className = 'sd-secs';
+    secs.onchange = () => saveSdBank(i, { seconds: +secs.value });
+    const del = document.createElement('button'); del.textContent = '×'; del.title = `Retirer ${s.file} de la banque`;
+    del.className = 'sd-del';
+    del.onclick = () => saveSdBank(i, null);
+    const cells = [num, cue, secs, del].map(el => {
+      if (el.tagName === 'TD') return el;
+      const td = document.createElement('td'); td.appendChild(el); return td;
+    });
+    tr.append(...cells);
+    rows.appendChild(tr);
+  });
+}
+async function loadSdBank() {
+  try { showSdBank(await (await fetch('/api/sdbank', { cache: 'no-store' })).json()); } catch { /* studio stopped: kept as is */ }
+}
+// One row changed (or removed: `change` null): the whole bank is sent and
+// checked by the studio; a refused change is undone on screen.
+async function saveSdBank(i, change) {
+  const slots = sdBank.slots.map(({ number, cue_id, seconds }) => ({ number, cue_id, seconds }));
+  if (change) Object.assign(slots[i], change); else slots.splice(i, 1);
+  const r = await sdRequest('/api/sdbank', { slots });
+  if (r) { showSdBank(r); sdMsg(change ? 'Banque enregistrée.' : 'Retiré de la banque.'); } else await loadSdBank();
+}
+$('sdAdd').onclick = async () => {
+  const r = await sdRequest('/api/sdbank/add', {});
+  if (r) { showSdBank(r); sdMsg(`Cue ajouté en ${String(r.added).padStart(3, '0')}.ild.`); }
+};
+$('sdRenumber').onclick = async () => {
+  const r = await sdRequest('/api/sdbank/renumber');
+  if (r) { showSdBank(r); sdMsg('Banque renumérotée à partir de 001.'); }
+};
+$('sdDir').value = remembered(SD_DIR_KEY) || '';
+$('sdExport').onclick = async () => {
+  const dir = $('sdDir').value.trim();
+  if (!dir) { sdMsg('Indiquez le dossier d\'export (par exemple ~/Desktop/carte-shownet).', true); $('sdDir').focus(); return; }
+  remember(SD_DIR_KEY, dir);
+  $('sdWarn').innerHTML = '';
+  sdMsg('Export en cours… (rendu de chaque cue)');
+  $('sdExport').disabled = true;
+  const r = await sdRequest('/api/sdbank/export', { dir, output: $('sdOutput').value || 'main' });
+  $('sdExport').disabled = false;
+  if (!r) return;
+  const total = r.files.reduce((n, f) => n + f.bytes, 0);
+  sdMsg(`${r.files.length} fichier${r.files.length > 1 ? 's' : ''} exporté${r.files.length > 1 ? 's' : ''} dans ${r.dir} (${kib(total)}), `
+    + `sécurité de la sortie « ${r.output} » incluse. Copiez-les à la racine de la carte microSD.`);
+  for (const w of r.warnings) { const li = document.createElement('li'); li.textContent = w; $('sdWarn').appendChild(li); }
+};
+loadSdBank();
 
 setFigTool('line');
 showFigProps();
