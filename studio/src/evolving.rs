@@ -267,6 +267,14 @@ impl EvolvingCue {
         if b <= 0.0 {
             return 0.0;
         }
+        // One period for every key (most cues): b / p, without walking the
+        // keys - a cue with a key every 1/8 beat stays cheap to sample.
+        let mut periods = self.keys_in().map(|(_, k)| k.params.period_beats);
+        if let Some(p) = periods.next() {
+            if periods.all(|q| q == p) {
+                return b / p.max(MIN_BEATS) as f64;
+            }
+        }
         // Break at every key: the period is smooth between two keys.
         let mut cuts: Vec<f64> = self.keys_in().map(|(_, k)| k.at_beats as f64).filter(|&t| t > 0.0 && t < b).collect();
         cuts.push(0.0);

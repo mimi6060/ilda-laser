@@ -9,9 +9,10 @@
 //! (« Abstraits 2 »), so `grid.<page>.<row>.<col>` and `page.N` keep
 //! meaning what they did before. The « Figures » and « ILDA » pages follow
 //! the operator's libraries: their cells are always that library's items.
-//! Pages added to the catalogue later (`presets::LATE_PAGES`: « Festival »)
-//! come after those overflow pages, and are appended once to the
-//! operator's own pages, so no page they had changes number.
+//! Pages added to the catalogue later (`presets::LATE_PAGES`: « Festival »,
+//! « Festival évolutifs ») come after those overflow pages, and are
+//! appended once to the operator's own pages, so no page they had changes
+//! number.
 //!
 //! Saved to `studio-data/pages.json` and in the project (`pages`). A page
 //! keeps every cue it holds when the grid gets smaller: cells past the last
@@ -559,6 +560,10 @@ mod tests {
         assert_eq!(names[before.len()], crate::presets::FESTIVAL);
         assert_eq!(g.view()[before.len()].cells.iter().flatten().cloned().collect::<Vec<_>>(), of(crate::presets::FESTIVAL));
         assert_eq!(g.cell(13, 1, 1), Some("festival-001"));
+        // « Festival évolutifs » (T-112 to T-123) came after it: page 14.
+        assert_eq!(names[before.len() + 1], crate::presets::EVOLVING);
+        assert_eq!(g.cell(14, 1, 1), Some("festival-evolutifs-001"));
+        assert_eq!(names.len(), before.len() + 2);
     }
 
     #[test]
@@ -571,16 +576,21 @@ mod tests {
         std::fs::write(&path, old).unwrap();
         let g = CueGrid::load(path.clone());
         let names: Vec<&str> = g.pages.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Mes cues", "Figures", crate::presets::FESTIVAL], "appended, the others keep their numbers");
-        assert_eq!(g.pages[2].slots.len(), 40);
+        assert_eq!(names, ["Mes cues", "Figures", crate::presets::FESTIVAL, crate::presets::EVOLVING], "appended, the others keep their numbers");
+        assert_eq!((g.pages[2].slots.len(), g.pages[3].slots.len()), (40, 12));
         // Saved, then loaded again: still once.
         g.save();
         let mut g = CueGrid::load(path.clone());
-        assert_eq!(g.pages.len(), 3);
+        assert_eq!(g.pages.len(), 4);
         // Deleted by the operator: it stays deleted.
         g.delete_page(2, &catalog()).unwrap();
         g.save();
-        assert_eq!(CueGrid::load(path.clone()).pages.len(), 2);
+        assert_eq!(CueGrid::load(path.clone()).pages.len(), 3);
+        // Pages that already got « Festival » (T-110) get only the later page.
+        let festival = r#"{"cols":8,"rows":5,"pages":[{"name":"Mes cues","slots":[{"builtin":"tunnels-001"}]}],"late_pages":["Festival"]}"#;
+        std::fs::write(&path, festival).unwrap();
+        let names: Vec<String> = CueGrid::load(path.clone()).pages.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names, ["Mes cues", crate::presets::EVOLVING]);
         // The default grid has it already, and doesn't get it twice once edited.
         let mut d = CueGrid::default();
         d.materialize(&catalog());

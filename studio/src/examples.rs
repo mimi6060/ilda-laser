@@ -30,13 +30,23 @@ const WHITE: [u8; 3] = [255, 255, 255];
 const WARM_WHITE: [u8; 3] = [255, 236, 200];
 const RED: [u8; 3] = [255, 0, 0];
 const GREEN: [u8; 3] = [0, 255, 0];
-const CYAN: [u8; 3] = [0, 255, 255];
 const VIOLET: [u8; 3] = [140, 60, 255];
-const MAGENTA: [u8; 3] = [255, 0, 255];
-const AMBER: [u8; 3] = [255, 140, 0];
 const GOLD: [u8; 3] = [255, 190, 40];
 /// The « couleur de marque » of the DJ entrance: the studio's own cyan.
 const BRAND: [u8; 3] = [34, 227, 255];
+
+/// The evolving cues (« Festival évolutifs », T-112 to T-123) the
+/// research's timelines name, E1 to E12.
+const E1: &str = "Montée – éventail qui monte · 16 temps";
+const E2: &str = "Montée – tunnel qui zoome sur le drop · 32 temps";
+const E3: &str = "Drop – ciseaux croisés · 32 temps";
+const E5: &str = "Break – plafond qui descend · 32 temps";
+const E6: &str = "Intro – lever de soleil · 32 temps";
+const E7: &str = "Montée – chaser qui accélère · 32 temps";
+const E8: &str = "Drop – rayons tournants inversés · 32 temps";
+const E9: &str = "Break – vague · 16 temps";
+const E10: &str = "Intro – couloir de rideaux · 32 temps";
+const E12: &str = "Montée – grille qui se resserre · 32 temps";
 
 /// Marker colours: section, build-up, drop / black.
 const M_SECTION: [u8; 3] = [77, 163, 255];
@@ -254,24 +264,24 @@ fn params(s: &mut Settings) -> Option<&mut crate::generators::GenParams> {
 /// T-124: 16 bars of build-up, then the drop (32 bars).
 fn montee_drop(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     let mut b = Builder::new(info, presets, &["Faisceaux", "Accents", "Strobe", "Nappe"]);
-    // 1-4: a chaser stepping on every beat, low and narrow.
-    let e = b.cue("Chaser centre → bords · cyan", 1.0, 16.0).size(0.8).dim(0.8);
+    // 1-4: the chaser that speeds up (E7), a step a beat then every 1/2 beat.
+    let e = b.cue(E7, 1.0, 16.0).dim(0.8);
     b.put(0, e);
     // 5-8: the same chase at 1/2 beat, a sheet rising under it.
     let e = b.cue("Chaser → · vert", 5.0, 16.0).size(0.85);
     b.put(0, e);
     let e = b.cue("Nappe qui monte · une fois", 5.0, 16.0).dim(0.5);
     b.put(3, e);
-    // 9-12: the fan fills up towards white, beams opening in the back.
-    let e = b.cue("Chaser remplissage · bleu", 9.0, 16.0).color(WHITE).size(0.9);
+    // 9-12: the rising fan (E1) fills up, widens and goes to white, beams
+    // opening in the back.
+    let e = b.cue(E1, 9.0, 16.0);
     b.put(0, e);
     let e = b.cue("Faisceaux qui s'ouvrent lents · cyan", 9.0, 16.0).dim(0.6).fade_in(8.0);
     b.put(1, e);
-    // 13-15: a tunnel spinning; 1/4-beat strobe from bar 14.
-    let e = b.cue("Tunnel 4 anneaux · cyan", 13.0, 12.0).color(WHITE).spin(0.5);
+    // 13-15: the tunnel closing to a point and spinning up (E2's build,
+    // from its beat 4), with its own strobe at the end.
+    let e = b.cue(E2, 13.0, 12.0).offset(4.0);
     b.put(0, e);
-    let e = b.look("Strobe 1/2 temps · blanc", 14.0, 8.0, |s| s.strobe_div = 4.0).dim(0.6);
-    b.put(2, e);
     // 16: hot white beam on beats 1-3, beat 4 dark.
     let e = b.cue("Faisceau chaud · blanc", 16.0, 3.0);
     b.put(0, e);
@@ -280,13 +290,13 @@ fn montee_drop(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     b.put(0, e);
     let e = b.cue("Strobe 1/2 temps · blanc", 17.0, 4.0);
     b.put(2, e);
-    // 18-24: crossing scissors with their white flash, stabs behind.
-    let e = b.cue("Ciseaux (X) flash blanc · vert / jaune", 18.0, 28.0);
+    // 18-24: crossing scissors with their white flash (E3), stabs behind.
+    let e = b.cue(E3, 18.0, 28.0);
     b.put(0, e);
     let e = b.cue("Coups sur le kick · blanc", 18.0, 28.0).dim(0.5);
     b.put(1, e);
-    // 25-32: rotating rays, new colour at 25.
-    let e = b.cue("Soleil 12 rayons · jaune", 25.0, 32.0).color(MAGENTA).spin(0.25);
+    // 25-32: rotating spokes turning back every 8 beats (E8), new colours at 25.
+    let e = b.cue(E8, 25.0, 32.0);
     b.put(0, e);
     let e = b.cue("Chaser aller-retour · blanc / bleu", 25.0, 32.0).dim(0.6);
     b.put(1, e);
@@ -308,8 +318,15 @@ fn montee_drop(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
 /// T-125: a 64-bar techno block, to play in a loop.
 fn bloc_techno(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     let mut b = Builder::new(info, presets, &["Faisceaux", "Accents", "Effets", "Fond"]);
-    // 1-16: a tightening green grid, no strobe.
-    let e = b.cue("Grille de balayage 5 · vert", 1.0, 64.0).fade_in(4.0);
+    // 1-16: the green grid that tightens (E12), twice, without its strobe.
+    let no_strobe = |s: &mut Settings| {
+        if let Content::Evolving(cue) = &mut s.content {
+            cue.keys.iter_mut().for_each(|k| k.strobe_div = 0.0);
+        }
+    };
+    let e = b.look(E12, 1.0, 32.0, no_strobe).fade_in(4.0);
+    b.put(0, e);
+    let e = b.look(E12, 9.0, 32.0, no_strobe);
     b.put(0, e);
     // 17-32: stabs on the kick, narrow fan, positions on every beat.
     let e = b.cue("Coups sur le kick · blanc", 17.0, 64.0).color(GREEN).width(0.5);
@@ -349,10 +366,10 @@ fn bloc_techno(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
 /// T-126: a trance breakdown and its euphoric drop (48 bars).
 fn break_trance(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     let mut b = Builder::new(info, presets, &["Faisceaux", "Accents", "Strobe", "Fond"]);
-    // 1-16: a ceiling coming down twice, cyan then blue.
-    let e = b.cue("Nappe (liquid sky) · bleu", 1.0, 32.0).color(CYAN).fade_in(8.0);
+    // 1-16: the ceiling coming down (E5), twice, cyan → blue.
+    let e = b.cue(E5, 1.0, 32.0).fade_in(8.0);
     b.put(0, e);
-    let e = b.cue("Nappe (liquid sky) · bleu", 9.0, 32.0);
+    let e = b.cue(E5, 9.0, 32.0);
     b.put(0, e);
     // 17-24: a very slow violet-blue aurora.
     let e = b.cue("Nappe (liquid sky) · cyan → magenta", 17.0, 32.0).color(VIOLET).speed(0.3).fade_in(4.0);
@@ -367,8 +384,8 @@ fn break_trance(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     b.put(0, e);
     let e = b.cue("Strobe 1/2 temps · blanc", 31.0, 4.0).dim(0.7);
     b.put(2, e);
-    // 33-40: the drop, cyan and white.
-    let e = b.cue("Cône 16 · cyan", 33.0, 32.0).spin(0.5);
+    // 33-40: the drop, cyan and white: E2's pumping tunnel (its beat 16 on).
+    let e = b.cue(E2, 33.0, 32.0).offset(16.0);
     b.put(0, e);
     let e = b.cue("Coups sur le kick · blanc", 33.0, 32.0).dim(0.7);
     b.put(1, e);
@@ -406,9 +423,10 @@ fn attaque_hardstyle(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
         let e = b.cue("Positions temps + contretemps · magenta", 9.0 + i as f64, 4.0).color(color);
         b.put(0, e);
     }
-    // 17-24: the build, a chaser at 1/2 then 1/4 beat over a rising sheet;
-    // black on the last two beats of bar 24.
-    let e = b.cue("Chaser → · vert", 17.0, 16.0).color(RED);
+    // 17-24: the build, the chaser that speeds up (E7 from its beat 8: 1/2
+    // then 1/4 beat) then a white one, over a rising sheet; black on the
+    // last two beats of bar 24.
+    let e = b.cue(E7, 17.0, 16.0).offset(8.0).color(RED);
     b.put(0, e);
     let e = b.look("Chaser → · vert", 21.0, 14.0, |s| {
         s.color = WHITE;
@@ -450,8 +468,8 @@ fn entree_dj(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     // 1-8: black, a sparse white starry sky.
     let e = b.cue("Ciel étoilé lent · bleu", 1.0, 32.0).color(WHITE).dim(0.7).fade_in(8.0);
     b.put(3, e);
-    // 9-16: a corridor of lines in the brand colour.
-    let e = b.cue("Lignes de balayage 3 · vert", 9.0, 32.0).color(BRAND).fade_in(4.0);
+    // 9-16: the curtain corridor (E10) in the brand colour.
+    let e = b.cue(E10, 9.0, 32.0).color(BRAND);
     b.put(0, e);
     // 17-20: the artist's name, held.
     let e = b.cue("DJ · cyan", 17.0, 16.0).color(BRAND);
@@ -460,10 +478,9 @@ fn entree_dj(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     // T-108, counting from the event's start); black on beat 4 of bar 24.
     let e = b.cue("Compte à rebours 4-3-2-1 · blanc", 21.0, 15.0);
     b.put(1, e);
-    // 25-32: rotating rays, amber then white, full level.
-    let e = b.cue("Soleil 24 rayons · jaune", 25.0, 16.0).color(AMBER).spin(0.25);
-    b.put(0, e);
-    let e = b.cue("Soleil 24 rayons · jaune", 29.0, 16.0).color(WHITE).spin(0.25);
+    // 25-32: the sunrise's second half (E6 from its beat 16): rays turning,
+    // amber to white, full level.
+    let e = b.cue(E6, 25.0, 32.0).offset(16.0);
     b.put(0, e);
     let e = b.cue("Coups sur le kick · blanc", 25.0, 32.0).dim(0.5);
     b.put(2, e);
@@ -483,21 +500,20 @@ fn entree_dj(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
 /// T-129: a sunset anthem to close the night (64 bars).
 fn hymne_cloture(info: &ExampleInfo, presets: &[Preset]) -> Result<Show> {
     let mut b = Builder::new(info, presets, &["Faisceaux", "Accents", "Effets", "Nappe"]);
-    // 1-16: a rising sun, amber then warm white.
-    let e = b.cue("Soleil 12 rayons · jaune", 1.0, 32.0).color(AMBER).spin(0.0625).fade_in(16.0);
+    // 1-16: the sunrise (E6), amber to white, then its last look held.
+    let e = b.cue(E6, 1.0, 64.0);
     b.put(0, e);
-    let e = b.cue("Soleil 12 rayons · jaune", 9.0, 32.0).color(WARM_WHITE).spin(0.0625);
-    b.put(0, e);
-    // 17-32: a gold sheet breathing slowly.
-    let e = b.cue("Nappe (liquid sky) · arc-en-ciel", 17.0, 64.0).color(GOLD).speed(0.5).fade_in(4.0);
+    // 17-32: the ceiling coming down (E5) in gold, breathing slowly.
+    let e = b.cue(E5, 17.0, 64.0).color(GOLD).fade_in(4.0);
     b.put(3, e);
-    // 33-40: a wave of beams, amber and magenta.
-    let e = b.cue("Vague de faisceaux 12 · vert", 33.0, 32.0).color(AMBER);
+    // 33-40: the wave (E9), amber and magenta.
+    let e = b.cue(E9, 33.0, 32.0);
     b.put(0, e);
-    let e = b.cue("Vague de faisceaux 8 · vert", 33.0, 32.0).color(MAGENTA).dim(0.6).offset(2.0);
-    b.put(1, e);
-    // 41-48: beams opening up towards white.
-    let e = b.cue("Faisceaux qui s'ouvrent lents · cyan", 41.0, 32.0).color(WHITE).fade_in(8.0);
+    // 41-48: beams opening up towards white, then the rising fan (E1)
+    // into the drop.
+    let e = b.cue("Faisceaux qui s'ouvrent lents · cyan", 41.0, 16.0).color(WHITE).fade_in(8.0);
+    b.put(0, e);
+    let e = b.cue(E1, 45.0, 16.0);
     b.put(0, e);
     let e = b.cue("Nappe qui monte · une fois", 41.0, 16.0).color(WHITE).dim(0.5);
     b.put(3, e);
@@ -565,6 +581,44 @@ mod tests {
             }
         }
         assert!(build("nope", &presets).is_err());
+    }
+
+    /// The research's timelines (T-124 to T-129) name the evolving cues
+    /// E1 to E12: each example plays the ones it names.
+    #[test]
+    fn the_examples_play_the_evolving_cues_their_timelines_name() {
+        let presets = catalog();
+        let id = |name: &str| presets.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("{name}")).id.clone();
+        let named: [(&str, &[&str]); 5] = [
+            ("montee-drop", &[E7, E1, E2, E3, E8]),
+            ("break-trance", &[E5, E2]),
+            ("attaque-hardstyle", &[E7]),
+            ("entree-dj", &[E10, E6]),
+            ("hymne-cloture", &[E6, E5, E9, E1]),
+        ];
+        for (example, cues) in named {
+            let show = build(example, &presets).unwrap();
+            let ids = show.cue_ids();
+            for name in cues {
+                assert!(ids.contains(id(name).as_str()), "{example} plays « {name} »");
+            }
+        }
+        // The techno block plays E12 as a look of its own, without its strobe.
+        let show = build("bloc-techno", &presets).unwrap();
+        let grids: Vec<&crate::evolving::EvolvingCue> = show
+            .tracks
+            .iter()
+            .flat_map(|t| &t.events)
+            .filter_map(|e| match &e.source {
+                EventSource::Look { settings } => match &settings.content {
+                    Content::Evolving(c) if c.keys.iter().any(|k| k.generator == "grid") => Some(c),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(grids.len(), 2);
+        assert!(grids.iter().all(|c| c.keys.iter().all(|k| k.strobe_div == 0.0)));
     }
 
     #[test]

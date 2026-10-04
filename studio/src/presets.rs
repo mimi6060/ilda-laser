@@ -42,6 +42,10 @@ pub enum CueTag {
 /// generators, each in a festival palette.
 pub const FESTIVAL: &str = "Festival";
 
+/// The « Festival évolutifs » page (T-112 to T-123): twelve cues that
+/// evolve by themselves over 16 or 32 beats (builds, drops, breaks).
+pub const EVOLVING: &str = "Festival évolutifs";
+
 /// Cue pages, in display order. Figures (`figures.rs`) and ILDA files
 /// (`ilda_library.rs`) hold the operator's libraries, not built-in cues.
 /// The last `LATE_PAGES` came later: in the default grid they go after
@@ -60,10 +64,11 @@ pub const CATEGORIES: &[&str] = &[
     crate::figures::CATEGORY,
     crate::ilda_library::CATEGORY,
     FESTIVAL,
+    EVOLVING,
 ];
 
 /// How many of the last `CATEGORIES` are appended pages (see above).
-pub const LATE_PAGES: usize = 1;
+pub const LATE_PAGES: usize = 2;
 
 const GREEN: [u8; 3] = [0, 255, 0];
 const RED: [u8; 3] = [255, 0, 0];
@@ -384,6 +389,14 @@ pub fn catalog() -> Vec<Preset> {
         b.graphic("Géométrie", label, "wire3d", 1, a, 1.0, 8.0, look, 0.6);
     }
 
+    // The « Festival évolutifs » page (T-112 to T-123), appended.
+    for (tag, name, settings) in evolving_cues() {
+        b.add(EVOLVING, name, settings);
+        if let Some(p) = b.presets.last_mut() {
+            p.tag = Some(tag);
+        }
+    }
+
     b.presets
 }
 
@@ -588,6 +601,454 @@ fn program_cues() -> Vec<(&'static str, &'static str, Settings)> {
     ]
 }
 
+/// Beats before a jump where `keys_at` puts a held key.
+const JUMP: f32 = 1.0 / 64.0;
+
+/// An evolving cue's keys, generated from `look(b)` (the look at beat `b`;
+/// its `at_beats` is set here) at the beats of `at` and `jumps`. Values
+/// ease from one key to the next, as the keys say; on a beat of `jumps`
+/// they change at once instead, through a key held (« Palier ») from
+/// `JUMP` before it. A curve the eases can't draw is keyed every beat or
+/// less, with no special case in the engine.
+fn keys_at(at: impl IntoIterator<Item = f32>, jumps: &[f32], look: impl Fn(f32) -> EvolvingKey) -> Vec<EvolvingKey> {
+    let mut times: Vec<f32> = at.into_iter().chain(jumps.iter().copied()).collect();
+    times.sort_by(f32::total_cmp);
+    times.dedup();
+    let mut keys = Vec::with_capacity(times.len() + jumps.len());
+    for t in times {
+        if t > JUMP && jumps.contains(&t) {
+            keys.push(EvolvingKey { at_beats: t - JUMP, ease: KeyEase::Step, ..look(t - JUMP) });
+        }
+        keys.push(EvolvingKey { at_beats: t, ..look(t) });
+    }
+    keys
+}
+
+/// Beats `from`, `from + step`… up to `to` included.
+fn every(from: f32, to: f32, step: f32) -> impl Iterator<Item = f32> {
+    let n = ((to - from) / step).round() as usize;
+    (0..=n).map(move |i| from + i as f32 * step)
+}
+
+/// Turns done by beat `b`, from beat 0, at `omega(b)` turns per beat.
+fn turns(b: f32, omega: impl Fn(f32) -> f32) -> f32 {
+    let n = (b * 64.0).ceil().max(1.0) as usize;
+    let h = b / n as f32;
+    (0..n).map(|i| omega((i as f32 + 0.5) * h)).sum::<f32>() * h
+}
+
+/// The tunnels' and the sun's `a` (their angle is `a` × beat) that puts
+/// the look at `theta` turns at beat `b`. Keyed every beat or less, it
+/// lets a rotation speed up, slow down or turn back without a jump.
+fn spin_at(theta: f32, b: f32) -> f32 {
+    if b > 0.0 { (theta / b).clamp(0.0, crate::tunnels::MAX_TURNS) } else { 0.0 }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn smooth(x: f32) -> f32 {
+    crate::beat::smoothstep(x)
+}
+
+/// `a` → `b`, `k` of the way (0..1).
+fn mix(a: [u8; 3], b: [u8; 3], k: f32) -> [u8; 3] {
+    std::array::from_fn(|i| lerp(a[i] as f32, b[i] as f32, k.clamp(0.0, 1.0)).round() as u8)
+}
+
+/// `c` with its saturation taken down by `k` (1 = white).
+fn to_white(c: [u8; 3], k: f32) -> [u8; 3] {
+    let (r, g, b) = crate::generators::toward_white((c[0] as f32, c[1] as f32, c[2] as f32), k);
+    [r, g, b].map(|v| v.round().clamp(0.0, 255.0) as u8)
+}
+
+/// `c` with its hue turned by `degrees` (a rotation about the grey axis).
+fn hue_turn(c: [u8; 3], degrees: f32) -> [u8; 3] {
+    let (s, co) = degrees.to_radians().sin_cos();
+    let k = (1.0 - co) / 3.0;
+    let r = s / 3f32.sqrt();
+    let m = [[co + k, k - r, k + r], [k + r, co + k, k - r], [k - r, k + r, co + k]];
+    let v = c.map(|x| x as f32);
+    std::array::from_fn(|i| (m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]).round().clamp(0.0, 255.0) as u8)
+}
+
+/// Beat-locked parameters (an evolving cue plays in beats anyway).
+fn synced() -> GenParams {
+    GenParams { beat_sync: true, ..GenParams::default() }
+}
+
+/// A key drawing `generator` in `color`, at size `scale`.
+fn key(generator: &str, params: GenParams, color: [u8; 3], scale: f32) -> EvolvingKey {
+    EvolvingKey { generator: generator.to_string(), params, color, scale, ..EvolvingKey::default() }
+}
+
+fn evolving(length_beats: f32, looped: bool, keys: Vec<EvolvingKey>) -> Content {
+    Content::Evolving(EvolvingCue { length_beats, looped, launch: crate::evolving::Launch::Beat, keys })
+}
+
+/// An evolving cue on its page: « <moment> – <name> · <n> temps ».
+fn evolving_cue(tag: CueTag, name: &str, content: Content, program: Option<CueProgram>) -> (CueTag, String, Settings) {
+    let beats = match &content {
+        Content::Evolving(cue) => cue.length_beats,
+        _ => 0.0,
+    };
+    let moment = match tag {
+        CueTag::Intro => "Intro",
+        CueTag::Groove => "Groove",
+        CueTag::Break => "Break",
+        CueTag::Build => "Montée",
+        CueTag::Drop => "Drop",
+    };
+    (tag, format!("{moment} – {name} · {beats} temps"), Settings { content, program, ..Settings::default() })
+}
+
+/// The twelve evolving cues of the « Festival évolutifs » page (T-112 to
+/// T-123, docs/research/festival-looks.md section 5), in order E1 to E12.
+/// Our own looks, written as maths over the beat with our generators:
+/// nothing taken from another product's library.
+fn evolving_cues() -> Vec<(CueTag, String, Settings)> {
+    vec![
+        evolving_e1(),
+        evolving_e2(),
+        evolving_e3(),
+        evolving_e4(),
+        evolving_e5(),
+        evolving_e6(),
+        evolving_e7(),
+        evolving_e8(),
+        evolving_e9(),
+        evolving_e10(),
+        evolving_e11(),
+        evolving_e12(),
+    ]
+}
+
+/// The chase shape of the first 1/64 beat of a chase cue (E1, E7): the
+/// frame an evolving cue holds while it waits for its beat (T-111) is its
+/// key 0, and a lone beam held still is blanked by the strict static-beam
+/// guard - it would then blink against a flash of the same cue. The fan's
+/// two outer beams (« bords → centre ») instead, for 8 ms at 128 BPM.
+const LAUNCH_SHAPE: f32 = 4.0;
+
+/// E1, 16 beats, one shot: a fill chase of 10 beams that widens, rises,
+/// speeds up (steps of 1, 1/2 then 1/4 beat) and goes to white, then half
+/// a beat of black. The chase fan has a fixed height: the cue's own
+/// `pos_y` curve lifts it.
+fn evolving_e1() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_SUNSET];
+    let look = |b: f32| {
+        let steps = if b < 8.0 { 1.0 } else if b < 12.0 { 2.0 } else { 4.0 };
+        let launch = b < JUMP;
+        let params = GenParams { count: 10, a: if launch { LAUNCH_SHAPE } else { 7.0 }, b: 0.0, steps_per_beat: steps, ..synced() };
+        EvolvingKey {
+            brightness: if (15.5..16.0).contains(&b) { 0.0 } else { 1.0 },
+            ease: if launch { KeyEase::Step } else { KeyEase::Linear },
+            ..key("chase_fan", params, to_white(pal.c1, smooth((b - 8.0) / 8.0)), lerp(0.15, 0.7, smooth(b / 16.0)))
+        }
+    };
+    let keys = keys_at(every(0.0, 16.0, 1.0).chain([JUMP, 15.5]), &[15.5, 16.0], look);
+    let program = CueProgram {
+        play: PlayMode::Once,
+        lanes: vec![lane("pos_y", &[(0.0, e1_lift(E1_LOW), KeyEase::EaseIn), (16.0, e1_lift(E1_HIGH), KeyEase::Linear)])],
+        ..CueProgram::default()
+    };
+    evolving_cue(CueTag::Build, "éventail qui monte", evolving(16.0, false, keys), Some(program))
+}
+
+/// E1's fan height above the horizon, at the start and at the end.
+const E1_LOW: f32 = 0.05;
+const E1_HIGH: f32 = 0.6;
+
+/// The `pos_y` that puts the chase fan (drawn at `CHASE_HEIGHT`) `y` above
+/// the horizon.
+fn e1_lift(y: f32) -> f32 {
+    crate::fans::HORIZON + y - crate::chases::CHASE_HEIGHT
+}
+
+/// E2's pump depth: radius 0.35 at rest, 0.45 on the kick.
+const E2_PUMP: f32 = 0.1 / 0.35;
+
+/// E2, 32 beats, one shot: 16 beats of build (the tunnel closes to a
+/// point and spins up, strobes from beat 12, half a beat of black), then
+/// the drop (wide, pumping on every kick, turning back every 4 beats, in
+/// colour 2). A plain circle shows no rotation: 8 beams on it (an inner
+/// layer) carry the spin.
+fn evolving_e2() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_ICE];
+    let radius = |b: f32| if b < 16.0 { lerp(0.35, 0.04, smooth(b / 16.0)) } else { 0.35 };
+    let colour = |b: f32| if b < 16.0 { pal.c1 } else { pal.c2 };
+    let tunnel = keys_at(every(0.0, 16.0, 1.0), &[16.0], |b| {
+        let a = if b < 16.0 { 0.0 } else { E2_PUMP };
+        key("tunnel_pump", GenParams { count: 1, a, b: 0.0, ..synced() }, colour(b), radius(b))
+    });
+    let beams = keys_at(every(0.0, 32.0, 1.0), &[16.0], |b| {
+        key("finger_tunnel", GenParams { count: 8, a: spin_at(turns(b, e2_omega), b), ..synced() }, colour(b), radius(b))
+    });
+    use KeyEase::Step;
+    let program = CueProgram {
+        play: PlayMode::Once,
+        layers: vec![evolving(32.0, false, beams)],
+        lanes: vec![
+            lane("brightness", &[(0.0, 1.0, Step), (15.5, 0.0, Step), (16.0, 1.0, Step)]),
+            lane("strobe.div", &[(0.0, 0.0, Step), (12.0, 2.0, Step), (14.0, 4.0, Step), (15.5, 0.0, Step)]),
+        ],
+        ..CueProgram::default()
+    };
+    evolving_cue(CueTag::Build, "tunnel qui zoome sur le drop", evolving(32.0, false, tunnel), Some(program))
+}
+
+/// E2's rotation in turns per beat: 1/32 → 1/4 over the build, then 1/4
+/// turning back every 4 beats.
+fn e2_omega(b: f32) -> f32 {
+    if b < 16.0 {
+        lerp(1.0 / 32.0, 0.25, b / 16.0)
+    } else if ((b - 16.0) / 4.0).floor() as i32 % 2 == 0 {
+        0.25
+    } else {
+        -0.25
+    }
+}
+
+/// E3, 32 beats, loop: scissors of 2 × 5 beams tilted ±15°, crossing every
+/// 2 beats, twice as fast on beats 4 to 8 of every 8, both groups white
+/// for the first 1/8 of every beat.
+fn evolving_e3() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_POP];
+    let look = |b: f32| {
+        let period = if b.rem_euclid(8.0) < 4.0 { 2.0 } else { 1.0 };
+        let flash = b.rem_euclid(1.0) < 1.0 / 8.0;
+        let (c1, c2) = if flash { (WHITE, WHITE) } else { (pal.c1, pal.c2) };
+        let params = GenParams { count: 10, a: 0.45, b: 0.3, period_beats: period, color2: c2, ..synced() };
+        EvolvingKey { ease: KeyEase::Step, ..key("scissor", params, c1, 0.7) }
+    };
+    let keys = keys_at(every(0.0, 31.0, 1.0).flat_map(|k| [k, k + 0.125]), &[], look);
+    evolving_cue(CueTag::Drop, "ciseaux croisés", evolving(32.0, true, keys), None)
+}
+
+/// E4, 16 beats, loop: four positions (wide fan high, narrow fans tilted
+/// either way, a V), one per beat lit 0.2 beat; from beat 8 one per half
+/// beat lit 0.15 beat. Colour 1 and colour 2 take turns every bar.
+fn evolving_e4() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_HARD];
+    let look = |b: f32| {
+        let (step, gate) = if b < 8.0 { (1.0, 0.2) } else { (0.5, 0.15) };
+        let lit = b.rem_euclid(step) < gate - 1e-4;
+        let color = if (b / 4.0).floor() as i32 % 2 == 0 { pal.c1 } else { pal.c2 };
+        let params = GenParams { count: 8, a: 0.0, b: 0.3, steps_per_beat: 1.0 / step, ..synced() };
+        EvolvingKey { brightness: if lit { 1.0 } else { 0.0 }, ease: KeyEase::Step, ..key("positions", params, color, 0.7) }
+    };
+    let on_beats = every(0.0, 7.0, 1.0).flat_map(|k| [k, k + 0.2]);
+    let halves = every(8.0, 15.5, 0.5).flat_map(|k| [k, k + 0.15]);
+    let keys = keys_at(on_beats.chain(halves), &[], look);
+    evolving_cue(CueTag::Drop, "coups sur 4 positions", evolving(16.0, true, keys), None)
+}
+
+/// E5, 32 beats, loop: the ceiling (liquid sky v2) comes down from 0.6 to
+/// 0.08 above the horizon, its ripple growing, in a colour 1 → colour 2
+/// gradient whose hue drifts ±15°, breathing over 8 beats (the ceiling's
+/// own breath); on the last half beat it is back up, ready to loop.
+fn evolving_e5() -> (CueTag, String, Settings) {
+    let look = |b: f32| {
+        let b = if b >= 31.5 { 0.0 } else { b };
+        let u = smooth(b / 32.0);
+        let drift = 15.0 * (std::f32::consts::TAU * b / 32.0).sin();
+        let params = GenParams { count: 1, a: 0.01 + 0.02 * u, b: lerp(0.6, 0.08, u), color_mode: ColorMode::Gradient, color2: hue_turn(BLUE, drift), ..synced() };
+        key("ceiling", params, hue_turn(CYAN, drift), 0.8)
+    };
+    let keys = keys_at(every(0.0, 31.0, 1.0).chain([31.5]), &[31.5], look);
+    evolving_cue(CueTag::Break, "plafond qui descend", evolving(32.0, true, keys), None)
+}
+
+/// E6's amber.
+const SUN_AMBER: [u8; 3] = [255, 140, 0];
+
+/// E6, 32 beats, one shot: a 16-ray sun over the horizon, its rays coming
+/// in by pairs (one pair a beat, all 16 by beat 8); from beat 16 it turns
+/// 1/64 of a turn a beat and its odd and even rays take turns at 100 % and
+/// 40 %. Amber to white along the rays, all white by beat 31.
+fn evolving_e6() -> (CueTag, String, Settings) {
+    let look = |b: f32| {
+        let count = if b < 8.0 { 2 * (b.floor() as u32 + 1) } else { 16 };
+        let (a, odd_even) = if b < 16.0 { (0.0, 0.0) } else { (spin_at((b - 16.0) / 64.0, b), 1.0) };
+        let params = GenParams { count, a, b: odd_even, color_mode: ColorMode::Gradient, color2: WHITE, ..synced() };
+        key("sunburst", params, mix(SUN_AMBER, WHITE, smooth((b - 16.0) / 15.0)), 0.85)
+    };
+    let keys = keys_at(every(0.0, 32.0, 1.0), &[16.0], look);
+    evolving_cue(CueTag::Intro, "lever de soleil", evolving(32.0, false, keys), None)
+}
+
+/// E7, 32 beats, one shot: a bouncing chase of 8 beams with a 2-beam tail
+/// in colour 2, a step every 1, 1/2, 1/4 then 1/8 beat; from beat 28 the
+/// whole fan strobes at 1/4 beat (3.5 beats: a burst well under the
+/// limiter's 5 s), then half a beat of black.
+fn evolving_e7() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_GREEN_BLUE];
+    let chase = |at_beats: f32, steps: f32| {
+        let params = GenParams { count: 8, a: 2.0, b: 2.0, steps_per_beat: steps, color_mode: ColorMode::Alternate, color2: pal.c2, ..synced() };
+        EvolvingKey { at_beats, ease: KeyEase::Step, ..key("chase_fan", params, pal.c1, 0.7) }
+    };
+    // The chase's own line: 8 beams at its height, all lit.
+    let fan = |at_beats: f32, brightness: f32| {
+        let params = GenParams { count: 8, a: 0.0, b: crate::chases::CHASE_HEIGHT - crate::fans::HORIZON, color2: pal.c2, ..synced() };
+        EvolvingKey { at_beats, brightness, strobe_div: 4.0, ease: KeyEase::Step, ..key("fan", params, pal.c1, 0.7) }
+    };
+    let launch = EvolvingKey { params: GenParams { a: LAUNCH_SHAPE, ..chase(0.0, 1.0).params }, ..chase(0.0, 1.0) };
+    let keys = vec![launch, chase(JUMP, 1.0), chase(8.0, 2.0), chase(16.0, 4.0), chase(24.0, 8.0), fan(28.0, 1.0), fan(31.5, 0.0)];
+    evolving_cue(CueTag::Build, "chaser qui accélère", evolving(32.0, false, keys), None)
+}
+
+/// E8's radius pump: +25 % on the kick, back over half a beat.
+const E8_PUMP: f32 = 1.25;
+
+/// E8, 32 beats, loop: a 12-beam finger tunnel turning 1/4 turn a beat,
+/// the other way every 8 beats through half a beat of easing, its odd and
+/// even beams in colours 1 and 2, swapped on every turn-around. The pump
+/// on every kick is the cue's own size curve, kept centred on the tunnel
+/// by a matching `pos_y` curve.
+fn evolving_e8() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_AFTERLIFE];
+    let look = |b: f32| {
+        let swapped = (b / 8.0).floor() as i32 % 2 == 1;
+        let (c1, c2) = if swapped { (pal.c2, pal.c1) } else { (pal.c1, pal.c2) };
+        let params = GenParams { count: 12, a: spin_at(turns(b, e8_omega), b), color_mode: ColorMode::Alternate, color2: c2, ..synced() };
+        key("finger_tunnel", params, c1, 0.3)
+    };
+    let turnarounds = [8.0f32, 16.0, 24.0].into_iter().flat_map(|c| [c - 0.25, c - 0.125, c + 0.125, c + 0.25]);
+    let keys = keys_at(every(0.0, 32.0, 1.0).chain(turnarounds).chain([0.125, 0.25, 31.75, 31.875]), &[8.0, 16.0, 24.0, 32.0], look);
+    let pump = |rest: f32, kick: f32| -> Vec<(f32, f32, KeyEase)> {
+        (0..32).flat_map(|k| [(k as f32, kick, KeyEase::EaseOut), (k as f32 + 0.5, rest, KeyEase::Step)]).collect()
+    };
+    let centre = |size: f32| crate::tunnels::TUNNEL_CY * (1.0 - size);
+    let program = CueProgram {
+        play: PlayMode::Loop,
+        lanes: vec![lane("size", &pump(1.0, E8_PUMP)), lane("pos_y", &pump(centre(1.0), centre(E8_PUMP)))],
+        ..CueProgram::default()
+    };
+    evolving_cue(CueTag::Drop, "rayons tournants inversés", evolving(32.0, true, keys), Some(program))
+}
+
+/// E8's rotation in turns per beat: ±1/4, through 0 over the half beat
+/// around every 8th beat (forwards on beats 0 to 8, backwards on 8 to 16…).
+fn e8_omega(b: f32) -> f32 {
+    let c = (b / 8.0).round() * 8.0;
+    let after = if (c / 8.0) as i32 % 2 == 0 { 0.25 } else { -0.25 };
+    let d = b - c;
+    if d.abs() < 0.25 {
+        after * (2.0 * smooth((d + 0.25) / 0.5) - 1.0)
+    } else if d > 0.0 {
+        after
+    } else {
+        -after
+    }
+}
+
+/// E9, 16 beats, loop: a wave through 14 beams, half a wavelength a beat,
+/// its height growing 0.05 → 0.35 over 8 beats; at beat 8 it turns back
+/// and a colour-2 front runs through the beams (a beam every 1/4 beat);
+/// from beat 12 it calms down to 0.05 again for the loop.
+fn evolving_e9() -> (CueTag, String, Settings) {
+    let (c1, c2) = (crate::festival::PALETTES[PAL_SUNSET].c1, crate::festival::PALETTES[PAL_POP].c1);
+    let wave = |at_beats: f32, a: f32, direction: i8, color_mode: ColorMode, steps: f32| {
+        let params = GenParams { count: 14, a, b: 0.4, direction, color_mode, steps_per_beat: steps, color2: c2, ..synced() };
+        EvolvingKey { at_beats, ..key("fan_wave", params, c1, 0.7) }
+    };
+    let keys = vec![
+        wave(0.0, 0.05, 1, ColorMode::Solid, 1.0),
+        wave(8.0, 0.35, -1, ColorMode::ColorChase, 4.0),
+        wave(12.0, 0.35, -1, ColorMode::ColorChase, 4.0),
+    ];
+    evolving_cue(CueTag::Break, "vague", evolving(16.0, true, keys), None)
+}
+
+/// E10, 32 beats, one shot: four curtains (x = ±0.2, ±0.6, from the
+/// horizon to 0.6 above it) come in one every 4 beats, then close in
+/// towards the centre, lit half of every beat, and merge into one line at
+/// beat 31. They come in through the cue's « Points visibles » curve, in
+/// the curtains' drawing order (left to right).
+fn evolving_e10() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_ICE];
+    let look = |b: f32| {
+        let closing = b >= 16.0;
+        let squeeze = if closing { 1.0 - 0.5 * smooth((b - 16.0) / 16.0) } else { 1.0 };
+        let params = GenParams { count: if b >= 31.0 { 1 } else { 4 }, a: 0.0, b: 0.0, ..synced() };
+        EvolvingKey {
+            gate_beats: if closing { 0.5 } else { 0.0 },
+            ease: if closing { KeyEase::Linear } else { KeyEase::Step },
+            ..key("curtain", params, pal.c1, E10_SIZE * squeeze)
+        }
+    };
+    let keys = keys_at(std::iter::once(0.0).chain(every(16.0, 31.0, 1.0)), &[16.0], look);
+    use KeyEase::Step;
+    let program = CueProgram {
+        play: PlayMode::Once,
+        lanes: vec![lane("trace", &[(0.0, 0.25, Step), (4.0, 0.5, Step), (8.0, 0.75, Step), (12.0, 1.0, Step)])],
+        ..CueProgram::default()
+    };
+    evolving_cue(CueTag::Intro, "couloir de rideaux", evolving(32.0, false, keys), Some(program))
+}
+
+/// E10's size: four curtains 0.4 apart, at x = ±0.2 and ±0.6.
+const E10_SIZE: f32 = 0.8;
+
+/// E11's meeting point, above the horizon.
+const E11_POINT: f32 = 0.3;
+/// E11's bundle size at its tightest.
+const E11_TIGHT: f32 = 0.05;
+
+/// E11, 16 beats, one shot: a starry sky that thickens (3 → 12 stars; the
+/// starfield draws 4 at least, for the static-beam guard) and quickens (a
+/// new sky every beat → every 1/4 beat) over 12 beats; then its stars
+/// close in on one point (the cue's size and `pos_y` curves), one hot
+/// white beam for half a beat, and black.
+fn evolving_e11() -> (CueTag, String, Settings) {
+    let look = |b: f32| {
+        let u = (b / 12.0).clamp(0.0, 1.0);
+        let params = GenParams { count: lerp(3.0, 12.0, u).round() as u32, a: 0.0, b: 0.1, steps_per_beat: 1.0 / lerp(1.0, 0.25, u), ..synced() };
+        EvolvingKey { ease: KeyEase::Step, ..key("starfield", params, WHITE, 0.7) }
+    };
+    let mut keys = keys_at(every(0.0, 14.0, 1.0), &[], look);
+    let hot = |at_beats: f32, brightness: f32| {
+        let params = GenParams { count: 1, a: 0.0, b: crate::crossings::HOT_DEFAULT_CAP, period_beats: 16.0, ..synced() };
+        EvolvingKey { at_beats, brightness, ease: KeyEase::Step, ..key("hot_beam", params, WHITE, 0.7) }
+    };
+    keys.extend([hot(15.0, 1.0), hot(15.5, 0.0)]);
+    // Positions → (0, E11_POINT): size s about the origin, then up by
+    // E11_POINT × (1 - s), both linear over the same beats.
+    use KeyEase::{Linear, Step};
+    let tight = 15.0 - JUMP;
+    let program = CueProgram {
+        play: PlayMode::Once,
+        lanes: vec![
+            lane("size", &[(12.0, 1.0, Linear), (tight, E11_TIGHT, Step), (15.0, 1.0, Step)]),
+            lane("pos_y", &[(12.0, 0.0, Linear), (tight, E11_POINT * (1.0 - E11_TIGHT), Step), (15.0, 0.0, Step)]),
+        ],
+        ..CueProgram::default()
+    };
+    evolving_cue(CueTag::Build, "étoiles puis éclatement", evolving(16.0, false, keys), Some(program))
+}
+
+/// E12, 32 beats, one shot: a grid of 5 + 5 lines in the upper field,
+/// revealed a line a beat (rows and columns in turn), tightening to 0.4 of
+/// its size from beat 16 to 28 as it scrolls a line a beat, strobing at
+/// 1/4 beat for the last bar (a 4-beat burst, under the limiter's 5 s),
+/// then a single ceiling.
+fn evolving_e12() -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[PAL_GREEN];
+    let grid = |at_beats: f32, lines: u32, scale: f32, strobe_div: f32, ease: KeyEase| {
+        let params = GenParams { count: lines.div_ceil(2).max(1), a: (lines / 2) as f32, b: 0.1, ..synced() };
+        EvolvingKey { at_beats, strobe_div, ease, ..key("grid", params, pal.c1, scale) }
+    };
+    let mut keys: Vec<EvolvingKey> = (0..10).map(|k| grid(k as f32, k + 1, E12_SIZE, 0.0, KeyEase::Step)).collect();
+    keys.push(grid(16.0, 10, E12_SIZE, 0.0, KeyEase::Linear));
+    keys.push(grid(28.0, 10, E12_SIZE * 0.4, 4.0, KeyEase::Step));
+    let sheet = GenParams { count: 1, a: 0.01, b: 0.3, ..synced() };
+    keys.push(EvolvingKey { at_beats: 32.0, ease: KeyEase::Step, ..key("ceiling", sheet, pal.c1, 0.8) });
+    evolving_cue(CueTag::Build, "grille qui se resserre", evolving(32.0, false, keys), None)
+}
+
+/// E12's grid size before it tightens.
+const E12_SIZE: f32 = 0.7;
 
 fn slug(category: &str) -> String {
     category
@@ -858,6 +1319,8 @@ mod tests {
 
     /// The T-108 graphics, after those.
     const GRAPHIC_CUES: usize = 12;
+    /// The T-112 to T-123 « Festival évolutifs » page, after those.
+    const EVOLVING_CUES: usize = 12;
 
     fn festival() -> Vec<Preset> {
         catalog().into_iter().skip(LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES).take(FESTIVAL_CUES).collect()
@@ -881,7 +1344,7 @@ mod tests {
         assert!(new.len() <= crate::controls::GRID_ROWS * crate::controls::GRID_COLS);
         // Only they are tagged, and every one is.
         assert!(new.iter().all(|p| p.tag.is_some()));
-        assert!(all.iter().filter(|p| p.category != FESTIVAL).all(|p| p.tag.is_none()));
+        assert!(all.iter().filter(|p| p.category != FESTIVAL && p.category != EVOLVING).all(|p| p.tag.is_none()));
         for tag in [CueTag::Intro, CueTag::Groove, CueTag::Break, CueTag::Build, CueTag::Drop] {
             assert!(new.iter().any(|p| p.tag == Some(tag)), "a {tag:?} cue");
         }
@@ -961,8 +1424,8 @@ mod tests {
     fn graphic_cues_are_appended_with_room_on_their_pages() {
         let all = catalog();
         let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES + FESTIVAL_CUES;
-        assert_eq!(all.len(), start + GRAPHIC_CUES, "appended last");
-        let new = &all[start..];
+        assert_eq!(all.len(), start + GRAPHIC_CUES + EVOLVING_CUES, "appended before the evolving cues");
+        let new = &all[start..start + GRAPHIC_CUES];
         assert_eq!((new[0].id.as_str(), new[6].id.as_str()), ("texte-horloge-022", "geometrie-013"));
         for p in new {
             let (g, params) = generator_of(p);
@@ -1094,6 +1557,385 @@ mod tests {
         assert!(new.iter().all(|p| p.settings.strobe_div <= 2.0) && new.iter().any(|p| p.settings.strobe_div > 0.0));
         // Older cues have no rhythm.
         assert!(all[..LEGACY_CUES].iter().all(|p| p.settings.gate == GateMode::Off && p.settings.strobe_div == 0.0));
+    }
+
+    /// The « Festival évolutifs » cues, E1 to E12.
+    fn evolving_page() -> Vec<Preset> {
+        catalog().into_iter().filter(|p| p.category == EVOLVING).collect()
+    }
+
+    /// Evolving cue E`n` (1-based): its keys and its program.
+    fn evo(n: usize) -> (EvolvingCue, Option<CueProgram>) {
+        let p = &evolving_page()[n - 1];
+        match &p.settings.content {
+            Content::Evolving(cue) => (cue.clone(), p.settings.program.clone()),
+            _ => panic!("{} is not an evolving cue", p.id),
+        }
+    }
+
+    fn at(cue: &EvolvingCue, b: f64) -> crate::evolving::Sample {
+        cue.sample(cue.local(b)).unwrap()
+    }
+
+    /// The program's modifiers of E`n` at beat `b`.
+    fn mods(n: usize, b: f64) -> crate::program::Mods {
+        let (cue, program) = evo(n);
+        let program = program.unwrap();
+        program.modifiers(b, program.length(&Content::Evolving(cue)), 128.0).unwrap()
+    }
+
+    /// One frame of E`n` at beat `b` of the cue (launched on beat 0).
+    fn frame_of(n: usize, b: f64, bpm: f64) -> Vec<crate::patterns::Point> {
+        let s = evolving_page()[n - 1].settings.clone();
+        Animator::starting_at(0.0).render(&s, AudioFeatures::default(), 0.0, &BeatClock { beat: b, bpm, beats_per_bar: 4 })
+    }
+
+    /// Lit places of a frame, rounded to `grid` (a beam is many points).
+    fn lit_places(points: &[crate::patterns::Point], grid: f32) -> Vec<(i32, i32)> {
+        let mut places: Vec<(i32, i32)> = points.iter().filter(|q| q.is_lit()).map(|q| ((q.x / grid).round() as i32, (q.y / grid).round() as i32)).collect();
+        places.sort();
+        places.dedup();
+        places
+    }
+
+    /// Distinct lit x of a frame, rounded to `grid`.
+    fn lit_xs(points: &[crate::patterns::Point], grid: f32) -> Vec<i32> {
+        let mut xs: Vec<i32> = points.iter().filter(|q| q.is_lit()).map(|q| (q.x / grid).round() as i32).collect();
+        xs.sort();
+        xs.dedup();
+        xs
+    }
+
+    #[test]
+    fn evolving_cues_are_appended_on_their_own_page() {
+        let all = catalog();
+        let new = &all[all.len() - EVOLVING_CUES..];
+        assert!(new.iter().all(|p| p.category == EVOLVING && p.tag.is_some()));
+        assert_eq!((new[0].id.as_str(), new[11].id.as_str()), ("festival-evolutifs-001", "festival-evolutifs-012"));
+        assert!(new.len() <= crate::controls::GRID_ROWS * crate::controls::GRID_COLS, "one grid page");
+        // E1 to E12: length in beats and loop, as specified.
+        let spec = [(16.0, false), (32.0, false), (32.0, true), (16.0, true), (32.0, true), (32.0, false), (32.0, false), (32.0, true), (16.0, true), (32.0, false), (16.0, false), (32.0, false)];
+        let names: HashSet<&str> = all.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names.len(), all.len(), "every cue name is unique (the examples find cues by name)");
+        for (p, (len, looped)) in new.iter().zip(spec) {
+            let Content::Evolving(cue) = &p.settings.content else { panic!("{} is not an evolving cue", p.id) };
+            assert_eq!((cue.length_beats, cue.looped), (len, looped), "{}", p.name);
+            assert!(p.name.ends_with(&format!(" · {len} temps")), "{} says its length", p.name);
+            let word = match p.tag.unwrap() {
+                CueTag::Intro => "Intro",
+                CueTag::Groove => "Groove",
+                CueTag::Break => "Break",
+                CueTag::Build => "Montée",
+                CueTag::Drop => "Drop",
+            };
+            assert!(p.name.starts_with(&format!("{word} – ")), "{}", p.name);
+            // Keys only ever name known generators; a program is valid and plays like its cue.
+            assert!(cue.keys.iter().all(|k| crate::generators::GENERATOR_NAMES.contains(&k.generator.as_str())), "{}", p.name);
+            if let Some(program) = &p.settings.program {
+                program.validate().unwrap();
+                assert_eq!(program.length(&p.settings.content), len as f64);
+                assert_eq!(program.play == PlayMode::Loop, looped, "{}", p.name);
+            }
+        }
+        for tag in [CueTag::Intro, CueTag::Break, CueTag::Build, CueTag::Drop] {
+            assert!(new.iter().any(|p| p.tag == Some(tag)), "a {tag:?} cue");
+        }
+    }
+
+    /// Every evolving cue over its whole length (and a bit after), every
+    /// 1/4 beat, at 120 and 150 BPM: a frame on every step, within the
+    /// point budget with the optimiser, above the horizon, lit at some
+    /// point; and the same frames at both tempos (E11's stars and hot beam
+    /// live a time in seconds, for the static-beam guard: not them).
+    #[test]
+    fn every_evolving_cue_plays_in_beats_above_the_horizon_and_within_budget() {
+        let on = crate::optimize::OptimizeParams { enabled: true, ..Default::default() };
+        for (n, p) in evolving_page().iter().enumerate() {
+            let Content::Evolving(cue) = &p.settings.content else { unreachable!() };
+            let steps = (cue.length() * 4.0) as usize + 8;
+            let play = |bpm: f64| {
+                let mut a = Animator::starting_at(0.0);
+                a.set_optimizer(&on);
+                (0..=steps)
+                    .map(|i| {
+                        let clock = BeatClock { beat: i as f64 / 4.0, bpm, beats_per_bar: 4 };
+                        a.render(&p.settings, AudioFeatures::default(), if i == 0 { 0.0 } else { (15.0 / bpm) as f32 }, &clock)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (slow, fast) = (play(120.0), play(150.0));
+            let mut lit = 0;
+            for (i, f) in slow.iter().enumerate() {
+                assert!(!f.is_empty() && f.len() <= 1000, "{} at beat {}: {} points", p.name, i as f64 / 4.0, f.len());
+                for q in f.iter().filter(|q| q.is_lit()) {
+                    assert!(q.y >= crate::fans::HORIZON - 1e-3 && q.x.abs() <= 1.0, "{} draws at ({}, {}) at beat {}", p.name, q.x, q.y, i as f64 / 4.0);
+                    lit += 1;
+                }
+            }
+            assert!(lit > 0, "{} is dark", p.name);
+            if n + 1 != 11 {
+                assert_eq!(slow, fast, "{} plays in beats, whatever the tempo", p.name);
+            }
+        }
+    }
+
+    /// Strobes faster than 1/2 beat (over 4 Hz at 128 BPM) only come in
+    /// bursts shorter than the limiter's 5 s, and never faster than 1/4 beat.
+    #[test]
+    fn evolving_strobes_stay_short_bursts() {
+        let max_burst_beats = crate::safety::DEFAULT_BURST_S as f64 * 128.0 / 60.0;
+        for (n, p) in evolving_page().iter().enumerate() {
+            let (cue, program) = evo(n + 1);
+            let len = cue.length();
+            let (mut run, mut longest, mut strobed) = (0.0, 0.0f64, false);
+            for i in 0..(len * 16.0) as usize {
+                let b = i as f64 / 16.0;
+                let key = at(&cue, b).strobe_div;
+                let lane = program.as_ref().and_then(|pr| pr.modifiers(b, len, 128.0)).map_or(0.0, |m| m.strobe_div);
+                let div = key.max(lane);
+                assert!(div <= 4.0, "{}: {div} flashes a beat", p.name);
+                strobed |= div > 0.0;
+                run = if div > 2.0 { run + 1.0 / 16.0 } else { 0.0 };
+                longest = longest.max(run);
+            }
+            assert!(longest <= max_burst_beats, "{}: {longest} beats of fast strobe", p.name);
+            if [2, 7, 12].contains(&(n + 1)) {
+                assert!(strobed && longest >= 1.0, "{} has its strobe", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn e1_fan_rises_widens_speeds_up_and_whitens() {
+        let (cue, _) = evo(1);
+        assert!((at(&cue, 0.0).scale - 0.15).abs() < 0.01 && (at(&cue, 16.0).scale - 0.7).abs() < 0.01);
+        assert!((at(&cue, 8.0).scale - 0.425).abs() < 0.01, "smooth: half way at beat 8");
+        let steps = |b: f64| at(&cue, b).params.steps_per_beat;
+        assert_eq!((steps(4.0), steps(7.9), steps(8.0), steps(11.5), steps(12.0), steps(15.0)), (1.0, 1.0, 2.0, 2.0, 4.0, 4.0));
+        assert_eq!(at(&cue, 0.5).params.a, 7.0, "fill chase");
+        // Held while it waits for its beat: two beams, not a lone one.
+        assert_eq!((at(&cue, 0.0).params.a, at(&cue, 0.02).params.a), (LAUNCH_SHAPE, 7.0));
+        assert_eq!(lit_places(&frame_of(1, 0.0, 120.0), 0.02).len(), 2);
+        let bright = |b: f64| at(&cue, b).brightness;
+        assert_eq!((bright(15.4), bright(15.5), bright(15.9), bright(16.0)), (1.0, 0.0, 0.0, 1.0));
+        assert!(frame_of(1, 15.7, 120.0).iter().all(|q| !q.is_lit()), "half a beat of black");
+        assert_eq!(at(&cue, 4.0).color, crate::festival::PALETTES[PAL_SUNSET].c1, "colour 1 for the first 8 beats");
+        assert!(at(&cue, 16.0).color.iter().all(|&c| c >= 250), "white at the end: {:?}", at(&cue, 16.0).color);
+        // Height above the horizon: 0.05, then ease-in to 0.6.
+        let height = |b: f64| {
+            let ys: Vec<f32> = frame_of(1, b, 120.0).iter().filter(|q| q.is_lit()).map(|q| q.y).collect();
+            ys.iter().sum::<f32>() / ys.len() as f32
+        };
+        assert!((height(0.1) - 0.05).abs() < 0.01, "{}", height(0.1));
+        let want = 0.05 + 0.55 * (15.0f32 / 16.0).powi(2);
+        assert!((height(15.0) - want).abs() < 0.01, "{} vs {want}", height(15.0));
+    }
+
+    #[test]
+    fn e2_tunnel_closes_then_pumps_and_turns_back_every_4_beats() {
+        let (cue, program) = evo(2);
+        let beams = match &program.as_ref().unwrap().layers[0] {
+            Content::Evolving(c) => c.clone(),
+            _ => panic!("a layer of beams"),
+        };
+        assert!(at(&cue, 15.0).scale <= 0.05 && (at(&cue, 0.0).scale - 0.35).abs() < 1e-3);
+        // Beat 16: the drop opens at 0.45 (the pump's peak) in colour 2.
+        let ring: Vec<f32> = frame_of(2, 16.0, 120.0).iter().filter(|q| q.is_lit()).map(|q| q.x.hypot(q.y - crate::tunnels::TUNNEL_CY)).collect();
+        let widest = ring.iter().cloned().fold(0.0, f32::max);
+        assert!((widest - 0.45).abs() < 0.01, "{widest}");
+        assert_eq!(at(&cue, 16.0).color, crate::festival::PALETTES[PAL_ICE].c2);
+        assert_eq!(at(&cue, 15.9).color, crate::festival::PALETTES[PAL_ICE].c1);
+        // The beams' angle (a × beat) turns back on beats 20, 24 and 28.
+        let angle = |b: f64| at(&beams, b).params.a as f64 * b;
+        for (turn, before) in [(20.0, 1.0), (24.0, -1.0), (28.0, 1.0)] {
+            assert!((angle(turn) - angle(turn - 0.5)) * before > 0.05, "beat {turn}");
+            assert!((angle(turn + 0.5) - angle(turn)) * before < -0.05, "beat {turn}");
+        }
+        // It speeds up over the build: 1/32 → 1/4 turn a beat.
+        let speed = |b: f64| (angle(b + 0.5) - angle(b - 0.5)).abs();
+        assert!(speed(1.5) < 0.06 && speed(14.5) > 0.2, "{} {}", speed(1.5), speed(14.5));
+        // Strobe from beat 12 (1/2 beat), 14 (1/4 beat); black from 15.5.
+        assert_eq!((mods(2, 11.0).strobe_div, mods(2, 12.5).strobe_div, mods(2, 14.5).strobe_div), (0.0, 2.0, 4.0));
+        assert_eq!((mods(2, 15.6).live.brightness, mods(2, 16.0).live.brightness), (0.0, 1.0));
+    }
+
+    #[test]
+    fn e3_scissors_double_their_speed_and_flash_white_on_every_beat() {
+        let (cue, _) = evo(3);
+        let period = |b: f64| cue.keys[at(&cue, b).key].params.period_beats;
+        for b in [0.5, 1.5, 3.9, 8.2, 11.0, 16.5, 27.0] {
+            assert_eq!(period(b), 2.0, "beat {b}");
+        }
+        for b in [4.0, 5.5, 7.9, 12.3, 31.5] {
+            assert_eq!(period(b), 1.0, "beat {b}");
+        }
+        for k in 0..32 {
+            let flash = at(&cue, k as f64 + 0.05);
+            assert_eq!((flash.color, flash.params.color2), (WHITE, WHITE), "beat {k}");
+            let after = at(&cue, k as f64 + 0.2);
+            assert_ne!(after.color, after.params.color2, "two groups, two colours");
+        }
+        let colours: HashSet<(u8, u8, u8)> =
+            frame_of(3, 0.5, 120.0).iter().filter(|q| q.is_lit()).map(|q| ((q.r * 255.0) as u8, (q.g * 255.0) as u8, (q.b * 255.0) as u8)).collect();
+        assert_eq!(colours.len(), 2, "{colours:?}");
+    }
+
+    #[test]
+    fn e4_stabs_step_through_four_positions_then_add_the_off_beat() {
+        let (cue, _) = evo(4);
+        let pal = crate::festival::PALETTES[PAL_HARD];
+        let places = |b: f64| lit_places(&frame_of(4, b, 120.0), 0.02);
+        for k in 0..4 {
+            let b = k as f64 + 0.05;
+            assert!(!places(b).is_empty(), "lit on beat {k}");
+            assert_eq!(places(b), places(b + 4.0), "beat {k} and {} show P[{k}]", k + 4);
+            assert_ne!(places(b), places(b + 1.0), "beat {k} and {} differ", k + 1);
+            assert!(places(k as f64 + 0.3).is_empty(), "dark after 0.2 beat");
+        }
+        assert_eq!(cue.keys[at(&cue, 8.0).key].params.steps_per_beat, 2.0);
+        assert!(!places(8.55).is_empty() && places(8.25).is_empty() && places(8.7).is_empty(), "the off-beat, lit 0.15 beat");
+        assert_ne!(places(8.05), places(8.55), "a new position on the off-beat");
+        assert_eq!((at(&cue, 0.05).color, at(&cue, 4.05).color, at(&cue, 8.05).color, at(&cue, 12.6).color), (pal.c1, pal.c2, pal.c1, pal.c2));
+    }
+
+    #[test]
+    fn e5_ceiling_comes_down_and_snaps_back_on_the_last_half_beat() {
+        let (cue, _) = evo(5);
+        let height = |b: f64| at(&cue, b).params.b;
+        assert!((height(0.0) - 0.6).abs() < 1e-4);
+        assert!((height(31.0) - 0.08).abs() < 0.005, "{}", height(31.0));
+        assert!(height(16.0) < height(8.0) && height(24.0) < height(16.0));
+        assert!((height(31.6) - 0.6).abs() < 1e-4 && (height(31.99) - 0.6).abs() < 1e-4, "back up for the loop");
+        assert!(at(&cue, 31.0).params.a > at(&cue, 1.0).params.a, "the ripple grows");
+        assert_eq!(at(&cue, 0.0).params.color_mode, ColorMode::Gradient);
+        assert_ne!(at(&cue, 8.0).color, at(&cue, 24.0).color, "the hue drifts");
+        assert_eq!(at(&cue, 32.0), at(&cue, 0.0), "loops");
+    }
+
+    #[test]
+    fn e6_sun_rays_come_in_by_pairs_then_turn_and_whiten() {
+        let (cue, _) = evo(6);
+        for k in 0..12 {
+            let rays = lit_places(&frame_of(6, k as f64 + 0.5, 120.0), 0.01).len();
+            assert_eq!(rays, (2 * (k + 1)).min(16), "beat {k}");
+        }
+        assert!((0..16).all(|b| at(&cue, b as f64 + 0.5).params.a == 0.0), "no rotation before beat 16");
+        assert!(at(&cue, 20.0).params.a > 0.0);
+        let turned = |b: f64| at(&cue, b).params.a as f64 * b;
+        assert!((turned(24.0) - turned(20.0) - 4.0 / 64.0).abs() < 2e-3, "1/64 turn a beat");
+        assert_eq!(at(&cue, 31.0).color, WHITE);
+        assert_eq!(at(&cue, 2.0).color, SUN_AMBER);
+        assert!(at(&cue, 17.0).params.b >= 0.5 && at(&cue, 15.0).params.b < 0.5, "odd / even from beat 16");
+    }
+
+    #[test]
+    fn e7_chase_speeds_up_then_strobes_then_goes_black() {
+        let (cue, _) = evo(7);
+        let steps = |b: f64| at(&cue, b).params.steps_per_beat;
+        assert_eq!((steps(4.0), steps(12.0), steps(20.0), steps(26.0)), (1.0, 2.0, 4.0, 8.0));
+        assert_eq!((at(&cue, 0.0).params.a, at(&cue, 0.5).params.a), (LAUNCH_SHAPE, 2.0), "held on two beams, then a bounce");
+        assert_eq!(lit_places(&frame_of(7, 0.0, 120.0), 0.02).len(), 2);
+        assert!((0..28).all(|b| at(&cue, b as f64).generator == "chase_fan" && at(&cue, b as f64).strobe_div == 0.0));
+        let strobe = at(&cue, 29.0);
+        assert_eq!((strobe.generator.as_str(), strobe.strobe_div), ("fan", 4.0));
+        assert!(lit_places(&frame_of(7, 29.0, 120.0), 0.02).len() == 8 && frame_of(7, 29.15, 120.0).iter().all(|q| !q.is_lit()));
+        for b in [31.6, 31.9, 40.0] {
+            assert!(frame_of(7, b, 120.0).iter().all(|q| !q.is_lit()), "black at {b}");
+        }
+        // 3.5 beats of 1/4-beat strobe: 1.6 s at 128 BPM.
+        let strobing = (0..32 * 16).filter(|i| {
+            let s = at(&cue, *i as f64 / 16.0);
+            s.strobe_div > 0.0 && s.brightness > 0.0
+        });
+        let beats = strobing.count() as f64 / 16.0;
+        assert_eq!(beats, 3.5);
+        assert!(beats * 60.0 / 128.0 <= crate::safety::DEFAULT_BURST_S as f64);
+    }
+
+    #[test]
+    fn e8_spokes_turn_back_through_zero_and_swap_colours() {
+        let (cue, _) = evo(8);
+        let pal = crate::festival::PALETTES[PAL_AFTERLIFE];
+        let angle = |b: f64| at(&cue, b).params.a as f64 * b;
+        let speed = |b: f64| (angle(b + 0.02) - angle(b - 0.02)) / 0.04;
+        for turn in [8.0, 16.0, 24.0] {
+            assert!(speed(turn).abs() < 0.03, "still at beat {turn}: {}", speed(turn));
+            assert!(speed(turn - 1.0).abs() > 0.2 && speed(turn + 1.0).abs() > 0.2, "beat {turn}");
+            assert!(speed(turn - 1.0) * speed(turn + 1.0) < 0.0, "turned back at {turn}");
+            let (before, after) = (at(&cue, turn - 0.1), at(&cue, turn));
+            assert_eq!((before.color, after.color), (after.params.color2, before.params.color2), "colours swapped at {turn}");
+        }
+        assert_eq!((at(&cue, 1.0).color, at(&cue, 9.0).color), (pal.c1, pal.c2));
+        // The radius pumps: largest just after each beat, back half a beat later.
+        for k in [0.0, 5.0, 17.0] {
+            let (kick, later, rest) = (mods(8, k + 0.01).live.size, mods(8, k + 0.3).live.size, mods(8, k + 0.6).live.size);
+            assert!(kick > 1.2 && kick > later && later > rest && rest == 1.0, "{kick} {later} {rest}");
+            // ... around the tunnel's centre.
+            let pos = mods(8, k + 0.01).live.pos_y;
+            assert!((crate::tunnels::TUNNEL_CY * kick + pos - crate::tunnels::TUNNEL_CY).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn e9_wave_grows_turns_back_with_a_colour_chase_and_loops_smoothly() {
+        let (cue, _) = evo(9);
+        let s = |b: f64| at(&cue, b);
+        assert!((s(8.0).params.a - 0.35).abs() < 1e-4 && (s(4.0).params.a - 0.2).abs() < 1e-4);
+        assert_eq!((s(7.9).params.direction, s(8.0).params.direction), (1, -1));
+        assert_eq!((s(7.9).params.color_mode, s(8.0).params.color_mode, s(15.0).params.color_mode), (ColorMode::Solid, ColorMode::ColorChase, ColorMode::ColorChase));
+        assert_eq!(s(9.0).params.steps_per_beat, 4.0, "the front moves a beam every 1/4 beat");
+        assert!((s(10.0).params.a - 0.35).abs() < 1e-4, "held to beat 12");
+        assert!((s(15.999).params.a - 0.05).abs() < 1e-3 && (s(16.0).params.a - 0.05).abs() < 1e-6, "back to 0.05 for the loop");
+    }
+
+    #[test]
+    fn e10_curtains_come_in_then_close_in_to_one_line() {
+        let (cue, _) = evo(10);
+        let curtains = |b: f64| lit_xs(&frame_of(10, b, 120.0), 0.1);
+        assert_eq!(curtains(0.5), [-6]);
+        assert_eq!(curtains(4.5), [-6, -2]);
+        assert_eq!(curtains(12.5), [-6, -2, 2, 6]);
+        assert!(curtains(20.25).len() == 4 && curtains(20.75).is_empty(), "lit half of every beat");
+        let width = |b: f64| at(&cue, b).scale;
+        assert!(width(16.0) > width(20.0) && width(20.0) > width(28.0), "closing in");
+        assert_eq!(at(&cue, 31.0).params.count, 1);
+        assert_eq!(curtains(31.1), [0], "one centre line");
+    }
+
+    #[test]
+    fn e11_stars_thicken_quicken_close_in_then_one_beam_then_black() {
+        let (cue, _) = evo(11);
+        let s = |b: f64| at(&cue, b);
+        assert_eq!((s(0.0).params.count, s(12.0).params.count), (3, 12));
+        assert_eq!((s(0.0).params.steps_per_beat, s(12.0).params.steps_per_beat), (1.0, 4.0));
+        let stars = |b: f64| lit_places(&frame_of(11, b, 120.0), 0.002).len();
+        assert!(stars(0.5) >= crate::textures::STAR_MIN, "the starfield's floor");
+        assert_eq!(frame_of(11, 6.3, 120.0), frame_of(11, 6.3, 120.0), "the same sky for the same beat");
+        // Beats 12 to 15: closing in on (0, 0.3).
+        let spread = |b: f64| {
+            let f = frame_of(11, b, 120.0);
+            f.iter().filter(|q| q.is_lit()).map(|q| q.x.hypot(q.y - E11_POINT)).fold(0.0, f32::max)
+        };
+        assert!(spread(14.9) < 0.06 && spread(14.9) < spread(13.0) && spread(13.0) < spread(11.0), "{} {} {}", spread(11.0), spread(13.0), spread(14.9));
+        assert_eq!(s(15.2).generator, "hot_beam");
+        assert!(stars(15.2) >= 1 && frame_of(11, 15.2, 120.0).iter().filter(|q| q.is_lit()).all(|q| q.r == q.g && q.g == q.b), "one white beam");
+        for b in [15.6, 15.9, 20.0] {
+            assert!(frame_of(11, b, 120.0).iter().all(|q| !q.is_lit()), "black at {b}");
+        }
+    }
+
+    #[test]
+    fn e12_grid_is_revealed_tightens_strobes_then_becomes_a_ceiling() {
+        let (cue, _) = evo(12);
+        let lines = |b: f64| {
+            let p = at(&cue, b).params;
+            p.count + p.a.round() as u32
+        };
+        assert_eq!((lines(0.0), lines(0.9), lines(1.0), lines(4.5), lines(9.0), lines(15.0)), (1, 1, 2, 5, 10, 10));
+        assert!((at(&cue, 28.0).scale / at(&cue, 16.0).scale - 0.4).abs() < 1e-4);
+        assert!((at(&cue, 22.0).scale / at(&cue, 16.0).scale - 0.7).abs() < 1e-4);
+        assert_eq!((at(&cue, 27.9).strobe_div, at(&cue, 28.0).strobe_div, at(&cue, 31.9).strobe_div), (0.0, 4.0, 4.0));
+        assert_eq!((at(&cue, 32.0).generator.as_str(), at(&cue, 40.0).generator.as_str(), at(&cue, 32.0).strobe_div), ("ceiling", "ceiling", 0.0));
     }
 
     const GOLDEN_FRAMES: u64 = 5_542_766_730_402_865_477;
