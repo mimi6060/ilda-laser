@@ -302,6 +302,12 @@ impl ControlRegistry {
         // « Tout arrêter » (T-423): unprotected cues, the timeline and the
         // playlist. Never the arm state, the modulators or the masters.
         add("running.stop_all".into(), "Tout arrêter".into(), "running", ControlKind::Trigger, true);
+        // The loaded cue list (T-410): playback only, so controllers may
+        // drive it; none of them arms, and Go waits for an e-stop reset.
+        add("list.go".into(), "Liste de cues : Go".into(), "list", ControlKind::Trigger, true);
+        add("list.back".into(), "Liste de cues : Retour".into(), "list", ControlKind::Trigger, true);
+        add("list.pause".into(), "Liste de cues : Pause".into(), "list", ControlKind::Trigger, true);
+        add("list.top".into(), "Liste de cues : Début".into(), "list", ControlKind::Trigger, true);
 
         for n in 1..=LAYER_COUNT {
             add(format!("layer.{n}.dimmer"), format!("Gradateur calque {n}"), "layer", cont(0.0, 1.0, 1.0, Unit::Percent), true);
@@ -532,6 +538,10 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         }
         "cue.stop_all" => stop_cues(s),
         "running.stop_all" => stop_running(s),
+        "list.go" => crate::cuelist::go(s, source).map_err(ControlError::Refused)?,
+        "list.back" => crate::cuelist::back(s, source).map_err(ControlError::Refused)?,
+        "list.pause" => crate::cuelist::pause(s, source).map_err(ControlError::Refused)?,
+        "list.top" => crate::cuelist::top(s, source).map_err(ControlError::Refused)?,
         "cue.transition" => {
             s.deck.transition.kind = TRANSITION_KINDS[choice_index(&desc.kind, input)];
             s.deck.save();
@@ -751,7 +761,7 @@ pub fn pad_cell(grid: &CueGrid, page: usize, slot: usize) -> Option<String> {
 /// A cue's look as it starts: the preset, but with the operator's
 /// brightness, and the operator's music settings unless the cue is built
 /// around the music.
-fn cue_settings(s: &Shared, id: &str) -> Option<Settings> {
+pub(crate) fn cue_settings(s: &Shared, id: &str) -> Option<Settings> {
     let mut settings = s.deck.with_program(id, s.presets.iter().find(|p| p.id == id)?.settings.clone());
     settings.brightness = s.settings.brightness;
     if !settings.audio.enabled {
@@ -908,13 +918,14 @@ pub fn stop_cues(s: &mut Shared) {
     with_deck(s, |d, _| d.stop_unprotected());
 }
 
-/// « Tout arrêter » (`running.stop_all`): unprotected cues, the timeline
-/// and the playlist. Leaves the arm state, the modulators, the audio links
-/// and the masters alone.
+/// « Tout arrêter » (`running.stop_all`): unprotected cues, the timeline,
+/// the playlist and the cue list (back to *Début*, T-410). Leaves the arm
+/// state, the modulators, the audio links and the masters alone.
 pub fn stop_running(s: &mut Shared) {
     stop_cues(s);
     s.timeline.stop();
     s.playlist = None;
+    s.cue_list.top();
 }
 
 /// Run a change on the deck, keeping `Shared::settings` the live look of
@@ -1561,5 +1572,37 @@ mod tests {
         if docs.is_dir() {
             std::fs::write(docs.join("controls.md"), md).unwrap();
         }
+    }
+
+    /// T-410: the cue list's four controls, external triggers that drive
+    /// the loaded list from a controller and never arm.
+    #[test]
+    fn list_controls_drive_the_cue_list_and_never_arm() {
+        use crate::cuelist::{CueList, Step, StepSource};
+        let mut s = shared();
+        for id in ["list.go", "list.back", "list.pause", "list.top"] {
+            let d = s.controls.get(id).unwrap_or_else(|| panic!("{id} registered"));
+            assert!(d.external && d.kind == ControlKind::Trigger, "{id}");
+        }
+        assert!(matches!(apply(&mut s, "list.go", ControlInput::Value(1.0), true), Err(ControlError::Refused(_))), "no list loaded");
+        let cue = |i: usize| Step { source: StepSource::Cue { id: s.presets[i].id.clone() }, ..Step::default() };
+        let list = CueList { name: "A".into(), steps: vec![cue(0), cue(1)], ..CueList::default() };
+        crate::cuelist::save(&mut s, list).unwrap();
+        crate::cuelist::load(&mut s, "A").unwrap();
+        apply(&mut s, "list.go", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "list.go", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.cue_list.index, Some(1));
+        assert_eq!(s.cue_list.source, ControlSource::Midi);
+        apply(&mut s, "list.back", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.cue_list.index, Some(0));
+        apply(&mut s, "list.pause", ControlInput::Value(1.0), true).unwrap();
+        assert!(s.cue_list.paused);
+        apply(&mut s, "list.top", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!((s.cue_list.index, s.cue_list.paused), (None, false));
+        assert!(!s.gate.is_armed());
+        // « Tout arrêter » takes the list back to Début too.
+        apply(&mut s, "list.go", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "running.stop_all", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.cue_list.index, None);
     }
 }

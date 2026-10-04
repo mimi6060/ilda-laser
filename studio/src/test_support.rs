@@ -54,6 +54,8 @@ pub fn shared() -> Shared {
         active_cue: None,
         settings_rev: 0,
         deck: cues::CueDeck::default(),
+        cue_lists: crate::cuelist::CueListStore::in_memory(),
+        cue_list: Default::default(),
         grid,
         look_on: true,
         tempo: tempo::TempoClock::default(),

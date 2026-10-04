@@ -45,6 +45,12 @@
 //!     included), the automation is off whenever the e-stop is latched,
 //!     and no rule acts in a frame that starts with the stop latched or
 //!     the switch off.
+//! 13. cue lists (T-410): a random list (every trigger, fades, morphs,
+//!     split timing, fired controls) driven by Go / Retour / Aller à /
+//!     Pause / Début and the `list.*` controls renders through the same
+//!     chain (1-12 hold with it), never arms, is paused by the e-stop and
+//!     never moves on by itself while paused; a fade from black never
+//!     shows intermediate geometry (`a_cue_list_fade_from_black_*`).
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst; and the ShowNET SD card over Art-Net
@@ -449,6 +455,49 @@ fn random_program(s: &Shared, rng: &mut Rng) -> program::CueProgram {
         lanes,
         lfos,
     }
+}
+
+/// A cue list of 1 to 8 random steps (T-410): every source, trigger,
+/// transition, split timing and a fired control now and then.
+fn random_cue_list(s: &Shared, rng: &mut Rng) -> crate::cuelist::CueList {
+    use crate::cuelist::{CueList, SplitTiming, Step, StepAction, StepSource, StepTrigger};
+    let fireable: Vec<String> = s
+        .controls
+        .list()
+        .iter()
+        .filter(|d| d.external && !d.id.starts_with("list.") && d.id != "safety.estop" && d.id != "transport.blackout")
+        .map(|d| d.id.clone())
+        .collect();
+    let steps = (0..1 + rng.below(8))
+        .map(|_| {
+            let source = match rng.below(4) {
+                0 => StepSource::Black,
+                _ => StepSource::Cue { id: random_preset(s, rng).0 },
+            };
+            let trigger = match rng.below(6) {
+                0 | 1 => StepTrigger::Go,
+                2 => StepTrigger::After { s: rng.range(0.0, 2.0) },
+                3 => StepTrigger::Follow,
+                4 => StepTrigger::Beats { n: 1 + rng.below(4) as u32 },
+                _ => StepTrigger::Audio { event: rng.pick(&crate::engine::AUDIO_EVENTS).to_string() },
+            };
+            let split = rng.chance(0.3).then(|| SplitTiming { geometry_s: rng.range(0.0, 2.0), color_s: rng.range(0.0, 3.0), brightness_s: rng.range(0.0, 2.0) });
+            let fire = rng.chance(0.1).then(|| StepAction { control: rng.pick(&fireable).clone(), value: rng.range(-1.0, 2.0) });
+            Step {
+                source,
+                trigger,
+                delay_s: if rng.chance(0.2) { rng.range(0.0, 1.0) } else { 0.0 },
+                fade_in_s: rng.range(0.0, 2.0),
+                fade_out_s: rng.range(0.0, 2.0),
+                transition: *rng.pick(&TRANSITION_KINDS),
+                split,
+                keep_color: rng.chance(0.2),
+                fire,
+                ..Step::default()
+            }
+        })
+        .collect();
+    CueList { name: "fuzz".into(), layer: 1 + rng.below(crate::layers::LAYER_COUNT) as u8, wrap: rng.chance(0.5), steps }
 }
 
 fn random_preset(s: &Shared, rng: &mut Rng) -> (String, Settings) {
@@ -952,8 +1001,48 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         crate::audio::triggers::set_config(&mut s, cfg).map_err(|e| format!("setup: triggers refused: {e:#}"))?;
         let _ = crate::audio::triggers::set_enabled(&mut s, grng.chance(0.8), ArmSource::Ui);
     }
+    // A cue list (T-410), from its own stream: loaded, driven now and then.
+    let mut lrng = Rng::new(seed ^ 0x0410_0410);
+    let lists = lrng.chance(0.5);
+    if lists {
+        let mut s = rig.s();
+        let list = random_cue_list(&s, &mut lrng);
+        crate::cuelist::save(&mut s, list).map_err(|e| format!("setup: cue list refused: {e:#}"))?;
+        crate::cuelist::load(&mut s, "fuzz").map_err(|e| format!("setup: {e}"))?;
+    }
     let mut beats = 0;
     for frame in 0..frames {
+        if lists && lrng.chance(0.08) {
+            let mut s = rig.s();
+            let src = *lrng.pick(&[controls::ControlSource::Ui, controls::ControlSource::Midi, controls::ControlSource::Keyboard]);
+            let was_paused = s.cue_list.paused;
+            let estop = s.estop.is_latched();
+            let _ = match lrng.below(5) {
+                0 | 1 => crate::cuelist::go(&mut s, src),
+                2 => crate::cuelist::back(&mut s, src),
+                3 => crate::cuelist::pause(&mut s, src),
+                _ => {
+                    let n = lrng.below(8);
+                    crate::cuelist::goto(&mut s, n, src)
+                }
+            };
+            if estop && was_paused && !s.cue_list.paused {
+                return Err(format!("frame {frame}: the cue list resumed while the e-stop is latched"));
+            }
+        }
+        if lists {
+            let s = rig.s();
+            if s.estop.is_latched() && s.cue_list.is_active() && !s.cue_list.paused {
+                // The engine pauses it at the top of the next frame; it must
+                // never stay running across one.
+                drop(s);
+                rig.tick();
+                let s = rig.s();
+                if s.estop.is_latched() && s.cue_list.is_active() && !s.cue_list.paused {
+                    return Err(format!("frame {frame}: the cue list keeps running with the e-stop latched"));
+                }
+            }
+        }
         if grng.chance(0.1) {
             let mut s = rig.s();
             let on = grng.chance(0.7);
@@ -1903,4 +1992,59 @@ fn the_estop_cuts_every_transition_and_waiting_launch() {
     let s = rig.s();
     assert!(!s.deck.active.iter().any(|a| a.cue == ids[2]), "the dropped launch never starts");
     assert!(!s.gate.is_armed(), "the reset doesn't re-arm");
+}
+
+/// T-410, through the real engine: a cue list step coming from black with
+/// a morph (the black rule makes it a fade) never shows a point that is
+/// not on its final geometry, frame after frame; the e-stop pauses the
+/// list and it doesn't start again by itself.
+#[test]
+fn a_cue_list_fade_from_black_never_shows_intermediate_geometry() {
+    use crate::cuelist::{CueList, Step, StepSource, StepTrigger};
+    let mut s = test_support::shared();
+    // A still look: a circle, no rotation, no music.
+    let look = Settings { brightness: 1.0, ..Settings::default() };
+    s.scenes.replace_in_memory(vec![crate::scenes::Scene { name: "rond".into(), settings: look, duration_secs: 8.0 }]);
+    let morph = |source: StepSource, trigger: StepTrigger| Step { source, trigger, transition: TransitionKind::Morph, fade_in_s: 1.0, fade_out_s: 1.0, ..Step::default() };
+    let list = CueList {
+        name: "noir".into(),
+        steps: vec![morph(StepSource::Black, StepTrigger::Go), morph(StepSource::Scene { name: "rond".into() }, StepTrigger::Go), morph(StepSource::Black, StepTrigger::After { s: 5.0 })],
+        ..CueList::default()
+    };
+    crate::cuelist::save(&mut s, list).unwrap();
+    crate::cuelist::load(&mut s, "noir").unwrap();
+    s.look_on = false;
+    let mut rig = Rig::new(s, "cuelist-black", 0);
+    crate::cuelist::go(&mut rig.s(), controls::ControlSource::Ui).unwrap();
+    rig.tick();
+    crate::cuelist::go(&mut rig.s(), controls::ControlSource::Ui).unwrap();
+    let mut frames = Vec::new();
+    for _ in 0..50 {
+        rig.tick();
+        frames.push(rig.s().frame.clone());
+    }
+    // Fully in by now (1 s fade): the final geometry.
+    for _ in 0..20 {
+        rig.tick();
+    }
+    let last = rig.s().frame.clone();
+    assert!(last.iter().any(|p| p.is_lit()), "the step is on show");
+    let lit_last: Vec<&Point> = last.iter().filter(|p| p.is_lit()).collect();
+    let mut seen_partial = false;
+    for (i, f) in frames.iter().enumerate() {
+        for p in f.iter().filter(|p| p.is_lit()) {
+            let near = lit_last.iter().any(|q| (q.x - p.x).abs() < 1e-3 && (q.y - p.y).abs() < 1e-3);
+            assert!(near, "frame {i}: lit point ({}, {}) is not on the final geometry", p.x, p.y);
+            seen_partial |= p.g < 0.99;
+        }
+    }
+    assert!(seen_partial, "the step faded in");
+    // The e-stop pauses the list; the timed step never comes by itself.
+    rig.s().emergency_stop(ArmSource::Keyboard);
+    for _ in 0..(8 * 60) {
+        rig.tick();
+    }
+    let s = rig.s();
+    assert_eq!((s.cue_list.index, s.cue_list.paused), (Some(1), true));
+    assert!(!s.gate.is_armed());
 }
