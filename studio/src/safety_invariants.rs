@@ -330,6 +330,14 @@ fn random_safety(rng: &mut Rng) -> SafetySettings {
             level: rng.f(),
             points: random_polygon(rng),
             audience: false,
+            // Soft edges and gradients (T-446), on Blank zones too: there
+            // they must change nothing (invariant 3 still holds).
+            feather: if rng.chance(0.4) { rng.range(0.0, zones::MAX_FEATHER) } else { 0.0 },
+            gradient: rng.chance(0.3).then(|| zones::ZoneGradient {
+                from: [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)],
+                to: [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)],
+                level_to: rng.f(),
+            }),
         })
         .collect();
     let horizon = Horizon {
@@ -919,7 +927,7 @@ fn mark_public(s: &mut Shared, rng: &mut Rng) {
     let mut cfg = s.safety.get();
     if cfg.zones.len() < zones::MAX_ZONES && (cfg.zones.is_empty() || rng.chance(0.4)) {
         let id = cfg.zones.iter().map(|z| z.id).max().unwrap_or(0) + 1;
-        cfg.zones.push(Zone { id, name: format!("Public {id}"), kind: ZoneKind::Dim, level: rng.range(0.0, audience::MAX_AUDIENCE_LEVEL), points: random_polygon(rng), audience: true });
+        cfg.zones.push(Zone { id, name: format!("Public {id}"), kind: ZoneKind::Dim, level: rng.range(0.0, audience::MAX_AUDIENCE_LEVEL), points: random_polygon(rng), audience: true, ..Default::default() });
     }
     for z in &mut cfg.zones {
         if rng.chance(0.5) {
@@ -927,6 +935,9 @@ fn mark_public(s: &mut Shared, rng: &mut Rng) {
         }
         if z.audience {
             z.level = z.level.min(audience::MAX_AUDIENCE_LEVEL);
+            if let Some(g) = &mut z.gradient {
+                g.level_to = g.level_to.min(audience::MAX_AUDIENCE_LEVEL);
+            }
         }
     }
     s.safety.set(cfg, true).expect("valid Public zones");
@@ -945,6 +956,9 @@ fn prepare_scanning(s: &mut Shared, rng: &mut Rng) {
         z.audience = true;
         z.kind = ZoneKind::Dim;
         z.level = z.level.min(audience::MAX_AUDIENCE_LEVEL);
+        if let Some(g) = &mut z.gradient {
+            g.level_to = g.level_to.min(audience::MAX_AUDIENCE_LEVEL);
+        }
     }
     cfg.dwell.profile = dwell::DwellProfile::Strict;
     s.safety.set(cfg, true).expect("valid settings");

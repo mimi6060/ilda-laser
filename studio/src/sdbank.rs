@@ -478,7 +478,7 @@ mod tests {
     fn exported_files_respect_the_blank_zones_of_the_rig() {
         let s0 = crate::test_support::shared();
         let mut s = bank_shared(vec![SdSlot { number: 3, cue_id: cue(&s0, 0), seconds: 0.4 }]);
-        let zone = Zone { id: 1, name: "public".into(), kind: ZoneKind::Blank, level: 0.0, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, -0.1], [-1.0, -0.1]], audience: false };
+        let zone = Zone { id: 1, name: "public".into(), kind: ZoneKind::Blank, level: 0.0, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, -0.1], [-1.0, -0.1]], ..Default::default() };
         let mut cfg = s.safety.get();
         cfg.zones = vec![zone];
         s.safety.set(cfg.clone(), true).unwrap();
