@@ -332,6 +332,18 @@ impl ControlRegistry {
         add("list.pause".into(), "Liste de cues : Pause".into(), "list", ControlKind::Trigger, true);
         add("list.top".into(), "Liste de cues : Début".into(), "list", ControlKind::Trigger, true);
 
+        // The FX grid (T-146): a cell plays like a cue pad (down / up), a
+        // drop on each press; all playback, none of them arms.
+        for line in 1..=crate::fx::LINES {
+            for cell in 1..=crate::fx::CELLS {
+                add(format!("fx.{line}.{cell}"), format!("Effet {line}.{cell}"), "fx", ControlKind::Momentary, true);
+            }
+            add(format!("fx.{line}.action"), format!("Action des effets, ligne {line}"), "fx", cont(0.0, 1.0, 1.0, Unit::Percent), true);
+        }
+        add("fx.stop".into(), "Arrêter les effets".into(), "fx", ControlKind::Trigger, true);
+        add("fx.dest".into(), "Destination des effets".into(), "fx", choice(&crate::fx::DEST_LABELS, 0), true);
+        add("fx.mode".into(), "Clic des effets".into(), "fx", choice(&crate::fx::CLICK_LABELS, 0), true);
+
         for n in 1..=LAYER_COUNT {
             add(format!("layer.{n}.dimmer"), format!("Gradateur calque {n}"), "layer", cont(0.0, 1.0, 1.0, Unit::Percent), true);
             add(format!("layer.{n}.mute"), format!("Muet calque {n}"), "layer", ControlKind::Toggle { default: false }, true);
@@ -616,6 +628,9 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             s.deck.beat_every = BEAT_EVERY[choice_index(&desc.kind, input)];
             s.deck.save();
         }
+        "fx.stop" => s.fx.stop_all(),
+        "fx.dest" => s.fx.set_dest(crate::fx::DESTS[choice_index(&desc.kind, input)]),
+        "fx.mode" => s.fx.set_click(crate::fx::CLICKS[choice_index(&desc.kind, input)]),
         "page.next" => s.cue_page = (s.cue_page + 1) % s.grid.page_count(),
         "page.prev" => s.cue_page = (s.cue_page + s.grid.page_count() - 1) % s.grid.page_count(),
         other => {
@@ -630,6 +645,16 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
                     set_live(s, |m| m.rot_angle[axis] = v);
                 } else {
                     set_live(s, |m| m.rot_speed[axis] = v);
+                }
+                return Ok(());
+            }
+            if let Some((line, param)) = fx_control(other) {
+                match param {
+                    FxParam::Cell(cell) => {
+                        let quantize = s.deck.quantize;
+                        s.fx.press(line, cell, truthy(input), quantize);
+                    }
+                    FxParam::Action => s.fx.set_action(line, value(input)),
                 }
                 return Ok(());
             }
@@ -658,6 +683,23 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         s.settings_rev += 1;
     }
     Ok(())
+}
+
+enum FxParam {
+    Cell(usize),
+    Action,
+}
+
+/// "fx.<line>.<cell>" / "fx.<line>.action" (1-based) → (line, param),
+/// 0-based, for registered ids only.
+fn fx_control(id: &str) -> Option<(usize, FxParam)> {
+    let (line, rest) = id.strip_prefix("fx.")?.split_once('.')?;
+    let line = line.parse::<usize>().ok()?.checked_sub(1)?;
+    let param = match rest {
+        "action" => FxParam::Action,
+        cell => FxParam::Cell(cell.parse::<usize>().ok()?.checked_sub(1)?),
+    };
+    Some((line, param))
 }
 
 /// "layer.<n>.<param>" → (n, param), for registered ids only.
@@ -789,6 +831,13 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
                 _ => return None,
             }
         }
+        "fx.dest" => json!(crate::fx::DESTS.iter().position(|&d| d == s.fx.grid().dest).unwrap_or(0)),
+        "fx.mode" => json!(crate::fx::CLICKS.iter().position(|&c| c == s.fx.grid().click).unwrap_or(0)),
+        id if id.starts_with("fx.") => match fx_control(id)? {
+            // Cells light up while they play (LED feedback).
+            (line, FxParam::Cell(cell)) => json!(s.fx.active(line) == Some(cell)),
+            (line, FxParam::Action) => json!(s.fx.action(line)),
+        },
         id if id.starts_with("layer.") => {
             let (n, param) = layer_control(id)?;
             let l = s.mixer.layer(n);
@@ -1626,6 +1675,34 @@ mod tests {
         assert_eq!(current(&s, s.controls.get("grid.1.1.3").unwrap()), Some(serde_json::json!(true)));
         apply(&mut s, "grid.1.1.3", ControlInput::Value(1.0), true).unwrap();
         assert!(!s.timeline.is_playing(), "second press stops it");
+    }
+
+    /// T-146: the FX grid from a controller: cells toggle (a drop on each
+    /// press), the *Action* faders, stop, destination and click mode read
+    /// back for LEDs; none of it arms.
+    #[test]
+    fn fx_controls_play_the_grid_and_never_arm() {
+        let mut s = shared();
+        for id in ["fx.1.1", "fx.4.8", "fx.2.action", "fx.stop", "fx.dest", "fx.mode"] {
+            assert!(s.controls.get(id).is_some_and(|d| d.external), "{id}");
+        }
+        apply(&mut s, "fx.1.2", ControlInput::Value(1.0), true).unwrap();
+        apply(&mut s, "fx.1.2", ControlInput::Value(0.0), true).unwrap();
+        apply(&mut s, "fx.2.1", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!((s.fx.active(0), s.fx.active(1)), (Some(1), Some(0)));
+        assert_eq!(current(&s, s.controls.get("fx.1.2").unwrap()), Some(json!(true)));
+        assert_eq!(current(&s, s.controls.get("fx.1.1").unwrap()), Some(json!(false)));
+        apply(&mut s, "fx.1.5", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.fx.active(0), Some(4), "one effect per line");
+        apply(&mut s, "fx.3.action", ControlInput::Norm(0.25), true).unwrap();
+        assert_eq!(s.fx.action(2), 0.25);
+        apply(&mut s, "fx.dest", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.fx.grid().dest, crate::fx::FxDest::Cue);
+        apply(&mut s, "fx.mode", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(current(&s, s.controls.get("fx.mode").unwrap()), Some(json!(1)));
+        apply(&mut s, "fx.stop", ControlInput::Value(1.0), true).unwrap();
+        assert!(!s.fx.any_playing());
+        assert!(!s.gate.is_armed());
     }
 
     /// Keeps docs/controls.md in sync with the registry, where the local

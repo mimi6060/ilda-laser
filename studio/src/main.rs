@@ -30,6 +30,7 @@ mod engine;
 mod evolving;
 mod examples;
 mod fans;
+mod fx;
 mod festival;
 mod figure_import;
 mod figures;
@@ -399,6 +400,9 @@ pub struct Shared {
     /// Audio routes (audio/routes.rs, audio_routes.json): analysis values
     /// and events shaped onto controls, every frame, on the same copies.
     pub routes: audio::routes::RouteStore,
+    /// The FX grid (fx.rs, fx.json, T-146): effects played on top of the
+    /// cues, on the same copies, after the LFOs. What plays is memory only.
+    pub fx: fx::FxStore,
     /// Audio event triggers (audio/triggers.rs, audio_triggers.json): rules
     /// that press cues on a kick, a drop, a break… Their switch is memory
     /// only and off at start; they never arm.
@@ -1228,6 +1232,7 @@ fn startup_state(cli: &Cli) -> Shared {
     let controls = controls::ControlRegistry::build(&presets);
     let lfos = lfo::LfoStore::load_or_create(cli.data_dir.join("lfos.json"), &controls);
     let routes = audio::routes::RouteStore::load_or_create(cli.data_dir.join("audio_routes.json"), &controls);
+    let fx = fx::FxStore::load_or_create(cli.data_dir.join("fx.json"), &controls);
     // Caps and the remembered connection (outputs.json), then the output
     // manager. Its thread is started by `main` only: building the state
     // never opens, scans or connects anything.
@@ -1292,6 +1297,7 @@ fn startup_state(cli: &Cli) -> Shared {
         },
         lfos,
         routes,
+        fx,
         triggers: audio::triggers::TriggerStore::load(cli.data_dir.join("audio_triggers.json")),
         mixer: {
             let mut m: layers::Mixer = load_json(&cli.data_dir.join("layers.json"));
@@ -1770,13 +1776,18 @@ impl Engine {
                 std::thread::sleep(stall);
             }
             self.frames_since_save += 1;
-            if (s.live_dirty || s.mixer_dirty) && self.frames_since_save >= 60 {
+            if (s.live_dirty || s.mixer_dirty || s.fx.dirty) && self.frames_since_save >= 60 {
                 // At most once a second, so MIDI faders don't hammer the disk.
                 if s.live_dirty {
                     save_json(&self.live_path, &s.live);
                 }
                 if s.mixer_dirty {
                     save_json(&self.layers_path, &s.mixer);
+                }
+                if s.fx.dirty {
+                    if let Err(e) = s.fx.save() {
+                        log::warn!("{e:#}");
+                    }
                 }
                 s.live_dirty = false;
                 s.mixer_dirty = false;
@@ -1836,6 +1847,26 @@ impl Engine {
             let (mut settings, mut live) = (calm.unwrap_or_else(|| s.settings.clone()), s.live.clone());
             let time_share = s.routes.routing().time_share();
             lfo::modulate_scaled(s.lfos.list(), &s.controls, &mut settings, &mut live, mod_t, mod_beat, time_share);
+            // The FX grid (T-146), on top of the LFOs, on the same copies.
+            // An e-stop ends every effect (they don't come back after the
+            // reset). *Cue sélectionné*: the master-level changes go to the
+            // newest cue's own modifiers instead (its look is `settings`).
+            if s.estop.is_latched() && s.fx.any_playing() {
+                s.fx.stop_all();
+            }
+            let fx_clock = fx::FxClock { t, beat: clock.beat, mod_t, mod_beat, bpm: clock.bpm, beats_per_bar: clock.beats_per_bar };
+            s.fx.frame(&fx_clock);
+            let fx_cue = match (s.fx.grid().dest, s.deck.primary()) {
+                (fx::FxDest::Cue, Some(top)) => {
+                    let mut m = usercues::master_of(&s, &top.cue).unwrap_or_default();
+                    s.fx.apply(&s.controls, &mut settings, &mut m, &fx_clock);
+                    Some((top.id, m))
+                }
+                _ => {
+                    s.fx.apply(&s.controls, &mut settings, &mut live, &fx_clock);
+                    None
+                }
+            };
             let beat_len_s = (60.0 / clock.bpm.max(1.0)) as f32;
             if s.routes.apply(&audio, dt, beat_len_s, &reaction.guard, &mut settings, &mut live) {
                 lfo::recolor_live(&mut live);
@@ -1877,13 +1908,14 @@ impl Engine {
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
             // User cues stored with master modifiers (T-405): theirs, per cue.
-            let cue_masters: HashMap<u64, live::LiveModifiers> = s
+            let mut cue_masters: HashMap<u64, live::LiveModifiers> = s
                 .deck
                 .active
                 .iter()
                 .chain(s.deck.ending.iter().map(|e| &e.cue))
                 .filter_map(|a| Some((a.id, usercues::master_of(&s, &a.cue)?)))
                 .collect();
+            cue_masters.extend(fx_cue);
             let armed = s.gate.is_armed();
             let routing = Routing::read(&s, &looks, &show_cues);
             let caps = s.outputs.active_limits();
@@ -2179,12 +2211,17 @@ impl Engine {
         }
         // The last second of live and layer moves joins the working copy (else
         // the next start would see them only in the autosave, T-287).
-        let s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
         if s.live_dirty {
             save_json(&self.live_path, &s.live);
         }
         if s.mixer_dirty {
             save_json(&self.layers_path, &s.mixer);
+        }
+        if s.fx.dirty {
+            if let Err(e) = s.fx.save() {
+                log::warn!("{e:#}");
+            }
         }
     }
 }
@@ -3292,7 +3329,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("laser-studio-startup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Files that try their luck with arming fields.
-        for name in ["presence.json", "live.json", "layers.json", "grid.json", "calibration.json", "scenes.json", "lfos.json", "audio_routes.json", "audio_triggers.json", "palettes.json"] {
+        for name in ["presence.json", "live.json", "layers.json", "grid.json", "calibration.json", "scenes.json", "lfos.json", "audio_routes.json", "audio_triggers.json", "palettes.json", "fx.json"] {
             std::fs::write(dir.join(name), r#"{"armed": true, "arm": true, "on": true, "hold_to_run": false}"#).unwrap();
         }
         let data_dir = dir.to_str().unwrap();

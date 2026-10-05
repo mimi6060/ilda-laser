@@ -989,6 +989,8 @@ struct Coverage {
     /// Frames with a lit preview through a live effect (T-142): strobe,
     /// visible points, dotted lines, mirror, prism or « Figer ».
     lit_with_effects: usize,
+    /// Frames with a lit preview while an FX grid line played (T-146).
+    lit_with_fx: usize,
 }
 
 /// The live effects of T-142 as a controller would drive them: latched
@@ -1010,6 +1012,33 @@ fn random_live_effect(s: &mut Shared, rng: &mut Rng) {
     let id = *rng.pick(&ids);
     let input = if rng.chance(0.8) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-2.0, 30.0)) };
     let _ = controls::apply(s, id, input, rng.chance(0.5));
+}
+
+/// The FX grid (T-146) as an API client could set it: the starter
+/// cells mangled (numbers, targets, strobes, colours), random *Action*
+/// faders, destination and click mode.
+fn random_fx(s: &mut Shared, rng: &mut Rng) {
+    let cells = mutated(&crate::fx::starter_grid().cells(), rng, 0.15);
+    let reg = controls::ControlRegistry::build(&s.presets);
+    s.fx.replace_cells(cells, &reg);
+    for line in 0..crate::fx::LINES {
+        s.fx.set_action(line, if rng.chance(0.2) { rng.range(-1.0, 2.0) } else { 1.0 });
+    }
+    s.fx.set_dest(*rng.pick(&crate::fx::DESTS));
+    s.fx.set_click(*rng.pick(&crate::fx::CLICKS));
+}
+
+/// An FX grid move from a controller or the page: a cell pressed or
+/// released, a fader, *Arrêter FX*, the destination.
+fn random_fx_move(s: &mut Shared, rng: &mut Rng) {
+    let id = match rng.below(10) {
+        0 => "fx.stop".to_string(),
+        1 => format!("fx.{}.action", 1 + rng.below(crate::fx::LINES)),
+        2 => "fx.dest".to_string(),
+        _ => format!("fx.{}.{}", 1 + rng.below(crate::fx::LINES), 1 + rng.below(crate::fx::CELLS)),
+    };
+    let input = if rng.chance(0.7) { ControlInput::Value(rng.chance(0.6) as u8 as f32) } else { ControlInput::Norm(rng.f()) };
+    let _ = controls::apply(s, &id, input, rng.chance(0.5));
 }
 
 /// One DMX fixture instance per zone (T-407), random personalities and
@@ -1147,6 +1176,13 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         let _ = s.outputs.set_scan(MAIN_OUTPUT, random_output_scan(&mut srng), false);
         let _ = controls::apply(&mut s, "master.scan", ControlInput::Norm(srng.f()), srng.chance(0.5));
     }
+    // The FX grid (T-146), from its own stream: random cells played on
+    // top of everything; 1-15 hold with them.
+    let mut xrng = Rng::new(seed ^ 0x0146_0146);
+    let fx_on = xrng.chance(0.4);
+    if fx_on {
+        random_fx(&mut rig.s(), &mut xrng);
+    }
     // Live effects (T-142), from their own stream.
     let mut erng = Rng::new(seed ^ 0x0142_0142);
     let effects = erng.chance(0.25);
@@ -1207,6 +1243,14 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         }
         if trng.chance(0.05) {
             random_transitions(&mut rig.s(), &mut trng);
+        }
+        if fx_on && xrng.chance(0.25) {
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            random_fx_move(&mut s, &mut xrng);
+            if s.gate.is_armed() != armed {
+                return Err(format!("frame {frame}: an FX grid move changed the arming"));
+            }
         }
         if zrng.chance(0.15) {
             random_routing(&mut rig.s(), &mut zrng);
@@ -1349,6 +1393,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         cov.lit_with_remote += (preview_lit && !s.netin.fixtures.remotes.is_empty()) as usize;
         cov.lit_with_transition += (preview_lit && !s.deck.transition_fx(t).is_empty()) as usize;
         cov.lit_with_effects += (preview_lit && with_effects) as usize;
+        cov.lit_with_fx += (preview_lit && s.fx.view()["lines"].as_array().is_some_and(|l| l.iter().any(|l| l["level"].as_f64().unwrap_or(0.0) > 0.0))) as usize;
+        if s.estop.is_latched() && s.fx.any_playing() {
+            return Err(format!("frame {frame}: an FX grid effect survived the e-stop"));
+        }
         if black_held && preview_lit && !limiter_holding {
             return Err(format!("frame {frame}: the preview is lit while « Noir » is held"));
         }
@@ -1401,6 +1449,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
         assert!(share(cov.lit_with_transition) > 0.01, "only {} of {} lit frames ran a transition", cov.lit_with_transition, cov.frames);
         assert!(share(cov.lit_with_effects) > 0.05, "only {} of {} lit frames went through a live effect", cov.lit_with_effects, cov.frames);
+        assert!(share(cov.lit_with_fx) > 0.02, "only {} of {} lit frames went through the FX grid", cov.lit_with_fx, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
@@ -1526,6 +1575,13 @@ fn run_strobe_case(seed: u64) -> Result<(), String> {
     strobe_case(seed, None)
 }
 
+/// `run_strobe_case` with the way forced (the seed's stream unchanged).
+/// Way 5: a cell of the FX grid (T-146) with a fast strobe, or a square
+/// modulator on a brightness, played on top.
+fn run_strobe_way(seed: u64, way: Option<usize>) -> Result<(), String> {
+    strobe_case_full(seed, None, way)
+}
+
 /// A catalogue cue a strobe case is forced onto (T-360).
 #[derive(Clone, Copy)]
 struct Forced<'a> {
@@ -1538,6 +1594,11 @@ struct Forced<'a> {
 /// flash cue), for the burst plus 2.5 s. The seed still draws the
 /// limits, guard profile, tempo, rate and way.
 fn strobe_case(seed: u64, forced: Option<Forced>) -> Result<(), String> {
+    strobe_case_full(seed, forced, None)
+}
+
+/// `strobe_case`, optionally with the way forced too (T-146).
+fn strobe_case_full(seed: u64, forced: Option<Forced>, forced_way: Option<usize>) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let mut s = test_support::shared();
     let mut cfg = SafetySettings { strobe_max_hz: rng.range(1.0, 4.0), strobe_burst_s: rng.range(0.5, 3.0), ..Default::default() };
@@ -1561,7 +1622,24 @@ fn strobe_case(seed: u64, forced: Option<Forced>) -> Result<(), String> {
             way = 3;
         }
     }
+    if let Some(w) = forced_way {
+        way = w;
+    }
     match way {
+        5 => {
+            use crate::fx::FxCell;
+            let cell = if seed.is_multiple_of(2) {
+                let strobe = live::Strobe { on: true, hold: false, rate: live::Rate::Hz(hz), duty: 0.5 };
+                FxCell { name: "strobe".into(), modifiers: Some(live::LiveModifiers { strobe, ..Default::default() }), ..Default::default() }
+            } else {
+                let target = if seed % 4 == 1 { "master.brightness" } else { "look.brightness" };
+                let m = lfo::Modulator { target: target.into(), wave: lfo::Wave::Square, rate: live::Rate::Hz(hz), depth: 1.0, offset: 0.0, ..Default::default() };
+                FxCell { name: "flash".into(), modulators: vec![m], ..Default::default() }
+            };
+            let reg = controls::ControlRegistry::build(&s.presets);
+            s.fx.set_cells(vec![vec![Some(cell)]], &reg).map_err(|e| format!("{e:#}"))?;
+            let _ = controls::apply(&mut s, "fx.1.1", ControlInput::Value(1.0), true);
+        }
         // The live strobe (T-142), free or synced: it runs before the
         // limiter and must not get past it.
         4 => {
@@ -1735,6 +1813,65 @@ const STROBE_SEEDS: usize = 40;
 /// T-354: a burst limit (0.52 s) shorter than two allowed periods
 /// (1.13 Hz); the limiter used to wait for a third fast flash before
 /// starting the burst clock, so 0.63 s of fast flashing went out.
+/// T-146: 20 preview frames from the real engine on a clock that starts
+/// at the studio's epoch, after `setup`.
+fn fx_frames(tag: &str, setup: impl FnOnce(&mut Shared)) -> Vec<Vec<Point>> {
+    let mut s = test_support::shared();
+    s.tempo.set_bpm_manual(120.0, 0.0);
+    setup(&mut s);
+    let mut rig = Rig::new(s, tag, 0x0146);
+    let epoch = rig.s().epoch;
+    rig.now = epoch;
+    (0..20)
+        .map(|_| {
+            rig.tick();
+            rig.s().frame.clone()
+        })
+        .collect()
+}
+
+/// T-146: *Action* at 0 draws exactly the frame drawn without effects;
+/// at 1 the effect shows. *Cue sélectionné* puts it on the newest cue.
+#[test]
+fn fx_action_zero_draws_the_frame_drawn_without_effects() {
+    let play = |s: &mut Shared| {
+        for id in ["fx.1.1", "fx.2.5", "fx.3.1"] {
+            controls::apply(s, id, ControlInput::Value(1.0), false).unwrap();
+        }
+    };
+    let plain = fx_frames("fx-plain", |_| {});
+    assert!(plain.iter().any(|f| f.iter().any(|p| p.is_lit())), "the look draws something");
+    let zero = fx_frames("fx-zero", |s| {
+        play(s);
+        for line in 1..=crate::fx::LINES {
+            controls::apply(s, &format!("fx.{line}.action"), ControlInput::Value(0.0), false).unwrap();
+        }
+    });
+    assert_eq!(zero, plain);
+    let full = fx_frames("fx-full", play);
+    assert_ne!(full, plain);
+    // On the newest cue: the effect shows on it.
+    let cue = test_support::shared().presets[0].id.clone();
+    let with_cue = |fx: bool| {
+        let cue = cue.clone();
+        fx_frames("fx-cue", move |s| {
+            controls::press_cue(s, &cue, Some(ClickMode::Toggle), true);
+            if fx {
+                controls::apply(s, "fx.dest", ControlInput::Value(1.0), false).unwrap();
+                controls::apply(s, "fx.2.5", ControlInput::Value(1.0), false).unwrap();
+            }
+        })
+    };
+    assert_ne!(with_cue(true), with_cue(false));
+}
+
+/// T-146: a strobe or a square brightness modulator in an FX grid cell
+/// is held by the same limiter.
+#[test]
+fn an_fx_grid_strobe_never_exceeds_the_burst_limit() {
+    run_property("an_fx_grid_strobe_never_exceeds_the_burst_limit", 0x0146, 12, |seed| run_strobe_way(seed, Some(5)));
+}
+
 #[test]
 fn strobe_seed_2002967_is_cut_within_the_burst() {
     run_strobe_case(2002967).unwrap();

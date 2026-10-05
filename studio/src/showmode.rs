@@ -185,6 +185,7 @@ mod tests {
             "/api/figures/delete",
             "/api/cuelists",
             "/api/cuelists/delete",
+            "/api/fx",
             "/api/some/future/route",
         ] {
             assert!(!allowed(p), "{p}");

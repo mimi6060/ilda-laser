@@ -26,6 +26,7 @@ pub fn shared() -> Shared {
     grid.resolve(&presets);
     let lfos = lfo::LfoStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/lfos.json"), &controls);
     let routes = crate::audio::routes::RouteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/audio_routes.json"), &controls);
+    let fx = crate::fx::FxStore::in_memory(&controls);
     // One latch for the gate and the network listeners' blackout path.
     let estop: std::sync::Arc<crate::interlock::EStop> = Default::default();
     Shared {
@@ -72,6 +73,7 @@ pub fn shared() -> Shared {
         timecode: crate::timecode::TimecodeState::in_memory(),
         lfos,
         routes,
+        fx,
         triggers: crate::audio::triggers::TriggerStore::in_memory(),
         mixer: layers::Mixer::default(),
         mixer_dirty: false,

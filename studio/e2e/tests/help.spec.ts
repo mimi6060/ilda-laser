@@ -37,7 +37,7 @@ test('the « ? » of every panel opens its own page', async ({ page }) => {
   const titles = new Map(pages.map(p => [p.slug, p.title_fr]));
   const seen = new Set<string>();
   // LIVE: each tab of the panel, the grid and the layers.
-  for (const tab of ['direct', 'lfo', 'music', 'scenes', 'cuelist', 'running']) {
+  for (const tab of ['direct', 'lfo', 'fx', 'music', 'scenes', 'cuelist', 'running']) {
     await page.locator(`#liveTabs [data-panel-tab="${tab}"]`).click();
     await clickVisibleHelp(page, titles, seen);
   }

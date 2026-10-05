@@ -35,6 +35,7 @@ pub const PAGES: &[HelpPage] = &[
     HelpPage { slug: "raccourcis", title_fr: "Raccourcis clavier", group_fr: GENERAL, body_html: include_str!("raccourcis.html") },
     HelpPage { slug: "live-direct", title_fr: "Direct", group_fr: "LIVE", body_html: include_str!("live-direct.html") },
     HelpPage { slug: "live-modulateurs", title_fr: "Modulateurs et liens audio", group_fr: "LIVE", body_html: include_str!("live-modulateurs.html") },
+    HelpPage { slug: "live-effets", title_fr: "Grille d'effets", group_fr: "LIVE", body_html: include_str!("live-effets.html") },
     HelpPage { slug: "live-musique", title_fr: "Musique", group_fr: "LIVE", body_html: include_str!("live-musique.html") },
     HelpPage { slug: "live-scenes", title_fr: "Scènes", group_fr: "LIVE", body_html: include_str!("live-scenes.html") },
     HelpPage { slug: "live-liste-cues", title_fr: "Liste de cues", group_fr: "LIVE", body_html: include_str!("live-liste-cues.html") },

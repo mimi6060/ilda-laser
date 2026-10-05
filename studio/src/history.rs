@@ -65,11 +65,14 @@ pub enum Section {
     Venue,
     /// Projection zones (T-012).
     Projection,
+    /// The FX grid's cells (T-146). Not what plays, nor the *Action*
+    /// faders, destination and click mode: those are live controls.
+    Fx,
 }
 
 use Section::*;
 
-const ALL: [Section; 12] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection];
+const ALL: [Section; 13] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -86,6 +89,7 @@ impl Section {
             Figures => "figures",
             Venue => "venue",
             Projection => "projection",
+            Fx => "fx",
         }
     }
 
@@ -111,6 +115,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/figures" | "/api/figures/delete" => &[Figures],
         "/api/venue" | "/api/venue/preset" => &[Venue],
         "/api/projection" => &[Projection],
+        "/api/fx" => &[Fx],
         _ => return None,
     })
 }
@@ -130,6 +135,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         Figures => json!(s.figures.list()),
         Venue => json!(s.venue.get()),
         Projection => json!(s.projection.get()),
+        Fx => json!(s.fx.grid().cells()),
     }
 }
 
@@ -204,6 +210,10 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         }
         Venue => crate::web::apply_venue(s, from(v)?).map_err(crate::web::VenueRefusal::status_and_text)?,
         Projection => s.projection.set(from(v)?).map_err(bad)?,
+        Fx => {
+            let cells = from(v)?;
+            s.fx.set_cells(cells, &s.controls).map_err(bad)?;
+        }
     }
     Ok(())
 }
@@ -479,7 +489,31 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, AudioRoutes) => "Liens audio modifiés".into(),
         (_, Venue) => "Lieu et projecteurs modifiés".into(),
         (_, Projection) => "Zones de projection modifiées".into(),
+        (_, Fx) => fx_label(old, new),
     }
+}
+
+/// « Effet « Respiration » modifié », « Effet 2.3 supprimé »…: the
+/// first cell that changed.
+fn fx_label(old: &Value, new: &Value) -> String {
+    let cell = |v: &Value, l: usize, c: usize| v.get(l).and_then(|line| line.get(c)).cloned().unwrap_or(Value::Null);
+    for l in 0..crate::fx::LINES {
+        for c in 0..crate::fx::CELLS {
+            let (a, b) = (cell(old, l, c), cell(new, l, c));
+            if a == b {
+                continue;
+            }
+            let name = |v: &Value| v.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).map(|n| format!("« {n} »"));
+            let shown = name(&b).or_else(|| name(&a)).unwrap_or_else(|| format!("{}.{}", l + 1, c + 1));
+            let what = match (a.is_null(), b.is_null()) {
+                (true, _) => "ajouté",
+                (_, true) => "supprimé",
+                _ => "modifié",
+            };
+            return format!("Effet {shown} {what}");
+        }
+    }
+    "Grille d'effets modifiée".into()
 }
 
 /// « Page 2 renommée », « Page « Intro » ajoutée »…
@@ -651,6 +685,33 @@ mod tests {
         shared.lock().unwrap().gate.disarm(crate::interlock::DisarmReason::User, crate::interlock::ArmSource::Ui);
         step(&shared, false, None).unwrap();
         assert!(!shared.lock().unwrap().gate.is_armed(), "and never arms");
+    }
+
+    /// T-146: an FX cell edited comes back on undo; what plays, the
+    /// *Action* faders and the destination are live, never in the history.
+    #[test]
+    fn fx_grid_edits_undo_but_playing_and_action_are_live() {
+        let shared = shared();
+        let original = shared.lock().unwrap().fx.grid().cells();
+        edit(&shared, "/api/fx", |s| {
+            let mut cells = s.fx.grid().cells();
+            cells[0][0].as_mut().unwrap().name = "Souffle".into();
+            cells[1][1] = None;
+            s.fx.replace_cells(cells, &s.controls);
+        });
+        {
+            let mut s = shared.lock().unwrap();
+            assert_eq!(s.history.undo[0].label, "Effet « Souffle » modifié");
+            assert_eq!(s.history.undo[0].section, "fx");
+            s.fx.press(0, 0, true, crate::cues::Quantize::Off);
+            s.fx.set_action(0, 0.3);
+        }
+        step(&shared, false, None).unwrap();
+        let s = shared.lock().unwrap();
+        assert_eq!(s.fx.grid().cells(), original);
+        assert_eq!(s.fx.active(0), Some(0), "still playing");
+        assert_eq!(s.fx.action(0), 0.3, "the fader is not an edit");
+        assert_eq!(fx_label(&json!([[null]]), &json!([[{ "name": "" }]])), "Effet 1.1 ajouté");
     }
 
     #[test]
