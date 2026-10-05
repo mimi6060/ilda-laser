@@ -64,7 +64,10 @@
 //!     (`scan_limits_never_add_light_and_never_trace_faster_than_pps_max`).
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
-//! longer than the allowed burst; and the ShowNET SD card over Art-Net
+//! longer than the allowed burst, on random cases and with every
+//! catalogue cue forced onto the default seeds (flashed over itself, and
+//! strobed every way; every cue on every seed when `SAFETY_CASES` is
+//! set; T-360, `SAFETY_CUE=<id>` replays one cue); and the ShowNET SD card over Art-Net
 //! (T-301): what it would send is intensity 0 and pattern 0 whenever the
 //! stage sends no light, and its intensity never exceeds the caps.
 //!
@@ -1520,6 +1523,21 @@ impl FlashMeter {
 /// has (the look's beat gate, a square LFO on a brightness, a controller
 /// fader pumped every frame, a flash cue hammered), armed, for 9 s.
 fn run_strobe_case(seed: u64) -> Result<(), String> {
+    strobe_case(seed, None)
+}
+
+/// A catalogue cue a strobe case is forced onto (T-360).
+#[derive(Clone, Copy)]
+struct Forced<'a> {
+    cue: &'a str,
+    /// Flashed over itself (way 3) rather than the seed's way.
+    self_flash: bool,
+}
+
+/// `run_strobe_case`, or with `forced` that cue as the look (and the
+/// flash cue), for the burst plus 2.5 s. The seed still draws the
+/// limits, guard profile, tempo, rate and way.
+fn strobe_case(seed: u64, forced: Option<Forced>) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let mut s = test_support::shared();
     let mut cfg = SafetySettings { strobe_max_hz: rng.range(1.0, 4.0), strobe_burst_s: rng.range(0.5, 3.0), ..Default::default() };
@@ -1528,12 +1546,21 @@ fn run_strobe_case(seed: u64) -> Result<(), String> {
     }
     s.safety.set(cfg.clone(), true).map_err(|e| format!("{e:?}"))?;
     let presets: Vec<_> = s.presets.iter().filter(|p| p.settings.gate == crate::engine::GateMode::Off).map(|p| (p.id.clone(), p.settings.clone())).collect();
-    let (cue, look) = rng.pick(&presets).clone();
+    let (mut cue, look) = rng.pick(&presets).clone();
     s.settings = look;
     let bpm = rng.range(90.0, 200.0) as f64;
     s.tempo.set_bpm_manual(bpm, 0.0);
     let hz = rng.range(6.0, 15.0);
-    let way = rng.below(5);
+    let mut way = rng.below(5);
+    if let Some(f) = forced {
+        // The look is the cue too: flashed over itself, every release
+        // falls back on it and every press restarts it.
+        let p = s.presets.iter().find(|p| p.id == f.cue).ok_or_else(|| format!("no cue {}", f.cue))?;
+        (cue, s.settings) = (p.id.clone(), p.settings.clone());
+        if f.self_flash {
+            way = 3;
+        }
+    }
     match way {
         // The live strobe (T-142), free or synced: it runs before the
         // limiter and must not get past it.
@@ -1557,9 +1584,17 @@ fn run_strobe_case(seed: u64) -> Result<(), String> {
         _ => {}
     }
     s.request_arm(ArmSource::Ui).map_err(|e| e.join("; "))?;
-    let mut rig = Rig::new(s, "strobe", seed);
+    let mut rig = Rig::new(s, &format!("strobe-{}", forced.map_or("any", |f| f.cue)), seed);
+    // Frames from the studio's epoch, not from whenever the rig was built
+    // (T-360): the beat clock's phase against the frames, and so the
+    // outcome of a seed, must not depend on how loaded the machine is.
+    let epoch = rig.s().epoch;
+    rig.now = epoch;
     let mut meter = FlashMeter { peak: 0.0, on: false, onsets: Vec::new() };
-    let frames = 9 * 60;
+    // Past the burst, the hold and a little after it is where a stage
+    // after the limiter would show.
+    let secs = forced.map_or(9.0, |_| cfg.strobe_burst_s as f64 + 2.5);
+    let frames = (secs * 60.0) as usize;
     for i in 0..frames {
         let t = i as f64 / 60.0;
         let on = (t * hz as f64).fract() < 0.5;
@@ -1584,7 +1619,7 @@ fn run_strobe_case(seed: u64) -> Result<(), String> {
     // The burst, plus a frame or two of the limiter's own timing.
     if run > cfg.strobe_burst_s as f64 + 0.1 {
         return Err(format!(
-            "way {way}: {:.2} s of output flashing faster than {:.2} Hz (burst limit {:.2} s, {} flashes in 9 s)",
+            "way {way}, cue {cue}: {:.2} s of output flashing faster than {:.2} Hz (burst limit {:.2} s, {} flashes in {secs:.1} s)",
             run,
             cfg.strobe_max_hz,
             cfg.strobe_burst_s,
@@ -1597,8 +1632,105 @@ fn run_strobe_case(seed: u64) -> Result<(), String> {
 /// The strobe limiter, measured on what leaves for the laser.
 #[test]
 fn strobe_never_exceeds_the_burst_limit() {
-    run_property("strobe_never_exceeds_the_burst_limit", 2, 40, run_strobe_case);
+    run_property("strobe_never_exceeds_the_burst_limit", 2, STROBE_SEEDS, run_strobe_case);
 }
+
+/// T-360: every catalogue cue strobed through the real engine, on the
+/// default seeds of `strobe_never_exceeds_the_burst_limit` (limits, guard
+/// profile, tempo, rate). Whatever a stage after the strobe limiter does
+/// with the cue (the static-beam guard blanking a lone beam, the caps,
+/// the hold itself), the output must not flash faster than the limit for
+/// longer than the burst.
+///
+/// A plain `cargo test` runs each cue on `per_cue` of the seeds, in turn,
+/// so the catalogue covers all of them; a deep run (`SAFETY_CASES` set)
+/// runs every cue on every default seed. `SAFETY_SEED` replays one seed
+/// and `SAFETY_CUE` one cue.
+fn sweep_every_cue(name: &str, self_flash: bool, per_cue: usize) {
+    let seeds: Vec<u64> = match env_u64("SAFETY_SEED") {
+        Some(seed) => vec![seed],
+        None => (0..STROBE_SEEDS as u64).map(|i| 2 * 1_000_003 + i).collect(),
+    };
+    let only = std::env::var("SAFETY_CUE").ok();
+    let cues: Vec<String> = test_support::shared().presets.iter().map(|p| p.id.clone()).filter(|c| only.as_ref().is_none_or(|o| o == c)).collect();
+    assert!(!cues.is_empty(), "{name}: no cue {only:?}");
+    let deep = env_u64("SAFETY_CASES").is_some();
+    let n = if deep { seeds.len() } else { per_cue.min(seeds.len()) };
+    let mut jobs: Vec<(u64, &str)> = Vec::new();
+    for (i, c) in cues.iter().enumerate() {
+        jobs.extend((0..n).map(|k| (seeds[(i * n + k) % seeds.len()], c.as_str())));
+    }
+    let _guard = property_guard(name, if deep { 4 } else { 1 }, 1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failures = Mutex::new(Vec::new());
+    // Half the machine: the other tests (some of them timed) run meanwhile.
+    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&(seed, cue)) = jobs.get(i) else { break };
+                if let Err(e) = strobe_case(seed, Some(Forced { cue, self_flash })) {
+                    failures.lock().unwrap().push(format!("{e} (replay: SAFETY_SEED={seed} SAFETY_CUE={cue} cargo test -p laser-studio {name})"));
+                }
+            });
+        }
+    });
+    let failures = failures.into_inner().unwrap();
+    assert!(failures.is_empty(), "{name}: {} of {} runs failed:\n{}", failures.len(), jobs.len(), failures.join("\n"));
+}
+
+/// Each cue flashed over itself, fast (way 3 with the cue as the look):
+/// every press restarts it, every release falls back on the look.
+#[test]
+fn every_cue_flashed_over_itself_stays_within_the_burst_limit() {
+    sweep_every_cue("every_cue_flashed_over_itself_stays_within_the_burst_limit", true, 8);
+}
+
+/// Each cue as the look, strobed the seed's way (beat gate, square LFO,
+/// pumped fader, its own flash, the live strobe).
+#[test]
+fn every_cue_strobed_every_way_stays_within_the_burst_limit() {
+    sweep_every_cue("every_cue_strobed_every_way_stays_within_the_burst_limit", false, 4);
+}
+
+/// T-360: « Strobe 1/2 temps » under the live strobe, at 2.56 Hz with a
+/// 1.61 s burst. The hold began in a dark gap, filling it with a flash of
+/// its own; the gap outlasted a period so the hold let the look go dark,
+/// and the look came back a third of a second after that flash: 1.95 s
+/// of fast flashing out. The output check refuses that flash.
+#[test]
+fn strobe_seed_2000035_holds_within_the_burst_on_a_strobed_beam_fan() {
+    let cue = test_support::shared().presets.iter().find(|p| p.name.starts_with("Strobe 1/2 temps")).map(|p| p.id.clone()).expect("the cue");
+    strobe_case(2000035, Some(Forced { cue: &cue, self_flash: false })).unwrap();
+}
+
+/// T-360: an evolving look flashed over, fast, carries on where it was
+/// at each release; it used to start over (a fresh animator) and sit on
+/// its first frame waiting for the next beat, never moving on.
+#[test]
+fn a_flash_released_goes_back_to_an_evolving_look_where_it_was() {
+    let mut s = test_support::shared();
+    s.settings = Settings { content: Content::Evolving(crate::evolving::test_cue(true)), brightness: 1.0, ..Default::default() };
+    s.tempo.set_bpm_manual(120.0, 0.0);
+    let cue = s.presets[0].id.clone();
+    let mut rig = Rig::new(s, "evolving-flash", 0);
+    let mut furthest = 0.0f64;
+    for i in 0..8 * 60 {
+        let down = (i / 5) % 2 == 0;
+        controls::press_cue(&mut rig.s(), &cue, Some(ClickMode::Flash), down);
+        rig.tick();
+        if !down {
+            let s = rig.s();
+            let (_, p) = s.evolving.iter().find(|(id, _)| *id == 0).expect("the look is on show between flashes");
+            furthest = furthest.max(p.pos);
+        }
+    }
+    assert!(furthest > 8.0, "the look moves on between flashes (reached beat {furthest:.2} of 16 beats played)");
+}
+
+/// Default seed count of the strobe property (and of the cue sweeps).
+const STROBE_SEEDS: usize = 40;
 
 /// T-354: a burst limit (0.52 s) shorter than two allowed periods
 /// (1.13 Hz); the limiter used to wait for a third fast flash before

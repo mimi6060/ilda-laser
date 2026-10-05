@@ -1603,7 +1603,8 @@ fn projector_lost(shared: &Mutex<Shared>, st: &mut ProjectorStage, estop: &EStop
 
 /// The safety stage of one projector's frame, in its order (see
 /// `Engine::tick`): frame size, colour rendering, strobe limiter and
-/// horizon, static-beam guard, power caps. Every projector runs it with
+/// horizon, static-beam guard, power caps, the limiter's check on the
+/// output. Every projector runs it with
 /// its own limiter, guard, colour and caps (T-277).
 #[allow(clippy::too_many_arguments)]
 fn safety_chain(
@@ -1645,6 +1646,12 @@ fn safety_chain(
     // safety stage: they can only reduce, and a lowered cap applies
     // from this tick. The preview shows the capped frame too.
     power::cap(&mut frame, caps);
+    // The limiter's last word (T-360): it measures the frame that really
+    // goes out. The guard and the caps run after its hold (the frame it
+    // puts back must be guarded and capped too), and dimming can make
+    // light alternate as well; a flash out that would exceed the burst
+    // stays dark. It only darkens, so everything above still holds.
+    limiter.finish(&mut frame, t, safety_cfg);
     frame
 }
 
@@ -1937,7 +1944,13 @@ impl Engine {
                 let anim_dt = live_dt * live.speed.clamp(0.0, 4.0);
                 let (animators, event_live, cue_live, frozen_events) = (&mut self.animators, &mut self.event_live, &mut self.cue_live, &mut self.frozen_events);
                 let frozen_at = self.frozen;
-                animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id));
+                // The manual look (id 0) keeps its animator while a cue
+                // hides it (T-360): a flash released goes back to the look
+                // where it was, instead of a fresh start each time (an
+                // evolving look would wait on its first frame for the next
+                // beat after every release, never moving on).
+                let look_hidden = looks.iter().any(|(_, i, _)| *i != 0);
+                animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id) || (*id == 0 && look_hidden));
                 event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
                 cue_live.retain(|id, _| cue_masters.contains_key(id));
                 // Timeline events first (under the cues played by hand on the same
@@ -2054,7 +2067,8 @@ impl Engine {
             extra_frames.iter_mut().for_each(|f| live::black_out(f));
         }
         // The safety stage (`safety_chain`): frame size, colour rendering,
-        // strobe limiter and horizon, static beam guard, power caps.
+        // strobe limiter and horizon, static beam guard, power caps, the
+        // limiter's check on the output.
         let frame = safety_chain(frame, frame_limits, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps);
 
         // Last stage: the gate. `armed` was read under the lock at the top

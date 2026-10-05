@@ -6,10 +6,12 @@
 //! figure shrunk to 2 %, a frozen effect or a zoom to 0 is a static beam,
 //! and slow parts of a scan (corners, turning points, dwell points) are hot
 //! spots. The guard runs on the finished frame (after calibration, the
-//! horizon, the zones and the strobe limiter, right before the output
-//! gate), so every source is covered: beam cues, figures, text, a shape shrunk
+//! horizon, the zones and the strobe limiter's hold, before the caps and
+//! the output gate), so every source is covered: beam cues, figures, text, a shape shrunk
 //! to a point by the live size, a frozen timeline event, a held strobe
-//! frame.
+//! frame. Its dimming can make light alternate (a lone beam blanked
+//! between wide frames); the limiter's check on the output, after the
+//! caps, keeps that from flashing faster than the limit (T-360).
 //!
 //! - **Minimum size.** The diagonal of the bounding box of the lit points.
 //!   Below `min_extent` the whole frame is dimmed linearly, down to 0 at

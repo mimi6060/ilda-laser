@@ -475,6 +475,8 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
             let frame = safety::apply(frame, at(lap, i), cfg, &mut limiter);
             let mut frame = dwell.apply(frame, at(lap, i), &cfg.dwell, &area, true);
             power::cap(&mut frame, &chain.limits);
+            // The limiter's check on the output, as the engine ends its chain (T-360).
+            limiter.finish(&mut frame, at(lap, i), cfg);
             floor_to_file_steps(&mut frame);
             if lap + 1 == laps {
                 out.push(frame);
