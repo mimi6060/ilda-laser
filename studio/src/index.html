@@ -879,8 +879,7 @@
   #directScopeHint.bad { color: var(--warn); }
   #livePanel.scope-off section[data-panel="direct"] .dblk ~ * { opacity: .45; pointer-events: none; }
   #directTabs button.lvl-on::after { content: ' •'; color: var(--accent); }
-  .dsmooth { margin-top: 6px; align-items: center; gap: 8px; }
-  .dsmooth input[type=range] { flex: 1; min-width: 0; }
+  .dsmooth { margin-top: 6px; }
   .dsmooth .v { color: var(--muted); font-size: 11px; }
   .dblk { margin: 14px 0 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); }
   .dzoom { margin-top: 0; }
@@ -1633,9 +1632,10 @@
         </div>
       </div>
       <div class="hint" id="directScopeHint"></div>
-      <div class="row dsmooth" title="Lissage : les curseurs glissent au lieu de sauter (tous les niveaux)">
+      <div class="dsmooth" title="Lissage : les curseurs glissent au lieu de sauter (tous les niveaux)">
         <label class="check" style="margin:0"><input type="checkbox" id="smoothOn" data-control="smoothing.on"> Lissage</label>
-        <span>Inertie</span><input type="range" id="smoothInertia" min="25" max="400" value="100" data-control="smoothing.inertia" title="smoothing.inertia"><span class="v" id="smoothInertiaV"></span>
+        <label>Inertie <span class="v" id="smoothInertiaV"></span></label>
+        <input type="range" id="smoothInertia" min="25" max="400" value="100" data-control="smoothing.inertia" title="smoothing.inertia">
       </div>
       <div class="hint" style="margin:6px 0 0">Double-clic sur un curseur : taper une valeur · clic droit ou double-clic sur son nom : valeur neutre · Maj + glisser : réglage fin.</div>
 
