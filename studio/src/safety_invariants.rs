@@ -250,10 +250,22 @@ impl Rig {
     /// A rig whose output takes at most `max_points` points per frame.
     fn with_max_points(s: Shared, tag: &str, seed: u64, max_points: Option<usize>) -> Self {
         let dir = std::env::temp_dir().join(format!("laser-studio-invariants-{tag}-{seed}-{}", std::process::id()));
+        // One simulated clock for the whole rig, starting at the epoch: the
+        // engine's frames, its first step and every `Shared::now_s` (cue
+        // presses, tempo, timeline) read it, so the same session replays
+        // bit for bit, whatever the machine's speed.
+        let mut s = s;
+        let now = Instant::now();
+        s.epoch = now;
+        s.sim_now = Some(now);
+        // The browser's (default) audio features arrived at startup: they
+        // go stale 500 ms of simulated time later, not of wall-clock time.
+        s.audio_at = now;
         let shared = Mutex::new(s);
         let wire = Arc::new(Mutex::new(Wire::default()));
-        let engine = Engine::new(&shared, Some(Box::new(Recorder(Arc::clone(&wire), max_points))), dir.join("live.json"), dir.join("layers.json"));
-        Rig { shared, engine: Some(engine), wire, now: Instant::now(), dir }
+        let mut engine = Engine::new(&shared, Some(Box::new(Recorder(Arc::clone(&wire), max_points))), dir.join("live.json"), dir.join("layers.json"));
+        engine.last = now;
+        Rig { shared, engine: Some(engine), wire, now, dir }
     }
 
     fn s(&self) -> std::sync::MutexGuard<'_, Shared> {
@@ -263,6 +275,10 @@ impl Rig {
     /// One engine frame, 1/60 s after the previous one.
     fn tick(&mut self) {
         self.now += FRAME_INTERVAL;
+        self.s().sim_now = Some(self.now);
+        // The analogue clock look shows simulated time too (noon + t).
+        let t = self.t();
+        crate::generators::TEST_CLOCK_SECONDS.with(|c| c.set(Some(43_200.0 + t as f32)));
         self.engine.as_mut().unwrap().tick(&self.shared, self.now);
     }
 
@@ -808,7 +824,7 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
                 let from = (rng.f() * 400.0) as i64;
                 let events: Vec<MidiEvent> = (0..3)
                     .flat_map(|p| mtc::quarter_frames(Tc::from_frames(from + 2 * p, Rate::F25), Rate::F25))
-                    .map(|data| MidiEvent { port: "MTC".into(), msg: MidiMsg::QuarterFrame { data }, at: Instant::now() })
+                    .map(|data| MidiEvent { port: "MTC".into(), msg: MidiMsg::QuarterFrame { data }, at: now })
                     .collect();
                 timecode::midi(&mut s, &events);
             }
@@ -2533,37 +2549,116 @@ fn every_projector_keeps_every_output_invariant() {
     }
 }
 
+/// `s` on rig `n` of a projector-independence check: `PREVIEWS[n]`
+/// more projectors in its venue, preview only (no output).
+fn rig_with_previews(mut s: Shared, n: usize, tag: &str, seed: u64) -> Rig {
+    let extra = PREVIEWS[n];
+    if extra > 0 {
+        let mut venue = s.venue.get().clone();
+        for i in 0..extra {
+            venue.projectors.push(crate::venue::Projector { id: format!("p{}", i + 2), ..Default::default() });
+        }
+        s.venue.set(venue).unwrap();
+    }
+    Rig::new(s, &format!("{tag}-{n}"), seed)
+}
+
+/// The frame the main output of the first rig was just sent, when every
+/// other rig's main output was sent the same one, bit for bit.
+fn same_main_frame(rigs: &[&Rig], what: impl Fn() -> String) -> Result<Vec<Point>, String> {
+    let first = rigs[0].wire.lock().unwrap().last.clone();
+    for (n, rig) in rigs.iter().enumerate().skip(1) {
+        let other = rig.wire.lock().unwrap().last.clone();
+        if other != first {
+            let drift = first.iter().zip(&other).map(|(p, q)| [p.x - q.x, p.y - q.y, p.r - q.r, p.g - q.g, p.b - q.b].iter().fold(0.0f32, |m, d| m.max(d.abs()))).fold(0.0f32, f32::max);
+            let previews = PREVIEWS[n];
+            return Err(format!("{}: the main output with {previews} preview projector(s) differs ({} vs {} points, up to {drift})", what(), first.len(), other.len()));
+        }
+    }
+    Ok(first)
+}
+
+/// The preview projectors of each rig of a projector-independence check.
+/// The second rig, without any, is the control: the same session must
+/// replay bit for bit (a simulated clock everywhere), else a difference
+/// with projectors would prove nothing.
+const PREVIEWS: [usize; 4] = [0, 0, 1, 2];
+
+/// Same random session on every rig of `PREVIEWS` (no, one and two more
+/// preview-only projectors in the venue, T-277, T-361): every frame the
+/// main output is sent is the same, bit for bit. The looks are rendered
+/// once per frame and every projector draws from them; nothing (animator,
+/// generator, transition, LFO, live stage, optimizer) advances per projector.
 #[test]
 fn a_preview_projector_leaves_the_main_output_exactly_as_it_was() {
-    // Same session twice, once with a second (preview-only) projector:
-    // every frame the main output is sent is the same, bit for bit.
-    let run = |extra: bool| -> Vec<Vec<Point>> {
-        let mut rng = Rng::new(42);
-        let mut s = test_support::shared();
-        s.safety.set(random_safety(&mut rng), true).unwrap();
-        s.outputs.set(MAIN_OUTPUT, Some(random_limits(&mut rng)), None, false, true).unwrap();
-        s.calibration = random_calibration(&mut rng);
-        if extra {
-            let mut venue = s.venue.get().clone();
-            venue.projectors.push(crate::venue::Projector { id: "p2".into(), ..Default::default() });
-            s.venue.set(venue).unwrap();
-        }
-        let mut rig = Rig::new(s, if extra { "golden-2" } else { "golden-1" }, 42);
-        rig.s().request_arm(ArmSource::Ui).unwrap();
-        let mut beats = 0;
-        let mut sent = Vec::new();
-        for _ in 0..90 {
-            if rng.chance(0.3) {
-                random_action(&mut rig, &mut rng, &mut beats);
+    let lit = std::cell::Cell::new(0usize);
+    run_property("a_preview_projector_leaves_the_main_output_exactly_as_it_was", 361, 12, |seed| {
+        let mut rigs: Vec<(Rig, Rng, u64)> = (0..PREVIEWS.len())
+            .map(|n| {
+                let mut rng = Rng::new(seed);
+                let mut s = test_support::shared();
+                s.safety.set(random_safety(&mut rng), true).unwrap();
+                s.outputs.set(MAIN_OUTPUT, Some(random_limits(&mut rng)), None, false, true).unwrap();
+                s.calibration = random_calibration(&mut rng);
+                let rig = rig_with_previews(s, n, "golden", seed);
+                rig.s().request_arm(ArmSource::Ui).unwrap();
+                (rig, rng, 0)
+            })
+            .collect();
+        for frame in 0..90 {
+            for (rig, rng, beats) in &mut rigs {
+                if rng.chance(0.3) {
+                    random_action(rig, rng, beats);
+                }
+                rig.tick();
             }
-            rig.tick();
-            sent.push(rig.wire.lock().unwrap().last.clone());
+            let sent = same_main_frame(&rigs.iter().map(|(r, _, _)| r).collect::<Vec<_>>(), || format!("frame {frame}"))?;
+            lit.set(lit.get() + sent.iter().any(|p| p.is_lit()) as usize);
         }
-        sent
-    };
-    let (one, two) = (run(false), run(true));
-    assert!(one.iter().any(|f| f.iter().any(|p| p.is_lit())), "the session sent light");
-    assert_eq!(one, two);
+        Ok(())
+    });
+    assert!(lit.get() > 0, "the sessions sent light");
+}
+
+/// Every cue of the catalogue (generators, texts, graphics, cue programs
+/// with their evolving layers and lanes...), one after the other in one
+/// session, on every rig of `PREVIEWS` (T-361): the main output is the
+/// same, bit for bit, in every frame of every cue.
+#[test]
+fn every_catalogue_cue_leaves_the_main_output_exactly_as_it_was() {
+    const FRAMES: usize = 12;
+    let presets = test_support::shared().presets;
+    assert!(presets.iter().any(|p| p.id == "faisceaux-045"), "the scissors that drifted (T-361) are in the catalogue");
+    assert!(presets.iter().any(|p| p.settings.program.is_some()), "cue programs (with evolving layers) are in the catalogue");
+    let ids: Vec<String> = presets.iter().map(|p| p.id.clone()).collect();
+    let _guard = test_support::time_guard("every_catalogue_cue_leaves_the_main_output_exactly_as_it_was", Duration::from_secs(600));
+    let mut rigs: Vec<Rig> = (0..PREVIEWS.len()).map(|n| rig_with_previews(test_support::shared(), n, "catalogue", 0)).collect();
+    for rig in &rigs {
+        rig.s().request_arm(ArmSource::Ui).unwrap();
+    }
+    let mut dark = Vec::new();
+    for id in &ids {
+        for rig in &rigs {
+            let mut s = rig.s();
+            // Alone, from its start (the previous cue may still fade out).
+            s.deck.stop_all();
+            assert!(controls::press_cue(&mut s, id, Some(ClickMode::Restart), true), "{id} plays");
+            controls::press_cue(&mut s, id, Some(ClickMode::Restart), false);
+        }
+        let mut lit = false;
+        for frame in 0..FRAMES {
+            for rig in &mut rigs {
+                rig.tick();
+            }
+            let sent = same_main_frame(&rigs.iter().collect::<Vec<_>>(), || format!("cue {id}, frame {frame}")).unwrap();
+            lit |= sent.iter().any(|p| p.is_lit());
+        }
+        if !lit {
+            dark.push(id.clone());
+        }
+    }
+    // A cue that draws nothing would prove nothing.
+    assert!(dark.len() * 20 < ids.len(), "{} of {} cues sent no light: {dark:?}", dark.len(), ids.len());
 }
 
 #[test]

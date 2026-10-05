@@ -649,9 +649,21 @@ pub fn hsv(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the time of day the analogue clock shows on this
+    /// thread, so a simulated session (the invariant rigs) replays bit for
+    /// bit instead of following the machine's clock.
+    pub static TEST_CLOCK_SECONDS: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
 /// Seconds since local midnight-ish (UTC offset is not known without a
 /// timezone crate, so this is UTC; good enough for a spinning clock).
 fn clock_seconds() -> f32 {
+    #[cfg(test)]
+    if let Some(secs) = TEST_CLOCK_SECONDS.with(|c| c.get()) {
+        return secs;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())

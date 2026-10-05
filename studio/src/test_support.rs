@@ -60,6 +60,7 @@ pub fn shared() -> Shared {
         look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch: Instant::now(),
+        sim_now: None,
         live: live::LiveModifiers::default(),
         live_dirty: false,
         palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
