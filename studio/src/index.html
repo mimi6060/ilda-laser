@@ -183,7 +183,7 @@
   .tl-empty-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
   .tl-empty-row button { padding: 10px 18px; font-size: 15px; font-weight: 600; border-radius: 10px; }
   .tl-empty-box .hint { margin: 0; }
-  .tl-head.empty { color: var(--muted); font-size: 11px; padding-left: 8px; opacity: .7; }
+  .tl-head.empty { color: var(--muted); font-size: 11px; padding-left: 8px; }
   #tlTempoHint { border-color: var(--ws-timeline); color: var(--ws-timeline); }
   #tlTempoHint[hidden] { display: none; }
   #tlModified.example { color: var(--ws-timeline); }
@@ -1115,7 +1115,7 @@
   .cue-tabs button { flex: none; white-space: nowrap; }
   .cue-tabs button kbd { font-size: 10px; padding: 0 4px; line-height: 1.4; opacity: .8; }
   .cue-tabs button.drop, .cues .drop { outline: 2px dashed var(--accent); outline-offset: 1px; }
-  .cue-empty { position: relative; min-height: 56px; border-radius: 10px; border: 1px dashed #22263a; background: #0b0d15; opacity: .55; }
+  .cue-empty { position: relative; min-height: 56px; border-radius: 10px; border: 1px dashed #22263a; background: #0b0d15; }
   .cue-empty .key { position: absolute; top: 3px; right: 5px; font-size: 10px; color: var(--muted); font-family: ui-monospace, "SF Mono", monospace; }
   .cues[data-empty]::before { content: attr(data-empty); position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; pointer-events: none; z-index: 1; }
   .cues.editing .cue { cursor: grab; }
@@ -1298,7 +1298,6 @@
   .help-q { flex: none; width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; font-weight: 700; line-height: 18px; text-transform: none; letter-spacing: 0;
     color: var(--muted); }
   .help-q:hover { color: var(--accent); border-color: var(--accent); }
-  summary > .help-q { float: right; margin-left: 8px; }
   #helpDrawer { position: fixed; z-index: 35; top: var(--top-h, 150px); right: 0; bottom: 0; width: min(400px, 100vw); display: flex; flex-direction: column; gap: 8px;
     padding: 12px 14px; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -12px 0 32px #0008; overflow: hidden; }
   #helpDrawer[hidden] { display: none; }
@@ -1360,6 +1359,21 @@
   #searchBox .hint { margin: 0; font-size: 11px; }
   .found { outline: 2px solid var(--accent) !important; outline-offset: 2px; animation: found-blink .5s ease-in-out 4 alternate; }
   @keyframes found-blink { from { outline-color: var(--accent); box-shadow: 0 0 14px var(--accent); } to { outline-color: transparent; box-shadow: none; } }
+  /* Accessibilité (T-436): one focus ring for every control reached by the
+     keyboard (the accent on the dark panels: well over 3:1), also on the
+     text fields that hide their outline on a mouse focus. */
+  :focus-visible, input[type=text]:focus-visible, input[type=number]:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #tlCanvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* The cue grid's rows (role=row) only group cells for assistive tech. */
+  .cue-row, #wsTabs .ws-tablist { display: contents; }
+  /* A panel's « ? » sits before its <details>, beside the summary: never
+     inside it (a button in a summary is a control in a control). */
+  .help-q.det-q { float: right; position: relative; z-index: 1; margin: 2px 0 0 8px; }
+  /* Decorative motion off when the system asks; safety states stay
+     readable without it (colours and text, never only a blink). */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  }
 </style>
 </head>
 <body>
@@ -1368,7 +1382,7 @@
   <h1><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lsLogo" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#22e3ff"/><stop offset=".55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#ff3dc8"/></linearGradient></defs>
   <g stroke="url(#lsLogo)" stroke-width="2.2" stroke-linecap="round" fill="none"><path d="M5 27 L13 4"/><path d="M5 27 L21 6"/><path d="M5 27 L27 13"/><path d="M5 27 L29 22"/></g><circle cx="5" cy="27" r="3.2" fill="#fff"/></svg><span class="name">Laser Studio</span></h1>
   <div class="proj">
-    <button id="projBtn" title="Projet : Cmd+S enregistrer, Cmd+O ouvrir">Projet ▾</button>
+    <button id="projBtn" aria-haspopup="true" aria-controls="projMenu" title="Projet : Cmd+S enregistrer, Cmd+O ouvrir">Projet ▾</button>
     <span id="projName" title="Projet ouvert (• = modifications non enregistrées)">Sans titre</span>
     <span id="autosaveStatus" role="status" hidden></span>
     <span id="backupStatus" role="status" hidden></span>
@@ -1384,15 +1398,15 @@
     </div>
   </div>
   <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
-    <input type="number" id="bpm" min="40" max="250" step="0.1" value="120" data-control="tempo.bpm" title="tempo.bpm">
+    <input type="number" id="bpm" aria-label="Tempo (BPM)" min="40" max="250" step="0.1" value="120" data-control="tempo.bpm" title="tempo.bpm">
     <span class="hint tb-bpm" style="margin:0">BPM</span>
     <div class="beats" id="beats"><span class="one"></span><span></span><span></span><span></span></div>
     <button data-ctl="tempo.tap" data-control="tempo.tap" title="tempo.tap (Entrée)">Tap</button>
     <button data-ctl="tempo.resync" data-control="tempo.resync" title="tempo.resync (⌫)">Sync 1</button>
-    <button class="tb-extra" data-ctl="tempo.half" data-control="tempo.half" title="tempo.half">÷2</button>
-    <button class="tb-extra" data-ctl="tempo.double" data-control="tempo.double" title="tempo.double">×2</button>
-    <button class="tb-extra" data-ctl="tempo.nudge_down" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
-    <button class="tb-extra" data-ctl="tempo.nudge_up" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
+    <button class="tb-extra" data-ctl="tempo.half" aria-label="Tempo divisé par deux" data-control="tempo.half" title="tempo.half">÷2</button>
+    <button class="tb-extra" data-ctl="tempo.double" aria-label="Tempo doublé" data-control="tempo.double" title="tempo.double">×2</button>
+    <button class="tb-extra" data-ctl="tempo.nudge_down" aria-label="Retarder la phase" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
+    <button class="tb-extra" data-ctl="tempo.nudge_up" aria-label="Avancer la phase" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
     <button id="tempoAuto" data-control="tempo.auto" title="tempo.auto : le tempo suit la musique détectée (un tap reprend la main)">Auto</button>
     <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" title="tempo.guide : tapez le tempo pour guider la détection, sans l'imposer" hidden>Guider</button>
     <span class="hint" id="tempoSrc" style="margin:0" title="Tempo auto : état du suivi et confiance de la détection" hidden></span>
@@ -1416,8 +1430,8 @@
     <div class="leds">
       <!-- Entrées externes (T-408): closed at start and after an e-stop. -->
       <button id="extGate" aria-pressed="false" title="Entrées externes fermées : DMX, OSC et timecode ne changent rien (sauf le noir et l'arrêt d'urgence) · Alt+X"><span class="long">Entrées externes</span><span class="short">Ext.</span></button>
-      <span id="presenceLed" class="led" title="Battement de l'interface : sans aucune page ouverte, le laser se désarme">Opérateur absent</span>
-      <span id="engineLed" class="led ok" title="Chien de garde du moteur">Moteur</span>
+      <span id="presenceLed" class="led" role="status" title="Battement de l'interface : sans aucune page ouverte, le laser se désarme">Opérateur absent</span>
+      <span id="engineLed" class="led ok" role="status" title="Chien de garde du moteur">Moteur</span>
       <div id="midiStatus" title="Contrôleurs MIDI : clic = RÉGLAGES › Contrôleur">MIDI : …</div>
       <span id="dmxPill" title="Entrée DMX (Art-Net / sACN) : clic = RÉGLAGES › Entrées réseau" hidden>DMX</span>
     </div>
@@ -1434,11 +1448,11 @@
     <button id="estopBtn" data-control="safety.estop" title="Arrêt d'urgence (Échap) · safety.estop">ARRÊT</button>
   </div>
   <div class="arm">
-    <button id="armBtn" data-control="transport.arm" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
-    <div id="armRefused" hidden></div>
+    <button id="armBtn" data-control="transport.arm" aria-pressed="false" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
+    <div id="armRefused" role="alert" hidden></div>
   </div>
 </header>
-<div id="estopBanner" hidden>ARRÊT D'URGENCE — réinitialiser pour réarmer
+<div id="estopBanner" role="alert" hidden>ARRÊT D'URGENCE — réinitialiser pour réarmer
   <button id="estopReset">Réinitialiser l'arrêt d'urgence</button></div>
 <div id="holdBanner" hidden></div>
 <div id="tpBanner" role="status" hidden>Mire affichée — cues et timeline en pause
@@ -1451,11 +1465,13 @@
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
   <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
 <!-- Espaces de travail (T-295) : changer d'onglet ne change que l'affichage. -->
-<nav id="wsTabs" role="tablist" aria-label="Espaces de travail">
+<nav id="wsTabs" aria-label="Espaces de travail">
+  <div class="ws-tablist" role="tablist" aria-label="Espaces de travail">
   <button role="tab" data-ws-tab="live" title="Jouer en direct (F1)">LIVE <kbd>F1</kbd></button>
   <button role="tab" data-ws-tab="timeline" title="Shows et timeline (F2)">TIMELINE <kbd>F2</kbd></button>
   <button role="tab" data-ws-tab="creation" title="Créer du contenu (F3)">CRÉATION <kbd>F3</kbd></button>
   <button role="tab" data-ws-tab="settings" title="Calibration, sécurité, MIDI, OSC/Art-Net (F4)">RÉGLAGES <kbd>F4</kbd></button>
+  </div>
   <span class="hint" id="wsHint"><kbd>Espace</kbd> laser · <kbd>Échap</kbd> arrêt, dans tous les onglets · lettres = cues (LIVE)</span>
   <!-- Annuler / Rétablir / Historique (T-285): edits only, hidden in show mode. -->
   <div class="hist lock-edit" role="group" aria-label="Historique des modifications">
@@ -1697,9 +1713,9 @@
       <h4 class="dblk">Taille</h4>
       <label>Taille <span class="v" id="mSizeV"></span></label>
       <div class="row dzoom">
-        <button id="zoomOut" title="master.size − 10 %">−</button>
-        <input type="range" id="mSize" min="0" max="200" data-live="size" data-k="100" data-control="master.size" title="master.size">
-        <button id="zoomIn" title="master.size + 10 %">+</button>
+        <button id="zoomOut" aria-label="Réduire la taille de 10 %" title="master.size − 10 %">−</button>
+        <input type="range" id="mSize" aria-label="Taille" min="0" max="200" data-live="size" data-k="100" data-control="master.size" title="master.size">
+        <button id="zoomIn" aria-label="Agrandir la taille de 10 %" title="master.size + 10 %">+</button>
       </div>
       <label>Taille X <span class="v" id="mSizeXV"></span></label>
       <input type="range" id="mSizeX" min="-200" max="200" data-live="size_x" data-k="100" data-control="master.size_x" title="master.size_x">
@@ -1720,7 +1736,7 @@
       </div>
       <div class="row">
         <label class="check" style="margin:0"><input type="checkbox" id="rotSync" data-control="master.rot.sync" title="master.rot.sync"> Sync tempo</label>
-        <button id="rotReverse" data-control="master.rot.reverse" title="master.rot.reverse (maintenir, ou touche &lt;)">⟲ Inverser (maintenir)</button>
+        <button id="rotReverse" aria-label="Inverser la rotation (maintenir)" data-control="master.rot.reverse" title="master.rot.reverse (maintenir, ou touche &lt;)">⟲ Inverser (maintenir)</button>
       </div>
       <label>Rotation X <span class="v" id="mTiltXV"></span></label>
       <input type="range" id="mTiltX" min="-180" max="180" data-live="rot_angle.0" data-k="1" data-control="master.rot_x.angle" title="master.rot_x.angle">
@@ -1739,8 +1755,8 @@
       <label>Vitesse d'animation <span class="v" id="mSpeedV"></span></label>
       <input type="range" id="mSpeed" min="0" max="400" data-live="speed" data-k="100" data-control="master.speed" title="master.speed">
       <div class="seg" id="speedPresets" title="master.speed">
-        <button data-speed="0.25">¼</button><button data-speed="0.5">½</button><button data-speed="1">1</button>
-        <button data-speed="2">2</button><button data-speed="4">4</button>
+        <button data-speed="0.25" aria-label="Vitesse × 0,25">¼</button><button data-speed="0.5" aria-label="Vitesse × 0,5">½</button><button data-speed="1" aria-label="Vitesse × 1">1</button>
+        <button data-speed="2" aria-label="Vitesse × 2">2</button><button data-speed="4" aria-label="Vitesse × 4">4</button>
       </div>
 
       <h4 class="dblk">Luminosité</h4>
@@ -1753,7 +1769,7 @@
           <button data-mode="0">Normal</button><button data-mode="1">Fixe</button><button data-mode="2">Teinte</button>
           <button data-mode="3">Palette</button><button data-mode="4">Arc-en-ciel</button><button data-mode="5">Chenillard</button>
         </div>
-        <div class="row"><input type="color" id="colorFixed" value="#ff0000" title="Couleur fixe (master.color.red/green/blue)"></div>
+        <div class="row"><input type="color" id="colorFixed" aria-label="Couleur fixe" value="#ff0000" title="Couleur fixe (master.color.red/green/blue)"></div>
         <div class="hue-strip" id="hueStrip" data-control="master.color.hue" title="Teinte (master.color.hue)"><span id="hueMark"></span></div>
         <div class="palettes" id="palettes" data-control="master.color.palette"></div>
         <div class="row">
@@ -1764,8 +1780,8 @@
         <input type="range" id="colorOffset" min="0" max="15" step="1" value="0" data-control="master.color.offset" title="master.color.offset">
         <label>Pas (temps)</label>
         <div class="seg" id="colorSteps" data-control="master.color.rate">
-          <button data-step="0">1/8</button><button data-step="1">1/4</button><button data-step="2">1/2</button>
-          <button data-step="3">1</button><button data-step="4">2</button><button data-step="5">4</button>
+          <button data-step="0" aria-label="Pas de couleur 1/8 de temps">1/8</button><button data-step="1" aria-label="Pas de couleur 1/4 de temps">1/4</button><button data-step="2" aria-label="Pas de couleur 1/2 temps">1/2</button>
+          <button data-step="3" aria-label="Pas de couleur 1 temps">1</button><button data-step="4" aria-label="Pas de couleur 2 temps">2</button><button data-step="5" aria-label="Pas de couleur 4 temps">4</button>
         </div>
         <label>Étalement <span class="v" id="colorSpreadV"></span></label>
         <input type="range" id="colorSpread" data-display-k="0.01" min="0" max="400" value="100" data-control="master.color.spread" title="master.color.spread">
@@ -1782,8 +1798,8 @@
         <label>Cadence <span class="v" id="fxRateV"></span></label>
         <input type="range" id="fxRate" min="1" max="25" step="0.5" value="8" data-control="master.strobe.rate" title="master.strobe.rate (Hz, cadence libre)">
         <div class="seg" id="fxSync" data-control="master.strobe.sync" title="master.strobe.sync : cadence libre (Hz) ou calée sur le tempo">
-          <button data-sync="0">Hz</button><button data-sync="1">1/1</button><button data-sync="2">1/2</button>
-          <button data-sync="3">1/4</button><button data-sync="4">1/8</button><button data-sync="5">1/16</button>
+          <button data-sync="0">Hz</button><button data-sync="1" aria-label="Stroboscope 1 par temps">1/1</button><button data-sync="2" aria-label="Stroboscope 1/2 temps">1/2</button>
+          <button data-sync="3" aria-label="Stroboscope 1/4 de temps">1/4</button><button data-sync="4" aria-label="Stroboscope 1/8 de temps">1/8</button><button data-sync="5">1/16</button>
         </div>
         <label>Rapport <span class="v" id="fxDutyV"></span></label>
         <input type="range" id="fxDuty" min="10" max="90" value="50" data-control="master.strobe.duty" title="master.strobe.duty (part allumée de chaque éclair)">
@@ -1796,7 +1812,7 @@
         <input type="range" id="mScan" min="50" max="150" data-live="scan" data-k="100" data-control="master.scan" title="master.scan">
         <label>Miroir</label>
         <div class="seg" id="fxMirror" data-control="master.mirror" title="master.mirror : copies en miroir autour du centre">
-          <button data-mirror="0">Aucun</button><button data-mirror="1">X</button><button data-mirror="2">Y</button><button data-mirror="3">XY</button>
+          <button data-mirror="0">Aucun</button><button data-mirror="1" aria-label="Miroir X">X</button><button data-mirror="2" aria-label="Miroir Y">Y</button><button data-mirror="3">XY</button>
         </div>
         <label>Prisme <span class="v" id="fxPrismV"></span></label>
         <input type="range" id="fxPrism" min="1" max="8" step="1" value="1" data-control="master.prism" title="master.prism : copies tournées autour du centre (1 = aucune)">
@@ -1892,7 +1908,7 @@
       <div id="musDevRow">
         <label for="micSelect" id="musDevLabel">Entrée audio</label>
         <select id="micSelect" title="Entrées vues par le navigateur"><option value="">Par défaut</option></select>
-        <select id="musDevice" title="Entrées du Mac (liste du studio)" hidden><option value="">Entrée par défaut du Mac</option></select>
+        <select id="musDevice" aria-label="Entrée audio" title="Entrées du Mac (liste du studio)" hidden><option value="">Entrée par défaut du Mac</option></select>
       </div>
       <div class="row">
         <button id="micBtn" class="primary">Écouter</button>
@@ -1931,7 +1947,7 @@
       <details id="musSettings">
         <summary>Réglages de l'analyse</summary>
         <div id="musNativeSettings">
-          <div class="check"><input type="checkbox" id="musAutoGain"><span>Gain automatique</span></div>
+          <label class="check"><input type="checkbox" id="musAutoGain"><span>Gain automatique</span></label>
           <label>Gain manuel <span class="v" id="musGainV"></span></label>
           <input type="range" id="musGain" data-default="0" min="-40" max="40" step="1" value="0">
           <label>Seuil de silence <span class="v" id="musSilenceV"></span></label>
@@ -1957,7 +1973,7 @@
           <button data-act="calm_look" role="radio" title="Une scène sauvée remplace le look pendant le silence">Look calme</button>
           <button data-act="blackout" role="radio" title="La sortie s'éteint en fondu pendant le silence (le laser reste armé ou désarmé comme avant)">Noir</button>
         </div>
-        <select id="musCalm" title="Scène jouée pendant le silence" hidden></select>
+        <select id="musCalm" aria-label="Scène du silence" title="Scène jouée pendant le silence" hidden></select>
         <div class="hint" id="musGuard" aria-live="polite"></div>
       </details>
 
@@ -1971,21 +1987,21 @@
       <!-- T-240 : déclencheurs sur évènements audio (kick, drop, break… → cues) -->
       <details id="trgPanel" open>
         <summary>Déclencheurs audio</summary>
-        <div class="check" title="audio.triggers.enabled : coupé à chaque démarrage et par l'arrêt d'urgence ; n'arme jamais le laser"><input type="checkbox" id="trgOn" data-control="audio.triggers.enabled"><span>Automatisme audio</span></div>
+        <div class="check" title="audio.triggers.enabled : coupé à chaque démarrage et par l'arrêt d'urgence ; n'arme jamais le laser"><input type="checkbox" id="trgOn" aria-label="Automatisme audio" data-control="audio.triggers.enabled"><span>Automatisme audio</span></div>
         <div class="hint" id="trgState" aria-live="polite"></div>
         <div id="trgList"></div>
         <button id="trgAdd" class="lock-edit" title="Ajouter une règle : quand un évènement arrive dans la musique, alors une action">+ Règle</button>
         <div class="hint" id="trgHint">Quand la musique fait un kick, un drop, un break…, lancer un cue, passer au suivant, un flash ou un noir bref. Au plus une action par règle et par intervalle ; rien ne se passe sans audio. Le laser n'est jamais armé par l'audio.</div>
       </details>
 
-      <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
+      <label class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></label>
       <label>Taille suit les basses <span class="v" id="aSizeV"></span></label>
       <input type="range" id="aSize" data-default="50" min="0" max="100">
       <label>Rotation suit les basses <span class="v" id="aRotV"></span></label>
       <input type="range" id="aRot" data-default="0" min="0" max="100">
       <label>Flash sur le beat <span class="v" id="aFlashV"></span></label>
       <input type="range" id="aFlash" data-default="0" min="0" max="100">
-      <div class="check"><input type="checkbox" id="aColor"><span>Change de couleur à chaque beat</span></div>
+      <label class="check"><input type="checkbox" id="aColor"><span>Change de couleur à chaque beat</span></label>
     </section>
 
     <!-- « En cours » (T-423): what plays, who drove it, the stop buttons. -->
@@ -2009,8 +2025,8 @@
     <section data-panel="scenes" data-help="live-scenes">
       <h2>Scènes</h2>
       <div class="row">
-        <input type="text" id="sceneName" placeholder="Nom de la scène">
-        <input type="number" id="sceneDur" value="8" min="0.5" step="0.5" title="Durée (s) dans la playlist" style="max-width:80px">
+        <input type="text" id="sceneName" aria-label="Nom de la scène" placeholder="Nom de la scène">
+        <input type="number" id="sceneDur" aria-label="Durée dans la playlist (s)" value="8" min="0.5" step="0.5" title="Durée (s) dans la playlist" style="max-width:80px">
         <button id="sceneSave" style="flex:0">Sauver</button>
       </div>
       <div id="sceneList"></div>
@@ -2023,9 +2039,9 @@
     <section data-panel="cuelist" id="cqPanel" data-help="live-liste-cues">
       <h2>Liste de cues</h2>
       <div class="row">
-        <select id="cqSelect" title="La liste chargée (GO joue ses pas)"></select>
+        <select id="cqSelect" aria-label="Liste de cues chargée" title="La liste chargée (GO joue ses pas)"></select>
         <button id="cqNew" class="lock-edit" style="flex:0" title="Nouvelle liste de cues">+ Liste</button>
-        <button id="cqDelete" class="hold-confirm lock-edit" style="flex:0" title="Supprimer la liste chargée (maintenir pour confirmer)">✕</button>
+        <button id="cqDelete" aria-label="Supprimer la liste" class="hold-confirm lock-edit" style="flex:0" title="Supprimer la liste chargée (maintenir pour confirmer)">✕</button>
       </div>
       <div class="cq-status" id="cqStatus" role="status">Aucune liste chargée</div>
       <div class="cq-bar" title="Fondu ou délai en cours"><div id="cqProgress"></div></div>
@@ -2039,7 +2055,7 @@
       </div>
       <div class="row">
         <span class="hint" style="margin:0;flex:none">Aller au pas</span>
-        <input type="number" id="cqGotoN" min="1" value="1" style="max-width:70px">
+        <input type="number" id="cqGotoN" aria-label="Aller au pas" min="1" value="1" style="max-width:70px">
         <button id="cqGoto" style="flex:0">Aller à</button>
       </div>
       <div class="row lock-edit">
@@ -2069,7 +2085,7 @@
         <button data-multi="1" title="Les cues s'additionnent">Multi</button>
       </div>
       <span class="hint" style="margin:0">Max</span>
-      <input type="number" id="cueMax" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
+      <input type="number" id="cueMax" aria-label="Cues actifs au plus" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
       <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all : tous les cues sauf ceux « Protégé de Tout arrêter »">Arrêter les cues</button>
       <span class="sep"></span>
       <label title="cue.transition : comment un cue remplace le précédent (le Flash reste immédiat)">Transition
@@ -2090,7 +2106,7 @@
         </select></label>
       <button id="cueStore" class="lock-edit" aria-pressed="false" title="Enregistrer le look courant dans une case (Cmd/Ctrl+E) : activer, puis cliquer la case. Recliquer pour annuler.">Enregistrer dans une case</button>
       <button id="cueUpdate" class="lock-edit" title="Réenregistrer le look courant dans le cue utilisateur en cours (Cmd/Ctrl+Maj+E)">Mettre à jour</button>
-      <select id="cueStoreFilter" class="lock-edit" title="Ce que l'enregistrement prend du look courant">
+      <select id="cueStoreFilter" aria-label="Ce que l'enregistrement prend du look" class="lock-edit" title="Ce que l'enregistrement prend du look courant">
         <option value="all">Tout</option><option value="color_only">Couleur seulement</option><option value="geometry_only">Géométrie seulement</option>
       </select>
       <label class="lock-edit" title="Enregistre aussi les modificateurs maîtres du moment (taille, position, rotation, couleur) avec le cue"><input type="checkbox" id="cueStoreMaster"> Avec les modificateurs maîtres</label>
@@ -2111,7 +2127,7 @@
       <label>Colonnes <input type="number" id="gridCols" min="4" max="12"></label>
       <label>Rangées <input type="number" id="gridRows" min="2" max="8"></label>
       <span class="sep"></span>
-      <input type="text" id="gridPageName" placeholder="Nom de la page" maxlength="40">
+      <input type="text" id="gridPageName" aria-label="Nom de la page" placeholder="Nom de la page" maxlength="40">
       <button id="gridPageNew">Nouvelle page</button>
       <button id="gridPageRename">Renommer la page</button>
       <button id="gridPageDelete" class="hold-confirm" title="Supprimer la page affichée (maintenir pour confirmer)">Supprimer la page</button>
@@ -2145,7 +2161,7 @@
       <button id="cueFilterBtn" aria-expanded="false" aria-controls="cueFilter" title="Filtrer la grille par étiquette, nom ou note (les cases restent en place)">Filtrer<span class="cf-badge" id="cueFilterBadge" hidden></span></button>
     </div>
     <div class="cue-scroll">
-      <div class="cues" id="cues"></div>
+      <div class="cues" id="cues" role="grid" aria-label="Grille de cues"></div>
       <div class="hint"><kbd>Maj</kbd> + lettre = flash · <kbd>F5</kbd>–<kbd>F12</kbd> ou <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> = page · clic droit sur un cue = propriétés (mode, groupe, calque)<span id="gridHidden"></span></div>
     </div>
   </section>
@@ -2164,7 +2180,7 @@
     <section id="timeline" data-help="timeline-shows">
       <h2>Timeline <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">shows enregistrés dans studio-data/shows</span></h2>
       <div class="cue-bar">
-        <select id="tlShow" title="Show à charger"><option value="">Aucun show</option></select>
+        <select id="tlShow" aria-label="Show" title="Show à charger"><option value="">Aucun show</option></select>
         <button id="tlPlay" title="timeline.play (une phrase en temps démarre à la mesure suivante)">▶ Lecture</button>
         <button data-ctl="timeline.pause" id="tlPause" title="timeline.pause">❚❚ Pause</button>
         <button data-ctl="timeline.stop" id="tlStop" title="timeline.stop">■ Arrêt</button>
@@ -2174,9 +2190,9 @@
       <div class="tl-audio" id="tlAudio">
         <div class="cue-bar">
           <span class="tl-track">Audio</span>
-          <select id="tlSong" class="lock-edit" title="Morceau du show (fichiers de studio-data/media/audio)"><option value="">Aucun morceau</option></select>
+          <select id="tlSong" aria-label="Morceau du show" class="lock-edit" title="Morceau du show (fichiers de studio-data/media/audio)"><option value="">Aucun morceau</option></select>
           <button id="tlImport" class="lock-edit" title="WAV, MP3, AIFF ou FLAC : copié dans studio-data/media/audio, jamais ailleurs">Importer un morceau…</button>
-          <input type="file" id="tlImportFile" accept=".wav,.mp3,.aif,.aiff,.flac" hidden>
+          <input type="file" id="tlImportFile" aria-label="Importer un morceau" accept=".wav,.mp3,.aif,.aiff,.flac" hidden>
           <label class="tl-knob lock-edit" title="Décalage du son par rapport au laser (±500 ms) : positif = le son plus tard, pour compenser la latence">Décalage <input type="range" id="tlOffset" data-default="0" min="-500" max="500" step="5" value="0"> <span id="tlOffsetV">0 ms</span></label>
           <label class="tl-knob lock-edit" title="Volume du morceau">Volume <input type="range" id="tlGain" data-default="100" min="0" max="100" step="1" value="100"> <span id="tlGainV">100 %</span></label>
           <span class="hint" id="tlSongStatus"></span>
@@ -2185,7 +2201,7 @@
       </div>
       <div class="cue-bar tl-auto lock-edit" id="tlAutoRow">
         <span class="tl-track">Show auto</span>
-        <select id="tlAutoSong" title="Morceau à analyser (studio-data/media/audio)"><option value="">Aucun morceau</option></select>
+        <select id="tlAutoSong" aria-label="Morceau à analyser" title="Morceau à analyser (studio-data/media/audio)"><option value="">Aucun morceau</option></select>
         <button id="tlAuto" title="Analyse le morceau (tempo, temps, sections : intro, couplet, montée, drop, pause, fin) et propose un show à retoucher, ouvert sans être enregistré. Ne touche jamais au laser.">Générer un show depuis le morceau</button>
         <progress id="tlAutoProg" max="1" value="0" hidden></progress>
         <button id="tlAutoCancel" hidden>Annuler</button>
@@ -2235,15 +2251,15 @@
       <button id="tlNew" title="Créer un show vide (deux pistes)">Nouveau show</button>
       <button id="tlExamples" title="Shows prêts à jouer (T-124 à T-129), faits avec les cues du catalogue : ils s'ouvrent comme une copie">Ouvrir un exemple</button>
       <span id="tlNewRow" hidden>
-        <input type="text" id="tlNewName" placeholder="Nom du show" maxlength="64" title="Lettres, chiffres, espaces, - et _">
-        <select id="tlNewBase" title="Secondes : show calé sur un morceau · Temps : phrase qui suit le tempo en direct">
+        <input type="text" id="tlNewName" aria-label="Nom du show" placeholder="Nom du show" maxlength="64" title="Lettres, chiffres, espaces, - et _">
+        <select id="tlNewBase" aria-label="Base de temps du show" title="Secondes : show calé sur un morceau · Temps : phrase qui suit le tempo en direct">
           <option value="seconds">Secondes</option><option value="beats">Temps</option>
         </select>
         <button id="tlNewOk" class="primary">Créer</button>
       </span>
       <button id="tlSave" title="Enregistrer le show dans studio-data/shows (ne touche jamais au laser)">Enregistrer</button>
       <span id="tlModified"></span>
-      <button id="tlTempoHint" hidden></button>
+      <button id="tlTempoHint" hidden>Tempo conseillé</button>
       <span class="sep"></span>
       <span class="hint" style="margin:0">Magnétisme :</span>
       <div class="seg" id="tlSnap" title="Magnétisme : Fort (temps / mesures), Moyen (à quelques pixels), Off">
@@ -2259,7 +2275,7 @@
           <button id="tlCsvExport" role="menuitem" title="#, Name, Start (secondes), Color">Exporter en CSV…</button>
           <button id="tlCsvImport" role="menuitem" title="CSV ou texte : séparateur , ; ou tabulation, temps en secondes ou m:ss">Importer un CSV…</button>
         </span>
-        <input type="file" id="tlCsvFile" accept=".csv,.txt,text/csv,text/plain" hidden>
+        <input type="file" id="tlCsvFile" aria-label="Fichier CSV de marqueurs" accept=".csv,.txt,text/csv,text/plain" hidden>
       </span>
       <button id="tlFit" title="Voir tout le show (molette : zoom centré sur le curseur, Maj+molette : défiler)">Tout afficher</button>
       <label class="check" style="margin:0" title="La vue suit la tête de lecture"><input type="checkbox" id="tlFollow" checked> Suivre</label>
@@ -2272,8 +2288,8 @@
       <button id="tlRedo" title="Cmd+Maj+Z">Rétablir</button>
       <button id="tlAddTrack" title="Nouvelle piste de cues">+ Piste</button>
       <span id="tlMarkRow" hidden>
-        <input type="text" id="tlMarkName" maxlength="64" title="Nom du marqueur">
-        <input type="color" id="tlMarkColor" title="Couleur du marqueur" style="width:36px;height:26px;padding:1px">
+        <input type="text" id="tlMarkName" aria-label="Nom du marqueur" maxlength="64" title="Nom du marqueur">
+        <input type="color" id="tlMarkColor" aria-label="Couleur du marqueur" title="Couleur du marqueur" style="width:36px;height:26px;padding:1px">
         <button id="tlMarkDel" title="Supprimer le marqueur">✕ marqueur</button>
       </span>
       <span id="tlScanRow" hidden>
@@ -2286,9 +2302,9 @@
       <div class="hint" id="tlEdMsg"></div>
     </div>
     <div class="tl-lib">
-      <select id="tlLibCat" title="Page de cues"></select>
-      <input type="search" id="tlLibFilter" placeholder="Filtrer…">
-      <div id="tlLibList" title="Glisser un cue sur une piste"></div>
+      <select id="tlLibCat" aria-label="Page de cues" title="Page de cues"></select>
+      <input type="search" id="tlLibFilter" aria-label="Filtrer les cues" placeholder="Filtrer…">
+      <div id="tlLibList" role="region" aria-label="Cues à glisser sur une piste" tabindex="0" title="Glisser un cue sur une piste"></div>
     </div>
     <div id="tlTracks">
       <div id="tlEmpty" hidden>
@@ -2338,13 +2354,13 @@
         </div>
         <label>Espacement des lettres <span class="v" id="textSpacingV"></span></label>
         <input type="range" id="textSpacing" data-default="0" min="-0.5" max="2" step="0.05">
-        <div class="check"><input type="checkbox" id="textFit"><span>Ajuster à la largeur</span></div>
+        <label class="check"><input type="checkbox" id="textFit"><span>Ajuster à la largeur</span></label>
         <label>Largeur <span class="v" id="textFitWV"></span></label>
         <input type="range" id="textFitW" data-default="80" min="5" max="100" title="Largeur du texte, en % de la largeur du cadre">
-        <div class="check"><input type="checkbox" id="textScroll"><span>Défilement</span></div>
+        <label class="check"><input type="checkbox" id="textScroll"><span>Défilement</span></label>
         <label>Vitesse <span class="v" id="textSpeedV"></span></label>
         <input type="range" id="textSpeed" data-default="0.25" min="-4" max="4" step="0.05" title="Largeurs de cadre ; positif : vers la gauche, négatif : vers la droite">
-        <select id="textPer" title="Unité de la vitesse de défilement">
+        <select id="textPer" aria-label="Unité de la vitesse de défilement" title="Unité de la vitesse de défilement">
           <option value="beat">par temps</option><option value="second">par seconde</option>
         </select>
         <div class="hint">Les polices détaillées coûtent plus de points : un texte long dépasse vite le budget du calque (« Points » en bas). Un texte long gagne à défiler.</div>
@@ -2393,11 +2409,11 @@
         <input type="range" id="gB" data-default="2" min="-1" max="3" step="0.05">
         <div class="hint" id="gBH" hidden></div>
         <div id="gCrossRow" hidden>
-          <div class="check"><input type="checkbox" id="gCrossFlash"><span>Flash blanc au croisement</span></div>
+          <label class="check"><input type="checkbox" id="gCrossFlash"><span>Flash blanc au croisement</span></label>
           <div class="hint">Les deux groupes passent au blanc pendant 1/8 de temps quand ils se croisent.</div>
         </div>
         <div id="gSnapRow" hidden>
-          <div class="check"><input type="checkbox" id="gSnap"><span>Rotation par à-coups</span></div>
+          <label class="check"><input type="checkbox" id="gSnap"><span>Rotation par à-coups</span></label>
           <div class="hint">Tourne d’un côté (360°/côtés) à chaque pas, immobile entre deux ; Pas par temps règle la cadence. Se voit mieux en Dégradé ou Arc-en-ciel.</div>
         </div>
         <label>Vitesse <span class="v" id="gSpeedV"></span></label>
@@ -2413,7 +2429,7 @@
         </select>
         <label>Deuxième couleur</label>
         <input type="color" id="gColor2" value="#0000ff">
-        <div class="check"><input type="checkbox" id="gSync"><span>Tempo du look (calé sur le BPM)</span></div>
+        <label class="check"><input type="checkbox" id="gSync"><span>Tempo du look (calé sur le BPM)</span></label>
         <div id="gSyncPanel" hidden>
           <div class="row" style="justify-content:space-between">
             <span id="gBpm" class="v">120 BPM</span>
@@ -2472,7 +2488,7 @@
       </select>
       <label>Durée gate (temps) <span class="v" id="rGateLenV"></span></label>
       <input type="range" id="rGateLen" data-default="0.2" min="0.05" max="0.5" step="0.05" title="Le look s'allume sur le temps et reste allumé ce temps-là">
-      <div class="check"><input type="checkbox" id="rDecay"><span>Décroissance (s'éteint en fondu au lieu d'être coupé)</span></div>
+      <label class="check"><input type="checkbox" id="rDecay"><span>Décroissance (s'éteint en fondu au lieu d'être coupé)</span></label>
       <label>Strobe</label>
       <select id="rStrobe">
         <option value="0">Aucun</option><option value="2">1/2 temps</option><option value="4">1/4 temps</option><option value="8">1/8 temps</option>
@@ -2516,7 +2532,7 @@
         (dossier <code>media/ilda</code> des données) et ne sont jamais copiés dans un projet.</div>
       <div id="ildaDrop" tabindex="0">
         <div>Glissez un fichier <b>.ild</b> ici, ou choisissez-le :</div>
-        <input type="file" id="ildaFile" accept=".ild">
+        <input type="file" id="ildaFile" aria-label="Fichier ILDA à importer" accept=".ild">
       </div>
       <div id="ildaMsg" class="hint" role="status"></div>
       <label>Fichiers</label>
@@ -2563,7 +2579,7 @@
       <h2 style="margin-top:14px">Tracé sélectionné</h2>
       <label for="figColor">Couleur (nouveaux tracés et sélection)</label>
       <input type="color" id="figColor" value="#00ff00">
-      <div class="check"><input type="checkbox" id="figLit" checked><span>Allumé (décoché : déplacement éteint)</span></div>
+      <label class="check"><input type="checkbox" id="figLit" checked><span>Allumé (décoché : déplacement éteint)</span></label>
       <div class="seg wrap" style="margin-top:8px">
         <button id="figUp" title="Tracer plus tôt">Avant</button>
         <button id="figDown" title="Tracer plus tard">Après</button>
@@ -2572,7 +2588,7 @@
       </div>
       <label>Transformer (la sélection, sinon toute l'image)</label>
       <div class="seg wrap">
-        <button id="figRotL">⟲ 15°</button><button id="figRotR">⟳ 15°</button>
+        <button id="figRotL" aria-label="Tourner de 15° vers la gauche">⟲ 15°</button><button id="figRotR" aria-label="Tourner de 15° vers la droite">⟳ 15°</button>
         <button id="figSmaller">− 10 %</button><button id="figBigger">+ 10 %</button>
         <button id="figMirX" title="Symétrie gauche / droite">Symétrie X</button><button id="figMirY" title="Symétrie haut / bas">Symétrie Y</button>
       </div>
@@ -2591,7 +2607,7 @@
       <label for="figRate">Cadence</label>
       <div class="row" style="margin-top:0">
         <input type="number" id="figRate" min="0.05" max="60" step="0.05" value="1">
-        <select id="figPer"><option value="beat">images par temps</option><option value="second">images par seconde</option></select>
+        <select id="figPer" aria-label="Unité de la cadence des images"><option value="beat">images par temps</option><option value="second">images par seconde</option></select>
       </div>
       <label for="figLoop">Après la dernière image</label>
       <select id="figLoop"><option value="loop">Boucle</option><option value="ping_pong">Aller-retour</option><option value="once">Une fois (reste sur la dernière)</option></select>
@@ -2659,8 +2675,8 @@
       <button id="figFinish" title="Terminer le tracé en cours (double-clic)">Terminer</button>
       <button id="figUndo" title="Annuler (Cmd+Z)">Annuler</button>
       <button id="figRedo" title="Rétablir (Cmd+Maj+Z)">Rétablir</button>
-      <div class="check"><input type="checkbox" id="figSnap"><span>Magnétisme</span></div>
-      <div class="check"><input type="checkbox" id="figOrder" checked><span>Ordre</span></div>
+      <label class="check"><input type="checkbox" id="figSnap"><span>Magnétisme</span></label>
+      <label class="check"><input type="checkbox" id="figOrder" checked><span>Ordre</span></label>
     </div>
     <div class="fig-canvas"><canvas id="figCanvas" width="800" height="800"></canvas></div>
     <div class="fig-frames">
@@ -2668,9 +2684,9 @@
         <button id="figAddFrame">+ Image</button>
         <button id="figDupFrame">Dupliquer</button>
         <button id="figDelFrame">Supprimer l'image</button>
-        <button id="figFrameLeft" title="Déplacer l'image vers la gauche">◀</button>
-        <button id="figFrameRight" title="Déplacer l'image vers la droite">▶</button>
-        <div class="check"><input type="checkbox" id="figOnion" checked><span>Pelure d'oignon</span></div>
+        <button id="figFrameLeft" aria-label="Déplacer l'image vers la gauche" title="Déplacer l'image vers la gauche">◀</button>
+        <button id="figFrameRight" aria-label="Déplacer l'image vers la droite" title="Déplacer l'image vers la droite">▶</button>
+        <label class="check"><input type="checkbox" id="figOnion" checked><span>Pelure d'oignon</span></label>
         <button id="figPreview" title="Lire l'animation dans l'éditeur (au tempo)">Lire</button>
         <span class="hint" id="figFrameInfo" style="margin:0"></span>
       </div>
@@ -2694,7 +2710,7 @@
   <dialog id="figImportDlg" aria-labelledby="impTitle" data-help="creation-import">
     <div class="imp-head">
       <h2 id="impTitle">Importer un SVG ou une image</h2>
-      <button id="impClose" title="Fermer sans créer">×</button>
+      <button id="impClose" aria-label="Fermer sans créer" title="Fermer sans créer">×</button>
     </div>
     <p class="hint imp-rights" id="impRights">N'importez que des fichiers dont vous avez les droits : vos propres créations, ou un contenu dont la licence le permet.
       Le fichier n'est pas conservé : seule la figure créée est enregistrée, dans studio-data.</p>
@@ -2719,7 +2735,7 @@
         <label for="impColor">Couleur (noir du SVG, image en une couleur)</label>
         <input type="color" id="impColor" value="#ffffff">
         <div id="impSvgOpts">
-          <div class="check"><input type="checkbox" id="impFills" checked><span>Contour des formes pleines (sans trait)</span></div>
+          <label class="check"><input type="checkbox" id="impFills" checked><span>Contour des formes pleines (sans trait)</span></label>
         </div>
         <div id="impRasterOpts" hidden>
           <label for="impMode">Mode</label>
@@ -2731,8 +2747,8 @@
           </select>
           <label>Seuil <span class="v" id="impThresholdV"></span></label>
           <input type="range" id="impThreshold" data-default="128" min="1" max="254" value="128">
-          <div class="check"><input type="checkbox" id="impAuto" checked><span>Seuil automatique</span></div>
-          <div class="check"><input type="checkbox" id="impInvert"><span>Inverser (tracer le clair)</span></div>
+          <label class="check"><input type="checkbox" id="impAuto" checked><span>Seuil automatique</span></label>
+          <label class="check"><input type="checkbox" id="impInvert"><span>Inverser (tracer le clair)</span></label>
           <label>Lissage <span class="v" id="impSmoothV"></span></label>
           <input type="range" id="impSmooth" data-default="2" min="0" max="5" value="2">
           <label>Nombre de couleurs <span class="v" id="impColorsV"></span></label>
@@ -2888,8 +2904,8 @@
       <details id="safetyLogPanel" data-search="Journal de sécurité">
         <summary>Journal de sécurité</summary>
         <div class="row">
-          <select id="slDay" title="Jour"></select>
-          <select id="slKind" title="Type d'événement">
+          <select id="slDay" aria-label="Jour" title="Jour"></select>
+          <select id="slKind" aria-label="Type d'événement" title="Type d'événement">
             <option value="">Tous les événements</option>
             <option value="arm">Armement et désarmement</option>
             <option value="estop">Arrêt d'urgence</option>
@@ -3092,7 +3108,7 @@
         </div>
         <div class="row"><button id="midiLearnMode" title="Puis cliquez un contrôle et touchez le contrôleur (ou clic droit sur un contrôle, à tout moment)">Apprendre MIDI</button></div>
         <div id="midiDevices"></div>
-        <input type="file" id="midiImportFile" accept=".json,application/json" hidden>
+        <input type="file" id="midiImportFile" aria-label="Profil MIDI à importer" accept=".json,application/json" hidden>
         <div class="mdev">
           <div class="n">Affectations</div>
           <div id="midiMappings"></div>
@@ -3329,9 +3345,9 @@
       <label for="pjClass">Classe (IEC 60825-1)</label>
       <select id="pjClass"><option value="">Non renseignée</option><option>1</option><option>1M</option><option>2</option><option>2M</option><option>3R</option><option>3B</option><option>4</option></select>
       <label>Puissance max par couleur (mW) : rouge, vert, bleu</label>
-      <div class="row"><input type="number" id="pjPowR" min="0" step="1" title="Rouge (mW)"><input type="number" id="pjPowG" min="0" step="1" title="Vert (mW)"><input type="number" id="pjPowB" min="0" step="1" title="Bleu (mW)"></div>
+      <div class="row"><input type="number" id="pjPowR" aria-label="Puissance rouge (mW)" min="0" step="1" title="Rouge (mW)"><input type="number" id="pjPowG" aria-label="Puissance verte (mW)" min="0" step="1" title="Vert (mW)"><input type="number" id="pjPowB" aria-label="Puissance bleue (mW)" min="0" step="1" title="Bleu (mW)"></div>
       <label>Longueurs d'onde (nm) : rouge, vert, bleu</label>
-      <div class="row"><input type="number" id="pjWlR" min="0" max="2000" step="1" title="Rouge (nm)"><input type="number" id="pjWlG" min="0" max="2000" step="1" title="Vert (nm)"><input type="number" id="pjWlB" min="0" max="2000" step="1" title="Bleu (nm)"></div>
+      <div class="row"><input type="number" id="pjWlR" aria-label="Longueur d’onde rouge (nm)" min="0" max="2000" step="1" title="Rouge (nm)"><input type="number" id="pjWlG" aria-label="Longueur d’onde verte (nm)" min="0" max="2000" step="1" title="Vert (nm)"><input type="number" id="pjWlB" aria-label="Longueur d’onde bleue (nm)" min="0" max="2000" step="1" title="Bleu (nm)"></div>
       <label for="pjAperture">Diamètre de sortie (mm)</label><input type="number" id="pjAperture" min="0" max="100" step="0.1">
       <label for="pjDiv">Divergence (mrad)</label><input type="number" id="pjDiv" min="0" max="100" step="0.1">
       <label for="pjScan">Angle de balayage optique (°)</label><input type="number" id="pjScan" min="0" max="180" step="1">
@@ -3411,11 +3427,11 @@
   <select id="cueMenuScan" title="Préréglage de balayage de ce cue (RÉGLAGES › Sorties et projecteurs › Préréglages de balayage)"></select>
   <label>Transition (à l'entrée et à l'arrêt de ce cue)</label>
   <div class="row">
-    <select id="cueMenuTransition">
+    <select id="cueMenuTransition" aria-label="Transition du cue">
       <option value="">Comme la grille</option><option value="cut">Coupe</option><option value="fade">Fondu</option>
       <option value="fade_through_black">Fondu au noir</option><option value="morph">Morph</option>
     </select>
-    <select id="cueMenuTransLen" title="Durée"><option value="0">¼ temps</option><option value="1">½ temps</option><option value="2">1 temps</option><option value="3">2 temps</option><option value="4">4 temps</option><option value="5">0,5 s</option><option value="6">1 s</option><option value="7">2 s</option><option value="8">4 s</option></select>
+    <select id="cueMenuTransLen" aria-label="Durée de la transition" title="Durée"><option value="0">¼ temps</option><option value="1">½ temps</option><option value="2">1 temps</option><option value="3">2 temps</option><option value="4">4 temps</option><option value="5">0,5 s</option><option value="6">1 s</option><option value="7">2 s</option><option value="8">4 s</option></select>
   </div>
   <label>Show (joué à la place du cue)</label>
   <select id="cueMenuShow"><option value="">Aucun</option></select>
@@ -3432,7 +3448,7 @@
   <textarea id="cueMenuNotes" rows="3" maxlength="500" placeholder="ex. seulement avec brouillard"></textarea>
   <div id="cueMenuUser" class="lock-edit" hidden>
     <label for="cueMenuNameInput">Nom et couleur du cue</label>
-    <div class="row"><input type="text" id="cueMenuNameInput" maxlength="40" title="Renommer le cue"><input type="color" id="cueMenuColor" title="Couleur du cue (la couleur de la case, si elle est choisie, l’emporte)"></div>
+    <div class="row"><input type="text" id="cueMenuNameInput" maxlength="40" title="Renommer le cue"><input type="color" id="cueMenuColor" aria-label="Couleur du cue" title="Couleur du cue (la couleur de la case, si elle est choisie, l’emporte)"></div>
   </div>
   <div class="row lock-edit">
     <button id="cueMenuProgram" title="Ouvre l'éditeur de cue (CRÉATION › Cue évolutif) : courbes, couches, modulateurs">Modifier le programme…</button>
@@ -4133,6 +4149,7 @@ function since(ms) {
 }
 function showArmed() {
   $('armBtn').classList.toggle('on', armed);
+  $('armBtn').setAttribute('aria-pressed', String(armed));
   document.body.classList.toggle('emitting', armed);
   const todo = !armed && checklistPending();
   $('armBtn').classList.toggle('todo', todo);
@@ -4160,7 +4177,21 @@ function showShownet(sn) {
 $('armBtn').addEventListener('click', () => { if (!armed && checklistPending()) openChecklist(); else toggleArmed('ui'); });
 // Lit slider tracks (T-299): the filled part follows the value, also when
 // the server or MIDI moves it.
-function syncFill(r) { const lo = +r.min || 0, hi = r.max === '' ? 100 : +r.max; r.style.setProperty('--fill', `${hi > lo ? (r.value - lo) / (hi - lo) * 100 : 0}%`); }
+function syncFill(r) { const lo = +r.min || 0, hi = r.max === '' ? 100 : +r.max; r.style.setProperty('--fill', `${hi > lo ? (r.value - lo) / (hi - lo) * 100 : 0}%`); syncValueText(r); }
+// T-436: a slider says its value with its unit (« 80 % »), as shown next
+// to it (its `<id>V` or the value right after it).
+function syncValueText(r) {
+  const next = r.nextElementSibling;
+  const shown = (r.id && document.getElementById(r.id + 'V')) || (next && next.matches('.v, .dv') ? next : null);
+  const t = shown ? shown.textContent.trim() : '';
+  if (t && r.getAttribute('aria-valuetext') !== t) r.setAttribute('aria-valuetext', t);
+  // Its name: the <label> right before it, also in built lists (modulators, effects).
+  const l = r.previousElementSibling;
+  if (l && l.tagName === 'LABEL' && !l.htmlFor && !r.hasAttribute('aria-label') && !r.hasAttribute('aria-labelledby')) {
+    if (!l.id) l.id = 'lbl-' + (r.id || 'r' + (syncValueText.n = (syncValueText.n || 0) + 1));
+    r.setAttribute('aria-labelledby', l.id);
+  }
+}
 document.addEventListener('input', e => { if (e.target.type === 'range') syncFill(e.target); });
 setInterval(() => document.querySelectorAll('input[type=range]').forEach(syncFill), 200);
 $('estopBtn').addEventListener('click', () => emergencyStop('ui'));
@@ -4185,9 +4216,12 @@ $('estopReset').addEventListener('click', async () => { if (await post('/api/est
 // The safety entries come first and only use what is defined above, so
 // Échap works even if a later part of the page failed to load.
 // 'ask': the « Modifications non enregistrées » question is open (T-433).
-const SHORTCUT_ZONES = ['live', 'timeline', 'tl-canvas', 'creation', 'figures', 'settings', 'ask'];
+// 'grid': LIVE with the focus in the cue grid (T-436): the arrows and
+// Début / Fin move between cells, `0` plays the focused one.
+const SHORTCUT_ZONES = ['live', 'grid', 'timeline', 'tl-canvas', 'creation', 'figures', 'settings', 'ask'];
 const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas' && z !== 'ask');
-const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live');
+const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live' && z !== 'grid');
+const LIVE_ZONES = ['live', 'grid'];
 const SAFETY_SHORTCUTS = [
   { id: 'estop', group: 'Sécurité', keys: ['Escape'], meta: '*', alt: '*', zones: '*', typing: true, show: true,
     label: "Arrêt d'urgence (verrouillé : réinitialiser pour réarmer) ; ferme aussi cette aide",
@@ -4233,31 +4267,31 @@ function buildShortcuts() {
       down: () => { post('/api/control', { id: 'tempo.resync' }); } },
     // Liste de cues (T-410), LIVE, once a list is loaded. Presentation
     // remotes send Page suivante / Page précédente. Espace stays the arming.
-    { id: 'list.go', group: 'Liste de cues', codes: ['PageDown'], zones: ['live'], show: true,
+    { id: 'list.go', group: 'Liste de cues', codes: ['PageDown'], zones: LIVE_ZONES, show: true,
       label: 'GO : pas suivant (télécommande de présentation)', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('go', 'keyboard'); } },
     // « Préparer » (T-274): Entrée du pavé numérique (Entrée est le tap).
-    { id: 'prepared.send', group: 'Cues et pages', codes: ['NumpadEnter'], zones: ['live'], show: true,
+    { id: 'prepared.send', group: 'Cues et pages', codes: ['NumpadEnter'], zones: LIVE_ZONES, show: true,
       label: 'Envoyer le cue préparé à la sortie', when: () => !!(prepared && prepared.cue),
       down: e => { if (!e.repeat) sendPrepared(); } },
-    { id: 'list.go.alt', group: 'Liste de cues', codes: ['Enter', 'NumpadEnter'], alt: true, zones: ['live'], show: true,
+    { id: 'list.go.alt', group: 'Liste de cues', codes: ['Enter', 'NumpadEnter'], alt: true, zones: LIVE_ZONES, show: true,
       label: 'GO (claviers sans touche Page suivante)', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('go', 'keyboard'); } },
-    { id: 'list.back', group: 'Liste de cues', codes: ['PageUp'], zones: ['live'], show: true,
+    { id: 'list.back', group: 'Liste de cues', codes: ['PageUp'], zones: LIVE_ZONES, show: true,
       label: 'Retour : pas précédent', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('back', 'keyboard'); } },
-    { id: 'list.top', group: 'Liste de cues', codes: ['Home'], zones: ['live'], show: true,
+    { id: 'list.top', group: 'Liste de cues', codes: ['Home'], zones: ['live'], where: 'LIVE (hors grille active)', show: true,
       label: 'Début : avant le premier pas, sortie au noir', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('top', 'keyboard'); } },
-    { id: 'list.pause', group: 'Liste de cues', codes: ['KeyP'], alt: true, zones: ['live'], show: true,
+    { id: 'list.pause', group: 'Liste de cues', codes: ['KeyP'], alt: true, zones: LIVE_ZONES, show: true,
       label: 'Pause de la liste (GO reprend)', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('pause', 'keyboard'); } },
-    { id: 'reverse', group: 'Direct', keys: ['<'], meta: '*', alt: '*', shift: '*', zones: ['live'], show: true,
+    { id: 'reverse', group: 'Direct', keys: ['<'], meta: '*', alt: '*', shift: '*', zones: LIVE_ZONES, show: true,
       label: 'Tenir : inverser la rotation',
       down: () => { if (!reverseKey) { reverseKey = true; reverse(true); } },
       up: () => { if (reverseKey) { reverseKey = false; reverse(false); } } },
     // Hold S (T-103): strobe 1/4 while held. In LIVE, S is a cue letter, so Alt+S.
-    { id: 'strobe.live', group: 'Direct', codes: ['KeyS'], alt: true, zones: ['live'], show: true,
+    { id: 'strobe.live', group: 'Direct', codes: ['KeyS'], alt: true, zones: LIVE_ZONES, show: true,
       label: 'Tenir : stroboscope 1/4 (LIVE)',
       down: () => holdStrobe(true), up: () => holdStrobe(false) },
     { id: 'strobe', group: 'Direct', codes: ['KeyS'], alt: '*', zones: NOT_LIVE, show: true,
@@ -4291,13 +4325,13 @@ function buildShortcuts() {
     // Annuler / Rétablir (T-285): the studio's history of edits, in LIVE,
     // CRÉATION and RÉGLAGES. TIMELINE and CRÉATION › Figures keep their own
     // undo (below); a text field keeps the browser's.
-    { id: 'edit.undo', group: 'Édition', keys: ['z'], meta: true, zones: ['live', 'creation', 'settings'], show: true,
+    { id: 'edit.undo', group: 'Édition', keys: ['z'], meta: true, zones: ['live', 'grid', 'creation', 'settings'], show: true,
       label: 'Annuler la dernière modification (hors TIMELINE et éditeur de figures)',
       down: e => { if (!e.repeat) historyStep('undo'); } },
-    { id: 'edit.redo', group: 'Édition', keys: ['z'], meta: true, shift: true, zones: ['live', 'creation', 'settings'], show: true,
+    { id: 'edit.redo', group: 'Édition', keys: ['z'], meta: true, shift: true, zones: ['live', 'grid', 'creation', 'settings'], show: true,
       label: 'Rétablir la modification annulée',
       down: e => { if (!e.repeat) historyStep('redo'); } },
-    { id: 'edit.redo.y', group: 'Édition', keys: ['y'], meta: true, shift: '*', zones: ['live', 'creation', 'settings'], show: false,
+    { id: 'edit.redo.y', group: 'Édition', keys: ['y'], meta: true, shift: '*', zones: ['live', 'grid', 'creation', 'settings'], show: false,
       label: 'Rétablir', down: e => { if (!e.repeat) historyStep('redo'); } },
     // TIMELINE (T-285): undo anywhere in the workspace; the rest while the
     // timeline itself has the focus.
@@ -4338,28 +4372,39 @@ function buildShortcuts() {
       label: 'Afficher / masquer cette aide',
       down: e => { if (!e.repeat) toggleKeysHelp(); } },
     // Cue letters, LIVE only (T-272); Maj = flash.
-    { id: 'cue', group: 'Cues et pages', codes: CUE_CODES, shift: '*', zones: ['live'], show: true,
+    { id: 'cue', group: 'Cues et pages', codes: CUE_CODES, shift: '*', zones: LIVE_ZONES, show: true,
       cap: cueCaps, label: 'Jouer la cue de la case (Maj : flash, tant que la touche est tenue)',
-      down: (e, i) => {
-        if (gridEditing) return;
-        // « Enregistrer dans une case »: the letter picks the cell.
-        if (storeMode) { if (!e.repeat) storeInto(i); return; }
-        const id = grid.pages[gridPage]?.cells[i] ?? null;
-        if (!id || !presetById.has(id)) return false;
-        // « Préparer » on (T-274): the letter prepares, nothing goes out.
-        if (prepMode) { if (!e.repeat) prepareCue(id); return; }
-        // Auto-repeat would toggle the cue on and off while the key is held.
-        if (e.repeat || heldKeys.has(e.code)) return;
-        heldKeys.set(e.code, id);
-        cueDown(id, shiftMod(e) ? 'flash' : null);
-      },
-      up: e => {
-        const id = heldKeys.get(e.code);
-        if (id === undefined) return;
-        heldKeys.delete(e.code);
-        cueUp(id);
-      } },
+      down: (e, i) => cellKeyDown(e, i), up: cellKeyUp },
+    // Grille au clavier (T-436), while the focus is in the grid: never
+    // Espace (arming) nor Entrée (tap), which keep their role there.
+    { id: 'grid.move', group: 'Cues et pages', codes: ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'], zones: ['grid'], show: true,
+      where: 'LIVE (grille active)', cap: () => '← → ↑ ↓ Début Fin', label: 'Aller de case en case dans la grille de cues (Tab y entre)',
+      down: (e, i) => gridMove(['left', 'right', 'up', 'down', 'home', 'end'][i]) },
+    { id: 'grid.activate', group: 'Cues et pages', codes: ['Digit0', 'Numpad0'], shift: '*', zones: ['grid'], show: true,
+      where: 'LIVE (grille active)', label: 'Déclencher la case sélectionnée (tenir : joue jusqu\'au relâchement en Flash ; Maj : flash)',
+      down: e => { const i = focusedCell(); return i < 0 ? false : cellKeyDown(e, i); }, up: cellKeyUp },
   ];
+}
+// A key on a cell (its letter, or `0` on the focused one): the same
+// press as a click, released with the key.
+function cellKeyDown(e, i) {
+  if (gridEditing) return;
+  // « Enregistrer dans une case »: the key picks the cell.
+  if (storeMode) { if (!e.repeat) storeInto(i); return; }
+  const id = grid.pages[gridPage]?.cells[i] ?? null;
+  if (!id || !presetById.has(id)) return false;
+  // « Préparer » on (T-274): the key prepares, nothing goes out.
+  if (prepMode) { if (!e.repeat) prepareCue(id); return; }
+  // Auto-repeat would toggle the cue on and off while the key is held.
+  if (e.repeat || heldKeys.has(e.code)) return;
+  heldKeys.set(e.code, id);
+  cueDown(id, shiftMod(e) ? 'flash' : null);
+}
+function cellKeyUp(e) {
+  const id = heldKeys.get(e.code);
+  if (id === undefined) return;
+  heldKeys.delete(e.code);
+  cueUp(id);
 }
 function allShortcuts() {
   if (!restShortcuts) {
@@ -4373,7 +4418,7 @@ function allShortcuts() {
 // Where the keyboard is: the workspace, or a part of it with its own keys.
 function shortcutZone() {
   if (!$('projAsk').hidden) return 'ask';
-  if (activeWs === 'live') return 'live';
+  if (activeWs === 'live') return document.activeElement?.closest?.('#cues') ? 'grid' : 'live';
   if (activeWs === 'timeline') return TL.show && document.activeElement === tlCv ? 'tl-canvas' : 'timeline';
   if (activeWs === 'creation') return !$('figEditor').hidden && !$('figImportDlg').open ? 'figures' : 'creation';
   return 'settings';
@@ -4452,8 +4497,8 @@ function shortcutConflicts(list = allShortcuts()) {
 // « ? » : the table, grouped. Keys shown as on this keyboard when the
 // browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
 const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Recherche', 'Timeline', 'Figures', 'Aide'];
-const ZONE_FR = { live: 'LIVE', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES' };
-const KEY_CAPS = { Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
+const ZONE_FR = { live: 'LIVE', grid: 'LIVE (grille active)', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES' };
+const KEY_CAPS = { Digit0: '0', Numpad0: '0 (pavé)', Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
 const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
 let keyLayout = null;
 function keyCap(code) {
@@ -4479,8 +4524,9 @@ function shortcutWhere(s) {
   if (s.zones === '*') return 'partout';
   if (s.zones === NOT_TL_CANVAS) return 'partout (sauf timeline active)';
   if (s.zones === NOT_LIVE) return 'hors LIVE';
+  if (s.zones === LIVE_ZONES) return 'LIVE';
   if (s.zones.length === 2 && s.zones.includes('timeline') && s.zones.includes('tl-canvas')) return 'TIMELINE';
-  return s.zones.map(z => ZONE_FR[z]).join(', ');
+  return s.zones.filter(z => z !== 'grid' || !s.zones.includes('live')).map(z => ZONE_FR[z]).join(', ');
 }
 function renderKeysHelp() {
   const box = $('keysList');
@@ -7321,6 +7367,7 @@ let presets = [], presetById = new Map(), cueCategories = [], serverPage = null;
 // the page on screen. `gridEditing`: « Réorganiser », cells are dragged
 // instead of played.
 let grid = { cols: 8, rows: 5, pages: [], rev: -1 }, gridPage = 0, gridEditing = false, dragFrom = null;
+let gridFocus = 0; // the grid's keyboard cell (T-436)
 // What the server says plays (from /api/frame), and the grid's cue properties.
 let deck = { active: [], shown: [], ending: [], pending: [], click_mode: 'toggle', multi: false, max_active: 4 }, deckKey = '', slots = {};
 // T-158: the grid bar's transition lengths, in the server's order (cue.transition_length).
@@ -7654,8 +7701,11 @@ function renderCues() {
   }
   const pg = grid.pages[gridPage] || { name: '', cells: [], hidden: 0, auto: false, editable: false };
   const cues = $('cues');
+  // Keyboard (T-436): a re-render keeps the focus on the same cell.
+  const hadFocus = cues.contains(document.activeElement);
   cues.innerHTML = '';
   cues.style.setProperty('--cols', grid.cols);
+  let row = null;
   cues.classList.toggle('editing', gridEditing);
   cues.classList.toggle('storing', storeMode);
   $('cueRegion').style.setProperty('--cat', pageColorOf(pg, gridPage));
@@ -7669,12 +7719,14 @@ function renderCues() {
       el = document.createElement('div');
       el.className = 'cue-empty';
       el.innerHTML = `<span class="key">${key}</span>`;
+      el.setAttribute('aria-label', 'Case vide' + (key ? ' ' + key : ''));
       el.addEventListener('pointerdown', e => { if (storeMode && e.button === 0) { e.preventDefault(); storeInto(i); } });
     } else {
       any = true;
       el = document.createElement('button');
       el.className = 'cue';
       el.dataset.id = p.id;
+      el.setAttribute('aria-label', p.name);
       el.title = el.dataset.control = `grid.${gridPage + 1}.${Math.floor(i / grid.cols) + 1}.${i % grid.cols + 1}`;
       const slot = slots[p.id] || {};
       // A user cue (T-405) has its own colour band; a colour set on the
@@ -7728,13 +7780,24 @@ function renderCues() {
       }
     }
     el.dataset.slot = i;
+    // role=grid (T-436): rows of `cols` cells (display: contents), one
+    // tab stop for the whole grid; the arrows move it (gridMove).
+    el.setAttribute('role', 'gridcell');
+    el.tabIndex = -1;
+    if (i % grid.cols === 0) {
+      row = document.createElement('div');
+      row.className = 'cue-row';
+      row.setAttribute('role', 'row');
+      cues.appendChild(row);
+    }
     if (gridEditing) {
       el.addEventListener('dragover', e => { if (canDropOn(gridPage)) { e.preventDefault(); el.classList.add('drop'); } });
       el.addEventListener('dragleave', () => el.classList.remove('drop'));
       el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('drop'); dropOn(gridPage, i, e.altKey); });
     }
-    cues.appendChild(el);
+    row.appendChild(el);
   });
+  gridFocusTo(gridFocus, hadFocus);
   if (any) delete cues.dataset.empty; else cues.dataset.empty = 'Page vide';
   $('gridHidden').textContent = pg.hidden
     ? ` · ${pg.hidden} cue${pg.hidden > 1 ? 's' : ''} de cette page hors grille : agrandir la grille pour ${pg.hidden > 1 ? 'les' : 'le'} voir` : '';
@@ -7743,6 +7806,36 @@ function renderCues() {
   paintCues();
   applyCueFilter();
 }
+// Keyboard in the grid (T-436): one tab stop (the last focused cell),
+// arrows and Début / Fin move it; `0` plays it (grid.activate).
+const gridCells = () => [...$('cues').querySelectorAll('[data-slot]')];
+function focusedCell() {
+  const el = document.activeElement?.closest?.('#cues [data-slot]');
+  return el ? +el.dataset.slot : -1;
+}
+function gridFocusTo(i, focus = true) {
+  const cells = gridCells();
+  if (!cells.length) return;
+  gridFocus = Math.max(0, Math.min(cells.length - 1, i));
+  cells.forEach((c, n) => { c.tabIndex = n === gridFocus ? 0 : -1; });
+  if (focus) cells[gridFocus].focus();
+}
+function gridMove(dir) {
+  const n = gridCells().length, cols = grid.cols || 1;
+  let i = Math.max(0, focusedCell());
+  const start = i - i % cols;
+  if (dir === 'left') i -= 1;
+  else if (dir === 'right') i += 1;
+  else if (dir === 'up') i = i - cols >= 0 ? i - cols : i;
+  else if (dir === 'down') i = i + cols < n ? i + cols : i;
+  else if (dir === 'home') i = start;
+  else if (dir === 'end') i = Math.min(n - 1, start + cols - 1);
+  gridFocusTo(i);
+}
+$('cues').addEventListener('focusin', e => {
+  const el = e.target.closest('[data-slot]');
+  if (el && +el.dataset.slot !== gridFocus) gridFocusTo(+el.dataset.slot, false);
+});
 function canDropOn(page) {
   const pg = grid.pages[page];
   return !!(dragFrom && pg && pg.editable && !pg.auto);
@@ -7908,6 +8001,9 @@ function paintCues() {
     b.classList.toggle('pending', waiting.has(id));
     b.classList.toggle('ending', ending.has(id) && !latched.has(id) && !held.has(id));
     b.classList.toggle('prepared', !!(prepared && prepared.cue && prepared.cue.id === id));
+    // Playing, for assistive tech (T-436; a gridcell takes aria-selected, not aria-pressed).
+    const on = String(latched.has(id) || held.has(id));
+    if (b.getAttribute('aria-selected') !== on) b.setAttribute('aria-selected', on);
   });
 }
 function showCueDeck(c) {
@@ -10122,7 +10218,7 @@ function renderLfos() {
     return `<div class="lfo" data-i="${i}">
       <div class="row"><canvas width="144" height="60" data-graph="${i}"></canvas>
         <select data-f="target" title="Cible">${opts(lfoTargets.map(t => [t.id, t.label]), m.target)}</select>
-        <button class="del" data-del="${i}" title="Supprimer ce modulateur">×</button></div>
+        <button class="del" data-del="${i}" title="Supprimer ce modulateur" aria-label="Supprimer ce modulateur">×</button></div>
       <div class="row"><select data-f="wave" title="Forme">${opts(LFO_WAVES, m.wave)}</select>
         <select data-f="period" title="Période">${opts([...LFO_PERIODS, ['hz', 'Hz (libre)']], period)}</select>
         ${period === 'hz' ? `<input type="number" data-f="hz" min="0" max="20" step="0.05" value="${m.rate.hz}" title="Fréquence (Hz)">` : ''}</div>
@@ -10205,7 +10301,7 @@ function renderFxGrid() {
     return `<div class="fg-row" role="row"><span class="n">${l + 1}</span>${line.map((c, i) =>
       `<button class="fg-cell${c ? '' : ' empty'}" role="gridcell" data-l="${l}" data-c="${i}" data-control="fx.${l + 1}.${i + 1}"
         title="fx.${l + 1}.${i + 1}${c ? ' : ' + lfoEsc(c.name) + (c.one_shot ? ' (ponctuel)' : '') : ' : case vide'}">${c ? (c.one_shot ? '⚡ ' : '') + lfoEsc(c.name || '(sans nom)') : '—'}</button>`).join('')}
-      <div class="fg-act" title="fx.${l + 1}.action : 0 = pas d'effet, 100 = plein effet"><label>Action</label>
+      <div class="fg-act" role="gridcell" title="fx.${l + 1}.action : 0 = pas d'effet, 100 = plein effet"><label>Action</label>
         <input type="range" min="0" max="100" value="${Math.round(act * 100)}" data-act="${l}" data-control="fx.${l + 1}.action"><span class="v">${Math.round(act * 100)} %</span></div></div>`;
   }).join('');
   FG.key = '';
@@ -10309,7 +10405,7 @@ function fgFillEditor() {
   const mods = c ? c.modulators : [];
   $('fgMods').innerHTML = mods.map((md, i) => `<div class="fg-mod" data-i="${i}">
       <div class="row"><select data-f="target" title="Cible">${opts(FG.targets.map(t => [t.id, t.label]), md.target)}</select>
-        <button class="del" data-del="${i}" title="Supprimer ce modulateur">×</button></div>
+        <button class="del" data-del="${i}" title="Supprimer ce modulateur" aria-label="Supprimer ce modulateur">×</button></div>
       <div class="row"><select data-f="wave" title="Forme">${opts(LFO_WAVES, md.wave)}</select>
         <select data-f="period" title="Période">${opts(LFO_PERIODS, md.rate && md.rate.beats !== undefined ? md.rate.beats : 4)}</select></div>
       <label>Profondeur <span class="v">${Math.round(md.depth * 100)} %</span></label>
@@ -11849,7 +11945,7 @@ function vapcBuild() {
   const x2 = Math.max(...pads.map(e => e.x + e.w)), y1 = Math.min(...pads.map(e => e.y)), y2 = Math.max(...pads.map(e => e.y + e.h));
   svgEl('rect', { class: 'zone', x: 8, y: y1 - 6, width: x2 - 2, height: y2 - y1 + 12, rx: 8 }, svg);
   for (const e of vapc.elements) {
-    const g = svgEl('g', { class: `ve ${e.widget === 'key' ? 'key' : ''} ${e.map ? 'mapped' : ''}`, 'data-vapc': e.id, 'aria-label': e.label }, svg);
+    const g = svgEl('g', { class: `ve ${e.widget === 'key' ? 'key' : ''} ${e.map ? 'mapped' : ''}`, 'data-vapc': e.id, role: 'img', 'aria-label': e.label }, svg);
     const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
     if (e.widget === 'fader' || e.widget === 'crossfader') {
       const horiz = e.widget === 'crossfader';
@@ -14225,6 +14321,8 @@ function addHelpButtons() {
   document.querySelectorAll('[data-help]').forEach(panel => {
     const title = panel.querySelector('[data-help-title]') || panel.querySelector('h2, summary');
     if (!title || title.querySelector(':scope > .help-q, :scope > .help-title > .help-q')) return;
+    const det = title.tagName === 'SUMMARY' ? title.parentElement : null;
+    if (det && det.previousElementSibling?.classList.contains('det-q')) return;
     const q = document.createElement('button');
     q.type = 'button'; q.className = 'help-q'; q.textContent = '?';
     q.title = 'Aide sur ce panneau'; q.setAttribute('aria-label', 'Aide sur ce panneau');
@@ -14239,8 +14337,11 @@ function addHelpButtons() {
       const wrap = document.createElement('span'); wrap.className = 'help-title';
       title.insertBefore(wrap, first);
       wrap.append(first, q);
-    } else if (title.tagName === 'SUMMARY') {
-      title.insertBefore(q, title.firstChild); // floated to the right edge
+    } else if (det) {
+      // Before the <details>, floated beside its summary (T-436: a button
+      // inside a summary is a control nested in a control).
+      q.classList.add('det-q');
+      det.before(q);
     } else title.appendChild(q);
   });
 }
@@ -14722,6 +14823,87 @@ function emptyState(text, actions = []) {
   }
   return box;
 }
+
+// ---------- accessibilité (T-436) ----------
+// Tab lists: only the selected tab is in the tab order; ← / → move to the
+// next shown tab and select it. Never Espace or Entrée (arming, tap).
+function syncTabStops(list) {
+  const tabs = [...list.querySelectorAll('[role=tab]')];
+  const sel = tabs.find(t => t.getAttribute('aria-selected') === 'true') || tabs.find(t => t.classList.contains('active')) || tabs[0];
+  tabs.forEach(t => { t.tabIndex = t === sel ? 0 : -1; });
+}
+document.querySelectorAll('[role=tablist]').forEach(list => {
+  syncTabStops(list);
+  new MutationObserver(() => syncTabStops(list)).observe(list, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-selected', 'class'] });
+  list.addEventListener('keydown', e => {
+    if ((e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.metaKey || e.ctrlKey || e.altKey) return;
+    const tab = e.target.closest('[role=tab]');
+    const tabs = [...list.querySelectorAll('[role=tab]')].filter(t => t.getClientRects().length && !t.disabled);
+    const i = tabs.indexOf(tab);
+    if (i < 0) return;
+    e.preventDefault();
+    const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+    next.focus();
+    next.click();
+  });
+});
+// Dialogs (.modal): the focus goes in when one opens, Tab loops inside,
+// and it goes back where it was on close. Échap is NOT « close »: it stays
+// the emergency stop (shortcut table); each dialog has its own button.
+const FOCUSABLE = 'button, [href], input:not([type=hidden]), select, textarea, [tabindex]:not([tabindex="-1"])';
+const focusablesIn = box => [...box.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.getClientRects().length);
+const modalOpeners = new Map();
+// The last control focused outside a dialog: the opener's own code may
+// focus a field inside before the dialog is seen open.
+let focusBeforeModal = null;
+document.addEventListener('focusin', e => { if (!e.target.closest('.modal')) focusBeforeModal = e.target; });
+const openModal = () => [...document.querySelectorAll('.modal')].filter(m => !m.hidden).pop() || null;
+function modalToggled(m) {
+  if (!m.hidden) {
+    if (modalOpeners.has(m)) return;
+    modalOpeners.set(m, focusBeforeModal);
+    // After the opener's own code, which may focus a field itself.
+    setTimeout(() => { if (!m.hidden && !m.contains(document.activeElement)) focusablesIn(m)[0]?.focus(); }, 0);
+    return;
+  }
+  let back = modalOpeners.get(m);
+  modalOpeners.delete(m);
+  // Opened from a menu that has closed since: back to the menu's button.
+  const shut = back && back.isConnected && !back.getClientRects().length ? back.closest('[hidden][id]') : null;
+  if (shut) back = document.querySelector(`[aria-controls="${shut.id}"]`) || back;
+  const lost = !document.activeElement || document.activeElement === document.body || m.contains(document.activeElement);
+  // Never onto the laser button: Space arms from anywhere anyway, but the
+  // focus does not go there unasked.
+  if (lost && back && back.isConnected && back !== document.body && back.id !== 'armBtn') back.focus();
+}
+document.querySelectorAll('.modal').forEach(m => {
+  if (!m.hasAttribute('role')) m.setAttribute('role', 'dialog');
+  m.setAttribute('aria-modal', 'true');
+  const h = m.querySelector('h3');
+  if (h && !m.hasAttribute('aria-labelledby') && !m.hasAttribute('aria-label')) {
+    if (!h.id) h.id = m.id + 'Title';
+    m.setAttribute('aria-labelledby', h.id);
+  }
+  new MutationObserver(() => modalToggled(m)).observe(m, { attributes: true, attributeFilter: ['hidden'] });
+});
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab' || e.metaKey || e.ctrlKey || e.altKey) return;
+  const m = openModal();
+  const f = m ? focusablesIn(m) : [];
+  if (!f.length) return;
+  const i = f.indexOf(document.activeElement);
+  if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+  else if (!e.shiftKey && (i < 0 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
+});
+// A control's name: the <label> right before it names it (aria-labelledby,
+// so a click on the label changes nothing), unless it has its own.
+document.querySelectorAll('label:not([for])').forEach(l => {
+  const c = l.nextElementSibling;
+  if (!c || !c.id || !/^(INPUT|SELECT|TEXTAREA)$/.test(c.tagName) || l.querySelector('input, select, textarea')) return;
+  if (c.hasAttribute('aria-label') || c.hasAttribute('aria-labelledby')) return;
+  if (!l.id) l.id = 'lbl-' + c.id;
+  c.setAttribute('aria-labelledby', l.id);
+});
 addHelpButtons();
 
 loadState().then(loadTestPatterns).then(loadProjection).then(loadPresets).then(loadPalettes).then(loadLfos).then(loadFxGrid).then(loadRoutes).then(loadAudioPresets).then(loadTriggers).then(previewLoop);

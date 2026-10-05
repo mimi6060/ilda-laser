@@ -4748,6 +4748,88 @@ mod tests {
         assert!(n > 80, "{n} sliders found");
     }
 
+    /// The page's static markup: without its scripts, styles and comments
+    /// (a `<button` inside a script is a template, checked in e2e by axe).
+    fn page_markup() -> String {
+        let mut out = String::new();
+        let mut rest = INDEX_HTML;
+        loop {
+            let next = ["<script", "<style", "<!--"].iter().filter_map(|t| rest.find(t).map(|i| (i, *t))).min();
+            let Some((i, tag)) = next else { break };
+            out.push_str(&rest[..i]);
+            let end = match tag { "<script" => "</script>", "<style" => "</style>", _ => "-->" };
+            let j = rest[i..].find(end).expect("closed") + i + end.len();
+            rest = &rest[j..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Visible text of a piece of markup: tags (and whole SVGs) left out.
+    fn markup_text(s: &str) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find('<') {
+            out.push_str(&rest[..i]);
+            let after = &rest[i..];
+            let end = if after.starts_with("<svg") { after.find("</svg>").map(|j| j + 6) } else { after.find('>').map(|j| j + 1) };
+            rest = &after[end.unwrap_or(after.len())..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// T-436: a button whose text is only a symbol (« ◀ », « ÷2 », « ? »)
+    /// says what it does to a screen reader: it has an `aria-label`. A text
+    /// is readable when it holds a word of two letters or digits at least.
+    #[test]
+    fn every_symbol_button_has_an_aria_label() {
+        let page = page_markup();
+        let mut n = 0;
+        for part in page.split("<button").skip(1) {
+            let open = &part[..part.find('>').expect("button tag")];
+            let body = &part[open.len() + 1..part.find("</button>").expect("closed button")];
+            let text = markup_text(body);
+            let readable = text.split(|c: char| !c.is_alphanumeric()).any(|w| w.chars().count() >= 2);
+            assert!(readable || open.contains("aria-label"), "<button{open}> {:?} needs an aria-label", text.trim());
+            n += 1;
+        }
+        assert!(n > 300, "{n} buttons found");
+        for (sel, label) in [("tempo.half\"", "Tempo divisé par deux"), ("tempo.double\"", "Tempo doublé"), ("tempo.nudge_up\"", "Avancer la phase"), ("tempo.nudge_down\"", "Retarder la phase")] {
+            assert!(page.contains(&format!("data-ctl=\"{sel} aria-label=\"{label}\"")), "{label}");
+        }
+    }
+
+    /// T-436: every form control of the markup has a name: a `<label for>`,
+    /// a wrapping `<label>`, `aria-label` / `aria-labelledby`, or the
+    /// `<label>` right before it (the page names it with that label's id in
+    /// `aria-labelledby` at start, « accessibilité (T-436) » in the page).
+    #[test]
+    fn every_input_has_a_label() {
+        let page = page_markup();
+        let fors: std::collections::HashSet<&str> = page.split("<label").skip(1)
+            .filter_map(|l| { let open = &l[..l.find('>')?]; let i = open.find("for=\"")? + 5; Some(&open[i..i + open[i..].find('"')?]) })
+            .collect();
+        let mut n = 0;
+        for tag in ["<input", "<select", "<textarea"] {
+            let mut from = 0;
+            while let Some(i) = page[from..].find(tag).map(|i| i + from) {
+                from = i + tag.len();
+                let open = &page[i..i + page[i..].find('>').expect("tag")];
+                if !open[tag.len()..].starts_with([' ', '>']) || open.contains("type=\"hidden\"") { continue; }
+                n += 1;
+                if open.contains("aria-label") { continue; }
+                let id = open.find(" id=\"").map(|j| &open[j + 5..j + 5 + open[j + 5..].find('"').unwrap()]);
+                if id.is_some_and(|id| fors.contains(id)) { continue; }
+                let before = &page[..i];
+                let wrapped = before.rfind("<label").is_some_and(|o| before.rfind("</label>").is_none_or(|c| c < o));
+                let sibling = before.trim_end().ends_with("</label>") && id.is_some();
+                assert!(wrapped || sibling, "{open}> has no label");
+            }
+        }
+        assert!(n > 200, "{n} controls found");
+    }
+
     /// T-429: the global search finds the RÉGLAGES sections by their
     /// `data-search` names, and opens from the single shortcut table.
     #[test]
