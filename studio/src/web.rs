@@ -4767,6 +4767,25 @@ mod tests {
         assert!(INDEX_HTML.contains("{ id: 'search', group: 'Recherche', keys: ['k', 'f'], meta: true"));
     }
 
+    /// T-282: the night mode dims the neutral and accent tokens only; the
+    /// state colours (armed / danger, warning, playing) and the undimmed
+    /// safety tokens are never redefined, and touch mode leaves the laser
+    /// button and ARRÊT out of the long press.
+    #[test]
+    fn night_mode_never_dims_the_safety_colours() {
+        let start = INDEX_HTML.find("---------- Mode nuit (T-282)").expect("night mode CSS");
+        let end = start + INDEX_HTML[start..].find("---------- Mode tactile (T-282)").expect("touch mode CSS");
+        let night = &INDEX_HTML[start..end];
+        assert!(night.contains("--text:"), "night mode redefines the text token");
+        for token in ["--danger:", "--warn:", "--ok:", "--text-full:", "--accent-full:"] {
+            assert!(!night.contains(token), "night mode must not redefine {token}");
+        }
+        let skip = INDEX_HTML.lines().find(|l| l.starts_with("const LONG_PRESS_SKIP")).expect("long press skip list");
+        for id in ["#armBtn", "#estopBtn", "#blackoutBtn", "#estopReset"] {
+            assert!(skip.contains(id), "{id} is out of the long press");
+        }
+    }
+
     /// T-404: the pattern API shows and leaves a pattern, never arms, and
     /// refuses unknown names and bad brightness values.
     #[test]
