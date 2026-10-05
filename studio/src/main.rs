@@ -87,6 +87,7 @@ mod testpattern;
 mod textures;
 mod timecode;
 mod timeline;
+mod timeline_csv;
 mod transition;
 mod tunnels;
 mod usercues;

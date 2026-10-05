@@ -161,6 +161,16 @@
   #tlModified { color: var(--warn); font-size: 12px; }
   #tlEdMsg { margin: 0; flex-basis: 100%; }
   #tlEdMsg.err { color: var(--danger); }
+  .tl-csv { position: relative; }
+  #tlCsvMenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 180px; display: flex; flex-direction: column; gap: 2px; padding: 6px;
+    border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+  #tlCsvMenu[hidden] { display: none; }
+  #tlCsvMenu button { text-align: left; }
+  #tlCsvDlg { width: min(460px, calc(100vw - 32px)); padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); color: inherit; }
+  #tlCsvDlg::backdrop { background: #000a; }
+  #tlCsvDlg h2 { margin: 0 0 8px; font-size: 16px; }
+  #tlCsvSkippedList { max-height: 180px; overflow: auto; margin: 4px 0; padding-left: 18px; font-size: 12px; }
+  .tl-csv-actions { display: flex; gap: 8px; justify-content: flex-end; }
   #tlNewRow[hidden], #tlMarkRow[hidden] { display: none; }
   /* Empty state and examples (T-124 to T-129), Theme (T-299) tokens. */
   #tlTracks { position: relative; }
@@ -2179,6 +2189,14 @@
       <label class="tl-knob" title="Temps par mesure">/ <input type="number" id="tlBpb" min="1" max="16" step="1"></label>
       <span class="sep"></span>
       <button id="tlAddMarker" title="À la tête de lecture (Entrée quand la timeline a le focus)">Ajouter un marqueur</button>
+      <span class="tl-csv">
+        <button id="tlCsvBtn" title="Échanger les marqueurs avec un logiciel audio (CSV)" aria-haspopup="menu">Marqueurs ▾</button>
+        <span id="tlCsvMenu" role="menu" hidden>
+          <button id="tlCsvExport" role="menuitem" title="#, Name, Start (secondes), Color">Exporter en CSV…</button>
+          <button id="tlCsvImport" role="menuitem" title="CSV ou texte : séparateur , ; ou tabulation, temps en secondes ou m:ss">Importer un CSV…</button>
+        </span>
+        <input type="file" id="tlCsvFile" accept=".csv,.txt,text/csv,text/plain" hidden>
+      </span>
       <button id="tlFit" title="Voir tout le show (molette : zoom centré sur le curseur, Maj+molette : défiler)">Tout afficher</button>
       <label class="check" style="margin:0" title="La vue suit la tête de lecture"><input type="checkbox" id="tlFollow" checked> Suivre</label>
       <span class="sep"></span>
@@ -2597,6 +2615,18 @@
   </section>
 
   <!-- CRÉATION › Figures › Importer (T-297) : fichier, réglages, aperçu, « Créer la figure » -->
+  <!-- TIMELINE › Marqueurs › Importer un CSV (T-443) -->
+  <dialog id="tlCsvDlg" aria-labelledby="tlCsvTitle">
+    <h2 id="tlCsvTitle">Importer des marqueurs</h2>
+    <p id="tlCsvSummary"></p>
+    <details id="tlCsvSkipped" hidden><summary>Lignes ignorées</summary><ul id="tlCsvSkippedList"></ul></details>
+    <p class="hint">Remplacer efface les marqueurs du show ; Ajouter garde les leurs (sans doublon). Un seul Cmd+Z annule l'import.</p>
+    <div class="tl-csv-actions">
+      <button id="tlCsvReplace" class="primary">Remplacer</button>
+      <button id="tlCsvAppend">Ajouter</button>
+      <button id="tlCsvCancel">Annuler</button>
+    </div>
+  </dialog>
   <dialog id="figImportDlg" aria-labelledby="impTitle" data-help="creation-import">
     <div class="imp-head">
       <h2 id="impTitle">Importer un SVG ou une image</h2>
@@ -8672,7 +8702,7 @@ function tlOnState(t, tempo, at = performance.now()) {
   if (!TL.inflight) tlShowFlags(t);
   tlTempoHint();
   const has = !!TL.show;
-  for (const id of ['tlSave', 'tlAddMarker', 'tlCopy', 'tlPaste', 'tlDup', 'tlDel', 'tlAddTrack', 'tlFit']) $(id).disabled = !has;
+  for (const id of ['tlSave', 'tlAddMarker', 'tlCsvBtn', 'tlCopy', 'tlPaste', 'tlDup', 'tlDel', 'tlAddTrack', 'tlFit']) $(id).disabled = !has;
   $('tlUndo').disabled = !has || !TL.undo.length;
   $('tlRedo').disabled = !has || !TL.redo.length;
   $('tlPaste').disabled = !has || !TL.clip;
@@ -9079,6 +9109,82 @@ function tlAddMarker(at) {
   tlMarkRow();
 }
 $('tlAddMarker').onclick = () => tlAddMarker(tlPlayhead());
+
+// --- markers as CSV (T-443): export, and import read by the server
+// (`markers/parse`, which changes nothing) then applied here through
+// tlChange, so one Cmd+Z undoes the whole import. ---
+const TL_CSV_MAX = 1 << 20, TL_MAX_MARKERS = 500;
+const tlCsv = { parsed: null };
+function tlCsvMenu(open) { $('tlCsvMenu').hidden = !open; }
+$('tlCsvBtn').onclick = e => { e.stopPropagation(); tlCsvMenu($('tlCsvMenu').hidden); };
+document.addEventListener('click', e => { if (!e.target.closest('.tl-csv')) tlCsvMenu(false); });
+$('tlCsvExport').onclick = async () => {
+  tlCsvMenu(false);
+  if (!TL.show) return;
+  let r;
+  try { r = await api('GET', '/api/timeline/markers.csv', undefined, { cache: 'no-store', quiet: true }); } catch { tlMsg('Studio injoignable : export impossible', true); return; }
+  if (!r.ok) { tlMsg('Export impossible : ' + await r.text(), true); return; }
+  const blob = await r.blob(), name = `${TL.show.name || 'show'}-marqueurs.csv`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  const n = TL.show.markers.length;
+  tlMsg(`${n} marqueur${n > 1 ? 's' : ''} exporté${n > 1 ? 's' : ''} dans ${name}`);
+};
+$('tlCsvImport').onclick = () => { tlCsvMenu(false); if (TL.show) { $('tlCsvFile').value = ''; $('tlCsvFile').click(); } };
+$('tlCsvFile').onchange = () => tlCsvRead($('tlCsvFile').files[0]);
+async function tlCsvRead(file) {
+  if (!file || !TL.show) return;
+  if (file.size > TL_CSV_MAX) { tlMsg(`Fichier trop gros : ${TL_CSV_MAX >> 20} Mo au plus.`, true); return; }
+  let r, body;
+  try {
+    r = await api('POST', '/api/timeline/markers/parse', file, { quiet: true });
+    body = r.ok ? await r.json() : await r.text();
+  } catch { tlMsg('Studio injoignable : fichier non lu', true); return; }
+  if (!r.ok) { tlMsg('Import impossible : ' + (body || r.status), true); return; }
+  tlCsv.parsed = body;
+  const n = body.markers.length, k = body.skipped_count || 0;
+  // Text only: names and reasons come from the file.
+  $('tlCsvSummary').textContent = `« ${file.name} » : ${n} marqueur${n > 1 ? 's' : ''} lu${n > 1 ? 's' : ''}`
+    + (k ? ` · ${k} ligne${k > 1 ? 's' : ''} ignorée${k > 1 ? 's' : ''}` : '') + (n ? '' : ' : rien à importer.');
+  const list = $('tlCsvSkippedList');
+  list.replaceChildren(...body.skipped.map(s => { const li = document.createElement('li'); li.textContent = `ligne ${s.line} : ${s.reason}`; return li; }));
+  if (k > body.skipped.length) { const li = document.createElement('li'); li.textContent = `… et ${k - body.skipped.length} autres`; list.append(li); }
+  $('tlCsvSkipped').hidden = !k;
+  $('tlCsvSkipped').open = false;
+  $('tlCsvReplace').disabled = $('tlCsvAppend').disabled = !n;
+  $('tlCsvDlg').showModal();
+}
+function tlCsvApply(mode) {
+  const parsed = tlCsv.parsed;
+  $('tlCsvDlg').close();
+  tlCsv.parsed = null;
+  if (!parsed || !TL.show) return;
+  // Under a millisecond apart (in the show's unit) with the same name: a duplicate.
+  const bpm = (TL.show.time_base === 'beats' && TL.show.tempo_map && TL.show.tempo_map[0] && TL.show.tempo_map[0].bpm) || 120;
+  const tol = TL.show.time_base === 'beats' ? 0.001 * bpm / 60 : 0.001;
+  let added = 0, dup = 0, over = 0;
+  tlChange(() => {
+    const keep = mode === 'replace' ? [] : TL.show.markers.slice();
+    for (const m of parsed.markers) {
+      if (keep.some(o => o.name === m.name && Math.abs(o.at - m.at) < tol)) { dup++; continue; }
+      if (keep.length >= TL_MAX_MARKERS) { over++; continue; }
+      const black = !m.color || m.color.every(c => c === 0);
+      keep.push({ at: m.at, name: m.name, color: black ? TL_MARK_COLORS[keep.length % TL_MARK_COLORS.length] : m.color });
+      added++;
+    }
+    keep.sort((a, b) => a.at - b.at);
+    TL.show.markers = keep;
+  });
+  TL.marker = -1; tlMarkRow();
+  const extra = [dup && `${dup} déjà présent${dup > 1 ? 's' : ''}`, over && `${over} au-delà de ${TL_MAX_MARKERS}`].filter(Boolean);
+  tlMsg(`${added} marqueur${added > 1 ? 's' : ''} importé${added > 1 ? 's' : ''}` + (extra.length ? ` (${extra.join(', ')} ignoré${dup + over > 1 ? 's' : ''})` : '')
+    + (added || mode === 'replace' ? ' (Cmd+Z pour annuler)' : ''));
+}
+$('tlCsvReplace').onclick = () => tlCsvApply('replace');
+$('tlCsvAppend').onclick = () => tlCsvApply('append');
+$('tlCsvCancel').onclick = () => { tlCsv.parsed = null; $('tlCsvDlg').close(); };
 function tlMarkRow() {
   const m = TL.show && TL.show.markers[TL.marker];
   $('tlMarkRow').hidden = !m;
