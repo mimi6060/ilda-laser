@@ -254,15 +254,18 @@ test('an external POST /api/control moves the sliders in under 500 ms', async ({
   await expect(page.locator('#mBright')).toHaveValue('30', { timeout: 500 });
 });
 
-test('Direct panel at 1280×800: no horizontal scroll, Calque/Cue greyed', async ({ page }) => {
+test('Direct panel at 1280×800: no horizontal scroll, Calque/Cue tabs (T-144)', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await reveal(page, '#mSize');
   const fits = await page.locator('#livePanel').evaluate(el => el.scrollWidth <= el.clientWidth);
   expect(fits).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await expect(page.locator('#directTabs button', { hasText: 'Maître' })).toHaveClass(/active/);
-  await expect(page.locator('#directTabs button', { hasText: 'Calque' })).toBeDisabled();
-  await expect(page.locator('#directTabs button', { hasText: 'Cue' })).toBeDisabled();
+  await expect(page.locator('#directTabs button', { hasText: 'Calque' })).toBeEnabled();
+  await expect(page.locator('#directTabs button', { hasText: 'Cue' })).toBeEnabled();
+  await page.locator('#directTabs [data-scope="cue"]').click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.locator('#directTabs [data-scope="master"]').click();
   await page.locator('#posPad').scrollIntoViewIfNeeded();
   await expect(page.locator('#posPad')).toBeVisible();
 });

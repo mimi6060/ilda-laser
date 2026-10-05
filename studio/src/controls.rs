@@ -219,6 +219,10 @@ impl ControlRegistry {
         add("master.perspective".into(), "Perspective".into(), "master", cont(0.0, 1.0, m.perspective, Unit::Percent), true);
         add("master.speed".into(), "Vitesse d'animation".into(), "master", cont(0.0, 4.0, m.speed, Unit::Percent), true);
         add("master.reset".into(), "Réinitialiser le direct".into(), "master", ControlKind::Trigger, true);
+        // « Lissage » of the live moves, every level (T-144).
+        let sm = crate::levels::Smoothing::default();
+        add("smoothing.on".into(), "Lissage des mouvements".into(), "master", ControlKind::Toggle { default: false }, true);
+        add("smoothing.inertia".into(), "Inertie du lissage".into(), "master", cont(crate::levels::MIN_INERTIA, crate::levels::MAX_INERTIA, sm.mass, Unit::None), true);
         // Live effects (T-142). The strobe only cuts light, before the
         // strobe limiter; « Noir » dims, it never disarms.
         let st = m.strobe;
@@ -429,9 +433,16 @@ fn apply_checked(s: &mut Shared, id: &str, input: ControlInput, from_external: b
 }
 
 fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: bool, src: ArmSource, source: ControlSource) -> Result<(), ControlError> {
-    let desc = s.controls.get(id).cloned().ok_or_else(|| ControlError::Unknown(id.to_string()))?;
+    let Some(desc) = s.controls.get(id).cloned() else { return apply_level(s, id, input, from_external) };
     if from_external && !desc.external {
         return Err(ControlError::Refused("ce contrôle ne peut pas être piloté depuis un contrôleur externe"));
+    }
+    // The master live modifiers: the same code as the cue and layer levels.
+    if let Some(param) = desc.id.strip_prefix("master.") {
+        if modify_live(&mut s.live, param, &desc.kind, input) {
+            s.live_dirty = true;
+            return Ok(());
+        }
     }
     let value = |i| match desc.kind {
         ControlKind::Continuous { min, max, .. } => native(min, max, i),
@@ -442,91 +453,10 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "look.size" => s.settings.scale = value(input),
         "look.brightness" => s.settings.brightness = value(input),
         "look.rotation_speed" => s.settings.rotation_speed = value(input),
-        "master.brightness" => set_live(s, |m| m.brightness = value(input)),
-        "master.size" => set_live(s, |m| m.size = value(input)),
-        "master.size_x" => set_live(s, |m| m.size_x = value(input)),
-        "master.size_y" => set_live(s, |m| m.size_y = value(input)),
-        "master.pos_x" => set_live(s, |m| m.pos_x = value(input)),
-        "master.pos_y" => set_live(s, |m| m.pos_y = value(input)),
-        "master.rot.preset" => {
-            let index = choice_index(&desc.kind, input);
-            set_live(s, |m| {
-                let table = if m.rot_sync { ROT_PRESETS_SYNC } else { ROT_PRESETS_FREE };
-                m.rot_speed[2] = table[index];
-            })
-        }
-        "master.rot.sync" => set_live(s, |m| {
-            // Keep the same step when switching modes (Moyen stays Moyen).
-            let on = truthy(input);
-            if on == m.rot_sync {
-                return;
-            }
-            let (from, to) = if on { (ROT_PRESETS_FREE, ROT_PRESETS_SYNC) } else { (ROT_PRESETS_SYNC, ROT_PRESETS_FREE) };
-            if let Some(i) = from.iter().position(|&v| v == m.rot_speed[2]) {
-                m.rot_speed[2] = to[i];
-            }
-            m.rot_sync = on;
-        }),
-        "master.rot.reverse" => set_live(s, |m| m.rot_reverse = truthy(input)),
-        "master.perspective" => set_live(s, |m| m.perspective = value(input)),
-        "master.speed" => set_live(s, |m| m.speed = value(input)),
-        "master.reset" => set_live(s, |m| *m = LiveModifiers::default()),
-        "master.strobe.on" => set_live(s, |m| m.strobe.on = truthy(input)),
-        "master.strobe.hold" => set_live(s, |m| m.strobe.hold = truthy(input)),
-        // The Hz fader frees the strobe; « Cadence (temps) » syncs it (0 = free).
-        "master.strobe.rate" => set_live(s, |m| m.strobe.rate = Rate::Hz(value(input))),
-        "master.strobe.sync" => {
-            let index = choice_index(&desc.kind, input);
-            set_live(s, |m| {
-                m.strobe.rate = match index {
-                    0 => Rate::Hz(match m.strobe.rate() {
-                        Rate::Hz(hz) => hz,
-                        Rate::Beats(_) => 8.0,
-                    }),
-                    i => Rate::Beats(1.0 / STROBE_DIVISIONS[i - 1]),
-                }
-            })
-        }
-        "master.strobe.duty" => set_live(s, |m| m.strobe.duty = value(input)),
-        "master.trace" => set_live(s, |m| m.trace = value(input)),
-        "master.dots" => set_live(s, |m| m.dots = value(input)),
-        "master.scan" => set_live(s, |m| m.scan = value(input)),
-        "master.mirror" => {
-            let mirror = MIRRORS[choice_index(&desc.kind, input)];
-            set_live(s, |m| m.mirror = mirror)
-        }
-        "master.prism" => set_live(s, |m| m.prism = value(input).round() as u8),
         "transport.freeze" => set_live(s, |m| m.freeze = truthy(input)),
         "transport.black_hold" => set_live(s, |m| m.black = truthy(input)),
-        "master.color.mode" => {
-            let index = choice_index(&desc.kind, input);
-            set_live(s, |m| m.color = m.color_params.build(index))
-        }
-        "master.color.hue" => set_color(s, |c| c.hue = value(input)),
-        "master.color.palette" => {
-            let index = choice_index(&desc.kind, input);
-            set_color(s, |c| c.palette = index)
-        }
-        "master.color.palette_mode" => {
-            let mode = [PaletteMode::Nearest, PaletteMode::Step][choice_index(&desc.kind, input)];
-            set_color(s, |c| c.palette_mode = mode)
-        }
-        "master.color.offset" => set_color(s, |c| c.offset = value(input).round() as usize),
-        "master.color.rate" => {
-            let rate = Rate::Beats(COLOR_STEPS_BEATS[choice_index(&desc.kind, input)]);
-            set_color_rate(s, rate)
-        }
-        "master.color.rate_hz" => set_color_rate(s, Rate::Hz(value(input))),
-        "master.color.spread" => set_color(s, |c| c.spread = value(input)),
-        "master.color.chase_spread" => {
-            let spread = [ChaseSpread::Whole, ChaseSpread::Stroke, ChaseSpread::Point][choice_index(&desc.kind, input)];
-            set_color(s, |c| c.chase_spread = spread)
-        }
-        "master.color.red" | "master.color.green" | "master.color.blue" => {
-            let channel = ["master.color.red", "master.color.green", "master.color.blue"].iter().position(|&i| i == desc.id).unwrap_or(0);
-            let v = (value(input) * 255.0).round() as u8;
-            set_color(s, |c| c.rgb[channel] = v)
-        }
+        "smoothing.on" => set_smoothing(s, |sm| sm.enabled = truthy(input)),
+        "smoothing.inertia" => set_smoothing(s, |sm| sm.set_inertia(value(input))),
         "audio.enabled" => s.settings.audio.enabled = truthy(input),
         "audio.size" => s.settings.audio.size = value(input),
         "audio.rotate" => s.settings.audio.rotate = value(input),
@@ -634,20 +564,6 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "page.next" => s.cue_page = (s.cue_page + 1) % s.grid.page_count(),
         "page.prev" => s.cue_page = (s.cue_page + s.grid.page_count() - 1) % s.grid.page_count(),
         other => {
-            if let Some(rest) = other.strip_prefix("master.rot_") {
-                let axis = match &rest[..1] {
-                    "x" => 0,
-                    "y" => 1,
-                    _ => 2,
-                };
-                let v = value(input);
-                if rest.ends_with(".angle") {
-                    set_live(s, |m| m.rot_angle[axis] = v);
-                } else {
-                    set_live(s, |m| m.rot_speed[axis] = v);
-                }
-                return Ok(());
-            }
             if let Some((line, param)) = fx_control(other) {
                 match param {
                     FxParam::Cell(cell) => {
@@ -718,20 +634,139 @@ fn set_live(s: &mut Shared, f: impl FnOnce(&mut LiveModifiers)) {
     s.live_dirty = true;
 }
 
+fn set_smoothing(s: &mut Shared, f: impl FnOnce(&mut crate::levels::Smoothing)) {
+    f(&mut s.mixer.smoothing);
+    s.mixer.smoothing.sanitize();
+    s.mixer_dirty = true;
+}
+
+/// One live modifier `param` (a `master.<param>` id without its prefix)
+/// changed on `m`: the master's, a layer's or a cue's (T-144). `kind` is
+/// the master control's. False for a param that is not a modifier.
+pub(crate) fn modify_live(m: &mut LiveModifiers, param: &str, kind: &ControlKind, input: ControlInput) -> bool {
+    let value = |i| match *kind {
+        ControlKind::Continuous { min, max, .. } => native(min, max, i),
+        _ => 0.0,
+    };
+    match param {
+        "brightness" => m.brightness = value(input),
+        "size" => m.size = value(input),
+        "size_x" => m.size_x = value(input),
+        "size_y" => m.size_y = value(input),
+        "pos_x" => m.pos_x = value(input),
+        "pos_y" => m.pos_y = value(input),
+        "rot.preset" => {
+            let table = if m.rot_sync { ROT_PRESETS_SYNC } else { ROT_PRESETS_FREE };
+            m.rot_speed[2] = table[choice_index(kind, input)];
+        }
+        "rot.sync" => {
+            // Keep the same step when switching modes (Moyen stays Moyen).
+            let on = truthy(input);
+            if on != m.rot_sync {
+                let (from, to) = if on { (ROT_PRESETS_FREE, ROT_PRESETS_SYNC) } else { (ROT_PRESETS_SYNC, ROT_PRESETS_FREE) };
+                if let Some(i) = from.iter().position(|&v| v == m.rot_speed[2]) {
+                    m.rot_speed[2] = to[i];
+                }
+                m.rot_sync = on;
+            }
+        }
+        "rot.reverse" => m.rot_reverse = truthy(input),
+        "perspective" => m.perspective = value(input),
+        "speed" => m.speed = value(input),
+        "reset" => *m = LiveModifiers::default(),
+        "strobe.on" => m.strobe.on = truthy(input),
+        "strobe.hold" => m.strobe.hold = truthy(input),
+        // The Hz fader frees the strobe; « Cadence (temps) » syncs it (0 = free).
+        "strobe.rate" => m.strobe.rate = Rate::Hz(value(input)),
+        "strobe.sync" => {
+            m.strobe.rate = match choice_index(kind, input) {
+                0 => Rate::Hz(match m.strobe.rate() {
+                    Rate::Hz(hz) => hz,
+                    Rate::Beats(_) => 8.0,
+                }),
+                i => Rate::Beats(1.0 / STROBE_DIVISIONS[i - 1]),
+            }
+        }
+        "strobe.duty" => m.strobe.duty = value(input),
+        "trace" => m.trace = value(input),
+        "dots" => m.dots = value(input),
+        "scan" => m.scan = value(input),
+        "mirror" => m.mirror = MIRRORS[choice_index(kind, input)],
+        "prism" => m.prism = value(input).round() as u8,
+        "color.mode" => m.color = m.color_params.build(choice_index(kind, input)),
+        "color.hue" => set_color(m, |c| c.hue = value(input)),
+        "color.palette" => {
+            let index = choice_index(kind, input);
+            set_color(m, |c| c.palette = index)
+        }
+        "color.palette_mode" => {
+            let mode = [PaletteMode::Nearest, PaletteMode::Step][choice_index(kind, input)];
+            set_color(m, |c| c.palette_mode = mode)
+        }
+        "color.offset" => set_color(m, |c| c.offset = value(input).round() as usize),
+        "color.rate" => set_color_rate(m, Rate::Beats(COLOR_STEPS_BEATS[choice_index(kind, input)])),
+        "color.rate_hz" => set_color_rate(m, Rate::Hz(value(input))),
+        "color.spread" => set_color(m, |c| c.spread = value(input)),
+        "color.chase_spread" => {
+            let spread = [ChaseSpread::Whole, ChaseSpread::Stroke, ChaseSpread::Point][choice_index(kind, input)];
+            set_color(m, |c| c.chase_spread = spread)
+        }
+        "color.red" | "color.green" | "color.blue" => {
+            let channel = ["color.red", "color.green", "color.blue"].iter().position(|&i| i == param).unwrap_or(0);
+            let v = (value(input) * 255.0).round() as u8;
+            set_color(m, |c| c.rgb[channel] = v)
+        }
+        other => {
+            // rot_<axis>.angle / rot_<axis>.speed
+            let Some(rest) = other.strip_prefix("rot_") else { return false };
+            let Some(axis) = ["x", "y", "z"].iter().position(|a| rest.starts_with(a)) else { return false };
+            match &rest[1..] {
+                ".angle" => m.rot_angle[axis] = value(input),
+                ".speed" => m.rot_speed[axis] = value(input),
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
+/// A cue or layer level control (T-144, `levels::parse`): the master
+/// control's range and behaviour on that level's modifiers. A cue that is
+/// not on show is refused (its working copy only lives while it plays).
+fn apply_level(s: &mut Shared, id: &str, input: ControlInput, from_external: bool) -> Result<(), ControlError> {
+    let Some((level, param)) = crate::levels::parse(id) else { return Err(ControlError::Unknown(id.to_string())) };
+    let desc = s.controls.get(&format!("master.{param}")).cloned().ok_or_else(|| ControlError::Unknown(id.to_string()))?;
+    if from_external && !desc.external {
+        return Err(ControlError::Refused("ce contrôle ne peut pas être piloté depuis un contrôleur externe"));
+    }
+    match level {
+        crate::levels::Level::Layer(n) => {
+            modify_live(&mut s.mixer.layer_mut(n).modifiers, param, &desc.kind, input);
+            s.mixer_dirty = true;
+        }
+        crate::levels::Level::Cue(cue) => {
+            if !s.presets.iter().any(|p| p.id == cue) {
+                return Err(ControlError::Unknown(id.to_string()));
+            }
+            let m = crate::levels::cue_mods_mut(s, cue).ok_or(ControlError::Refused("ce cue ne joue pas"))?;
+            modify_live(m, param, &desc.kind, input);
+        }
+    }
+    Ok(())
+}
+
 /// Change a colour setting; the active colour mode picks it up at once. It
 /// never switches mode by itself (that's `master.color.mode`).
-fn set_color(s: &mut Shared, f: impl FnOnce(&mut ColorParams)) {
-    set_live(s, |m| {
-        f(&mut m.color_params);
-        m.color = m.color_params.build(m.color.mode_index());
-    })
+fn set_color(m: &mut LiveModifiers, f: impl FnOnce(&mut ColorParams)) {
+    f(&mut m.color_params);
+    m.color = m.color_params.build(m.color.mode_index());
 }
 
 /// « Pas » drives the mode that uses a rate (rainbow or chase); in the
 /// other modes it presets both.
-fn set_color_rate(s: &mut Shared, rate: Rate) {
-    let mode = s.live.color.mode_index();
-    set_color(s, |c| match mode {
+fn set_color_rate(m: &mut LiveModifiers, rate: Rate) {
+    let mode = m.color.mode_index();
+    set_color(m, |c| match mode {
         4 => c.rainbow_rate = rate,
         5 => c.chase_step = rate,
         _ => (c.rainbow_rate, c.chase_step) = (rate, rate),
@@ -782,6 +817,8 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "master.prism" => json!(s.live.prism),
         "transport.freeze" => json!(s.live.freeze),
         "transport.black_hold" => json!(s.live.black),
+        "smoothing.on" => json!(s.mixer.smoothing.enabled),
+        "smoothing.inertia" => json!(s.mixer.smoothing.mass),
         "master.color.mode" => json!(s.live.color.mode_index()),
         "master.color.hue" => json!(s.live.color_params.hue),
         "master.color.palette" => json!(s.live.color_params.palette),

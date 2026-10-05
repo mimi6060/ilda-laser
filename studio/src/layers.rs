@@ -29,11 +29,15 @@ pub struct Layer {
     pub mute: bool,
     /// While any layer is solo, only solo layers are drawn.
     pub solo: bool,
+    /// The layer's live modifiers (T-144, levels.rs): on everything the
+    /// layer draws, between the cue's and the master's. Neutral in older
+    /// files.
+    pub modifiers: crate::live::LiveModifiers,
 }
 
 impl Default for Layer {
     fn default() -> Self {
-        Self { dimmer: 1.0, mute: false, solo: false }
+        Self { dimmer: 1.0, mute: false, solo: false, modifiers: Default::default() }
     }
 }
 
@@ -51,11 +55,19 @@ pub struct Mixer {
     /// choose none. `None` = « Auto »: `optimizer` as it is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan_default: Option<String>,
+    /// « Lissage » of the live moves, every level (T-144). Off by default.
+    pub smoothing: crate::levels::Smoothing,
 }
 
 impl Default for Mixer {
     fn default() -> Self {
-        Self { layers: Default::default(), point_budget: DEFAULT_POINT_BUDGET, optimizer: OptimizeParams::default(), scan_default: None }
+        Self {
+            layers: Default::default(),
+            point_budget: DEFAULT_POINT_BUDGET,
+            optimizer: OptimizeParams::default(),
+            scan_default: None,
+            smoothing: Default::default(),
+        }
     }
 }
 
@@ -63,8 +75,10 @@ impl Mixer {
     pub fn sanitize(&mut self) {
         self.point_budget = self.point_budget.clamp(MIN_POINT_BUDGET, MAX_POINT_BUDGET);
         self.optimizer.sanitize();
+        self.smoothing.sanitize();
         for l in &mut self.layers {
             l.dimmer = if l.dimmer.is_finite() { l.dimmer.clamp(0.0, 1.0) } else { 1.0 };
+            l.modifiers = crate::levels::for_storage(&l.modifiers);
         }
     }
 

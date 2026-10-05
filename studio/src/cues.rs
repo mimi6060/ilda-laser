@@ -180,6 +180,11 @@ pub struct CueSlot {
     /// The cell's colour band; set, it wins over a user cue's own colour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// The cue's own live modifiers (T-144, « Enregistrer dans le cue »):
+    /// the cue level starts from them each time the cue starts. Neutral
+    /// in older files.
+    #[serde(skip_serializing_if = "crate::levels::is_neutral")]
+    pub modifiers: crate::live::LiveModifiers,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -375,6 +380,7 @@ impl CueDeck {
             slot.zones.sort_unstable();
             slot.zones.dedup();
             slot.program = slot.program.take().filter(|p| p.validate().is_ok());
+            slot.modifiers = crate::levels::for_storage(&slot.modifiers);
             slot.transition = slot.transition.map(Transition::sanitized);
             sanitize_notes(&mut slot.notes);
             sanitize_tags(&mut slot.tags);

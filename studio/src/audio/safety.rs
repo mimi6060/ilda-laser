@@ -52,6 +52,9 @@ pub const SOUND_BACK_FADE_S: f32 = 0.2;
 /// Changes of the darkness smaller than this (fraction of the control's
 /// range) are noise, not a new dip.
 const FLASH_EPS: f32 = 0.01;
+/// A light-up counts as lit (its onset) once the darkness is below this
+/// share of its dip: the meter of T-101 calls a frame lit at 0.6 of its peak.
+const LIT_FRAC: f32 = 0.4;
 /// Float slack on the dip period (frame times are summed).
 const PERIOD_SLACK_S: f32 = 1e-4;
 
@@ -126,20 +129,35 @@ impl Guard {
 
 /// Caps how often an audio-driven light can dip and come back. Works on
 /// the *darkness* of a control (0 = the operator's level, more = dimmer):
-/// it may fall (light up) at any time; it may rise (a new dip) only once
-/// per `1 / max_hz`; while that is refused the light is held where it is.
-/// A dip already under way may go on deepening.
+/// it may rise (a new dip) only once per `1 / max_hz`; while that is
+/// refused the light is held where it is. And the light may come back
+/// from a dip only one period after the last light onset (the moment it
+/// was lit again, as the T-101 meter counts flashes): a route dark
+/// between hits flashes on the way up, and a short dip after a long one
+/// would otherwise bring two onsets closer than a period. While that is
+/// refused it stays dark a little longer (the safe side). A dip already
+/// under way may go on deepening; a fade to neutral (`bypass`) passes
+/// but is counted.
 #[derive(Clone, Copy, Debug)]
 pub struct FlashLimiter {
     out: f32,
     dimming: bool,
     since_dip: f32,
+    /// Seconds since the last light onset. Starts at 0: whatever the
+    /// output showed before this limiter existed may have just lit up
+    /// (the look appearing, a cue starting), so the first light-up after
+    /// a dip waits a period from the limiter's start too.
+    since_light: f32,
+    /// Deepest darkness of the current (or last) dip, and whether its
+    /// light onset was counted (`since_light` runs from there).
+    peak: f32,
+    onset_seen: bool,
     limited: bool,
 }
 
 impl Default for FlashLimiter {
     fn default() -> Self {
-        Self { out: 0.0, dimming: false, since_dip: f32::INFINITY, limited: false }
+        Self { out: 0.0, dimming: false, since_dip: f32::INFINITY, since_light: 0.0, peak: 0.0, onset_seen: true, limited: false }
     }
 }
 
@@ -151,27 +169,40 @@ impl FlashLimiter {
         let darkness = if darkness.is_finite() { darkness } else { 0.0 };
         if dt.is_finite() && dt > 0.0 {
             self.since_dip += dt;
+            self.since_light += dt;
         }
         self.limited = false;
+        let period = 1.0 / clamp_hz(max_hz);
+        let due = |since: f32| bypass || since + PERIOD_SLACK_S >= period;
         if darkness > self.out + FLASH_EPS && !self.dimming {
             // A new dip.
-            if bypass || self.since_dip + PERIOD_SLACK_S >= 1.0 / clamp_hz(max_hz) {
-                self.dimming = true;
-                self.since_dip = 0.0;
-                self.out = darkness;
+            if due(self.since_dip) {
+                (self.dimming, self.since_dip, self.peak, self.onset_seen, self.out) = (true, 0.0, darkness, false, darkness);
             } else {
                 self.limited = true;
             }
         } else if darkness >= self.out {
             // Deepening the current dip, or a change too small to count.
             if self.dimming || bypass {
+                self.peak = self.peak.max(darkness);
                 self.out = darkness;
             }
-        } else {
-            if darkness < self.out - FLASH_EPS {
+        } else if self.dimming && darkness < self.out - FLASH_EPS {
+            // The light comes back: a flash of light for a route dark
+            // between hits, so one period after the last light onset.
+            if due(self.since_light) {
                 self.dimming = false;
+                self.out = darkness;
+            } else {
+                // Too soon: it stays dark a little longer (the safe side).
+                self.limited = true;
             }
+        } else {
             self.out = darkness;
+        }
+        // The light onset, as the output's meter sees it (lit again).
+        if !self.dimming && !self.onset_seen && self.out <= LIT_FRAC * self.peak {
+            (self.onset_seen, self.since_light) = (true, 0.0);
         }
         self.out
     }
@@ -348,9 +379,34 @@ pub(crate) mod tests {
         }
     }
 
+    /// T-144 report: the studio's first lit frame, then the route's first
+    /// dip and light-up 140 ms later, made a 7 Hz pair on the output's
+    /// meter with a 3 Hz cap. The first light-up waits a period from the
+    /// limiter's start: the light before it may have just come up.
     #[test]
-    fn the_light_comes_back_at_once_and_is_never_held_dark() {
+    fn the_first_light_up_waits_a_period_from_the_start() {
         let mut lim = FlashLimiter::default();
+        let (mut t, mut back) = (0.0f32, None);
+        for i in 0..60 {
+            t += FPS60;
+            let dark = if i < 8 { 1.0 } else { 0.0 };
+            if lim.step(dark, FPS60, 3.0, false) == 0.0 && back.is_none() {
+                back = Some(t);
+            }
+        }
+        let back = back.expect("comes back");
+        assert!(back + 1e-3 >= 1.0 / 3.0, "back after {back} s");
+        assert!(back < 1.0 / 3.0 + 2.0 * FPS60, "and not later than needed: {back} s");
+    }
+
+    #[test]
+    fn the_light_comes_back_at_once_when_its_period_allows() {
+        let mut lim = FlashLimiter::default();
+        // Lit for a period first: the light may have come up just before
+        // the limiter started (`since_light` starts at 0).
+        for _ in 0..6 {
+            assert_eq!(lim.step(0.0, FPS60, 10.0, false), 0.0);
+        }
         assert_eq!(lim.step(1.0, FPS60, 10.0, false), 1.0, "the first dip is free");
         assert_eq!(lim.step(0.0, FPS60, 10.0, false), 0.0, "back up at once");
         assert_eq!(lim.step(1.0, FPS60, 10.0, false), 0.0, "a second dip too soon: held lit");

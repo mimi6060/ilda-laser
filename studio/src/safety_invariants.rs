@@ -62,6 +62,12 @@
 //!     the safety stage (no Blank zone lit after it), and no look is
 //!     traced faster than the output's `pps_max`
 //!     (`scan_limits_never_add_light_and_never_trace_faster_than_pps_max`).
+//! 16. cue and layer modifiers (T-144): random level controls (from the
+//!     UI or a controller, on layers and on cues on show or not), mangled
+//!     cell, layer and working-copy modifiers, « Enregistrer dans le cue »
+//!     and the smoothing run in the sessions, so 1-15 hold with every
+//!     level on; they never arm, and they apply before the safety stage
+//!     (`cue_and_layer_modifiers_apply_before_the_safety_stage`).
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -843,7 +849,12 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
         18 => {
             let bpm = rng.range(40.0, 220.0) as f64;
             s.tempo.set_bpm_manual(bpm, t);
+            // The layers' modifiers (T-144) have their own stream (`random_level`).
+            let mods: Vec<live::LiveModifiers> = s.mixer.layers.iter().map(|l| l.modifiers.clone()).collect();
             s.mixer = mutated(&s.mixer.clone(), rng, 0.2);
+            for (l, m) in s.mixer.layers.iter_mut().zip(mods) {
+                l.modifiers = m;
+            }
             s.mixer_dirty = true;
             if rng.chance(0.5) {
                 random_scan(&mut s, rng);
@@ -1005,6 +1016,53 @@ struct Coverage {
     lit_with_effects: usize,
     /// Frames with a lit preview while an FX grid line played (T-146).
     lit_with_fx: usize,
+    /// Frames with a lit preview while a cue or layer level was not
+    /// neutral (T-144).
+    lit_with_levels: usize,
+}
+
+/// Cue and layer modifiers (T-144) as the page, a controller or a bad
+/// client could set them: level controls on any layer and on a cue on
+/// show (or one that isn't), mangled stored and working copies,
+/// « Enregistrer dans le cue », the smoothing switched and its inertia.
+fn random_level(s: &mut Shared, rng: &mut Rng) {
+    let playing = s.deck.active.first().map(|a| a.cue.clone());
+    let cue = match &playing {
+        Some(id) if rng.chance(0.8) => id.clone(),
+        _ => random_preset(s, rng).0,
+    };
+    match rng.below(6) {
+        0..=2 => {
+            let param = *rng.pick(crate::levels::PARAMS);
+            let target = if rng.chance(0.5) { format!("layer.{}", 1 + rng.below(4)) } else { format!("cue.{cue}") };
+            // Mostly lit: a level dimmed to black would hide the rest.
+            let input = match param {
+                "brightness" | "trace" if rng.chance(0.8) => ControlInput::Norm(rng.range(0.5, 1.0)),
+                _ if rng.chance(0.8) => ControlInput::Norm(rng.f()),
+                _ => ControlInput::Value(rng.range(-5.0, 30.0)),
+            };
+            let _ = controls::apply(s, &format!("{target}.{param}"), input, rng.chance(0.5));
+        }
+        3 => {
+            // Cell modifiers from a mangled file (sanitised by the deck)…
+            let mut slot = s.deck.slot(&cue);
+            slot.modifiers = mutated(&live::LiveModifiers::default(), rng, 0.3);
+            s.deck.set_slot(&cue, slot);
+        }
+        4 => {
+            // …and layer and working copies the engine must cope with as they are.
+            let n = rng.below(4);
+            s.mixer.layers[n].modifiers = mutated(&live::LiveModifiers { size: 0.9, ..Default::default() }, rng, 0.3);
+            if let Some(id) = playing {
+                s.cue_mods.insert(id, mutated(&live::LiveModifiers { size: 0.9, ..Default::default() }, rng, 0.3));
+            }
+        }
+        _ => {
+            let _ = crate::levels::store(s, &cue, rng.chance(0.5));
+            let _ = controls::apply(s, "smoothing.on", ControlInput::Value(rng.below(2) as f32), rng.chance(0.5));
+            let _ = controls::apply(s, "smoothing.inertia", ControlInput::Norm(rng.f()), rng.chance(0.5));
+        }
+    }
 }
 
 /// The live effects of T-142 as a controller would drive them: latched
@@ -1202,6 +1260,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     let effects = erng.chance(0.25);
     // « Préparer » (T-274), from its own stream.
     let mut prng = Rng::new(seed ^ 0x0274_0274);
+    // Cue and layer modifiers (T-144), from their own stream.
+    let mut vrng = Rng::new(seed ^ 0x0144_0144);
+    let level_mods = vrng.chance(0.35);
     let mut beats = 0;
     for frame in 0..frames {
         {
@@ -1210,6 +1271,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             if effects && erng.chance(0.3) {
                 random_live_effect(&mut s, &mut erng);
             }
+            if level_mods && vrng.chance(0.4) {
+                random_level(&mut s, &mut vrng);
+            }
             // Held buttons are let go of: « Noir » and « Figer » don't
             // stay down for the whole session.
             if (s.live.black || s.live.freeze || s.live.strobe.hold) && erng.chance(0.7) {
@@ -1217,7 +1281,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 let _ = controls::apply(&mut s, id, ControlInput::Value(0.0), erng.chance(0.5));
             }
             if s.gate.is_armed() != armed {
-                return Err(format!("frame {frame}: a live effect changed the arming"));
+                return Err(format!("frame {frame}: a live effect or a level changed the arming"));
             }
         }
         if lists && lrng.chance(0.08) {
@@ -1424,6 +1488,8 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         if s.estop.is_latched() && s.fx.any_playing() {
             return Err(format!("frame {frame}: an FX grid effect survived the e-stop"));
         }
+        let levels_on = s.mixer.layers.iter().any(|l| !crate::levels::is_neutral(&l.modifiers)) || s.cue_mods.values().any(|m| !crate::levels::is_neutral(m));
+        cov.lit_with_levels += (preview_lit && levels_on) as usize;
         if black_held && preview_lit && !limiter_holding {
             return Err(format!("frame {frame}: the preview is lit while « Noir » is held"));
         }
@@ -1466,7 +1532,7 @@ fn random_sessions_keep_every_output_invariant() {
     }
     if seeds.len() > 100 {
         let share = |n: usize| n as f64 / cov.frames as f64;
-        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}; sent lit {:.3}, effects {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition), share(cov.sent_lit), share(cov.lit_with_effects));
+        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}; sent lit {:.3}, effects {:.3}, levels {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition), share(cov.sent_lit), share(cov.lit_with_effects), share(cov.lit_with_levels));
         assert!(share(cov.sent_lit) > 0.1, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
@@ -1477,6 +1543,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_transition) > 0.01, "only {} of {} lit frames ran a transition", cov.lit_with_transition, cov.frames);
         assert!(share(cov.lit_with_effects) > 0.05, "only {} of {} lit frames went through a live effect", cov.lit_with_effects, cov.frames);
         assert!(share(cov.lit_with_fx) > 0.02, "only {} of {} lit frames went through the FX grid", cov.lit_with_fx, cov.frames);
+        assert!(share(cov.lit_with_levels) > 0.05, "only {} of {} lit frames went through a cue or layer level", cov.lit_with_levels, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
@@ -2425,6 +2492,53 @@ fn a_user_cues_own_master_applies_before_the_safety_stage() {
     assert!(lit(&low).iter().all(|p| p.y >= -1e-3), "a lit point below the horizon");
 }
 
+
+/// T-144: the cue and layer levels sit before the safety stage. Sizes
+/// compose (cue 0.5 × master 2 = the plain size), brightness only ever
+/// goes down, and a figure pushed down by its cue and its layer is still
+/// cut by the horizon.
+#[test]
+fn cue_and_layer_modifiers_apply_before_the_safety_stage() {
+    let frame_of = |moves: &[(&str, f32)], horizon: Option<f32>| -> Vec<Point> {
+        let mut s = test_support::shared();
+        let y = horizon.unwrap_or(-1.0);
+        s.safety.set(SafetySettings { horizon: Horizon { y, lines: true, ramp: 0.0, level: 0.0 }, ..Default::default() }, true).unwrap();
+        let mut g = s.grid.clone();
+        let page = g.new_page("Mes looks", &s.presets).unwrap();
+        s.grid = g;
+        crate::usercues::refresh(&mut s);
+        s.settings = Settings { content: crate::engine::Content::Shape { shape: "square".into() }, scale: 0.8, rotation_speed: 0.0, ..Settings::default() };
+        let id = crate::usercues::store(&mut s, page, 0, None, crate::usercues::StoreFilter::All, false).unwrap();
+        s.settings = Settings::default();
+        assert!(controls::press_cue(&mut s, &id, None, true));
+        for (control, v) in moves {
+            let control = control.replace("{cue}", &id);
+            controls::apply(&mut s, &control, ControlInput::Value(*v), false).unwrap();
+        }
+        let mut rig = Rig::new(s, "levels", 0);
+        for _ in 0..3 {
+            rig.tick();
+        }
+        assert!(!rig.s().gate.is_armed(), "never armed");
+        let frame = rig.s().frame.clone();
+        frame
+    };
+    let lit = |f: &[Point]| f.iter().filter(|p| p.r + p.g + p.b > 0.0).cloned().collect::<Vec<_>>();
+    let extent = |f: &[Point]| lit(f).iter().fold(0.0f32, |m, p| m.max(p.x.abs()));
+    let peak = |f: &[Point]| lit(f).iter().fold(0.0f32, |m, p| m.max(p.r).max(p.g).max(p.b));
+    let plain = frame_of(&[], None);
+    assert!(extent(&plain) > 0.7, "{}", extent(&plain));
+    let composed = frame_of(&[("cue.{cue}.size", 0.5), ("master.size", 2.0)], None);
+    assert!((extent(&composed) - extent(&plain)).abs() < 0.05, "{} vs {}", extent(&composed), extent(&plain));
+    let layer = frame_of(&[("layer.1.size", 0.5)], None);
+    assert!((extent(&layer) - extent(&plain) * 0.5).abs() < 0.05, "{} vs {}", extent(&layer), extent(&plain));
+    let dim = frame_of(&[("cue.{cue}.brightness", 0.5), ("layer.1.brightness", 0.8)], None);
+    assert!(!lit(&dim).is_empty());
+    assert!(peak(&dim) <= peak(&plain) * 0.4 + 0.02, "{} vs {}", peak(&dim), peak(&plain));
+    let low = frame_of(&[("cue.{cue}.pos_y", -0.3), ("layer.1.pos_y", -0.5)], Some(0.0));
+    assert!(!lit(&low).is_empty());
+    assert!(lit(&low).iter().all(|p| p.y >= -1e-3), "a lit point below the horizon");
+}
 
 // ---------- transitions between cues (T-158) ----------
 
