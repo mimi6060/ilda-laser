@@ -59,6 +59,7 @@ test('the live scan speed is a master slider', async ({ page }) => {
   await expect(page.locator('#mScanV')).toHaveText('100 %');
   await page.locator('#mScan').fill('150');
   await expect.poll(async () => (await studio.live()).scan).toBeCloseTo(1.5, 3);
-  await page.locator('#mScan').dblclick();
+  // T-431: a double-click on the slider types a value; on its name, neutral.
+  await page.locator('label', { has: page.locator('#mScanV') }).dblclick();
   await expect.poll(async () => (await studio.live()).scan).toBe(1);
 });

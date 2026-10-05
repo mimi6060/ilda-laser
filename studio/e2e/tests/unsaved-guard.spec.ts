@@ -34,8 +34,14 @@ test.beforeEach(async ({ page }) => {
 
 test('a change asks before reloading, even right after it; saved, nothing is asked', async ({ page }) => {
   expect((await quitCheck()).modified).toBe(false);
-  // Move the top bar's master (a click: also the user gesture the browser needs) and reload at once.
-  await page.locator('#topMaster').click({ position: { x: 10, y: 5 } });
+  // Drag the top bar's master (also the user gesture the browser needs) and
+  // reload at once. A drag, not a click: a click on a slider waits for the
+  // double-click window before it sends (T-431).
+  const box = (await page.locator('#topMaster').boundingBox())!;
+  await page.mouse.move(box.x + box.width - 4, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 10, box.y + box.height / 2, { steps: 4 });
+  await page.mouse.up();
   expect(await reloadCounting(page)).toEqual(['beforeunload']);
   await openUi(page, studio);
   await expect.poll(async () => (await quitCheck()).modified).toBe(true);

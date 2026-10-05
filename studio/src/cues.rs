@@ -33,6 +33,55 @@ use std::path::{Path, PathBuf};
 
 /// Number of exclusive groups a cue can join (1..=MAX_GROUP).
 pub const MAX_GROUP: u8 = 8;
+/// Notes and tags on a cue (T-430): at most this many tags per cue, …
+pub const MAX_TAGS: usize = 8;
+/// … each at most this many characters, …
+pub const MAX_TAG_LEN: usize = 24;
+/// … and notes of at most this many characters.
+pub const MAX_NOTES_LEN: usize = 500;
+
+/// A tag as compared (T-430): trimmed, lower case, without accents, so
+/// « Intro », « intro » and « ÍNTRO » are the same tag.
+pub fn tag_key(tag: &str) -> String {
+    tag.trim()
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+            'ç' => 'c',
+            'è' | 'é' | 'ê' | 'ë' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ñ' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' => 'u',
+            'ý' | 'ÿ' => 'y',
+            c => c,
+        })
+        .collect()
+}
+
+/// Tags kept as typed, but trimmed and cut to `MAX_TAG_LEN` characters;
+/// empty ones and repeats (by `tag_key`) dropped; at most `MAX_TAGS`.
+pub fn sanitize_tags(tags: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    for t in tags.drain(..) {
+        let t: String = t.trim().chars().take(MAX_TAG_LEN).collect::<String>().trim_end().to_string();
+        if !t.is_empty() && kept.len() < MAX_TAGS && seen.insert(tag_key(&t)) {
+            kept.push(t);
+        }
+    }
+    *tags = kept;
+}
+
+/// Notes cut to `MAX_NOTES_LEN` characters; only blanks = none.
+pub fn sanitize_notes(notes: &mut String) {
+    if notes.trim().is_empty() {
+        notes.clear();
+    } else if notes.chars().count() > MAX_NOTES_LEN {
+        *notes = notes.chars().take(MAX_NOTES_LEN).collect();
+    }
+}
 pub const MAX_ACTIVE_LIMIT: u8 = 16;
 
 /// What a press on a cue does.
@@ -121,6 +170,16 @@ pub struct CueSlot {
     /// figure's, else the output's default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan: Option<String>,
+    /// The operator's free notes on the cue (T-430, « seulement avec
+    /// brouillard »). Shown escaped, never interpreted.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    /// Tags (« intro », « drop »…) the grid filter dims cells by.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The cell's colour band; set, it wins over a user cue's own colour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -317,6 +376,8 @@ impl CueDeck {
             slot.zones.dedup();
             slot.program = slot.program.take().filter(|p| p.validate().is_ok());
             slot.transition = slot.transition.map(Transition::sanitized);
+            sanitize_notes(&mut slot.notes);
+            sanitize_tags(&mut slot.tags);
         }
         self.slots.retain(|_, slot| *slot != CueSlot::default());
     }
@@ -338,6 +399,17 @@ impl CueDeck {
     /// The scan preset set on a cue's cell (T-415), without cloning the slot.
     pub fn slot_scan(&self, cue: &str) -> Option<&str> {
         self.slots.get(cue).and_then(|s| s.scan.as_deref())
+    }
+
+    /// The distinct tags of the grid's cues (T-430), sorted without case
+    /// or accents, each with how many cues carry it; the spelling shown is
+    /// the first met.
+    pub fn tags(&self) -> Vec<(String, usize)> {
+        let mut by_key: BTreeMap<String, (String, usize)> = BTreeMap::new();
+        for t in self.slots.values().flat_map(|s| &s.tags) {
+            by_key.entry(tag_key(t)).or_insert_with(|| (t.clone(), 0)).1 += 1;
+        }
+        by_key.into_values().collect()
     }
 
     /// The program set on `cue` from the grid, if any.
@@ -1437,5 +1509,43 @@ mod tests {
         d.set_slot("a", CueSlot { protect_stop: true, protect_solo: true, ..Default::default() });
         let back: CueDeck = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         assert!(back.slot("a").protect_stop && back.slot("a").protect_solo);
+    }
+
+    #[test]
+    fn a_grid_without_notes_or_tags_loads_with_them_empty() {
+        let old: CueDeck = serde_json::from_str(r#"{"slots":{"a":{"layer":2}}}"#).unwrap();
+        let slot = old.slot("a");
+        assert_eq!((slot.notes.as_str(), slot.tags.len(), slot.color), ("", 0, None));
+        let text = serde_json::to_string(&old).unwrap();
+        assert!(!text.contains("notes") && !text.contains("tags") && !text.contains("color"));
+    }
+
+    #[test]
+    fn tags_are_cut_deduplicated_and_capped() {
+        let mut d = deck(false);
+        let long = "x".repeat(100);
+        let mut tags: Vec<String> = ["Intro", "intro", " ", "ÍNTRO", &long, "drop"].iter().map(|s| s.to_string()).collect();
+        tags.extend((1..=10).map(|n| format!("t{n}")));
+        d.set_slot("a", CueSlot { tags, notes: "n".repeat(900), color: Some([1, 2, 3]), ..Default::default() });
+        let slot = d.slot("a");
+        assert_eq!(slot.tags.len(), MAX_TAGS, "a 9th tag is dropped");
+        assert_eq!(slot.tags[0], "Intro", "kept as first typed");
+        assert_eq!(slot.tags[1].chars().count(), MAX_TAG_LEN);
+        assert_eq!(slot.tags[2], "drop");
+        assert_eq!(slot.notes.chars().count(), MAX_NOTES_LEN);
+        assert_eq!(slot.color, Some([1, 2, 3]));
+        // Only blanks = nothing left: the slot goes away.
+        d.set_slot("a", CueSlot { tags: vec!["  ".into()], notes: " \n".into(), ..Default::default() });
+        assert!(d.slots.is_empty());
+    }
+
+    #[test]
+    fn tag_keys_ignore_case_and_accents() {
+        assert_eq!(tag_key(" Été "), "ete");
+        assert_eq!(tag_key("CALME"), tag_key("calme"));
+        let mut d = deck(false);
+        d.set_slot("a", CueSlot { tags: vec!["Intro".into(), "drop".into()], ..Default::default() });
+        d.set_slot("b", CueSlot { tags: vec!["intro".into()], ..Default::default() });
+        assert_eq!(d.tags(), vec![("drop".to_string(), 1), ("Intro".to_string(), 2)]);
     }
 }
