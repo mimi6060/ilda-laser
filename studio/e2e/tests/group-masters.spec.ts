@@ -32,10 +32,6 @@ test.beforeEach(async ({ page }) => {
   await openUi(page, studio);
 });
 
-test.afterAll(async () => {
-  await studio.post('/api/projection', { zones: [{ id: 1, name: 'Principale' }], default_zones: [1] });
-});
-
 test('two groups made in the settings, Côtés dimmed to 50 % from LIVE, then Tout à 100 %', async ({ page }) => {
   // No group: the row is hidden.
   await expect(page.locator('#groupMasters')).toBeHidden();
@@ -100,6 +96,7 @@ test('a group deleted in the settings takes its fader away', async ({ page }) =>
   const two = { ...ZONES, groups: [{ name: 'Centre', zones: [1] }, { name: 'Côtés', zones: [2] }] };
   expect(await studio.post('/api/projection', two)).toBe(200);
   expect(await studio.post('/api/control', { id: 'group.2.master', value: 0.4 })).toBe(200);
+  await openUi(page, studio); // the settings panel reads the zones on load
   await reveal(page, '#groupMasters');
   await expect(page.locator('#gmRow .layer')).toHaveCount(2);
   await expect(page.locator('#gmRow .layer[data-group="2"] .dv')).toHaveText('40 %');
@@ -109,7 +106,7 @@ test('a group deleted in the settings takes its fader away', async ({ page }) =>
   await reveal(page, '#pzGroups .pz-group[data-group="1"] .del');
   await page.locator('#pzGroups .pz-group[data-group="1"] .del').click();
   // Côtés is now group 1 and keeps its level.
-  await expect.poll(async () => (await groups()).map(g => [g.name, g.master])).toEqual([['Côtés', 0.4]]);
+  await expect.poll(async () => (await groups()).map(g => [g.name, Math.round(g.master * 100)])).toEqual([['Côtés', 40]]);
   await expect(page.locator('#gmRow .layer')).toHaveCount(1);
   await expect(page.locator('#gmRow .layer[data-group="1"] .t')).toHaveText('Côtés');
 

@@ -455,7 +455,9 @@ fn random_groups(rng: &mut Rng, ids: &[u8]) -> Vec<ZoneGroup> {
     (0..1 + rng.below(4))
         .map(|i| {
             let zones = (0..1 + rng.below(3)).map(|_| *rng.pick(ids)).collect();
-            ZoneGroup { name: format!("G{i}"), zones, master: random_master(rng) }
+            // Created lit (mostly): the moves below reach 0 and out of range.
+            let master = if rng.chance(0.2) { random_master(rng) } else { rng.range(0.8, 1.0) };
+            ZoneGroup { name: format!("G{i}"), zones, master }
         })
         .collect()
 }
@@ -463,12 +465,12 @@ fn random_groups(rng: &mut Rng, ids: &[u8]) -> Vec<ZoneGroup> {
 /// A group master as a control or a damaged file could ask for it.
 fn random_master(rng: &mut Rng) -> f32 {
     // Mostly lit, so the sessions keep sending light (coverage).
-    match rng.below(20) {
+    match rng.below(50) {
         0 => 0.0,
         1 => rng.range(-2.0, 3.0),
-        2..=4 => 1.0,
-        5..=7 => rng.f(),
-        _ => rng.range(0.6, 1.0),
+        2..=9 => 1.0,
+        10..=13 => rng.f(),
+        _ => rng.range(0.8, 1.0),
     }
 }
 
@@ -819,7 +821,9 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
         4 | 5 => {
             // Any control, from a controller or the UI (the UI's arm toggle
             // is an explicit arm request).
-            let ids: Vec<String> = s.controls.list().iter().map(|d| d.id.clone()).collect();
+            // Group masters (T-420) have their own stream (`mrng` in
+            // `run_case`), so this one picks as it did before them.
+            let ids: Vec<String> = s.controls.list().iter().filter(|d| d.group != "group").map(|d| d.id.clone()).collect();
             let id = rng.pick(&ids).clone();
             let external = rng.chance(0.5);
             let input = if rng.chance(0.5) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-3.0, 3.0)) };
@@ -1393,7 +1397,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         if zrng.chance(0.15) {
             random_routing(&mut rig.s(), &mut zrng);
         }
-        if mrng.chance(0.1) {
+        if mrng.chance(0.6) {
             let mut s = rig.s();
             if s.projection.get().groups.is_empty() || mrng.chance(0.2) {
                 random_zone_groups(&mut s, &mut mrng);
@@ -2650,7 +2654,9 @@ fn run_group_master_case(seed: u64) -> Result<bool, String> {
             let mut mrng = Rng::new(mseed);
             let mut s = rig.s();
             for n in 1..=s.projection.get().groups.len() {
-                let input = if mrng.chance(0.5) { ControlInput::Norm(random_master(&mut mrng)) } else { ControlInput::Value(random_master(&mut mrng)) };
+                // Anywhere below 100 % here (0 and out of range included).
+                let level = if mrng.chance(0.3) { random_master(&mut mrng) } else { mrng.f() };
+                let input = if mrng.chance(0.5) { ControlInput::Norm(level) } else { ControlInput::Value(level) };
                 controls::apply(&mut s, &format!("group.{n}.master"), input, true).map_err(|e| format!("group.{n}.master refused: {e:?}"))?;
             }
         }
