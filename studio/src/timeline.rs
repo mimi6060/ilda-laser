@@ -116,11 +116,14 @@ pub struct Track {
     pub mute: bool,
     pub solo: bool,
     pub events: Vec<Event>,
+    /// Verrou de piste (T-445): the editor leaves its events, name, layer
+    /// and kind alone (`Show::check_locks`). Playback ignores it.
+    pub locked: bool,
 }
 
 impl Default for Track {
     fn default() -> Self {
-        Self { name: String::new(), kind: TrackKind::Cues, layer: 1, mute: false, solo: false, events: Vec::new() }
+        Self { name: String::new(), kind: TrackKind::Cues, layer: 1, mute: false, solo: false, events: Vec::new(), locked: false }
     }
 }
 
@@ -442,6 +445,30 @@ impl Show {
                 if env.keys.iter().any(|k| !k.at.is_finite() || !k.value.is_finite() || k.at < 0.0) {
                     bail!("enveloppe « {} » : nœud invalide", env.target);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Verrou de piste (T-445): an error if a track locked in `self` (the
+    /// show loaded) and still locked in `new` (the edit) changed its events,
+    /// name, layer or kind, or is gone. Tracks have no id: they match by
+    /// position, so a locked track can't be moved either. Locking and
+    /// unlocking are always allowed; *Muet* and *Solo* stay free. An
+    /// unlocked track in its place must keep its name: otherwise the
+    /// locked one was deleted or moved and the next one took its place.
+    pub fn check_locks(&self, new: &Show) -> Result<()> {
+        for (i, old) in self.tracks.iter().enumerate().filter(|(_, t)| t.locked) {
+            let gone = || anyhow::anyhow!("piste verrouillée « {} » : elle ne peut pas être supprimée ni déplacée", old.name);
+            let Some(t) = new.tracks.get(i) else { return Err(gone()) };
+            if !t.locked {
+                if t.name != old.name {
+                    return Err(gone());
+                }
+                continue;
+            }
+            if t.events != old.events || t.name != old.name || t.layer != old.layer || t.kind != old.kind {
+                bail!("piste verrouillée « {} » : déverrouillez-la pour la modifier", old.name);
             }
         }
         Ok(())
@@ -1823,6 +1850,83 @@ mod tests {
         let mut bad = ok;
         bad.markers = vec![Marker { name: "é".repeat(MAX_LABEL + 1), ..Default::default() }];
         assert!(bad.validate_edit(known).is_err());
+    }
+
+    /// T-445: a locked track (before and after the edit) keeps its events,
+    /// name, layer and kind, and stays where it is; locking, unlocking,
+    /// Muet and Solo are always allowed.
+    #[test]
+    fn locked_tracks_refuse_edits() {
+        let mut cur = show(TimeBase::Seconds, vec![event(1, 0.0, 1.0), event(2, 2.0, 1.0)]);
+        cur.tracks.push(Track { name: "libre".into(), events: vec![event(3, 0.0, 1.0)], ..Default::default() });
+        cur.tracks[0].name = "verrou".into();
+        cur.tracks[0].locked = true;
+        assert!(cur.check_locks(&cur).is_ok(), "no change");
+
+        let mut moved = cur.clone();
+        moved.tracks[0].events[0].start = 0.004;
+        assert!(moved.validate_edit(|_| true).is_ok());
+        assert!(cur.check_locks(&moved).unwrap_err().to_string().contains("piste verrouillée « verrou »"));
+        let mut removed = cur.clone();
+        removed.tracks[0].events.pop();
+        assert!(cur.check_locks(&removed).is_err(), "event deleted");
+        let mut added = cur.clone();
+        added.tracks[0].events.push(event(9, 8.0, 1.0));
+        assert!(cur.check_locks(&added).is_err(), "event added");
+        let mut renamed = cur.clone();
+        renamed.tracks[0].name = "autre".into();
+        assert!(cur.check_locks(&renamed).is_err());
+        let mut layer = cur.clone();
+        layer.tracks[0].layer = 2;
+        assert!(cur.check_locks(&layer).is_err());
+        let mut gone = cur.clone();
+        gone.tracks.remove(0);
+        assert!(cur.check_locks(&gone).is_err(), "track removed (the free one moved up)");
+        gone.tracks[0].locked = true;
+        assert!(cur.check_locks(&gone).is_err(), "track removed (the next one, locked, moved up)");
+        let mut none = cur.clone();
+        none.tracks.clear();
+        assert!(cur.check_locks(&none).unwrap_err().to_string().contains("supprimée"));
+        let mut swapped = cur.clone();
+        swapped.tracks.swap(0, 1);
+        swapped.tracks[0].locked = true;
+        assert!(cur.check_locks(&swapped).is_err(), "a locked track can't be moved");
+
+        // Free: the other track, Muet / Solo, locking and unlocking.
+        let mut free = cur.clone();
+        free.tracks[1].events[0].start = 5.0;
+        free.tracks[1].name = "renommée".into();
+        free.tracks[0].mute = true;
+        free.tracks[0].solo = true;
+        assert!(cur.check_locks(&free).is_ok());
+        let mut unlocked = cur.clone();
+        unlocked.tracks[0].locked = false;
+        unlocked.tracks[0].events.clear();
+        assert!(cur.check_locks(&unlocked).is_ok(), "unlocked in the same edit");
+        let mut lock_all = cur.clone();
+        lock_all.tracks[1].locked = true;
+        lock_all.tracks[1].events.clear();
+        assert!(cur.check_locks(&lock_all).is_ok(), "locked by this edit: nothing to compare yet");
+        assert!(lock_all.check_locks(&cur).is_ok(), "unlocking is always allowed");
+    }
+
+    /// T-445: a show saved before the lock existed loads with every track
+    /// free; the lock is saved and read back; playback ignores it.
+    #[test]
+    fn old_shows_load_unlocked() {
+        let old = r#"{"name":"vieux","tracks":[{"name":"A","layer":2,"events":[{"id":1,"start":0,"len":4,"source":{"kind":"cue","id":"c"}}]},{"name":"B"}]}"#;
+        let s: Show = serde_json::from_str(old).unwrap();
+        assert!(s.tracks.iter().all(|t| !t.locked));
+        let mut locked = s.clone();
+        locked.tracks[0].locked = true;
+        let back: Show = serde_json::from_str(&serde_json::to_string(&locked).unwrap()).unwrap();
+        assert!(back.tracks[0].locked && !back.tracks[1].locked);
+        let (mut a, mut b) = (player(s), player(back));
+        a.play(&clock(100.0));
+        b.play(&clock(100.0));
+        let (fa, fb) = (a.frame(&clock(101.0)), b.frame(&clock(101.0)));
+        assert_eq!(fa.len(), 1);
+        assert_eq!(fa.iter().map(|c| c.event).collect::<Vec<_>>(), fb.iter().map(|c| c.event).collect::<Vec<_>>(), "a lock changes nothing at playback");
     }
 
     #[test]

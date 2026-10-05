@@ -199,6 +199,8 @@
   .tl-head select { flex: none; width: auto; padding: 1px; font-size: 11px; border-radius: 4px; }
   .tl-head button { flex: none; padding: 1px 4px; font-size: 11px; }
   .tl-head button.active { border-color: var(--ws-timeline); color: var(--ws-timeline); }
+  /* Verrou de piste (T-445): a light hatch, as on the canvas lane. */
+  .tl-head.locked { background: repeating-linear-gradient(135deg, transparent 0 6px, #ffffff0d 6px 8px); }
   /* Envelope lane under a track (T-163). */
   .tl-envhead { flex-wrap: wrap; align-content: center; border-top-style: dashed; padding-left: 14px; background: var(--panel); }
   .tl-envhead select[data-f="envt"] { flex: 1 1 100px; min-width: 0; }
@@ -2181,6 +2183,7 @@
       <button id="tlUndo" title="Cmd+Z">Annuler</button>
       <button id="tlRedo" title="Cmd+Maj+Z">Rétablir</button>
       <button id="tlAddTrack" title="Nouvelle piste de cues">+ Piste</button>
+      <button id="tlLockAll" title="Verrouiller toutes les pistes : plus aucun événement ne bouge (Maj+Alt+L, timeline active)">Tout verrouiller</button>
       <span id="tlMarkRow" hidden>
         <input type="text" id="tlMarkName" maxlength="64" title="Nom du marqueur">
         <input type="color" id="tlMarkColor" title="Couleur du marqueur" style="width:36px;height:26px;padding:1px">
@@ -4183,6 +4186,11 @@ function buildShortcuts() {
       label: 'Coller à la tête de lecture (timeline active)', down: () => tlPaste() },
     { id: 'tl.duplicate', group: 'Timeline', keys: ['d'], meta: true, shift: '*', zones: ['tl-canvas'], show: false,
       label: 'Dupliquer (timeline active)', down: () => tlDuplicate() },
+    // Verrou de piste (T-445): by code, Alt changes the character on macOS.
+    { id: 'tl.lock', group: 'Timeline', codes: ['KeyL'], alt: true, zones: ['tl-canvas'], show: false,
+      label: 'Verrouiller / déverrouiller la piste (timeline active)', down: e => { if (!e.repeat) tlLockKey(); } },
+    { id: 'tl.lock.all', group: 'Timeline', codes: ['KeyL'], alt: true, shift: true, zones: ['tl-canvas'], show: false,
+      label: 'Tout verrouiller / déverrouiller (timeline active)', down: e => { if (!e.repeat) tlLockAll(); } },
     { id: 'tl.all', group: 'Timeline', keys: ['a'], meta: true, shift: '*', zones: ['tl-canvas'], show: false,
       label: 'Tout sélectionner (timeline active)',
       down: () => { TL.sel = new Set(tlEvents().map(v => v.e.id)); TL.need = true; } },
@@ -8249,6 +8257,9 @@ const TL = {
 };
 const TL_RULER = 30, TL_MARK = 18, TL_WAVE = 40, TL_LANE = 34, TL_TOP = TL_RULER + TL_MARK + TL_WAVE;
 const TL_UNDO = 50, TL_MIN_LEN = 0.01, TL_SNAP_PX = 8, TL_ENV = 48, TL_ENV_PAD = 6;
+// Seuil anti-glissement (T-445): a press must move this far (CSS pixels,
+// whatever the zoom) before an event, a marker or a loop edge moves.
+const TL_DRAG_PX = 4;
 const TL_LAYER_COLORS = ['#3ddc84', '#4da3ff', '#ffb020', '#e062ff'];
 const TL_MARK_COLORS = [[255, 176, 32], [77, 163, 255], [224, 98, 255], [61, 220, 132], [255, 77, 79]];
 const tlSeconds = () => !TL.show || TL.show.time_base !== 'beats';
@@ -8375,14 +8386,55 @@ function tlPushUndo(snapshot) {
   if (TL.undo.length > TL_UNDO) TL.undo.shift();
   TL.redo = [];
 }
-// One undoable change: snapshot, apply, send.
+// One undoable change: snapshot, apply, send. False when nothing went
+// out (no change, or a locked track touched: undone here, T-445).
 function tlChange(fn) {
-  if (!TL.show) return;
+  if (!TL.show) return false;
   const before = JSON.stringify(TL.show);
   fn();
-  if (JSON.stringify(TL.show) === before) return;
+  if (JSON.stringify(TL.show) === before) return false;
+  if (tlLockBroken(JSON.parse(before), TL.show)) {
+    TL.show = JSON.parse(before);
+    TL.headsKey = tlScanKey = tlNoteKey = ''; TL.need = true;
+    tlMsg('Piste verrouillée', true);
+    return false;
+  }
   tlPushUndo(before);
   tlCommit();
+  return true;
+}
+// --- Verrou de piste (T-445) ---
+const tlLockedTi = ti => !!(TL.show && TL.show.tracks[ti] && TL.show.tracks[ti].locked);
+// The server's rule (Show::check_locks): a track locked before and after
+// keeps its events, name, layer and kind, at its place; unlocking is free
+// (the track keeps its name, else it is another one that moved up).
+function tlLockBroken(before, after) {
+  return before.tracks.some((o, i) => {
+    if (!o.locked) return false;
+    const t = after.tracks[i];
+    if (!t) return true;
+    if (!t.locked) return t.name !== o.name;
+    return t.name !== o.name || t.layer !== o.layer || t.kind !== o.kind || JSON.stringify(t.events) !== JSON.stringify(o.events);
+  });
+}
+const tlIgnoredMsg = n => n === 1 ? '1 événement verrouillé ignoré' : `${n} événements verrouillés ignorés`;
+function tlLockToggle(ti) {
+  const t = TL.show && TL.show.tracks[ti];
+  if (!t) { tlMsg('Sélectionnez un événement ou placez le pointeur sur une piste.', true); return; }
+  tlChange(() => { t.locked = !t.locked; });
+  tlMsg(t.locked ? `Piste « ${t.name} » verrouillée : ses événements ne bougent plus.` : `Piste « ${t.name} » déverrouillée.`);
+}
+// Alt+L: the track of the selected event, else the one under the pointer.
+function tlLockKey() {
+  const sel = tlSelected();
+  tlLockToggle(sel.length ? sel[0].ti : TL.pointerTi);
+}
+// Tout verrouiller / Tout déverrouiller: one change, one undo step.
+function tlLockAll() {
+  if (!TL.show || !TL.show.tracks.length) return;
+  const all = TL.show.tracks.every(t => t.locked);
+  tlChange(() => { for (const t of TL.show.tracks) t.locked = !all; });
+  tlMsg(all ? 'Toutes les pistes sont déverrouillées.' : 'Toutes les pistes sont verrouillées.');
 }
 async function tlCommit() {
   TL.need = true;
@@ -8471,6 +8523,7 @@ function tlOnState(t, tempo, at = performance.now()) {
   tlTempoHint();
   const has = !!TL.show;
   for (const id of ['tlSave', 'tlAddMarker', 'tlCopy', 'tlPaste', 'tlDup', 'tlDel', 'tlAddTrack', 'tlFit']) $(id).disabled = !has;
+  $('tlLockAll').disabled = !has || !TL.show.tracks.length;
   $('tlUndo').disabled = !has || !TL.undo.length;
   $('tlRedo').disabled = !has || !TL.redo.length;
   $('tlPaste').disabled = !has || !TL.clip;
@@ -8631,11 +8684,11 @@ function tlEnvDelKey(hit) {
   });
 }
 function tlEnvCycleEase(hit) {
-  tlChange(() => {
+  const ok = tlChange(() => {
     const i = TL_EASES.findIndex(x => x[0] === (hit.k.ease || 'linear'));
     hit.k.ease = TL_EASES[(i + 1) % TL_EASES.length][0];
   });
-  tlMsg(`Courbe du nœud : ${tlEaseFr(hit.k.ease)}`);
+  if (ok) tlMsg(`Courbe du nœud : ${tlEaseFr(hit.k.ease)}`);
 }
 // Show or hide the lane of a track (`id` null: hidden; the envelopes stay).
 function tlEnvOpen(ti, id) {
@@ -8683,7 +8736,9 @@ function tlEnvOptions(cur) {
 function tlHeads() {
   const tracks = TL.show ? TL.show.tracks : [];
   if (TL.show && !TL.envTargets) tlLoadEnvTargets();
-  const key = TL.show ? JSON.stringify([tracks.map((t, i) => [t.name, t.layer, t.mute, t.solo, t.kind, TL.env[i] || '', TL.env[i] ? tlEnvModeOf(i, TL.env[i]) : '']), !!TL.envTargets]) : 'empty';
+  const key = TL.show ? JSON.stringify([tracks.map((t, i) => [t.name, t.layer, t.mute, t.solo, t.kind, !!t.locked, TL.env[i] || '', TL.env[i] ? tlEnvModeOf(i, TL.env[i]) : '']), !!TL.envTargets]) : 'empty';
+  const all = !!tracks.length && tracks.every(t => t.locked);
+  $('tlLockAll').textContent = all ? 'Tout déverrouiller' : 'Tout verrouiller';
   const c = tlCanvas();
   const h = TL.show ? (tracks.length ? tlLaneY(tracks.length) : TL_TOP + TL_LANE) : TL_TOP + TL_EMPTY_TRACKS * TL_LANE;
   if (c.style.height !== h + 'px') { c.style.height = h + 'px'; TL.need = true; }
@@ -8698,20 +8753,21 @@ function tlHeads() {
     return;
   }
   $('tlHeads').innerHTML = `<div class="top" style="height:${TL_TOP}px">Pistes</div>` + tracks.map((t, i) => `
-    <div class="tl-head" data-ti="${i}" style="height:${TL_LANE}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
-      <input type="text" value="${esc(t.name)}" maxlength="64" data-f="name" title="Nom de la piste">
-      <select data-f="layer" title="Calque">${[1, 2, 3, 4].map(n => `<option value="${n}"${n === t.layer ? ' selected' : ''}>C${n}</option>`).join('')}</select>
-      <select data-f="kind" title="Cues : la piste joue des cues · Bus : ses enveloppes agissent sur toutes les pistes de son calque">
+    <div class="tl-head${t.locked ? ' locked' : ''}" data-ti="${i}" style="height:${TL_LANE}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
+      <input type="text" value="${esc(t.name)}" maxlength="64" data-f="name" title="Nom de la piste"${t.locked ? ' disabled' : ''}>
+      <select data-f="layer" title="Calque"${t.locked ? ' disabled' : ''}>${[1, 2, 3, 4].map(n => `<option value="${n}"${n === t.layer ? ' selected' : ''}>C${n}</option>`).join('')}</select>
+      <select data-f="kind" title="Cues : la piste joue des cues · Bus : ses enveloppes agissent sur toutes les pistes de son calque"${t.locked ? ' disabled' : ''}>
         <option value="cues"${t.kind !== 'bus' ? ' selected' : ''}>Cues</option><option value="bus"${t.kind === 'bus' ? ' selected' : ''}>Bus</option></select>
       <button data-f="mute" class="${t.mute ? 'active' : ''}" title="Muet">M</button>
       <button data-f="solo" class="${t.solo ? 'active' : ''}" title="Solo">S</button>
+      <button data-f="lock" class="${t.locked ? 'active' : ''}" title="${t.locked ? 'Déverrouiller la piste' : 'Verrouiller la piste'} (Alt+L)" aria-pressed="${!!t.locked}">V</button>
       <button data-f="env" class="${TL.env[i] ? 'active' : ''}" title="+ Enveloppe : une ligne sous la piste pour dessiner un paramètre (taille, rotation, luminosité…)">∿</button>
       <button data-f="del" title="Supprimer la piste (Annuler la rétablit)">✕</button>
     </div>${TL.env[i] ? `
     <div class="tl-head tl-envhead" data-ti="${i}" style="height:${TL_ENV}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
       <span class="lbl">Env.</span>
       <select data-f="envt" title="Paramètre de l'enveloppe (ceux qu'un LFO peut moduler)">${tlEnvOptions(TL.env[i])}</select>
-      <select data-f="envm" title="Absolu : la courbe remplace la valeur · Relatif : elle la multiplie (×0 à ×2). Une luminosité ne fait que baisser.">
+      <select data-f="envm" title="Absolu : la courbe remplace la valeur · Relatif : elle la multiplie (×0 à ×2). Une luminosité ne fait que baisser."${t.locked ? ' disabled' : ''}>
         <option value="absolute"${tlEnvModeOf(i, TL.env[i]) === 'absolute' ? ' selected' : ''}>Absolu</option><option value="relative"${tlEnvModeOf(i, TL.env[i]) === 'relative' ? ' selected' : ''}>Relatif</option></select>
       <button data-f="envx" title="Masquer la ligne (les enveloppes restent)">✕</button>
     </div>` : ''}`).join('');
@@ -8741,11 +8797,17 @@ $('tlHeads').addEventListener('click', e => {
   const i = +head.dataset.ti, t = TL.show.tracks[i];
   if (b.dataset.f === 'mute') tlChange(() => { t.mute = !t.mute; });
   if (b.dataset.f === 'solo') tlChange(() => { t.solo = !t.solo; });
-  if (b.dataset.f === 'del') { tlChange(() => { TL.show.tracks.splice(i, 1); TL.sel.clear(); }); tlEnvShift(i); TL.headsKey = ''; }
+  if (b.dataset.f === 'lock') { b.blur(); tlLockToggle(i); }
+  if (b.dataset.f === 'del') {
+    if (t.locked) { tlMsg('Piste verrouillée', true); return; }
+    if (tlChange(() => { TL.show.tracks.splice(i, 1); TL.sel.clear(); })) tlEnvShift(i);
+    TL.headsKey = '';
+  }
   // The heads are drawn again only when none has the focus.
   if (b.dataset.f === 'env') { b.blur(); tlEnvOpen(i, TL.env[i] ? null : tlEnvDefault(i)); }
   if (b.dataset.f === 'envx') { b.blur(); tlEnvOpen(i, null); }
 });
+$('tlLockAll').onclick = tlLockAll;
 $('tlAddTrack').onclick = () => tlChange(() => {
   const n = TL.show.tracks.length;
   TL.show.tracks.push({ name: `Piste ${n + 1}`, kind: 'cues', layer: (n % 4) + 1, mute: false, solo: false, events: [] });
@@ -8902,7 +8964,10 @@ function tlScanRow() {
 }
 $('tlScan').addEventListener('change', () => {
   const v = $('tlScan').value;
-  tlChange(() => { for (const x of tlSelected()) { if (v) x.e.scan = v; else delete x.e.scan; } });
+  const items = tlSelected(), free = items.filter(x => !x.t.locked);
+  if (!free.length) { tlMsg('Piste verrouillée', true); tlScanKey = ''; return; }
+  tlChange(() => { for (const x of free) { if (v) x.e.scan = v; else delete x.e.scan; } });
+  if (free.length < items.length) tlMsg(tlIgnoredMsg(items.length - free.length));
 });
 
 // Notes and tags of the selected event (T-430): one event at a time.
@@ -8940,8 +9005,12 @@ $('tlEvTags').addEventListener('change', () => {
 function tlSelected() { return tlEvents().filter(x => TL.sel.has(x.e.id)); }
 function tlDelete() {
   if (!TL.sel.size) return;
-  tlChange(() => { for (const t of TL.show.tracks) t.events = t.events.filter(e => !TL.sel.has(e.id)); });
-  TL.sel.clear();
+  // Locked tracks keep theirs (T-445), still selected.
+  const kept = tlSelected().filter(x => x.t.locked).map(x => x.e.id);
+  if (kept.length && kept.length === TL.sel.size) { tlMsg('Piste verrouillée', true); return; }
+  tlChange(() => { for (const t of TL.show.tracks) if (!t.locked) t.events = t.events.filter(e => !TL.sel.has(e.id)); });
+  TL.sel = new Set(kept);
+  if (kept.length) tlMsg(tlIgnoredMsg(kept.length));
 }
 // A phrase: events with their position in bars, so a paste moves them by whole bars.
 function tlPhrase(items) {
@@ -8958,27 +9027,34 @@ function tlCopy() {
   tlMsg(`Phrase copiée : ${items.length} événement(s), ${TL.clip.bars} mesure(s).`);
   $('tlPaste').disabled = false;
 }
-// Paste `phrase` shifted by `bars` whole bars; the new events become the selection.
+// Paste `phrase` shifted by `bars` whole bars; the new events become the
+// selection. Nothing lands on a locked track (T-445): -1 if nothing did,
+// else how many were left out.
 function tlPasteShift(phrase, bars) {
+  const target = it => Math.min(it.ti, TL.show.tracks.length - 1);
+  const skipped = phrase.items.filter(it => tlLockedTi(target(it))).length;
+  if (skipped === phrase.items.length) { tlMsg('Piste verrouillée', true); return -1; }
   tlChange(() => {
     let id = tlNextId();
     TL.sel.clear();
     for (const it of phrase.items) {
-      const ti = Math.min(it.ti, TL.show.tracks.length - 1);
+      const ti = target(it);
       if (ti < 0) return;
+      if (tlLockedTi(ti)) continue;
       const start = tlUAtBar(it.bar + bars), end = tlUAtBar(it.endBar + bars);
       const e = { ...JSON.parse(JSON.stringify(it.e)), id: id++, start, len: Math.max(TL_MIN_LEN, end - start) };
       TL.show.tracks[ti].events.push(e);
       TL.sel.add(e.id);
     }
   });
+  if (skipped) tlMsg(tlIgnoredMsg(skipped));
+  return skipped;
 }
 function tlPaste() {
   if (!TL.clip || !TL.show) return;
   if (!TL.show.tracks.length) { tlMsg('Ajoutez une piste d\'abord.', true); return; }
   const to = Math.ceil(tlBarAt(tlPlayhead()) - 1e-6);
-  tlPasteShift(TL.clip, to - TL.clip.fromBar);
-  tlMsg(`Collé à la mesure ${to + 1}.`);
+  if (tlPasteShift(TL.clip, to - TL.clip.fromBar) === 0) tlMsg(`Collé à la mesure ${to + 1}.`);
 }
 function tlDuplicate() {
   const items = tlSelected();
@@ -9012,6 +9088,15 @@ function tlDraw() {
   // Lanes (with no show: the empty tracks of the empty state).
   const lanes = TL.show ? TL.show.tracks.length : TL_EMPTY_TRACKS;
   for (let i = 0; i < lanes; i++) { g.fillStyle = i % 2 ? '#ffffff05' : '#00000030'; g.fillRect(0, tlLaneY(i), W, TL.show ? tlLaneH(i) : TL_LANE); }
+  // Verrou de piste (T-445): locked lanes lightly hatched.
+  if (TL.show) TL.show.tracks.forEach((t, i) => {
+    if (!t.locked) return;
+    const y = tlLaneY(i), h = tlLaneH(i);
+    g.save(); g.beginPath(); g.rect(0, y, W, h); g.clip();
+    g.strokeStyle = '#ffffff12'; g.beginPath();
+    for (let x = -h; x < W; x += 8) { g.moveTo(x, y + h); g.lineTo(x + h, y); }
+    g.stroke(); g.restore();
+  });
   g.fillStyle = C.panel; g.fillRect(0, 0, W, TL_RULER);
   // Grid: bars bright, beats faint, labels in the ruler (bars on top, seconds below).
   const grid = tlGrid();
@@ -9227,22 +9312,23 @@ tlCv.addEventListener('pointerdown', e => {
   if (y < TL_RULER) {
     const r = TL.show.loop_region;
     const which = r ? (Math.abs(tlUToX(r[0]) - x) < 6 ? 0 : Math.abs(tlUToX(r[1]) - x) < 6 ? 1 : -1) : -1;
-    TL.drag = which >= 0 ? { kind: 'loop', which, before, x0: x } : { kind: 'ruler', before, x0: x, u0: u };
+    TL.drag = which >= 0 ? { kind: 'loop', which, before, x0: x, y0: y } : { kind: 'ruler', before, x0: x, u0: u };
   } else if (y < TL_RULER + TL_MARK) {
     const i = tlMarkerAt(x);
     TL.marker = i; tlMarkRow();
     if (i >= 0) {
       const m = TL.show.markers[i];
-      // Events snapped to the marker move with it.
-      const stuck = tlEvents().filter(v => Math.abs(v.e.start - m.at) < 1e-6).map(v => v.e);
-      TL.drag = { kind: 'marker', m, at0: m.at, stuck, before, x0: x };
+      // Events snapped to the marker move with it (not those of a locked track).
+      const stuck = tlEvents().filter(v => Math.abs(v.e.start - m.at) < 1e-6 && !v.t.locked).map(v => v.e);
+      TL.drag = { kind: 'marker', m, at0: m.at, stuck, before, x0: x, y0: y };
     }
   } else if (y < TL_TOP) {
     TL.drag = { kind: 'seek', x0: x, u0: u };
   } else if (tlInEnv(tlTrackAt(y), y)) {
     // Envelope lane: grab a node (double-click adds one, right click deletes it).
     const ti = tlTrackAt(y), hit = tlEnvKeyAt(ti, x, y);
-    TL.drag = hit ? { kind: 'envkey', ti, ...hit, at0: hit.k.at, before, x0: x, y0: y } : null;
+    TL.drag = hit && !tlLockedTi(ti) ? { kind: 'envkey', ti, ...hit, at0: hit.k.at, before, x0: x, y0: y } : null;
+    if (hit && !TL.drag) tlMsg('Piste verrouillée', true);
     TL.marker = -1; tlMarkRow();
   } else {
     const ti = tlTrackAt(y), hit = tlEventAt(ti, x);
@@ -9250,19 +9336,24 @@ tlCv.addEventListener('pointerdown', e => {
       if (e.shiftKey) { TL.sel.has(hit.e.id) ? TL.sel.delete(hit.e.id) : TL.sel.add(hit.e.id); TL.need = true; TL.drag = null; return; }
       if (!TL.sel.has(hit.e.id)) { TL.sel.clear(); TL.sel.add(hit.e.id); }
       let primary = hit.e, dup = false;
+      // Verrou de piste (T-445): what is on a locked track stays selected but never moves.
+      const ignored = hit.edge ? 0 : tlSelected().filter(s => s.t.locked).length;
       if (e.altKey && !hit.edge) {
         // Alt+glisser: the copies move, the originals stay.
         let id = tlNextId();
         const copies = new Set();
         for (const s of tlSelected()) {
+          if (s.t.locked) continue;
           const c = { ...JSON.parse(JSON.stringify(s.e)), id: id++ };
           s.t.events.push(c); copies.add(c.id);
           if (s.e === hit.e) primary = c;
         }
-        TL.sel = copies; dup = true;
+        if (copies.size) { TL.sel = copies; dup = true; }
       }
-      const orig = tlSelected().map(s => ({ e: s.e, ti: s.ti, start: s.e.start, len: s.e.len }));
-      TL.drag = { kind: hit.edge ? 'resize' : 'move', edge: hit.edge, primary, p0: { start: primary.start, len: primary.len }, orig, ti0: ti, x0: x, before, dup };
+      const orig = tlSelected().filter(s => !s.t.locked).map(s => ({ e: s.e, ti: s.ti, start: s.e.start, len: s.e.len }));
+      const frozen = hit.edge ? tlLockedTi(ti) : !orig.length;
+      TL.drag = frozen ? { kind: 'locked', x0: x, y0: y }
+        : { kind: hit.edge ? 'resize' : 'move', edge: hit.edge, primary, p0: { start: primary.start, len: primary.len }, orig, ti0: ti, x0: x, y0: y, before, dup, ignored };
     } else {
       if (!e.shiftKey) TL.sel.clear();
       TL.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y, base: new Set(TL.sel) };
@@ -9273,6 +9364,7 @@ tlCv.addEventListener('pointerdown', e => {
 });
 tlCv.addEventListener('pointermove', e => {
   const { x, y } = tlLocal(e), d = TL.drag;
+  TL.pointerTi = TL.show && y >= TL_TOP ? tlTrackAt(y) : -1; // Alt+L
   // The value under the mouse in an envelope lane (and while dragging a node).
   const envTi = TL.show && y >= TL_TOP ? tlTrackAt(y) : -1;
   const hover = d && d.kind === 'envkey' ? { ti: d.ti, x, y } : envTi >= 0 && tlInEnv(envTi, y) ? { ti: envTi, x, y } : null;
@@ -9285,9 +9377,18 @@ tlCv.addEventListener('pointermove', e => {
     if (tlCv.title !== (tip || tlCv.dataset.baseTitle)) tlCv.title = tip || tlCv.dataset.baseTitle;
     const r = TL.show && TL.show.loop_region;
     const onEdge = r && y < TL_RULER && (Math.abs(tlUToX(r[0]) - x) < 6 || Math.abs(tlUToX(r[1]) - x) < 6);
-    tlCv.style.cursor = hit && hit.edge || onEdge ? 'ew-resize' : hit ? 'grab' : y < TL_RULER ? 'pointer' : 'default';
+    tlCv.style.cursor = hit && tlLockedTi(hit.ti) ? 'not-allowed' : hit && hit.edge || onEdge ? 'ew-resize' : hit ? 'grab' : y < TL_RULER ? 'pointer' : 'default';
     return;
   }
+  // Seuil anti-glissement (T-445): under TL_DRAG_PX from the press, a
+  // press only selects; past it, the drag starts from the press (no jump).
+  if (TL_THRESHOLD_KINDS.includes(d.kind) && !d.started) {
+    if (Math.hypot(x - d.x0, y - d.y0) < TL_DRAG_PX) return;
+    d.started = d.moved = true;
+    if (d.kind === 'locked') tlMsg('Piste verrouillée', true);
+    else if (d.ignored) tlMsg(tlIgnoredMsg(d.ignored));
+  }
+  if (d.kind === 'locked') return;
   if (Math.abs(x - d.x0) > 2) d.moved = true;
   if (d.kind === 'envkey') {
     // Within its event; its time keeps still until the mouse really moves sideways.
@@ -9300,13 +9401,16 @@ tlCv.addEventListener('pointermove', e => {
   }
   const du = (x - d.x0) / TL.pps;
   if (d.kind === 'move') {
-    const skip = new Set(d.orig.map(o => o.e.id));
+    const skip = new Set(d.orig.map(o => o.e.id)).add(d.primary.id);
     let delta = tlSnapU(d.p0.start + du, skip) - d.p0.start;
     delta = Math.max(delta, -Math.min(...d.orig.map(o => o.start)));
     const n = TL.show.tracks.length;
     let dt = Math.max(0, Math.min(n - 1, tlTrackAt(y))) - d.ti0;
     dt = Math.max(dt, -Math.min(...d.orig.map(o => o.ti)));
     dt = Math.min(dt, n - 1 - Math.max(...d.orig.map(o => o.ti)));
+    // Never onto a locked track: the events stay on the last free one.
+    if (d.orig.some(o => tlLockedTi(o.ti + dt))) dt = d.dt || 0;
+    d.dt = dt;
     if (dt) d.moved = true;
     for (const o of d.orig) {
       o.e.start = o.start + delta;
@@ -9342,6 +9446,7 @@ tlCv.addEventListener('pointermove', e => {
   }
   TL.need = true;
 });
+const TL_THRESHOLD_KINDS = ['move', 'resize', 'marker', 'loop', 'locked'];
 function tlPointerUp(e) {
   const d = TL.drag;
   if (!d) return;
@@ -9357,10 +9462,10 @@ function tlPointerUp(e) {
   }
   else if (['move', 'resize', 'marker', 'loop', 'ruler'].includes(d.kind)) {
     if (d.kind === 'ruler' && TL.show.loop_region && TL.show.loop_region[1] - TL.show.loop_region[0] < 1e-6) TL.show.loop_region = null;
-    if (d.moved) {
+    if (d.moved && JSON.stringify(TL.show) !== d.before) {
       if (d.kind === 'marker') TL.show.markers.sort((a, b) => a.at - b.at), TL.marker = TL.show.markers.indexOf(d.m);
-      tlPushUndo(d.before);
-      tlCommit();
+      if (tlLockBroken(JSON.parse(d.before), TL.show)) { TL.show = JSON.parse(d.before); tlMsg('Piste verrouillée', true); } // never expected
+      else { tlPushUndo(d.before); tlCommit(); }
     } else if (d.dup) {
       TL.show = JSON.parse(d.before); TL.sel.clear(); // Alt+click without a move: no copy
     }
@@ -9400,6 +9505,7 @@ tlCv.addEventListener('wheel', e => {
 function tlDropAt(e) {
   const { x, y } = tlLocal(e), ti = tlTrackAt(y);
   if (!TL.show || !TL.dragCue || y < TL_TOP || ti < 0 || ti >= TL.show.tracks.length || TL.show.tracks[ti].kind === 'bus') return null;
+  if (TL.show.tracks[ti].locked) { tlMsg('Piste verrouillée', true); return null; }
   const start = tlSnapU(tlXToU(x));
   return { ti, start, len: tlDefaultLen(TL.dragCue, start), id: TL.dragCue };
 }
@@ -9438,6 +9544,7 @@ window.tlDebug = {
   view: () => ({ t0: TL.t0, pps: TL.pps, top: TL_TOP, lane: TL_LANE, ruler: TL_RULER, mark: TL_MARK }), setView: tlSetView, stats: () => ({ drawMs: TL.drawMs, draws: TL.draws }), show: () => TL.show,
   // Envelope lanes (T-163): the top of a track's lane, and the value ↔ y mapping of its envelope lane.
   laneY: ti => tlLaneY(ti),
+  dragPx: TL_DRAG_PX,
   env: ti => { if (!tlEnvOf(ti)) return null; const g = tlEnvGeom(ti); return { id: g.id, mode: g.mode, min: g.min, max: g.max, y0: g.y0, y1: g.y1 }; },
 };
 requestAnimationFrame(tlLoop);

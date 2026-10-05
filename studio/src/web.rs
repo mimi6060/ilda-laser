@@ -2551,6 +2551,13 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
             if let Err(e) = show.validate_edit(|id| before.contains(id) || s.presets.iter().any(|p| p.id == id)) {
                 return text(400, &format!("{e:#}"));
             }
+            // Verrou de piste (T-445): compared as the player will keep it
+            // (sorted, numbered), so a resent copy of the server's show passes.
+            let mut kept = show.clone();
+            kept.sanitize();
+            if let Err(e) = cur.check_locks(&kept) {
+                return text(400, &format!("{e:#}"));
+            }
             s.timeline.edit(show);
             let warnings = envelope_warnings(&s);
             return json_response(json!({ "state": s.timeline.state(&c), "show": s.timeline.show, "warnings": warnings }));
@@ -5534,6 +5541,52 @@ mod tests {
         assert_eq!(state["timeline"]["name"], "Editeur copie");
         assert_eq!(state["armed"], false, "editing and saving never arm");
         t.request("POST", "/api/timeline/stop", "");
+    }
+
+    /// T-445: `POST /api/timeline/edit` refuses a change to a track locked
+    /// before and after it, even sent by hand; locking alone, unlocking and
+    /// the free tracks pass; the lock is saved with the show.
+    #[test]
+    fn timeline_locked_tracks_are_guarded() {
+        let t = TestServer::start(false);
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        let json = |b: &str| serde_json::from_str::<serde_json::Value>(b).unwrap();
+        assert_eq!(t.request("POST", "/api/timeline/new", r#"{"name":"Verrou","time_base":"seconds"}"#).0, 200);
+        let mut show = json(&t.request("GET", "/api/timeline", "").1)["show"].clone();
+        assert_eq!(show["tracks"][0]["locked"], false);
+        show["tracks"][0]["events"] = json!([{ "id": 1, "start": 2.0, "len": 2.0, "source": { "kind": "cue", "id": cue } }]);
+        let edit = |s: &serde_json::Value| t.request("POST", "/api/timeline/edit", &json!({ "show": s }).to_string());
+        let (status, body) = edit(&show);
+        assert_eq!(status, 200, "{body}");
+        let mut show = json(&body)["show"].clone();
+
+        show["tracks"][0]["locked"] = json!(true);
+        let (status, body) = edit(&show);
+        assert_eq!(status, 200, "locking alone: {body}");
+        let locked = json(&body)["show"].clone();
+        assert_eq!(locked["tracks"][0]["locked"], true);
+        assert_eq!(edit(&locked).0, 200, "the server's copy sent back unchanged");
+
+        let mut moved = locked.clone();
+        moved["tracks"][0]["events"][0]["start"] = json!(2.004);
+        let (status, body) = edit(&moved);
+        assert_eq!((status, body.contains("piste verrouillée")), (400, true), "{body}");
+        let mut gone = locked.clone();
+        gone["tracks"].as_array_mut().unwrap().remove(0);
+        assert_eq!(edit(&gone).0, 400, "a locked track can't be deleted");
+        let mut free = locked.clone();
+        free["tracks"][1]["events"] = json!([{ "start": 0.0, "len": 1.0, "source": { "kind": "cue", "id": cue } }]);
+        free["tracks"][0]["mute"] = json!(true);
+        assert_eq!(edit(&free).0, 200, "the free track and Muet");
+        assert_eq!(t.shared.lock().unwrap().timeline.show.as_ref().unwrap().tracks[0].events[0].start, 2.0);
+
+        assert_eq!(t.request("POST", "/api/timeline/save", "{}").0, 200);
+        assert!(t.shared.lock().unwrap().shows.load("Verrou").unwrap().tracks[0].locked, "saved with the show");
+        let mut unlocked = json(&t.request("GET", "/api/timeline", "").1)["show"].clone();
+        unlocked["tracks"][0]["locked"] = json!(false);
+        unlocked["tracks"][0]["events"][0]["start"] = json!(6.0);
+        assert_eq!(edit(&unlocked).0, 200, "unlocked in the same edit");
+        assert_eq!(t.shared.lock().unwrap().timeline.show.as_ref().unwrap().tracks[0].events[0].start, 6.0);
     }
 
     /// T-124 to T-129: the built-in examples open as an unsaved copy
