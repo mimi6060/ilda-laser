@@ -1368,7 +1368,8 @@ mod tests {
     #[test]
     fn two_launches_at_the_same_local_beat_give_the_same_frame() {
         let programs: Vec<_> = crate::presets::catalog().into_iter().filter(|p| p.settings.program.is_some()).collect();
-        assert_eq!(programs.len(), 3);
+        // The three T-157 examples and five evolving cues (T-112 to T-123).
+        assert_eq!(programs.len(), 8);
         for p in programs {
             // Launched at beat 2, then at beat 42 (same place in a bar).
             for after in [0.5, 5.5, 13.25, 30.0] {
