@@ -23,7 +23,7 @@
 //!
 //! **Audio safety (T-245, audio/safety.rs)**: routes on a brightness or
 //! visibility control share one `FlashLimiter` per control (at most
-//! `max_flash_hz` dips a second); when the audio is stale, gone, silent or
+//! `max_flash_hz` dips, and light-ups, a second); when the audio is stale, gone, silent or
 //! switching source, every route fades to neutral over its release.
 //!
 //! The legacy per-look `AudioReact` (`settings.audio`) is untouched and
@@ -650,6 +650,56 @@ mod tests {
             let sent = count_flashes(normalised(&out)) as f32 / 8.0;
             assert!(sent <= max_hz + 0.15, "{max_hz} Hz: {sent} flashes/s out");
             assert_eq!(pipe.limiter.status().active, max_hz > 4.0, "{max_hz} Hz: {:?}", pipe.limiter.status());
+        }
+    }
+
+    /// The cap as the output's flash meter (the T-101 limiter's, counting
+    /// light onsets) sees it. With a kick route that lights on each hit
+    /// (dark between them) the flash is the light coming *up*: capping only
+    /// the dips let two light onsets come a frame or two apart (a light-up
+    /// just before an allowed dip, the next one just after it), and the
+    /// fade to neutral when the audio goes stale was an uncounted onset
+    /// right before the next ones. Seen as 3.4-3.7 flashes/s for a 3/s cap
+    /// in e2e `audio-safety.spec.ts`. Irregular frames and kicks too.
+    #[test]
+    fn light_onsets_never_come_faster_than_max_flash_hz() {
+        for seed in 1..=40u64 {
+            let mut rng = crate::safety_invariants::Rng::new(seed);
+            for max_hz in [3.0, 6.0] {
+                let mut s = store(vec![kick_flash()]);
+                let cfg = SafetySettings::default();
+                let mut meter = safety::StrobeLimiter::default();
+                let mut f = AudioFeatures { level: 0.8, ..Default::default() };
+                let (mut t, mut next_kick, mut worst) = (0.0f64, 0.6f64, 0.0f32);
+                let mut onsets: Vec<f64> = Vec::new();
+                let mut lit = true;
+                while t < 8.0 {
+                    let dt = rng.range(0.008, 0.04);
+                    t += dt as f64;
+                    // Live but no kicks yet (dark), stale for a moment (the
+                    // route fades back to the operator's light), then kicks.
+                    let live = !(0.3..0.6).contains(&t);
+                    while t >= 0.6 && next_kick <= t {
+                        f.kick += 1;
+                        next_kick += rng.range(0.03, 0.07) as f64;
+                    }
+                    let guard = Guard { max_flash_hz: max_hz, live, ..Guard::LIVE };
+                    let (mut settings, mut live_mods) = (Settings::default(), LiveModifiers::default());
+                    s.apply(&f, dt, 0.5, &guard, &mut settings, &mut live_mods);
+                    let b = live_mods.brightness.clamp(0.0, 1.0);
+                    if !lit && b >= 0.6 {
+                        onsets.push(t);
+                    }
+                    lit = if lit { b > 0.3 } else { b >= 0.6 };
+                    let frame: Vec<Point> = (0..50).map(|i| Point::lit(i as f32 / 50.0 - 0.5, 0.0, b, b, b)).collect();
+                    meter.would_cut(&frame, t, &cfg);
+                    worst = worst.max(meter.status().rate_hz);
+                }
+                let closest = onsets.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min);
+                assert!(closest >= 1.0 / max_hz as f64 - 0.001, "seed {seed}, {max_hz} Hz cap: two light onsets {closest} s apart");
+                assert!(worst <= max_hz * 1.05, "seed {seed}, {max_hz} Hz cap: the output meter saw {worst} flashes/s");
+                assert!(onsets.len() as f32 >= max_hz * 7.0 * 0.6, "seed {seed}, {max_hz} Hz cap: still flashes ({} onsets)", onsets.len());
+            }
         }
     }
 
