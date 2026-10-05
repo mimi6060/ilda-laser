@@ -4,7 +4,8 @@
 //! all drive to 1.0. The cap is a hardware ceiling per output that nothing
 //! upstream can exceed: it is applied to the finished frame, **after** the
 //! whole safety stage (`safety::apply`: horizon, zones, colour calibration,
-//! strobe limiter) and before the output gate, so every source goes
+//! strobe limiter, static-beam guard) and before the limiter's check on
+//! the output (T-360) and the output gate, so every source goes
 //! through it and the preview shows the capped frame:
 //!
 //! `r = min(r, max_color[0]) * max_power` (and the same for g, b)

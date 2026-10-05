@@ -20,6 +20,20 @@
 //! flashing for that long. A pause shorter than the cooldown does not
 //! reset the burst clock, so 4.9 s bursts with short gaps are still cut.
 //!
+//! **Last word on the output (T-360).** The hold puts back a frame that
+//! the static-beam guard and the power caps must still see, so those run
+//! after the limiter - and they can make light alternate too (the guard
+//! blanks a lone beam, the next frame is a moving chase), as can the
+//! hold itself (a fill that starts in a dark gap, a look really stopped
+//! that comes back). So the limiter also measures the frame that really
+//! goes out, after the guard and the caps (`StrobeLimiter::finish`), with
+//! the same flash detector: an off → on edge that would make a run of
+//! flashes closer than one allowed period last longer than the burst is
+//! refused - the frame stays dark until a period has passed since the
+//! last flash out. It can only darken, so the guard, caps, zones and
+//! horizon still hold, and the output never flashes faster than the
+//! limit for longer than the burst, whatever any stage does.
+//!
 //! **Beam horizon.** A beam (a lit point held in place, which is what
 //! reads as a beam in haze) below `horizon.y` is always blanked, whatever
 //! else is configured. The height is in output coordinates (after
@@ -456,6 +470,9 @@ pub struct StrobeStatus {
     pub beams_blanked: usize,
     /// Lit samples darkened by a zone or the horizon in the last frame.
     pub points_masked: usize,
+    /// The last frame was kept dark by the check on the output (T-360):
+    /// it would have flashed too soon after the previous flash out.
+    pub output_cut: bool,
 }
 
 /// The strobe part of the settings, clamped (a copy per frame).
@@ -489,6 +506,23 @@ pub struct StrobeLimiter {
     dark_since: Option<f64>,
     held: Vec<Point>,
     status: StrobeStatus,
+    /// The check on what really goes out (`finish`).
+    out: OutputCheck,
+}
+
+/// The limiter's check on the final output (T-360): the same flash
+/// detector as the input side, on the frame that leaves for the laser.
+#[derive(Default)]
+struct OutputCheck {
+    last_t: Option<f64>,
+    peak: f32,
+    on: bool,
+    /// The last flash (off → on edge) that went out.
+    last_onset: Option<f64>,
+    /// First flash of the current run of too-close flashes.
+    burst_start: Option<f64>,
+    /// Last time a flash came too soon after the previous one.
+    last_fast: Option<f64>,
 }
 
 /// Mean drive level of a frame: proportional to its light output.
@@ -586,8 +620,59 @@ impl StrobeLimiter {
             burst_s: self.burst_start.map_or(0.0, |b| (t - b) as f32),
             beams_blanked: 0,
             points_masked: 0,
+            output_cut: false,
         };
         out
+    }
+
+    /// The last stage before the gate (T-360): measures `frame`, the frame
+    /// that really goes out (after the static-beam guard and the caps),
+    /// and darkens it when it would start a flash that makes the output
+    /// flash faster than the limit for longer than the burst. Only ever
+    /// darkens: a refused flash stays dark until one allowed period has
+    /// passed since the last flash out.
+    pub fn finish(&mut self, frame: &mut [Point], t: f64, cfg: &SafetySettings) {
+        let cfg = StrobeCfg::of(cfg);
+        let o = &mut self.out;
+        let dt = o.last_t.map_or(0.0, |last| (t - last).max(0.0)) as f32;
+        o.last_t = Some(t);
+        let period = 1.0 / cfg.strobe_max_hz as f64;
+        let cooldown = cfg.strobe_cooldown_s as f64;
+        // Quiet for the cooldown: a new burst may start.
+        if o.last_fast.is_none_or(|lf| t - lf >= cooldown) {
+            o.burst_start = None;
+        }
+
+        let e = level(frame);
+        let decayed = o.peak * (-dt / PEAK_DECAY_S).exp();
+        let peak = e.max(decayed);
+        let mut cut = false;
+        if !o.on && e > MIN_LEVEL && e >= ON_FRAC * peak {
+            // A flash would start. Too soon after the last one, it extends
+            // a fast run; past the burst (plus the frame timing slack the
+            // input side has too), it is refused.
+            if let Some(last) = o.last_onset.filter(|&last| t - last < period - SLACK_S) {
+                o.last_fast = Some(t);
+                let start = *o.burst_start.get_or_insert(last);
+                cut = t - start > cfg.strobe_burst_s as f64 + SLACK_S;
+            }
+            if !cut {
+                o.on = true;
+                o.last_onset = Some(t);
+            }
+        } else if o.on && (e <= MIN_LEVEL || e <= OFF_FRAC * peak) {
+            o.on = false;
+        }
+        if cut {
+            for p in frame.iter_mut() {
+                *p = Point::blanked(p.x, p.y);
+            }
+            o.peak = decayed;
+        } else {
+            o.peak = peak;
+        }
+        self.status.output_cut = cut;
+        self.status.active |= cut;
     }
 
     /// When the input is flashing faster than one flash per `period`, the
@@ -624,7 +709,8 @@ impl StrobeLimiter {
 }
 
 /// The whole output safety stage: beam horizon, zones / full horizon /
-/// colour calibration, then the strobe limiter. A frame the limiter puts
+/// colour calibration, then the strobe limiter (its input side: the
+/// engine ends the chain with `StrobeLimiter::finish`). A frame the limiter puts
 /// back goes through the horizon and zones again with the current
 /// settings (they may have been tightened since). Returns the output frame.
 pub fn apply(frame: Vec<Point>, t: f64, cfg: &SafetySettings, limiter: &mut StrobeLimiter) -> Vec<Point> {
@@ -1320,6 +1406,102 @@ mod tests {
                 last = out;
             }
             assert!(level_max(&last) > 0.99, "{profile:?}: back at full size once restored");
+        }
+    }
+
+    /// Output flash onsets of a run, measured like the limiter (and the
+    /// safety invariants) do; returns the longest run of flashes closer
+    /// than one allowed period, in seconds.
+    fn longest_fast_run(levels: &[(f64, f32)], period: f64) -> f64 {
+        let (mut peak, mut on, mut onsets) = (0.0f32, false, Vec::new());
+        let mut last_t = None;
+        for &(t, e) in levels {
+            let dt = last_t.map_or(0.0, |l: f64| t - l) as f32;
+            last_t = Some(t);
+            peak = e.max(peak * (-dt / PEAK_DECAY_S).exp());
+            if !on && e > MIN_LEVEL && e >= ON_FRAC * peak {
+                on = true;
+                onsets.push(t);
+            } else if on && (e <= MIN_LEVEL || e <= OFF_FRAC * peak) {
+                on = false;
+            }
+        }
+        let (mut best, mut start) = (0.0f64, None::<f64>);
+        for w in onsets.windows(2) {
+            if w[1] - w[0] < period - SLACK_S {
+                best = best.max(w[1] - *start.get_or_insert(w[0]));
+            } else {
+                start = None;
+            }
+        }
+        best
+    }
+
+    /// T-360: content that alternates between a lone beam and a wide
+    /// figure, about 6 times a second. The input is steadily lit, so the
+    /// limiter's input side never engages; the strict guard after it
+    /// blanks every lone beam and the figure comes back as the guard
+    /// lifts, so the light that goes out flashes at 6 Hz. The output
+    /// check cuts it to the limit once the burst is over.
+    #[test]
+    fn a_guard_blanking_a_lone_beam_cannot_strobe_the_output() {
+        use crate::dwell::{DwellProfile, DwellState, StrictArea};
+        let beam = || vec![Point::lit(0.2, 0.5, 1.0, 1.0, 1.0); 12];
+        let wide = || (0..40).map(|i| Point::lit(-0.8 + i as f32 * 0.04, 0.5, 1.0, 1.0, 1.0)).collect::<Vec<_>>();
+        let cfg = SafetySettings { strobe_burst_s: 1.0, dwell: DwellGuard { profile: DwellProfile::Strict, ..Default::default() }, ..Default::default() };
+        let area = StrictArea::new(cfg.horizon.y, &cfg.zones);
+        let period = 1.0 / cfg.strobe_max_hz as f64;
+        for check in [false, true] {
+            let (mut lim, mut guard) = (StrobeLimiter::default(), DwellState::default());
+            let mut levels = Vec::new();
+            for i in 0..(8.0 * FPS) as usize {
+                let t = i as f64 / FPS;
+                let frame = if i % 10 == 0 { beam() } else { wide() };
+                let frame = apply(frame, t, &cfg, &mut lim);
+                assert!(!lim.status().active, "the input is steady: no hold");
+                let mut frame = guard.apply(frame, t, &cfg.dwell, &area, true);
+                if check {
+                    lim.finish(&mut frame, t, &cfg);
+                }
+                levels.push((t, level(&frame)));
+            }
+            let run = longest_fast_run(&levels, period);
+            if check {
+                assert!(run <= cfg.strobe_burst_s as f64 + SLACK_S, "{run} s of fast flashing out");
+                assert!(levels.iter().any(|&(t, e)| t > 7.0 && e > 0.5), "still drawn, at the limit");
+            } else {
+                assert!(run > 5.0, "without the output check the guard strobes the output ({run} s)");
+            }
+        }
+    }
+
+    #[test]
+    fn the_output_check_leaves_a_held_strobe_steady_and_slow_flashes_alone() {
+        // The usual case: the input side holds the output lit after the
+        // burst, so the output check sees no fast flash past it.
+        let cfg = SafetySettings::default();
+        let mut lim = StrobeLimiter::default();
+        let mut cut = 0;
+        let mut out = Vec::new();
+        for i in 0..(9.0 * FPS) as usize {
+            let t = i as f64 / FPS;
+            let input = if strobe(8.0, 0.5)(t) { lit_frame() } else { dark_frame() };
+            let mut f = apply(input, t, &cfg, &mut lim);
+            lim.finish(&mut f, t, &cfg);
+            cut += lim.status().output_cut as usize;
+            out.push((t, level(&f) > 0.5));
+        }
+        let steady = steady_from(&out, 9.0).expect("held steady");
+        assert!((steady - 5.0).abs() <= 0.1, "cut to steady after 5 s ± 0.1 s, got {steady}");
+        assert_eq!(cut, 0, "nothing for the output check to do");
+        // 4 Hz, the limit itself, is never touched.
+        let mut lim = StrobeLimiter::default();
+        for i in 0..(10.0 * FPS) as usize {
+            let t = i as f64 / FPS;
+            let input = if strobe(4.0, 0.5)(t) { lit_frame() } else { dark_frame() };
+            let mut f = apply(input.clone(), t, &cfg, &mut lim);
+            lim.finish(&mut f, t, &cfg);
+            assert_eq!(level(&f), level(&input), "t = {t}");
         }
     }
 
