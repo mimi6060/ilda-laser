@@ -129,6 +129,7 @@ pub enum Unit {
     Bpm,
     Deg,
     Hz,
+    Ms,
 }
 
 const PALETTE_MODE_LABELS: [&str; 2] = ["Plus proche", "Pas à pas"];
@@ -292,6 +293,10 @@ impl ControlRegistry {
         add("tempo.auto".into(), "Tempo auto (suit la musique)".into(), "tempo", ControlKind::Toggle { default: false }, true);
         add("tempo.guide".into(), "Guider la détection (tap)".into(), "tempo", ControlKind::Trigger, true);
         add("tempo.new_track".into(), "Nouveau morceau".into(), "tempo", ControlKind::Trigger, true);
+        // Décalage de sortie (T-246): the effects read the beat this far
+        // ahead. Only what is drawn; never when a frame goes out.
+        let max = tempo::MAX_OUTPUT_OFFSET_MS;
+        add("tempo.output_offset".into(), "Décalage de sortie".into(), "tempo", cont(-max, max, 0.0, Unit::Ms), true);
 
         add("timeline.play".into(), "Lecture de la timeline".into(), "timeline", ControlKind::Trigger, true);
         add("timeline.pause".into(), "Pause de la timeline".into(), "timeline", ControlKind::Trigger, true);
@@ -494,6 +499,9 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             }
         }
         "tempo.new_track" => s.tempo_new_track(),
+        "tempo.output_offset" => {
+            crate::latency::set_offset(s, value(input) as f64).map_err(ControlError::Refused)?;
+        }
         "tempo.nudge_up" => s.tempo.nudge(1.0 / 32.0),
         "tempo.nudge_down" => s.tempo.nudge(-1.0 / 32.0),
         "tempo.double" | "tempo.half" => {
@@ -848,6 +856,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "safety.hold" => json!(s.presence.status().midi_hold),
         "tempo.bpm" => json!(s.tempo.bpm),
         "tempo.auto" => json!(s.tempo.source == tempo::TempoSource::Audio),
+        "tempo.output_offset" => json!(s.tempo.output_offset_ms()),
         "timeline.play" => json!(s.timeline.is_playing()),
         "timeline.pause" => json!(s.timeline.transport == crate::timeline::Transport::Paused),
         "timeline.loop" => json!(s.timeline.loop_on),
@@ -1106,7 +1115,8 @@ fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
 
 /// The deck's clock at `t` (seconds on the studio clock).
 fn deck_clock(s: &Shared, t: f64) -> cues::At {
-    cues::At { s: t, beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar }
+    // The effects' beat (T-246): a launch on the beat lands with the light.
+    cues::At { s: t, beat: s.tempo.effect_beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar }
 }
 
 /// `with_deck` at a given time (the engine's frame clock).

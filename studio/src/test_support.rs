@@ -60,6 +60,7 @@ pub fn shared() -> Shared {
         grid,
         look_on: true,
         tempo: tempo::TempoClock::default(),
+        latency_path: None,
         epoch: Instant::now(),
         sim_now: None,
         live: live::LiveModifiers::default(),

@@ -1259,6 +1259,17 @@
   #projName { max-width: 120px; }
   @media (max-width: 1359px) { .tempo .tb-extra, .tempo .tb-bpm { display: none; } #projName { max-width: 80px; } }
   .tempo #tempoSrc { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Compensation de latence (T-246). */
+  .lat-wrap { position: relative; display: inline-flex; }
+  #latMenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: 260px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+  #latMenu[hidden] { display: none; }
+  #latMenu .row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  #latMenu label { font-size: 12px; color: var(--muted); }
+  #latMenu input[type=range] { width: 100%; padding: 0; font-size: inherit; text-shadow: none; }
+  #latMenu .hint { margin: 0; font-size: 11px; }
+  #latMenu button { background: #ffffff0d; color: #fff; }
+  #latFlash { width: 16px; height: 16px; border-radius: 50%; background: #2a2f44; }
+  #latFlash.on { background: var(--accent); box-shadow: 0 0 12px var(--accent); }
   .tb-master { display: flex; flex-direction: column; flex: none; gap: 0; padding: 3px 10px 1px; border-radius: 12px; background: #0b0d15; border: 1px solid #22263a; }
   .tb-master .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0; }
   .tb-master label { margin: 0; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #aeb4cf; }
@@ -1396,6 +1407,19 @@
     <button id="tempoAuto" data-control="tempo.auto" title="tempo.auto : le tempo suit la musique détectée (un tap reprend la main)">Auto</button>
     <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" title="tempo.guide : tapez le tempo pour guider la détection, sans l'imposer" hidden>Guider</button>
     <span class="hint" id="tempoSrc" style="margin:0" title="Tempo auto : état du suivi et confiance de la détection" hidden></span>
+    <!-- Compensation de latence (T-246): the effects read the beat ahead; never a frame held back. -->
+    <span class="lat-wrap">
+      <button id="latBtn" class="tb-extra" aria-expanded="false" title="Latence : décalage de sortie, latence estimée, calage à l'oreille">Lat.</button>
+      <div id="latMenu" hidden>
+        <div class="row"><label for="latOffset">Décalage de sortie (ms)</label><span class="v" id="latOffsetV">0 ms</span></div>
+        <input type="range" id="latOffset" min="-100" max="100" step="1" value="0" data-default="0" title="tempo.output_offset : les effets cadencés lisent le temps en avance d'autant (+40 = 40 ms plus tôt)">
+        <div class="hint" id="latEst">Latence estimée : …</div>
+        <div class="hint" id="latAnalysis"></div>
+        <div class="row"><button id="latEar" aria-pressed="false">Caler à l'oreille</button><span id="latFlash" title="Éclair : le temps que le studio envoie au laser (aperçu)"></span></div>
+        <div class="hint" id="latEarHint" hidden>Un clic sonne sur chaque temps. Lancez un effet au temps (strobe cadencé) et réglez le décalage jusqu'à ce que l'éclair du laser tombe sur le clic. Le point montre ce que le studio envoie.</div>
+        <div class="hint">Ne retarde jamais l'arrêt : Échap, noir et désarmement agissent sur l'image suivante.</div>
+      </div>
+    </span>
   </div>
   <!-- Maître (T-271): the same control as LIVE › Direct › Luminosité maître. -->
   <div class="tb-master" title="Luminosité maître : 100 % au plus, la limite de sécurité s'applique après">
@@ -6891,7 +6915,7 @@ $('zoomIn').addEventListener('click', () => zoom(0.1));
 // handlers (safety still asks before loosening, #sfLoosen).
 const controlDefaults = {}, controlKinds = {};
 const SLIDER_HINT = 'Double-clic : taper une valeur · Maj + glisser : réglage fin · clic droit sur le libellé : valeur par défaut';
-const UNIT_FR = { percent: ' %', deg: '°', deg_per_sec: ' °/s', bpm: ' BPM', hz: ' Hz', none: '' };
+const UNIT_FR = { percent: ' %', deg: '°', deg_per_sec: ' °/s', bpm: ' BPM', hz: ' Hz', ms: ' ms', none: '' };
 const sliderLabel = el => {
   const prev = n => n?.previousElementSibling?.tagName === 'LABEL' ? n.previousElementSibling : null;
   return el.closest('label') || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`))
@@ -7301,10 +7325,106 @@ function showTempo(t) {
   const FOLLOW = { waiting: 'en attente', locked: 'verrouillé', coasting: 'maintien', unlocked: 'déverrouillé' };
   $('tempoSrc').hidden = !auto;
   $('tempoSrc').textContent = auto ? `${FOLLOW[t.follow] || t.follow} ${Math.round(100 * (t.confidence || 0))} %` + (t.guide_bpm ? ` · guide ${t.guide_bpm.toFixed(0)}` : '') : '';
+  // Décalage de sortie (T-246): a controller may move it too.
+  const off = t.output_offset_ms || 0;
+  $('latBtn').classList.toggle('active', off !== 0);
+  // The text stays short (the bar is one row at 1280 px); the value is in the title.
+  $('latBtn').title = 'Latence : décalage de sortie ' + (off ? fmtMs(off) : 'aucun') + ', latence estimée, calage à l\'oreille';
+  if (LAT && LAT.data && LAT.data.config.output_offset_ms !== off && !LAT.send) { LAT.data.config.output_offset_ms = off; showLatency(); }
 }
 $('tempoAuto').addEventListener('click', () => post('/api/control', { id: 'tempo.auto', value: $('tempoAuto').classList.contains('active') ? 0 : 1 }));
 document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => { const id = scopedId(b.dataset.ctl); if (id) post('/api/control', { id }); }));
 $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm', value: +$('bpm').value }));
+
+// ---------- compensation de latence (T-246) ----------
+// *Décalage de sortie*: the effects read the beat ahead by this much, so the
+// light, late by the DAC's buffer, lands on the beat. It never holds a
+// frame back: Échap, the blackout and a disarm act on the next frame.
+// `var` and a function declaration: `showTempo` (above) may read them first.
+var LAT = { data: null, send: null, ctx: null, timer: null, last: null };
+function fmtMs(ms) { return (ms > 0 ? '+' : '') + Math.round(ms) + ' ms'; }
+function showLatency() {
+  const d = LAT.data;
+  if (!d) return;
+  const c = d.config;
+  if (document.activeElement !== $('latOffset')) $('latOffset').value = Math.round(c.output_offset_ms);
+  $('latOffsetV').textContent = fmtMs(c.output_offset_ms);
+  $('latEst').textContent = d.output.ms == null ? 'Latence estimée : sans objet' : `Latence estimée : ${Math.round(d.output.ms)} ms`;
+  $('latEst').title = d.output.detail;
+  $('latAnalysis').textContent = `Retard d'analyse déjà compensé : ${c.analysis_delay_ms.toFixed(1)} ms`;
+}
+async function loadLatency() {
+  try { LAT.data = await apiJson('GET', '/api/latency', undefined, { quiet: true }); showLatency(); } catch { /* shown on the next open */ }
+}
+async function sendLatency() {
+  LAT.send = null;
+  try { LAT.data = await apiJson('POST', '/api/latency', { output_offset_ms: +$('latOffset').value }); showLatency(); } catch { /* refused: said by api() */ }
+}
+function latOffsetMoved() {
+  $('latOffsetV').textContent = fmtMs(+$('latOffset').value);
+  clearTimeout(LAT.send);
+  LAT.send = setTimeout(sendLatency, 60);
+}
+$('latOffset').addEventListener('input', latOffsetMoved);
+$('latOffset').addEventListener('change', latOffsetMoved);
+function latClose() {
+  $('latMenu').hidden = true;
+  $('latBtn').setAttribute('aria-expanded', 'false');
+  latEarStop();
+}
+$('latBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  if (!$('latMenu').hidden) return latClose();
+  $('latMenu').hidden = false;
+  $('latBtn').setAttribute('aria-expanded', 'true');
+  loadLatency();
+});
+document.addEventListener('click', e => { if (!$('latMenu').hidden && !e.target.closest('.lat-wrap')) latClose(); });
+// *Caler à l'oreille*: a click on every beat of the clock, on the Mac, and
+// a dot on every beat the effects play (the clock's, `offset` ahead).
+function latClick(at, accent) {
+  const ctx = LAT.ctx, osc = ctx.createOscillator(), g = ctx.createGain();
+  osc.frequency.value = accent ? 1760 : 1320;
+  g.gain.setValueAtTime(0.0001, at);
+  g.gain.exponentialRampToValueAtTime(0.5, at + 0.002);
+  g.gain.exponentialRampToValueAtTime(0.0001, at + 0.05);
+  osc.connect(g).connect(ctx.destination);
+  osc.start(at);
+  osc.stop(at + 0.06);
+}
+function latEarTick() {
+  const t = tempoNow();
+  if (!t) return;
+  const beatS = 60 / Math.max(20, t.bpm), next = Math.ceil(t.beat), wait = (next - t.beat) * beatS;
+  if (LAT.ctx && wait < 0.1 && LAT.last !== next) {
+    LAT.last = next;
+    latClick(LAT.ctx.currentTime + wait, next % (t.beats_per_bar || 4) === 0);
+  }
+  const offset = (LAT.data ? LAT.data.config.output_offset_ms : t.output_offset_ms || 0) / 1000;
+  const eb = t.beat + offset / beatS;
+  $('latFlash').classList.toggle('on', eb - Math.floor(eb) < 0.15);
+}
+function latEarStart() {
+  try {
+    LAT.ctx = LAT.ctx || new AudioContext();
+    LAT.ctx.resume();
+  } catch { LAT.ctx = null; }
+  LAT.last = null;
+  clearInterval(LAT.timer);
+  LAT.timer = setInterval(latEarTick, 20);
+  $('latEar').setAttribute('aria-pressed', 'true');
+  $('latEar').textContent = 'Arrêter le calage';
+  $('latEarHint').hidden = false;
+}
+function latEarStop() {
+  clearInterval(LAT.timer);
+  LAT.timer = null;
+  $('latFlash').classList.remove('on');
+  $('latEar').setAttribute('aria-pressed', 'false');
+  $('latEar').textContent = "Caler à l'oreille";
+  $('latEarHint').hidden = true;
+}
+$('latEar').addEventListener('click', () => (LAT.timer ? latEarStop() : latEarStart()));
 
 // ---------- cues ----------
 // Cue keys by physical position (e.code), labelled as on an AZERTY Mac:

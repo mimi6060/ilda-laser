@@ -13,6 +13,15 @@
 //! at most 1/16 beat per beat (spread over the beat, so nothing ever
 //! jumps), and otherwise keeps running at the last BPM and phase (*Maintien*),
 //! unlocking after 30 s. A tap, or any manual BPM, takes the clock back.
+//!
+//! *Décalage de sortie* (T-246): sound, analysis, the engine loop and the
+//! DAC's buffer make the light late on the music. The effects read the
+//! *predicted* beat, `effect_beat_at(t) = beat_at(t + offset)`, so with
+//! +40 ms they cross each beat 40 ms early and the light lands on it. The
+//! clock itself (`bpm`, `beat_at`, the follower, taps) never sees the
+//! offset. It only moves *what* is computed for a frame, never *when* a
+//! frame goes out: nothing is buffered, and arming, blackout, the e-stop
+//! and every safety stage act on the very next frame as before.
 
 use crate::audio::bpm::{DetectState, TempoEstimate};
 use serde::{Deserialize, Serialize};
@@ -46,6 +55,38 @@ const DRIFT_GAIN: f64 = 0.02;
 const DRIFT_MAX_ERROR: f64 = 1.0 / 16.0;
 /// Integral term cap, BPM per bar.
 const MAX_DRIFT_PER_BAR: f64 = 0.05;
+
+/// The output offset's range (ms), both ways (T-246).
+pub const MAX_OUTPUT_OFFSET_MS: f32 = 100.0;
+
+/// Latency compensation (T-246), saved in `latency.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LatencyConfig {
+    /// *Décalage de sortie*: how far ahead the effects read the beat
+    /// (ms, −100..+100, 0 = none).
+    pub output_offset_ms: f32,
+    /// The analysis delay already taken off the detection times (ms):
+    /// computed from the audio settings, never read back from the file.
+    #[serde(skip_deserializing)]
+    pub analysis_delay_ms: f32,
+}
+
+impl LatencyConfig {
+    /// The offset, or why it is refused: not a number. Clamped to
+    /// ±`MAX_OUTPUT_OFFSET_MS` (a file or a request can say anything).
+    pub fn checked_offset_ms(ms: f64) -> Result<f32, &'static str> {
+        if !ms.is_finite() {
+            return Err("décalage de sortie : un nombre de millisecondes est attendu");
+        }
+        Ok((ms as f32).clamp(-MAX_OUTPUT_OFFSET_MS, MAX_OUTPUT_OFFSET_MS))
+    }
+
+    /// A loaded file made safe: a damaged offset is 0.
+    pub fn sanitized(self) -> Self {
+        Self { output_offset_ms: Self::checked_offset_ms(self.output_offset_ms as f64).unwrap_or(0.0), analysis_delay_ms: 0.0 }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +181,8 @@ pub struct TempoClock {
     /// The guide given to the estimator (*Guider*), if any.
     guide_bpm: Option<f64>,
     follow: Follow,
+    /// *Décalage de sortie* (s, T-246): only `effect_beat_at` reads it.
+    output_offset_s: f64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -160,6 +203,8 @@ pub struct TempoState {
     pub detected_bpm: f64,
     /// The *Guider* tempo sent to the estimator.
     pub guide_bpm: Option<f64>,
+    /// *Décalage de sortie* (T-246): the effects read the beat this far ahead.
+    pub output_offset_ms: f32,
 }
 
 impl Default for TempoClock {
@@ -174,6 +219,7 @@ impl Default for TempoClock {
             guide_taps: VecDeque::new(),
             guide_bpm: None,
             follow: Follow::default(),
+            output_offset_s: 0.0,
         }
     }
 }
@@ -219,6 +265,27 @@ impl TempoClock {
         (t - self.origin_s) * self.bpm / 60.0
     }
 
+    /// The beat the effects play at `t` (T-246): the clock's beat
+    /// `output_offset` later, so the light, late by the output's latency,
+    /// lands on the beat. Everything rendered reads this one; the clock,
+    /// the follower and the operator's own beat display read `beat_at`.
+    pub fn effect_beat_at(&self, t: f64) -> f64 {
+        self.beat_at(t + self.output_offset_s)
+    }
+
+    /// Sets the *Décalage de sortie* (ms): refused when not a number,
+    /// clamped to ±`MAX_OUTPUT_OFFSET_MS`. Returns the value applied. The
+    /// BPM and `beat_at` don't change.
+    pub fn set_output_offset_ms(&mut self, ms: f64) -> Result<f32, &'static str> {
+        let ms = LatencyConfig::checked_offset_ms(ms)?;
+        self.output_offset_s = ms as f64 / 1_000.0;
+        Ok(ms)
+    }
+
+    pub fn output_offset_ms(&self) -> f32 {
+        (self.output_offset_s * 1_000.0) as f32
+    }
+
     pub fn state(&self, t: f64) -> TempoState {
         let beat = self.beat_at(t);
         let whole = beat.floor();
@@ -235,6 +302,7 @@ impl TempoClock {
             confidence: self.follow.confidence,
             detected_bpm: self.follow.detected_bpm,
             guide_bpm: self.guide_bpm,
+            output_offset_ms: self.output_offset_ms(),
         }
     }
 
@@ -543,6 +611,80 @@ mod tests {
         assert_eq!(c.bpm, MAX_BPM);
         c.set_bpm_manual(1.0, 5.0);
         assert_eq!(c.bpm, MIN_BPM);
+    }
+
+    // ---- Décalage de sortie (T-246), simulated time ----
+
+    /// (beat number, time) each time `beat(t)` crosses a whole beat,
+    /// sampled every 1 ms over `secs`.
+    fn crossings(secs: f64, beat: impl Fn(f64) -> f64) -> Vec<(i64, f64)> {
+        let mut out = Vec::new();
+        let mut last = beat(0.0).floor();
+        for ms in 1..=(secs * 1_000.0) as i64 {
+            let t = ms as f64 / 1_000.0;
+            let b = beat(t).floor();
+            if b != last {
+                out.push((b as i64, t));
+                last = b;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_offset_of_40_ms_crosses_every_beat_40_ms_early() {
+        for offset in [40.0, -25.0] {
+            let mut c = TempoClock::default();
+            c.set_bpm_manual(128.0, 0.0);
+            c.nudge(0.3);
+            assert_eq!(c.set_output_offset_ms(offset), Ok(offset as f32));
+            let clock = crossings(10.0, |t| c.beat_at(t));
+            let effects = crossings(10.0, |t| c.effect_beat_at(t));
+            assert!(clock.len() >= 20);
+            // Each beat, by its number: when the clock crosses it, minus
+            // when the effects do.
+            let lead: Vec<f64> = clock.iter().filter_map(|&(n, t)| effects.iter().find(|e| e.0 == n).map(|e| t - e.1)).collect();
+            assert!(lead.len() >= 20);
+            for l in lead {
+                assert!((l - offset / 1_000.0).abs() <= 0.0011, "offset {offset}: effects lead by {:.1} ms", l * 1e3);
+            }
+        }
+    }
+
+    #[test]
+    fn the_offset_moves_neither_the_bpm_nor_the_clock() {
+        let mut c = TempoClock::default();
+        c.set_bpm_manual(128.0, 3.0);
+        let (bpm, beats): (f64, Vec<f64>) = (c.bpm, (0..50).map(|i| c.beat_at(i as f64 * 0.37)).collect());
+        c.set_output_offset_ms(80.0).unwrap();
+        assert_eq!(c.bpm, bpm);
+        assert_eq!((0..50).map(|i| c.beat_at(i as f64 * 0.37)).collect::<Vec<_>>(), beats);
+        assert_eq!(c.state(5.0).beat, c.beat_at(5.0), "the state shows the clock's beat");
+        assert_eq!(c.state(5.0).output_offset_ms, 80.0);
+        assert!((c.effect_beat_at(5.0) - c.beat_at(5.08)).abs() < 1e-9);
+        // Tap, tempo changes and resync work on the clock as before.
+        c.set_bpm_manual(140.0, 6.0);
+        assert!((c.effect_beat_at(6.0) - c.beat_at(6.08)).abs() < 1e-9);
+        c.set_output_offset_ms(0.0).unwrap();
+        assert_eq!(c.effect_beat_at(6.0), c.beat_at(6.0));
+    }
+
+    #[test]
+    fn the_offset_is_clamped_and_never_nan() {
+        let mut c = TempoClock::default();
+        assert_eq!(c.set_output_offset_ms(5_000.0), Ok(MAX_OUTPUT_OFFSET_MS));
+        assert_eq!(c.set_output_offset_ms(-5_000.0), Ok(-MAX_OUTPUT_OFFSET_MS));
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(c.set_output_offset_ms(bad).is_err());
+            assert_eq!(c.output_offset_ms(), -MAX_OUTPUT_OFFSET_MS, "a refused value changes nothing");
+            assert!(c.effect_beat_at(1.0).is_finite());
+        }
+        // Old files and damaged ones load.
+        let old: LatencyConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(old, LatencyConfig::default());
+        let file: LatencyConfig = serde_json::from_str(r#"{ "output_offset_ms": 900, "analysis_delay_ms": 55 }"#).unwrap();
+        assert_eq!(file.sanitized(), LatencyConfig { output_offset_ms: 100.0, analysis_delay_ms: 0.0 });
+        assert_eq!(LatencyConfig { output_offset_ms: f32::NAN, analysis_delay_ms: 0.0 }.sanitized().output_offset_ms, 0.0);
     }
 
     #[test]

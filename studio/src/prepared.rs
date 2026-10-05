@@ -172,7 +172,7 @@ pub fn render(s: &mut Shared) -> Vec<Point> {
     let t = s.now_s();
     let Some(cue) = &s.prepared.cue else { return Vec::new() };
     let dt = s.prepared.last_t.map_or(0.0, |last| (t - last).clamp(0.0, 0.1)) as f32;
-    let clock = BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
+    let clock = BeatClock { beat: s.tempo.effect_beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
     let audio = s.audio_in.effective(s.audio, s.audio_at, Instant::now()).0;
     let points = s.prepared.animator.render(&cue.settings, audio, dt, &clock);
     s.prepared.last_t = Some(t);
