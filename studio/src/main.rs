@@ -371,6 +371,11 @@ pub struct Shared {
     /// The single tempo clock (see tempo.rs); times are seconds since `epoch`.
     pub tempo: tempo::TempoClock,
     pub epoch: Instant,
+    /// Tests only: the simulated « now » `now_s` reads, set by the test
+    /// rigs that drive the engine on a simulated clock (wall-clock time
+    /// would make two identical simulated sessions differ).
+    #[cfg(test)]
+    pub sim_now: Option<Instant>,
     /// Master live modifiers (live.rs), saved to live.json when changed.
     pub live: live::LiveModifiers,
     pub live_dirty: bool,
@@ -798,6 +803,10 @@ impl Shared {
 
     /// Seconds since startup: the time base of the tempo clock.
     pub fn now_s(&self) -> f64 {
+        #[cfg(test)]
+        if let Some(now) = self.sim_now {
+            return now.saturating_duration_since(self.epoch).as_secs_f64();
+        }
         self.epoch.elapsed().as_secs_f64()
     }
 
@@ -1264,6 +1273,8 @@ fn startup_state(cli: &Cli) -> Shared {
         look_on: true,
         tempo: tempo::TempoClock::default(),
         epoch,
+        #[cfg(test)]
+        sim_now: None,
         // Held effects (« Noir », « Figer », strobe flash) never survive a restart.
         live: {
             let mut live: live::LiveModifiers = load_json(&cli.data_dir.join("live.json"));
