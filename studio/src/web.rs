@@ -1299,6 +1299,19 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             let presets: Vec<_> = shared.lock().unwrap().presets.iter().map(|p| (p.id.clone(), p.settings.clone())).collect();
             json_response(json!(cue_thumbnails(&presets)))
         }
+        // Animated grid thumbnails (T-273), for the cues of the page on screen.
+        (Method::Get, "/api/presets/loops") => {
+            let Some(ids) = query_str(request.url(), "ids") else { return text(400, "expected ?ids=<cue>,<cue>…") };
+            let looks: Vec<_> = {
+                let s = shared.lock().unwrap();
+                ids.split(',')
+                    .filter(|id| !id.is_empty())
+                    .take(MAX_LOOP_IDS)
+                    .filter_map(|id| s.presets.iter().find(|p| p.id == id).map(|p| (p.id.clone(), s.deck.with_program(id, p.settings.clone()))))
+                    .collect()
+            };
+            json_response(cue_loops(looks))
+        }
         // Hover preview of a cue (T-157): its program at the current tempo.
         (Method::Get, "/api/presets/preview") => {
             let Some(id) = query_str(request.url(), "id") else { return text(400, "expected ?id=<cue>") };
@@ -2024,11 +2037,7 @@ fn cue_thumbnails(presets: &[(String, Settings)]) -> serde_json::Map<String, ser
     presets
         .iter()
         .map(|(id, settings)| {
-            let mut key = serde_json::to_string(settings).unwrap_or_default();
-            // An ILDA cue is drawn again once its file is (re)loaded.
-            if let crate::engine::Content::Ilda { file, .. } = &settings.content {
-                key += &crate::ilda_library::clip(file).map_or(0, |c| c.stamp).to_string();
-            }
+            let key = look_key(settings);
             let hex = match cache.get(id) {
                 Some((k, hex)) if *k == key => hex.clone(),
                 _ => {
@@ -2040,6 +2049,77 @@ fn cue_thumbnails(presets: &[(String, Settings)]) -> serde_json::Map<String, ser
             (id.clone(), json!(hex))
         })
         .collect()
+}
+
+/// What a cue picture is drawn from: the look, and for an ILDA cue its
+/// file's load stamp (drawn again once the file is (re)loaded).
+fn look_key(settings: &Settings) -> String {
+    let mut key = serde_json::to_string(settings).unwrap_or_default();
+    if let crate::engine::Content::Ilda { file, .. } = &settings.content {
+        key += &crate::ilda_library::clip(file).map_or(0, |c| c.stamp).to_string();
+    }
+    key
+}
+
+/// Most cues asked for in one `/api/presets/loops` (a 12 × 8 page).
+const MAX_LOOP_IDS: usize = 96;
+
+/// Animated grid thumbnails (T-273): the loops drawn, by cue id with the
+/// look they were drawn from, and the ids waiting for the drawing thread.
+#[derive(Default)]
+struct Loops {
+    done: std::collections::HashMap<String, (String, Arc<crate::presets::Preview>)>,
+    queued: std::collections::HashSet<String>,
+}
+static LOOPS: Mutex<Option<Loops>> = Mutex::new(None);
+/// The drawing thread's queue, started on the first request.
+static LOOP_JOBS: std::sync::OnceLock<std::sync::mpsc::Sender<(String, String, Settings)>> = std::sync::OnceLock::new();
+
+/// One drawing thread for every loop: never the engine's nor the HTTP
+/// worker's time. A look that fails to draw gets an empty loop (the UI
+/// keeps its still picture) rather than staying queued forever.
+fn draw_loops(jobs: std::sync::mpsc::Receiver<(String, String, Settings)>) {
+    for (id, key, settings) in jobs {
+        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::presets::thumb_loop(&settings)))
+            .unwrap_or_else(|_| crate::presets::Preview { step_beats: crate::presets::LOOP_BEATS, frames: Vec::new() });
+        let mut loops = LOOPS.lock().unwrap();
+        let loops = loops.get_or_insert_with(Default::default);
+        loops.queued.remove(&id);
+        loops.done.insert(id, (key, Arc::new(drawn)));
+    }
+}
+
+/// `GET /api/presets/loops?ids=a,b`: the loops already drawn, at once;
+/// the others are queued for the drawing thread and listed as `pending`,
+/// for the page to ask again. Only a cache lookup on the HTTP worker.
+fn cue_loops(looks: Vec<(String, Settings)>) -> serde_json::Value {
+    let jobs = LOOP_JOBS.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Err(e) = std::thread::Builder::new().name("thumb-loops".into()).spawn(move || draw_loops(rx)) {
+            log::warn!("no thread for the animated thumbnails: {e}");
+        }
+        tx
+    });
+    let mut out = serde_json::Map::new();
+    let mut pending = Vec::new();
+    let mut loops = LOOPS.lock().unwrap();
+    let loops = loops.get_or_insert_with(Default::default);
+    for (id, settings) in looks {
+        let key = look_key(&settings);
+        match loops.done.get(&id) {
+            Some((k, drawn)) if *k == key => {
+                out.insert(id, json!(**drawn));
+            }
+            _ => {
+                if loops.queued.insert(id.clone()) && jobs.send((id.clone(), key, settings)).is_err() {
+                    loops.queued.remove(&id);
+                    continue; // no drawing thread: the still picture stays
+                }
+                pending.push(id);
+            }
+        }
+    }
+    json!({ "loops": out, "pending": pending })
 }
 
 fn import_song(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
@@ -5976,6 +6056,42 @@ mod tests {
         // `null` removes it.
         assert_eq!(set("tunnels-001", &serde_json::Value::Null).0, 200);
         assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["program"], serde_json::Value::Null);
+    }
+
+    /// T-273: animated grid thumbnails are drawn aside (pending first, then
+    /// served from the cache), small, and never touch what plays.
+    #[test]
+    fn cue_loops_are_drawn_aside_and_leave_the_show_alone() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        assert_eq!(t.request("POST", "/api/cue", r#"{"id":"tunnels-001","down":true}"#).0, 200);
+        let now = |t: &TestServer| {
+            let s = t.shared.lock().unwrap();
+            (serde_json::to_string(&s.settings).unwrap(), s.deck.active.iter().map(|a| a.cue.clone()).collect::<Vec<_>>())
+        };
+        let was = now(&t);
+        assert_eq!(t.request("GET", "/api/presets/loops", "").0, 400);
+        let mut v = serde_json::Value::Null;
+        for _ in 0..250 {
+            let (code, body) = t.request("GET", "/api/presets/loops?ids=tunnels-002,vagues-028,nope,", "");
+            assert_eq!(code, 200, "{body}");
+            v = js(&body);
+            if v["pending"].as_array().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // An unknown cue is neither drawn nor pending.
+        let loops = v["loops"].as_object().unwrap();
+        let mut ids: Vec<_> = loops.keys().cloned().collect();
+        ids.sort();
+        assert_eq!(ids, ["tunnels-002", "vagues-028"]);
+        for l in loops.values() {
+            let frames = l["frames"].as_array().unwrap();
+            assert_eq!(frames.len(), crate::presets::LOOP_FRAMES);
+            assert!(frames.iter().all(|f| f.as_str().unwrap().len() / 10 <= 300));
+        }
+        assert_eq!(was, now(&t), "a thumbnail changed the show");
     }
 
     /// T-164: the cue editor opens a cue's program, previews unsaved edits

@@ -1090,7 +1090,12 @@ pub fn thumbnail(settings: &Settings) -> String {
 
 /// Points → a thumbnail string (see `thumbnail`).
 fn pack(points: &[crate::patterns::Point]) -> String {
-    let step = points.len().div_ceil(THUMB_POINTS).max(1);
+    pack_max(points, THUMB_POINTS)
+}
+
+/// `pack` thinned to at most `max` points.
+fn pack_max(points: &[crate::patterns::Point], max: usize) -> String {
+    let step = points.len().div_ceil(max.max(1)).max(1);
     let pos = |v: f32| ((v.clamp(-1.0, 1.0) + 1.0) * 127.5).round() as u8;
     let col = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     points
@@ -1140,6 +1145,34 @@ pub fn preview_with(settings: &Settings, bpm: f64, beats_per_bar: u8, max_frames
     Preview { step_beats: step, frames }
 }
 
+/// Pictures in an animated grid thumbnail (T-273): one every quarter beat
+/// over `LOOP_BEATS`, each thinned to `LOOP_POINTS` points (a light page:
+/// about 19 kB per cue), well under the 300 the task allows.
+pub const LOOP_FRAMES: usize = 16;
+pub const LOOP_POINTS: usize = 120;
+/// One 4/4 bar, the UI loops it at the current tempo, on the beat.
+pub const LOOP_BEATS: f64 = 4.0;
+/// The tempo the loop is drawn at. Only time-based motion (not beat-based)
+/// depends on it, and a thumbnail doesn't need to be exact.
+const LOOP_BPM: f64 = 120.0;
+
+/// A cue's animated grid thumbnail (T-273): its first bar from the launch,
+/// with its own Animator (the live one is never touched).
+/// Display only: it never reaches the output.
+pub fn thumb_loop(settings: &Settings) -> Preview {
+    let step = LOOP_BEATS / LOOP_FRAMES as f64;
+    let dt = (step * 60.0 / LOOP_BPM) as f32;
+    let audio = AudioFeatures { level: 0.6, bass: 0.6, ..AudioFeatures::default() };
+    let mut animator = Animator::starting_at(0.0);
+    let frames = (0..LOOP_FRAMES)
+        .map(|i| {
+            let clock = BeatClock { beat: i as f64 * step, bpm: LOOP_BPM, beats_per_bar: 4 };
+            pack_max(&animator.render(settings, audio, if i == 0 { 0.0 } else { dt }, &clock), LOOP_POINTS)
+        })
+        .collect();
+    Preview { step_beats: step, frames }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,6 +1187,23 @@ mod tests {
             let bytes: Vec<u8> = (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).unwrap()).collect();
             assert!(bytes.chunks(5).any(|q| q[2..].iter().any(|&c| c > 0)), "{} has a dark thumbnail", p.id);
         }
+    }
+
+    #[test]
+    fn thumbnail_loops_are_small_lit_and_move() {
+        // A sample across the pages (the whole catalogue is slow in debug).
+        let all = catalog();
+        let mut moving = 0;
+        for p in all.iter().step_by(all.len() / 24) {
+            let l = thumb_loop(&p.settings);
+            assert_eq!((l.frames.len(), l.step_beats), (LOOP_FRAMES, LOOP_BEATS / LOOP_FRAMES as f64), "{}", p.id);
+            for f in &l.frames {
+                assert!(f.len().is_multiple_of(10) && f.len() / 10 <= LOOP_POINTS && LOOP_POINTS <= 300, "{}: {} points", p.id, f.len() / 10);
+            }
+            assert!(l.frames.iter().any(|f| !f.is_empty()), "{} has an empty loop", p.id);
+            moving += usize::from(l.frames.iter().any(|f| *f != l.frames[0]));
+        }
+        assert!(moving * 2 > 24, "only {moving} of the sampled loops move");
     }
 
     #[test]
