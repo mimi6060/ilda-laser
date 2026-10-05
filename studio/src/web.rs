@@ -1889,6 +1889,10 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             let s = shared.lock().unwrap();
             json_response(json!({ "state": s.timeline.state(&s.timeline_clock()), "show": s.timeline.show, "audio": song_view(&s) }))
         }
+        // T-443: the loaded show's markers as CSV, and a CSV read without
+        // touching the show (the page applies it through `edit`).
+        (Method::Get, "/api/timeline/markers.csv") => export_markers(&shared.lock().unwrap()),
+        (Method::Post, "/api/timeline/markers/parse") => parse_markers(request, shared),
         (Method::Get, "/api/media/audio") => {
             let media = Arc::clone(&shared.lock().unwrap().media);
             json_response(json!({ "files": media.list(), "extensions": crate::audio::media::EXTENSIONS }))
@@ -2170,6 +2174,55 @@ fn import_song(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpRespon
         Ok(imported) => json_response(json!(imported)),
         Err(e) => text(400, &format!("{e:#}")),
     }
+}
+
+/// `GET /api/timeline/markers.csv` (T-443): `#,Name,Start,Color`, times in
+/// seconds whatever the show's unit, downloaded as `<show>-marqueurs.csv`.
+fn export_markers(s: &Shared) -> HttpResponse {
+    use crate::timeline::TimeBase;
+    let Some(show) = s.timeline.show.as_ref() else { return text(409, "aucun show chargé") };
+    let csv = crate::timeline_csv::export(&show.markers, |at| if show.time_base == TimeBase::Beats { show.s_at_beat(at) } else { at });
+    // The header is ASCII: accented letters of the name become `_` there,
+    // and the full name goes in `filename*`.
+    let file = format!("{}-marqueurs.csv", if show.name.is_empty() { "show" } else { show.name.as_str() });
+    let ascii: String = file.chars().map(|c| if c.is_ascii_alphanumeric() || " -_.".contains(c) { c } else { '_' }).collect();
+    let encoded: String = file.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    let disposition = format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}");
+    let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+    with_type(Response::from_string(csv), "text/csv; charset=utf-8").with_header(header)
+}
+
+/// `POST /api/timeline/markers/parse`, the CSV file as the body (1 MB at
+/// most): `{ markers, skipped, skipped_count }` in the loaded show's unit.
+/// Changes nothing: no show edit, no transport, never arms. The body is
+/// read without the lock.
+fn parse_markers(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    use crate::timeline_csv::MAX_CSV_BYTES;
+    use std::io::Read;
+    let too_big = || text(413, &format!("fichier trop gros ({} Mo au plus)", MAX_CSV_BYTES >> 20));
+    if request.body_length().is_some_and(|n| n > MAX_CSV_BYTES) {
+        return too_big();
+    }
+    let mut bytes = Vec::new();
+    if let Err(e) = request.as_reader().take(MAX_CSV_BYTES as u64 + 1).read_to_end(&mut bytes) {
+        return text(400, &format!("unreadable body: {e}"));
+    }
+    if bytes.len() > MAX_CSV_BYTES {
+        return too_big();
+    }
+    // Only what the conversion needs: the time base and the tempo map.
+    let tempo = {
+        let s = shared.lock().unwrap();
+        let Some(show) = s.timeline.show.as_ref() else { return text(409, "aucun show chargé") };
+        crate::timeline::Show { time_base: show.time_base, tempo_map: show.tempo_map.clone(), ..Default::default() }
+    };
+    let decoded = match crate::timeline_csv::decode(&bytes) {
+        Ok(t) => t,
+        Err(e) => return text(400, &format!("{e:#}")),
+    };
+    let beats = tempo.time_base == crate::timeline::TimeBase::Beats;
+    let parsed = crate::timeline_csv::parse(&decoded, |sec| if beats { tempo.beat_at_s(sec) } else { sec });
+    json_response(json!(parsed))
 }
 
 /// `POST /api/media/ilda?name=<file name>`, the file's bytes as the body:
@@ -5475,6 +5528,64 @@ mod tests {
         stream.read_to_string(&mut raw).unwrap();
         let status = raw.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
         (status, raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    /// T-443: markers go out as CSV and a CSV is read back without changing
+    /// the show; 409 without a show, 413 beyond 1 MB, 423 in show mode.
+    #[test]
+    fn timeline_markers_export_and_parse_without_editing() {
+        let t = TestServer::start(false);
+        let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        assert_eq!(t.request("GET", "/api/timeline/markers.csv", "").0, 409);
+        assert_eq!(t.request("POST", "/api/timeline/markers/parse", "Name,Start\nA,1\n").0, 409);
+        assert_eq!(t.request("POST", "/api/timeline/new", r#"{"name":"csv web"}"#).0, 200);
+        let mut show = json(&t.request("GET", "/api/timeline", "").1)["show"].clone();
+        show["markers"] = json!([{ "at": 4.0, "name": "Drop, fort", "color": [255, 0, 0] }, { "at": 1.0, "name": "Intro" }]);
+        assert_eq!(t.request("POST", "/api/timeline/edit", &json!({ "show": show }).to_string()).0, 200);
+
+        // The download: headers, then the rows in time order.
+        let mut stream = TcpStream::connect(t.addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "GET /api/timeline/markers.csv HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let (head, csv) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("text/csv; charset=utf-8"), "{head}");
+        assert!(head.contains("filename=\"csv web-marqueurs.csv\""), "{head}");
+        assert_eq!(csv, "#,Name,Start,Color\r\nM1,Intro,1.000,\r\nM2,\"Drop, fort\",4.000,FF0000\r\n");
+
+        // Parsing it back changes nothing.
+        let before = t.request("GET", "/api/timeline", "").1;
+        let (status, body) = t.request("POST", "/api/timeline/markers/parse", &format!("{csv}M3,Mauvais,abc,\r\n"));
+        assert_eq!(status, 200, "{body}");
+        let parsed = json(&body);
+        assert_eq!(parsed["markers"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["markers"][1]["name"], "Drop, fort");
+        assert_eq!(parsed["skipped"][0]["line"], 4);
+        assert_eq!(parsed["skipped"][0]["reason"], "temps illisible");
+        let (status, body) = http_bytes(t.addr, "/api/timeline/markers/parse", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR");
+        assert_eq!((status, body.contains("binaire")), (400, true), "{body}");
+        let (status, body) = t.request("POST", "/api/timeline/markers/parse", "");
+        assert_eq!((status, body.contains("vide")), (400, true), "{body}");
+        // Too big: refused from its announced length, before reading.
+        let mut stream = TcpStream::connect(t.addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let big = vec![b'1'; crate::timeline_csv::MAX_CSV_BYTES + 1];
+        write!(stream, "POST /api/timeline/markers/parse HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", big.len()).unwrap();
+        let _ = stream.write_all(&big);
+        let mut raw = Vec::new();
+        let _ = stream.read_to_end(&mut raw);
+        assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 413"), "{}", String::from_utf8_lossy(&raw[..raw.len().min(80)]));
+        let after = t.request("GET", "/api/timeline", "").1;
+        assert_eq!(json(&before)["show"], json(&after)["show"], "parse never edits the show");
+        assert_eq!(json(&after)["state"]["playing"], json(&before)["state"]["playing"]);
+        assert_eq!(json(&t.request("GET", "/api/state", "").1)["armed"], false, "never arms");
+
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/markers/parse", "Name,Start\nA,1\n").0, 423);
+        assert_eq!(t.request("GET", "/api/timeline/markers.csv", "").0, 200, "reading is allowed");
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
     }
 
     /// T-011: an ILDA file generated by our own writer is imported, shows

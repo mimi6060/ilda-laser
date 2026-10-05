@@ -184,6 +184,7 @@ mod tests {
             "/api/dmx/learn",
             "/api/netin",
             "/api/timeline/edit",
+            "/api/timeline/markers/parse",
             "/api/figures/delete",
             "/api/cuelists",
             "/api/cuelists/delete",
