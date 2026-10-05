@@ -95,7 +95,19 @@ const NEVER: [&str; 2] = ["transport.arm", "safety.hold"];
 pub const ACCESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn group_allowed(group: &str) -> bool {
-    SCOPE_SETS.iter().any(|set| set.groups.contains(&group))
+    SCOPE_SETS.iter().any(|set| set.groups.contains(&scope_group(group)))
+}
+
+/// The scope group a registry group is checked against: the zone group
+/// masters (T-420, registry group `group`) are dimmers like the layer
+/// dimmers and go with them (« Maîtres »), so scopes saved before them
+/// keep their meaning.
+fn scope_group(group: &str) -> &str {
+    if group == "group" {
+        "layer"
+    } else {
+        group
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -334,7 +346,7 @@ pub fn check(s: &mut Shared, src: SourceKind, client: &str, desc: &ControlDesc, 
     if forbidden(desc) {
         return Err(Refusal::Forbidden);
     }
-    check_group(s, src, client, desc.group, now)
+    check_group(s, src, client, scope_group(desc.group), now)
 }
 
 fn count(s: &mut Shared, src: SourceKind, what: &str, r: Result<(), Refusal>) -> Result<(), Refusal> {
@@ -422,7 +434,7 @@ pub fn instance_apply(s: &mut Shared, access: bool, id: &str, input: ControlInpu
     } else if forbidden(&desc) {
         Err(Refusal::Forbidden)
     } else {
-        check_instance(s, desc.group, access)
+        check_instance(s, scope_group(desc.group), access)
     };
     let r = r.and_then(|()| controls::apply_as(s, &desc.id, input, ArmSource::Dmx).map_err(|_| Refusal::Forbidden));
     count(s, SourceKind::Dmx, &desc.id, r)
@@ -575,6 +587,30 @@ mod tests {
                 assert_eq!(s.live.size == 0.5, want.is_ok() && id == "master.size", "{src:?} {id}");
                 assert_eq!(s.external.gate.refused.get(&src).copied().unwrap_or(0), want.is_err() as u64);
             }
+        }
+    }
+
+    /// T-420: a zone group's master goes with the « Maîtres » scope (as
+    /// the layer dimmers do), even in a scope saved before it existed;
+    /// out of that scope it is refused; it never arms.
+    #[test]
+    fn group_masters_follow_the_masters_scope() {
+        use crate::projection::{ProjectionConfig, ZoneGroup};
+        let now = Instant::now();
+        for src in [SourceKind::Dmx, SourceKind::Osc] {
+            let mut s = shared();
+            let cfg = ProjectionConfig { groups: vec![ZoneGroup { name: "Côtés".into(), zones: vec![1], master: 1.0 }], ..Default::default() };
+            s.projection.set(cfg).unwrap();
+            open(&mut s);
+            set_access(&mut s, src, "c", true, now);
+            assert_eq!(apply(&mut s, src, "c", "group.1.master", ControlInput::Norm(0.25), now), Ok(()));
+            assert_eq!(s.projection.master(1), Some(0.25));
+            assert_eq!(apply(&mut s, src, "c", "group.all_full", ControlInput::Value(1.0), now), Ok(()));
+            assert_eq!(s.projection.master(1), Some(1.0));
+            update_scopes(&mut s, &json!({ "scopes": [{ "source": src, "groups": ["master", "look"], "require_access": true }] })).unwrap();
+            assert_eq!(apply(&mut s, src, "c", "group.1.master", ControlInput::Norm(0.0), now), Err(Refusal::OutOfScope));
+            assert_eq!(s.projection.master(1), Some(1.0));
+            assert!(!s.gate.is_armed());
         }
     }
 

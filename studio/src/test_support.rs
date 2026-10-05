@@ -78,6 +78,7 @@ pub fn shared() -> Shared {
         triggers: crate::audio::triggers::TriggerStore::in_memory(),
         mixer: layers::Mixer::default(),
         mixer_dirty: false,
+        groups_dirty: false,
         mix: layers::MixReport::default(),
         safety: crate::safety::SafetyStore::in_memory(),
         strobe: Default::default(),

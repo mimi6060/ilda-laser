@@ -498,7 +498,7 @@ mod tests {
         let mut s = shared();
         s.netin = NetInState::new(NetHub::in_memory(Arc::clone(&s.estop)));
         let zones = vec![ProjectionZone { id: 1, name: "Gauche".into(), ..Default::default() }, ProjectionZone { id: 2, name: "Droite".into(), ..Default::default() }];
-        s.projection.set(ProjectionConfig { zones, default_zones: vec![1, 2] }).unwrap();
+        s.projection.set(ProjectionConfig { zones, default_zones: vec![1, 2], ..Default::default() }).unwrap();
         let mut cfg = NetInConfig::default();
         cfg.sacn.enabled = true;
         cfg.dmx.fixtures = vec![fx(1, Personality::Compact, 1), fx(2, Personality::Full, 17)];

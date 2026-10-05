@@ -355,6 +355,14 @@ impl ControlRegistry {
             add(format!("layer.{n}.clear"), format!("Vider le calque {n}"), "layer", ControlKind::Trigger, true);
         }
 
+        // Group masters (T-420): inhibitive dimmers, one per zone group
+        // (the 16 first), 1 by default; they only ever dim, never arm.
+        // « Tout à 100 % » puts them all back (`master.reset` doesn't).
+        for n in 1..=crate::projection::GROUP_MASTER_CONTROLS {
+            add(format!("group.{n}.master"), format!("Maître groupe {n}"), "group", cont(0.0, 1.0, 1.0, Unit::Percent), true);
+        }
+        add("group.all_full".into(), "Maîtres de groupe : tout à 100 %".into(), "group", ControlKind::Trigger, true);
+
         // Momentary: pad down (value 1) presses, pad up (value 0) releases -
         // what flash and solo need. Toggle/restart cues ignore the release.
         let names: HashMap<&str, &str> = presets.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
@@ -558,6 +566,11 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             s.deck.beat_every = BEAT_EVERY[choice_index(&desc.kind, input)];
             s.deck.save();
         }
+        "group.all_full" => {
+            let n = s.projection.get().groups.len();
+            s.projection.set_masters(&vec![1.0; n]);
+            s.groups_dirty = true;
+        }
         "fx.stop" => s.fx.stop_all(),
         "fx.dest" => s.fx.set_dest(crate::fx::DESTS[choice_index(&desc.kind, input)]),
         "fx.mode" => s.fx.set_click(crate::fx::CLICKS[choice_index(&desc.kind, input)]),
@@ -572,6 +585,13 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
                     }
                     FxParam::Action => s.fx.set_action(line, value(input)),
                 }
+                return Ok(());
+            }
+            if let Some(n) = group_master_control(other) {
+                if !s.projection.set_master(n, value(input)) {
+                    return Err(ControlError::Refused("ce groupe de zones n'existe pas"));
+                }
+                s.groups_dirty = true;
                 return Ok(());
             }
             if let Some((n, param)) = layer_control(other) {
@@ -616,6 +636,11 @@ fn fx_control(id: &str) -> Option<(usize, FxParam)> {
         cell => FxParam::Cell(cell.parse::<usize>().ok()?.checked_sub(1)?),
     };
     Some((line, param))
+}
+
+/// "group.<n>.master" → n (1-based), for registered ids only.
+fn group_master_control(id: &str) -> Option<usize> {
+    id.strip_prefix("group.")?.strip_suffix(".master")?.parse().ok()
 }
 
 /// "layer.<n>.<param>" → (n, param), for registered ids only.
@@ -875,6 +900,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
             (line, FxParam::Cell(cell)) => json!(s.fx.active(line) == Some(cell)),
             (line, FxParam::Action) => json!(s.fx.action(line)),
         },
+        id if id.starts_with("group.") => json!(s.projection.master(group_master_control(id)?)?),
         id if id.starts_with("layer.") => {
             let (n, param) = layer_control(id)?;
             let l = s.mixer.layer(n);
@@ -1800,5 +1826,43 @@ mod tests {
         apply(&mut s, "list.go", ControlInput::Value(1.0), true).unwrap();
         apply(&mut s, "running.stop_all", ControlInput::Value(1.0), true).unwrap();
         assert_eq!(s.cue_list.index, None);
+    }
+
+    /// T-420: the group masters, continuous 0..1, external, default 1; a
+    /// missing group refuses, `master.reset` leaves them, « Tout à 100 % »
+    /// puts them back; nothing arms.
+    #[test]
+    fn group_masters_are_registered_clamped_and_never_arm() {
+        use crate::projection::{ProjectionConfig, ProjectionZone, ZoneGroup, GROUP_MASTER_CONTROLS};
+        let mut s = shared();
+        for n in 1..=GROUP_MASTER_CONTROLS {
+            let d = s.controls.get(&format!("group.{n}.master")).unwrap_or_else(|| panic!("group.{n}.master"));
+            assert!(d.external);
+            assert_eq!(d.group, "group");
+            assert_eq!(d.kind, ControlKind::Continuous { min: 0.0, max: 1.0, default: 1.0, unit: Unit::Percent });
+        }
+        assert!(s.controls.get(&format!("group.{}.master", GROUP_MASTER_CONTROLS + 1)).is_none());
+        assert!(matches!(apply(&mut s, "group.1.master", ControlInput::Value(0.5), true), Err(ControlError::Refused(_))), "no group yet");
+        let cfg = ProjectionConfig {
+            zones: vec![ProjectionZone { id: 1, ..Default::default() }, ProjectionZone { id: 2, ..Default::default() }],
+            default_zones: vec![1],
+            groups: vec![ZoneGroup { name: "Centre".into(), zones: vec![1], master: 1.0 }, ZoneGroup { name: "Côtés".into(), zones: vec![2], master: 1.0 }],
+        };
+        s.projection.set(cfg).unwrap();
+        apply(&mut s, "group.2.master", ControlInput::Value(0.5), true).unwrap();
+        assert!(s.groups_dirty);
+        assert_eq!(current(&s, s.controls.get("group.2.master").unwrap()), Some(json!(0.5)));
+        apply(&mut s, "group.1.master", ControlInput::Value(9.0), true).unwrap();
+        assert_eq!(s.projection.master(1), Some(1.0), "never above 100 %");
+        apply(&mut s, "group.1.master", ControlInput::Norm(-2.0), true).unwrap();
+        assert_eq!(s.projection.master(1), Some(0.0));
+        apply(&mut s, "group.1.master", ControlInput::Value(f32::NAN), true).unwrap();
+        assert_eq!(s.projection.master(1), Some(0.0), "NaN is dark");
+        apply(&mut s, "master.reset", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.projection.masters(), [0.0, 0.5], "Réinitialiser le direct leaves the group masters");
+        apply(&mut s, "group.all_full", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.projection.masters(), [1.0, 1.0]);
+        assert_eq!(current(&s, s.controls.get("group.3.master").unwrap()), None);
+        assert!(!s.gate.is_armed());
     }
 }
