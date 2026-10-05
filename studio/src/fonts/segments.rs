@@ -40,7 +40,7 @@ fn seg_g() -> Stroke { vec![MID_LEFT, MID_RIGHT] }
 /// Look up the strokes for one glyph, in the 1x2 cell described above.
 /// Unknown characters (and space) return no strokes - just advance the
 /// cursor.
-fn glyph(c: char) -> Vec<Stroke> {
+pub(super) fn glyph(c: char) -> Vec<Stroke> {
     match c.to_ascii_uppercase() {
         '0' => vec![seg_a(), seg_b(), seg_c(), seg_d(), seg_e(), seg_f()],
         '1' => vec![seg_b(), seg_c()],

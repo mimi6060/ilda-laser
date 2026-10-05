@@ -1863,15 +1863,24 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // Import (T-297): the raw file in the body, settings in the query.
         // Returns a preview; nothing is saved (« Créer la figure » does).
         (Method::Post, "/api/figures/import") => import_figure(request, shared),
-        // The editor's text tool: the laser font as strokes. No state.
+        // The editor's text tool: a laser font as strokes. No state.
         (Method::Post, "/api/figures/text") => match body::<TextRequest>(request) {
             Ok(req) => {
-                let text: String = req.text.to_uppercase().chars().take(64).collect();
+                let text: String = req.text.chars().take(crate::fonts::MAX_TEXT_CHARS).collect();
                 let size = if req.size.is_finite() { req.size.clamp(0.02, 2.0) } else { 0.3 };
-                json_response(json!({ "strokes": crate::font::text_strokes(&text, size) }))
+                let font = crate::fonts::info(req.font.as_deref().unwrap_or("segments")).id;
+                let strokes = if font == "segments" {
+                    // As before T-439 (not cut at the frame's edges).
+                    crate::fonts::text_strokes(&text.to_uppercase(), size)
+                } else {
+                    crate::fonts::layout(&text, &crate::fonts::TextStyle { font: font.into(), ..Default::default() }, size)
+                };
+                json_response(json!({ "strokes": strokes, "font": font }))
             }
             Err(e) => e,
         },
+        // The laser fonts (T-439), « Segments » first.
+        (Method::Get, "/api/fonts") => json_response(json!(crate::fonts::fonts())),
         (Method::Get, "/api/timeline") => {
             let s = shared.lock().unwrap();
             json_response(json!({ "state": s.timeline.state(&s.timeline_clock()), "show": s.timeline.show, "audio": song_view(&s) }))
@@ -2866,6 +2875,9 @@ struct TextRequest {
     text: String,
     #[serde(default = "default_text_size")]
     size: f32,
+    /// A `fonts::fonts()` id; absent or unknown = « segments ».
+    #[serde(default)]
+    font: Option<String>,
 }
 
 fn default_text_size() -> f32 {
@@ -4405,6 +4417,40 @@ mod tests {
         assert_eq!(t.shared.lock().unwrap().test_pattern.brightness, 1.0);
         assert_eq!(t.request("POST", "/api/testpattern", r#"{"pattern":null}"#).0, 200);
         assert_eq!(t.shared.lock().unwrap().test_pattern.active, None);
+    }
+
+    #[test]
+    fn fonts_are_listed_and_the_text_tool_uses_them() {
+        let t = TestServer::start(false);
+        let (status, body) = t.request("GET", "/api/fonts", "");
+        assert_eq!(status, 200);
+        let list: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ids: Vec<&str> = list.as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["segments", "hershey-simple", "hershey-double", "relief"]);
+        assert_eq!(list[3]["name_fr"], "Relief");
+        assert_eq!(list[3]["accents"], true);
+        let strokes = |body: &str| -> serde_json::Value {
+            let (status, out) = t.request("POST", "/api/figures/text", body);
+            assert_eq!(status, 200, "{out}");
+            serde_json::from_str(&out).unwrap()
+        };
+        // Without a font: the segment font, as before.
+        let seg = strokes(r#"{"text":"hi","size":0.3}"#);
+        assert_eq!(seg["font"], "segments");
+        let flat = |v: &serde_json::Value| -> Vec<f64> { v.as_array().unwrap().iter().flat_map(|s| s.as_array().unwrap().iter().flat_map(|p| [p[0].as_f64().unwrap(), p[1].as_f64().unwrap()])).collect() };
+        let old = crate::fonts::text_strokes("HI", 0.3);
+        let old: Vec<f64> = old.iter().flatten().flat_map(|p| [p[0] as f64, p[1] as f64]).collect();
+        let got = flat(&seg["strokes"]);
+        assert_eq!(got.len(), old.len());
+        assert!(got.iter().zip(&old).all(|(a, b)| (a - b).abs() < 1e-6));
+        let relief = strokes(r#"{"text":"Été","size":0.3,"font":"relief"}"#);
+        assert_eq!(relief["font"], "relief");
+        let pts = flat(&relief["strokes"]);
+        assert!(pts.len() > 20 && pts.iter().all(|v| v.abs() <= 1.0));
+        assert_eq!(strokes(r#"{"text":"A","font":"nope"}"#)["font"], "segments");
+        // 128 characters at most.
+        let long = strokes(&json!({ "text": "I".repeat(300), "size": 0.01 }).to_string());
+        assert_eq!(long["strokes"].as_array().unwrap().len(), crate::fonts::MAX_TEXT_CHARS);
     }
 
     #[test]

@@ -1100,7 +1100,7 @@ mod tests {
             let frame = render(Content::Shape { shape: shape.into() }, 0.2);
             assert_eq!(lit_beams_below(&frame, 1.0), 0, "{shape} has no beam");
         }
-        let text = render(Content::Text { text: "LASER 42".into() }, 0.2);
+        let text = render(Content::Text { text: "LASER 42".into(), style: Default::default() }, 0.2);
         assert_eq!(lit_beams_below(&text, 1.0), 0);
         let wave = render(Content::Wave, 0.2);
         assert_eq!(lit_beams_below(&wave, 1.0), 0);

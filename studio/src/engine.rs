@@ -7,7 +7,7 @@
 use crate::beat;
 use crate::evolving::{self, EvolvingCue};
 use crate::figures::Figure;
-use crate::font;
+use crate::fonts::{self, TextStyle};
 use crate::generators::{self, GenCtx, GenParams};
 use crate::optimize::{OptimizeParams, Optimizer};
 use crate::patterns::{self, Point};
@@ -18,7 +18,14 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Content {
     Shape { shape: String },
-    Text { text: String },
+    /// Laser text (T-439): `style` picks the font, alignment, spacing,
+    /// fitting and scrolling; absent (scenes saved before) = the segment
+    /// font, centred, drawn exactly as it always was.
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "TextStyle::is_default")]
+        style: TextStyle,
+    },
     Wave,
     /// A procedural effect from `generators.rs` (what most cues use).
     Generator {
@@ -417,6 +424,10 @@ pub struct Animator {
     fig_time: f64,
     /// Seconds an ILDA file has been playing.
     ilda_time: f64,
+    /// Seconds a text has been on show (for scrolling per second).
+    text_time: f64,
+    /// The text's glyph layout, kept until the text or its style change.
+    text_cache: fonts::TextCache,
     flash: f32,
     last_beat: u64,
     /// Tempo-clock beat the look started at (the cue's launch); `None`
@@ -625,6 +636,9 @@ impl Animator {
         if let Content::Ilda { .. } = &s.content {
             self.ilda_time += dt as f64;
         }
+        if let Content::Text { .. } = &s.content {
+            self.text_time += dt as f64;
+        }
 
         // size = 0 leaves the scale alone; size = 1 swings it 0.5x..1.5x.
         let scale = s.scale * (1.0 - 0.5 * react.size * (react.enabled as u8 as f32) + react.size * bass);
@@ -643,7 +657,13 @@ impl Animator {
 
         let points = match &s.content {
             Content::Shape { shape } => patterns::by_name(shape, scale, r, g, b).unwrap_or_default(),
-            Content::Text { text } => font::text_to_points(&text.to_uppercase(), scale, r, g, b),
+            Content::Text { text, style } => {
+                let pos = match style.scroll.per {
+                    crate::figures::RateUnit::Beat => beat_pos,
+                    crate::figures::RateUnit::Second => self.text_time,
+                };
+                self.text_cache.points(text, style, scale, pos, (r, g, b))
+            }
             Content::Wave => patterns::wave(scale, 0.15 + 0.6 * level, self.wave_phase, r, g, b),
             // Drawn through `render_evolving`, never directly.
             Content::Evolving(_) => Vec::new(),
@@ -946,10 +966,53 @@ mod tests {
     #[test]
     fn settings_json_round_trips_and_fills_missing_fields() {
         let s: Settings = serde_json::from_str(r#"{"content":{"kind":"text","text":"HI"}}"#).unwrap();
-        assert_eq!(s.content, Content::Text { text: "HI".into() });
+        assert_eq!(s.content, Content::Text { text: "HI".into(), style: TextStyle::default() });
         assert_eq!(s.brightness, Settings::default().brightness);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+        // The default style is not written: saved files stay as they were.
+        assert_eq!(serde_json::to_value(&s.content).unwrap(), serde_json::json!({ "kind": "text", "text": "HI" }));
+    }
+
+    #[test]
+    fn a_text_saved_before_t439_draws_the_same_points() {
+        let s: Settings = serde_json::from_str(r#"{"content":{"kind":"text","text":"Hello 42"},"scale":0.3,"brightness":1.0}"#).unwrap();
+        let (r, g, b) = shift_hue(s.color, 0.0);
+        let before = densify(&fonts::text_to_points("HELLO 42", 0.3, r, g, b));
+        assert_eq!(a_frame(&s, AudioFeatures::default()), before);
+    }
+
+    #[test]
+    fn a_text_style_changes_the_drawing_on_the_next_frame() {
+        let mut s: Settings = serde_json::from_str(r#"{"content":{"kind":"text","text":"Été"},"scale":0.3,"brightness":1.0}"#).unwrap();
+        let mut a = Animator::default();
+        let seg = a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default());
+        s.content = serde_json::from_value(serde_json::json!({ "kind": "text", "text": "Été", "style": { "font": "relief" } })).unwrap();
+        let relief = a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock::default());
+        assert_ne!(seg, relief);
+        assert!(relief.iter().filter(|p| p.is_lit()).count() > 10);
+        assert!(relief.iter().all(|p| p.x.abs() <= 1.0 && p.y.abs() <= 1.0));
+    }
+
+    #[test]
+    fn scrolling_text_follows_the_tempo_clock() {
+        let s: Settings = serde_json::from_value(serde_json::json!({
+            "content": { "kind": "text", "text": "BONJOUR", "style": { "font": "hershey-simple", "scroll": { "enabled": true, "speed": 0.25 } } },
+            "scale": 0.1, "brightness": 1.0
+        }))
+        .unwrap();
+        let centre = |pts: &[Point]| {
+            let lit = lit(pts);
+            lit.iter().map(|p| p.x).sum::<f32>() / lit.len() as f32
+        };
+        let at = |beat: f64| {
+            let mut a = Animator::default();
+            a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock { beat: 0.0, ..Default::default() });
+            a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock { beat, ..Default::default() })
+        };
+        // Same beat, same picture, however the frames got there.
+        assert_eq!(at(1.0), at(1.0));
+        assert!(centre(&at(1.0)) < centre(&at(0.5)) - 0.1);
     }
 
     #[test]

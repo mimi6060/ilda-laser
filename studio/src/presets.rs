@@ -292,7 +292,7 @@ pub fn catalog() -> Vec<Preset> {
     }
     for word in ["HELLO", "PARTY", "DJ", "LOVE", "WOW", "MERCI"] {
         for (color_name, color) in [("vert", GREEN), ("rouge", RED), ("cyan", CYAN)] {
-            let settings = Settings { content: Content::Text { text: word.to_string() }, color, scale: 0.25, ..Settings::default() };
+            let settings = Settings { content: Content::Text { text: word.to_string(), style: Default::default() }, color, scale: 0.25, ..Settings::default() };
             b.add("Texte & horloge", format!("{word} · {color_name}"), settings);
         }
     }
