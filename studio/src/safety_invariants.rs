@@ -2616,7 +2616,7 @@ fn cue_and_layer_modifiers_apply_before_the_safety_stage() {
 
 /// One case of `a_group_master_never_brightens_the_output`: the same
 /// random session (look, safety settings, caps, calibration, projection
-/// zones with groups) rendered twice on the same simulated clock, once
+/// zones with groups, sometimes a cue with T-144 cue and layer levels) rendered twice on the same simulated clock, once
 /// with every master at 100 % and once with random masters at or below
 /// it. No frame sent to the output with the masters down has a lit
 /// sample the frame at 100 % doesn't match or beat on every channel: the masters sit before the safety stage, which still dims after them,
@@ -2647,6 +2647,17 @@ fn run_group_master_case(seed: u64) -> Result<bool, String> {
             g.master = 1.0;
         }
         s.projection.set(cfg).map_err(|e| format!("setup: projection refused: {e:#}"))?;
+        // A playing cue with cue and layer levels (T-144) in some cases,
+        // the same in both sessions: the group masters dim on top of the
+        // whole level chain (cue → layer → FX → master).
+        let mut vrng = Rng::new(seed ^ 0x0144_0420);
+        if vrng.chance(0.5) {
+            let (id, _) = random_preset(&s, &mut vrng);
+            controls::press_cue(&mut s, &id, None, true);
+            for _ in 0..1 + vrng.below(3) {
+                random_level(&mut s, &mut vrng);
+            }
+        }
         let mut rig = Rig::new(s, "group-master", seed);
         rig.tick();
         rig.s().request_arm(ArmSource::Ui).map_err(|e| format!("setup: arm refused: {e:?}"))?;

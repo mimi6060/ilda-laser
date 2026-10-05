@@ -3,7 +3,7 @@
 // only dims its zones, « Tout à 100 % » puts them back. Two test zones
 // (left and right halves) show the same look, so their light can be
 // compared in one frame. Preview only: the studio stays disarmed.
-import { test, expect, useStudio, openUi, reveal, isLit, type Point } from '../studio';
+import { test, expect, useStudio, openUi, reveal, isLit, focusPage, openWorkspace, type Point } from '../studio';
 
 const studio = useStudio();
 
@@ -115,4 +115,17 @@ test('a group deleted in the settings takes its fader away', async ({ page }) =>
   await expect.poll(async () => (await groups()).length).toBe(0);
   await expect(page.locator('#groupMasters')).toBeHidden();
   expect((await studio.state()).armed).toBe(false);
+});
+
+test('the global search finds « Groupes de zones » and unfolds Zones de projection', async ({ page }) => {
+  await openWorkspace(page, 'live');
+  await focusPage(page);
+  await page.keyboard.press('Control+k');
+  await expect(page.locator('#searchBox')).toHaveAttribute('data-ready', /\d+/);
+  await page.locator('#searchInput').fill('groupes de zones');
+  const row = page.locator('#searchResults .sr[data-kind="setting"]').filter({ has: page.locator('.l', { hasText: /^Groupes de zones/ }) }).first();
+  await row.click();
+  await expect(page.locator('#wsTabs [data-ws-tab="settings"]')).toHaveClass(/active/);
+  await expect(page.locator('#pzPanel')).toHaveAttribute('open', '');
+  await expect(page.locator('#pzGroupAdd')).toBeVisible();
 });
