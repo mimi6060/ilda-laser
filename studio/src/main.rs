@@ -13,6 +13,7 @@ mod artnet;
 mod audience;
 mod audio;
 mod autosave;
+mod backup;
 mod beat;
 mod chases;
 mod checklist;
@@ -25,6 +26,7 @@ mod cuelist;
 mod devices;
 mod dmx;
 mod datafile;
+mod formats;
 mod dwell;
 mod engine;
 mod evolving;
@@ -85,6 +87,7 @@ mod timeline;
 mod transition;
 mod tunnels;
 mod usercues;
+mod versions;
 mod venue;
 mod watchdog;
 mod zones;
@@ -606,6 +609,10 @@ impl Shared {
         notices::drain_writes(&mut self.notices);
         let autosave = self.project.autosave.error.as_ref().map(|e| (notices::Level::Warning, format!("échec de la sauvegarde automatique : {e}")));
         self.notices.condition("autosave", "Projet", autosave);
+        // The copy to a second location (T-450): unavailable, or low space.
+        let storage = self.project.backup.status();
+        self.notices.condition("backup", "Projet", storage.error.map(|e| (notices::Level::Warning, e)));
+        self.notices.condition("disk_space", "Projet", storage.low_space.map(|e| (notices::Level::Warning, e)));
         let audio = self.audio_in.status();
         let level = match audio.state {
             audio::CaptureState::DeviceLost => Some(notices::Level::Warning),
@@ -898,6 +905,14 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
         }
     };
 
+    // Format versions (T-288), before any store reads its file: a data
+    // folder written by a newer studio is refused, untouched; older files
+    // are brought to the current format, their originals kept.
+    if let Err(e) = formats::prepare_data_dir(&cli.data_dir) {
+        eprintln!("{e:#}");
+        log::error!("{e:#}");
+        std::process::exit(2);
+    }
     let mut state = startup_state(&cli);
     // The output named on the command line opens now, as before (a failure
     // stops the studio); otherwise the remembered one is connected by the
@@ -1051,6 +1066,9 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
         });
     }
     let autosave_thread = autosave::spawn(Arc::clone(&shared), Arc::clone(&running));
+    // The copy to a second location (T-450): its own thread, fed by saves.
+    let backup_hub = Arc::clone(&shared.lock().unwrap().project.backup);
+    let backup_thread = backup::spawn(Arc::clone(&backup_hub));
     // Keep the Mac awake while armed or playing (T-412); never the real
     // assertion in tests.
     let blocker: Box<dyn keep_awake::SleepBlocker> = if cli.test_keep_awake || cli.test_hooks || cli.test_output.is_some() {
@@ -1087,6 +1105,13 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     // must not hold the exit.
     let deadline = Instant::now() + AUTOSAVE_SHUTDOWN_WAIT;
     while !autosave_thread.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Then the copy writes what it was given (that last autosave too); a
+    // pulled-out key or a slow network folder must not hold the exit.
+    backup_hub.shutdown();
+    let deadline = Instant::now() + AUTOSAVE_SHUTDOWN_WAIT;
+    while !backup_thread.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     if let Some(midi_thread) = midi_thread {

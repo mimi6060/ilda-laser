@@ -122,6 +122,7 @@
   body.show-mode #livePanel [data-panel]:not([data-panel="direct"]):not([data-panel="running"]):not([data-panel="cuelist"]),
   body.show-mode #tlEditor, body.show-mode .lock-edit, body.show-mode #palettes .del,
   body.show-mode #projMenu [data-proj="new"], body.show-mode #projMenu [data-proj="open"], body.show-mode #projMenu [data-proj="save-as"],
+  body.show-mode #projMenu [data-proj="version-save"], body.show-mode #projMenu [data-proj="versions"],
   body.show-mode #projMenu .sub, body.show-mode #projRecent { display: none !important; }
   body.show-mode main[data-ws-active="timeline"] { grid-template-rows: minmax(0, 1fr); grid-template-areas: "stage panel"; }
   .tp-sub { margin: 14px 0 2px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
@@ -915,6 +916,18 @@
   /* Autosave (T-287): a quiet status next to the project name, orange on failure. */
   #autosaveStatus { font-size: 11px; color: var(--muted); white-space: nowrap; }
   #autosaveStatus.err { color: var(--warn); font-weight: 600; }
+  /* Copy to a second location (T-450) and named versions (T-288). */
+  #backupStatus { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  #backupStatus.err { color: var(--warn); font-weight: 600; }
+  #projName.ro { color: var(--warn); }
+  #projMenu button:disabled { opacity: .45; }
+  #verList { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 260px; overflow: auto; }
+  #verList .ver { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; background: var(--panel-2); }
+  #verList .ver .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #verList .ver .d { font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #verList .ver button { font-size: 12px; padding: 2px 8px; }
+  #verDialog .row input { flex: 1; }
+  #bkDir { width: 100%; }
   #recoverWhen { margin-bottom: 10px; }
   #projFiles { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 200px; overflow: auto; }
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
@@ -1225,6 +1238,7 @@
     <button id="projBtn" title="Projet : Cmd+S enregistrer, Cmd+O ouvrir">Projet ▾</button>
     <span id="projName" title="Projet ouvert (• = modifications non enregistrées)">Sans titre</span>
     <span id="autosaveStatus" role="status" hidden></span>
+    <span id="backupStatus" role="status" hidden></span>
     <div id="projMenu" hidden>
       <button data-proj="new">Nouveau</button>
       <button data-proj="open">Ouvrir…</button>
@@ -1232,6 +1246,8 @@
       <div id="projRecent"></div>
       <button data-proj="save">Enregistrer</button>
       <button data-proj="save-as">Enregistrer sous…</button>
+      <button data-proj="version-save">Enregistrer une version…</button>
+      <button data-proj="versions">Versions…</button>
     </div>
   </div>
   <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
@@ -1298,6 +1314,7 @@
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
 <div id="dmxLost" role="alert">Signal DMX perdu</div>
 <div id="dataWarn" role="alert" hidden></div>
+<div id="spaceWarn" role="alert" hidden><div class="dw"><span id="spaceWarnText"></span><button id="spaceWarnClose" title="Fermer ce bandeau (l'avertissement reste dans la ligne d'état)">Fermer</button></div></div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
   <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
 <!-- Espaces de travail (T-295) : changer d'onglet ne change que l'affichage. -->
@@ -1398,6 +1415,17 @@
     <div id="projFiles"></div>
     <div id="projError" class="merr" role="alert"></div>
     <div class="row"><button id="projOk">Ouvrir</button><button id="projCancel">Annuler</button></div>
+  </div>
+</div>
+<div id="verDialog" class="modal" hidden>
+  <div class="box">
+    <h3>Versions</h3>
+    <div class="hint" id="verProject"></div>
+    <label for="verName">Enregistrer une version…</label>
+    <div class="row"><input type="text" id="verName" autocomplete="off" placeholder="avant festival" maxlength="64"><button id="verSave" class="primary">Enregistrer</button></div>
+    <div id="verError" class="merr" role="alert"></div>
+    <div id="verList"></div>
+    <div class="row"><button id="verClose">Fermer</button></div>
   </div>
 </div>
 <div id="recoverAsk" class="modal" hidden>
@@ -2699,6 +2727,16 @@
         <div class="hint" id="asInfo"></div>
         <div class="hint">Une copie du projet non enregistré est écrite à part (les 20 plus récentes par projet), sans jamais ralentir la sortie laser. Après un plantage, le studio propose de la récupérer ; il redémarre toujours laser désarmé.</div>
       </details>
+      <details id="backupPanel">
+        <summary>Copie de sauvegarde</summary>
+        <label class="check"><input type="checkbox" id="bkEnabled"> Copie de sauvegarde sur un second emplacement</label>
+        <label for="bkDir">Dossier de copie</label>
+        <input type="text" id="bkDir" autocomplete="off" spellcheck="false" placeholder="/Volumes/MaCle">
+        <div id="bkError" class="merr" role="alert"></div>
+        <div class="row"><button id="bkNow">Copier maintenant</button><span class="hint" id="bkResult" role="status"></span></div>
+        <div class="hint" id="bkInfo"></div>
+        <div class="hint">Chaque enregistrement du projet et chaque sauvegarde auto sont aussi écrits dans « Laser Studio » à l'intérieur de ce dossier (une clé USB, un autre disque, un dossier iCloud), après l'écriture principale et sans jamais la retarder. Si le dossier manque, l'enregistrement réussit quand même et un avertissement orange reste affiché jusqu'à la prochaine copie réussie. Les médias (morceaux audio) ne sont pas copiés : le paquet de projet sert à cela. Rien n'est jamais restauré tout seul depuis la copie : pour s'en servir, copiez le fichier dans le dossier des projets puis ouvrez-le avec « Ouvrir… ». Réglage de cette machine (pas du projet).</div>
+      </details>
     </section>
 
     <section data-help="reglages-midi">
@@ -3347,7 +3385,7 @@ async function pullNotices(last) {
 // fetch does, when nothing answered. Nothing is awaited before the
 // request leaves (the emergency stop goes through here).
 const API_SOURCES = [
-  [/^\/api\/project/, 'Projet'],
+  [/^\/api\/(project|backup)/, 'Projet'],
   [/^\/api\/(timeline|shows|media\/audio|timecode)/, 'Timeline'],
   [/^\/api\/(figures|media\/ilda|sdbank)/, 'Figures'],
   [/^\/api\/(midi|dmx|netin|external)/, 'MIDI'],
@@ -10894,10 +10932,17 @@ $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_dis
 // never arms the laser and never changes calibration or safety settings.
 let project = { name: 'Sans titre', file: null, modified: false, projects: [], recent: [], dir: '' };
 let projDialogMode = 'open';
+// A version opened as a copy (T-288): the name offered by « Enregistrer sous… ».
+let projSuggested = '';
 function showProject() {
-  $('projName').textContent = project.name + (project.modified ? ' •' : '');
+  $('projName').textContent = project.name + (project.modified ? ' •' : '') + (project.read_only ? ' (lecture seule)' : '');
   $('projName').classList.toggle('modified', project.modified);
+  // T-288: a project from a newer version: « Enregistrer » is off.
+  $('projName').classList.toggle('ro', !!project.read_only);
+  $('projName').title = project.read_only ? project.read_only_message : 'Projet ouvert (• = modifications non enregistrées)';
+  $('projMenu').querySelector('[data-proj="save"]').disabled = !!project.read_only;
   showAutosave(project.autosave);
+  showBackup(project.backup);
   $('projRecent').innerHTML = project.recent.length
     ? project.recent.map(n => `<button data-recent="${esc(n)}">${esc(n)}</button>`).join('') : '<div class="hint">Aucun projet récent : « Enregistrer » garde tout le show dans un projet.</div>';
   $('projRecent').querySelectorAll('[data-recent]').forEach(b => b.onclick = () => { $('projMenu').hidden = true; projOpen(b.dataset.recent); });
@@ -10949,8 +10994,10 @@ async function projPost(action, body) {
   project = await r.json();
   // Saved, opened or new: nothing unsaved any more (T-433).
   if (['save', 'save-as', 'open', 'new'].includes(action)) projectSaved();
+  if (action !== 'version-save') projSuggested = project.suggested_name || '';
   takeProjectModified(project.modified, at);
   showProject();
+  if (project.notice) flash(project.notice);
   if (project.warnings?.length) alert(project.warnings.join('\n'));
 }
 // Everything a project brings back, reloaded into the page.
@@ -10987,7 +11034,7 @@ function askUnsaved(what = unsavedWork({ figure: false })) {
         }
         // A saved show changes the project's files: the project is saved after it.
         if (tl || what.some(w => w.kind === 'project')) {
-          if (!project.file) { done(false); projDialog('save-as'); return; }
+          if (!project.file || project.read_only) { done(false); projDialog('save-as'); return; }
           await projPost('save');
         }
         done(true);
@@ -11016,7 +11063,7 @@ function projDialog(mode) {
   $('projDlgTitle').textContent = mode === 'open' ? 'Ouvrir…' : 'Enregistrer sous…';
   $('projOk').textContent = mode === 'open' ? 'Ouvrir' : 'Enregistrer';
   $('projDir').textContent = 'Dossier : ' + project.dir;
-  $('projPath').value = mode === 'open' ? '' : (project.file ? project.name : '');
+  $('projPath').value = mode === 'open' ? '' : (project.file && !project.read_only ? project.name : projSuggested);
   $('projError').textContent = '';
   $('projFiles').innerHTML = project.projects.length
     ? project.projects.map(n => `<button data-pfile="${esc(n)}">${esc(n)}</button>`).join('') : '<div class="hint">Aucun projet enregistré.</div>';
@@ -11048,6 +11095,7 @@ async function projAction(kind) {
   if (showMode && kind !== 'save') return flash(LOCKED_FR);
   await loadProject();
   if (kind === 'save') {
+    if (project.read_only) { flash(project.read_only_message); return; }
     if (!project.file) { projDialog('save-as'); return; }
     try { await projPost('save'); } catch (e) { alert(e.message); }
   } else if (kind === 'save-as') {
@@ -11057,6 +11105,8 @@ async function projAction(kind) {
   } else if (kind === 'new') {
     if (!await askUnsaved()) return;
     try { await projPost('new'); await afterOpen(); } catch (e) { alert(e.message); }
+  } else if (kind === 'version-save' || kind === 'versions') {
+    verDialog(kind === 'version-save');
   }
 }
 $('projBtn').onclick = e => { e.stopPropagation(); $('projMenu').hidden = !$('projMenu').hidden; if (!$('projMenu').hidden) loadProject(); };
@@ -11067,6 +11117,116 @@ $('projCancel').onclick = () => { $('projDialog').hidden = true; };
 $('projPath').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); projDialogOk(); } });
 loadProject();
 setInterval(loadProject, 2000);
+
+// ---------- named versions (T-288) ----------
+// « Enregistrer une version… » keeps the show as it is now under a free
+// name (versions/<projet>/ in the data folder); « Ouvrir comme copie »
+// opens one as a new unsaved project, never over the one it came from.
+// Nothing here arms the laser.
+async function loadVersions() {
+  try {
+    const v = await apiJson('GET', '/api/project/versions');
+    $('verProject').textContent = `Projet « ${v.project} » — ${v.versions.length} version${v.versions.length > 1 ? 's' : ''}`;
+    $('verList').innerHTML = v.versions.length ? v.versions.map(x => `<div class="ver" data-file="${esc(x.file)}">
+      <span class="n">${esc(x.name)}</span><span class="d">${esc(new Date(x.at_ms).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }))}</span>
+      <button data-ver-open>Ouvrir comme copie</button><button data-ver-del>Supprimer</button></div>`).join('')
+      : '<div class="hint">Aucune version : donnez un nom (« avant festival », « version courte ») et enregistrez.</div>';
+  } catch (e) { $('verError').textContent = e.message; }
+}
+function verDialog(focusName) {
+  if (showMode) return flash(LOCKED_FR);
+  $('verError').textContent = '';
+  $('verName').value = '';
+  $('verDialog').hidden = false;
+  loadVersions();
+  if (focusName) $('verName').focus();
+}
+async function verSave() {
+  const name = $('verName').value.trim();
+  if (!name) { $('verError').textContent = 'Donnez un nom à la version.'; return; }
+  try { await projPost('version-save', { name }); $('verName').value = ''; $('verError').textContent = ''; loadVersions(); }
+  catch (e) { $('verError').textContent = e.message; }
+}
+$('verSave').onclick = verSave;
+$('verName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); verSave(); } });
+$('verClose').onclick = () => { $('verDialog').hidden = true; };
+$('verList').addEventListener('click', async e => {
+  const row = e.target.closest('.ver'); if (!row) return;
+  const file = row.dataset.file, name = row.querySelector('.n').textContent;
+  if (e.target.matches('[data-ver-del]')) {
+    if (!confirm(`Supprimer la version « ${name} » ?`)) return;
+    try { await projPost('version-delete', { file }); loadVersions(); } catch (err) { $('verError').textContent = err.message; }
+  } else if (e.target.matches('[data-ver-open]')) {
+    $('verDialog').hidden = true;
+    if (!await askUnsaved()) return;
+    try { await projPost('version-open', { file }); await afterOpen(); } catch (err) { alert(err.message); }
+  }
+});
+
+// ---------- copy to a second location (T-450) ----------
+// The studio writes the copy on its own thread after each save and
+// autosave; the page shows the settings, the status line and, when the
+// disk space is low, an orange banner that can be closed.
+const goFr = b => (b / 1e9).toFixed(1).replace('.', ',') + ' Go';
+let spaceDismissed = '';
+function showBackup(b) {
+  if (!b) return;
+  const st = b.status, set = b.settings;
+  const el = $('backupStatus');
+  el.classList.toggle('err', !!st.warning);
+  if (st.error) { el.textContent = '⚠ Copie de sauvegarde indisponible'; el.title = st.error; }
+  else if (st.low_space) { el.textContent = '⚠ Espace disque faible'; el.title = st.low_space; }
+  else if (set.enabled && set.dir && st.last_backup_ms) { el.textContent = 'Copie ' + hhmm(st.last_backup_ms); el.title = `Dernière copie, dans ${set.dir}/${b.folder}`; }
+  else { el.textContent = ''; el.title = ''; }
+  el.hidden = !el.textContent;
+  if (document.activeElement !== $('bkEnabled')) $('bkEnabled').checked = set.enabled;
+  if (document.activeElement !== $('bkDir')) $('bkDir').value = set.dir || '';
+  $('bkNow').disabled = !(set.enabled && set.dir);
+  const parts = [];
+  if (!set.enabled) parts.push('Désactivée');
+  else if (!set.dir) parts.push('Aucun dossier choisi');
+  else {
+    parts.push(st.last_backup_ms ? 'Dernière copie : ' + hhmm(st.last_backup_ms) : 'Aucune copie encore');
+    if (st.backup_free_bytes != null) parts.push(goFr(st.backup_free_bytes) + ' libres');
+  }
+  $('bkInfo').textContent = parts.join(' — ');
+  const low = st.low_space || '';
+  $('spaceWarnText').textContent = low;
+  $('spaceWarn').hidden = !low || low === spaceDismissed;
+}
+$('spaceWarnClose').onclick = () => { spaceDismissed = $('spaceWarnText').textContent; $('spaceWarn').hidden = true; };
+async function backupPost(path, body) {
+  const r = await api('POST', path, body, { quiet: true });
+  if (!r.ok) throw new Error(await r.text());
+  const b = await r.json();
+  project.backup = b; showBackup(b);
+  return b;
+}
+$('bkEnabled').onchange = async e => {
+  $('bkError').textContent = '';
+  try { await backupPost('/api/backup', { enabled: e.target.checked }); } catch (err) { $('bkError').textContent = err.message; e.target.checked = !e.target.checked; }
+};
+$('bkDir').addEventListener('change', async e => {
+  $('bkError').textContent = '';
+  try { await backupPost('/api/backup', { dir: e.target.value.trim() || null }); } catch (err) { $('bkError').textContent = err.message; }
+});
+$('bkDir').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); e.target.blur(); } });
+$('bkNow').onclick = async () => {
+  $('bkResult').textContent = 'Copie en cours…';
+  try {
+    const before = await backupPost('/api/backup/now', {});
+    const was = before.status.last_backup_ms;
+    // Written by the studio's copy thread: wait for its result (10 s at most).
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 250));
+      const b = await apiJson('GET', '/api/backup', undefined, { quiet: true });
+      project.backup = b; showBackup(b);
+      if (b.status.last_backup_ms !== was && b.status.backup_ok) { $('bkResult').textContent = 'Copie faite à ' + hhmm(b.status.last_backup_ms); return; }
+      if (b.status.backup_ok === false) { $('bkResult').textContent = b.status.error; return; }
+    }
+    $('bkResult').textContent = 'Copie toujours en cours (dossier lent)';
+  } catch (e) { $('bkResult').textContent = e.message; }
+};
 
 // ---------- CRÉATION › Figures: figure editor (T-296) ----------
 // The figure is edited here, in the page; « Enregistrer » sends it to the
