@@ -83,7 +83,7 @@ impl Modulator {
     }
 
     /// Clamp every number to its range (NaN and infinities → defaults).
-    fn sanitized(mut self) -> Self {
+    pub(crate) fn sanitized(mut self) -> Self {
         let d = Self::default();
         let fin = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
         self.depth = fin(self.depth, d.depth).clamp(0.0, 1.0);

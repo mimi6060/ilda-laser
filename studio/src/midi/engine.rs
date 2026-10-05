@@ -1124,6 +1124,26 @@ mod tests {
         send_msgs(s, &[pad_msg(slug, r, c), MidiMsg::NoteOff { channel, note }]);
     }
 
+    /// T-146: Shift + the top four pad rows play the FX grid (a row per
+    /// line); the cue under the pad doesn't start.
+    #[test]
+    fn shift_and_the_top_four_rows_play_the_fx_grid() {
+        for slug in APC_PROFILES {
+            let mut s = builtin(slug);
+            send_msgs(&mut s, &[on(SHIFT)]);
+            tap_pad(&mut s, slug, 0, 1);
+            tap_pad(&mut s, slug, 2, 0);
+            send_msgs(&mut s, &[off(SHIFT)]);
+            assert_eq!((s.fx.active(0), s.fx.active(2)), (Some(1), Some(0)), "{slug}");
+            assert!(s.deck.active.is_empty(), "{slug}: no cue started");
+            send_msgs(&mut s, &[on(SHIFT)]);
+            tap_pad(&mut s, slug, 0, 1);
+            send_msgs(&mut s, &[off(SHIFT)]);
+            assert_eq!(s.fx.active(0), None, "{slug}: a second press stops it");
+            assert!(!s.gate.is_armed());
+        }
+    }
+
     #[test]
     fn default_layout_plays_pads_changes_pages_and_blacks_out() {
         for slug in APC_PROFILES {

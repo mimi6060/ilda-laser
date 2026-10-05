@@ -1621,6 +1621,39 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // The FX grid (T-146): the cells, what plays, the targets a cell's
+        // modulators may use, our starter effects. Playing goes through
+        // `/api/control` (`fx.*`); POST replaces the cells (an edit:
+        // recorded in the history, locked in show mode).
+        (Method::Get, "/api/fx") => {
+            let s = shared.lock().unwrap();
+            let targets: Vec<_> = s
+                .controls
+                .list()
+                .iter()
+                .filter_map(|d| {
+                    let (min, max) = crate::lfo::modulatable(&s.controls, &d.id)?;
+                    Some(json!({ "id": d.id, "label": d.label_fr, "group": d.group, "min": min, "max": max }))
+                })
+                .collect();
+            json_response(json!({
+                "cells": s.fx.grid().cells(),
+                "state": s.fx.view(),
+                "targets": targets,
+                "starter": crate::fx::starter_grid().cells(),
+                "max_modulators": crate::fx::MAX_CELL_MODULATORS,
+            }))
+        }
+        (Method::Post, "/api/fx") => match body::<FxCellsBody>(request) {
+            Ok(b) => {
+                let s = &mut *shared.lock().unwrap();
+                match s.fx.set_cells(b.cells, &s.controls) {
+                    Ok(()) => ok(),
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/audio/routes") => {
             let s = shared.lock().unwrap();
             let targets: Vec<_> = s
@@ -3480,6 +3513,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     });
     // T-285: undo / redo counts and labels; `rev` moves on every change.
     v["history"] = s.history.summary();
+    // T-146: what plays on the FX grid, each line's level now.
+    v["fx"] = s.fx.view();
     v
 }
 
@@ -3565,6 +3600,12 @@ fn lfo_positions(s: &Shared) -> Vec<serde_json::Value> {
     let t = s.now_s();
     let beat = s.tempo.beat_at(t);
     s.lfos.list().iter().map(|m| json!({ "phase": m.position(t, beat).1, "value": m.wave_at(t, beat) })).collect()
+}
+
+/// `POST /api/fx`: the grid's cells, line by line.
+#[derive(serde::Deserialize)]
+struct FxCellsBody {
+    cells: crate::fx::Cells,
 }
 
 fn body<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T, HttpResponse> {
@@ -4062,6 +4103,31 @@ mod tests {
         // Two projectors on one output: refused.
         venue["projectors"].as_array_mut().unwrap().push(json!({ "id": "p3", "output": "rec" }));
         assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 400);
+    }
+
+    /// T-146: the FX grid over the API: read, edited (recorded in the
+    /// history, refused in show mode), played through `/api/control`
+    /// (allowed in show mode), its state in `/api/frame`.
+    #[test]
+    fn the_fx_grid_over_the_api() {
+        let t = TestServer::start(false);
+        let g = js(&t.request("GET", "/api/fx", "").1);
+        assert_eq!(g["cells"].as_array().unwrap().len(), crate::fx::LINES);
+        assert_eq!(g["cells"][0][0]["name"], "Respiration");
+        assert!(g["targets"].as_array().unwrap().iter().all(|t| t["id"] != "transport.arm"));
+        let mut cells = g["cells"].clone();
+        cells[3][0] = json!({ "name": "Mon effet", "modifiers": { "size": 0.5 } });
+        assert_eq!(t.request("POST", "/api/fx", &json!({ "cells": cells }).to_string()).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Effet « Mon effet » ajouté");
+        let mut bad = cells.clone();
+        bad[3][1] = json!({ "name": "x", "modulators": [{ "target": "safety.estop" }] });
+        assert_eq!(t.request("POST", "/api/fx", &json!({ "cells": bad }).to_string()).0, 400);
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/fx", &json!({ "cells": cells }).to_string()).0, 423);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"fx.4.1","value":1}"#).0, 200);
+        let f = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(f["fx"]["lines"][3]["active"], 0);
+        assert_eq!(f["armed"], false);
     }
 
     /// T-285: edits are recorded, cue presses are not; undo restores a

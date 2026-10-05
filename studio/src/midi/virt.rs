@@ -676,7 +676,7 @@ mod tests {
         let l = layout(&s);
         assert_eq!(el_json(&l, "knob.dev.1")["map"]["target"], "master.brightness");
         assert_eq!(el_json(&l, "knob.dev.1")["map"]["mode"], "absolute");
-        assert_eq!(s.midi.store.get("apc40-mk2").unwrap().mappings.len(), 103, "built-in untouched");
+        assert_eq!(s.midi.store.get("apc40-mk2").unwrap().mappings.len(), 135, "built-in untouched");
 
         // A button on the Shift layer, an encoder in relative mode.
         learn::start(&mut s, "cue.multi", Value::Null, true, Instant::now()).unwrap();
