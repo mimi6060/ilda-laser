@@ -1330,6 +1330,12 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Err(e) => e,
         },
         (Method::Get, "/api/cues") => json_response(json!(shared.lock().unwrap().deck)),
+        // The grid's distinct tags (T-430), for the filter bar and the
+        // properties menu's suggestions.
+        (Method::Get, "/api/cues/tags") => {
+            let tags = shared.lock().unwrap().deck.tags();
+            json_response(json!(tags.into_iter().map(|(tag, count)| json!({ "tag": tag, "count": count })).collect::<Vec<_>>()))
+        }
         (Method::Post, "/api/cues/slot") => match body::<SlotRequest>(request) {
             Ok(req) => {
                 let mut s = shared.lock().unwrap();
@@ -4296,6 +4302,20 @@ mod tests {
         assert!(!BEAM3D_JS.contains("fetch("));
     }
 
+    /// T-431: every slider of the page (static, or in a template) has a
+    /// default to go back to: the registry's (`data-control`) or its own
+    /// `data-default`.
+    #[test]
+    fn every_slider_of_the_page_has_a_default() {
+        let mut n = 0;
+        for tag in INDEX_HTML.split('<').filter(|t| t.starts_with("input ") && t.contains(r#"type="range""#)) {
+            let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+            assert!(tag.contains("data-control=") || tag.contains("data-default="), "no default: <{tag}>");
+            n += 1;
+        }
+        assert!(n > 80, "{n} sliders found");
+    }
+
     /// T-404: the pattern API shows and leaves a pattern, never arms, and
     /// refuses unknown names and bad brightness values.
     #[test]
@@ -5837,6 +5857,22 @@ mod tests {
         // A cue's zones go through « Propriétés du cue ».
         assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-001","zones":[2,1,1,12]}"#).0, 200);
         assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["zones"], json!([1, 2]));
+    }
+
+    #[test]
+    fn cue_notes_tags_and_colour_go_through_the_slot_route() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        assert_eq!(js(&t.request("GET", "/api/cues/tags", "").1), json!([]));
+        let body = json!({ "id": "tunnels-001", "notes": "seulement avec brouillard", "tags": ["Intro", "intro", "calme"], "color": [255, 0, 64] });
+        assert_eq!(t.request("POST", "/api/cues/slot", &body.to_string()).0, 200);
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-002","tags":["INTRO"]}"#).0, 200);
+        let slot = &js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"];
+        assert_eq!((slot["notes"].as_str(), slot["tags"].clone(), slot["color"].clone()), (Some("seulement avec brouillard"), json!(["Intro", "calme"]), json!([255, 0, 64])));
+        assert_eq!(js(&t.request("GET", "/api/cues/tags", "").1), json!([{ "tag": "calme", "count": 1 }, { "tag": "Intro", "count": 2 }]));
+        // Undoable like every « Propriétés du cue » edit (T-285).
+        assert_eq!(t.request("POST", "/api/undo", "").0, 200);
+        assert_eq!(js(&t.request("GET", "/api/cues/tags", "").1), json!([{ "tag": "calme", "count": 1 }, { "tag": "Intro", "count": 1 }]));
     }
 
     #[test]

@@ -985,6 +985,23 @@ mod tests {
     }
 
     #[test]
+    fn cue_notes_tags_and_colour_mark_the_project_modified_and_come_back() {
+        let dir = temp_dir("cue-notes");
+        let shared = studio(&dir);
+        post(&shared, &dir, "save-as", json!({ "path": "Notes" })).unwrap();
+        assert!(!modified(&shared));
+        let id = shared.lock().unwrap().presets[0].id.clone();
+        let slot = crate::cues::CueSlot { notes: "seulement avec brouillard".into(), tags: vec!["Intro".into()], color: Some([255, 0, 64]), ..Default::default() };
+        shared.lock().unwrap().deck.set_slot(&id, slot.clone());
+        assert!(modified(&shared), "a note changes the fingerprint");
+        post(&shared, &dir, "save", json!({})).unwrap();
+        shared.lock().unwrap().deck.set_slot(&id, crate::cues::CueSlot::default());
+        post(&shared, &dir, "open", json!({ "path": "Notes.lsproj" })).unwrap();
+        assert_eq!(shared.lock().unwrap().deck.slot(&id), slot);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn save_change_open_restores_scenes_playlist_grid_and_more() {
         let dir = temp_dir("roundtrip");
         let shared = studio(&dir);

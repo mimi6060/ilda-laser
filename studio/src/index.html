@@ -588,6 +588,7 @@
   #tlAutoMsg.err { color: var(--warn); }
   #tlAutoMsg b { color: var(--ws-timeline); font-weight: 600; }
   #cueMenu { position: fixed; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 220px; box-shadow: 0 8px 24px #0008; }
+  #cueMenu { max-height: calc(100vh - 16px); overflow-y: auto; }
   #cueMenu[hidden] { display: none; }
   #cueMenu h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
   .tempo { display: flex; align-items: center; gap: 6px; }
@@ -825,7 +826,11 @@
   #posPad { position: relative; width: 140px; height: 140px; margin: 8px auto 0; border-radius: 8px; border: 1px solid var(--line); cursor: crosshair; touch-action: none;
     background: linear-gradient(var(--line), var(--line)) 50% 0 / 1px 100% no-repeat, linear-gradient(var(--line), var(--line)) 0 50% / 100% 1px no-repeat, var(--bg); }
   #posDot { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); pointer-events: none; }
-  #livePanel label[data-neutral] { cursor: context-menu; }
+  label[data-neutral] { cursor: context-menu; }
+  /* Saisie d'une valeur au clavier (T-431), Theme (T-299) tokens. */
+  .slider-entry { position: fixed; z-index: 30; height: 26px; padding: 2px 6px; font: inherit; font-size: 12px; text-align: right;
+    font-variant-numeric: tabular-nums; color: var(--text); background: var(--panel-2); border: 1px solid var(--accent); border-radius: 6px;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
   /* LIVE › Direct › Effets (T-142), Theme (T-299) tokens. */
   #fxBlock button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   #fxBlock .fx-hold { touch-action: none; user-select: none; }
@@ -1064,6 +1069,30 @@
   #pageMenu[hidden] { display: none; }
   #pageMenu h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
   #pageMenu button { display: block; width: 100%; text-align: left; margin-top: 4px; }
+  /* Notes, étiquettes et couleur de case (T-430), Theme (T-299) tokens. */
+  #cueMenu .cm-color input[type=color] { flex: none; width: 40px; padding: 0; }
+  #cueMenu .cm-color input.unset { opacity: .35; }
+  #cueMenu textarea { width: 100%; resize: vertical; font: inherit; font-size: 12px; }
+  .tag-edit { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .tag-edit input { flex: 1; min-width: 60px; border: 0; background: transparent; padding: 2px 4px; }
+  .tag-chip { display: inline-flex; align-items: center; gap: 2px; padding: 1px 4px 1px 8px; border-radius: 999px; font-size: 11px; background: color-mix(in srgb, var(--accent) 16%, var(--panel-2)); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+  .tag-chip button { padding: 0 4px; border: 0; background: none; color: var(--muted); font-size: 12px; line-height: 1; }
+  .cue-filter[hidden] { display: none; }
+  #cueFilterBtn { flex: none; border-radius: 999px; padding: 6px 12px; font-size: 12px; white-space: nowrap; }
+  #cueFilterBtn[aria-expanded="true"], #cueFilterBtn.on { border-color: var(--accent); color: var(--text); }
+  #cueFilterBtn .cf-badge { margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: 11px; background: var(--accent); color: var(--accent-ink); }
+  .cue-filter { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 0 0 8px; font-size: 12px; }
+  .cue-filter .cf-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .cue-filter .cf-tags button { border-radius: 999px; padding: 3px 10px; font-size: 12px; }
+  .cue-filter .cf-tags button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 22%, var(--panel)); }
+  .cue-filter .cf-tags button small { color: var(--muted); margin-left: 4px; }
+  .cue-filter input[type=search] { width: 170px; padding: 5px 8px; font-size: 12px; }
+  .cue-filter .seg button { padding: 4px 8px; font-size: 12px; }
+  .cue-filter > button { padding: 4px 10px; font-size: 12px; }
+  .cue-filter:not(.on) .cf-count, .cue-filter:not(.on) #cueFilterClear { visibility: hidden; }
+  .cue.dimmed { opacity: .28; filter: saturate(.4); }
+  .cue.dimmed:hover { opacity: .6; }
+  .cue .note { position: absolute; bottom: 5px; left: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 4px var(--warn); pointer-events: none; }
   #cueMenuUser[hidden] { display: none; }
   #cueMenuUser .row input[type=text] { flex: 1; min-width: 0; }
   #cueMenuUser .row input[type=color] { flex: none; width: 40px; padding: 0; }
@@ -1436,9 +1465,9 @@
     </div>
     <div class="render3d" id="render3d" hidden>
       <div><label title="Aide à la conception, pas une mesure photométrique">Exposition <span class="v" id="r3exposureV"></span></label>
-        <input type="range" id="r3exposure" min="10" max="400" step="5" title="Aide à la conception, pas une mesure photométrique"></div>
-      <div><label>Brume : densité <span class="v" id="r3hazeV"></span></label><input type="range" id="r3haze" min="0" max="100"></div>
-      <div><label>Lumière de salle <span class="v" id="r3roomLightV"></span></label><input type="range" id="r3roomLight" min="0" max="100"></div>
+        <input type="range" id="r3exposure" data-default="100" min="10" max="400" step="5" title="Aide à la conception, pas une mesure photométrique"></div>
+      <div><label>Brume : densité <span class="v" id="r3hazeV"></span></label><input type="range" id="r3haze" data-default="50" min="0" max="100"></div>
+      <div><label>Lumière de salle <span class="v" id="r3roomLightV"></span></label><input type="range" id="r3roomLight" data-default="10" min="0" max="100"></div>
       <label class="check"><input type="checkbox" id="r3sheets"> Nappes</label>
       <label class="check"><input type="checkbox" id="r3spots"> Impacts</label>
       <label class="check"><input type="checkbox" id="r3bloom"> Halo</label>
@@ -1485,7 +1514,7 @@
         <button role="tab" disabled title="Modificateurs par calque : bientôt (les gradateurs des calques sont sous la grille de cues)">Calque</button>
         <button role="tab" disabled title="Modificateurs par cue : bientôt">Cue</button>
       </div>
-      <div class="hint" style="margin:6px 0 0">Double-clic sur un curseur, ou clic droit sur son nom : valeur neutre.</div>
+      <div class="hint" style="margin:6px 0 0">Double-clic sur un curseur : taper une valeur · clic droit ou double-clic sur son nom : valeur neutre · Maj + glisser : réglage fin.</div>
 
       <h4 class="dblk">Taille</h4>
       <label>Taille <span class="v" id="mSizeV"></span></label>
@@ -1561,7 +1590,7 @@
           <button data-step="3">1</button><button data-step="4">2</button><button data-step="5">4</button>
         </div>
         <label>Étalement <span class="v" id="colorSpreadV"></span></label>
-        <input type="range" id="colorSpread" min="0" max="400" value="100" data-control="master.color.spread" title="master.color.spread">
+        <input type="range" id="colorSpread" data-display-k="0.01" min="0" max="400" value="100" data-control="master.color.spread" title="master.color.spread">
         <label>Chenillard</label>
         <div class="seg" id="chaseSpreads" data-control="master.color.chase_spread"><button data-cs="0">Tout</button><button data-cs="1">Par trait</button><button data-cs="2">Par point</button></div>
       </div>
@@ -1611,7 +1640,7 @@
     <section data-panel="lfo" id="arPanel" data-help="live-modulateurs">
       <h2>Liens audio <button id="arAdd" title="Ajouter un lien audio (la musique pilote un réglage)" style="padding:4px 8px;font-size:11px">+ Lien audio</button></h2>
       <label title="0 = seuls les modulateurs (temps), 100 = seuls les liens audio, au milieu les deux en plein">Temps ↔ Audio <span class="v" id="arMixV"></span></label>
-      <input type="range" id="arMix" min="0" max="100" value="50">
+      <input type="range" id="arMix" data-default="50" min="0" max="100" value="50">
       <div id="arList"></div>
       <div class="empty-state" id="arHint"><p>Un lien audio fait réagir un réglage à la musique : basses → taille, kick → luminosité, montée → vitesse… (LIVE › Musique doit écouter).</p>
         <div class="row"><button type="button" id="arHintAdd">Ajouter un lien audio</button></div></div>
@@ -1674,16 +1703,16 @@
         <div id="musNativeSettings">
           <div class="check"><input type="checkbox" id="musAutoGain"><span>Gain automatique</span></div>
           <label>Gain manuel <span class="v" id="musGainV"></span></label>
-          <input type="range" id="musGain" min="-40" max="40" step="1" value="0">
+          <input type="range" id="musGain" data-default="0" min="-40" max="40" step="1" value="0">
           <label>Seuil de silence <span class="v" id="musSilenceV"></span></label>
-          <input type="range" id="musSilence" min="-100" max="-20" step="1" value="-60">
+          <input type="range" id="musSilence" data-default="-60" min="-100" max="-20" step="1" value="-60">
           <label>Sensibilité des coups <span class="v" id="musSensV"></span></label>
-          <input type="range" id="musSens" min="0" max="100" step="1" value="48">
+          <input type="range" id="musSens" data-default="48" min="0" max="100" step="1" value="48">
           <div class="hint">Réglages de l'analyse native (gardés dans audio.json).</div>
         </div>
         <div id="musBrowserSettings">
           <label>Gain du navigateur <span class="v" id="gainV"></span></label>
-          <input type="range" id="gain" min="0.5" max="8" step="0.1" value="2">
+          <input type="range" id="gain" data-default="2" min="0.5" max="8" step="0.1" value="2">
         </div>
       </details>
 
@@ -1691,7 +1720,7 @@
       <details id="musSafety" open>
         <summary>Sécurité audio</summary>
         <label for="musFlash">Flashs max / s <span class="v" id="musFlashV"></span></label>
-        <input type="range" id="musFlash" min="0.5" max="10" step="0.5" value="10" title="Les liens audio vers la luminosité ne font jamais plus de flashs par seconde (10 au plus) ; le limiteur de stroboscope s'applique ensuite">
+        <input type="range" id="musFlash" data-default="10" min="0.5" max="10" step="0.5" value="10" title="Les liens audio vers la luminosité ne font jamais plus de flashs par seconde (10 au plus) ; le limiteur de stroboscope s'applique ensuite">
         <label>En cas de silence</label>
         <div class="seg" id="musSilAct" role="radiogroup" aria-label="En cas de silence">
           <button data-act="keep" role="radio" title="Le look reste, sans modulation audio">Garder</button>
@@ -1721,11 +1750,11 @@
 
       <div class="check"><input type="checkbox" id="aOn"><span>Le laser réagit à la musique</span></div>
       <label>Taille suit les basses <span class="v" id="aSizeV"></span></label>
-      <input type="range" id="aSize" min="0" max="100">
+      <input type="range" id="aSize" data-default="50" min="0" max="100">
       <label>Rotation suit les basses <span class="v" id="aRotV"></span></label>
-      <input type="range" id="aRot" min="0" max="100">
+      <input type="range" id="aRot" data-default="0" min="0" max="100">
       <label>Flash sur le beat <span class="v" id="aFlashV"></span></label>
-      <input type="range" id="aFlash" min="0" max="100">
+      <input type="range" id="aFlash" data-default="0" min="0" max="100">
       <div class="check"><input type="checkbox" id="aColor"><span>Change de couleur à chaque beat</span></div>
     </section>
 
@@ -1837,6 +1866,16 @@
       <label class="lock-edit" title="Enregistre aussi les modificateurs maîtres du moment (taille, position, rotation, couleur) avec le cue"><input type="checkbox" id="cueStoreMaster"> Avec les modificateurs maîtres</label>
       <button id="gridMenuBtn" class="lock-edit" aria-expanded="false" title="Taille de grille, pages, réorganiser les cues">Pages…</button>
     </div>
+    <div class="cue-filter" id="cueFilter" aria-label="Filtrer la grille" title="Atténue les cases qui ne correspondent pas ; elles restent à leur place et se déclenchent toujours" hidden>
+      <span class="hint" style="margin:0">Filtrer :</span>
+      <div class="cf-tags" id="cueFilterTags"></div>
+      <input type="search" id="cueFilterText" placeholder="nom, note, étiquette…" autocomplete="off" spellcheck="false" aria-label="Filtrer par nom, note ou étiquette">
+      <div class="seg" id="cueFilterMode" title="Plusieurs étiquettes cochées : la case doit les avoir toutes, ou au moins une">
+        <button data-any="0">Toutes</button><button data-any="1">Au moins une</button>
+      </div>
+      <button id="cueFilterClear" title="Retire le filtre">Tout afficher</button>
+      <span class="hint cf-count" id="cueFilterCount" role="status" style="margin:0"></span>
+    </div>
     <div class="grid-menu lock-edit" id="gridMenu" hidden>
       <span class="hint" style="margin:0">Taille de grille</span>
       <label>Colonnes <input type="number" id="gridCols" min="4" max="12"></label>
@@ -1863,9 +1902,9 @@
       <span class="sep"></span>
       <label title="Le vert paraît bien plus lumineux que le rouge et le bleu dans la fumée : baisse le vert pour équilibrer. Réglage du contenu, distinct des Couleurs de la sortie (calibration du projecteur) ; ne fait que baisser, avant toute la chaîne de sécurité."><input type="checkbox" id="festBal"> Équilibre perçu</label>
       <span class="fest-gains" id="festGains" hidden>
-        <label title="Gain rouge">R <input type="range" id="festGainR" min="0" max="1" step="0.05"></label>
-        <label title="Gain vert">V <input type="range" id="festGainG" min="0" max="1" step="0.05"></label>
-        <label title="Gain bleu">B <input type="range" id="festGainB" min="0" max="1" step="0.05"></label>
+        <label title="Gain rouge">R <input type="range" id="festGainR" data-default="1" min="0" max="1" step="0.05"></label>
+        <label title="Gain vert">V <input type="range" id="festGainG" data-default="1" min="0" max="1" step="0.05"></label>
+        <label title="Gain bleu">B <input type="range" id="festGainB" data-default="1" min="0" max="1" step="0.05"></label>
         <button id="festPreset" title="Vert 0,6 · rouge 1 · bleu 1">Préréglage</button>
       </span>
     </div>
@@ -1873,6 +1912,7 @@
     <div class="cue-tabs-row">
       <div class="cue-tabs" id="cueTabs" role="tablist" aria-label="Pages de cues"></div>
       <button id="cuePageAdd" class="lock-edit" title="Nouvelle page utilisateur (clic droit sur une page : renommer, supprimer)">+ Page</button>
+      <button id="cueFilterBtn" aria-expanded="false" aria-controls="cueFilter" title="Filtrer la grille par étiquette, nom ou note (les cases restent en place)">Filtrer<span class="cf-badge" id="cueFilterBadge" hidden></span></button>
     </div>
     <div class="cue-scroll">
       <div class="cues" id="cues"></div>
@@ -1907,8 +1947,8 @@
           <select id="tlSong" class="lock-edit" title="Morceau du show (fichiers de studio-data/media/audio)"><option value="">Aucun morceau</option></select>
           <button id="tlImport" class="lock-edit" title="WAV, MP3, AIFF ou FLAC : copié dans studio-data/media/audio, jamais ailleurs">Importer un morceau…</button>
           <input type="file" id="tlImportFile" accept=".wav,.mp3,.aif,.aiff,.flac" hidden>
-          <label class="tl-knob lock-edit" title="Décalage du son par rapport au laser (±500 ms) : positif = le son plus tard, pour compenser la latence">Décalage <input type="range" id="tlOffset" min="-500" max="500" step="5" value="0"> <span id="tlOffsetV">0 ms</span></label>
-          <label class="tl-knob lock-edit" title="Volume du morceau">Volume <input type="range" id="tlGain" min="0" max="100" step="1" value="100"> <span id="tlGainV">100 %</span></label>
+          <label class="tl-knob lock-edit" title="Décalage du son par rapport au laser (±500 ms) : positif = le son plus tard, pour compenser la latence">Décalage <input type="range" id="tlOffset" data-default="0" min="-500" max="500" step="5" value="0"> <span id="tlOffsetV">0 ms</span></label>
+          <label class="tl-knob lock-edit" title="Volume du morceau">Volume <input type="range" id="tlGain" data-default="100" min="0" max="100" step="1" value="100"> <span id="tlGainV">100 %</span></label>
           <span class="hint" id="tlSongStatus"></span>
         </div>
         <div class="tl-wave" id="tlWaveBox" title="Forme d'onde : cliquer pour se placer"><canvas id="tlWave"></canvas><div id="tlWaveEmpty">Pas de morceau</div><div id="tlWaveHead"></div></div>
@@ -2001,6 +2041,10 @@
       <span id="tlScanRow" hidden>
         <label class="tl-knob" title="Préréglage de balayage des événements sélectionnés">Balayage <select id="tlScan"></select></label>
       </span>
+      <span id="tlNoteRow" hidden>
+        <label class="tl-knob" title="Notes de l'événement sélectionné (info-bulle sur la timeline)">Notes <input type="text" id="tlEvNotes" maxlength="500" placeholder="ex. avec brouillard"></label>
+        <label class="tl-knob" title="Étiquettes, séparées par des virgules (8 au plus)">Étiquettes <input type="text" id="tlEvTags" maxlength="200" placeholder="intro, drop"></label>
+      </span>
       <div class="hint" id="tlEdMsg"></div>
     </div>
     <div class="tl-lib">
@@ -2055,10 +2099,10 @@
         <label>Effet</label>
         <select id="gen"></select>
         <label>Nombre <span class="v" id="gCountV"></span></label>
-        <input type="range" id="gCount" min="1" max="32">
+        <input type="range" id="gCount" data-default="8" min="1" max="32">
         <div class="hint" id="gCountH" hidden></div>
         <label>Forme A <span class="v" id="gAV"></span></label>
-        <input type="range" id="gA" min="0" max="10" step="0.01">
+        <input type="range" id="gA" data-default="3" min="0" max="10" step="0.01">
         <div class="hint" id="gAH" hidden></div>
         <div id="gChaseRow" hidden>
           <label>Forme du chaser</label>
@@ -2084,7 +2128,7 @@
           </select>
         </div>
         <label>Forme B <span class="v" id="gBV"></span></label>
-        <input type="range" id="gB" min="-1" max="3" step="0.05">
+        <input type="range" id="gB" data-default="2" min="-1" max="3" step="0.05">
         <div class="hint" id="gBH" hidden></div>
         <div id="gCrossRow" hidden>
           <div class="check"><input type="checkbox" id="gCrossFlash"><span>Flash blanc au croisement</span></div>
@@ -2095,7 +2139,7 @@
           <div class="hint">Tourne d’un côté (360°/côtés) à chaque pas, immobile entre deux ; Pas par temps règle la cadence. Se voit mieux en Dégradé ou Arc-en-ciel.</div>
         </div>
         <label>Vitesse <span class="v" id="gSpeedV"></span></label>
-        <input type="range" id="gSpeed" min="0" max="4" step="0.05">
+        <input type="range" id="gSpeed" data-default="1" min="0" max="4" step="0.05">
         <label>Mode couleur</label>
         <select id="gMode">
           <option value="solid">Couleur unie</option>
@@ -2124,7 +2168,7 @@
             <option value="4">4</option><option value="8">8</option>
           </select>
           <label>Gate (temps) <span class="v" id="gGateV"></span></label>
-          <input type="range" id="gGate" min="0" max="1" step="0.05" value="0" title="0 = pas de gate">
+          <input type="range" id="gGate" data-default="0" min="0" max="1" step="0.05" value="0" title="0 = pas de gate">
           <label>Sens</label>
           <select id="gDir"><option value="1">→</option><option value="-1">←</option><option value="0">↔ aller-retour</option></select>
           <label>Groupes</label>
@@ -2151,11 +2195,11 @@
       <label>Couleur</label>
       <input type="color" id="color" value="#00ff00">
       <label>Taille du look <span class="v" id="scaleV"></span></label>
-      <input type="range" id="scale" min="5" max="100">
+      <input type="range" id="scale" data-default="50" min="5" max="100">
       <label>Rotation du look <span class="v" id="rotV"></span></label>
-      <input type="range" id="rot" min="-360" max="360" step="5">
+      <input type="range" id="rot" data-default="0" min="-360" max="360" step="5">
       <label>Luminosité du look <span class="v" id="brightV"></span></label>
-      <input type="range" id="bright" min="0" max="100">
+      <input type="range" id="bright" data-default="50" min="0" max="100">
     </section>
 
     <section data-cpanel="look" id="rhythmPanel" data-help="creation-look">
@@ -2165,14 +2209,14 @@
         <option value="off">Aucun</option><option value="beat">Temps</option><option value="beat_and_offbeat">Temps + contretemps</option>
       </select>
       <label>Durée gate (temps) <span class="v" id="rGateLenV"></span></label>
-      <input type="range" id="rGateLen" min="0.05" max="0.5" step="0.05" title="Le look s'allume sur le temps et reste allumé ce temps-là">
+      <input type="range" id="rGateLen" data-default="0.2" min="0.05" max="0.5" step="0.05" title="Le look s'allume sur le temps et reste allumé ce temps-là">
       <div class="check"><input type="checkbox" id="rDecay"><span>Décroissance (s'éteint en fondu au lieu d'être coupé)</span></div>
       <label>Strobe</label>
       <select id="rStrobe">
         <option value="0">Aucun</option><option value="2">1/2 temps</option><option value="4">1/4 temps</option><option value="8">1/8 temps</option>
       </select>
       <label>Rapport cyclique <span class="v" id="rDutyV"></span></label>
-      <input type="range" id="rDuty" min="30" max="50" step="5">
+      <input type="range" id="rDuty" data-default="40" min="30" max="50" step="5">
       <div class="hint">Calé sur le tempo, pour tous les looks. Maintenir <b>S</b> (Alt+S en LIVE) : strobe 1/4 tant que la touche est enfoncée.
         Un strobe plus rapide que 4 éclairs/s est coupé par le limiteur de sécurité après 5 s.</div>
     </section>
@@ -2273,7 +2317,7 @@
       <label for="figText">Texte (outil Texte)</label>
       <input type="text" id="figText" maxlength="64" value="LASER">
       <label>Taille du texte <span class="v" id="figTextSizeV"></span></label>
-      <input type="range" id="figTextSize" min="5" max="100" value="30">
+      <input type="range" id="figTextSize" data-default="30" min="5" max="100" value="30">
       <label for="figSides">Côtés (outil Polygone)</label>
       <input type="number" id="figSides" min="3" max="24" value="5">
       <h2 style="margin-top:14px">Animation</h2>
@@ -2388,9 +2432,9 @@
       </div>
       <div class="imp-right">
         <label>Simplification <span class="v" id="impSimplifyV"></span></label>
-        <input type="range" id="impSimplify" min="0" max="100" value="20">
+        <input type="range" id="impSimplify" data-default="20" min="0" max="100" value="20">
         <label>Taille <span class="v" id="impSizeV"></span></label>
-        <input type="range" id="impSize" min="10" max="100" value="90">
+        <input type="range" id="impSize" data-default="90" min="10" max="100" value="90">
         <label for="impBudget">Budget de points (par image)</label>
         <input type="number" id="impBudget" min="100" max="10000" step="50" value="750">
         <label for="impColor">Couleur (noir du SVG, image en une couleur)</label>
@@ -2407,17 +2451,17 @@
             <option value="colors">Couleurs</option>
           </select>
           <label>Seuil <span class="v" id="impThresholdV"></span></label>
-          <input type="range" id="impThreshold" min="1" max="254" value="128">
+          <input type="range" id="impThreshold" data-default="128" min="1" max="254" value="128">
           <div class="check"><input type="checkbox" id="impAuto" checked><span>Seuil automatique</span></div>
           <div class="check"><input type="checkbox" id="impInvert"><span>Inverser (tracer le clair)</span></div>
           <label>Lissage <span class="v" id="impSmoothV"></span></label>
-          <input type="range" id="impSmooth" min="0" max="5" value="2">
+          <input type="range" id="impSmooth" data-default="2" min="0" max="5" value="2">
           <label>Nombre de couleurs <span class="v" id="impColorsV"></span></label>
-          <input type="range" id="impColors" min="1" max="6" value="3">
+          <input type="range" id="impColors" data-default="3" min="1" max="6" value="3">
           <label>Résolution de travail <span class="v" id="impResV"></span></label>
-          <input type="range" id="impRes" min="64" max="800" step="16" value="320">
+          <input type="range" id="impRes" data-default="320" min="64" max="800" step="16" value="320">
           <label>Taches ignorées <span class="v" id="impMinV"></span></label>
-          <input type="range" id="impMin" min="0" max="40" value="4">
+          <input type="range" id="impMin" data-default="4" min="0" max="40" value="4">
         </div>
         <label for="impName">Nom de la figure</label>
         <input type="text" id="impName" maxlength="64" autocomplete="off">
@@ -2486,12 +2530,12 @@
           <div class="row"><button id="sfLoosenOk">Confirmer l'assouplissement</button><button id="sfLoosenCancel">Annuler</button></div>
         </div>
         <div class="hint sf-error" id="sfError"></div>
-        <label>Strobe max (Hz) <span class="v" id="sfHzV"></span></label><input type="range" id="sfHz" min="0.5" max="4" step="0.5">
-        <label>Rafale max (s) <span class="v" id="sfBurstV"></span></label><input type="range" id="sfBurst" min="0" max="5" step="0.5">
-        <label>Horizon <span class="v" id="sfFloorV"></span></label><input type="range" id="sfFloor" min="-1" max="1" step="0.05">
+        <label>Strobe max (Hz) <span class="v" id="sfHzV"></span></label><input type="range" id="sfHz" data-default="4" min="0.5" max="4" step="0.5">
+        <label>Rafale max (s) <span class="v" id="sfBurstV"></span></label><input type="range" id="sfBurst" data-default="5" min="0" max="5" step="0.5">
+        <label>Horizon <span class="v" id="sfFloorV"></span></label><input type="range" id="sfFloor" data-default="0" min="-1" max="1" step="0.05">
         <label class="check"><input type="checkbox" id="sfLines"> L'horizon coupe aussi lignes, textes et nappes</label>
-        <label>Rampe de l'horizon <span class="v" id="sfRampV"></span></label><input type="range" id="sfRamp" min="0" max="0.5" step="0.05">
-        <label>Luminosité sous l'horizon <span class="v" id="sfLevelV"></span></label><input type="range" id="sfLevel" min="0" max="1" step="0.05">
+        <label>Rampe de l'horizon <span class="v" id="sfRampV"></span></label><input type="range" id="sfRamp" data-default="0.1" min="0" max="0.5" step="0.05">
+        <label>Luminosité sous l'horizon <span class="v" id="sfLevelV"></span></label><input type="range" id="sfLevel" data-default="0" data-display-k="100" min="0" max="1" step="0.05">
         <div class="hint">Au-delà de 4 Hz, un strobe est limité à 5 s puis la sortie reste allumée en continu (au moins 2 s). Les faisceaux sous l'horizon sont toujours éteints ; cochée, la case éteint aussi tout le reste sous l'horizon (fondu sur la rampe, au-dessus).</div>
         <div class="sf-sub">Zones de projection</div>
         <div id="sfZones"></div>
@@ -2500,10 +2544,10 @@
         <div class="hint" id="sfDrawHint" hidden>Cliquez les sommets sur l'aperçu 2D, puis « Terminer ».</div>
         <div class="hint">Masquer : rien n'est allumé dans la zone, même un trait qui la traverse. Atténuer : luminosité réduite au pourcentage indiqué. Public : là où se trouve le public ; hors « Balayage public », rien n'y est allumé, quel que soit le type ; une zone Public atténuée garde 50 % au plus (10 % recommandé). Coordonnées de sortie, de -1 à 1 (y vers le haut).</div>
         <div class="sf-sub">Couleurs</div>
-        <label>Gain rouge <span class="v" id="sfGainRV"></span></label><input type="range" id="sfGainR" min="0" max="1" step="0.01">
-        <label>Gain vert <span class="v" id="sfGainGV"></span></label><input type="range" id="sfGainG" min="0" max="1" step="0.01">
-        <label>Gain bleu <span class="v" id="sfGainBV"></span></label><input type="range" id="sfGainB" min="0" max="1" step="0.01">
-        <label>Niveau minimum des diodes <span class="v" id="sfMinV"></span></label><input type="range" id="sfMin" min="0" max="0.5" step="0.01">
+        <label>Gain rouge <span class="v" id="sfGainRV"></span></label><input type="range" id="sfGainR" data-default="1" data-display-k="100" min="0" max="1" step="0.01">
+        <label>Gain vert <span class="v" id="sfGainGV"></span></label><input type="range" id="sfGainG" data-default="1" data-display-k="100" min="0" max="1" step="0.01">
+        <label>Gain bleu <span class="v" id="sfGainBV"></span></label><input type="range" id="sfGainB" data-default="1" data-display-k="100" min="0" max="1" step="0.01">
+        <label>Niveau minimum des diodes <span class="v" id="sfMinV"></span></label><input type="range" id="sfMin" data-default="0" data-display-k="100" min="0" max="0.5" step="0.01">
         <div class="hint">Sécurité : limites. Sorties : rendu des couleurs (balance des blancs, courbes et retard couleur dans RÉGLAGES › Sorties et projecteurs).</div>
         <div class="sf-sub">Garde anti-point fixe</div>
         <label for="sfDwellProfile">Garde anti-point fixe</label>
@@ -2512,9 +2556,9 @@
           <option value="beams">Faisceaux (faisceaux fixes permis au-dessus de l'horizon)</option>
           <option value="off">Désactivée (aperçu seulement : laser armé = Faisceaux)</option>
         </select>
-        <label>Taille minimum (%) <span class="v" id="sfDwellMinV"></span></label><input type="range" id="sfDwellMin" min="2" max="50" step="1">
-        <label>Plafond par case, strict (%) <span class="v" id="sfDwellCapV"></span></label><input type="range" id="sfDwellCap" min="5" max="50" step="1">
-        <label>Plafond par case, faisceaux (%) <span class="v" id="sfDwellBeamsV"></span></label><input type="range" id="sfDwellBeams" min="10" max="80" step="1">
+        <label>Taille minimum (%) <span class="v" id="sfDwellMinV"></span></label><input type="range" id="sfDwellMin" data-default="5" min="2" max="50" step="1">
+        <label>Plafond par case, strict (%) <span class="v" id="sfDwellCapV"></span></label><input type="range" id="sfDwellCap" data-default="25" min="5" max="50" step="1">
+        <label>Plafond par case, faisceaux (%) <span class="v" id="sfDwellBeamsV"></span></label><input type="range" id="sfDwellBeams" data-default="60" min="10" max="80" step="1">
         <div class="hint">Atténue puis éteint ce qui concentre trop de lumière au même endroit : une figure plus petite que la taille minimum (taille 0, zoom, effet figé), ou une case de la grille (32 × 32) qui reste allumée trop longtemps sur 250 ms (point fixe, balayage trop lent, coins). En Faisceaux, les règles strictes s'appliquent sous l'horizon et dans les zones Public ; en balayage public, partout. Les cases concernées sont en orange sur l'aperçu.</div>
         <div class="hint sf-warn" id="sfDwellWarn">⚠ Cette garde ne protège pas contre une panne de scanner : si un miroir se bloque, le logiciel ne le voit pas (aucun retour de position depuis l'interface). Seul un circuit « scan-fail » matériel dans le projecteur peut couper le faisceau à temps.</div>
         <div class="hint" id="dwellInfo"></div>
@@ -2581,16 +2625,16 @@
     <section data-help="reglages-calibration">
       <details>
         <summary>Calibration</summary>
-        <label>Décalage X <span class="v" id="cOxV"></span></label><input type="range" id="cOx" min="-100" max="100">
-        <label>Décalage Y <span class="v" id="cOyV"></span></label><input type="range" id="cOy" min="-100" max="100">
-        <label>Échelle X <span class="v" id="cSxV"></span></label><input type="range" id="cSx" min="10" max="200">
-        <label>Échelle Y <span class="v" id="cSyV"></span></label><input type="range" id="cSy" min="10" max="200">
-        <label>Rotation <span class="v" id="cRotV"></span></label><input type="range" id="cRot" min="-180" max="180">
+        <label>Décalage X <span class="v" id="cOxV"></span></label><input type="range" id="cOx" data-default="0" data-display-k="0.01" min="-100" max="100">
+        <label>Décalage Y <span class="v" id="cOyV"></span></label><input type="range" id="cOy" data-default="0" data-display-k="0.01" min="-100" max="100">
+        <label>Échelle X <span class="v" id="cSxV"></span></label><input type="range" id="cSx" data-default="100" data-display-k="0.01" min="10" max="200">
+        <label>Échelle Y <span class="v" id="cSyV"></span></label><input type="range" id="cSy" data-default="100" data-display-k="0.01" min="10" max="200">
+        <label>Rotation <span class="v" id="cRotV"></span></label><input type="range" id="cRot" data-default="0" min="-180" max="180">
         <div class="hint">S'applique à tout ce qui sort, et reste enregistrée.</div>
         <div class="tp-sub">Mires</div>
         <label for="tpSelect">Mire</label>
         <select id="tpSelect"><option value="">Aucune</option></select>
-        <label>Luminosité de la mire <span class="v" id="tpBrightV"></span></label><input type="range" id="tpBright" min="0" max="100" step="1" value="20">
+        <label>Luminosité de la mire <span class="v" id="tpBrightV"></span></label><input type="range" id="tpBright" data-default="20" min="0" max="100" step="1" value="20">
         <div class="row"><button id="tpExit" disabled>Quitter la mire</button></div>
         <div class="hint">Une mire remplace la sortie jusqu'à « Quitter la mire » : les cues restent actifs et la timeline est en pause. Elle passe par la calibration ci-dessus et par toute la sécurité (zones, horizon, plafonds de puissance) ; elle n'arme jamais le laser.</div>
       </details>
@@ -2889,10 +2933,10 @@
         <div class="row"><button id="pwLoosenOk">Confirmer la hausse</button><button id="pwLoosenCancel">Annuler</button></div>
       </div>
       <div class="hint sf-error" id="pwError"></div>
-      <label>Puissance max (%) <span class="v" id="pwPowerV"></span></label><input type="range" id="pwPower" min="0" max="100" step="1">
-      <label>Rouge max (%) <span class="v" id="pwRedV"></span></label><input type="range" id="pwRed" min="0" max="100" step="1">
-      <label>Vert max (%) <span class="v" id="pwGreenV"></span></label><input type="range" id="pwGreen" min="0" max="100" step="1">
-      <label>Bleu max (%) <span class="v" id="pwBlueV"></span></label><input type="range" id="pwBlue" min="0" max="100" step="1">
+      <label>Puissance max (%) <span class="v" id="pwPowerV"></span></label><input type="range" id="pwPower" data-default="100" min="0" max="100" step="1">
+      <label>Rouge max (%) <span class="v" id="pwRedV"></span></label><input type="range" id="pwRed" data-default="100" min="0" max="100" step="1">
+      <label>Vert max (%) <span class="v" id="pwGreenV"></span></label><input type="range" id="pwGreen" data-default="100" min="0" max="100" step="1">
+      <label>Bleu max (%) <span class="v" id="pwBlueV"></span></label><input type="range" id="pwBlue" data-default="100" min="0" max="100" step="1">
       <div class="hint">Plafond de cette sortie, appliqué en dernier à tout ce qui sort (cues, MIDI, LFO, audio, timeline) : chaque couleur est écrêtée à son maximum, puis tout est multiplié par la puissance max. Ces réglages appartiennent à cette machine (pas au projet). Baisser s'applique tout de suite ; relever demande une confirmation, laser désarmé.</div>
       <div class="sf-sub">Balayage de la sortie</div>
       <div id="oscanBox">
@@ -2919,11 +2963,11 @@
         </div>
         <div class="hint sf-error" id="ocError"></div>
         <div class="sf-sub" style="margin-top:4px">Balance des blancs</div>
-        <label>Rouge (%) <span class="v" id="ocWbRV"></span></label><input type="range" id="ocWbR" min="0" max="100" step="1">
-        <label>Vert (%) <span class="v" id="ocWbGV"></span></label><input type="range" id="ocWbG" min="0" max="100" step="1">
-        <label>Bleu (%) <span class="v" id="ocWbBV"></span></label><input type="range" id="ocWbB" min="0" max="100" step="1">
+        <label>Rouge (%) <span class="v" id="ocWbRV"></span></label><input type="range" id="ocWbR" data-default="100" min="0" max="100" step="1">
+        <label>Vert (%) <span class="v" id="ocWbGV"></span></label><input type="range" id="ocWbG" data-default="100" min="0" max="100" step="1">
+        <label>Bleu (%) <span class="v" id="ocWbBV"></span></label><input type="range" id="ocWbB" data-default="100" min="0" max="100" step="1">
         <div id="ocCurves"></div>
-        <label>Retard couleur (points) <span class="v" id="ocDelayV"></span></label><input type="range" id="ocDelay" min="-8" max="8" step="1">
+        <label>Retard couleur (points) <span class="v" id="ocDelayV"></span></label><input type="range" id="ocDelay" data-default="0" min="-8" max="8" step="1">
         <div class="hint" id="ocLibDelay"></div>
         <div class="row">
           <button id="ocTpRamp" title="Affiche la mire « Rampe de blanc » : les réglages agissent en direct">Rampe de blanc</button>
@@ -2944,11 +2988,11 @@
         </div>
         <label for="spName">Nom (renommer)</label>
         <input type="text" id="spName" maxlength="40" autocomplete="off">
-        <label>Pas des traits <span class="v" id="spLitV"></span></label><input type="range" id="spLit" min="0.005" max="0.2" step="0.005">
-        <label>Pas des déplacements <span class="v" id="spBlankV"></span></label><input type="range" id="spBlank" min="0.01" max="1" step="0.01">
-        <label>Arrêt aux angles (points au plus) <span class="v" id="spCornerV"></span></label><input type="range" id="spCorner" min="0" max="32" step="1">
-        <label>Arrêt aux extrémités (points) <span class="v" id="spEndV"></span></label><input type="range" id="spEnd" min="0" max="32" step="1">
-        <label>Vitesse de balayage (%) <span class="v" id="spScanV"></span></label><input type="range" id="spScan" min="50" max="150" step="5">
+        <label>Pas des traits <span class="v" id="spLitV"></span></label><input type="range" id="spLit" data-default="0.025" min="0.005" max="0.2" step="0.005">
+        <label>Pas des déplacements <span class="v" id="spBlankV"></span></label><input type="range" id="spBlank" data-default="0.15" min="0.01" max="1" step="0.01">
+        <label>Arrêt aux angles (points au plus) <span class="v" id="spCornerV"></span></label><input type="range" id="spCorner" data-default="8" min="0" max="32" step="1">
+        <label>Arrêt aux extrémités (points) <span class="v" id="spEndV"></span></label><input type="range" id="spEnd" data-default="3" min="0" max="32" step="1">
+        <label>Vitesse de balayage (%) <span class="v" id="spScanV"></span></label><input type="range" id="spScan" data-default="100" min="50" max="150" step="5">
         <div class="hint sf-error" id="spMsg" role="status"></div>
         <div class="hint">Comment chaque cue est tracé : <b>Faisceaux</b> peu de points et des arrêts francs aux extrémités, <b>Graphismes</b> un pas fin et des angles nets, <b>Trame</b> un pas régulier sans arrêt aux angles. Choix par cue (clic droit sur la case), par figure ou par événement de timeline ; sinon le défaut de la sortie, et « Auto » garde le tracé habituel. Les préréglages intégrés ne se modifient pas : dupliquez-les. Un préréglage ne touche ni aux plafonds ni à la sécurité : le budget de points, les zones et toutes les protections s'appliquent après, et les déplacements restent éteints.</div>
       </div>
@@ -3051,9 +3095,16 @@
   <div id="cueMenuZones" class="pz-checks"></div>
   <label class="check" title="« Arrêter les cues » et « Tout arrêter » le laissent jouer ; l'arrêt d'urgence coupe tout"><input type="checkbox" id="cueMenuProtStop"> Protégé de Tout arrêter</label>
   <label class="check" title="Reste affiché quand un autre cue est tenu en mode Solo"><input type="checkbox" id="cueMenuProtSolo"> Protégé du solo</label>
+  <label for="cueMenuCellColor">Couleur de la case</label>
+  <div class="row cm-color"><input type="color" id="cueMenuCellColor" title="Couleur de la bande de la case (et des pads en mode « case »)"><button id="cueMenuCellColorNone" title="Couleur par défaut (catégorie ou cue utilisateur)">Aucune</button></div>
+  <label for="cueMenuTagInput">Étiquettes</label>
+  <div class="tag-edit" id="cueMenuTags"><input type="text" id="cueMenuTagInput" list="cueTagList" maxlength="24" placeholder="intro, drop…" title="Entrée ou virgule pour ajouter une étiquette (8 au plus)" autocomplete="off"></div>
+  <datalist id="cueTagList"></datalist>
+  <label for="cueMenuNotes">Notes</label>
+  <textarea id="cueMenuNotes" rows="3" maxlength="500" placeholder="ex. seulement avec brouillard"></textarea>
   <div id="cueMenuUser" class="lock-edit" hidden>
-    <label for="cueMenuNameInput">Nom et couleur de la case</label>
-    <div class="row"><input type="text" id="cueMenuNameInput" maxlength="40" title="Renommer le cue"><input type="color" id="cueMenuColor" title="Couleur de la case"></div>
+    <label for="cueMenuNameInput">Nom et couleur du cue</label>
+    <div class="row"><input type="text" id="cueMenuNameInput" maxlength="40" title="Renommer le cue"><input type="color" id="cueMenuColor" title="Couleur du cue (la couleur de la case, si elle est choisie, l’emporte)"></div>
   </div>
   <div class="row lock-edit">
     <button id="cueMenuProgram" title="Ouvre l'éditeur de cue (CRÉATION › Cue évolutif) : courbes, couches, modulateurs">Modifier le programme…</button>
@@ -6107,29 +6158,247 @@ document.querySelectorAll('#speedPresets button').forEach(b => b.addEventListene
 const zoom = d => setLive('size', 'master.size', Math.min(2, Math.max(0, Math.round(((live ? live.size : 1) + d) * 10) / 10)));
 $('zoomOut').addEventListener('click', () => zoom(-0.1));
 $('zoomIn').addEventListener('click', () => zoom(0.1));
-// Neutral value (T-143): double-click on a slider, or right click / double
-// click on its name (a right click on the slider itself is the MIDI menu,
-// which offers « Valeur neutre » too). Neutral = the registry's default.
-const controlDefaults = {};
+// Sliders (T-431, after T-143): one behaviour for every input[type=range]
+// of the page, static or built later (layers, modulators, audio links,
+// safety, calibration), applied by `enhanceSlider`:
+// - double-click on the slider: type a value (in the unit shown: « 42,5 »,
+//   « 80 % », « -45° »), clamped to the bounds; Entrée or a click
+//   elsewhere validates, Tab validates and moves on, Échap cancels (and is
+//   still the e-stop);
+// - Maj (or Alt) + drag: fine, a tenth of the movement;
+// - with the keyboard focus: arrows = a step (Maj: a tenth of one), Page
+//   préc./suiv. = ten steps, Début/Fin = the bounds; the wheel only then,
+//   so a page scrolled over a slider never moves it;
+// - right click or double-click on its name: the default value (a right
+//   click on the slider itself stays the MIDI menu, which has it too).
+// Bounds and default: the registry's (GET /api/controls) for a
+// [data-control] slider, else min / max and `data-default`. A value always
+// takes the slider's usual road: a master's control (/api/control, like
+// the MIDI menu's « Valeur neutre ») or the slider's own input / change
+// handlers (safety still asks before loosening, #sfLoosen).
+const controlDefaults = {}, controlKinds = {};
+const SLIDER_HINT = 'Double-clic : taper une valeur · Maj + glisser : réglage fin · clic droit sur le libellé : valeur par défaut';
+const UNIT_FR = { percent: ' %', deg: '°', deg_per_sec: ' °/s', bpm: ' BPM', hz: ' Hz', none: '' };
 const sliderLabel = el => {
   const prev = n => n?.previousElementSibling?.tagName === 'LABEL' ? n.previousElementSibling : null;
-  return el.closest('label') || prev(el) || (el.parentElement?.classList.contains('row') ? prev(el.parentElement) : null);
+  return el.closest('label') || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`))
+    || prev(el) || (el.parentElement?.classList.contains('row') ? prev(el.parentElement) : null);
 };
+// Where the slider shows its value: #<id>V, the name's « .v », or the
+// value right after it (layer strips).
+function sliderDisplay(el) {
+  const byId = el.id ? $(el.id + 'V') : null;
+  if (byId) return byId;
+  const lab = sliderLabel(el);
+  const inLab = lab && !lab.contains(el) ? lab.querySelector('.v') : null;
+  if (inLab) return inLab;
+  const next = el.nextElementSibling;
+  return next && next.matches('span.v, span.dv, span[id$="V"]') ? next : null;
+}
+// Typed text → number: comma or point, a sign, an optional unit after it.
+function parseTyped(text) {
+  const m = String(text).replace(/\s+/g, '').replace('\u2212', '-').replace(',', '.').match(/^[-+]?(\d+\.?\d*|\.\d+)/);
+  return m ? parseFloat(m[0]) : NaN;
+}
+const clampTyped = (v, min, max) => Math.min(max, Math.max(min, v));
+// Slider units per native unit, for a [data-control] slider: `data-k`,
+// else its top over the registry's (0..200 for 0..2 = 100).
+function sliderK(el) {
+  if (el.dataset.k) return +el.dataset.k;
+  const k = controlKinds[el.dataset.control];
+  if (!k) return 1;
+  const r = k.max ? +el.max / k.max : k.min ? +el.min / k.min : 1;
+  return Math.round(r * 1000) / 1000 || 1;
+}
+// A master slider (LIVE › Direct, top bar): set through its control, exact
+// (not rounded to its step), like the MIDI menu's « Valeur neutre ».
+const exactSlider = el => !!el.dataset.live && !!el.dataset.control;
+// Shown number per slider unit (`data-display-k`, e.g. 0.01 when a 0..400
+// slider shows 0,00…4,00).
+const displayK = el => +(el.dataset.displayK || 1);
+function sliderUnit(el) {
+  const k = controlKinds[el.dataset.control];
+  if (el.dataset.unit !== undefined) return el.dataset.unit;
+  if (k && UNIT_FR[k.unit] !== undefined && displayK(el) === 1) return UNIT_FR[k.unit];
+  const m = (sliderDisplay(el)?.textContent || '').match(/\d\s*([^\d\s][^]*)$/);
+  return m ? (m[1].startsWith('%') ? ' ' : '') + m[1].trim() : '';
+}
+const fmtTyped = v => (+v.toFixed(3)).toLocaleString('fr-FR', { maximumFractionDigits: 3 });
+// The slider's value as `v` (slider units, already within bounds): a
+// master slider's control (exact), else the slider's own input / change
+// handlers, as a drag would. `done` = the end of a gesture (change).
+function setSlider(el, v, done = true) {
+  if (exactSlider(el)) {
+    el.value = v;
+    el.dataset.exact = v; el.dataset.exactAt = el.value;
+    syncFill(el);
+    setLive(el.dataset.live, el.dataset.control, v / sliderK(el));
+    return;
+  }
+  el.value = v;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  if (done) el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function sliderDefault(el) {
+  const id = el.dataset.control;
+  if (id && typeof controlDefaults[id] === 'number') return controlDefaults[id] * sliderK(el);
+  return el.dataset.default !== undefined ? +el.dataset.default : null;
+}
+async function resetSlider(el) {
+  if (el.dataset.control && !(el.dataset.control in controlKinds)) {
+    await controlsLoaded;
+    if (!(el.dataset.control in controlKinds)) await (controlsLoaded = loadControls());
+  }
+  const d = sliderDefault(el);
+  if (d == null || el.disabled) return;
+  setSlider(el, clampTyped(d, +el.min, +el.max));
+}
+// The registry's default for a control (MIDI menu « Valeur neutre »).
 function toNeutral(id) {
   const v = controlDefaults[id];
   if (typeof v !== 'number') return;
-  const el = document.querySelector(`#livePanel [data-live][data-control="${id}"]`);
-  return el ? setLive(el.dataset.live, id, v) : postLive({ id, value: v });
+  const el = document.querySelector(`input[type=range][data-control="${id}"]`);
+  return el ? resetSlider(el) : postLive({ id, value: v });
 }
-document.querySelectorAll('#livePanel [data-live]').forEach(el => {
-  el.addEventListener('dblclick', () => toNeutral(el.dataset.control));
+// The slider's value: the exact one a control was set to (finer than its
+// step), while its position is still the one that gave; else its position.
+const sliderValue = el => el.dataset.exactAt === el.value && el.dataset.exact !== undefined ? +el.dataset.exact : +el.value;
+function stepOf(el) { return el.step === 'any' ? (+el.max - +el.min) / 100 : +el.step || 1; }
+// One move of `n` steps; `fine` = a tenth of a step when the slider can
+// hold it (a master slider: always), else one step.
+function nudgeSlider(el, n, fine = false) {
+  const step = stepOf(el), cur = sliderValue(el);
+  let v = clampTyped(cur + n * (fine ? step / 10 : step), +el.min, +el.max);
+  if (!exactSlider(el) && fine) {
+    // The step would round a tenth of it away: one step then.
+    const probe = document.createElement('input');
+    probe.type = 'range'; probe.min = el.min; probe.max = el.max; probe.step = el.step || '1'; probe.value = v;
+    if (+probe.value === +el.value) v = clampTyped(cur + n * step, +el.min, +el.max);
+  }
+  setSlider(el, v);
+}
+let sliderEntry = null;
+function openSliderEntry(el) {
+  if (el.disabled) return;
+  closeSliderEntry(true);
+  const disp = sliderDisplay(el);
+  const box = (disp && disp.offsetParent ? disp : el).getBoundingClientRect();
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'slider-entry';
+  input.setAttribute('inputmode', 'decimal');
+  input.setAttribute('aria-label', 'Valeur');
+  input.value = fmtTyped(+el.value * displayK(el));
+  const w = Math.max(64, disp && disp.offsetParent ? box.width + 12 : 72);
+  input.style.width = w + 'px';
+  input.style.left = Math.max(4, box.right - w) + 'px';
+  input.style.top = (box.top + box.height / 2 - 13) + 'px';
+  el.after(input);
+  if (disp) disp.style.visibility = 'hidden';
+  sliderEntry = { el, input, disp };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === 'NumpadEnter') {
+      // Validate here, never a tap tempo.
+      e.preventDefault(); e.stopPropagation();
+      closeSliderEntry(true);
+      el.focus();
+    } else if (e.key === 'Escape') {
+      // Cancels; the e-stop still runs (the page's handler, after this).
+      closeSliderEntry(false);
+    }
+    // Tab: the focus moves on (the field sits right after the slider) and
+    // the blur validates.
+  });
+  input.addEventListener('blur', () => closeSliderEntry(true));
+  // Its typing is not the panel's (delegated input / change handlers).
+  ['input', 'change'].forEach(t => input.addEventListener(t, e => e.stopPropagation()));
+  input.focus();
+  input.select();
+}
+function closeSliderEntry(commit) {
+  const s = sliderEntry;
+  if (!s) return;
+  sliderEntry = null;
+  const typed = parseTyped(s.input.value);
+  if (s.disp) s.disp.style.visibility = '';
+  s.input.remove();
+  if (!commit || !Number.isFinite(typed)) return;
+  const dk = displayK(s.el), min = +s.el.min, max = +s.el.max;
+  const want = typed / dk, v = clampTyped(want, min, max);
+  if (v !== want) flash(`Limité à ${fmtTyped((v === max ? max : min) * dk)}${sliderUnit(s.el)}`);
+  setSlider(s.el, v);
+}
+function enhanceSlider(el) {
+  if (el.dataset.enh !== undefined) return;
+  el.dataset.enh = '';
+  // The double-click's first click moved the thumb to the pointer: the
+  // value from before it comes back, and the field starts from it.
+  let before = null;
+  el.addEventListener('pointerdown', () => {
+    const now = performance.now();
+    if (!before || now - before.t > 600) before = { v: sliderValue(el), t: now };
+  }, true);
+  el.addEventListener('dblclick', e => {
+    e.preventDefault();
+    if (before && performance.now() - before.t < 1000 && +el.value !== before.v) setSlider(el, before.v);
+    if (before) el.value = before.v;
+    before = null;
+    openSliderEntry(el);
+  });
+  // Fine drag: Maj or Alt held when the drag starts.
+  el.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || !(e.shiftKey || e.altKey) || el.disabled) return;
+    e.preventDefault();
+    el.focus();
+    el.setPointerCapture(e.pointerId);
+    const x0 = e.clientX, v0 = sliderValue(el), w = el.getBoundingClientRect().width || 1;
+    const span = +el.max - +el.min;
+    const move = ev => setSlider(el, clampTyped(v0 + (ev.clientX - x0) / w * span / 10, +el.min, +el.max), false);
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  });
+  // A plain drag forgets the exact value (a value from the studio moves the
+  // position, which does too).
+  el.addEventListener('input', e => { if (e.isTrusted) delete el.dataset.exact; });
+  el.addEventListener('keydown', e => {
+    const fine = e.shiftKey;
+    const moves = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 10, PageDown: -10 };
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (moves[e.key] !== undefined) nudgeSlider(el, moves[e.key], fine && Math.abs(moves[e.key]) === 1);
+    else if (e.key === 'Home' || e.key === 'End') setSlider(el, e.key === 'Home' ? +el.min : +el.max);
+    else return;
+    // Ours, not the page's (cue list Page suiv. / Début).
+    e.preventDefault(); e.stopPropagation();
+  });
+  el.addEventListener('wheel', e => {
+    if (document.activeElement !== el || el.disabled) return;
+    e.preventDefault();
+    nudgeSlider(el, e.deltaY < 0 || e.deltaX > 0 ? 1 : -1, e.shiftKey);
+  }, { passive: false });
   const lab = sliderLabel(el);
-  if (!lab) return;
-  lab.dataset.neutral = '';
-  lab.title = 'Clic droit ou double-clic : valeur neutre';
-  lab.addEventListener('contextmenu', e => { e.preventDefault(); toNeutral(el.dataset.control); });
-  lab.addEventListener('dblclick', () => toNeutral(el.dataset.control));
-});
+  if (lab && lab.dataset.neutral === undefined) {
+    lab.dataset.neutral = '';
+    lab.title = (lab.title ? lab.title + '\n' : '') + SLIDER_HINT;
+    const onName = e => !el.contains(e.target) && e.target !== el && !(sliderEntry && e.target === sliderEntry.input);
+    lab.addEventListener('contextmenu', e => { if (!onName(e)) return; e.preventDefault(); e.stopPropagation(); resetSlider(el); });
+    lab.addEventListener('dblclick', e => { if (onName(e)) resetSlider(el); });
+  }
+}
+document.querySelectorAll('input[type=range]').forEach(enhanceSlider);
+new MutationObserver(records => {
+  for (const r of records) for (const n of r.addedNodes) {
+    if (n.nodeType !== 1) continue;
+    if (n.matches('input[type=range]')) enhanceSlider(n);
+    else n.querySelectorAll?.('input[type=range]').forEach(enhanceSlider);
+  }
+}).observe(document.body, { childList: true, subtree: true });
 // Position pad: drag = X/Y together (top = +Y), double-click = centre.
 function padMove(e) {
   const box = $('posPad').getBoundingClientRect();
@@ -6414,8 +6683,96 @@ function stopCuePreview() {
 }
 async function loadSlots() {
   slots = (await apiJson('GET', '/api/cues')).slots || {};
+  try { cueTags = await apiJson('GET', '/api/cues/tags', undefined, { quiet: true }); } catch { /* the bar keeps the last list */ }
+  renderCueFilter();
   renderCues();
 }
+
+// ---------- Filtre de grille (T-430) ----------
+// A display state only: cells that don't match are dimmed, never moved
+// nor hidden, and still play from the mouse, the keys and MIDI. Kept in
+// this browser (localStorage), never in the project; output and
+// controller LEDs don't see it.
+const FILTER_KEY = 'laserStudio.cueFilter';
+let cueTags = [];
+let cueFilter = (() => {
+  try {
+    const f = JSON.parse(remembered(FILTER_KEY) || '{}') || {};
+    return { tags: Array.isArray(f.tags) ? f.tags.filter(t => typeof t === 'string') : [], text: typeof f.text === 'string' ? f.text : '', any: !!f.any };
+  } catch { return { tags: [], text: '', any: false }; }
+})();
+// Tags compare without case or accents (cues.rs `tag_key`).
+const tagKey = t => String(t).trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const filterOn = () => cueFilter.tags.length > 0 || cueFilter.text.trim() !== '';
+function cueMatches(p) {
+  const slot = slots[p.id] || {};
+  const tags = (slot.tags || []).map(tagKey);
+  const want = cueFilter.tags.map(tagKey);
+  if (want.length && !(cueFilter.any ? want.some(t => tags.includes(t)) : want.every(t => tags.includes(t)))) return false;
+  const q = tagKey(cueFilter.text);
+  return !q || [p.name, slot.notes || '', ...(slot.tags || [])].some(x => tagKey(x).includes(q));
+}
+function setCueFilter(f) {
+  cueFilter = { ...cueFilter, ...f };
+  remember(FILTER_KEY, JSON.stringify(cueFilter));
+  renderCueFilter();
+  applyCueFilter();
+}
+function renderCueFilter() {
+  const keys = new Set(cueTags.map(t => tagKey(t.tag)));
+  // A ticked tag no cue carries any more still shows, to untick it.
+  const list = [...cueTags, ...cueFilter.tags.filter(t => !keys.has(tagKey(t))).map(tag => ({ tag, count: 0 }))];
+  const on = new Set(cueFilter.tags.map(tagKey));
+  $('cueFilterTags').replaceChildren(...list.map(({ tag, count }) => {
+    const b = document.createElement('button');
+    b.textContent = tag;
+    b.insertAdjacentHTML('beforeend', `<small>${count}</small>`);
+    b.dataset.tag = tag;
+    b.setAttribute('aria-pressed', String(on.has(tagKey(tag))));
+    b.title = `${count} cue${count > 1 ? 's' : ''}`;
+    b.onclick = () => {
+      const k = tagKey(tag);
+      setCueFilter({ tags: on.has(k) ? cueFilter.tags.filter(t => tagKey(t) !== k) : [...cueFilter.tags, tag] });
+    };
+    return b;
+  }));
+  if (document.activeElement !== $('cueFilterText')) $('cueFilterText').value = cueFilter.text;
+  document.querySelectorAll('#cueFilterMode button').forEach(b => b.classList.toggle('active', (b.dataset.any === '1') === cueFilter.any));
+  $('cueTagList').replaceChildren(...cueTags.map(t => { const o = document.createElement('option'); o.value = t.tag; return o; }));
+}
+function applyCueFilter() {
+  const on = filterOn();
+  let shown = 0, total = 0;
+  document.querySelectorAll('#cues .cue').forEach(el => {
+    const p = presetById.get(el.dataset.id);
+    if (!p) return;
+    total++;
+    const match = !on || cueMatches(p);
+    if (match) shown++;
+    el.classList.toggle('dimmed', !match);
+  });
+  $('cueFilter').classList.toggle('on', on);
+  $('cueFilterCount').textContent = on ? `${shown} / ${total}` : '';
+  // The bar opens from « Filtrer » (no row taken from the grid when unused)
+  // and stays open while a filter is on.
+  if (on) cueFilterOpen = true;
+  $('cueFilter').hidden = !cueFilterOpen;
+  $('cueFilterBtn').setAttribute('aria-expanded', String(cueFilterOpen));
+  $('cueFilterBtn').classList.toggle('on', on);
+  $('cueFilterBadge').hidden = !on;
+  $('cueFilterBadge').textContent = on ? `${shown} / ${total}` : '';
+}
+let cueFilterOpen = false;
+$('cueFilterBtn').addEventListener('click', () => {
+  cueFilterOpen = !cueFilterOpen;
+  if (!cueFilterOpen) { $('cueFilterText').value = ''; setCueFilter({ tags: [], text: '' }); }
+  applyCueFilter();
+  if (cueFilterOpen) $('cueFilterText').focus();
+});
+$('cueFilterText').addEventListener('input', () => setCueFilter({ text: $('cueFilterText').value }));
+$('cueFilterText').addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); });
+document.querySelectorAll('#cueFilterMode button').forEach(b => b.addEventListener('click', () => setCueFilter({ any: b.dataset.any === '1' })));
+$('cueFilterClear').addEventListener('click', () => { $('cueFilterText').value = ''; setCueFilter({ tags: [], text: '' }); });
 async function loadGrid(render = true) {
   try { applyGrid(await apiJson('GET', '/api/grid', undefined, { cache: 'no-store' }), render); } catch { /* next frame retries */ }
 }
@@ -6485,10 +6842,11 @@ function renderCues() {
       el.className = 'cue';
       el.dataset.id = p.id;
       el.title = el.dataset.control = `grid.${gridPage + 1}.${Math.floor(i / grid.cols) + 1}.${i % grid.cols + 1}`;
-      // A user cue (T-405) has its own colour band.
-      el.style.setProperty('--cat', p.user && p.color ? hex(p.color) : catColor(p.category));
-      el.classList.toggle('user', !!p.user);
       const slot = slots[p.id] || {};
+      // A user cue (T-405) has its own colour band; a colour set on the
+      // cell (T-430) wins over both.
+      el.style.setProperty('--cat', slot.color ? hex(slot.color) : p.user && p.color ? hex(p.color) : catColor(p.category));
+      el.classList.toggle('user', !!p.user);
       const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '', slot.transition ? 'T' : '']
         .filter(Boolean).join(' ');
       el.innerHTML = `<span class="key">${key}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`
@@ -6498,6 +6856,13 @@ function renderCues() {
         const dot = document.createElement('span');
         dot.className = 'ftag'; dot.dataset.tag = p.tag; dot.title = TRACK_TAGS[p.tag];
         el.appendChild(dot);
+      }
+      if (slot.notes || slot.tags?.length) {
+        // Annotated (T-430): a dot, and the note and tags on hover.
+        const dot = document.createElement('span');
+        dot.className = 'note';
+        el.appendChild(dot);
+        el.title += '\n' + [slot.tags?.length ? '# ' + slot.tags.join(', ') : '', slot.notes || ''].filter(Boolean).join('\n');
       }
       drawThumb(el.querySelector('canvas.th'), thumbs[p.id]);
       if (p.program || slot.program) {
@@ -6539,6 +6904,7 @@ function renderCues() {
     ? ` · ${pg.hidden} cue${pg.hidden > 1 ? 's' : ''} de cette page hors grille : agrandir la grille pour ${pg.hidden > 1 ? 'les' : 'le'} voir` : '';
   $('gridPageRename').disabled = $('gridPageDelete').disabled = !pg.editable;
   paintCues();
+  applyCueFilter();
 }
 function canDropOn(page) {
   const pg = grid.pages[page];
@@ -6851,6 +7217,15 @@ function openCueMenu(p, x, y, at) {
   $('cueMenuTransLen').disabled = !slot.transition;
   $('cueMenuProtStop').checked = !!slot.protect_stop;
   $('cueMenuProtSolo').checked = !!slot.protect_solo;
+  // T-430: the cell's colour (none = category or user cue), tags, notes.
+  menuColor = slot.color || null;
+  $('cueMenuCellColor').value = hex(slot.color || (p.user && p.color) || [0, 255, 0]);
+  $('cueMenuCellColor').classList.toggle('unset', !slot.color);
+  $('cueMenuCellColorNone').disabled = !slot.color;
+  menuTags = [...(slot.tags || [])];
+  renderMenuTags();
+  $('cueMenuTagInput').value = '';
+  $('cueMenuNotes').value = slot.notes || '';
   fillShowSelect($('cueMenuShow'), 'Aucun', slot.show || '');
   // Projection zones (T-012): none ticked = the default zones.
   $('cueMenuZones').replaceChildren(...(proj ? proj.zones : []).map(z => {
@@ -6880,9 +7255,66 @@ async function saveCueMenu() {
   $('cueMenuTransLen').disabled = !kind;
   const protect_stop = $('cueMenuProtStop').checked, protect_solo = $('cueMenuProtSolo').checked;
   const scan = $('cueMenuScan').value || null;
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan });
+  const notes = $('cueMenuNotes').value, tags = menuTags, color = menuColor;
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color });
   await loadSlots();
 }
+// Tags in the properties menu (T-430): chips, typed with Enter or a comma;
+// 8 at most, repeats (without case or accents) ignored, like cues.rs.
+let menuTags = [], menuColor = null;
+function renderMenuTags() {
+  const box = $('cueMenuTags'), input = $('cueMenuTagInput');
+  box.querySelectorAll('.tag-chip').forEach(c => c.remove());
+  menuTags.forEach((t, i) => {
+    const c = document.createElement('span');
+    c.className = 'tag-chip';
+    c.textContent = t;
+    const x = document.createElement('button');
+    x.type = 'button'; x.textContent = '×'; x.title = 'Retirer l’étiquette';
+    x.onclick = () => { menuTags.splice(i, 1); renderMenuTags(); saveCueMenu(); };
+    c.appendChild(x);
+    box.insertBefore(c, input);
+  });
+  input.disabled = menuTags.length >= 8;
+  input.placeholder = menuTags.length >= 8 ? '8 étiquettes au plus' : 'intro, drop…';
+}
+function addMenuTags(text) {
+  let changed = false;
+  for (const raw of text.split(',')) {
+    const t = raw.trim().slice(0, 24).trim();
+    if (!t || menuTags.length >= 8 || menuTags.some(x => tagKey(x) === tagKey(t))) continue;
+    menuTags.push(t); changed = true;
+  }
+  if (changed) { renderMenuTags(); saveCueMenu(); }
+}
+$('cueMenuTagInput').addEventListener('keydown', e => {
+  const input = e.target;
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    addMenuTags(input.value); input.value = '';
+  } else if (e.key === 'Backspace' && !input.value && menuTags.length) {
+    menuTags.pop(); renderMenuTags(); saveCueMenu();
+  }
+});
+// A pasted list, or a suggestion picked from the list, is taken at once.
+$('cueMenuTagInput').addEventListener('input', e => {
+  const input = e.target;
+  if (input.value.includes(',') || e.inputType === 'insertReplacementText') { addMenuTags(input.value); input.value = ''; }
+});
+$('cueMenuTagInput').addEventListener('blur', e => { if (e.target.value.trim()) { addMenuTags(e.target.value); e.target.value = ''; } });
+$('cueMenuNotes').addEventListener('change', saveCueMenu);
+$('cueMenuCellColor').addEventListener('change', () => {
+  menuColor = rgb($('cueMenuCellColor').value);
+  $('cueMenuCellColor').classList.remove('unset');
+  $('cueMenuCellColorNone').disabled = false;
+  saveCueMenu();
+});
+$('cueMenuCellColorNone').addEventListener('click', () => {
+  menuColor = null;
+  $('cueMenuCellColor').classList.add('unset');
+  $('cueMenuCellColorNone').disabled = true;
+  saveCueMenu();
+});
 ['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 
 // ---------- « En cours » (T-423) ----------
@@ -8032,6 +8464,37 @@ $('tlScan').addEventListener('change', () => {
   tlChange(() => { for (const x of tlSelected()) { if (v) x.e.scan = v; else delete x.e.scan; } });
 });
 
+// Notes and tags of the selected event (T-430): one event at a time.
+let tlNoteKey = '';
+function tlNoteRow() {
+  const items = TL.show ? tlSelected() : [];
+  const e = items.length === 1 ? items[0].e : null;
+  const key = e ? e.id + ':' + (e.notes || '') + ':' + (e.tags || []).join(',') : '';
+  if (key === tlNoteKey) return;
+  tlNoteKey = key;
+  $('tlNoteRow').hidden = !e;
+  if (!e) return;
+  if (document.activeElement !== $('tlEvNotes')) $('tlEvNotes').value = e.notes || '';
+  if (document.activeElement !== $('tlEvTags')) $('tlEvTags').value = (e.tags || []).join(', ');
+}
+$('tlEvNotes').addEventListener('change', () => {
+  const items = tlSelected();
+  if (items.length !== 1) return;
+  const v = $('tlEvNotes').value.trim().slice(0, 500);
+  tlChange(() => { if (v) items[0].e.notes = v; else delete items[0].e.notes; });
+});
+$('tlEvTags').addEventListener('change', () => {
+  const items = tlSelected();
+  if (items.length !== 1) return;
+  const tags = [];
+  for (const raw of $('tlEvTags').value.split(',')) {
+    const t = raw.trim().slice(0, 24).trim();
+    if (t && tags.length < 8 && !tags.some(x => tagKey(x) === tagKey(t))) tags.push(t);
+  }
+  tlChange(() => { if (tags.length) items[0].e.tags = tags; else delete items[0].e.tags; });
+});
+['tlEvNotes', 'tlEvTags'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); }));
+
 // --- selection, copy / paste / duplicate / delete ---
 function tlSelected() { return tlEvents().filter(x => TL.sel.has(x.e.id)); }
 function tlDelete() {
@@ -8166,6 +8629,8 @@ function tlDraw() {
       g.globalAlpha = 1;
       if (bus) { g.strokeStyle = col; g.setLineDash([4, 3]); g.strokeRect(x0 + 0.5, y + 0.5, Math.max(2, x1 - x0) - 1, h - 1); g.setLineDash([]); }
       if (sel) { g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x0 + 1, y + 1, Math.max(2, x1 - x0) - 2, h - 2); g.lineWidth = 1; }
+      // Annotated (T-430): a corner mark; the note shows on hover.
+      if (e.notes || e.tags?.length) { g.fillStyle = '#ffb020'; g.beginPath(); g.moveTo(x1 - 8, y); g.lineTo(x1, y); g.lineTo(x1, y + 8); g.closePath(); g.fill(); }
       if (x1 - x0 > 24) {
         g.save(); g.beginPath(); g.rect(x0, y, x1 - x0, h); g.clip();
         g.fillStyle = bus ? C.text : '#06120b'; g.fillText(bus ? `Bus · calque ${t.layer}` : tlEventName(e), Math.max(x0, 0) + 4, y + h / 2);
@@ -8269,6 +8734,7 @@ function tlLoop() {
     }
     tlHeads();
     tlScanRow();
+    tlNoteRow();
     if (TL.fitPending && tlCanvas().clientWidth) { TL.fitPending = false; tlFit(); }
     tlWaveWanted();
     if (TL.need || (t && t.playing)) { TL.need = false; tlDraw(); }
@@ -8373,6 +8839,9 @@ tlCv.addEventListener('pointermove', e => {
   if (!d) {
     if (hover) { tlCv.style.cursor = tlEnvKeyAt(hover.ti, x, y) ? 'move' : 'crosshair'; return; }
     const hit = TL.show && y >= TL_TOP ? tlEventAt(tlTrackAt(y), x) : null;
+    const tip = hit && (hit.e.notes || hit.e.tags?.length) ? [hit.e.tags?.length ? '# ' + hit.e.tags.join(', ') : '', hit.e.notes || ''].filter(Boolean).join('\n') : '';
+    tlCv.dataset.baseTitle ??= tlCv.title;
+    if (tlCv.title !== (tip || tlCv.dataset.baseTitle)) tlCv.title = tip || tlCv.dataset.baseTitle;
     const r = TL.show && TL.show.loop_region;
     const onEdge = r && y < TL_RULER && (Math.abs(tlUToX(r[0]) - x) < 6 || Math.abs(tlUToX(r[1]) - x) < 6);
     tlCv.style.cursor = hit && hit.edge || onEdge ? 'ew-resize' : hit ? 'grab' : y < TL_RULER ? 'pointer' : 'default';
@@ -8541,8 +9010,8 @@ function buildLayers() {
     const d = document.createElement('div');
     d.className = 'layer';
     d.dataset.layer = n;
-    d.innerHTML = `<span class="t">Calque ${n}</span><span class="pts">0 pts</span>
-      <input type="range" min="0" max="100" value="100" data-control="layer.${n}.dimmer" title="layer.${n}.dimmer" aria-label="Gradateur calque ${n}">
+    d.innerHTML = `<label class="t" for="layerDim${n}">Calque ${n}</label><span class="pts">0 pts</span>
+      <input type="range" id="layerDim${n}" min="0" max="100" value="100" data-control="layer.${n}.dimmer" title="layer.${n}.dimmer" aria-label="Gradateur calque ${n}">
       <span class="dv">100 %</span>
       <div class="btns"><button class="mute" data-control="layer.${n}.mute" title="layer.${n}.mute">Muet</button><button class="solo" data-control="layer.${n}.solo" title="layer.${n}.solo">Solo</button></div>
       <button class="clear" data-control="layer.${n}.clear" title="layer.${n}.clear : arrête les cues du calque" style="width:100%;padding:4px;font-size:11px">Vider</button>`;
@@ -8744,9 +9213,9 @@ function renderLfos() {
         <select data-f="period" title="Période">${opts([...LFO_PERIODS, ['hz', 'Hz (libre)']], period)}</select>
         ${period === 'hz' ? `<input type="number" data-f="hz" min="0" max="20" step="0.05" value="${m.rate.hz}" title="Fréquence (Hz)">` : ''}</div>
       <label>Profondeur <span class="v">${Math.round(m.depth * 100)} %</span></label>
-      <input type="range" data-f="depth" min="0" max="100" value="${Math.round(m.depth * 100)}">
+      <input type="range" data-f="depth" min="0" max="100" data-default="50" value="${Math.round(m.depth * 100)}">
       <label>Phase <span class="v">${Math.round(m.phase * 360)}°</span></label>
-      <input type="range" data-f="phase" min="0" max="99" value="${Math.round(m.phase * 100)}">
+      <input type="range" data-f="phase" min="0" max="99" data-default="0" data-display-k="3.6" value="${Math.round(m.phase * 100)}">
       <label class="check" style="justify-content:flex-start"><input type="checkbox" data-f="enabled"${m.enabled ? ' checked' : ''}> Actif</label>
     </div>`;
   }).join('');
@@ -8836,9 +9305,9 @@ function renderRoutes() {
         <button class="del" data-del="${i}" title="Supprimer ce lien audio">×</button></div>
       <div class="row"><select data-f="target" title="Cible">${opts(arTargets.map(t => [t.id, t.label]), r.target)}</select></div>
       <label>Quantité <span class="v">${amt} %</span></label>
-      <input type="range" data-f="amount" min="-100" max="100" value="${amt}" title="Part de la plage du réglage (négatif : vers le bas)">
+      <input type="range" data-f="amount" min="-100" max="100" data-default="100" value="${amt}" title="Part de la plage du réglage (négatif : vers le bas)">
       <label>Seuil <span class="v">${Math.round(r.shape.gate * 100)} %</span></label>
-      <input type="range" data-f="gate" min="0" max="100" value="${Math.round(r.shape.gate * 100)}" title="En dessous, le signal est ignoré (bruit)">
+      <input type="range" data-f="gate" min="0" max="100" data-default="5" value="${Math.round(r.shape.gate * 100)}" title="En dessous, le signal est ignoré (bruit)">
       <label>Courbe</label><select data-f="curve">${opts(AR_CURVES, r.shape.curve)}</select>
       ${arSpan(r, 'attack', 'Attaque', 'Temps de montée')}
       ${ev ? arSpan(r, 'decay', 'Déclin', 'Temps de retombée après un coup') : arSpan(r, 'release', 'Relâche', 'Temps de retombée')}
@@ -9147,7 +9616,7 @@ $('ocCurves').innerHTML = OC_CH.map(([k, name], i) => `
     <h4 class="${k}">Courbe ${name.toLowerCase()}</h4>
     <canvas id="ocGraph${i}" width="144" height="144" aria-label="Courbe ${name.toLowerCase()}"></canvas>
     <select id="ocType${i}" aria-label="Type de courbe ${name.toLowerCase()}"><option value="gamma">Gamma</option><option value="points">5 points</option></select>
-    <div id="ocGammaRow${i}"><label>Gamma <span class="v" id="ocGammaV${i}"></span></label><input type="range" id="ocGamma${i}" min="0.2" max="5" step="0.05"></div>
+    <div id="ocGammaRow${i}"><label>Gamma <span class="v" id="ocGammaV${i}"></span></label><input type="range" id="ocGamma${i}" data-default="1" min="0.2" max="5" step="0.05"></div>
     <div id="ocPtsRow${i}" class="oc-pts" hidden>${OC_NODES.map(n => `<span>${n} %</span>`).join('')}${OC_NODES.map((n, j) =>
       `<input type="number" id="ocPt${i}_${j}" min="0" max="100" step="1" title="Sortie pour ${n} % en entrée"${j === 0 ? ' disabled' : ''}>`).join('')}</div>
   </div>`).join('');
@@ -10034,12 +10503,15 @@ function renderMidi(m) {
 // it in the port's profile. Échap cancels (and still stops the laser).
 const MODE_FR = { trigger: 'Déclencher', toggle: 'Bascule', momentary: 'Maintenu', absolute: 'Absolu', relative: 'Relatif', grid: 'Grille' };
 let controlLabels = {}, midiMaps = [], learnMode = false, learnBusy = false, seenLearn = -1, bannerTimer = null, menuControl = null;
-apiJson('GET', '/api/controls').then(list => {
+// The registry; a slider reset asks for it again if it isn't there yet.
+const loadControls = () => apiJson('GET', '/api/controls').then(list => {
   for (const c of (list.controls || list)) {
     controlLabels[c.id] = c.label_fr;
+    controlKinds[c.id] = c.kind;
     if (c.kind?.type === 'continuous') controlDefaults[c.id] = c.kind.default;
   }
 }).catch(() => {});
+let controlsLoaded = loadControls();
 const labelOf = id => controlLabels[id] || id;
 const mapLabel = mp => mp.message + (mp.channel != null ? ` · can. ${mp.channel + 1}` : '') + (mp.shift ? ' + Shift' : '');
 
@@ -12158,11 +12630,11 @@ function pgRenderLfos() {
         <select data-f="period" title="Période">${opts([...LFO_PERIODS, ['hz', 'Hz (libre)']], period)}</select>
         ${period === 'hz' ? `<input type="number" data-f="hz" min="0" max="20" step="0.05" value="${m.rate.hz}" title="Fréquence (Hz)">` : ''}</div>
       <label>Profondeur <span class="v">${Math.round(m.depth * 100)} %</span></label>
-      <input type="range" data-f="depth" min="0" max="100" value="${Math.round(m.depth * 100)}">
+      <input type="range" data-f="depth" min="0" max="100" data-default="50" value="${Math.round(m.depth * 100)}">
       <label>Décalage <span class="v">${Math.round(m.offset * 100)} %</span></label>
-      <input type="range" data-f="offset" min="-100" max="100" value="${Math.round(m.offset * 100)}">
+      <input type="range" data-f="offset" min="-100" max="100" data-default="0" value="${Math.round(m.offset * 100)}">
       <label>Phase <span class="v">${Math.round(m.phase * 360)}°</span></label>
-      <input type="range" data-f="phase" min="0" max="99" value="${Math.round(m.phase * 100)}">
+      <input type="range" data-f="phase" min="0" max="99" data-default="0" data-display-k="3.6" value="${Math.round(m.phase * 100)}">
       <label class="check" style="justify-content:flex-start"><input type="checkbox" data-f="enabled"${m.enabled ? ' checked' : ''}> Actif</label>
     </div>`;
   }).join('') : '<div class="hint">Aucun modulateur.</div>';

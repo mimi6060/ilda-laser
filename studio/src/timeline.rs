@@ -282,6 +282,11 @@ pub struct Event {
     /// Scan preset (T-415, `scan.rs`); `None` = « Comme le cue ».
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan: Option<String>,
+    /// The operator's notes and tags on the event (T-430), as on a cue.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl Default for Event {
@@ -300,6 +305,8 @@ impl Default for Event {
             modifiers: LiveModifiers::default(),
             envelopes: Vec::new(),
             scan: None,
+            notes: String::new(),
+            tags: Vec::new(),
         }
     }
 }
@@ -369,6 +376,8 @@ impl Show {
                 sanitize_modifiers(&mut e.modifiers);
                 e.envelopes.truncate(MAX_ENVELOPES);
                 e.envelopes.iter_mut().for_each(Envelope::sanitize);
+                crate::cues::sanitize_notes(&mut e.notes);
+                crate::cues::sanitize_tags(&mut e.tags);
                 if e.id == 0 || !seen.insert(e.id) {
                     e.id = next_id;
                     seen.insert(next_id);
@@ -1533,6 +1542,21 @@ mod tests {
         assert_eq!(s.tempo_map[0].at_s, 0.0);
         assert_eq!((s.tempo_map[1].bpm, s.tempo_map[1].beats_per_bar), (MAX_BPM as f32, 1));
         assert_eq!(s.loop_region, None);
+    }
+
+    #[test]
+    fn event_notes_and_tags_load_empty_and_are_sanitized() {
+        let old: Event = serde_json::from_str(r#"{"start":1,"len":2}"#).unwrap();
+        assert!(old.notes.is_empty() && old.tags.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("tags"));
+        let mut e = event(1, 0.0, 1.0);
+        e.notes = "fumée".repeat(200);
+        e.tags = vec!["Drop".into(), "drop".into(), "".into()];
+        let mut s = show(TimeBase::Beats, vec![e]);
+        s.sanitize();
+        let e = &s.tracks[0].events[0];
+        assert_eq!(e.notes.chars().count(), crate::cues::MAX_NOTES_LEN);
+        assert_eq!(e.tags, ["Drop"]);
     }
 
     #[test]

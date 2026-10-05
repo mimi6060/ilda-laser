@@ -115,8 +115,8 @@ pub enum PadColors {
     /// The cue's own colour (its look), live while it plays.
     #[default]
     Cue,
-    /// The cell's colour on screen: the user cue's band, else its page's
-    /// category colour.
+    /// The cell's colour on screen: the colour set on the cell (T-430),
+    /// else the user cue's band, else its page's category colour.
     Cell,
     /// Yellow = cue present, green = playing, like the original APC40.
     Classic,
@@ -165,6 +165,9 @@ pub fn cue_rgb(s: &Shared, id: &str, scheme: PadColors) -> Option<[u8; 3]> {
             Some(look_rgb(settings))
         }
         PadColors::Cell => {
+            if let Some(c) = s.deck.slots.get(id).and_then(|slot| slot.color) {
+                return Some(c);
+            }
             if let Some(c) = s.user_cues.get(id) {
                 return Some(c.color);
             }
@@ -250,6 +253,10 @@ mod tests {
         assert_eq!(cue_rgb(&s, &p.id, PadColors::Cue), Some(look_rgb(&p.settings)));
         assert_eq!(cue_rgb(&s, &p.id, PadColors::Cell), Some(CATEGORY_COLORS[1]));
         assert_eq!(cue_rgb(&s, &p.id, PadColors::Classic), None);
+        // A colour set on the cell (T-430) wins.
+        s.deck.set_slot(&p.id, crate::cues::CueSlot { color: Some([1, 2, 3]), ..Default::default() });
+        assert_eq!(cue_rgb(&s, &p.id, PadColors::Cell), Some([1, 2, 3]));
+        s.deck.set_slot(&p.id, crate::cues::CueSlot::default());
         assert_eq!(cue_rgb(&s, "nope", PadColors::Cue), None);
         // Playing: the live look, changed from the UI.
         assert!(crate::controls::press_cue(&mut s, &p.id, None, true));

@@ -150,7 +150,7 @@ test('every Direct slider reaches /api/control-values and the frame; double-clic
     expect(await page.locator(sel).getAttribute('title')).toBe(id);
     if (moves) await expect.poll(async () => same(await points(), base), `${id} moves the frame`).toBe(false);
     else await expect.poll(async () => (await studio.frame()).live.speed, `${id} in the frame`).toBeCloseTo(native, 3);
-    await page.locator(sel).dblclick();
+    await page.locator('label', { has: page.locator(sel + 'V') }).dblclick(); // T-431: neutral from the name
     await expect.poll(async () => (await values())[id], `${id} back to neutral`).toBeCloseTo(neutral, 3);
   }
 });

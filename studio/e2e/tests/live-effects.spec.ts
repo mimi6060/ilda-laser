@@ -78,13 +78,13 @@ test('visible points, dotted lines, mirror and prism', async ({ page }) => {
   await page.locator('#mTrace').fill('50');
   await expect.poll(async () => (await live()).trace).toBeCloseTo(0.5, 3);
   await expect.poll(lit).toBeLessThan(full * 0.75);
-  await page.locator('#mTrace').dblclick();
+  await page.locator('label', { has: page.locator('#mTraceV') }).dblclick(); // T-431: neutral from the name
   await expect.poll(async () => (await live()).trace).toBe(1);
 
   await page.locator('#mDots').fill('60');
   await expect.poll(async () => (await live()).dots).toBeCloseTo(0.6, 3);
   await expect.poll(lit).toBeLessThan(full);
-  await page.locator('#mDots').dblclick();
+  await page.locator('label', { has: page.locator('#mDotsV') }).dblclick();
 
   await reveal(page, '#fxMirror');
   await page.locator('#fxMirror button', { hasText: 'XY' }).click();
