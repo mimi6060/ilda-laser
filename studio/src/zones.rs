@@ -9,6 +9,16 @@
 //! A `Blank` zone keeps nothing lit inside; a `Dim` zone scales the colour
 //! by its level. Overlapping attenuations multiply.
 //!
+//! **Soft edges and gradients** (T-446, Dim zones only; a Blank zone always
+//! keeps a hard edge). A `feather` grows a band *outwards* from the
+//! polygon in which the factor ramps linearly from the nearest edge
+//! point's level up to 1 at the band's outer limit: it only darkens more
+//! around the zone, and inside the level never exceeds the configured one.
+//! A `gradient` varies the level inside linearly along `from → to`, from
+//! `level` to `level_to` (clamped beyond both ends). Segments are cut where
+//! they enter or leave a band, and get extra samples every `FEATHER_STEP`
+//! where the factor varies, so the brightness follows the ramp.
+//!
 //! **Horizon.** Beams below `y` are always blanked (the T-101 protection,
 //! `safety::blank_low_beams`). With `lines` on, *everything* below `y` -
 //! lines, text, sheets, figures - is scaled to `level` (0 = blank), with a
@@ -43,6 +53,11 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_ZONES: usize = 8;
 pub const MAX_VERTICES: usize = 24;
+/// Widest soft edge (T-446), in output units: 25 % of the field width.
+pub const MAX_FEATHER: f32 = 0.5;
+/// Longest step between samples inside a soft edge or a gradient (T-446),
+/// so that the brightness follows the ramp instead of jumping.
+pub const FEATHER_STEP: f32 = 0.02;
 /// Inserted samples sit this far (normalised units) along the segment on
 /// each side of an edge (0.05 % of the field width).
 const EDGE_GAP: f32 = 1e-3;
@@ -75,27 +90,70 @@ pub struct Zone {
     /// A « Public » zone: where the audience is (T-255, `audience.rs`).
     /// Outside audience scanning mode it is blanked whatever its kind.
     pub audience: bool,
+    /// Width of the soft edge, outwards from the polygon, in output units
+    /// (0..`MAX_FEATHER`, T-446). Dim zones only: a Blank zone stays hard.
+    pub feather: f32,
+    /// A gradient inside the zone (T-446). Dim zones only.
+    pub gradient: Option<ZoneGradient>,
 }
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { id: 0, name: "Zone".into(), kind: ZoneKind::Blank, level: 0.3, points: Vec::new(), audience: false }
+        Self { id: 0, name: "Zone".into(), kind: ZoneKind::Blank, level: 0.3, points: Vec::new(), audience: false, feather: 0.0, gradient: None }
+    }
+}
+
+/// A linear gradient inside a Dim zone (T-446): the level is the zone's
+/// `level` at `from` and before, `level_to` at `to` and after, along the
+/// axis `from → to` (output coordinates).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZoneGradient {
+    pub from: [f32; 2],
+    pub to: [f32; 2],
+    pub level_to: f32,
+}
+
+impl Default for ZoneGradient {
+    fn default() -> Self {
+        Self { from: [0.0, 1.0], to: [0.0, -1.0], level_to: 0.2 }
+    }
+}
+
+impl ZoneGradient {
+    /// `from` and `to` are distinct finite points (otherwise the gradient
+    /// is ignored).
+    pub fn usable(&self) -> bool {
+        let finite = self.from.iter().chain(&self.to).all(|v| v.is_finite());
+        finite && (self.to[0] - self.from[0]).hypot(self.to[1] - self.from[1]) > 1e-6
     }
 }
 
 impl Zone {
-    /// Brightness factor inside the zone.
+    /// The highest brightness factor inside the zone: its level, or with a
+    /// gradient the larger of its two levels.
     pub fn factor(&self) -> f32 {
         match self.kind {
             ZoneKind::Blank => 0.0,
-            ZoneKind::Dim => {
-                if self.level.is_finite() {
-                    self.level.clamp(0.0, 1.0)
-                } else {
-                    0.0
-                }
-            }
+            ZoneKind::Dim => match self.soft_gradient() {
+                Some(g) => unit(self.level, 0.0).max(unit(g.level_to, 0.0)),
+                None => unit(self.level, 0.0),
+            },
         }
+    }
+
+    /// The soft edge's width in effect: 0 for a Blank zone or a bad value.
+    pub fn soft_feather(&self) -> f32 {
+        if self.kind == ZoneKind::Dim && self.feather.is_finite() && self.feather > 0.0 {
+            self.feather.min(MAX_FEATHER)
+        } else {
+            0.0
+        }
+    }
+
+    /// The gradient in effect: none for a Blank zone or a degenerate axis.
+    pub fn soft_gradient(&self) -> Option<ZoneGradient> {
+        self.gradient.filter(|g| self.kind == ZoneKind::Dim && g.usable())
     }
 }
 
@@ -135,11 +193,43 @@ impl Horizon {
     }
 }
 
+/// A compiled gradient: `level → level_to` along `from → to`, clamped.
+#[derive(Clone, Copy)]
+struct Grad {
+    from: (f32, f32),
+    /// (to - from) / |to - from|².
+    axis: (f32, f32),
+    level: f32,
+    level_to: f32,
+}
+
+impl Grad {
+    fn at(&self, x: f32, y: f32) -> f32 {
+        let t = ((x - self.from.0) * self.axis.0 + (y - self.from.1) * self.axis.1).clamp(0.0, 1.0);
+        let f = self.level + (self.level_to - self.level) * t;
+        // Never outside the two levels, whatever the rounding.
+        f.clamp(self.level.min(self.level_to), self.level.max(self.level_to))
+    }
+}
+
+/// Where a point is relative to one zone (T-446).
+#[derive(Clone, Copy, PartialEq)]
+enum Place {
+    Out,
+    /// In the soft edge band, outside the polygon.
+    Band,
+    /// Inside or on an edge.
+    In,
+}
+
 struct Poly {
     factor: f32,
     v: Vec<(f32, f32)>,
     min: (f32, f32),
     max: (f32, f32),
+    /// Soft edge width (T-446), 0 = hard.
+    feather: f32,
+    grad: Option<Grad>,
 }
 
 impl Poly {
@@ -150,7 +240,77 @@ impl Poly {
         let v: Vec<(f32, f32)> = zone.points.iter().map(|p| (p[0], p[1])).collect();
         let min = v.iter().fold((f32::INFINITY, f32::INFINITY), |m, p| (m.0.min(p.0), m.1.min(p.1)));
         let max = v.iter().fold((f32::NEG_INFINITY, f32::NEG_INFINITY), |m, p| (m.0.max(p.0), m.1.max(p.1)));
-        Some(Self { factor: zone.factor(), v, min, max })
+        let grad = zone.soft_gradient().map(|g| {
+            let d = (g.to[0] - g.from[0], g.to[1] - g.from[1]);
+            let len2 = d.0 * d.0 + d.1 * d.1;
+            Grad { from: (g.from[0], g.from[1]), axis: (d.0 / len2, d.1 / len2), level: unit(zone.level, 0.0), level_to: unit(g.level_to, 0.0) }
+        });
+        Some(Self { factor: zone.factor(), v, min, max, feather: zone.soft_feather(), grad })
+    }
+
+    /// Has a soft edge or a gradient: its factor varies continuously.
+    fn is_soft(&self) -> bool {
+        self.feather > 0.0 || self.grad.is_some()
+    }
+
+    /// The factor inside (or on the edge) at (x, y).
+    fn core(&self, x: f32, y: f32) -> f32 {
+        match &self.grad {
+            Some(g) => g.at(x, y),
+            None => self.factor,
+        }
+    }
+
+    /// Within reach of the zone or its soft edge (bounding box grown by
+    /// the feather and `ON_EDGE`).
+    fn near(&self, x: f32, y: f32) -> bool {
+        let f = self.feather + ON_EDGE;
+        x >= self.min.0 - f && x <= self.max.0 + f && y >= self.min.1 - f && y <= self.max.1 + f
+    }
+
+    /// Distance from (x, y) to the outline, and the nearest outline point.
+    fn nearest(&self, x: f32, y: f32) -> (f32, (f32, f32)) {
+        let mut best = (f32::INFINITY, (x, y));
+        let mut j = self.v.len() - 1;
+        for i in 0..self.v.len() {
+            let (p, q) = (self.v[j], self.v[i]);
+            let e = (q.0 - p.0, q.1 - p.1);
+            let w = (x - p.0, y - p.1);
+            let len2 = e.0 * e.0 + e.1 * e.1;
+            let s = if len2 > 0.0 { ((w.0 * e.0 + w.1 * e.1) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let n = (p.0 + s * e.0, p.1 + s * e.1);
+            let d2 = (x - n.0).powi(2) + (y - n.1).powi(2);
+            if d2 < best.0 {
+                best = (d2, n);
+            }
+            j = i;
+        }
+        (best.0.sqrt(), best.1)
+    }
+
+    /// This zone at (x, y) (T-446): its factor and where the point is. The
+    /// core inside or on an edge; in the soft edge band outside, a linear
+    /// ramp from the nearest outline point's core up to 1 at `feather`; 1
+    /// beyond. Never above 1, and inside never above the core.
+    fn probe(&self, x: f32, y: f32) -> (f32, Place) {
+        if !self.near(x, y) {
+            return (1.0, Place::Out);
+        }
+        if self.covers(x, y) {
+            return (self.core(x, y), Place::In);
+        }
+        if self.feather > 0.0 {
+            let (d, n) = self.nearest(x, y);
+            if d < self.feather {
+                let base = self.core(n.0, n.1);
+                return ((base + (1.0 - base) * d / self.feather).clamp(base, 1.0), Place::Band);
+            }
+        }
+        (1.0, Place::Out)
+    }
+
+    fn factor_at(&self, x: f32, y: f32) -> f32 {
+        self.probe(x, y).0
     }
 
     /// Even-odd point in polygon.
@@ -331,6 +491,8 @@ impl AudienceArea {
 /// The compiled zones, horizon and colour calibration for one frame.
 pub struct Mask {
     polys: Vec<Poly>,
+    /// Some zone has a soft edge or a gradient (T-446).
+    soft: bool,
     horizon: Horizon,
     gain: [f32; 3],
     min_level: f32,
@@ -346,8 +508,10 @@ fn unit(v: f32, default: f32) -> f32 {
 
 impl Mask {
     pub fn new(zones: &[Zone], horizon: Horizon, gain: [f32; 3], min_level: f32) -> Self {
+        let polys: Vec<Poly> = zones.iter().filter_map(Poly::new).collect();
         Self {
-            polys: zones.iter().filter_map(Poly::new).collect(),
+            soft: polys.iter().any(Poly::is_soft),
+            polys,
             horizon,
             gain: gain.map(|g| unit(g, 1.0)),
             min_level: unit(min_level, 0.0).min(0.5),
@@ -359,17 +523,16 @@ impl Mask {
         self.polys.is_empty() && !self.horizon.lines && self.gain == [1.0; 3] && self.min_level == 0.0
     }
 
-    /// Brightness factor at (x, y): horizon × every zone containing it.
-    /// A point on a zone's edge counts as inside (T-351).
+    /// Brightness factor at (x, y): horizon × every zone containing it,
+    /// or whose soft edge reaches it (T-446). A point on a zone's edge
+    /// counts as inside (T-351).
     pub fn factor(&self, x: f32, y: f32) -> f32 {
         let mut f = self.horizon.factor(y);
         for p in &self.polys {
             if f == 0.0 {
                 break;
             }
-            if p.covers(x, y) {
-                f *= p.factor;
-            }
+            f *= p.factor_at(x, y);
         }
         f
     }
@@ -406,6 +569,7 @@ impl Mask {
         }
         let mut out = Vec::with_capacity(frame.len() + 16);
         let mut ts = Vec::new();
+        let mut soft = Vec::new();
         let mut masked = 0;
         for (i, b) in frame.iter().enumerate() {
             let fb = self.factor(b.x, b.y);
@@ -416,8 +580,9 @@ impl Mask {
                 let a = &frame[i - 1];
                 if a.is_lit() || b.is_lit() {
                     self.crossings(a, b, &mut ts);
-                    if !ts.is_empty() {
-                        self.split(a, b, &ts, &mut out);
+                    self.soft_steps(a, b, &mut soft);
+                    if !ts.is_empty() || !soft.is_empty() {
+                        self.split(a, b, &ts, &soft, &mut out);
                     }
                 }
             }
@@ -447,31 +612,121 @@ impl Mask {
         ts.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
     }
 
+    /// The parameters t in (0, 1) of the extra samples on a→b where a soft
+    /// edge or a gradient makes the factor vary (T-446): steps of at most
+    /// `FEATHER_STEP` there, plus the points where the segment enters or
+    /// leaves a soft edge band. Empty without soft zones.
+    fn soft_steps(&self, a: &Point, b: &Point, out: &mut Vec<f32>) {
+        out.clear();
+        if !self.soft {
+            return;
+        }
+        let len = (b.x - a.x).hypot(b.y - a.y);
+        if len.is_nan() || len <= FEATHER_STEP {
+            return;
+        }
+        let (lo, hi) = ((a.x.min(b.x), a.y.min(b.y)), (a.x.max(b.x), a.y.max(b.y)));
+        let polys: Vec<&Poly> = self
+            .polys
+            .iter()
+            .filter(|p| {
+                let f = p.feather;
+                p.is_soft() && !(hi.0 < p.min.0 - f || lo.0 > p.max.0 + f || hi.1 < p.min.1 - f || lo.1 > p.max.1 + f)
+            })
+            .collect();
+        if polys.is_empty() {
+            return;
+        }
+        let at = |t: f32| (a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+        // Which bands (bit per zone) hold the point at t, and whether the
+        // factor varies there (a band, or inside a gradient).
+        let probe = |t: f32| {
+            let (x, y) = at(t);
+            polys.iter().enumerate().fold((0u32, false), |(m, soft), (i, p)| match p.probe(x, y).1 {
+                Place::Band => (m | 1 << (i % 32), true),
+                Place::In => (m, soft || p.grad.is_some()),
+                Place::Out => (m, soft),
+            })
+        };
+        let bands = |t: f32| probe(t).0;
+        let n = (len / FEATHER_STEP).ceil() as usize;
+        let tj = |j: usize| j as f32 / n as f32;
+        let probes: Vec<(u32, bool)> = (0..=n).map(|j| probe(tj(j))).collect();
+        let soft: Vec<bool> = probes.iter().map(|p| p.1).collect();
+        let mut prev = probes[0].0;
+        for j in 1..=n {
+            let here = probes[j].0;
+            // A band's outer limit (or a band handing over to another)
+            // between two steps: bisect for it.
+            if here != prev {
+                let (mut t0, mut t1) = (tj(j - 1), tj(j));
+                for _ in 0..16 {
+                    let m = (t0 + t1) / 2.0;
+                    if bands(m) == prev {
+                        t0 = m;
+                    } else {
+                        t1 = m;
+                    }
+                }
+                out.push((t0 + t1) / 2.0);
+            }
+            if j < n && (soft[j - 1] || soft[j] || soft[j + 1]) {
+                out.push(tj(j));
+            }
+            prev = here;
+        }
+        out.retain(|&t| t > 0.0 && t < 1.0);
+        out.sort_by(|x, y| x.total_cmp(y));
+        out.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
+    }
+
     /// Inserts the samples around each crossing of a→b (the segment takes
-    /// b's colour; a is already emitted, b is emitted by the caller).
-    fn split(&self, a: &Point, b: &Point, ts: &[f32], out: &mut Vec<Point>) {
+    /// b's colour; a is already emitted, b is emitted by the caller), and
+    /// the soft edge / gradient samples `soft` between them, each at the
+    /// factor of its own position (T-446).
+    fn split(&self, a: &Point, b: &Point, ts: &[f32], soft: &[f32], out: &mut Vec<Point>) {
         let at = |t: f32| (a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
         let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
         let gap = if len > 0.0 { EDGE_GAP / len } else { 0.0 };
         // Interval k runs from bounds[k] to bounds[k+1]; its level is taken
         // at its middle (no edge inside an interval, so it is constant). A
         // crossing may be at t = 0 or 1, making an empty first/last interval
-        // whose level is the end's own.
+        // whose level is the end's own. With soft zones the level varies
+        // inside an interval: it is then taken right next to the crossing.
         let bound = |k: usize| if k == 0 { 0.0 } else if k > ts.len() { 1.0 } else { ts[k - 1] };
         let level = |k: usize| {
             let (x, y) = at((bound(k) + bound(k + 1)) / 2.0);
             self.factor(x, y)
         };
+        // The soft samples strictly between parameters `from` and `to`.
+        let mut next_soft = 0;
+        let mut soft_until = |from: f32, to: f32, out: &mut Vec<Point>| {
+            while next_soft < soft.len() && soft[next_soft] < to - 1e-6 {
+                let t = soft[next_soft];
+                if t > from + 1e-6 {
+                    let (x, y) = at(t);
+                    out.push(self.sample(x, y, b, self.factor(x, y)));
+                }
+                next_soft += 1;
+            }
+        };
+        let mut last = 0.0;
         let mut before = level(0);
         for (k, &t) in ts.iter().enumerate() {
-            let after = level(k + 1);
+            let lo_t = t - gap.min((t - bound(k)) / 2.0);
+            let hi_t = t + gap.min((bound(k + 2) - t) / 2.0);
+            let (lo, hi) = (at(lo_t), at(hi_t));
+            let mut after = level(k + 1);
+            if self.soft {
+                before = self.factor(lo.0, lo.1);
+                after = self.factor(hi.0, hi.1);
+            }
             // The edge itself can be darker than both sides: a segment that
             // only touches a zone (a corner, or a vertex of a concave one).
             let (x, y) = at(t);
             let low = before.min(after).min(self.factor(x, y));
             if before > low || after > low {
-                let lo = at(t - gap.min((t - bound(k)) / 2.0));
-                let hi = at(t + gap.min((bound(k + 2) - t) / 2.0));
+                soft_until(last, lo_t, out);
                 let mut emit = |(x, y): (f32, f32), f: f32| out.push(self.sample(x, y, b, f.min(self.factor(x, y))));
                 emit(lo, before);
                 if before > low {
@@ -481,9 +736,11 @@ impl Mask {
                     emit(hi, low);
                 }
                 emit(hi, after);
+                last = hi_t;
             }
             before = after;
         }
+        soft_until(last, 1.0, out);
     }
 }
 
@@ -799,6 +1056,228 @@ mod tests {
             assert!(lit_inside(&out, &zones).is_empty(), "seed {seed}");
             assert_eq!(lit_segments_inside(&out, &zones), 0, "seed {seed}");
         }
+    }
+
+    fn soft(level: f32, feather: f32) -> Zone {
+        Zone { level, feather, ..rect(-0.2, -0.2, 0.2, 0.2, ZoneKind::Dim) }
+    }
+
+    /// T-446: the core keeps the zone's level, the band ramps up to 1
+    /// monotonically outwards, nothing changes beyond it.
+    #[test]
+    fn a_soft_edge_ramps_outwards_only() {
+        let m = mask(&[soft(0.2, 0.2)]);
+        assert!((m.factor(0.0, 0.0) - 0.2).abs() < 1e-6);
+        assert!((m.factor(0.2, 0.0) - 0.2).abs() < 1e-6, "on the edge: the core");
+        assert!((m.factor(0.3, 0.0) - 0.6).abs() < 1e-6, "half-way through the band");
+        assert_eq!(m.factor(0.41, 0.0), 1.0);
+        assert_eq!(m.factor(0.9, 0.9), 1.0);
+        // Corner band: distance to the corner.
+        let d = 0.1f32;
+        assert!((m.factor(0.2 + d / 2f32.sqrt(), 0.2 + d / 2f32.sqrt()) - 0.6).abs() < 1e-4);
+        // Inside never above the level; outwards never decreasing.
+        let mut prev = 0.0;
+        for k in 0..=200 {
+            let x = -0.2 + 0.7 * k as f32 / 200.0;
+            let f = m.factor(x, 0.05);
+            if x <= 0.2 {
+                assert!(f <= 0.2 + 1e-6, "{x}: {f}");
+            }
+            assert!(f >= prev - 1e-6, "monotone at {x}: {prev} → {f}");
+            prev = f;
+        }
+        // A wider band only darkens.
+        let wide = mask(&[soft(0.2, 0.4)]);
+        for k in 0..100 {
+            let x = k as f32 / 100.0;
+            assert!(wide.factor(x, 0.1) <= m.factor(x, 0.1) + 1e-6, "{x}");
+        }
+    }
+
+    #[test]
+    fn a_gradient_interpolates_inside() {
+        let g = ZoneGradient { from: [0.0, 0.5], to: [0.0, -0.5], level_to: 0.2 };
+        let z = Zone { level: 1.0, gradient: Some(g), ..rect(-1.0, -0.5, 1.0, 0.5, ZoneKind::Dim) };
+        let m = mask(std::slice::from_ref(&z));
+        assert!((m.factor(0.3, 0.5) - 1.0).abs() < 1e-6, "at from");
+        assert!((m.factor(-0.3, -0.5) - 0.2).abs() < 1e-6, "at to");
+        assert!((m.factor(0.7, 0.0) - 0.6).abs() < 1e-6, "half-way");
+        assert_eq!(m.factor(0.0, 0.8), 1.0, "outside, no soft edge");
+        assert_eq!(z.factor(), 1.0, "the highest level inside");
+        // Clamped beyond both ends, never outside the two levels.
+        let g2 = ZoneGradient { from: [0.0, 0.2], to: [0.0, -0.2], level_to: 0.5 };
+        let m = mask(&[Zone { level: 0.1, gradient: Some(g2), ..rect(-1.0, -0.5, 1.0, 0.5, ZoneKind::Dim) }]);
+        assert!((m.factor(0.0, 0.4) - 0.1).abs() < 1e-6);
+        assert!((m.factor(0.0, -0.4) - 0.5).abs() < 1e-6);
+        // A degenerate axis is ignored: the plain level.
+        let flat = ZoneGradient { from: [0.1, 0.1], to: [0.1, 0.1], level_to: 0.9 };
+        let z = Zone { level: 0.3, gradient: Some(flat), ..rect(-1.0, -0.5, 1.0, 0.5, ZoneKind::Dim) };
+        assert!((mask(std::slice::from_ref(&z)).factor(0.0, 0.0) - 0.3).abs() < 1e-6);
+        assert_eq!(z.factor(), 0.3);
+    }
+
+    /// With a soft edge and a gradient, the band starts from the nearest
+    /// edge point's level.
+    #[test]
+    fn a_soft_edge_starts_from_the_gradient_level() {
+        let g = ZoneGradient { from: [0.0, 0.2], to: [0.0, -0.2], level_to: 0.2 };
+        let m = mask(&[Zone { level: 1.0, feather: 0.2, gradient: Some(g), ..rect(-0.2, -0.2, 0.2, 0.2, ZoneKind::Dim) }]);
+        assert!((m.factor(0.0, -0.3) - 0.6).abs() < 1e-5, "below: from 0.2");
+        assert!((m.factor(0.3, 0.0) - 0.8).abs() < 1e-5, "right, half-way down: from 0.6");
+        assert!((m.factor(0.0, 0.3) - 1.0).abs() < 1e-5, "above: from 1");
+    }
+
+    #[test]
+    fn overlapping_soft_zones_multiply() {
+        let a = soft(0.5, 0.2);
+        let b = Zone { level: 0.5, feather: 0.1, ..rect(0.25, -0.2, 0.6, 0.2, ZoneKind::Dim) };
+        let (ma, mb, both) = (mask(std::slice::from_ref(&a)), mask(std::slice::from_ref(&b)), mask(&[a, b]));
+        for k in 0..50 {
+            let x = -0.3 + k as f32 / 50.0;
+            assert!((both.factor(x, 0.0) - ma.factor(x, 0.0) * mb.factor(x, 0.0)).abs() < 1e-6, "{x}");
+        }
+    }
+
+    /// Blank zones ignore soft edges and gradients: the same frame out.
+    #[test]
+    fn a_blank_zone_stays_hard() {
+        let hard = rect(-0.2, -0.2, 0.2, 0.2, ZoneKind::Blank);
+        let g = ZoneGradient { from: [0.0, 0.2], to: [0.0, -0.2], level_to: 1.0 };
+        let fuzzy = Zone { feather: 0.4, gradient: Some(g), ..hard.clone() };
+        assert_eq!(fuzzy.soft_feather(), 0.0);
+        assert!(fuzzy.soft_gradient().is_none());
+        let frame = vec![white(-1.0, 0.0), white(1.0, 0.05), white(0.0, -1.0), white(0.1, 1.0)];
+        assert_eq!(mask(std::slice::from_ref(&fuzzy)).apply(&frame), mask(&[hard]).apply(&frame));
+        assert!(!mask(&[fuzzy]).soft);
+    }
+
+    /// A segment crossing a 0.2-wide band gets samples every 0.02 at
+    /// most: the factor never jumps more than one step's worth.
+    #[test]
+    fn a_segment_through_a_band_follows_the_ramp() {
+        let zones = [soft(0.2, 0.2)];
+        let (out, _) = mask(&zones).apply(&[white(-1.0, 0.0), white(1.0, 0.0)]);
+        assert!(out.len() > 20, "{}", out.len());
+        // Along x, consecutive samples' brightness differs by at most one
+        // step of the ramp (0.8 over 0.2, a step of 0.02: 0.08).
+        let max_jump = 0.8 * FEATHER_STEP / 0.2 + 1e-3;
+        for w in out.windows(2) {
+            assert!(w[0].x <= w[1].x + 1e-6, "in order: {w:?}");
+            assert!((w[0].r - w[1].r).abs() <= max_jump, "jump {w:?}");
+        }
+        // Cut at the outer limit of the band, both sides.
+        for edge in [-0.4f32, 0.4] {
+            assert!(out.iter().any(|p| (p.x - edge).abs() < 1e-4 && (p.r - 1.0).abs() < 1e-3), "{edge}: {out:?}");
+        }
+        // Inside never above the level.
+        assert!(out.iter().filter(|p| p.x.abs() < 0.2).all(|p| p.r <= 0.2 + 1e-6));
+    }
+
+    /// A short segment (below one step) is left alone; a hard-only mask
+    /// adds no sample for soft zones it doesn't have.
+    #[test]
+    fn soft_steps_only_where_the_factor_varies() {
+        let m = mask(&[soft(0.2, 0.1)]);
+        let (out, _) = m.apply(&[white(0.5, 0.5), white(0.9, 0.9)]);
+        assert_eq!(out.len(), 2, "away from the band: {out:?}");
+        let (out, _) = m.apply(&[white(0.25, 0.0), white(0.26, 0.0)]);
+        assert_eq!(out.len(), 2, "shorter than a step: {out:?}");
+    }
+
+    /// Property (T-446): with soft edges (and gradients no brighter than
+    /// the zone) the output is never brighter than without them, and Blank
+    /// zones nearby keep nothing lit.
+    #[test]
+    fn soft_edges_never_brighten() {
+        let r = |seed: u64, i: u64| crate::beat::seeded_rand(seed, i) * 2.0 - 1.0;
+        for seed in 0..150u64 {
+            let hard: Vec<Zone> = (0..4u64)
+                .map(|z| {
+                    let (cx, cy, s) = (r(seed, z * 100), r(seed, z * 100 + 1), 0.15 + 0.3 * r(seed, z * 100 + 2).abs());
+                    let n = 3 + (seed + z) as usize % 5;
+                    let points = (0..n)
+                        .map(|k| {
+                            let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                            let rad = s * (0.4 + 0.6 * r(seed, z * 100 + 10 + k as u64).abs());
+                            [(cx + rad * a.cos()).clamp(-1.0, 1.0), (cy + rad * a.sin()).clamp(-1.0, 1.0)]
+                        })
+                        .collect();
+                    let kind = if z % 2 == 0 { ZoneKind::Dim } else { ZoneKind::Blank };
+                    Zone { kind, level: r(seed, z * 100 + 3).abs(), points, ..Default::default() }
+                })
+                .collect();
+            let softened: Vec<Zone> = hard
+                .iter()
+                .enumerate()
+                .map(|(i, z)| {
+                    let i = i as u64;
+                    let gradient = (r(seed, 500 + i) > 0.0).then(|| ZoneGradient {
+                        from: [r(seed, 510 + i), r(seed, 520 + i)],
+                        to: [r(seed, 530 + i), r(seed, 540 + i)],
+                        level_to: z.level * r(seed, 550 + i).abs(),
+                    });
+                    Zone { feather: MAX_FEATHER * r(seed, 560 + i).abs(), gradient, ..z.clone() }
+                })
+                .collect();
+            let frame: Vec<Point> = (0..40u64)
+                .map(|i| {
+                    let (x, y) = (r(seed + 1000, i * 2), r(seed + 1000, i * 2 + 1));
+                    let v = r(seed + 3000, i).abs();
+                    if r(seed + 2000, i) > 0.7 {
+                        Point::blanked(x, y)
+                    } else {
+                        Point::lit(x, y, v, v, 1.0)
+                    }
+                })
+                .collect();
+            let (h, s) = (mask(&hard), mask(&softened));
+            let (out, _) = s.apply(&frame);
+            for p in &out {
+                let peak = p.r.max(p.g).max(p.b);
+                assert!(peak <= h.factor(p.x, p.y) + 1e-5, "seed {seed}: {p:?} brighter than without soft edges");
+                assert!(peak <= s.factor(p.x, p.y) + 1e-5, "seed {seed}: {p:?} brighter than its own factor");
+                assert!((-1.0..=1.0).contains(&p.x) && (-1.0..=1.0).contains(&p.y), "seed {seed}: {p:?}");
+            }
+            assert_eq!(blank_violations(&out, &softened), 0, "seed {seed}");
+            assert!(lit_inside(&out, &softened).is_empty(), "seed {seed}");
+            assert_eq!(lit_segments_inside(&out, &softened), 0, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn three_thousand_points_with_eight_soft_zones_fit_in_a_frame() {
+        let zones: Vec<Zone> = (0..MAX_ZONES)
+            .map(|z| {
+                let (cx, cy) = (-0.8 + 0.22 * z as f32, 0.1 * z as f32 - 0.4);
+                let points = (0..MAX_VERTICES)
+                    .map(|k| {
+                        let a = k as f32 / MAX_VERTICES as f32 * std::f32::consts::TAU;
+                        let rad = if k % 2 == 0 { 0.2 } else { 0.1 };
+                        [cx + rad * a.cos(), cy + rad * a.sin()]
+                    })
+                    .collect();
+                let gradient = Some(ZoneGradient { from: [cx, cy + 0.2], to: [cx, cy - 0.2], level_to: 0.1 });
+                Zone { kind: ZoneKind::Dim, level: 0.5, feather: 0.1, gradient, points, ..Default::default() }
+            })
+            .collect();
+        let m = Mask::new(&zones, Horizon { lines: true, ..Default::default() }, [0.9; 3], 0.05);
+        let frame: Vec<Point> = (0..3000)
+            .map(|i| {
+                let t = i as f32 / 3000.0;
+                let a = t * 60.0;
+                white(t * a.cos(), t * a.sin())
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let runs = 10;
+        for _ in 0..runs {
+            std::hint::black_box(m.apply(std::hint::black_box(&frame)));
+        }
+        let per_frame = start.elapsed() / runs;
+        // Under 1 ms in a release build; an unoptimised test build is
+        // several times slower.
+        assert!(per_frame.as_secs_f64() < 0.03, "{per_frame:?} per frame");
+        eprintln!("soft mask: {per_frame:?} per 3000-point frame (8 soft zones × 24 vertices)");
     }
 
     #[test]

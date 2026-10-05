@@ -266,3 +266,71 @@ test('the horizon also covers lines once ticked', async ({ page }) => {
   await page.locator('#sfLoosenOk').click();
   await expect.poll(async () => (await safety()).horizon.lines).toBe(false);
 });
+
+// ---------- soft edges and gradients (T-446) ----------
+
+test('a soft edge ramps the light around an Atténuer zone; narrowing it asks first', async ({ page }) => {
+  // A Dim stripe at 20 % (set up over HTTP, confirmed), then the UI.
+  const stripe = { id: 0, name: 'Public', kind: 'dim', level: 0.2, points: [[-0.2, -1], [0.2, -1], [0.2, 1], [-0.2, 1]] };
+  expect(await studio.post('/api/safety', { ...DEFAULTS, zones: [stripe], confirm_loosen: true })).toBe(200);
+  await showLook({ kind: 'shape', shape: 'line' });
+  await openUi(page, studio); // the panel loads the zone
+  await openSafety(page);
+  const row = page.locator('#sfZones .sfzone').first();
+  await expect(row.locator('.zsoft')).toBeVisible();
+  // Widening the soft edge tightens: applied at once.
+  await row.locator('.zfeather').fill('10');
+  await expect.poll(async () => (await safety()).zones[0].feather).toBeCloseTo(0.2, 5);
+  await expect(page.locator('#sfLoosen')).toBeHidden();
+  await expect(row.locator('.zfeatherV')).toHaveText('10 %');
+
+  // The horizontal line through it: 20 % in the core, a ramp over the
+  // band (0.2 to 0.4 from the centre), full brightness beyond.
+  await expect.poll(async () => (await frame()).points.filter(p => isLit(p) && Math.abs(p[0]) > 0.25 && Math.abs(p[0]) < 0.35).length).toBeGreaterThan(0);
+  const f = await frame();
+  const peak = (p: Point) => Math.max(p[2], p[3], p[4]);
+  const lit = f.points.filter(p => isLit(p) && Math.abs(p[1]) < 0.01);
+  const ref = Math.max(...lit.filter(p => Math.abs(p[0]) > 0.45).map(peak));
+  expect(ref).toBeGreaterThan(0);
+  for (const p of lit) {
+    const d = Math.abs(p[0]);
+    const k = peak(p) / ref;
+    if (d < 0.195) expect(k, `core ${p}`).toBeLessThanOrEqual(0.2 + 0.02);
+    else if (d > 0.205 && d < 0.395) expect(Math.abs(k - (0.2 + 0.8 * (d - 0.2) / 0.2)), `band ${p}`).toBeLessThan(0.1);
+  }
+  // Samples were added inside the band: no gap wider than a step there.
+  const band = lit.filter(p => p[0] > 0.2 && p[0] < 0.4).map(p => p[0]).sort((a, b) => a - b);
+  expect(band.length).toBeGreaterThan(5);
+  for (let i = 1; i < band.length; i++) expect(band[i] - band[i - 1]).toBeLessThan(0.025);
+
+  // Narrowing it loosens: the confirmation box, with what changes.
+  await row.locator('.zfeather').fill('4');
+  await expect(page.locator('#sfLoosen')).toBeVisible();
+  await expect(page.locator('#sfLoosenText')).toContainText('Zone « Public » : bord doux 10 % → 4 %');
+  await page.locator('#sfLoosenCancel').click();
+  await expect(page.locator('#sfLoosen')).toBeHidden();
+  expect((await safety()).zones[0].feather).toBeCloseTo(0.2, 5);
+  // Widening again: no confirmation.
+  await page.locator('#sfZones .sfzone .zfeather').fill('15');
+  await expect.poll(async () => (await safety()).zones[0].feather).toBeCloseTo(0.3, 5);
+  await expect(page.locator('#sfLoosen')).toBeHidden();
+
+  // A gradient top → bottom, 10 % on arrival, tightens; raising it asks.
+  await page.locator('#sfZones .zgrad').check();
+  await expect.poll(async () => (await safety()).zones[0].gradient?.level_to).toBeCloseTo(0.2, 5);
+  expect((await safety()).zones[0].gradient.from).toEqual([0, 1]);
+  await page.locator('#sfZones .zlevelto').fill('10');
+  await page.locator('#sfZones .zlevelto').press('Tab');
+  await expect.poll(async () => (await safety()).zones[0].gradient?.level_to).toBeCloseTo(0.1, 5);
+  await page.locator('#sfZones .zlevelto').fill('50');
+  await page.locator('#sfZones .zlevelto').press('Tab');
+  await expect(page.locator('#sfLoosenText')).toContainText('luminosité à l\'arrivée 10 % → 50 %');
+  await page.locator('#sfLoosenCancel').click();
+  await page.screenshot({ path: 'test-results/safety-soft-zone-dim.png' });
+  // A Masquer zone has no soft edge controls.
+  await page.locator('#sfZones .zkind').selectOption('blank');
+  await expect.poll(async () => (await safety()).zones[0].kind).toBe('blank');
+  await expect(page.locator('#sfZones .zsoft')).toBeHidden();
+  await page.screenshot({ path: 'test-results/safety-soft-zone.png' });
+  expect((await frame()).armed).toBe(false);
+});

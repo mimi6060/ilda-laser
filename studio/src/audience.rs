@@ -267,7 +267,7 @@ mod tests {
     use crate::zones::Zone;
 
     fn public(kind: ZoneKind, level: f32) -> Zone {
-        Zone { id: 1, name: "Public".into(), kind, level, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, -0.4], [-1.0, -0.4]], audience: true }
+        Zone { id: 1, name: "Public".into(), kind, level, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, -0.4], [-1.0, -0.4]], audience: true, ..Default::default() }
     }
 
     fn sheet() -> ProjectorInfo {

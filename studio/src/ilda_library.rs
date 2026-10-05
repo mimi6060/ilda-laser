@@ -722,7 +722,7 @@ mod tests {
     }
 
     fn zone(kind: crate::zones::ZoneKind, points: &[[f32; 2]]) -> crate::zones::Zone {
-        crate::zones::Zone { id: 1, name: "z".into(), kind, level: 0.3, points: points.to_vec(), audience: false }
+        crate::zones::Zone { id: 1, name: "z".into(), kind, level: 0.3, points: points.to_vec(), ..Default::default() }
     }
 
     /// A big circle turning, lit all around the field.

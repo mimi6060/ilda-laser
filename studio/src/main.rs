@@ -2516,7 +2516,7 @@ mod tests {
     fn ready_for_audience_scanning(log: safety_log::SafetyLog) -> Shared {
         let mut s = test_support::shared();
         s.gate.set_log(log);
-        let zone = zones::Zone { id: 1, name: "Public".into(), kind: zones::ZoneKind::Dim, level: 0.1, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 0.0], [-1.0, 0.0]], audience: true };
+        let zone = zones::Zone { id: 1, name: "Public".into(), kind: zones::ZoneKind::Dim, level: 0.1, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 0.0], [-1.0, 0.0]], audience: true, ..Default::default() };
         let mut cfg = safety::SafetySettings { zones: vec![zone], ..Default::default() };
         cfg.dwell.profile = dwell::DwellProfile::Strict;
         s.safety.set(cfg, true).unwrap();

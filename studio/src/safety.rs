@@ -60,7 +60,7 @@
 
 use crate::dwell::DwellGuard;
 use crate::patterns::Point;
-use crate::zones::{Horizon, Mask, Zone, ZoneKind, MAX_VERTICES, MAX_ZONES};
+use crate::zones::{Horizon, Mask, Zone, ZoneGradient, ZoneKind, MAX_FEATHER, MAX_VERTICES, MAX_ZONES};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -175,6 +175,8 @@ const FLOOR_RANGE: (f32, f32) = (-1.0, 1.0);
 const RAMP_RANGE: (f32, f32) = (0.0, 0.5);
 const UNIT_RANGE: (f32, f32) = (0.0, 1.0);
 const MIN_DIODE_RANGE: (f32, f32) = (0.0, 0.5);
+/// Soft edge width of a Dim zone (T-446), in output units.
+const FEATHER_RANGE: (f32, f32) = (0.0, MAX_FEATHER);
 const MAX_ZONE_NAME: usize = 40;
 
 fn fix(v: f32, (lo, hi): (f32, f32), def: f32) -> f32 {
@@ -219,6 +221,20 @@ impl SafetySettings {
                 check(p[1], FLOOR_RANGE, &what)?;
             }
             check(z.level, UNIT_RANGE, &format!("{what}, luminosité"))?;
+            check(z.feather, FEATHER_RANGE, &format!("{what}, bord doux"))?;
+            if let Some(g) = &z.gradient {
+                for v in g.from.iter().chain(&g.to) {
+                    check(*v, FLOOR_RANGE, &format!("{what}, dégradé"))?;
+                }
+                check(g.level_to, UNIT_RANGE, &format!("{what}, luminosité à l'arrivée"))?;
+                if z.audience && z.kind == ZoneKind::Dim && g.level_to > crate::audience::MAX_AUDIENCE_LEVEL {
+                    bail!(
+                        "{what} (Public) : luminosité à l'arrivée {:.0} %, {:.0} % au plus (atténuation d'au moins 50 %)",
+                        g.level_to * 100.0,
+                        crate::audience::MAX_AUDIENCE_LEVEL * 100.0
+                    );
+                }
+            }
             // A Public zone attenuates by 50 % at least (T-255).
             if z.audience && z.kind == ZoneKind::Dim && z.level > crate::audience::MAX_AUDIENCE_LEVEL {
                 bail!(
@@ -246,10 +262,32 @@ impl SafetySettings {
             .zones
             .iter()
             .filter(|z| z.points.len() >= 3)
-            .map(|z| Zone {
-                points: z.points.iter().map(|p| [fix(p[0], FLOOR_RANGE, 0.0), fix(p[1], FLOOR_RANGE, 0.0)]).collect(),
-                level: fix(z.level, if z.audience { (0.0, crate::audience::MAX_AUDIENCE_LEVEL) } else { UNIT_RANGE }, 0.0),
-                ..z.clone()
+            .map(|z| {
+                let levels = if z.audience { (0.0, crate::audience::MAX_AUDIENCE_LEVEL) } else { UNIT_RANGE };
+                let mut level = fix(z.level, levels, 0.0);
+                let (mut feather, mut gradient) = (0.0, None);
+                // Soft edges and gradients are for Dim zones only (T-446).
+                if z.kind == ZoneKind::Dim {
+                    // Not a number → the widest edge, the tighter value.
+                    feather = fix(z.feather, FEATHER_RANGE, MAX_FEATHER);
+                    if let Some(g) = &z.gradient {
+                        let level_to = fix(g.level_to, levels, 0.0);
+                        if g.from.iter().chain(&g.to).all(|v| v.is_finite()) {
+                            let pos = |p: [f32; 2]| p.map(|v| v.clamp(FLOOR_RANGE.0, FLOOR_RANGE.1));
+                            gradient = Some(ZoneGradient { from: pos(g.from), to: pos(g.to), level_to });
+                        } else {
+                            // No usable axis: the darker level everywhere.
+                            level = level.min(level_to);
+                        }
+                    }
+                }
+                Zone {
+                    points: z.points.iter().map(|p| [fix(p[0], FLOOR_RANGE, 0.0), fix(p[1], FLOOR_RANGE, 0.0)]).collect(),
+                    level,
+                    feather,
+                    gradient,
+                    ..z.clone()
+                }
             })
             .collect();
         // Unique ids (0 or duplicates get fresh ones).
@@ -322,11 +360,42 @@ impl SafetySettings {
                         format!("Zone « {} » : luminosité {:.0} % → {:.0} %", z.name, z.level * 100.0, n.level * 100.0),
                     );
                     more(n.points != z.points, format!("Zone « {} » déplacée ou redessinée", z.name));
+                    if z.kind == ZoneKind::Dim && n.kind == ZoneKind::Dim {
+                        Self::soft_loosenings(z, n, &mut more);
+                    }
                 }
             }
         }
         out.extend(self.dwell.loosenings(&new.dwell));
         out
+    }
+
+    /// What a Dim zone's soft edge and gradient changes loosen (T-446): a
+    /// narrower soft edge; a higher arrival level, a moved axis, a removed
+    /// gradient darker than the zone, or an added one brighter than it.
+    fn soft_loosenings(z: &Zone, n: &Zone, more: &mut impl FnMut(bool, String)) {
+        // The soft edge as a percentage of the field width (2 units).
+        let pct = |f: f32| f * 50.0;
+        let (zf, nf) = (z.soft_feather(), n.soft_feather());
+        more(nf < zf, format!("Zone « {} » : bord doux {:.0} % → {:.0} %", z.name, pct(zf), pct(nf)));
+        match (z.soft_gradient(), n.soft_gradient()) {
+            (Some(g), Some(h)) => {
+                more(
+                    h.level_to > g.level_to,
+                    format!("Zone « {} » : luminosité à l'arrivée {:.0} % → {:.0} %", z.name, g.level_to * 100.0, h.level_to * 100.0),
+                );
+                more(h.from != g.from || h.to != g.to, format!("Zone « {} » : dégradé déplacé", z.name));
+            }
+            (Some(g), None) => more(
+                g.level_to < n.level,
+                format!("Zone « {} » : dégradé retiré (arrivée {:.0} % → {:.0} %)", z.name, g.level_to * 100.0, n.level * 100.0),
+            ),
+            (None, Some(h)) => more(
+                h.level_to > z.level,
+                format!("Zone « {} » : luminosité à l'arrivée {:.0} % → {:.0} %", z.name, z.level * 100.0, h.level_to * 100.0),
+            ),
+            (None, None) => {}
+        }
     }
 }
 
@@ -1012,6 +1081,72 @@ mod tests {
         store.set(renamed, false).unwrap();
         store.set(SafetySettings::default(), true).unwrap();
         assert_eq!(store.get(), SafetySettings::default());
+    }
+
+    fn dim(id: u32, level: f32, feather: f32, gradient: Option<ZoneGradient>) -> Zone {
+        Zone { kind: ZoneKind::Dim, level, feather, gradient, name: "Public".into(), ..zone(id, -1.0, -1.0, 1.0, -0.2) }
+    }
+
+    /// T-446: soft edges and gradients, validated, sanitized, and their
+    /// changes sorted into tightening (applied) and loosening (confirmed).
+    #[test]
+    fn soft_zones_validate_sanitize_and_loosen() {
+        let g = |level_to: f32| Some(ZoneGradient { from: [0.0, -0.2], to: [0.0, -1.0], level_to });
+        let ok = SafetySettings { zones: vec![dim(1, 0.5, 0.2, g(0.2))], ..Default::default() };
+        assert!(ok.validate().is_ok());
+        for bad in [dim(1, 0.5, 0.6, None), dim(1, 0.5, f32::NAN, None), dim(1, 0.5, -0.1, None), dim(1, 0.5, 0.0, g(1.5)), dim(1, 0.5, 0.0, g(f32::INFINITY))] {
+            let s = SafetySettings { zones: vec![bad], ..Default::default() };
+            assert!(s.validate().is_err(), "{s:?}");
+        }
+        let off_field = Zone { gradient: Some(ZoneGradient { from: [0.0, 2.0], ..ZoneGradient::default() }), ..dim(1, 0.5, 0.0, None) };
+        assert!(SafetySettings { zones: vec![off_field], ..Default::default() }.validate().is_err());
+        // A Public Dim zone: the arrival level is capped like its level.
+        let public = Zone { audience: true, ..dim(1, 0.3, 0.0, g(0.8)) };
+        let err = SafetySettings { zones: vec![public], ..Default::default() }.validate().unwrap_err().to_string();
+        assert!(err.contains("arrivée"), "{err}");
+
+        // sanitized: Blank zones lose both; bad values are clamped tighter.
+        let blank = Zone { feather: 0.3, gradient: g(0.9), ..zone(2, 0.0, 0.0, 0.5, 0.5) };
+        let nan = dim(3, 0.6, f32::NAN, Some(ZoneGradient { from: [f32::NAN, 0.0], to: [0.0, 1.0], level_to: 0.1 }));
+        let s = SafetySettings { zones: vec![blank, nan, dim(4, 0.5, 3.0, g(2.0))], ..Default::default() }.sanitized();
+        assert_eq!((s.zones[0].feather, s.zones[0].gradient), (0.0, None));
+        assert_eq!((s.zones[1].feather, s.zones[1].gradient, s.zones[1].level), (MAX_FEATHER, None, 0.1));
+        assert_eq!((s.zones[2].feather, s.zones[2].gradient.unwrap().level_to), (MAX_FEATHER, 1.0));
+        assert!(s.validate().is_ok());
+
+        // A file from before T-446 loads with no soft edge and no gradient.
+        let old: SafetySettings =
+            serde_json::from_str(r#"{"zones":[{"id":1,"name":"P","kind":"dim","level":0.4,"points":[[0,0],[1,0],[1,1]]}]}"#).unwrap();
+        assert_eq!((old.zones[0].feather, old.zones[0].gradient), (0.0, None));
+        let partial: Zone = serde_json::from_str(r#"{"kind":"dim","gradient":{"level_to":0.1}}"#).unwrap();
+        assert_eq!(partial.gradient, Some(ZoneGradient { level_to: 0.1, ..ZoneGradient::default() }));
+
+        // Loosenings.
+        let base = SafetySettings { zones: vec![dim(1, 0.5, 0.2, g(0.2))], ..Default::default() };
+        let with = |z: Zone| SafetySettings { zones: vec![z], ..Default::default() };
+        let loosens = |z: Zone| base.loosenings(&with(z));
+        assert!(loosens(dim(1, 0.5, 0.3, g(0.2))).is_empty(), "wider soft edge tightens");
+        assert!(loosens(dim(1, 0.5, 0.2, g(0.1))).is_empty(), "lower arrival tightens");
+        assert!(loosens(Zone { kind: ZoneKind::Blank, ..dim(1, 0.5, 0.0, None) }).is_empty(), "Blank tightens");
+        assert_eq!(loosens(dim(1, 0.5, 0.08, g(0.2))), vec!["Zone « Public » : bord doux 10 % → 4 %"]);
+        assert_eq!(loosens(dim(1, 0.5, 0.2, g(0.5))), vec!["Zone « Public » : luminosité à l'arrivée 20 % → 50 %"]);
+        let moved = Zone { gradient: Some(ZoneGradient { from: [0.0, -0.3], to: [0.0, -1.0], level_to: 0.2 }), ..dim(1, 0.5, 0.2, None) };
+        assert!(loosens(moved)[0].contains("dégradé déplacé"));
+        assert!(loosens(dim(1, 0.5, 0.2, None))[0].contains("dégradé retiré"), "removing a darker gradient");
+        // Adding a gradient: at or below the level tightens, above loosens.
+        let plain = SafetySettings { zones: vec![dim(1, 0.5, 0.0, None)], ..Default::default() };
+        assert!(plain.loosenings(&with(dim(1, 0.5, 0.0, g(0.5)))).is_empty());
+        assert!(plain.loosenings(&with(dim(1, 0.5, 0.0, g(0.7))))[0].contains("arrivée"));
+        // A degenerate gradient is no gradient: adding one changes nothing.
+        let flat = Some(ZoneGradient { from: [0.0, 0.0], to: [0.0, 0.0], level_to: 1.0 });
+        assert!(plain.loosenings(&with(dim(1, 0.5, 0.0, flat))).is_empty());
+
+        // Through the store: narrowing needs confirmation, widening not.
+        let mut store = SafetyStore::in_memory();
+        store.set(base.clone(), true).unwrap();
+        assert!(matches!(store.set(with(dim(1, 0.5, 0.05, g(0.2))), false), Err(SetError::Loosens(_))));
+        store.set(with(dim(1, 0.5, 0.4, g(0.2))), false).unwrap();
+        assert_eq!(store.get().zones[0].feather, 0.4);
     }
 
     #[test]
