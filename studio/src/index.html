@@ -741,6 +741,14 @@
   #sfLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
   #sfLoosenOk { border-color: var(--danger); color: var(--danger); }
   .sf-error { color: var(--danger); }
+  /* Exposure estimator (T-257): red over the MPE, green under; never « safe ». */
+  .ex-banner { margin: 6px 0 8px; padding: 8px 10px; border-left: 3px solid var(--danger); border-radius: 6px; background: var(--panel-2); font-size: 12px; font-weight: 600; }
+  .ex-results { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; font-size: 13px; margin: 6px 0; }
+  .ex-results b { font-variant-numeric: tabular-nums; text-align: right; }
+  #exVerdict { padding: 6px 10px; border-radius: 6px; font-weight: 700; margin: 6px 0; border: 1px solid var(--line); }
+  #exVerdict[data-over="true"] { color: var(--danger); border-color: var(--danger); }
+  #exVerdict[data-over="false"] { color: var(--ok); border-color: var(--ok); }
+  #exAssumptions { margin: 4px 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
   .diag-warn { color: var(--warn); font-weight: 600; }
   #diagContents { margin: 4px 0 6px 18px; padding: 0; }
   #diagDir { word-break: break-all; }
@@ -2748,6 +2756,37 @@
         <div class="row"><span>Touche de maintien : <b id="holdKeyLabel"></b></span>
           <button id="holdKeyPick" style="flex:0;white-space:nowrap">Changer…</button></div>
         <div class="hint">Mode maintien : le laser n'émet que tant que la touche est maintenue (une pédale USB qui envoie une touche fonctionne aussi ; pad MIDI : contrôle safety.hold). Relâcher = sortie noire ; relâché plus de 10 s = désarmé.</div>
+      </details>
+    </section>
+
+    <section data-help="reglages-securite">
+      <details id="exposurePanel">
+        <summary>Estimation d'exposition</summary>
+        <div class="ex-banner" id="exBanner">Estimation théorique — ne remplace pas une mesure avec un appareil étalonné, l'évaluation d'une personne compétente en sécurité laser ni le respect de la réglementation. L'arrêt réel reste matériel (interlock, arrêt d'urgence, clé).</div>
+        <div class="hint">Calcul à partir de la fiche projecteur (RÉGLAGES › Sorties et projecteurs) et du plafond de puissance de la sortie : <span id="exProjector"></span>. Aucun effet sur la sortie : rien n'est armé ni modifié.</div>
+        <label for="exDistance">Distance minimale du public (m)</label>
+        <input type="number" id="exDistance" min="0.1" max="10000" step="0.1">
+        <label for="exAttenuation">Atténuation dans la zone public (%)</label>
+        <input type="number" id="exAttenuation" min="0" max="99.9" step="1">
+        <div class="hint sf-error" id="exError" role="alert"></div>
+        <div id="exVerdict" data-over="">—</div>
+        <div class="ex-results">
+          <span>Puissance (toutes couleurs, plafond appliqué)</span><b id="exPower">—</b>
+          <span>Diamètre du faisceau à cette distance</span><b id="exBeam">—</b>
+          <span>Irradiance estimée</span><b id="exIrr">—</b>
+          <span>EMP (0,25 s)</span><b id="exMpe">—</b>
+          <span>Dépassement</span><b id="exRatio">—</b>
+          <span>Distance de danger (DNRO), faisceau fixe</span><b id="exNohd">—</b>
+          <span>Sans plafond logiciel : dépassement</span><b id="exRatioFull">—</b>
+          <span>Sans plafond logiciel : DNRO</span><b id="exNohdFull">—</b>
+          <span>Référence ILDA, faisceau fixe (2,5 mW/cm²)</span><b id="exIldaStatic">—</b>
+          <span>Référence ILDA, balayage continu sans point chaud (10 mW/cm²)</span><b id="exIldaScan">—</b>
+        </div>
+        <div class="hint" id="exSuggest"></div>
+        <div class="hint sf-warn" id="exWarnings"></div>
+        <div class="sf-sub">Hypothèses</div>
+        <ul id="exAssumptions"></ul>
+        <div class="hint">Formules publiques simplifiées (IEC 60825-1 : EMP = 18·t<sup>0,75</sup> J/m² entre 400 et 700 nm ; faisceau de diamètre a + d·φ ; moyenne sur 7 mm). Les effets balayés ne sont pas évalués. Un résultat sous l'EMP ne veut pas dire « sans danger » : seule une mesure au point le plus proche du public, faite par une personne compétente, le dit. Le plafond indiqué n'est qu'une suggestion : il n'est jamais appliqué tout seul.</div>
       </details>
     </section>
 
@@ -6230,6 +6269,50 @@ const SL_GROUPS = {
   studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow', 'output_select', 'output'],
 };
 let slLog = null;
+// Exposure estimator (T-257): read-only figures, never an action on the output.
+const exFmt = (v, digits, unit) => v == null ? '—' : v.toLocaleString('fr-FR', { maximumFractionDigits: digits }) + unit;
+function showExposure(j) {
+  $('exBanner').textContent = j.disclaimer;
+  $('exProjector').textContent = (j.projector_name || 'projecteur sans nom') + ', plafond ' + Math.round(j.max_power * 100) + ' %';
+  if (document.activeElement !== $('exDistance')) $('exDistance').value = j.settings.distance_m;
+  if (document.activeElement !== $('exAttenuation')) $('exAttenuation').value = j.settings.attenuation_pct;
+  const r = j.result;
+  const over = r ? r.ratio > 1 : null;
+  $('exVerdict').dataset.over = over == null ? '' : String(over);
+  $('exVerdict').textContent = r == null ? 'Pas d\'estimation : fiche projecteur incomplète.'
+    : over ? 'Estimation : au-dessus de l\'EMP (× ' + exFmt(r.ratio, 1, '') + ') à ' + exFmt(j.settings.distance_m, 1, ' m')
+      : 'Estimation : sous l\'EMP à ' + exFmt(j.settings.distance_m, 1, ' m') + ' — à confirmer par une mesure, ce n\'est pas une garantie';
+  $('exPower').textContent = exFmt(j.power_capped_mw, 0, ' mW') + ' (fiche : ' + exFmt(j.power_full_mw, 0, ' mW') + ')';
+  $('exBeam').textContent = r ? exFmt(r.beam_mm, 1, ' mm') : '—';
+  $('exIrr').textContent = r ? exFmt(r.irradiance_mw_cm2, 2, ' mW/cm²') : '—';
+  $('exMpe').textContent = r ? exFmt(r.mpe_mw_cm2, 2, ' mW/cm²') : '—';
+  $('exRatio').textContent = r ? '× ' + exFmt(r.ratio, 1, '') : '—';
+  const nohd = (res, d) => res == null ? '—' : d == null ? 'illimitée (divergence inconnue)' : exFmt(d, 1, ' m');
+  $('exNohd').textContent = nohd(r, r && r.nohd_m);
+  $('exRatioFull').textContent = j.ratio_full == null ? '—' : '× ' + exFmt(j.ratio_full, 1, '');
+  $('exNohdFull').textContent = nohd(j.ratio_full, j.nohd_full_m);
+  $('exIldaStatic').textContent = j.ratio_ilda_static == null ? '—' : '× ' + exFmt(j.ratio_ilda_static, 1, '');
+  $('exIldaScan').textContent = j.ratio_ilda_scanned == null ? '—' : '× ' + exFmt(j.ratio_ilda_scanned, 1, '');
+  $('exSuggest').textContent = j.suggested_max_power == null ? ''
+    : 'À titre indicatif, un plafond de puissance d\'environ ' + exFmt(j.suggested_max_power * 100, 2, ' %') + ' ramènerait cette estimation à l\'EMP (à régler vous-même dans RÉGLAGES › Sorties et projecteurs, puis à mesurer).';
+  $('exWarnings').textContent = j.warnings.join(' ');
+  $('exAssumptions').replaceChildren(...j.assumptions.map(a => { const li = document.createElement('li'); li.textContent = a; return li; }));
+}
+async function loadExposure() {
+  let r;
+  try { r = await api('GET', '/api/safety/exposure', undefined, { quiet: true }); } catch { return; }
+  if (r.ok) { $('exError').textContent = ''; showExposure(await r.json()); }
+}
+async function saveExposure() {
+  const body = { exposure: { distance_m: +$('exDistance').value, attenuation_pct: +$('exAttenuation').value } };
+  let r;
+  try { r = await api('POST', '/api/safety/exposure', body, { quiet: true }); } catch { return; }
+  if (r.ok) { $('exError').textContent = ''; showExposure(await r.json()); }
+  else { const msg = await r.text(); await loadExposure(); $('exError').textContent = msg; }
+}
+['exDistance', 'exAttenuation'].forEach(id => $(id).addEventListener('change', saveExposure));
+$('exposurePanel').addEventListener('toggle', () => { if ($('exposurePanel').open) loadExposure(); });
+setInterval(() => { if (activeWs === 'settings' && $('exposurePanel').open && !document.hidden && !$('exposurePanel').contains(document.activeElement)) loadExposure(); }, 3000);
 async function loadSafetyLog() {
   const day = $('slDay').value;
   let j;

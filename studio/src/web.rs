@@ -1043,6 +1043,30 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // Exposure estimator (T-257): MPE and NOHD from the projector sheet,
+        // the caps and the audience distance. Informative only: never
+        // changes a cap, the output or the arming. `?output=` picks the
+        // output (main by default).
+        (Method::Get, "/api/safety/exposure") => {
+            let s = shared.lock().unwrap();
+            match color_output(request.url(), &s) {
+                Ok(id) => json_response(exposure_view(&s, &id)),
+                Err(e) => e,
+            }
+        }
+        // `{output?, exposure: {distance_m, attenuation_pct}}`: saved with
+        // the output. An edit, locked in show mode.
+        (Method::Post, "/api/safety/exposure") => match body::<ExposureBody>(request) {
+            Ok(b) => {
+                let mut s = shared.lock().unwrap();
+                let id = b.output.unwrap_or_else(|| crate::power::MAIN_OUTPUT.into());
+                match s.outputs.set_exposure(&id, b.exposure) {
+                    Ok(_) => json_response(exposure_view(&s, &id)),
+                    Err(e) => text(400, &e.to_string()),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/outputs/color") => {
             let s = shared.lock().unwrap();
             match color_output(request.url(), &s) {
@@ -3024,6 +3048,24 @@ struct OutputsBody {
     projector: Option<crate::power::ProjectorInfo>,
     #[serde(default, alias = "confirm_raise")]
     confirm_loosen: bool,
+}
+
+/// `POST /api/safety/exposure` (T-257).
+#[derive(Deserialize)]
+struct ExposureBody {
+    #[serde(default)]
+    output: Option<String>,
+    exposure: crate::mpe::ExposureSettings,
+}
+
+/// `GET /api/safety/exposure`: the estimate for one output.
+fn exposure_view(s: &Shared, id: &str) -> serde_json::Value {
+    let cfg = s.outputs.config_for(id);
+    let mut v = json!(crate::mpe::report(&cfg.projector, &cfg.limits, &cfg.exposure));
+    v["output"] = json!(id);
+    v["projector_name"] = json!(cfg.projector.name);
+    v["max_power"] = json!(cfg.limits.max_power);
+    v
 }
 
 /// `POST /api/outputs/color` (T-414).
@@ -5790,6 +5832,46 @@ mod tests {
         for forbidden in ["fetch(", "XMLHttpRequest", "WebSocket", "/api/", "sendBeacon", "import("] {
             assert!(!module.contains(forbidden), "beam3d.js must not use {forbidden}");
         }
+    }
+
+    #[test]
+    fn the_exposure_estimate_reads_the_sheet_and_changes_nothing() {
+        let t = TestServer::start(false);
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        // No power in the sheet: nothing to estimate, said.
+        let (code, body) = t.request("GET", "/api/safety/exposure", "");
+        assert_eq!(code, 200, "{body}");
+        let v = js(&body);
+        assert!(v["result"].is_null());
+        assert!(v["disclaimer"].as_str().unwrap().contains("ne remplace pas"));
+        // 1 W, 5 mm, 1 mrad; caps 100 % so the hand calculation of mpe.rs
+        // applies: 10 m → 565.9 mW/cm², ratio 222, NOHD 218.6 m.
+        assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"projector":{"power_mw":[300,400,300],"aperture_mm":5,"divergence_mrad":1}}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/outputs/limits", r#"{"limits":{"max_power":1,"max_color":[1,1,1]},"confirm_loosen":true}"#).0, 200);
+        let snapshot = |t: &TestServer| {
+            let s = t.shared.lock().unwrap();
+            (s.outputs.active_limits(), s.gate.is_armed())
+        };
+        let before = snapshot(&t);
+        let (code, body) = t.request("POST", "/api/safety/exposure", r#"{"exposure":{"distance_m":10,"attenuation_pct":0}}"#);
+        assert_eq!(code, 200, "{body}");
+        let v = js(&body);
+        let r = &v["result"];
+        assert!((r["irradiance_mw_cm2"].as_f64().unwrap() - 565.884).abs() < 0.1, "{r}");
+        assert!((r["nohd_m"].as_f64().unwrap() - 218.64).abs() < 0.1, "{r}");
+        assert!(r["ratio"].as_f64().unwrap() > 1.0);
+        // Saved with the output, and nothing about the output changed.
+        assert_eq!(js(&t.request("GET", "/api/safety/exposure", "").1)["settings"]["distance_m"], 10.0);
+        assert_eq!(snapshot(&t), before);
+        // Untrusted values refused.
+        for bad in [r#"{"exposure":{"distance_m":-1}}"#, r#"{"exposure":{"attenuation_pct":100}}"#, r#"{"exposure":{"distance_m":"x"}}"#] {
+            assert_eq!(t.request("POST", "/api/safety/exposure", bad).0, 400, "{bad}");
+        }
+        assert_eq!(t.request("GET", "/api/safety/exposure?output=nope", "").0, 400);
+        // An edit: locked in show mode; reading is not.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/safety/exposure", r#"{"exposure":{"distance_m":5}}"#).0, 423);
+        assert_eq!(t.request("GET", "/api/safety/exposure", "").0, 200);
     }
 
     #[test]
