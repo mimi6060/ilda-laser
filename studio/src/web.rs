@@ -4211,6 +4211,12 @@ struct SimEstimate {
     state: crate::audio::bpm::DetectState,
     #[serde(default)]
     offset_s: f64,
+    /// A simulated downbeat detection (T-235): which beat of the grid
+    /// (`n` mod 4, `n` counted from `offset_s`) is the "1", and its confidence.
+    #[serde(default)]
+    downbeat_beat: Option<u8>,
+    #[serde(default)]
+    downbeat_confidence: f32,
 }
 
 impl SimEstimate {
@@ -4218,6 +4224,14 @@ impl SimEstimate {
         let spb = 60.0 / (self.bpm as f64).clamp(crate::tempo::MIN_BPM, crate::tempo::MAX_BPM);
         let beat_time = self.offset_s + ((now - self.offset_s) / spb).floor() * spb;
         let tempo = crate::audio::bpm::TempoEstimate { bpm: self.bpm, confidence: self.confidence, beat_time, next_beat: beat_time + spb, state: self.state };
+        let downbeat = match self.downbeat_beat {
+            Some(one) => {
+                let n = ((now - self.offset_s) / spb).floor() as i64;
+                let last_one = n - (n - one as i64).rem_euclid(4);
+                crate::audio::downbeat::DownbeatDetection { downbeat_t: self.offset_s + last_one as f64 * spb, confidence: self.downbeat_confidence, bpm: self.bpm, bars: 8, ..Default::default() }
+            }
+            None => Default::default(),
+        };
         crate::audio::NativeSnapshot {
             features: crate::engine::AudioFeatures::default(),
             rms_db: crate::audio::analysis::FLOOR_DB,
@@ -4227,6 +4241,7 @@ impl SimEstimate {
             tempo,
             spectrum: [crate::audio::analysis::FLOOR_DB; crate::audio::spectrum::SPECTRUM_BANDS],
             sections: Default::default(),
+            downbeat,
             t: now,
             at: Instant::now(),
         }
@@ -4297,6 +4312,7 @@ impl SimNative {
                     tempo,
                     spectrum,
                     sections,
+                    downbeat: Default::default(),
                     t: now,
                     at: Instant::now(),
                 })

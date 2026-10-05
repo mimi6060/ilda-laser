@@ -58,7 +58,8 @@ async function freePort(): Promise<number> {
 
 export type Point = [number, number, number, number, number];
 export interface Frame { points: Point[]; armed: boolean; output: string | null; cue_page: number; active_cue: string | null; playlist: number | null; tempo: Tempo; live: Live }
-export interface Tempo { bpm: number; beat: number; bar: number; beat_in_bar: number; phase: number; beats_per_bar: number; source: 'manual' | 'tap' | 'audio'; follow: 'off' | 'waiting' | 'locked' | 'coasting' | 'unlocked'; confidence: number; detected_bpm: number; guide_bpm: number | null }
+export interface Tempo { bpm: number; beat: number; bar: number; beat_in_bar: number; phase: number; beats_per_bar: number; source: 'manual' | 'tap' | 'audio'; follow: 'off' | 'waiting' | 'locked' | 'coasting' | 'unlocked'; confidence: number; detected_bpm: number; guide_bpm: number | null;
+  downbeat: { beat_in_bar_offset: number; confidence: number; phrase_start: number | null } | null; downbeat_suggested: boolean; phrase_bar: number | null; phrase_bars: number }
 export interface Live { brightness: number; size: number; pos_x: number; pos_y: number; rot_angle: number[]; rot_speed: number[]; rot_sync: boolean; rot_reverse: boolean; speed: number; [k: string]: unknown }
 
 export interface StudioOptions {

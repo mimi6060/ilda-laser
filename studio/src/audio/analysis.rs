@@ -12,6 +12,7 @@
 //! line.
 
 use super::bpm::{BpmTracker, TempoEstimate};
+use super::downbeat::{DownbeatDetection, DownbeatDetector};
 use super::onsets::{OnsetDetector, Onsets};
 use super::sections::{SectionDetector, SectionState};
 use super::spectrum::{AnalysisConfig, SpectralAnalyzer, SpectralFrame, FFT_SIZE, SPECTRUM_BANDS};
@@ -42,6 +43,8 @@ pub struct Meter {
     pub tempo: TempoEstimate,
     /// Silence / normal / break / build-up / drop (T-236).
     pub sections: SectionState,
+    /// The suggested "1" and the phrases (T-235).
+    pub downbeat: DownbeatDetection,
 }
 
 /// The engine's snapshot of one hop (T-237). The legacy fields stay
@@ -91,6 +94,7 @@ pub struct Analyzer {
     onsets: OnsetDetector,
     bpm: BpmTracker,
     sections: SectionDetector,
+    downbeat: DownbeatDetector,
 }
 
 impl Analyzer {
@@ -113,6 +117,7 @@ impl Analyzer {
             onsets,
             bpm,
             sections: SectionDetector::new(sample_rate, HOP),
+            downbeat: DownbeatDetector::new(sample_rate, FFT_SIZE),
         }
     }
 
@@ -142,8 +147,9 @@ impl Analyzer {
         let onsets = self.onsets.process(self.spectral.power(), t, spectral.silent);
         let tempo = self.bpm.process(self.onsets.band_flux(), t, spectral.silent);
         let sections = self.sections.process(&spectral, &onsets, &tempo, t);
+        let downbeat = self.downbeat.process(self.onsets.band_flux()[0], self.spectral.power(), &tempo, &sections, spectral.silent, t);
         let features = native_features(level, &spectral, &onsets, &tempo, &sections);
-        Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets, tempo, sections }
+        Meter { rms_db, peak_db: self.peak_db, features, spectral, onsets, tempo, sections, downbeat }
     }
 
     /// The last hop's display spectrum (`SpectralAnalyzer::log_spectrum`).
@@ -173,11 +179,21 @@ impl Analyzer {
         self.sections.carry(s);
     }
 
-    /// *Nouveau morceau*: the tempo history and the section references are
-    /// forgotten.
+    pub fn downbeat(&self) -> DownbeatDetection {
+        self.downbeat.state()
+    }
+
+    /// A reopened input continues the phrase counter.
+    pub fn carry_downbeat(&mut self, d: &DownbeatDetection) {
+        self.downbeat.carry(d);
+    }
+
+    /// *Nouveau morceau*: the tempo history, the section references and
+    /// the bar statistics are forgotten.
     pub fn new_track(&mut self) {
         self.bpm.new_track();
         self.sections.forget();
+        self.downbeat.forget();
     }
 
     /// A guide tempo for the estimator (T-234's *Guider*), or none.

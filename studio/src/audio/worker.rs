@@ -18,6 +18,7 @@
 use super::analysis::{Analyzer, FLOOR_DB, HOP};
 use super::spectrum::SPECTRUM_BANDS;
 use super::bpm::TempoEstimate;
+use super::downbeat::DownbeatDetection;
 use super::onsets::Onsets;
 use super::sections::SectionState;
 use super::capture::{self, CaptureCounters, CpalSource, OpenError, OpenRequest, SampleSource};
@@ -234,6 +235,8 @@ pub struct Analysis {
     tempo: TempoEstimate,
     /// Drop counter and history, carried like the onsets.
     sections: SectionState,
+    /// Phrase counter, carried like the drops.
+    downbeat: DownbeatDetection,
     /// *Nouveau morceau* requests already applied (`AudioHub::new_track`).
     new_tracks: u64,
     /// Generation of the *Guider* tempo already applied (`AudioHub::set_guide`).
@@ -245,7 +248,7 @@ pub struct Analysis {
 impl Analysis {
     pub fn new(hub: Arc<AudioHub>, feeds: Receiver<Feed>) -> Self {
         let new_tracks = hub.new_track_requests();
-        Self { hub, feeds, current: None, onsets: Onsets::default(), tempo: TempoEstimate::default(), sections: SectionState::default(), new_tracks, guides: 0, buf: [0.0; HOP], ltc_buf: [0.0; LTC_CHUNK] }
+        Self { hub, feeds, current: None, onsets: Onsets::default(), tempo: TempoEstimate::default(), sections: SectionState::default(), downbeat: DownbeatDetection::default(), new_tracks, guides: 0, buf: [0.0; HOP], ltc_buf: [0.0; LTC_CHUNK] }
     }
 
     /// Reads every complete hop waiting in the ring and publishes the
@@ -256,6 +259,7 @@ impl Analysis {
             analyzer.carry_bpm(self.tempo.bpm);
             analyzer.set_guide(self.hub.guide().0);
             analyzer.carry_sections(&self.sections);
+            analyzer.carry_downbeat(&self.downbeat);
             let ltc = LtcDecoder::new(feed.sample_rate);
             self.current = Some(Current { analyzer, feed, consumed: 0, ltc });
         }
@@ -289,12 +293,13 @@ impl Analysis {
         self.onsets = cur.analyzer.onsets();
         self.tempo = cur.analyzer.tempo();
         self.sections = cur.analyzer.sections();
+        self.downbeat = cur.analyzer.downbeat();
         if let Some((m, t)) = last {
             // The display spectrum of the last hop only (64 maxima over 513
             // bins, once per poll).
             let mut spectrum = [FLOOR_DB; SPECTRUM_BANDS];
             cur.analyzer.log_spectrum(&mut spectrum);
-            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, tempo: m.tempo, spectrum, sections: m.sections, t, at: Instant::now() });
+            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, tempo: m.tempo, spectrum, sections: m.sections, downbeat: m.downbeat, t, at: Instant::now() });
         }
         if cur.feed.consumer.is_abandoned() && cur.feed.consumer.slots() < HOP {
             // The stream was closed and its ring is drained.

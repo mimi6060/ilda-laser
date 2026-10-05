@@ -144,6 +144,11 @@ impl History {
         self.len = (self.len + 1).min(HISTORY_LEN);
     }
 
+    #[cfg(test)]
+    pub(crate) fn push_for_test(&mut self, change: SectionChange) {
+        self.push(change);
+    }
+
     pub fn as_slice(&self) -> &[SectionChange] {
         &self.items[..self.len]
     }

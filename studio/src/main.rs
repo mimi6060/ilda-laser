@@ -1879,6 +1879,10 @@ impl Engine {
                 let est = s.audio_in.fresh_tempo(now).unwrap_or_default();
                 s.tempo.apply_detection(&est, t);
             }
+            // Temps 1 (T-235): the suggested "1" and the phrases, shown in
+            // any source; the bar moves by itself only under Tempo auto.
+            let downbeat = s.audio_in.fresh_downbeat(now);
+            s.tempo.apply_downbeat(downbeat, t);
             // Quantised launches due now start, finished transitions end;
             // with the e-stop latched, every transition is cut (T-158/159).
             controls::deck_frame(&mut s, t);
