@@ -1306,6 +1306,31 @@
   .empty-state p { margin: 0 0 6px; }
   .empty-state .row { margin: 0; gap: 6px; flex-wrap: wrap; }
   .empty-state button { flex: none; padding: 4px 10px; font-size: 12px; }
+  /* Recherche globale (T-429): a palette under the top bar, not modal
+     (Espace and Échap keep their role). Leads to a place, plays nothing. */
+  #wsTabs #searchBtn { display: inline-flex; align-items: center; gap: 6px; align-self: center; margin-left: 8px; padding: 4px 10px; border-radius: 8px; border: 1px solid #2a2f44;
+    font-weight: 600; letter-spacing: 0; font-size: 12px; white-space: nowrap; }
+  #wsTabs #searchBtn::before { display: none; }
+  #searchBtn svg { width: 14px; height: 14px; flex: none; }
+  #searchBtn kbd { font-size: 10px; }
+  @media (max-width: 1399px) { #searchBtn .long { display: none; } }
+  #searchBox { position: fixed; z-index: 36; top: calc(var(--top-h, 150px) - 8px); left: 50%; transform: translateX(-50%); width: min(620px, calc(100vw - 32px));
+    display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--accent); box-shadow: 0 12px 32px #000a; }
+  #searchBox[hidden] { display: none; }
+  #searchInput { width: 100%; font-size: 15px; padding: 8px 10px; }
+  #searchResults { max-height: min(60vh, 520px); overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+  #searchResults h4 { margin: 8px 4px 2px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  #searchResults .sr { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+  #searchResults .sr .l { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #searchResults .sr .w { flex: none; max-width: 45%; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #searchResults .sr .play { flex: none; padding: 1px 8px; font-size: 11px; }
+  #searchResults .sr.sel { background: var(--accent-ink); outline: 1px solid var(--accent); }
+  #searchResults .sr.missing .l { color: var(--muted); }
+  #searchResults .sr.missing code { font-size: 11px; color: var(--muted); }
+  #searchResults .none { padding: 8px; color: var(--muted); }
+  #searchBox .hint { margin: 0; font-size: 11px; }
+  .found { outline: 2px solid var(--accent) !important; outline-offset: 2px; animation: found-blink .5s ease-in-out 4 alternate; }
+  @keyframes found-blink { from { outline-color: var(--accent); box-shadow: 0 0 14px var(--accent); } to { outline-color: transparent; box-shadow: none; } }
 </style>
 </head>
 <body>
@@ -1409,9 +1434,21 @@
     <button id="redoBtn" disabled aria-label="Rétablir" title="Rien à rétablir"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3l3.5 3.5L10 10"/><path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3"/></svg></button>
     <button id="historyBtn" aria-haspopup="true" aria-expanded="false" aria-label="Historique" title="Historique des modifications (cliquer une ligne annule jusqu'à elle)"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.6"/></svg></button>
   </div>
+  <!-- Recherche globale (T-429): Cmd+K or Cmd+F, from every workspace; in the tab bar, the top bar is full. -->
+  <button id="searchBtn" aria-haspopup="dialog" aria-expanded="false" title="Rechercher un cue, une page, une scène, un show, un contrôle, un réglage ou une page d'aide (Cmd+K ou Cmd+F)">
+    <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+    <span class="long">Rechercher…</span><kbd>⌘K</kbd></button>
   <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
   <button id="helpBtn" aria-haspopup="menu" aria-expanded="false" title="Aide intégrée, raccourcis et visite guidée">? Aide</button>
 </nav>
+</div>
+<!-- Recherche globale (T-429): results lead to a place; only « Jouer »
+     plays a cue, through the same press as the grid. -->
+<div id="searchBox" role="dialog" aria-label="Recherche globale" hidden>
+  <input type="search" id="searchInput" placeholder="Rechercher… (cue, page, scène, show, contrôle, réglage, aide)" autocomplete="off" spellcheck="false"
+    aria-label="Rechercher" aria-controls="searchResults" aria-autocomplete="list">
+  <div id="searchResults" role="listbox" aria-label="Résultats"></div>
+  <div class="hint">↑ ↓ choisir · Entrée : y aller · Maj+Entrée : jouer le cue · Cmd+K : fermer · Échap reste l'arrêt d'urgence</div>
 </div>
 <!-- Aide (T-437, T-438): the menu behind « ? Aide », no shortcut of its own. -->
 <div id="helpMenu" role="menu" aria-label="Aide" hidden>
@@ -1531,7 +1568,7 @@
         <button data-view="3d">3D</button>
         <button data-view="both" title="Aperçu 2D et vue 3D côte à côte">2D+3D</button>
       </div>
-      <button id="prepBtn" aria-pressed="false" title="Préparer : un clic sur une case (ou une lettre) charge le cue dans la vue « Préparé » sans l'envoyer au laser. Alt + clic prépare sans activer le mode.">Préparer</button>
+      <button id="prepBtn" data-search="Préparer (vue Préparé, sans envoyer au laser)" aria-pressed="false" title="Préparer : un clic sur une case (ou une lettre) charge le cue dans la vue « Préparé » sans l'envoyer au laser. Alt + clic prépare sans activer le mode.">Préparer</button>
       <button id="recenter3d" hidden title="Double-clic sur la vue : même effet">Recentrer</button>
       <span class="hint" id="hint3d" hidden>Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer</span>
     </div>
@@ -2237,7 +2274,7 @@
       <div id="textPanel">
         <label for="text">Texte</label><input type="text" id="text" maxlength="128" value="HELLO">
         <label for="textFont">Police</label>
-        <select id="textFont">
+        <select id="textFont" data-search="Police du texte">
           <option value="segments">Segments</option><option value="hershey-simple">Hershey simple</option>
           <option value="hershey-double">Hershey double</option><option value="relief">Relief</option>
         </select>
@@ -2653,7 +2690,7 @@
   <!-- RÉGLAGES : sécurité, calibration, contrôleurs MIDI, entrées réseau (le projet est dans la barre du haut) -->
   <div class="ws-panel ws-grid" data-ws="settings" id="settingsPanel" hidden>
     <section data-help="reglages-avant-show">
-      <details id="checklistPanel">
+      <details id="checklistPanel" data-search="Avant le show">
         <summary>Avant le show <span id="clLed">Aperçu : facultative</span></summary>
         <div class="hint">Aide-mémoire des vérifications avant un show : il ne remplace ni une analyse de risques, ni une autorisation, ni une conformité légale. Avec une vraie sortie laser, l'armement attend que la liste soit terminée ; terminer la liste n'arme jamais le laser. Elle repart à zéro à chaque démarrage du studio.</div>
         <div class="hint sf-error" id="clError" role="alert"></div>
@@ -2683,7 +2720,7 @@
     </section>
 
     <section data-help="reglages-securite">
-      <details id="safetyPanel">
+      <details id="safetyPanel" data-search="Sécurité">
         <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span><span id="dwellLed" title="Garde anti-point fixe">Garde active</span></summary>
         <div class="sf-sub">Mode de sortie</div>
         <div class="seg" id="audSeg" role="group" aria-label="Mode de sortie">
@@ -2751,7 +2788,7 @@
     </section>
 
     <section data-help="reglages-securite">
-      <details id="safetyLogPanel">
+      <details id="safetyLogPanel" data-search="Journal de sécurité">
         <summary>Journal de sécurité</summary>
         <div class="row">
           <select id="slDay" title="Jour"></select>
@@ -2777,7 +2814,7 @@
     </section>
 
     <section data-help="depannage">
-      <details id="diagPanel">
+      <details id="diagPanel" data-search="Diagnostic">
         <summary>Diagnostic</summary>
         <div class="hint">Après un incident, exportez un rapport et transmettez-le vous-même à la personne qui vous aide : rien n'est envoyé sur le réseau.</div>
         <button id="diagExport">Exporter un rapport de diagnostic</button>
@@ -2800,7 +2837,7 @@
     </section>
 
     <section data-help="reglages-calibration">
-      <details>
+      <details data-search="Calibration">
         <summary>Calibration</summary>
         <label>Décalage X <span class="v" id="cOxV"></span></label><input type="range" id="cOx" data-default="0" data-display-k="0.01" min="-100" max="100">
         <label>Décalage Y <span class="v" id="cOyV"></span></label><input type="range" id="cOy" data-default="0" data-display-k="0.01" min="-100" max="100">
@@ -2818,7 +2855,7 @@
     </section>
 
     <section data-help="reglages-calibration">
-      <details id="pzPanel">
+      <details id="pzPanel" data-search="Zones de projection">
         <summary>Zones de projection</summary>
         <div class="hint">Chaque zone a sa propre correction géométrique ; un cue joue sur les zones choisies dans « Propriétés du cue » (clic droit), sinon sur les zones par défaut. Ordre : contenu → contrôles live → zone → calibration → sécurité. Les zones de sécurité et l'horizon restent dans l'espace de sortie : ils protègent toujours la même zone réelle, quelle que soit la géométrie.</div>
         <div class="pz-tabs" id="pzList" role="tablist"></div>
@@ -2853,7 +2890,7 @@
     </section>
 
     <section data-help="reglages-calibration">
-      <details id="venuePanel">
+      <details id="venuePanel" data-search="Lieu et projecteurs">
         <summary>Lieu et projecteurs</summary>
         <div class="hint">Chaque projecteur est une sortie laser à part entière : ses zones de projection (« Sortie » d'une zone), ses plafonds et ses couleurs (« Sorties et projecteurs », choisir le projecteur) et toute la sécurité. Un seul armement et un seul arrêt d'urgence pour tous ; perdre la sortie d'un projecteur désarme tout. Changer la sortie d'un projecteur se fait laser désarmé. Position, angles, luminosité et miroir servent seulement à la vue 3D.</div>
         <label for="vnPreset">Préréglage</label>
@@ -2903,7 +2940,7 @@
     </section>
 
     <section data-help="projet">
-      <details id="generalPanel">
+      <details id="generalPanel" data-search="Général">
         <summary>Général</summary>
         <label class="check"><input type="checkbox" id="kaEnabled"> Empêcher la mise en veille pendant un show</label>
         <div class="hint" id="kaStatus" role="status"></div>
@@ -2919,7 +2956,7 @@
     </section>
 
     <section data-help="projet">
-      <details id="autosavePanel">
+      <details id="autosavePanel" data-search="Sauvegarde auto">
         <summary>Sauvegarde auto</summary>
         <label class="check"><input type="checkbox" id="asEnabled"> Sauvegarde auto</label>
         <label for="asDelay">Délai après la dernière modification (s)</label>
@@ -2927,7 +2964,7 @@
         <div class="hint" id="asInfo"></div>
         <div class="hint">Une copie du projet non enregistré est écrite à part (les 20 plus récentes par projet), sans jamais ralentir la sortie laser. Après un plantage, le studio propose de la récupérer ; il redémarre toujours laser désarmé.</div>
       </details>
-      <details id="backupPanel">
+      <details id="backupPanel" data-search="Copie de sauvegarde">
         <summary>Copie de sauvegarde</summary>
         <label class="check"><input type="checkbox" id="bkEnabled"> Copie de sauvegarde sur un second emplacement</label>
         <label for="bkDir">Dossier de copie</label>
@@ -2940,7 +2977,7 @@
     </section>
 
     <section data-help="reglages-midi">
-      <details id="midiPanel">
+      <details id="midiPanel" data-search="Contrôleur MIDI">
         <summary>Contrôleur</summary>
         <div class="mdev" id="vapcBox" style="border-top:0;padding-top:0">
           <div class="n">Disposition <span class="hint" id="vapcInfo"></span></div>
@@ -2978,7 +3015,7 @@
     </section>
 
     <section data-help="reglages-entrees">
-      <details id="extPanel">
+      <details id="extPanel" data-search="Entrées externes">
         <summary>Entrées externes (porte et périmètres)</summary>
         <div class="hint"><b>Le noir et l'arrêt d'urgence sont acceptés de toutes les sources, tout le temps. Rien d'externe ne peut armer le laser.</b></div>
         <div class="hint">La porte <b>Entrées externes</b> (barre du haut, <kbd>Alt</kbd>+<kbd>X</kbd>) est fermée à chaque démarrage et après un arrêt d'urgence : seul l'opérateur la rouvre. Ouverte, chaque source n'agit que sur les groupes cochés, et seulement si son accès est levé quand « Exiger l'accès » est coché (DMX : canal d'accès ≥ 128 ; OSC : <code>/ls/access 1</code>, retombe après 10 s sans message de ce client). Le MIDI garde ses propres règles.</div>
@@ -2988,7 +3025,7 @@
     </section>
 
     <section data-help="reglages-entrees">
-      <details id="netinPanel">
+      <details id="netinPanel" data-search="Entrées réseau OSC Art-Net sACN DMX">
         <summary>Entrées réseau (OSC, Art-Net, sACN, DMX)</summary>
         <div class="hint">Pilotage depuis une console lumière ou une autre application. Rien de ce qui arrive par le réseau ne peut armer le laser ; le blackout et l'arrêt d'urgence sont toujours acceptés. Écoute seule : le studio n'envoie rien. Réglage de cette machine (pas du projet).</div>
         <div class="mdev">
@@ -3073,7 +3110,7 @@
       </details>
     </section>
 
-    <section id="outputsPanel" data-help="reglages-sorties">
+    <section id="outputsPanel" data-help="reglages-sorties" data-search="Sorties et projecteurs">
       <h2>Sorties et projecteurs</h2>
       <div class="hint">La sortie en cours est aussi indiquée dans la barre du haut.</div>
       <div class="sf-sub">Sortie laser</div>
@@ -3085,7 +3122,7 @@
       </div>
       <ul id="devList"></ul>
       <label class="check" title="Une sortie perdue est retentée après 1 s, 2 s, 4 s, 8 s puis toutes les 15 s. Elle revient toujours désarmée."><input type="checkbox" id="outAuto" checked> Reconnexion automatique</label>
-      <details id="artnetPanel">
+      <details id="artnetPanel" data-search="ShowNET carte SD Art-Net">
         <summary>ShowNET carte SD (Art-Net)</summary>
         <div class="shownet-help">
           <b>Le ShowNET joue lui-même les fichiers de sa carte SD</b> (voir « Carte SD ShowNET ») : le studio lui envoie seulement, par Art-Net,
@@ -3220,7 +3257,7 @@
     </section>
 
     <!-- Carte SD ShowNET (T-302) : banque de cues numérotés, export d'un dossier prêt à copier -->
-    <section id="sdBankPanel" data-help="reglages-sorties">
+    <section id="sdBankPanel" data-help="reglages-sorties" data-search="Carte SD ShowNET">
       <h2>Carte SD ShowNET</h2>
       <div class="hint">Le ShowNET joue seul les fichiers <b>001.ild</b> à <b>229.ild</b> de sa carte microSD, choisis par DMX / Art-Net
         (valeur du canal figure). 000 et 230 à 255 sont réservés. Chaque cue est rendu à <span id="sdFps">50</span> images/s, puis bouclé.</div>
@@ -4065,7 +4102,7 @@ const SAFETY_SHORTCUTS = [
 // After the stop, never instead of it: end a hold-key pick, a MIDI learn, the help.
 function afterEscape() {
   pickingHoldKey = false;
-  try { stopLearning(); closeKeysHelp(); closeTlExamples(); closeVapcMenu(); } catch (err) { console.warn('Échap', err); }
+  try { stopLearning(); closeKeysHelp(); closeTlExamples(); closeVapcMenu(); closeSearch(); } catch (err) { console.warn('Échap', err); }
 }
 let restShortcuts = null;
 function buildShortcuts() {
@@ -4195,6 +4232,11 @@ function buildShortcuts() {
       label: 'Rétablir', down: () => figRedo() },
     { id: 'fig.delete', group: 'Figures', keys: ['Delete'], alt: '*', shift: '*', zones: ['figures'], show: false,
       label: 'Supprimer les points sélectionnés', down: () => deleteSelected() },
+    // Recherche globale (T-429): also from a text field (its own field
+    // included, to close it); it replaces the browser's find on this page.
+    { id: 'search', group: 'Recherche', keys: ['k', 'f'], meta: true, zones: '*', typing: true, show: true,
+      cap: () => 'K ou F', label: 'Rechercher : aller à un cue, une page, une scène, un show, un contrôle, un réglage (ouvrir / fermer)',
+      down: e => { if (!e.repeat) toggleSearch(); } },
     { id: 'help', group: 'Aide', keys: ['?'], shift: '*', zones: '*', show: true,
       label: 'Afficher / masquer cette aide',
       down: e => { if (!e.repeat) toggleKeysHelp(); } },
@@ -4312,7 +4354,7 @@ function shortcutConflicts(list = allShortcuts()) {
 
 // « ? » : the table, grouped. Keys shown as on this keyboard when the
 // browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
-const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Timeline', 'Figures', 'Aide'];
+const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Recherche', 'Timeline', 'Figures', 'Aide'];
 const ZONE_FR = { live: 'LIVE', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES' };
 const KEY_CAPS = { Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
 const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
@@ -13911,6 +13953,326 @@ async function maybeStartTour() {
 }
 // For the e2e tests: what the tour and the help hold.
 window.helpDebug = { steps: () => TOUR_STEPS.map(s => ({ target: s.target, ws: s.ws || null, title: s.title })), tourOn: () => TOUR.on, page: () => HELP.slug, loaded: () => !!HELP.pages };
+
+// ---------- recherche globale (T-429) ----------
+// One field finds a place: cues (and user cues), pages, figures, ILDA
+// files, scenes, cue lists, shows and their markers, controls (French
+// label or id), RÉGLAGES sections ([data-search] and their sub-titles and
+// labels) and the help pages. The index lives here, rebuilt each time the
+// field opens (lists fetched again, so a figure made since is found), not
+// at each key. Choosing a result only shows it: workspace, tab, page,
+// highlight. « Jouer » (or Maj+Entrée) is the one explicit action, and it
+// is the grid's own press (POST /api/cue down then up): it never arms.
+const SEARCH_KINDS = [['cue', 'Cues'], ['page', 'Pages'], ['figure', 'Figures'], ['ilda', 'Médiathèque ILDA'], ['scene', 'Scènes'],
+  ['cuelist', 'Listes de cues'], ['show', 'Shows'], ['marker', 'Marqueurs de timeline'], ['control', 'Contrôles'], ['setting', 'Réglages'], ['help', 'Aide']];
+const SEARCH_ORDER = Object.fromEntries(SEARCH_KINDS.map(([k], i) => [k, i]));
+const SEARCH_MAX = 30;
+const SEARCH = { items: [], shown: [], sel: 0, gen: 0, markTimer: 0 };
+const WS_FR = { live: 'LIVE', timeline: 'TIMELINE', creation: 'CRÉATION', settings: 'RÉGLAGES' };
+// The same folding as the help's own search: lower case, no accents.
+const searchFold = helpFold;
+// The first text of an element (a summary without its LEDs, a tab without its counter).
+const ownText = el => {
+  if (!el) return '';
+  for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) return n.textContent.trim();
+  return el.textContent.trim();
+};
+// Where an element lives, in words: « RÉGLAGES › Sécurité », « LIVE › Direct ».
+function searchWhere(el) {
+  const ws = el.closest('[data-ws]')?.dataset.ws;
+  const parts = [ws ? WS_FR[ws] : el.closest('#stage') ? 'Aperçu' : 'barre du haut'];
+  const panel = el.closest('#livePanel [data-panel]');
+  if (panel) parts.push(ownText(document.querySelector(`#liveTabs [data-panel-tab="${panel.dataset.panel}"]`)));
+  const cp = el.closest('#creationPanel [data-cpanel]');
+  if (cp) parts.push(ownText(document.querySelector(`#creationTabs [data-ctab="${cp.dataset.cpanel}"]`)));
+  const sec = el.closest('[data-search]');
+  if (sec && sec !== el) parts.push(searchSectionName(sec));
+  else if (!sec) {
+    const det = el.closest('details');
+    if (det && det !== el) parts.push(ownText(det.querySelector(':scope > summary')));
+  }
+  return parts.filter(Boolean).join(' › ');
+}
+function searchSectionName(el) {
+  return ownText(el.querySelector(':scope > summary, :scope > h2')) || el.dataset.search;
+}
+// SearchItem: { kind, label, sub, id?, extra?: [], deep?: text, target: {…}, missing?, play? }
+function searchBuild(items) {
+  SEARCH.items = items.map(it => {
+    const l = searchFold(it.label || '');
+    return { ...it, l, lw: ' ' + l.replace(/[^a-z0-9]+/g, ' '), idf: it.id ? searchFold(it.id) : '',
+      key: searchFold([it.label, it.sub, it.id, ...(it.extra || [])].filter(Boolean).join(' ')),
+      deep: it.deep ? searchFold(it.deep) : '' };
+  });
+  return SEARCH.items.length;
+}
+// 0: its exact id (master.size); 1: the name starts with the text; 2: each
+// word starts a word of the name; 3: in the name; 4: in where it is (or
+// its id); 5: a help page's text.
+function searchRank(it, q, words) {
+  if (words.every(w => it.key.includes(w))) {
+    if (it.idf === q) return 0;
+    if (it.l.startsWith(q)) return 1;
+    if (words.every(w => it.lw.includes(' ' + w))) return 2;
+    if (words.every(w => it.l.includes(w))) return 3;
+    return 4;
+  }
+  return it.deep && words.every(w => it.deep.includes(w)) ? 5 : -1;
+}
+function searchQuery(text) {
+  const q = searchFold(text).trim().replace(/\s+/g, ' ');
+  if (!q) return [];
+  const words = q.split(' ');
+  const hits = [];
+  for (const it of SEARCH.items) {
+    const r = searchRank(it, q, words);
+    if (r >= 0) hits.push([r, it]);
+  }
+  hits.sort((a, b) => a[0] - b[0] || SEARCH_ORDER[a[1].kind] - SEARCH_ORDER[b[1].kind] || a[1].l.length - b[1].l.length);
+  return hits.slice(0, SEARCH_MAX).map(h => h[1]);
+}
+// The page holding a cue: the one on screen if it is there, else the first.
+function searchCuePage(id) {
+  if (grid.pages[gridPage]?.cells.includes(id)) return gridPage;
+  return grid.pages.findIndex(pg => pg.cells.includes(id));
+}
+async function searchCollect() {
+  const get = path => apiJson('GET', path, undefined, { cache: 'no-store', source: 'Recherche' }).catch(() => null);
+  const [figs, shows, lists, ilda] = await Promise.all([get('/api/figures'), get('/api/shows'), get('/api/cuelists'), get('/api/media/ilda'),
+    helpLoad().catch(() => null)]);
+  const items = [];
+  for (const p of presets) {
+    const i = searchCuePage(p.id);
+    items.push({ kind: 'cue', label: p.name, play: p.id,
+      sub: [i >= 0 ? `page ${grid.pages[i].name}` : `${p.category} · hors grille`, p.user ? 'cue utilisateur' : ''].filter(Boolean).join(' · '),
+      // The cell's notes and tags (T-430).
+      id: p.id, extra: [p.category, slots[p.id]?.notes, ...(slots[p.id]?.tags || [])], target: { cue: p.id } });
+  }
+  grid.pages.forEach((pg, i) => items.push({ kind: 'page', label: pg.name,
+    sub: `LIVE › page ${i + 1}` + (pageKey(i) ? ` · ${pageKey(i)}` : ''), extra: [`page.${i + 1}`], target: { page: i } }));
+  for (const f of figs || []) items.push({ kind: 'figure', label: f.name, play: f.id,
+    sub: `figure · ${f.frames} image${f.frames > 1 ? 's' : ''}`, target: { cue: f.id, fig: f.name } });
+  for (const f of (ilda && ilda.files) || []) items.push({ kind: 'ilda', label: f.file, play: f.id,
+    sub: 'CRÉATION › Médiathèque', target: { file: f.file } });
+  for (const sc of scenes) items.push({ kind: 'scene', label: sc.name, sub: 'LIVE › Scènes', target: { scene: sc.name } });
+  for (const l of (lists && lists.lists) || []) items.push({ kind: 'cuelist', label: l.name,
+    sub: `LIVE › Liste de cues · ${l.steps.length} pas`, target: { cuelist: l.name } });
+  for (const s of shows || []) {
+    items.push({ kind: 'show', label: s.name, sub: `TIMELINE · ${s.tracks} piste${s.tracks > 1 ? 's' : ''}`, target: { show: s.name } });
+    for (const m of s.markers || []) items.push({ kind: 'marker', label: m.name || 'Marqueur',
+      sub: `show ${s.name} · ${s.time_base === 'beats' ? 'temps ' + (+m.at).toFixed(1) : fmtTime(m.at)}`, target: { show: s.name } });
+  }
+  for (const [id, label] of Object.entries(controlLabels)) {
+    if (/^(grid|page)\./.test(id)) continue; // the cells and pages are found by their names
+    const el = document.querySelector(`[data-control="${CSS.escape(id)}"]`);
+    items.push({ kind: 'control', label: label || id, sub: el ? searchWhere(el) : id, id, missing: !el, target: { control: id } });
+  }
+  const seen = new Set();
+  document.querySelectorAll('[data-search]').forEach(sec => {
+    const name = searchSectionName(sec);
+    items.push({ kind: 'setting', label: name, sub: searchWhere(sec), extra: [sec.dataset.search], target: { el: sec } });
+    // A list's choices (the fonts of « Police du texte ») lead to it.
+    if (sec.tagName === 'SELECT') for (const o of sec.options) items.push({ kind: 'setting', label: o.textContent.trim(), sub: `${searchWhere(sec)} › ${name}`, target: { el: sec } });
+    sec.querySelectorAll('.sf-sub, label, h2, summary').forEach(el => {
+      const text = ownText(el).replace(/\s+/g, ' ').slice(0, 80);
+      if (!text || text === name || el.closest('[data-search]') !== sec) return;
+      const k = name + '|' + text;
+      if (seen.has(k)) return;
+      seen.add(k);
+      items.push({ kind: 'setting', label: text, sub: searchWhere(el), target: { el } });
+    });
+  });
+  for (const p of HELP.pages || []) items.push({ kind: 'help', label: p.title_fr, sub: `Aide › ${p.group_fr}`, deep: p.text, target: { help: p.slug } });
+  return items;
+}
+
+// ----- the palette -----
+function searchRender() {
+  const box = $('searchResults');
+  box.replaceChildren();
+  const text = $('searchInput').value;
+  const found = searchQuery(text);
+  SEARCH.shown = [];
+  const msg = t => { const d = document.createElement('div'); d.className = 'none'; d.textContent = t; box.appendChild(d); };
+  if (!text.trim()) return msg('Un nom ou une partie : cue, page, scène, show, contrôle (« Taille maître » ou master.size), réglage, page d\'aide.');
+  if (!found.length) return msg(`Rien trouvé pour « ${text.trim()} »`);
+  for (const [kind, title] of SEARCH_KINDS) {
+    const group = found.filter(it => it.kind === kind);
+    if (!group.length) continue;
+    const h = document.createElement('h4'); h.textContent = title; box.appendChild(h);
+    for (const it of group) {
+      const n = SEARCH.shown.push(it) - 1;
+      const row = document.createElement('div');
+      row.className = 'sr'; row.setAttribute('role', 'option'); row.dataset.kind = kind; row.dataset.n = n;
+      row.classList.toggle('missing', !!it.missing);
+      const l = document.createElement('span'); l.className = 'l'; l.textContent = it.label;
+      const w = document.createElement('span'); w.className = 'w';
+      if (it.missing) {
+        // Not on screen: greyed, with the id to copy (MIDI, OSC, macros).
+        const c = document.createElement('code'); c.textContent = it.target.control; w.append('pas à l\'écran · ', c);
+        row.title = 'Pas d\'élément à l\'écran : cliquer copie l\'identifiant';
+      } else w.textContent = it.sub;
+      row.append(l, w);
+      if (it.play && presetById.has(it.play)) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'play'; b.textContent = '▶ Jouer';
+        b.title = 'Jouer ce cue, comme un clic sur sa case (Maj+Entrée). N\'arme pas le laser.';
+        b.addEventListener('click', e => { e.stopPropagation(); searchPlay(it); });
+        row.appendChild(b);
+      }
+      row.addEventListener('mousemove', () => { if (SEARCH.sel !== n) { SEARCH.sel = n; searchPaintSel(); } });
+      row.addEventListener('click', () => searchChoose(it));
+      box.appendChild(row);
+    }
+  }
+  SEARCH.sel = Math.max(0, Math.min(SEARCH.sel, SEARCH.shown.length - 1));
+  searchPaintSel();
+}
+function searchPaintSel() {
+  document.querySelectorAll('#searchResults .sr').forEach(r => {
+    const on = +r.dataset.n === SEARCH.sel;
+    r.classList.toggle('sel', on);
+    r.setAttribute('aria-selected', String(on));
+    if (on) r.scrollIntoView({ block: 'nearest' });
+  });
+}
+async function openSearch() {
+  closeHelpMenu();
+  $('searchBox').hidden = false;
+  $('searchBtn').setAttribute('aria-expanded', 'true');
+  $('searchInput').focus();
+  $('searchInput').select();
+  SEARCH.sel = 0;
+  searchRender(); // the last index at once, the fresh one in a moment
+  const gen = ++SEARCH.gen;
+  const items = await searchCollect();
+  if (gen !== SEARCH.gen || $('searchBox').hidden) return;
+  searchBuild(items);
+  searchRender();
+  $('searchBox').dataset.ready = String(gen);
+}
+function closeSearch() {
+  if ($('searchBox').hidden) return;
+  $('searchBox').hidden = true;
+  $('searchBtn').setAttribute('aria-expanded', 'false');
+  if (document.activeElement === $('searchInput')) $('searchInput').blur();
+}
+function toggleSearch() { if ($('searchBox').hidden) openSearch(); else closeSearch(); }
+$('searchBtn').querySelector('kbd').textContent = IS_MAC ? '⌘K' : 'Ctrl+K';
+$('searchBtn').addEventListener('click', toggleSearch);
+$('searchInput').addEventListener('input', () => { SEARCH.sel = 0; searchRender(); });
+// ↑ ↓ Entrée here; Échap is left to the page (the e-stop, which also closes this).
+$('searchInput').addEventListener('keydown', e => {
+  const n = SEARCH.shown.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (n) { SEARCH.sel = (SEARCH.sel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; searchPaintSel(); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const it = SEARCH.shown[SEARCH.sel];
+    if (!it || e.repeat) return;
+    if (e.shiftKey) { if (it.play) searchPlay(it); } else searchChoose(it);
+  }
+});
+document.addEventListener('pointerdown', e => {
+  if (!$('searchBox').hidden && !e.target.closest('#searchBox, #searchBtn')) closeSearch();
+}, true);
+
+// ----- going there -----
+// Outlines what get() finds for 2 s, again if a redraw replaces it.
+function searchMark(get) {
+  clearInterval(SEARCH.markTimer);
+  document.querySelectorAll('.found').forEach(el => el.classList.remove('found'));
+  const until = performance.now() + 2000;
+  let first = true;
+  const tick = () => {
+    if (performance.now() > until) {
+      clearInterval(SEARCH.markTimer);
+      document.querySelectorAll('.found').forEach(x => x.classList.remove('found'));
+      return;
+    }
+    const el = get();
+    if (el && !el.classList.contains('found')) {
+      el.classList.add('found');
+      if (first) { first = false; el.scrollIntoView({ block: 'nearest' }); }
+    }
+  };
+  tick();
+  SEARCH.markTimer = setInterval(tick, 150);
+}
+// The workspace, tab and folded sections around `el`; false if show mode keeps it hidden.
+function searchReveal(el) {
+  const ws = el.closest('[data-ws]')?.dataset.ws;
+  if (ws && showMode && (ws === 'creation' || ws === 'settings')) { flash(LOCKED_FR); return false; }
+  if (ws && ws !== activeWs) setWorkspace(ws);
+  const panel = el.closest('#livePanel [data-panel]');
+  if (panel) setLivePanel(panel.dataset.panel);
+  const cp = el.closest('#creationPanel [data-cpanel]');
+  if (cp) setCreationTab(cp.dataset.cpanel);
+  for (let d = el.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true;
+  return true;
+}
+function searchGoCue(id) {
+  const i = searchCuePage(id);
+  if (i < 0) return false;
+  setWorkspace('live');
+  if (i !== gridPage) selectPage(i);
+  searchMark(() => document.querySelector(`#cues .cue[data-id="${CSS.escape(id)}"]`));
+  return true;
+}
+function searchChoose(it) {
+  const t = it.target;
+  closeSearch();
+  if (it.missing) {
+    navigator.clipboard?.writeText(t.control).catch(() => {});
+    flash(`« ${it.label} » n'est pas à l'écran · identifiant copié : ${t.control}`);
+  } else if (t.fig !== undefined) {
+    // A figure: its cell if it has one, else the library in CRÉATION.
+    if (searchGoCue(t.cue)) return;
+    if (showMode) { flash(LOCKED_FR); return; }
+    setWorkspace('creation'); setCreationTab('figures');
+    searchMark(() => document.querySelector(`#figLib [data-fig="${CSS.escape(t.fig)}"]`));
+  } else if (t.cue !== undefined) {
+    if (!searchGoCue(t.cue)) flash(`« ${it.label} » n'est sur aucune page de la grille (agrandir la grille ?)`);
+  } else if (t.page !== undefined) {
+    if (!grid.pages[t.page]) return;
+    setWorkspace('live');
+    selectPage(t.page);
+    searchMark(() => $('cueTabs').children[t.page]);
+  } else if (t.file !== undefined) {
+    if (!searchReveal($('ildaLib'))) return;
+    loadIldaLib();
+    searchMark(() => document.querySelector(`#ildaLib .ildaitem[data-file="${CSS.escape(t.file)}"]`));
+  } else if (t.scene !== undefined) {
+    setWorkspace('live'); setLivePanel('scenes');
+    searchMark(() => { const i = scenes.findIndex(s => s.name === t.scene); return i < 0 ? null : document.querySelector(`#sceneList .scene[data-index="${i}"]`); });
+  } else if (t.cuelist !== undefined) {
+    // Shown, not loaded: loading a list is the operator's choice.
+    setWorkspace('live'); setLivePanel('cuelist');
+    searchMark(() => $('cqSelect'));
+    flash(`Liste « ${t.cuelist} » : la choisir ici pour la charger`);
+  } else if (t.show !== undefined) {
+    setWorkspace('timeline');
+    searchMark(() => $('tlShow'));
+    if (!timeline || timeline.name !== t.show) flash(`Show « ${t.show} » : le choisir dans la liste pour le charger`);
+  } else if (t.control !== undefined) {
+    const get = () => document.querySelector(`[data-control="${CSS.escape(t.control)}"]`);
+    const el = get();
+    if (el && searchReveal(el)) searchMark(get);
+  } else if (t.el) {
+    if (searchReveal(t.el)) searchMark(() => t.el);
+  } else if (t.help !== undefined) {
+    openHelp(t.help);
+  }
+}
+// The one action: the grid's own press and release. Never arms.
+async function searchPlay(it) {
+  if (!it.play || !presetById.has(it.play)) return;
+  await cueDown(it.play, null);
+  await cueUp(it.play);
+}
+// For the e2e tests (performance): build an index, query it.
+window.__search = { build: items => searchBuild(items), query: text => searchQuery(text), size: () => SEARCH.items.length };
 
 // ---------- états vides (T-437) ----------
 // What an empty list is for, and a button for the first action (the same

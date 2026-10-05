@@ -1181,6 +1181,9 @@ pub struct ShowInfo {
     pub time_base: TimeBase,
     pub length: f64,
     pub tracks: usize,
+    /// The show's markers, for the global search (T-429): « Refrain » leads
+    /// to its show.
+    pub markers: Vec<Marker>,
 }
 
 /// A show name that is also a safe file name (already trimmed): letters,
@@ -1251,7 +1254,7 @@ impl ShowStore {
                 let name = path.file_stem()?.to_str()?.to_string();
                 (path.extension()? == "json").then_some(())?;
                 let show = self.load(&name).ok()?;
-                Some(ShowInfo { name, time_base: show.time_base, length: show.end(), tracks: show.tracks.len() })
+                Some(ShowInfo { name, time_base: show.time_base, length: show.end(), tracks: show.tracks.len(), markers: show.markers })
             })
             .collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1570,6 +1573,7 @@ mod tests {
         assert_eq!(store.load("Drop 16").unwrap(), s);
         let list = store.list();
         assert_eq!((list[0].name.as_str(), list[0].time_base, list[0].length), ("Drop 16", TimeBase::Beats, 4.0));
+        assert_eq!(list[0].markers, s.markers, "markers listed for the search (T-429)");
         for bad in ["", "../x", "a/b", "a.b", "..", "x\\y"] {
             assert!(store.load(bad).is_err() && store.save(&Show { name: bad.into(), ..Default::default() }).is_err(), "{bad:?}");
         }

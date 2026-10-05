@@ -4568,6 +4568,18 @@ mod tests {
         assert!(n > 80, "{n} sliders found");
     }
 
+    /// T-429: the global search finds the RÉGLAGES sections by their
+    /// `data-search` names, and opens from the single shortcut table.
+    #[test]
+    fn settings_sections_are_searchable() {
+        for name in ["Sécurité", "Calibration", "Contrôleur MIDI", "Sorties et projecteurs", "Lieu et projecteurs", "Entrées externes", "Copie de sauvegarde", "Police du texte"] {
+            assert!(INDEX_HTML.contains(&format!("data-search=\"{name}\"")), "{name}");
+        }
+        let settings = INDEX_HTML.split("id=\"settingsPanel\"").nth(1).expect("RÉGLAGES").split("</main>").next().unwrap();
+        assert!(settings.split("<details").skip(1).all(|d| d.split('>').next().unwrap().contains("data-search=")), "every RÉGLAGES section is indexed");
+        assert!(INDEX_HTML.contains("{ id: 'search', group: 'Recherche', keys: ['k', 'f'], meta: true"));
+    }
+
     /// T-404: the pattern API shows and leaves a pattern, never arms, and
     /// refuses unknown names and bad brightness values.
     #[test]
