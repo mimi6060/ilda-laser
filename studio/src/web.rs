@@ -1868,6 +1868,31 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // The command line (T-424): one line, parsed then run like a
+        // controller (nothing that arms). Nothing is stored here.
+        (Method::Post, "/api/command") => match body::<CommandRequest>(request) {
+            Ok(req) => match crate::command::run(&mut shared.lock().unwrap(), &req.line, controls::ControlSource::Command) {
+                Ok(echo) => json_response(json!({ "ok": true, "echo": echo })),
+                Err(e) => with_status(json_response(json!(e)), 400),
+            },
+            Err(e) => e,
+        },
+        // The palette's list, with each control's value now.
+        (Method::Get, "/api/command/actions") => {
+            let s = shared.lock().unwrap();
+            let actions: Vec<serde_json::Value> = crate::command::actions(&s.controls, &s.presets)
+                .into_iter()
+                .map(|a| {
+                    let value = a.id.as_deref().and_then(|id| s.controls.get(id)).and_then(|d| controls::current(&s, d).and_then(|v| crate::command::value_fr(d, &v)));
+                    let mut v = json!(a);
+                    if let Some(value) = value {
+                        v["value_fr"] = json!(value);
+                    }
+                    v
+                })
+                .collect();
+            json_response(json!({ "actions": actions }))
+        }
         // « En cours » (T-423): what plays and who drove it; the stop buttons.
         (Method::Get, "/api/running") => json_response(crate::running::snapshot(&shared.lock().unwrap())),
         (Method::Post, "/api/running/stop") => match body::<crate::running::StopRequest>(request) {
@@ -3119,6 +3144,11 @@ struct IdRequest {
 }
 
 /// `value` is a number or a boolean (native units); `norm` is 0..1.
+#[derive(Deserialize)]
+struct CommandRequest {
+    line: String,
+}
+
 #[derive(Deserialize)]
 struct ControlRequest {
     id: String,
@@ -7175,5 +7205,41 @@ mod tests {
         let trig = |fired: u64, ago: Option<f64>| json!({ "audio_triggers": { "enabled": true, "rules": [{ "fired": fired, "ago_s": ago, "limited": false }] } });
         assert_eq!(fingerprint(trig(1, Some(0.1)), 0.0), fingerprint(trig(1, Some(4.0)), 0.0), "time since a trigger fired");
         assert_ne!(fingerprint(trig(1, Some(4.0)), 0.0), fingerprint(trig(2, Some(0.0)), 0.0), "a new firing");
+    }
+
+    #[test]
+    fn command_line_route_sets_refuses_and_works_in_show_mode() {
+        let t = TestServer::start(false);
+        let cmd = |line: &str| t.request("POST", "/api/command", &json!({ "line": line }).to_string());
+        let (code, body) = cmd("master.size 80");
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body), json!({ "ok": true, "echo": "master.size = 80 %" }));
+        assert!((js(&t.request("GET", "/api/live", "").1)["size"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(cmd("master.size 80,5").0, 200);
+        assert_eq!(js(&cmd("master.size 900").1)["echo"], "master.size = 200 %");
+        // Errors: 400 with the word, its position and the French message.
+        let (code, body) = cmd("mastr.size 80");
+        assert_eq!(code, 400);
+        assert_eq!(js(&body), json!({ "token": "mastr.size", "pos": 0, "message_fr": "Mot inconnu : « mastr.size »", "refused": false }));
+        let (code, body) = cmd("armer");
+        assert_eq!(code, 400);
+        assert_eq!(js(&body)["refused"], true);
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap());
+        // Playback: allowed in show mode, and never in the edit history.
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(cmd("tempo 128").0, 200);
+        assert_eq!(cmd("tout arrêter").0, 200);
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["history"]["undo"], 0);
+        // The palette's list: values in words, nothing that arms.
+        let actions = js(&t.request("GET", "/api/command/actions", "").1);
+        let list = actions["actions"].as_array().unwrap();
+        let size = list.iter().find(|a| a["id"] == "master.size").unwrap();
+        assert_eq!(size["value_fr"], "200 %");
+        assert_eq!(size["label_fr"], "Taille maître");
+        assert!(list.iter().all(|a| a["id"] != "transport.arm"));
+        // Noir latches the stop at once.
+        assert_eq!(cmd("noir").0, 200);
+        assert!(t.shared.lock().unwrap().estop.is_latched());
     }
 }

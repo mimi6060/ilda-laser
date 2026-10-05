@@ -76,6 +76,8 @@ pub fn allowed(path: &str) -> bool {
         // Playing.
         "/api/cue",
         "/api/control",
+        // The command line (T-424): controls, cues, page, tempo, stops only.
+        "/api/command",
         "/api/live",
         "/api/scenes/play",
         "/api/playlist/start",

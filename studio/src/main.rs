@@ -18,6 +18,7 @@ mod beat;
 mod chases;
 mod checklist;
 mod colorcal;
+mod command;
 mod autoshow;
 mod controls;
 mod crossings;
