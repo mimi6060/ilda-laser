@@ -46,6 +46,8 @@ pub enum ControlSource {
     /// OSC or Art-Net through the older network inputs (netin/).
     Network,
     System,
+    /// The command line and its palette (T-424).
+    Command,
 }
 
 impl ControlSource {
@@ -63,6 +65,7 @@ impl ControlSource {
             ControlSource::Api => "API",
             ControlSource::Network => "Réseau",
             ControlSource::System => "Système",
+            ControlSource::Command => "Ligne de commande",
         }
     }
 

@@ -1362,12 +1362,13 @@
   .empty-state button { flex: none; padding: 4px 10px; font-size: 12px; }
   /* Recherche globale (T-429): a palette under the top bar, not modal
      (Espace and Échap keep their role). Leads to a place, plays nothing. */
-  #wsTabs #searchBtn { display: inline-flex; align-items: center; gap: 6px; align-self: center; margin-left: 8px; padding: 4px 10px; border-radius: 8px; border: 1px solid #2a2f44;
+  #wsTabs :is(#searchBtn, #cmdBtn) { display: inline-flex; align-items: center; gap: 6px; align-self: center; margin-left: 8px; padding: 4px 10px; border-radius: 8px; border: 1px solid #2a2f44;
     font-weight: 600; letter-spacing: 0; font-size: 12px; white-space: nowrap; }
-  #wsTabs #searchBtn::before { display: none; }
+  #wsTabs :is(#searchBtn, #cmdBtn)::before { display: none; }
   #searchBtn svg { width: 14px; height: 14px; flex: none; }
-  #searchBtn kbd { font-size: 10px; }
-  @media (max-width: 1399px) { #searchBtn .long { display: none; } }
+  :is(#searchBtn, #cmdBtn) kbd { font-size: 10px; }
+  #wsTabs #cmdBtn { margin-left: 4px; font-family: ui-monospace, Menlo, monospace; }
+  @media (max-width: 1399px) { :is(#searchBtn, #cmdBtn) .long { display: none; } #cmdBtn kbd { display: none; } }
   #searchBox { position: fixed; z-index: 36; top: calc(var(--top-h, 150px) - 8px); left: 50%; transform: translateX(-50%); width: min(620px, calc(100vw - 32px));
     display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--accent); box-shadow: 0 12px 32px #000a; }
   #searchBox[hidden] { display: none; }
@@ -1383,6 +1384,12 @@
   #searchResults .sr.missing code { font-size: 11px; color: var(--muted); }
   #searchResults .none { padding: 8px; color: var(--muted); }
   #searchBox .hint { margin: 0; font-size: 11px; }
+  /* Ligne de commande (T-424): the same box, in « commande » mode. */
+  #searchBox.cmd #searchInput { font-family: ui-monospace, Menlo, monospace; }
+  #searchResults .sr .w code { font-size: 11px; }
+  #cmdErr { margin: 0; padding: 4px 8px; border-radius: 6px; font-size: 12px; color: var(--danger); border: 1px solid var(--danger); }
+  #cmdEcho { margin: 0; padding: 2px 8px; font-size: 12px; color: var(--ok); font-family: ui-monospace, Menlo, monospace; }
+  :is(#cmdErr, #cmdEcho)[hidden] { display: none; }
   .found { outline: 2px solid var(--accent) !important; outline-offset: 2px; animation: found-blink .5s ease-in-out 4 alternate; }
   @keyframes found-blink { from { outline-color: var(--accent); box-shadow: 0 0 14px var(--accent); } to { outline-color: transparent; box-shadow: none; } }
   /* ---------- Mode nuit (T-282), Theme (T-299) tokens ----------
@@ -1587,6 +1594,10 @@
   <button id="searchBtn" aria-haspopup="dialog" aria-expanded="false" title="Rechercher un cue, une page, une scène, un show, un contrôle, un réglage ou une page d'aide (Cmd+K ou Cmd+F)">
     <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
     <span class="long">Rechercher…</span><kbd>⌘K</kbd></button>
+  <!-- Ligne de commande (T-424): the search box in « commande » mode. Never arms. -->
+  <button id="cmdBtn" aria-haspopup="dialog" aria-expanded="false" aria-label="Commandes"
+    title="Ligne de commande : régler un contrôle, lancer un cue, page, tempo, noir (Cmd+Maj+K). N'arme jamais le laser.">
+    <span aria-hidden="true">›_</span><span class="long">Commandes</span><kbd>⇧⌘K</kbd></button>
   <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
   <button id="helpBtn" aria-haspopup="menu" aria-expanded="false" title="Aide intégrée, raccourcis et visite guidée">? Aide</button>
 </nav>
@@ -1597,7 +1608,9 @@
   <input type="search" id="searchInput" placeholder="Rechercher… (cue, page, scène, show, contrôle, réglage, aide)" autocomplete="off" spellcheck="false"
     aria-label="Rechercher" aria-controls="searchResults" aria-autocomplete="list">
   <div id="searchResults" role="listbox" aria-label="Résultats"></div>
-  <div class="hint">↑ ↓ choisir · Entrée : y aller · Maj+Entrée : jouer le cue · Cmd+K : fermer · Échap reste l'arrêt d'urgence</div>
+  <div id="cmdErr" role="alert" hidden></div>
+  <div id="cmdEcho" role="status" aria-live="polite" hidden></div>
+  <div class="hint" id="searchHint">↑ ↓ choisir · Entrée : y aller · Maj+Entrée : jouer le cue · Cmd+K : fermer · Échap reste l'arrêt d'urgence</div>
 </div>
 <!-- Aide (T-437, T-438): the menu behind « ? Aide », no shortcut of its own. -->
 <div id="helpMenu" role="menu" aria-label="Aide" hidden>
@@ -4488,6 +4501,10 @@ function buildShortcuts() {
     { id: 'search', group: 'Recherche', keys: ['k', 'f'], meta: true, zones: '*', typing: true, show: true,
       cap: () => 'K ou F', label: 'Rechercher : aller à un cue, une page, une scène, un show, un contrôle, un réglage (ouvrir / fermer)',
       down: e => { if (!e.repeat) toggleSearch(); } },
+    // Ligne de commande (T-424): the same box; Cmd+K stays the search.
+    { id: 'command', group: 'Recherche', keys: ['k'], meta: true, shift: true, zones: '*', typing: true, show: true,
+      label: 'Ligne de commande : régler un contrôle, lancer un cue, page, tempo, noir (ouvrir / fermer ; n\'arme jamais)',
+      down: e => { if (!e.repeat) toggleCommand(); } },
     { id: 'help', group: 'Aide', keys: ['?'], shift: '*', zones: '*', show: true,
       label: 'Afficher / masquer cette aide',
       down: e => { if (!e.repeat) toggleKeysHelp(); } },
@@ -14992,14 +15009,21 @@ function searchSectionName(el) {
   return ownText(el.querySelector(':scope > summary, :scope > h2')) || el.dataset.search;
 }
 // SearchItem: { kind, label, sub, id?, extra?: [], deep?: text, target: {…}, missing?, play? }
-function searchBuild(items) {
-  SEARCH.items = items.map(it => {
+function searchIndex(items) {
+  return items.map(it => {
     const l = searchFold(it.label || '');
     return { ...it, l, lw: ' ' + l.replace(/[^a-z0-9]+/g, ' '), idf: it.id ? searchFold(it.id) : '',
       key: searchFold([it.label, it.sub, it.id, ...(it.extra || [])].filter(Boolean).join(' ')),
       deep: it.deep ? searchFold(it.deep) : '' };
   });
+}
+function searchBuild(items) {
+  SEARCH.items = searchIndex(items);
   return SEARCH.items.length;
+}
+// The letters of `q` in order in the name or the id (« tlmtr » finds « Taille maître »).
+function searchSubseq(it, q) {
+  return [it.l, it.idf].some(t => { let i = 0; for (const c of t) if (c === q[i] && ++i === q.length) return true; return false; });
 }
 // 0: its exact id (master.size); 1: the name starts with the text; 2: each
 // word starts a word of the name; 3: in the name; 4: in where it is (or
@@ -15014,13 +15038,16 @@ function searchRank(it, q, words) {
   }
   return it.deep && words.every(w => it.deep.includes(w)) ? 5 : -1;
 }
-function searchQuery(text) {
+// `fuzzy` (the command palette): also the names holding the letters in order, last.
+function searchQuery(text, items = SEARCH.items, fuzzy = false) {
   const q = searchFold(text).trim().replace(/\s+/g, ' ');
   if (!q) return [];
   const words = q.split(' ');
   const hits = [];
-  for (const it of SEARCH.items) {
-    const r = searchRank(it, q, words);
+  const sq = q.replace(/ /g, '');
+  for (const it of items) {
+    let r = searchRank(it, q, words);
+    if (r < 0 && fuzzy && searchSubseq(it, sq)) r = 6;
     if (r >= 0) hits.push([r, it]);
   }
   hits.sort((a, b) => a[0] - b[0] || SEARCH_ORDER[a[1].kind] - SEARCH_ORDER[b[1].kind] || a[1].l.length - b[1].l.length);
@@ -15134,6 +15161,7 @@ function searchPaintSel() {
 async function openSearch() {
   closeHelpMenu();
   $('searchBox').hidden = false;
+  searchSetMode('search');
   $('searchBtn').setAttribute('aria-expanded', 'true');
   $('searchInput').focus();
   $('searchInput').select();
@@ -15150,14 +15178,21 @@ function closeSearch() {
   if ($('searchBox').hidden) return;
   $('searchBox').hidden = true;
   $('searchBtn').setAttribute('aria-expanded', 'false');
+  $('cmdBtn').setAttribute('aria-expanded', 'false');
   if (document.activeElement === $('searchInput')) $('searchInput').blur();
 }
-function toggleSearch() { if ($('searchBox').hidden) openSearch(); else closeSearch(); }
+function toggleSearch() { if ($('searchBox').hidden || SEARCH.mode !== 'search') openSearch(); else closeSearch(); }
 $('searchBtn').querySelector('kbd').textContent = IS_MAC ? '⌘K' : 'Ctrl+K';
 $('searchBtn').addEventListener('click', toggleSearch);
-$('searchInput').addEventListener('input', () => { SEARCH.sel = 0; searchRender(); });
+$('searchInput').addEventListener('input', () => {
+  SEARCH.sel = 0;
+  // « > » first: the command line, as in a code editor.
+  if (SEARCH.mode === 'search' && $('searchInput').value.startsWith('>')) { openCommand($('searchInput').value.slice(1).trimStart()); return; }
+  if (SEARCH.mode === 'cmd') { CMD.nav = false; CMD.hi = -1; $('cmdErr').hidden = true; cmdRender(); } else searchRender();
+});
 // ↑ ↓ Entrée here; Échap is left to the page (the e-stop, which also closes this).
 $('searchInput').addEventListener('keydown', e => {
+  if (SEARCH.mode === 'cmd') { cmdKey(e); return; }
   const n = SEARCH.shown.length;
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
@@ -15170,7 +15205,7 @@ $('searchInput').addEventListener('keydown', e => {
   }
 });
 document.addEventListener('pointerdown', e => {
-  if (!$('searchBox').hidden && !e.target.closest('#searchBox, #searchBtn')) closeSearch();
+  if (!$('searchBox').hidden && !e.target.closest('#searchBox, #searchBtn, #cmdBtn')) closeSearch();
 }, true);
 
 // ----- going there -----
@@ -15266,6 +15301,175 @@ async function searchPlay(it) {
   await cueDown(it.play, null);
   await cueUp(it.play);
 }
+// ---------- ligne de commande (T-424) ----------
+// The search box in « commande » mode (Cmd+Maj+K, « ›_ Commandes », or
+// « > » typed first in the search). The list: every control a line may
+// drive and the cues by name (GET /api/command/actions); the line is
+// parsed and run by the studio (POST /api/command), like a controller: it
+// never arms, never resets the e-stop; « noir » latches the stop at once.
+// Échap stays the e-stop (the page's handler runs first, then closes this).
+const CMD = { items: [], nav: false, hi: -1, echo: '' };
+const CMD_KINDS = [['cmd', 'Contrôles'], ['cmdcue', 'Cues']];
+Object.assign(SEARCH_ORDER, { cmd: SEARCH_KINDS.length, cmdcue: SEARCH_KINDS.length + 1 });
+const CMD_HISTORY_KEY = 'laserStudio.cmdHistory', CMD_HISTORY_MAX = 50;
+// The last valid lines, newest first (this browser only).
+function cmdHistory() {
+  try { const h = JSON.parse(localStorage.getItem(CMD_HISTORY_KEY) || '[]'); return Array.isArray(h) ? h.filter(x => typeof x === 'string') : []; } catch { return []; }
+}
+function cmdRemember(line) {
+  const h = [line, ...cmdHistory().filter(x => x !== line)].slice(0, CMD_HISTORY_MAX);
+  try { localStorage.setItem(CMD_HISTORY_KEY, JSON.stringify(h)); } catch { /* private window: no history */ }
+}
+const SEARCH_TEXT = {
+  search: { label: 'Recherche globale', ph: 'Rechercher… (cue, page, scène, show, contrôle, réglage, aide)', input: 'Rechercher',
+    hint: "↑ ↓ choisir · Entrée : y aller · Maj+Entrée : jouer le cue · « > » : commandes · Cmd+K : fermer · Échap reste l'arrêt d'urgence" },
+  cmd: { label: 'Ligne de commande', ph: 'Tapez une action ou une commande…', input: 'Commande',
+    hint: "↑ ↓ choisir (champ vide : dernières commandes) · Tab : compléter · Entrée : exécuter · Cmd+Maj+K : fermer · Échap reste l'arrêt d'urgence · n'arme jamais le laser (Espace, palette fermée)" },
+};
+function searchSetMode(mode) {
+  SEARCH.mode = mode;
+  const t = SEARCH_TEXT[mode], box = $('searchBox'), input = $('searchInput');
+  box.classList.toggle('cmd', mode === 'cmd');
+  box.setAttribute('aria-label', t.label);
+  input.placeholder = t.ph;
+  input.setAttribute('aria-label', t.input);
+  $('searchHint').textContent = t.hint;
+  $('cmdErr').hidden = true;
+  $('cmdEcho').hidden = mode !== 'cmd' || !CMD.echo;
+  $('searchBtn').setAttribute('aria-expanded', String(mode === 'search' && !box.hidden));
+  $('cmdBtn').setAttribute('aria-expanded', String(mode === 'cmd' && !box.hidden));
+}
+async function cmdLoadActions() {
+  const j = await apiJson('GET', '/api/command/actions', undefined, { cache: 'no-store', source: 'Commandes', quiet: true }).catch(() => null);
+  if (!j) return false;
+  CMD.items = searchIndex(j.actions.map(a => ({ kind: a.id ? 'cmd' : 'cmdcue', label: a.label_fr, id: a.id, extra: [a.command], action: a })));
+  return true;
+}
+async function openCommand(text = '') {
+  closeHelpMenu();
+  $('searchBox').hidden = false;
+  searchSetMode('cmd');
+  const input = $('searchInput');
+  input.value = text;
+  input.focus();
+  SEARCH.sel = 0; CMD.nav = false; CMD.hi = -1;
+  cmdRender();
+  const gen = ++SEARCH.gen;
+  await cmdLoadActions();
+  if (gen !== SEARCH.gen || $('searchBox').hidden || SEARCH.mode !== 'cmd') return;
+  cmdRender();
+  $('searchBox').dataset.ready = String(gen);
+}
+function toggleCommand() { if ($('searchBox').hidden || SEARCH.mode !== 'cmd') openCommand(); else closeSearch(); }
+$('cmdBtn').querySelector('kbd').textContent = IS_MAC ? '⇧⌘K' : 'Ctrl+Maj+K';
+$('cmdBtn').addEventListener('click', toggleCommand);
+function cmdRender() {
+  const box = $('searchResults');
+  box.replaceChildren();
+  SEARCH.shown = [];
+  const text = $('searchInput').value.trim();
+  const msg = t => { const d = document.createElement('div'); d.className = 'none'; d.textContent = t; box.appendChild(d); };
+  if (!text) return msg('Une action par son nom (« taille », « teinte », un cue) ou une commande : master.size 80 · cue 2.14 go · page 3 · tempo 128 · tap · noir · tout arrêter. ↑ : dernières commandes.');
+  // A line with a value: the action named by its first word.
+  let found = searchQuery(text, CMD.items, true);
+  if (!found.length && /\s/.test(text)) found = searchQuery(text.split(/\s+/)[0], CMD.items, true);
+  if (!found.length) return msg(`Aucune action pour « ${text} » : Entrée l'exécute comme commande`);
+  for (const [kind, title] of CMD_KINDS) {
+    const group = found.filter(it => it.kind === kind);
+    if (!group.length) continue;
+    const h = document.createElement('h4'); h.textContent = title; box.appendChild(h);
+    for (const it of group) {
+      const n = SEARCH.shown.push(it) - 1, a = it.action;
+      const row = document.createElement('div');
+      row.className = 'sr'; row.setAttribute('role', 'option'); row.dataset.kind = kind; row.dataset.n = n;
+      const l = document.createElement('span'); l.className = 'l'; l.textContent = it.label;
+      const w = document.createElement('span'); w.className = 'w';
+      const c = document.createElement('code'); c.textContent = a.id || a.command; w.appendChild(c);
+      if (a.value_fr !== undefined) w.append(` = ${a.value_fr}`);
+      else if (a.hint_fr) w.append(` · ${a.hint_fr}`);
+      if (a.hint_fr) row.title = `Valeur : ${a.hint_fr}`;
+      row.append(l, w);
+      row.addEventListener('mousemove', () => { if (SEARCH.sel !== n) { SEARCH.sel = n; searchPaintSel(); } });
+      row.addEventListener('click', () => cmdChoose(it));
+      box.appendChild(row);
+    }
+  }
+  SEARCH.sel = Math.max(0, Math.min(SEARCH.sel, SEARCH.shown.length - 1));
+  searchPaintSel();
+}
+// An action with a value: its id in the field, waiting for the value; else run it.
+function cmdFill(it) {
+  const a = it.action, input = $('searchInput');
+  input.value = a.command + (a.needs_value ? ' ' : '');
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  CMD.nav = false; CMD.hi = -1;
+  $('cmdErr').hidden = true;
+  cmdRender();
+}
+function cmdChoose(it) {
+  if (it.action.needs_value) cmdFill(it); else cmdRun(it.action.command);
+}
+function cmdShowError(j) {
+  const err = $('cmdErr'), input = $('searchInput');
+  err.textContent = j.message_fr || 'Commande refusée';
+  err.hidden = false;
+  err.dataset.refused = String(!!j.refused);
+  // The faulty word, selected in the field.
+  if (j.token && input.value.substr(j.pos, j.token.length) === j.token) input.setSelectionRange(j.pos, j.pos + j.token.length);
+}
+// `fallback`: the first result, chosen when the text is a name, not a command.
+async function cmdRun(line, fallback) {
+  let r, j = null;
+  try { r = await api('POST', '/api/command', { line }, { quiet: [400], source: 'Commandes' }); } catch { return cmdShowError({ message_fr: 'Studio injoignable' }); }
+  try { j = await r.json(); } catch { /* 423 and others: plain text */ }
+  if (r.ok && j) {
+    cmdRemember(line);
+    CMD.echo = j.echo;
+    $('cmdEcho').textContent = '✓ ' + j.echo;
+    $('cmdEcho').hidden = SEARCH.mode !== 'cmd';
+    $('cmdErr').hidden = true;
+    $('searchInput').value = '';
+    CMD.hi = -1; CMD.nav = false;
+    cmdRender();
+    if (await cmdLoadActions() && SEARCH.mode === 'cmd') cmdRender();
+    return;
+  }
+  if (r.status === 400 && j) {
+    if (fallback && !j.refused && j.pos === 0 && /^Mot inconnu/.test(j.message_fr) && !/\d/.test(line)) return cmdChoose(fallback);
+    return cmdShowError(j);
+  }
+  cmdShowError({ message_fr: r.status === 423 ? 'Verrouillé en mode spectacle' : `Erreur ${r.status}` });
+}
+function cmdKey(e) {
+  const input = $('searchInput'), n = SEARCH.shown.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const hist = cmdHistory();
+    const browsing = !input.value.trim() || (CMD.hi >= 0 && input.value === hist[CMD.hi]);
+    if (browsing && hist.length) {
+      const hi = Math.min(hist.length - 1, CMD.hi + (e.key === 'ArrowUp' ? 1 : -1));
+      CMD.hi = hi;
+      input.value = hi < 0 ? '' : hist[hi];
+      input.setSelectionRange(input.value.length, input.value.length);
+      $('cmdErr').hidden = true;
+      cmdRender();
+      return;
+    }
+    if (n) { SEARCH.sel = (SEARCH.sel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; CMD.nav = true; searchPaintSel(); }
+  } else if (e.key === 'Tab' && !e.shiftKey && SEARCH.shown[SEARCH.sel]) {
+    e.preventDefault();
+    cmdFill(SEARCH.shown[SEARCH.sel]);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.repeat) return;
+    const it = SEARCH.shown[SEARCH.sel];
+    if (CMD.nav && it) return cmdChoose(it);
+    const line = input.value.trim();
+    if (line) cmdRun(line, it);
+  }
+}
+
 // For the e2e tests (performance): build an index, query it.
 window.__search = { build: items => searchBuild(items), query: text => searchQuery(text), size: () => SEARCH.items.length };
 
