@@ -10,7 +10,7 @@ type Grid = { pages: { cells: (string | null)[] }[] };
 let cells: string[] = [];
 const slots = async () => (await studio.get('/api/cues')).slots as Record<string, { notes?: string; tags?: string[]; color?: number[] }>;
 const activeCue = async () => (await studio.controlValues()).active_cue;
-const rects = (page: import('@playwright/test').Page) => page.locator('#cues > *').evaluateAll(els => els.map(e => {
+const rects = (page: import('@playwright/test').Page) => page.locator('#cues [data-slot]').evaluateAll(els => els.map(e => {
   const r = e.getBoundingClientRect();
   return [r.x, r.y, r.width, r.height].map(Math.round).join(',');
 }));

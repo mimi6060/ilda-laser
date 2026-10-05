@@ -6,7 +6,7 @@ const studio = useStudio();
 type Grid = { page: number; pages: { name: string; cells: (string | null)[]; user: boolean }[] };
 const getGrid = () => studio.get<Grid>('/api/grid');
 const tab = (page: import('@playwright/test').Page, i: number) => page.locator('#cueTabs button').nth(i);
-const cell = (page: import('@playwright/test').Page, i: number) => page.locator('#cues > *').nth(i);
+const cell = (page: import('@playwright/test').Page, i: number) => page.locator('#cues [data-slot]').nth(i);
 const activeCue = async () => (await studio.controlValues()).active_cue;
 // The frame, rounded, so two renders of the same still look compare equal.
 const frame = async () => (await studio.frame()).points.map((p: Point) => p.map(v => Math.round(v * 1000) / 1000).join(',')).join(' ');

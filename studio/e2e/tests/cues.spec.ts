@@ -144,7 +144,7 @@ test('T-272: the grid stays 8×5 at any width; empty cells keep their place and 
   await tab(page, 1).click();
   for (const width of [1440, 1100]) {
     await page.setViewportSize({ width, height: 900 });
-    const cells = page.locator('#cues > *');
+    const cells = page.locator('#cues [data-slot]');
     await expect(cells).toHaveCount(40);
     const tops = await cells.evaluateAll(els => els.map(e => Math.round(e.getBoundingClientRect().top)));
     expect(new Set(tops).size, `${width}px`).toBe(5);
@@ -170,7 +170,7 @@ test('T-272: a 6×4 grid keeps the cues in order and is saved', async ({ page })
   await page.locator('#gridRows').fill('4');
   await page.locator('#gridRows').press('Tab');
   await expect.poll(async () => { const g = await getGrid(); return [g.cols, g.rows]; }).toEqual([6, 4]);
-  await expect(page.locator('#cues > *')).toHaveCount(24);
+  await expect(page.locator('#cues [data-slot]')).toHaveCount(24);
   const first = pageCues(catalog.categories[0]);
   const shown = await page.locator('#cues .cue').evaluateAll(els => els.map(e => (e as HTMLElement).dataset.id));
   expect(shown).toEqual(first.slice(0, 24).map(p => p.id));
@@ -181,7 +181,7 @@ test('T-272: a 6×4 grid keeps the cues in order and is saved', async ({ page })
   // Saved: a reload shows the same size.
   await page.reload();
   await openUi(page, studio);
-  await expect(page.locator('#cues > *')).toHaveCount(24);
+  await expect(page.locator('#cues [data-slot]')).toHaveCount(24);
 });
 
 test('T-272: a new page is empty, a cue dragged onto it plays from there', async ({ page }) => {
