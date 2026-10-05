@@ -219,6 +219,38 @@ test('resetting a safety slider that loosens asks first', async ({ page }) => {
   expect(await studio.post('/api/safety', { ...settings, confirm_loosen: true })).toBe(200);
 });
 
+test('a double-click sends nothing before the typed value; a click sends once, a drag moves', async ({ page }) => {
+  const s = page.locator('#mBright');
+  await show(page, s);
+  const sent: string[] = [];
+  page.on('request', r => {
+    if (r.method() === 'POST' && /\/api\/(control|live)\b/.test(r.url())) sent.push(r.postData() ?? '');
+  });
+  // Far from the current value (100 %): a jump would be plain to see.
+  const box = (await s.boundingBox())!;
+  await page.mouse.dblclick(box.x + box.width * 0.2, box.y + box.height / 2);
+  await expect(page.locator('.slider-entry')).toBeVisible();
+  await page.waitForTimeout(700); // past the double-click window
+  expect(sent, 'nothing sent by the double-click').toEqual([]);
+  expect((await values())['master.brightness']).toBeCloseTo(1, 3);
+  await page.locator('.slider-entry').fill('70');
+  await page.locator('.slider-entry').press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  expect(JSON.parse(sent[0])).toEqual({ id: 'master.brightness', value: 0.7 });
+
+  // A single click: one value, after the double-click window.
+  sent.length = 0;
+  await page.mouse.click(box.x + box.width * 0.5, box.y + box.height / 2);
+  await expect.poll(() => sent.length).toBe(1);
+  await expect.poll(async () => (await values())['master.brightness']).toBeCloseTo(0.5, 1);
+  // A drag still follows the pointer.
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.9, box.y + box.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await values())['master.brightness']).toBeGreaterThan(0.8);
+});
+
 test('after a slider, Space still arms and Escape still stops (T-291)', async ({ page }) => {
   const s = page.locator('#mBright');
   await show(page, s);

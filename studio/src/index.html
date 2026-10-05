@@ -6166,6 +6166,8 @@ $('zoomIn').addEventListener('click', () => zoom(0.1));
 //   elsewhere validates, Tab validates and moves on, Échap cancels (and is
 //   still the e-stop);
 // - Maj (or Alt) + drag: fine, a tenth of the movement;
+// - a press alone sends nothing: a drag sends once it moved 4 px, a click
+//   only when no second click came (so a double-click never jumps);
 // - with the keyboard focus: arrows = a step (Maj: a tenth of one), Page
 //   préc./suiv. = ten steps, Début/Fin = the bounds; the wheel only then,
 //   so a page scrolled over a slider never moves it;
@@ -6277,6 +6279,15 @@ function nudgeSlider(el, n, fine = false) {
   }
   setSlider(el, v);
 }
+// A press becomes a drag past this many pixels; a click waits this long
+// for a second click before it sends its value.
+const SLIDER_DRAG_PX = 4, SLIDER_DBL_MS = 450;
+// `v` rounded to the slider's step.
+function snapSlider(el, v) {
+  if (el.step === 'any') return v;
+  const step = +el.step || 1, min = +el.min || 0;
+  return clampTyped(+(min + Math.round((v - min) / step) * step).toFixed(6), +el.min, +el.max);
+}
 let sliderEntry = null;
 function openSliderEntry(el) {
   if (el.disabled) return;
@@ -6331,38 +6342,50 @@ function closeSliderEntry(commit) {
 function enhanceSlider(el) {
   if (el.dataset.enh !== undefined) return;
   el.dataset.enh = '';
-  // The double-click's first click moved the thumb to the pointer: the
-  // value from before it comes back, and the field starts from it.
-  let before = null;
-  el.addEventListener('pointerdown', () => {
-    const now = performance.now();
-    if (!before || now - before.t > 600) before = { v: sliderValue(el), t: now };
-  }, true);
-  el.addEventListener('dblclick', e => {
-    e.preventDefault();
-    if (before && performance.now() - before.t < 1000 && +el.value !== before.v) setSlider(el, before.v);
-    if (before) el.value = before.v;
-    before = null;
-    openSliderEntry(el);
-  });
-  // Fine drag: Maj or Alt held when the drag starts.
+  // The pointer is ours, not the browser's: a press never sends a value
+  // by itself (laser safety: the first click of a double-click must not
+  // flash the output or make it jump). A drag sends once it has moved a
+  // few pixels; a plain click sends its value only after the double-click
+  // window has passed without a second click. Maj or Alt: fine drag.
+  let pendingClick = 0;
   el.addEventListener('pointerdown', e => {
-    if (e.button !== 0 || !(e.shiftKey || e.altKey) || el.disabled) return;
+    if (e.button !== 0 || el.disabled) return;
     e.preventDefault();
     el.focus();
     el.setPointerCapture(e.pointerId);
-    const x0 = e.clientX, v0 = sliderValue(el), w = el.getBoundingClientRect().width || 1;
-    const span = +el.max - +el.min;
-    const move = ev => setSlider(el, clampTyped(v0 + (ev.clientX - x0) / w * span / 10, +el.min, +el.max), false);
-    const up = () => {
+    clearTimeout(pendingClick);
+    const fine = e.shiftKey || e.altKey, r = el.getBoundingClientRect();
+    const vertical = getComputedStyle(el).writingMode.startsWith('vertical');
+    const pos = ev => vertical ? -ev.clientY : ev.clientX;
+    const p0 = pos(e), v0 = sliderValue(el), min = +el.min, max = +el.max, span = max - min;
+    const len = (vertical ? r.height : r.width) || 1, thumb = Math.min(16, len / 4);
+    // Where the pointer is along the track, as the browser would place the thumb.
+    const at = ev => {
+      const t = vertical ? (r.bottom - ev.clientY - thumb / 2) / (len - thumb) : (ev.clientX - r.left - thumb / 2) / (len - thumb);
+      return snapSlider(el, min + clampTyped(t, 0, 1) * span);
+    };
+    let dragging = false;
+    const move = ev => {
+      if (!dragging) { if (Math.abs(pos(ev) - p0) < SLIDER_DRAG_PX) return; dragging = true; }
+      setSlider(el, fine ? clampTyped(v0 + (pos(ev) - p0) / len * span / 10, min, max) : at(ev), false);
+    };
+    const up = ev => {
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', up);
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      if (dragging) { el.dispatchEvent(new Event('change', { bubbles: true })); return; }
+      if (ev.type !== 'pointerup' || fine) return;
+      const v = at(e);
+      pendingClick = setTimeout(() => { if (v !== sliderValue(el)) setSlider(el, v); }, SLIDER_DBL_MS);
     };
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
+  });
+  el.addEventListener('dblclick', e => {
+    e.preventDefault();
+    clearTimeout(pendingClick);
+    openSliderEntry(el);
   });
   // A plain drag forgets the exact value (a value from the studio moves the
   // position, which does too).
