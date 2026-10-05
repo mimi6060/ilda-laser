@@ -81,6 +81,11 @@ pub fn allowed(path: &str) -> bool {
         "/api/playlist/start",
         "/api/playlist/stop",
         "/api/presets/play",
+        // « Préparer » (T-274): a cue loaded blind and sent, playback only.
+        "/api/prepared",
+        "/api/prepared/adjust",
+        "/api/prepared/send",
+        "/api/prepared/clear",
         // The cue list's transport (T-410); saving lists is an edit.
         "/api/cuelist/load",
         "/api/cuelist/go",
@@ -152,7 +157,7 @@ mod tests {
 
     #[test]
     fn playback_and_safety_are_allowed_edits_are_not() {
-        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/cuelist/go", "/api/cuelist/goto", "/api/lock", "/api/test/stall", "/api/external/gate", "/api/timecode/arm", "/api/midi/virtual"] {
+        for p in ["/api/estop", "/api/arm", "/api/cue", "/api/control", "/api/scenes/play", "/api/timeline/play", "/api/cuelist/go", "/api/cuelist/goto", "/api/prepared", "/api/prepared/send", "/api/lock", "/api/test/stall", "/api/external/gate", "/api/timecode/arm", "/api/midi/virtual"] {
             assert!(allowed(p), "{p}");
         }
         for p in [

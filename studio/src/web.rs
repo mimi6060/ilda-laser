@@ -489,6 +489,27 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             json_response(json!({ "lines": app.tail(n), "status": app.status() }))
         }
         (Method::Get, "/api/frame") => frame(shared),
+        // « Préparer » (T-274): the prepared cue's own frame, rendered here
+        // on its own animator; never the output's (`/api/frame`).
+        (Method::Get, "/api/preview-frame") => {
+            let mut s = shared.lock().unwrap();
+            let round = |v: f32| (v * 1000.0).round() / 1000.0;
+            let points: Vec<[f32; 5]> = crate::prepared::render(&mut s).iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect();
+            json_response(json!({ "prepared": crate::prepared::view(&s), "points": points }))
+        }
+        (Method::Post, "/api/prepared") => match body::<IdRequest>(request) {
+            Ok(req) => prepared_reply(shared, |s| crate::prepared::prepare(s, &req.id)),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/prepared/adjust") => match body::<crate::prepared::Adjust>(request) {
+            Ok(req) => prepared_reply(shared, |s| crate::prepared::adjust(s, &req)),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/prepared/send") => prepared_reply(shared, |s| crate::prepared::send(s).map(|_| ())),
+        (Method::Post, "/api/prepared/clear") => prepared_reply(shared, |s| {
+            crate::prepared::clear(s);
+            Ok(())
+        }),
         // Notification centre (T-432): read only, `since` = the last id seen.
         (Method::Get, "/api/notices") => {
             let since = query_u64(request.url(), "since").unwrap_or(0);
@@ -3439,6 +3460,15 @@ fn timeline_with_timecode(s: &Shared) -> serde_json::Value {
 /// the page's state (`live_view`). `X-State-Version`: the pushed state's
 /// version (T-411), so a page polling as a fallback knows when the
 /// stream has caught up.
+/// A « Préparer » action (T-274), answered with the slot's view.
+fn prepared_reply(shared: &Arc<Mutex<Shared>>, f: impl FnOnce(&mut Shared) -> Result<(), crate::prepared::PrepareError>) -> HttpResponse {
+    let mut s = shared.lock().unwrap();
+    match f(&mut s) {
+        Ok(()) => json_response(crate::prepared::view(&s)),
+        Err(e) => text(e.status(), e.message_fr()),
+    }
+}
+
 fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     let (mut view, points, version) = {
         let mut s = shared.lock().unwrap();
@@ -3521,6 +3551,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["history"] = s.history.summary();
     // T-146: what plays on the FX grid, each line's level now.
     v["fx"] = s.fx.view();
+    // T-274: what is prepared (no points: those are `/api/preview-frame`).
+    v["prepared"] = crate::prepared::view(s);
     v
 }
 
@@ -4310,6 +4342,37 @@ mod tests {
         assert!(body.contains(r#""mode":"above""#), "{body}");
         assert_eq!(arm_status(&t)["armed"], true, "going back above leaves the arming alone");
         assert_eq!(t.request("POST", "/api/audience", r#"{"mode":"nope"}"#).0, 400);
+    }
+
+    /// T-274: a prepared cue changes `/api/preview-frame`, never
+    /// `/api/frame`; « Envoyer » plays it; all of it in show mode too.
+    #[test]
+    fn prepare_previews_apart_and_send_plays_the_cue() {
+        let t = TestServer::start(false);
+        let js = |b: &str| serde_json::from_str::<serde_json::Value>(b).unwrap();
+        let id = t.shared.lock().unwrap().presets[0].id.clone();
+        let before = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(js(&t.request("GET", "/api/preview-frame", "").1)["points"], json!([]));
+        assert_eq!(t.request("POST", "/api/prepared/send", "").0, 409);
+        assert_eq!(t.request("POST", "/api/prepared", r#"{"id":"pas-un-cue"}"#).0, 404);
+        t.shared.lock().unwrap().show_mode.on = true;
+        let (status, body) = t.request("POST", "/api/prepared", &json!({ "id": id }).to_string());
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(js(&body)["cue"]["id"], json!(id));
+        let (status, body) = t.request("POST", "/api/prepared/adjust", r#"{"scale":0.4,"color":[0,255,0]}"#);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(js(&body)["cue"]["color"], json!([0, 255, 0]));
+        let preview = js(&t.request("GET", "/api/preview-frame", "").1);
+        assert!(!preview["points"].as_array().unwrap().is_empty(), "the prepared view draws");
+        let after = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(after["points"], before["points"], "the output frame is untouched");
+        assert_eq!(after["prepared"]["cue"]["id"], json!(id), "the page sees what is prepared");
+        assert!(after["cues"]["active"].as_array().unwrap().is_empty(), "nothing plays");
+        assert_eq!(t.request("POST", "/api/prepared/send", "").0, 200);
+        let sent = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(sent["cues"]["active"][0]["cue"], json!(id));
+        assert_eq!(sent["prepared"]["cue"], json!(null));
+        assert_eq!(sent["armed"], json!(false), "« Envoyer » never arms");
     }
 
     #[test]

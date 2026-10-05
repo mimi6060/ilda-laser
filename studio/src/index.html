@@ -342,6 +342,34 @@
   .view > canvas#beams { width: 100cqw; height: 100cqh; aspect-ratio: auto; flex: none; }
   .view.both > canvas#preview { width: min(calc(50cqw - 6px), 100cqh); }
   .view.both > canvas#beams { width: calc(50cqw - 6px); }
+  /* « Préparer » (T-274), Theme (T-299) tokens: the prepared view is
+     framed in blue (--ws-timeline), the output keeps its own look. --ps:
+     the side of the « Sortie » and « Préparé » squares; the prepared pane
+     adds its controls column (154 px) and its header (40 px). */
+  .view.prep { --ps: min(calc(50cqw - 83px), calc(100cqh - 40px)); }
+  .view.prep.both { --ps: min(calc((100cqw - 178px) / 3), calc(100cqh - 40px)); }
+  .view.prep > canvas#preview { width: var(--ps); }
+  .view.prep > canvas#beams { width: calc(100cqw - var(--ps) - 166px); }
+  .view.prep.both > canvas#beams { width: var(--ps); }
+  #prepPane { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 4px 6px 6px; border: 2px solid var(--ws-timeline); border-radius: 8px; background: var(--panel); }
+  #prepPane[hidden] { display: none; }
+  .prep-body { display: flex; gap: 8px; align-items: flex-start; }
+  #prepPane canvas { display: block; flex: none; width: var(--ps); height: auto; aspect-ratio: 1; background: #000; border-radius: 4px; }
+  .prep-side { width: 130px; max-height: var(--ps); overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  .prep-head { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); min-width: 0; width: calc(var(--ps) + 138px); }
+  .prep-head span { flex: 1; min-width: 0; }
+  .prep-head button { flex: none; padding: 3px 10px; font-size: 12px; }
+  .prep-head b { color: var(--ws-timeline); text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
+  .prep-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prep-side > div { display: flex; flex-direction: column; }
+  .prep-side label { font-size: 11px; color: var(--muted); }
+  .prep-side input[type=color] { width: 100%; height: 20px; padding: 0; border: 1px solid var(--line); background: var(--panel-2); }
+  #prepSend:not(:disabled) { background: var(--ws-timeline); border-color: var(--ws-timeline); color: #fff; font-weight: 600; }
+  #prepBtn.active { background: var(--ws-timeline); border-color: var(--ws-timeline); color: #fff; }
+  #outTag { position: absolute; top: 44px; left: 12px; padding: 2px 10px; border-radius: 999px; background: #000c; color: var(--text); border: 1px solid var(--line); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+  #outTag[hidden] { display: none; }
+  .cue.prepared { box-shadow: inset 0 0 0 2px var(--ws-timeline); }
+  body.prep-mode #cues .cue { cursor: copy; }
   @media (max-width: 900px) {
     main, main[data-ws-active] { display: flex; flex-direction: column; height: auto; }
     .stage { order: 1; } .ws-cues { order: 2; } .ws-cues > .cue-scroll { overflow: visible; } .ws-panel { order: 3; overflow: visible; }
@@ -349,6 +377,8 @@
     .view { container-type: normal; flex-direction: column; }
     .view > canvas#preview, .view.both > canvas#preview, #beamsMsg { width: 100%; }
     .view > canvas#beams, .view.both > canvas#beams { width: 100%; height: auto; aspect-ratio: 1; }
+    .view.prep > canvas#preview, .view.prep > canvas#beams, .view.prep.both > canvas#preview, .view.prep.both > canvas#beams { width: 100%; }
+    .view.prep { --ps: calc(100vw - 210px); }
     .ws-layers { order: 2; }
     #wsHint { display: none; }
     #wsTabs { flex-wrap: wrap; }
@@ -1472,6 +1502,7 @@
         <button data-view="3d">3D</button>
         <button data-view="both" title="Aperçu 2D et vue 3D côte à côte">2D+3D</button>
       </div>
+      <button id="prepBtn" aria-pressed="false" title="Préparer : un clic sur une case (ou une lettre) charge le cue dans la vue « Préparé » sans l'envoyer au laser. Alt + clic prépare sans activer le mode.">Préparer</button>
       <button id="recenter3d" hidden title="Double-clic sur la vue : même effet">Recentrer</button>
       <span class="hint" id="hint3d" hidden>Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer</span>
     </div>
@@ -1479,7 +1510,23 @@
       <canvas id="preview" width="900" height="900"></canvas>
       <canvas id="beams" width="900" height="900" hidden></canvas>
       <div id="beamsMsg" hidden>Visualiseur 3D indisponible sur ce navigateur</div>
+      <div id="prepPane" hidden aria-label="Cue préparé, pas envoyé au laser">
+        <div class="prep-head"><b>Préparé</b><span id="prepName"></span>
+          <button id="prepSend" title="Envoyer à la sortie comme un clic sur la case (transition et quantification comprises) — Entrée du pavé numérique">Envoyer</button>
+          <button id="prepClear" title="Vider la préparation">Vider</button>
+        </div>
+        <div class="prep-body">
+          <canvas id="prepared" width="600" height="600" title="Cue préparé : son contenu seul, jamais envoyé à une sortie avant « Envoyer »"></canvas>
+          <div class="prep-side">
+            <div><label for="prepScale">Taille</label><input type="range" id="prepScale" min="0" max="100" data-default="50"></div>
+            <div><label for="prepBright">Luminosité</label><input type="range" id="prepBright" min="0" max="100" data-default="100"></div>
+            <div><label for="prepRot">Rotation</label><input type="range" id="prepRot" min="-360" max="360" step="5" data-default="0"></div>
+            <div><label for="prepColor">Couleur</label><input type="color" id="prepColor"></div>
+          </div>
+        </div>
+      </div>
       <div id="offBadge">Laser éteint : aperçu seulement</div>
+      <div id="outTag" hidden>Sortie</div>
       <div id="aud3d" hidden role="status" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="aud3dN">0</b></div>
     </div>
     <div class="render3d" id="render3d" hidden>
@@ -3531,7 +3578,7 @@ async function apiRefused(method, path, r, opts) {
 // raised by every editing request so a reload within that time is caught),
 // the timeline editor's show, the figure being drawn and the cue program
 // being edited in CRÉATION. An autosave is not a save: the guard stays.
-const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame|onboarding|help)/;
+const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame|onboarding|help|prepared)/;
 const DIRTY = { editAt: -1, savedAt: 0, server: false, serverAt: 0 };
 function noteEdit(path) { if (!NOT_EDITS.test(path)) DIRTY.editAt = performance.now(); }
 function takeProjectModified(modified, at) {
@@ -3921,7 +3968,7 @@ function buildShortcuts() {
       alt: true, zones: '*', show: true, cap: () => '1 … 9', label: 'Pages de cues 1 à 9',
       down: (e, i) => { if (!e.repeat) selectPage(i); } },
     // Entrée and ⌫ belong to the timeline while it has the focus (marker, delete).
-    { id: 'tempo.tap', group: 'Tempo', codes: ['Enter', 'NumpadEnter'], meta: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
+    { id: 'tempo.tap', group: 'Tempo', codes: ['Enter'], meta: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
       label: 'Tap tempo',
       down: () => { post('/api/control', { id: 'tempo.tap' }); } },
     { id: 'tempo.resync', group: 'Tempo', codes: ['Backspace'], meta: '*', alt: '*', shift: '*', zones: NOT_TL_CANVAS, show: true,
@@ -3932,6 +3979,10 @@ function buildShortcuts() {
     { id: 'list.go', group: 'Liste de cues', codes: ['PageDown'], zones: ['live'], show: true,
       label: 'GO : pas suivant (télécommande de présentation)', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('go', 'keyboard'); } },
+    // « Préparer » (T-274): Entrée du pavé numérique (Entrée est le tap).
+    { id: 'prepared.send', group: 'Cues et pages', codes: ['NumpadEnter'], zones: ['live'], show: true,
+      label: 'Envoyer le cue préparé à la sortie', when: () => !!(prepared && prepared.cue),
+      down: e => { if (!e.repeat) sendPrepared(); } },
     { id: 'list.go.alt', group: 'Liste de cues', codes: ['Enter', 'NumpadEnter'], alt: true, zones: ['live'], show: true,
       label: 'GO (claviers sans touche Page suivante)', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('go', 'keyboard'); } },
@@ -4033,6 +4084,8 @@ function buildShortcuts() {
         if (storeMode) { if (!e.repeat) storeInto(i); return; }
         const id = grid.pages[gridPage]?.cells[i] ?? null;
         if (!id || !presetById.has(id)) return false;
+        // « Préparer » on (T-274): the letter prepares, nothing goes out.
+        if (prepMode) { if (!e.repeat) prepareCue(id); return; }
         // Auto-repeat would toggle the cue on and off while the key is held.
         if (e.repeat || heldKeys.has(e.code)) return;
         heldKeys.set(e.code, id);
@@ -4359,13 +4412,15 @@ $('holdKeyPick').addEventListener('click', e => {
 
 // ---------- preview ----------
 const cv = $('preview'), g = cv.getContext('2d');
-function draw(points) {
-  const W = cv.width, H = cv.height;
+function draw(points, c = cv) {
+  // Another canvas (« Préparé », T-274) draws without the output's overlays.
+  const out = c === cv, g = out ? cv.getContext('2d') : c.getContext('2d');
+  const W = c.width, H = c.height;
   g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
   g.strokeStyle = '#ffffff10'; g.lineWidth = 1;
   g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
   const px = p => [(p[0] + 1) / 2 * W, (1 - (p[1] + 1) / 2) * H];
-  drawSafetyOverlay(W, H, px);
+  if (out) drawSafetyOverlay(W, H, px);
   // Boost dim colors so a low-brightness look is still visible on screen.
   const col = (p, a) => `rgba(${[2, 3, 4].map(i => Math.round(255 * Math.sqrt(p[i]))).join(',')},${a})`;
   for (const [width, alpha] of [[9, 0.18], [2.5, 1]]) {
@@ -4655,6 +4710,7 @@ function applyState(f, at, pushed) {
     if (grid.pages[serverPage] && serverPage !== gridPage) { gridPage = serverPage; renderCues(); }
   }
   showCueDeck(f.cues);
+  showPrepared(f.prepared);
   showCueList(f.cuelist);
   // A cell « en attente » (T-159) blinks with the beat.
   if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
@@ -4774,6 +4830,68 @@ async function setView(mode) {
   try { localStorage.setItem(STAGE_KEY, mode); } catch { /* private window: not remembered */ }
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
+
+// ---------- « Préparer » (T-274) ----------
+// A cue loaded blind into its own view, « Préparé », drawn from
+// GET /api/preview-frame: the studio renders it on a separate animator
+// that never feeds an output. Adjusted here, then « Envoyer » plays it
+// like a click on its cell (transition and quantise included). The mode
+// is this page's; what is prepared is the studio's (`prepared` in the state).
+let prepMode = false, prepared = null, prepRev = -1, prepTimer = null, prepBusy = false;
+const prepCv = $('prepared');
+function showPrepPane() {
+  const c = prepared && prepared.cue, on = prepMode || !!c;
+  $('prepPane').hidden = !on; $('outTag').hidden = !on;
+  $('preview').parentElement.classList.toggle('prep', on);
+  $('prepBtn').classList.toggle('active', prepMode);
+  $('prepBtn').setAttribute('aria-pressed', String(prepMode));
+  document.body.classList.toggle('prep-mode', prepMode);
+  $('prepName').textContent = c ? c.name : 'Cliquez une case pour la préparer';
+  for (const id of ['prepSend', 'prepClear', 'prepScale', 'prepBright', 'prepRot', 'prepColor']) $(id).disabled = !c;
+  if (c) {
+    setVal('prepScale', Math.round(c.scale * 100)); setVal('prepBright', Math.round(c.brightness * 100));
+    setVal('prepRot', Math.round(c.rotation_speed)); setVal('prepColor', hex(c.color));
+  }
+  if (deck) paintCues();
+  if (on && !prepTimer) { prepTimer = setInterval(pollPrepared, 50); pollPrepared(); }
+  if (!on && prepTimer) { clearInterval(prepTimer); prepTimer = null; }
+  if (!c) draw([], prepCv);
+}
+function showPrepared(p) {
+  if (!p || p.rev === prepRev) return;
+  prepRev = p.rev; prepared = p;
+  showPrepPane();
+}
+async function pollPrepared() {
+  if (prepBusy || document.hidden) return;
+  prepBusy = true;
+  try {
+    const r = await api('GET', '/api/preview-frame', undefined, { cache: 'no-store', quiet: true });
+    if (r.ok) {
+      const j = await r.json();
+      showPrepared(j.prepared);
+      if (prepared && prepared.cue) draw(j.points, prepCv);
+    }
+  } catch { /* the link notice says it */ } finally { prepBusy = false; }
+}
+async function prepPost(path, body) {
+  const r = await api('POST', path, body ?? {});
+  if (!r.ok) return false;
+  showPrepared(await r.json());
+  return true;
+}
+function setPrepMode(on) { prepMode = on; showPrepPane(); }
+async function prepareCue(id) { if (await prepPost('/api/prepared', { id })) pollPrepared(); }
+async function sendPrepared() {
+  if (prepared && prepared.cue && await prepPost('/api/prepared/send')) refreshLook();
+}
+$('prepBtn').onclick = () => setPrepMode(!prepMode);
+$('prepSend').onclick = sendPrepared;
+$('prepClear').onclick = () => prepPost('/api/prepared/clear');
+$('prepScale').oninput = e => prepPost('/api/prepared/adjust', { scale: e.target.value / 100 });
+$('prepBright').oninput = e => prepPost('/api/prepared/adjust', { brightness: e.target.value / 100 });
+$('prepRot').oninput = e => prepPost('/api/prepared/adjust', { rotation_speed: +e.target.value });
+$('prepColor').oninput = e => prepPost('/api/prepared/adjust', { color: rgb(e.target.value) });
 
 // ---------- show mode (T-283) ----------
 // The server owns the lock (GET/POST /api/lock, `lock` in every frame) and
@@ -6976,6 +7094,8 @@ function renderCues() {
         if (storeMode) { e.preventDefault(); storeInto(i); return; }
         if (gridEditing) return;
         e.preventDefault();
+        // « Préparer » (T-274): into the prepared view, never the output.
+        if (prepMode || e.altKey) { prepareCue(p.id); return; }
         if (pointerCue) cueUp(pointerCue);
         pointerCue = p.id;
         cueDown(p.id, shiftMod(e) ? 'flash' : null);
@@ -7166,6 +7286,7 @@ function paintCues() {
     b.classList.toggle('hidden-out', (latched.has(id) || held.has(id)) && !shown.has(id));
     b.classList.toggle('pending', waiting.has(id));
     b.classList.toggle('ending', ending.has(id) && !latched.has(id) && !held.has(id));
+    b.classList.toggle('prepared', !!(prepared && prepared.cue && prepared.cue.id === id));
   });
 }
 function showCueDeck(c) {

@@ -61,6 +61,7 @@ mod patterns;
 mod ponk;
 mod power;
 mod presence;
+mod prepared;
 mod presets;
 mod running;
 mod program;
@@ -525,6 +526,10 @@ pub struct Shared {
     /// Undo / redo of edits (history.rs, T-285): in memory, 50 levels,
     /// emptied when another project opens.
     pub history: history::EditHistory,
+    /// « Préparer » (T-274): a cue loaded blind, with its own animator,
+    /// rendered only by `GET /api/preview-frame`. The engine never reads
+    /// it; only « Envoyer » plays it, as a cue press. Memory only.
+    pub prepared: prepared::PreviewSlot,
 }
 
 impl Shared {
@@ -1351,6 +1356,7 @@ fn startup_state(cli: &Cli) -> Shared {
         projector_frames: Vec::new(),
         notices: Default::default(),
         history: Default::default(),
+        prepared: Default::default(),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);

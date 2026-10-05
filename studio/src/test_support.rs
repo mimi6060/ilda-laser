@@ -127,6 +127,7 @@ pub fn shared() -> Shared {
         projector_frames: Vec::new(),
         notices: Default::default(),
         history: Default::default(),
+        prepared: Default::default(),
     }
 }
 
