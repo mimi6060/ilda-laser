@@ -538,6 +538,7 @@
   #musPreset { width: 100%; margin-top: 4px; }
   #musPresetHint:empty, #trgState:empty { display: none; }
   #musPresetHint.warn { color: var(--warn); }
+  #textAccentWarn { color: var(--warn); }
   #trgPanel { margin-top: 12px; }
   #trgState[data-run=true] { color: var(--ok); }
   #trgState[data-black=true] { color: var(--warn); }
@@ -2233,7 +2234,31 @@
         <button data-kind="generator">Effet</button>
       </div>
       <div id="shapePanel"><div class="shapes" id="shapes"></div></div>
-      <div id="textPanel"><label>Texte</label><input type="text" id="text" maxlength="24" value="HELLO"></div>
+      <div id="textPanel">
+        <label for="text">Texte</label><input type="text" id="text" maxlength="128" value="HELLO">
+        <label for="textFont">Police</label>
+        <select id="textFont">
+          <option value="segments">Segments</option><option value="hershey-simple">Hershey simple</option>
+          <option value="hershey-double">Hershey double</option><option value="relief">Relief</option>
+        </select>
+        <div class="hint warn" id="textAccentWarn" hidden>Cette police n'a pas de lettres accentuées.</div>
+        <label>Alignement</label>
+        <div class="seg" id="textAlign">
+          <button data-talign="left">Gauche</button><button data-talign="center">Centre</button><button data-talign="right">Droite</button>
+        </div>
+        <label>Espacement des lettres <span class="v" id="textSpacingV"></span></label>
+        <input type="range" id="textSpacing" data-default="0" min="-0.5" max="2" step="0.05">
+        <div class="check"><input type="checkbox" id="textFit"><span>Ajuster à la largeur</span></div>
+        <label>Largeur <span class="v" id="textFitWV"></span></label>
+        <input type="range" id="textFitW" data-default="80" min="5" max="100" title="Largeur du texte, en % de la largeur du cadre">
+        <div class="check"><input type="checkbox" id="textScroll"><span>Défilement</span></div>
+        <label>Vitesse <span class="v" id="textSpeedV"></span></label>
+        <input type="range" id="textSpeed" data-default="0.25" min="-4" max="4" step="0.05" title="Largeurs de cadre ; positif : vers la gauche, négatif : vers la droite">
+        <select id="textPer" title="Unité de la vitesse de défilement">
+          <option value="beat">par temps</option><option value="second">par seconde</option>
+        </select>
+        <div class="hint">Les polices détaillées coûtent plus de points : un texte long dépasse vite le budget du calque (« Points » en bas). Un texte long gagne à défiler.</div>
+      </div>
       <div id="wavePanel" class="hint">Une onde qui défile ; avec la musique, son amplitude suit le volume.</div>
       <div id="evoPanel" class="hint" hidden></div>
       <div id="figNote" class="hint" hidden></div>
@@ -2462,7 +2487,12 @@
         <button id="figMirX" title="Symétrie gauche / droite">Symétrie X</button><button id="figMirY" title="Symétrie haut / bas">Symétrie Y</button>
       </div>
       <label for="figText">Texte (outil Texte)</label>
-      <input type="text" id="figText" maxlength="64" value="LASER">
+      <input type="text" id="figText" maxlength="128" value="LASER">
+      <label for="figTextFont">Police</label>
+      <select id="figTextFont">
+        <option value="segments">Segments</option><option value="hershey-simple">Hershey simple</option>
+        <option value="hershey-double">Hershey double</option><option value="relief">Relief</option>
+      </select>
       <label>Taille du texte <span class="v" id="figTextSizeV"></span></label>
       <input type="range" id="figTextSize" data-default="30" min="5" max="100" value="30">
       <label for="figSides">Côtés (outil Polygone)</label>
@@ -3720,7 +3750,7 @@ function showSettings() {
     showGenHelp(s.content.generator);
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
-  if (kind === 'text') setVal('text', s.content.text);
+  if (kind === 'text') showTextStyle(s.content);
   setVal('color', hex(s.color));
   setVal('scale', Math.round(s.scale * 100));
   setVal('rot', s.rotation_speed);
@@ -3740,7 +3770,40 @@ function showSettings() {
   showValues();
 }
 
+// The text options (T-439): absent style = the defaults (segment font).
+const TEXT_STYLE = { font: 'segments', align: 'center', spacing: 0, fit_width: null, scroll: { enabled: false, speed: 0.25, per: 'beat' } };
+const textStyle = c => {
+  const st = c.style || {};
+  return { ...TEXT_STYLE, ...st, scroll: { ...TEXT_STYLE.scroll, ...(st.scroll || {}) } };
+};
+// Which fonts draw accents, from /api/fonts (none known until it answers).
+let FONT_ACCENTS = {};
+apiJson('GET', '/api/fonts', undefined, { quiet: true }).then(list => {
+  FONT_ACCENTS = Object.fromEntries(list.map(f => [f.id, f.accents]));
+  if (settings?.content?.kind === 'text') showTextStyle(settings.content);
+}).catch(() => {});
+const ACCENTED = /[àâäáéèêëíìîïóòôöúùûüÿçœæ]/i;
+function showTextStyle(c) {
+  const st = textStyle(c);
+  setVal('text', c.text);
+  setVal('textFont', st.font);
+  document.querySelectorAll('[data-talign]').forEach(b => b.classList.toggle('active', b.dataset.talign === st.align));
+  setVal('textSpacing', st.spacing);
+  setCheck('textFit', st.fit_width != null);
+  setVal('textFitW', Math.round((st.fit_width ?? 1.6) * 50));
+  $('textFitW').disabled = st.fit_width == null;
+  setCheck('textScroll', st.scroll.enabled);
+  setVal('textSpeed', st.scroll.speed);
+  setVal('textPer', st.scroll.per);
+  $('textSpeed').disabled = $('textPer').disabled = !st.scroll.enabled;
+  document.querySelectorAll('[data-talign]').forEach(b => { b.disabled = st.scroll.enabled; });
+  $('textAccentWarn').hidden = !(FONT_ACCENTS[st.font] === false && ACCENTED.test(c.text));
+}
+
 function showValues() {
+  $('textSpacingV').textContent = (+$('textSpacing').value).toFixed(2);
+  $('textFitWV').textContent = $('textFitW').value + ' %';
+  $('textSpeedV').textContent = (+$('textSpeed').value).toFixed(2) + ($('textPer').value === 'second' ? ' /s' : ' /temps');
   $('scaleV').textContent = $('scale').value + ' %';
   $('rotV').textContent = $('rot').value + ' °/s';
   $('brightV').textContent = $('bright').value + ' %';
@@ -3760,6 +3823,8 @@ function showValues() {
 
 // One edit per control: the value it had when moved, written to one field.
 const genEdit = f => s => { if (s.content.kind === 'generator') f(s.content); };
+// A text option: on the full style (a look saved without one gets the defaults).
+const textEdit = f => s => { if (s.content.kind === 'text') { s.content.style = textStyle(s.content); f(s.content.style); } };
 const LOOK_EDITS = {
   color: v => s => { s.color = rgb(v); },
   scale: v => s => { s.scale = v / 100; },
@@ -3771,6 +3836,13 @@ const LOOK_EDITS = {
   aFlash: v => s => { s.audio.flash = v / 100; },
   aColor: v => s => { s.audio.color_on_beat = v; },
   text: v => s => { if (s.content.kind === 'text') s.content.text = v; },
+  textFont: v => textEdit(st => { st.font = v; }),
+  textSpacing: v => textEdit(st => { st.spacing = +v; }),
+  textFit: v => textEdit(st => { st.fit_width = v ? $('textFitW').value / 50 : null; }),
+  textFitW: v => textEdit(st => { if (st.fit_width != null) st.fit_width = v / 50; }),
+  textScroll: v => textEdit(st => { st.scroll.enabled = v; }),
+  textSpeed: v => textEdit(st => { st.scroll.speed = +v; }),
+  textPer: v => textEdit(st => { st.scroll.per = v; }),
   ildaFps: v => s => { if (s.content.kind === 'ilda' && +v > 0) s.content.fps = Math.min(100, Math.max(1, +v)); },
   rGate: v => s => { s.gate = v; },
   rGateLen: v => s => { s.gate_beats = +v; },
@@ -3815,7 +3887,8 @@ for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   $(id).addEventListener('blur', () => setTimeout(showSettings));
   // A new generator may bring its own values and help, and a « Vitesse »
   // preset moves Forme A: show them now.
-  if (id === 'gen' || id === 'gTurns' || id === 'gChase' || id === 'gSolid' || id === 'rGate' || id === 'rDecay' || id === 'rStrobe') $(id).addEventListener('input', () => showSettings());
+  if (id === 'gen' || id === 'gTurns' || id === 'gChase' || id === 'gSolid' || id === 'rGate' || id === 'rDecay' || id === 'rStrobe'
+    || id === 'textFont' || id === 'textFit' || id === 'textScroll' || id === 'textPer' || id === 'text') $(id).addEventListener('input', () => showSettings());
 }
 
 function editLook(fn) {
@@ -3852,6 +3925,11 @@ function takeLook(st) {
 async function loadLook() {
   takeLook(await apiJson('GET', '/api/state'));
 }
+
+document.querySelectorAll('[data-talign]').forEach(b => b.addEventListener('click', () => {
+  editLook(textEdit(st => { st.align = b.dataset.talign; }));
+  showSettings();
+}));
 
 document.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
   const kind = b.dataset.kind;
@@ -12409,7 +12487,7 @@ cvF.addEventListener('contextmenu', e => { if (fe.draft) { e.preventDefault(); f
 async function placeText(p) {
   const text = $('figText').value.trim();
   if (!text) return;
-  const r = await api('POST', '/api/figures/text', { text, size: $('figTextSize').value / 100 });
+  const r = await api('POST', '/api/figures/text', { text, size: $('figTextSize').value / 100, font: $('figTextFont').value });
   if (!r.ok) return;
   const { strokes } = await r.json();
   if (!strokes.length) return;

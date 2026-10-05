@@ -36,7 +36,7 @@ mod fx;
 mod festival;
 mod figure_import;
 mod figures;
-mod font;
+mod fonts;
 mod generators;
 mod graphics;
 mod grid;

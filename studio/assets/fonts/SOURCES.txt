@@ -1,0 +1,27 @@
+Third-party font files embedded in Laser Studio (T-439). Every file in this
+directory is listed here; a test checks it. Checked on 2026-10-05.
+
+hershey/rowmans.jhf, hershey/rowmand.jhf
+  Source:  https://github.com/kamalmostafa/hershey-fonts (hershey-fonts/*.jhf)
+  Licence: Hershey Fonts use restriction (any use, commercial or not, with
+           the acknowledgement shipped with the data; any format except
+           the NTIS one). Full text: hershey/HERSHEY-LICENSE.txt
+  Note:    data files unmodified; the GPL library of that repository is
+           not used.
+
+hershey/HERSHEY-LICENSE.txt
+  The acknowledgement the Hershey licence requires, quoted verbatim.
+
+relief/ReliefSingleLineSVG-Regular.svg
+  Source:  https://github.com/isdat-type/Relief-SingleLine
+           (fonts/open_svg/ReliefSingleLineSVG-Regular.svg)
+  Licence: SIL Open Font License 1.1, Copyright 2021-2022 The Relief
+           SingleLine Project Authors. No Reserved Font Name declared.
+           Full text: relief/OFL.txt
+  Note:    file unmodified; bundled with the software, never sold alone.
+
+relief/OFL.txt
+  The licence text of Relief SingleLine, from the same repository.
+
+SOURCES.txt
+  This list.

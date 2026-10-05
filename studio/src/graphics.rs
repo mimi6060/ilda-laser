@@ -93,7 +93,7 @@ fn countdown(p: &GenParams, ctx: &GenCtx, w: f32) -> Geometry {
     let text = v.to_string();
     // The font's cell is twice as tall as `text_strokes`' scale and sits
     // above the baseline: centred here on its own bounding box.
-    let strokes = crate::font::text_strokes(&text, DIGIT_H * w / 2.0 / text.len() as f32);
+    let strokes = crate::fonts::text_strokes(&text, DIGIT_H * w / 2.0 / text.len() as f32);
     let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
     for q in strokes.iter().flatten() {
         for i in 0..2 {
