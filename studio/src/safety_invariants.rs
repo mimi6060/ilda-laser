@@ -81,6 +81,13 @@
 //! failure prints its seed. `SAFETY_SEED=<n>` replays one seed,
 //! `SAFETY_CASES=<n>` runs more (or fewer) cases.
 //!
+//! **Coverage** (T-473): every session has a show phase where the
+//! operator keeps the laser armed and lit while every stream keeps
+//! playing, and the random sessions assert, with about a 2× margin, how
+//! many frames, show-phase frames and sessions sent light. A new dimming
+//! feature must not push these to their edge: brighten its own stream
+//! rather than leave controls out of `random_action`.
+//!
 //! **Adding an invariant** when a new protection lands: give `Rig` a way
 //! to set it up (or randomise it in `random_case`), add an action that
 //! exercises it to `random_action` if it has a runtime control, and
@@ -821,9 +828,9 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
         4 | 5 => {
             // Any control, from a controller or the UI (the UI's arm toggle
             // is an explicit arm request).
-            // Group masters (T-420) have their own stream (`mrng` in
-            // `run_case`), so this one picks as it did before them.
-            let ids: Vec<String> = s.controls.list().iter().filter(|d| d.group != "group").map(|d| d.id.clone()).collect();
+            // Group masters (T-420) included: their own stream (`mrng` in
+            // `run_case`) moves them more often, this one like any other.
+            let ids: Vec<String> = s.controls.list().iter().map(|d| d.id.clone()).collect();
             let id = rng.pick(&ids).clone();
             let external = rng.chance(0.5);
             let input = if rng.chance(0.5) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-3.0, 3.0)) };
@@ -1050,6 +1057,17 @@ struct Coverage {
     frames: usize,
     /// Frames that sent lit points to the output.
     sent_lit: usize,
+    /// Sessions, and those that sent light at least once.
+    sessions: usize,
+    sessions_lit: usize,
+    /// Frames of the show phase (`keep_show_on`), and those that sent
+    /// light: the share that tells a dimming feature drowning the fuzz
+    /// apart from sessions that were never armed.
+    show_frames: usize,
+    show_sent_lit: usize,
+    /// Frames that sent light while a zone group's master was between 0
+    /// and 100 % (T-420): the masters dim the output, not only the preview.
+    sent_lit_with_group_master: usize,
     /// Frames with a lit preview while at least one Blank zone was set.
     lit_with_zones: usize,
     /// Frames with a lit preview below a full horizon at level 0.
@@ -1233,6 +1251,44 @@ fn random_transitions(s: &mut Shared, rng: &mut Rng) {
     }
 }
 
+/// The operator during the show phase (T-473), once per frame before
+/// the other streams play: the page open (it beats), the hold-to-run pad
+/// down, « Noir » let go, the e-stop reset and an arm request from the UI
+/// whenever the laser is off; on its first frame, group masters back to
+/// 100 % and a cue on. Everything the other streams do afterwards in the
+/// frame (disarm, e-stop, dimming, « Noir »…) still lands and is checked:
+/// this only makes sure each session spends a stretch armed and lit.
+fn keep_show_on(rig: &mut Rig, rng: &mut Rng, first: bool) {
+    let now = rig.now;
+    let mut s = rig.s();
+    if s.presence.enforced {
+        s.presence.beat("fuzz-show", now, true, false);
+    }
+    if s.presence.settings.hold_to_run {
+        let _ = controls::apply(&mut s, "safety.hold", ControlInput::Value(1.0), true);
+    }
+    if s.live.black {
+        let _ = controls::apply(&mut s, "transport.black_hold", ControlInput::Value(0.0), false);
+    }
+    if first {
+        let _ = controls::apply(&mut s, "master.reset", ControlInput::Value(1.0), false);
+        let _ = controls::apply(&mut s, "group.all_full", ControlInput::Value(1.0), false);
+        for n in 1..=crate::layers::LAYER_COUNT {
+            let _ = controls::apply(&mut s, &format!("layer.{n}.dimmer"), ControlInput::Value(1.0), false);
+            let _ = controls::apply(&mut s, &format!("layer.{n}.mute"), ControlInput::Value(0.0), false);
+        }
+        let (id, _) = random_preset(&s, rng);
+        controls::press_cue(&mut s, &id, None, true);
+    }
+    if s.estop.is_latched() {
+        let estop = Arc::clone(&s.estop);
+        s.gate.reset_estop(&estop);
+    }
+    if !s.gate.is_armed() {
+        let _ = s.request_arm(*rng.pick(&ARM_SOURCES));
+    }
+}
+
 fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let (s, hold_to_run) = random_case(&mut rng);
@@ -1325,8 +1381,24 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // Cue and layer modifiers (T-144), from their own stream.
     let mut vrng = Rng::new(seed ^ 0x0144_0144);
     let level_mods = vrng.chance(0.35);
+    // The show phase (T-473), from its own stream: a third of the session,
+    // anywhere in it, where the operator keeps the laser on (see
+    // `keep_show_on`). Without it the share of lit frames hung on how
+    // often a random action happened to arm, and every new dimming feature
+    // pushed the coverage gate to its edge.
+    let mut orng = Rng::new(seed ^ 0x0473_0473);
+    let show_len = frames / 3;
+    let show = {
+        let start = orng.below(frames - show_len + 1);
+        start..start + show_len
+    };
+    let mut session_lit = false;
     let mut beats = 0;
     for frame in 0..frames {
+        let in_show = show.contains(&frame);
+        if in_show {
+            keep_show_on(&mut rig, &mut orng, frame == show.start);
+        }
         {
             let mut s = rig.s();
             let armed = s.gate.is_armed();
@@ -1548,6 +1620,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         cov.lit_with_public_scanning += (preview_lit && public && scanning) as usize;
         cov.frames += 1;
         cov.sent_lit += (lit > 0) as usize;
+        session_lit |= lit > 0;
+        cov.show_frames += in_show as usize;
+        cov.show_sent_lit += (in_show && lit > 0) as usize;
+        cov.sent_lit_with_group_master += (lit > 0 && s.projection.get().groups.iter().any(|g| g.master > 0.0 && g.master < 1.0 && !g.zones.is_empty())) as usize;
         cov.lit_with_zones += (preview_lit && cfg.zones.iter().any(|z| z.kind == ZoneKind::Blank)) as usize;
         cov.lit_with_horizon += (preview_lit && cfg.horizon.lines && cfg.horizon.level == 0.0) as usize;
         cov.lit_with_projection += (preview_lit && s.projection.get().zones.iter().any(|z| !z.geometry.is_identity())) as usize;
@@ -1568,6 +1644,8 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             return Err(format!("frame {frame}: a transition or a waiting launch survived the e-stop"));
         }
     }
+    cov.sessions += 1;
+    cov.sessions_lit += session_lit as usize;
     Ok(())
 }
 
@@ -1603,8 +1681,18 @@ fn random_sessions_keep_every_output_invariant() {
     }
     if seeds.len() > 100 {
         let share = |n: usize| n as f64 / cov.frames as f64;
+        let show = cov.show_sent_lit as f64 / cov.show_frames.max(1) as f64;
+        let sessions = cov.sessions_lit as f64 / cov.sessions.max(1) as f64;
+        eprintln!("coverage: sessions lit {sessions:.3}, show phase lit {show:.3}, sent lit with a group master dimmed {:.3}", share(cov.sent_lit_with_group_master));
         eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}; sent lit {:.3}, effects {:.3}, levels {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition), share(cov.sent_lit), share(cov.lit_with_effects), share(cov.lit_with_levels));
-        assert!(share(cov.sent_lit) > 0.1, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
+        // Gates at about half of what the fuzz measures (T-473): sent lit
+        // ~0.33, show phase ~0.55, sessions ~0.87, group masters ~0.23 at
+        // 1000 cases. A new dimming feature that eats the margin must
+        // brighten its own stream, not drop controls from the fuzz.
+        assert!(share(cov.sent_lit) > 0.15, "only {} of {} frames sent light", cov.sent_lit, cov.frames);
+        assert!(show > 0.25, "only {} of {} show phase frames sent light", cov.show_sent_lit, cov.show_frames);
+        assert!(sessions > 0.4, "only {} of {} sessions ever sent light", cov.sessions_lit, cov.sessions);
+        assert!(share(cov.sent_lit_with_group_master) > 0.1, "only {} of {} frames sent light through a group master below 100 %", cov.sent_lit_with_group_master, cov.frames);
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
         assert!(share(cov.lit_with_projection) > 0.2, "only {} of {} lit frames went through a projection zone", cov.lit_with_projection, cov.frames);
