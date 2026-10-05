@@ -11852,13 +11852,22 @@ function showVenue() {
     if (p.output && !opts.some(o => o.value === p.output)) opts.push(new Option(p.output, p.output));
     sel.replaceChildren(...opts); sel.value = p.output || ''; sel.disabled = false; sel.title = '';
   }
+  showVnOutState();
+  $('vnDel').disabled = vnSel === 0;
+  $('vnAdd').disabled = $('vnDup').disabled = venue.projectors.length >= vnMax;
+}
+// The selected projector's output line: refreshed on its own while the
+// form has the focus (T-474), so « connexion… » never stays after the link
+// has connected or been lost.
+function showVnOutState() {
+  const p = vnProj();
+  if (!p) return;
+  const link = venueLinks.find(l => l.id === p.id) || {};
   const st = $('vnOutState');
   const state = link.state, ok = state === 'connected' && (vnSel === 0 || link.output_name);
   st.textContent = !(vnSel === 0 ? link.output : p.output) ? 'Aperçu seulement : ce projecteur ne pilote aucune sortie.' + (vnSel > 0 && !vnDevices.length ? ' « Rechercher » (Sorties et projecteurs) liste les sorties disponibles.' : '')
     : `Sortie ${VN_STATE[state] || '…'}${link.output_name ? ' : ' + link.output_name : ''}${link.error ? ' — ' + link.error : ''}`;
   st.className = 'vn-out' + (ok ? ' ok' : state === 'lost' ? ' bad' : '');
-  $('vnDel').disabled = vnSel === 0;
-  $('vnAdd').disabled = $('vnDup').disabled = venue.projectors.length >= vnMax;
 }
 // The caps panel and the zones' « Sortie »: one entry per projector.
 function vnTargets() {
@@ -11932,8 +11941,21 @@ $('vnDel').onclick = () => {
 };
 $('pwTarget').addEventListener('change', () => { reloadOutputs(); reloadOutColor(); });
 // While the panel is open, the projectors' outputs follow connections and
-// losses (never over an edit still to be sent).
-setInterval(() => { if (activeWs === 'settings' && $('venuePanel').open && !vnTimer && !$('venuePanel').contains(document.activeElement)) reloadVenue(); }, 1000);
+// losses (never over an edit still to be sent). While a field of the panel
+// has the focus (a button just clicked, a select just chosen), only the
+// output lines follow: the form is left alone (T-474).
+async function reloadVenueLinks() {
+  try {
+    const j = await apiJson('GET', '/api/venue', undefined, { quiet: true });
+    if (!venue || vnTimer) return;
+    venueLinks = j.links || [];
+    showVnOutState();
+  } catch { /* next time */ }
+}
+setInterval(() => {
+  if (activeWs !== 'settings' || !$('venuePanel').open || vnTimer) return;
+  if ($('venuePanel').contains(document.activeElement)) reloadVenueLinks(); else reloadVenue();
+}, 1000);
 // The output list when the panel opens (no scan: what the studio knows).
 $('venuePanel').addEventListener('toggle', async () => {
   venueTo3d();
