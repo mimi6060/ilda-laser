@@ -13,6 +13,9 @@
     --danger: #ff4d5e; --warn: #ffb020;
     /* Workspace colours, like a lighting desk's coloured views. */
     --ws-live: #ff3d7f; --ws-timeline: #3d9bff; --ws-creation: #b45cff; --ws-settings: #ffb020;
+    /* Mode nuit (T-282): never dimmed, for the arm state, the stops and the
+       safety warnings; --nl is the interface's luminance (1 = day). */
+    --text-full: #eef0f8; --accent-full: #22e3ff; --nl: 1;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
@@ -1362,6 +1365,88 @@
   #searchBox .hint { margin: 0; font-size: 11px; }
   .found { outline: 2px solid var(--accent) !important; outline-offset: 2px; animation: found-blink .5s ease-in-out 4 alternate; }
   @keyframes found-blink { from { outline-color: var(--accent); box-shadow: 0 0 14px var(--accent); } to { outline-color: transparent; box-shadow: none; } }
+  /* ---------- Mode nuit (T-282), Theme (T-299) tokens ----------
+     The neutral and accent tokens are mixed with black down to --nl; the
+     state tokens (--danger, --warn, --ok) and the *-full ones are left
+     alone, so the arm state, ARRÊT, Noir and every warning keep their
+     colour and contrast. No large light area: lit buttons become a tinted
+     outline, the backdrop is flat. Colour is kept for states: red = armed /
+     danger, green = playing cue, orange = waiting / warning. */
+  html.night {
+    --dim: calc(var(--nl) * 100%);
+    --bg: #000; --panel: color-mix(in srgb, #0c0d14 var(--dim), #000); --panel-2: color-mix(in srgb, #12141d var(--dim), #000);
+    --line: color-mix(in srgb, #23263a var(--dim), #000);
+    --text: color-mix(in srgb, #d6d9e6 var(--dim), #000); --muted: color-mix(in srgb, #7b8198 var(--dim), #000);
+    --accent: color-mix(in srgb, #22e3ff var(--dim), #000); --accent-2: color-mix(in srgb, #ff3dc8 var(--dim), #000);
+    --violet: color-mix(in srgb, #8b5cf6 var(--dim), #000);
+    --laser: linear-gradient(90deg, var(--accent), var(--violet) 55%, var(--accent-2));
+    --ws-live: color-mix(in srgb, #ff3d7f var(--dim), #000); --ws-timeline: color-mix(in srgb, #3d9bff var(--dim), #000);
+    --ws-creation: color-mix(in srgb, #b45cff var(--dim), #000); --ws-settings: color-mix(in srgb, #ffb020 var(--dim), #000);
+  }
+  /* Teinte rouge: the neutrals and accents turn a dim red; red stays the
+     armed / danger colour, so the armed laser button also gets a thick
+     outline and the armed frame grows. */
+  html.night.red-tint {
+    --panel: color-mix(in srgb, #100605 var(--dim), #000); --panel-2: color-mix(in srgb, #170908 var(--dim), #000);
+    --line: color-mix(in srgb, #2e1210 var(--dim), #000);
+    --text: color-mix(in srgb, #e0705e var(--dim), #000); --muted: color-mix(in srgb, #9a4c40 var(--dim), #000);
+    --accent: color-mix(in srgb, #ff8466 var(--dim), #000); --accent-2: color-mix(in srgb, #d0584a var(--dim), #000);
+    --violet: color-mix(in srgb, #b4483c var(--dim), #000); --accent-ink: #000;
+    --ws-live: var(--accent); --ws-timeline: var(--accent); --ws-creation: var(--accent); --ws-settings: var(--accent);
+  }
+  html.night body { background: var(--bg); }
+  html.night ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+  html.night header { background: var(--panel); }
+  html.night header h1 .logo, html.night canvas, html.night img, html.night video { filter: brightness(var(--nl)); }
+  html.night section { background: var(--panel); border-color: var(--line); box-shadow: none; }
+  html.night section h2, html.night details summary, html.night kbd { color: var(--muted); }
+  html.night button { background: var(--panel-2); border-color: var(--line); color: var(--text); }
+  html.night button:hover { background: color-mix(in srgb, var(--text) 8%, var(--panel-2)); }
+  html.night button.active, html.night button.primary, html.night .tempo button.active {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel-2)); color: var(--accent); border-color: var(--accent); box-shadow: none; }
+  html.night input[type=text], html.night input[type=number], html.night input[type=search], html.night select, html.night textarea {
+    background: var(--panel); border-color: var(--line); color: var(--text); }
+  html.night input[type=range]::-webkit-slider-runnable-track { background: linear-gradient(90deg, var(--accent), var(--violet)) 0 / var(--fill, 50%) 100% no-repeat, var(--line); }
+  html.night input[type=range]::-webkit-slider-thumb { background: var(--muted); box-shadow: none; }
+  html.night .tempo input { text-shadow: none; }
+  html.night #wsTabs { background: var(--bg); }
+  html.night #wsTabs button { background: transparent; }
+  html.night #wsTabs button.active { color: var(--text); }
+  html.night .layer { background: var(--panel); border-color: var(--line); }
+  html.night .layer .t, html.night .cue, html.night .cue .key { color: var(--text); }
+  html.night .cue { background: var(--panel); border-color: var(--line); }
+  html.night .cue-tabs button.active { color: var(--text); background: color-mix(in srgb, var(--c) 18%, var(--panel)); box-shadow: none; }
+  /* Green = the playing cue, orange = held (flash) or waiting. */
+  html.night .cue.active { background: color-mix(in srgb, var(--ok) 14%, var(--panel)); color: var(--text); border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok); }
+  html.night .cue.active .key, html.night .cue.active .tag, html.night .cue.flash .key { color: var(--text); }
+  html.night .cue.flash { background: color-mix(in srgb, var(--warn) 18%, var(--panel)); color: var(--text); border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
+  html.night .cue.pending { border-color: var(--warn); }
+  /* Safety stays at full strength: the laser button, Noir, ARRÊT, the
+     stop and hold banners, the arm refusal and the warning pills.
+     Their rules use ids (stronger than the night rules above) and the
+     undimmed tokens; only these few would otherwise follow the dimming. */
+  html.night #armInfo { color: var(--text-full); }
+  html.night #holdBanner.emitting { color: var(--accent-full); border-color: var(--accent-full); }
+  html.night.red-tint #armBtn.on { outline: 5px solid var(--danger); outline-offset: 3px; }
+  html.night.red-tint body.emitting::after { border-width: 8px; }
+  /* ---------- Mode tactile (T-282) ----------
+     Targets of 44 px at least, taller grid cells, no double-tap zoom, and
+     no hover-only information (a long press shows a control's help). */
+  html.touch body { touch-action: manipulation; -webkit-touch-callout: none; }
+  html.touch :is(button, select, summary, label, a) { touch-action: manipulation; }
+  html.touch :is(button, select, input[type=text], input[type=number], input[type=search]) { min-height: 44px; }
+  html.touch input[type=range] { min-height: 44px; touch-action: none; }
+  html.touch :is(input[type=checkbox], input[type=radio]) { width: 22px; height: 22px; }
+  html.touch label.check { min-height: 44px; display: flex; align-items: center; gap: 8px; }
+  html.touch details > summary { min-height: 44px; }
+  html.touch #noticeBtn { width: 44px; }
+  html.touch #cues :is(.cue, .cue-empty) { min-height: 76px; }
+  /* Recherche globale (T-429): finger-sized result rows. */
+  html.touch #searchResults .sr { min-height: 44px; }
+  /* Timeline track heads stay aligned with their canvas lanes (fixed
+     height): their small controls keep the desk size. */
+  html.touch .tl-head :is(button, select, input[type=text]) { min-height: 0; }
+  html.night .tl-head.locked { background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--text) 8%, transparent) 6px 8px); }
 </style>
 </head>
 <body>
@@ -3052,6 +3137,21 @@
           <option value="none">Aucune</option>
         </select>
         <div class="hint">Images des cases de la grille de cues. Animées : une mesure de chaque cue en boucle au tempo, seulement pour les cases à l'écran, à l'arrêt quand la fenêtre est cachée. Fixes ou Aucune allègent le processeur. Affichage seulement, rien ne part vers le laser. Réglage de ce navigateur.</div>
+      </details>
+      <!-- Mode nuit et mode tactile (T-282): this browser's display only. -->
+      <details id="displayPanel" data-search="Affichage : mode nuit, mode tactile">
+        <summary>Affichage</summary>
+        <label class="check"><input type="checkbox" id="dispNight"> Mode nuit</label>
+        <label for="dispLevel">Luminosité de l'interface <span class="v" id="dispLevelV"></span></label>
+        <input type="range" id="dispLevel" min="40" max="100" step="5" value="60" data-default="60">
+        <label class="check"><input type="checkbox" id="dispRed"> Teinte rouge</label>
+        <div class="hint">Pour une régie dans le noir : l'interface s'assombrit, sans grand aplat clair, et la couleur ne sert plus qu'aux états (rouge = laser armé ou danger, vert = cue en cours, orange = attente ou avertissement). Le bouton du laser, Noir, ARRÊT et les alertes de sécurité gardent leurs couleurs et leur contraste. Teinte rouge : tout passe au rouge sombre ; le laser armé est alors entouré d'un cadre épais. L'aperçu du laser est assombri aussi, pas la sortie.</div>
+        <label id="dispTouchName">Mode tactile</label>
+        <div class="seg" id="dispTouch" role="radiogroup" aria-labelledby="dispTouchName">
+          <button data-touch="auto" role="radio">Auto</button><button data-touch="on" role="radio">Activé</button><button data-touch="off" role="radio">Désactivé</button>
+        </div>
+        <div class="hint" id="dispTouchInfo" role="status"></div>
+        <div class="hint">Cibles d'au moins 44 px et cases de la grille plus hautes. Appui long (½ s) = clic droit : un curseur revient à sa valeur neutre ; sur un cue, ses propriétés ; ailleurs, l'aide du contrôle. Un cue en flash reste actif tant que le doigt est posé. Armer le laser demande toujours le bouton du laser (ou Espace) ; Échap reste l'arrêt d'urgence. Auto : activé sur un écran tactile. Réglages de ce navigateur.</div>
       </details>
     </section>
 
@@ -5249,6 +5349,99 @@ const WORKSPACES = ['live', 'timeline', 'creation', 'settings'];
 let activeWs = 'live';
 function remembered(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function remember(key, v) { try { localStorage.setItem(key, v); } catch { /* private window: not remembered */ } }
+
+// ---------- Mode nuit et mode tactile (T-282) ----------
+// This browser's display only: nothing reaches the studio or the laser.
+// prefs = { night, nightLevel (0.4–1), redTint, touch: 'auto'|'on'|'off' }.
+const DISPLAY_KEY = 'laserStudio.display', TOUCH_MODES = ['auto', 'on', 'off'];
+const coarsePointer = matchMedia('(pointer: coarse)');
+function readDisplayPrefs() {
+  let p = {};
+  try { p = JSON.parse(remembered(DISPLAY_KEY) || '{}') || {}; } catch { p = {}; }
+  const lvl = Number(p.nightLevel);
+  return {
+    night: p.night === true,
+    nightLevel: Number.isFinite(lvl) ? Math.min(1, Math.max(0.4, lvl)) : 0.6,
+    redTint: p.redTint === true,
+    touch: TOUCH_MODES.includes(p.touch) ? p.touch : 'auto',
+  };
+}
+let displayPrefs = readDisplayPrefs();
+const touchMode = () => displayPrefs.touch === 'on' || (displayPrefs.touch === 'auto' && coarsePointer.matches);
+function applyDisplay() {
+  const p = displayPrefs, root = document.documentElement;
+  root.classList.toggle('night', p.night);
+  root.classList.toggle('red-tint', p.night && p.redTint);
+  root.style.setProperty('--nl', p.night ? String(p.nightLevel) : '1');
+  root.classList.toggle('touch', touchMode());
+  $('dispNight').checked = p.night;
+  $('dispRed').checked = p.redTint;
+  $('dispRed').disabled = $('dispLevel').disabled = !p.night;
+  if (document.activeElement !== $('dispLevel')) $('dispLevel').value = String(Math.round(p.nightLevel * 100));
+  $('dispLevelV').textContent = `${Math.round(p.nightLevel * 100)} %`;
+  document.querySelectorAll('#dispTouch button').forEach(b => {
+    const on = b.dataset.touch === p.touch;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', String(on));
+  });
+  $('dispTouchInfo').textContent = p.touch === 'auto'
+    ? (coarsePointer.matches ? 'Écran tactile détecté : mode tactile activé.' : 'Pas d\'écran tactile détecté : mode tactile désactivé.')
+    : '';
+}
+function setDisplay(patch) {
+  displayPrefs = { ...displayPrefs, ...patch };
+  remember(DISPLAY_KEY, JSON.stringify(displayPrefs));
+  applyDisplay();
+}
+$('dispNight').addEventListener('change', e => setDisplay({ night: e.target.checked }));
+$('dispRed').addEventListener('change', e => setDisplay({ redTint: e.target.checked }));
+$('dispLevel').addEventListener('input', e => setDisplay({ nightLevel: +e.target.value / 100 }));
+$('dispLevel').addEventListener('change', e => setDisplay({ nightLevel: +e.target.value / 100 }));
+document.querySelectorAll('#dispTouch button').forEach(b => b.addEventListener('click', () => setDisplay({ touch: b.dataset.touch })));
+coarsePointer.addEventListener?.('change', applyDisplay);
+applyDisplay();
+
+// Long press (T-282): a finger or a pen held still for 500 ms is a right
+// click. Sliders handle it themselves (back to neutral, enhanceSlider);
+// elsewhere a `contextmenu` goes to what was pressed (cue properties, page
+// menu, « Apprendre MIDI »…); if nothing takes it, the control's help
+// (its title) is shown, so no information stays hover-only. Never on the
+// laser button or ARRÊT: a long press never arms nor resets anything there.
+const LONG_PRESS_MS = 500, LONG_PRESS_SLOP = 10;
+let longPress = null, longPressAt = -Infinity;
+// Hold buttons (flash effects, reverse, padlock) and played cues keep the
+// press for themselves: a flash cue is held for as long as the finger is
+// down. In grid editing mode a long press on a cue opens its properties.
+const LONG_PRESS_SKIP = '#armBtn, #estopBtn, #blackoutBtn, #estopReset, #lockBtn, .fx-hold, #rotReverse, input[type=range], input[type=text], input[type=number], textarea, select';
+const longPressSkipped = el => !!el.closest(LONG_PRESS_SKIP) || (!!el.closest('#cues .cue') && !el.closest('#cues.editing'));
+function endLongPress() { if (longPress) { clearTimeout(longPress.timer); longPress = null; } }
+document.addEventListener('pointerdown', e => {
+  endLongPress();
+  if (e.pointerType === 'mouse' || !e.isPrimary || !(e.target instanceof Element) || longPressSkipped(e.target)) return;
+  const target = e.target, x = e.clientX, y = e.clientY;
+  longPress = { x, y, timer: setTimeout(() => {
+    longPress = null;
+    if (!target.isConnected) return;
+    longPressAt = performance.now();
+    const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 2, buttons: 0 });
+    if (target.dispatchEvent(ev)) {
+      const help = target.closest('[title]')?.title;
+      if (help) flash(help);
+    }
+  }, LONG_PRESS_MS) };
+}, true);
+document.addEventListener('pointermove', e => {
+  if (longPress && Math.hypot(e.clientX - longPress.x, e.clientY - longPress.y) > LONG_PRESS_SLOP) endLongPress();
+}, true);
+['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, endLongPress, true));
+// The browser's own long-press menu, and the click that ends a long
+// press, are not passed on: the press already did its job.
+document.addEventListener('contextmenu', e => {
+  if (e.isTrusted && (longPress || performance.now() - longPressAt < 800)) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
+document.addEventListener('click', e => {
+  if (performance.now() - longPressAt < 800) { longPressAt = -Infinity; e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
 function setWorkspace(ws) {
   if (!WORKSPACES.includes(ws)) ws = 'live';
   if (showMode && (ws === 'creation' || ws === 'settings')) ws = 'live'; // T-283
@@ -7083,15 +7276,21 @@ function enhanceSlider(el) {
       const t = vertical ? (r.bottom - ev.clientY - thumb / 2) / (len - thumb) : (ev.clientX - r.left - thumb / 2) / (len - thumb);
       return snapSlider(el, min + clampTyped(t, 0, 1) * span);
     };
-    let dragging = false;
+    let dragging = false, held = false;
+    // Long press with a finger or a pen (T-282): back to the neutral value,
+    // like the right click / double-click on the slider's name.
+    const hold = e.pointerType === 'mouse' ? 0 : setTimeout(() => { held = true; resetSlider(el); }, LONG_PRESS_MS);
     const move = ev => {
-      if (!dragging) { if (Math.abs(pos(ev) - p0) < SLIDER_DRAG_PX) return; dragging = true; }
+      if (held) return;
+      if (!dragging) { if (Math.abs(pos(ev) - p0) < SLIDER_DRAG_PX) return; dragging = true; clearTimeout(hold); }
       setSlider(el, fine ? clampTyped(v0 + (pos(ev) - p0) / len * span / 10, min, max) : at(ev), false);
     };
     const up = ev => {
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', up);
+      clearTimeout(hold);
+      if (held) return;
       if (dragging) { el.dispatchEvent(new Event('change', { bubbles: true })); return; }
       if (ev.type !== 'pointerup' || fine) return;
       const v = at(e);
