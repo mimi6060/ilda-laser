@@ -291,6 +291,67 @@ impl Default for ProjectionZone {
     }
 }
 
+/// Groups with a master (`group.<n>.master`, T-420); more groups can
+/// exist in no version, so a file never holds more.
+pub const GROUP_MASTER_CONTROLS: usize = 16;
+
+/// A named group of projection zones (« Centre », « Côtés ») and its
+/// master: an inhibitive dimmer, 0..1, that multiplies the colours of
+/// every zone in the group and can never brighten one (T-420). A zone in
+/// several groups gets the product of their masters.
+///
+/// The master is applied per zone on the zone's mix, after the master
+/// live controls and before the zone geometry, the calibration and the
+/// whole safety stage, which keep the last word. It is not a safety cap
+/// (that is T-254). The level is a playing value: the engine saves it at
+/// most once a second (`Shared::groups_dirty`), a project carries it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZoneGroup {
+    pub name: String,
+    /// Zone ids (1..=MAX_ZONES).
+    pub zones: Vec<u8>,
+    /// 0..=1, 1 by default (groups saved before T-420 load at 100 %).
+    pub master: f32,
+}
+
+impl Default for ZoneGroup {
+    fn default() -> Self {
+        Self { name: String::new(), zones: Vec::new(), master: 1.0 }
+    }
+}
+
+/// A master as the output uses it: within 0..1, anything not finite is 0
+/// (a dimmer that can't be read is dark, never full).
+pub fn master_level(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// A zone's gain: the product of the masters of the groups that hold it
+/// (1.0 if none). Always within 0..1.
+pub fn zone_gain(zone: u8, groups: &[ZoneGroup]) -> f32 {
+    groups.iter().filter(|g| g.zones.contains(&zone)).map(|g| master_level(g.master)).product::<f32>().clamp(0.0, 1.0)
+}
+
+/// Multiplies r, g, b by `gain` (clamped like a master); never touches the
+/// positions nor the number of points. At 0 every point is dark but kept,
+/// so the galvos keep scanning (an empty frame would park the beam).
+pub fn apply_gain(frame: &mut [Point], gain: f32) {
+    let gain = master_level(gain);
+    if gain >= 1.0 {
+        return;
+    }
+    for p in frame {
+        p.r *= gain;
+        p.g *= gain;
+        p.b *= gain;
+    }
+}
+
 /// `projection.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -298,11 +359,14 @@ pub struct ProjectionConfig {
     pub zones: Vec<ProjectionZone>,
     /// Where cues without zones of their own play (and timeline looks).
     pub default_zones: Vec<u8>,
+    /// Zone groups and their masters (T-420). Missing in files saved
+    /// before: none.
+    pub groups: Vec<ZoneGroup>,
 }
 
 impl Default for ProjectionConfig {
     fn default() -> Self {
-        Self { zones: vec![ProjectionZone::default()], default_zones: vec![1] }
+        Self { zones: vec![ProjectionZone::default()], default_zones: vec![1], groups: Vec::new() }
     }
 }
 
@@ -324,6 +388,14 @@ impl ProjectionConfig {
             }
             if z.geometry.warp.enabled {
                 check_quad(&z.geometry.warp.corners).map_err(|e| anyhow::anyhow!("zone {} : {e}", z.id))?;
+            }
+        }
+        if self.groups.len() > GROUP_MASTER_CONTROLS {
+            bail!("au plus {GROUP_MASTER_CONTROLS} groupes");
+        }
+        for g in &self.groups {
+            if let Some(id) = g.zones.iter().find(|id| self.zone(**id).is_none()) {
+                bail!("le groupe « {} » contient la zone {id}, qui n'existe pas", g.name.trim());
             }
         }
         Ok(())
@@ -357,7 +429,23 @@ impl ProjectionConfig {
         if default_zones.is_empty() {
             default_zones.push(zones[0].id);
         }
-        Self { zones, default_zones }
+        let groups = self
+            .groups
+            .iter()
+            .take(GROUP_MASTER_CONTROLS)
+            .enumerate()
+            .map(|(i, g)| {
+                let mut ids: Vec<u8> = g.zones.iter().copied().filter(|id| zones.iter().any(|z| z.id == *id)).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                let mut name: String = g.name.trim().chars().take(40).collect();
+                if name.is_empty() {
+                    name = format!("Groupe {}", i + 1);
+                }
+                ZoneGroup { name, zones: ids, master: master_level(g.master) }
+            })
+            .collect();
+        Self { zones, default_zones, groups }
     }
 
     pub fn zone(&self, id: u8) -> Option<&ProjectionZone> {
@@ -432,17 +520,62 @@ impl ProjectionStore {
     }
 
     /// Validates, clamps and saves. The alignment zone is dropped if it
-    /// no longer exists.
+    /// no longer exists. Group masters are playing values, moved by their
+    /// controls: a group that already exists (same name) keeps its level
+    /// whatever the page sent (it may hold a stale copy), even when the
+    /// groups before it were removed; a new group takes the level it
+    /// comes with.
     pub fn set(&mut self, cfg: ProjectionConfig) -> Result<()> {
         cfg.validate()?;
-        self.cfg = cfg.sanitized();
+        let mut cfg = cfg.sanitized();
+        for g in &mut cfg.groups {
+            if let Some(old) = self.cfg.groups.iter().find(|o| o.name == g.name) {
+                g.master = old.master;
+            }
+        }
+        self.cfg = cfg;
         if self.align.is_some_and(|id| self.cfg.zone(id).is_none()) {
             self.align = None;
         }
+        self.save();
+        Ok(())
+    }
+
+    /// Writes `projection.json` (in-memory stores: nothing).
+    pub fn save(&self) {
         if let Some(path) = &self.path {
             crate::datafile::save_json(Path::new(path), &self.cfg);
         }
-        Ok(())
+    }
+
+    /// Group `n`'s master (1-based), if the group exists.
+    pub fn master(&self, n: usize) -> Option<f32> {
+        self.cfg.groups.get(n.checked_sub(1)?).map(|g| g.master)
+    }
+
+    /// Sets group `n`'s master (1-based), clamped to 0..1 (not finite: 0).
+    /// Memory only: the caller marks `groups_dirty`. False if no such group.
+    pub fn set_master(&mut self, n: usize, level: f32) -> bool {
+        match n.checked_sub(1).and_then(|i| self.cfg.groups.get_mut(i)) {
+            Some(g) => {
+                g.master = master_level(level);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The masters in group order, for a project.
+    pub fn masters(&self) -> Vec<f32> {
+        self.cfg.groups.iter().map(|g| g.master).collect()
+    }
+
+    /// A project's masters, by group order; groups past the list go back
+    /// to 100 %. Memory only.
+    pub fn set_masters(&mut self, levels: &[f32]) {
+        for (i, g) in self.cfg.groups.iter_mut().enumerate() {
+            g.master = master_level(levels.get(i).copied().unwrap_or(1.0));
+        }
     }
 
     /// The geometry a test pattern goes through (T-404 + alignment).
@@ -460,7 +593,8 @@ type Layered = (u8, Vec<Point>);
 
 /// Mixes the looks of each active zone (its share of the point budget),
 /// runs `finish` (the master live controls, and the zone's DMX remote of
-/// T-407: `finish(zone id, mix)`) on each zone's mix, places it
+/// T-407: `finish(zone id, mix)`) on each zone's mix, dims it by the
+/// zone's group masters (T-420), places it
 /// through the zone geometry and the calibration, and joins the zones
 /// with blanked travel. With one neutral zone this is exactly
 /// mix → finish → calibration.
@@ -516,7 +650,11 @@ pub fn render_zones(
         for (sum, n) in report.per_layer.iter_mut().zip(r.per_layer) {
             *sum = (*sum).max(n);
         }
-        placed.push(zone.geometry.placer().place(&finish(zone.id, &mix), calibration));
+        // The zone's group masters (T-420): colours only, at most 1, before
+        // the geometry, the calibration and the whole safety stage.
+        let mut look = finish(zone.id, &mix);
+        apply_gain(&mut look, zone_gain(zone.id, &cfg.groups));
+        placed.push(zone.geometry.placer().place(&look, calibration));
     }
     if placed.len() == 1 {
         return (placed.pop().unwrap_or_default(), report);
@@ -679,6 +817,7 @@ mod tests {
                 ProjectionZone { id: 2, name: "Gauche".into(), output: Some(" ".into()), ..Default::default() },
             ],
             default_zones: vec![7, 3, 3],
+            ..Default::default()
         };
         assert!(cfg.validate().is_err());
         let s = cfg.sanitized();
@@ -686,7 +825,7 @@ mod tests {
         assert_eq!(s.zones[1].name, "Zone 3");
         assert_eq!(s.zones[0].output, None);
         assert_eq!(s.default_zones, [3]);
-        let empty = ProjectionConfig { zones: vec![], default_zones: vec![] }.sanitized();
+        let empty = ProjectionConfig { zones: vec![], default_zones: vec![], groups: vec![] }.sanitized();
         assert_eq!(empty, ProjectionConfig::default());
         // An old or empty file: one neutral zone, the default.
         let old: ProjectionConfig = serde_json::from_str("{}").unwrap();
@@ -702,6 +841,7 @@ mod tests {
                 ProjectionZone { id: 3, enabled: false, ..Default::default() },
             ],
             default_zones: vec![1],
+            ..Default::default()
         };
         let ids = |o: Option<&str>| cfg.active(o).iter().map(|z| z.id).collect::<Vec<_>>();
         assert_eq!(ids(None), [1, 2], "preview: every enabled zone");
@@ -720,6 +860,7 @@ mod tests {
                 ProjectionZone { id: 2, geometry: Geometry { size_x: 0.5, pos_x: 0.5, ..Default::default() }, ..Default::default() },
             ],
             default_zones: vec![1],
+            ..Default::default()
         }
     }
 
@@ -767,7 +908,7 @@ mod tests {
     #[test]
     fn each_projector_draws_its_own_zones_and_the_unbound_ones() {
         let zone = |id: u8, output: Option<&str>| ProjectionZone { id, name: format!("Z{id}"), output: output.map(str::to_string), ..Default::default() };
-        let cfg = ProjectionConfig { zones: vec![zone(1, None), zone(2, Some("p2")), zone(3, Some("dac-b")), zone(4, Some("main")), zone(5, Some("ailleurs"))], default_zones: vec![1] };
+        let cfg = ProjectionConfig { zones: vec![zone(1, None), zone(2, Some("p2")), zone(3, Some("dac-b")), zone(4, Some("main")), zone(5, Some("ailleurs"))], default_zones: vec![1], ..Default::default() };
         let ids = |v: Vec<&ProjectionZone>| v.iter().map(|z| z.id).collect::<Vec<_>>();
         // main drives dac-a, p2 drives dac-b.
         assert_eq!(ids(cfg.active_on("main", Some("dac-a"), &[("p2", Some("dac-b"))])), [1, 4]);
@@ -780,5 +921,121 @@ mod tests {
             let on = ids(cfg.active_on("main", out, &[]));
             assert_eq!(on.iter().filter(|id| **id != 4).collect::<Vec<_>>(), single.iter().filter(|id| **id != 4).collect::<Vec<_>>(), "output {out:?}");
         }
+    }
+
+    // ---------- group masters (T-420) ----------
+
+    fn group(name: &str, zones: &[u8], master: f32) -> ZoneGroup {
+        ZoneGroup { name: name.into(), zones: zones.to_vec(), master }
+    }
+
+    #[test]
+    fn zone_gain_is_the_product_of_the_zones_groups_clamped() {
+        assert_eq!(zone_gain(1, &[]), 1.0, "no group");
+        let groups = [group("Centre", &[1], 0.5), group("Côtés", &[2, 3], 0.25), group("Tout", &[1, 2], 0.5)];
+        assert_eq!(zone_gain(1, &groups[..1]), 0.5, "one group");
+        assert_eq!(zone_gain(1, &groups), 0.25, "two groups at 50 %: 25 %");
+        assert_eq!(zone_gain(2, &groups), 0.125);
+        assert_eq!(zone_gain(3, &groups), 0.25);
+        assert_eq!(zone_gain(4, &groups), 1.0, "in no group");
+        // Out of range: clamped; not finite: dark.
+        assert_eq!(zone_gain(1, &[group("A", &[1], 7.0)]), 1.0);
+        assert_eq!(zone_gain(1, &[group("A", &[1], -3.0)]), 0.0);
+        assert_eq!(zone_gain(1, &[group("A", &[1], f32::NAN)]), 0.0);
+        assert_eq!(zone_gain(1, &[group("A", &[1], f32::INFINITY)]), 0.0);
+    }
+
+    #[test]
+    fn apply_gain_scales_colours_only() {
+        let src = line(0.3);
+        let mut half = src.clone();
+        apply_gain(&mut half, 0.5);
+        assert_eq!(half.len(), src.len());
+        for (a, b) in src.iter().zip(&half) {
+            assert_eq!((a.x, a.y), (b.x, b.y));
+            assert_eq!((b.r, b.g, b.b), (a.r * 0.5, a.g * 0.5, a.b * 0.5));
+        }
+        for g in [0.0, -1.0, f32::NAN] {
+            let mut dark = src.clone();
+            apply_gain(&mut dark, g);
+            assert_eq!(dark.len(), src.len(), "points kept: the galvos keep scanning");
+            assert!(dark.iter().all(|p| !p.is_lit()));
+            assert!(dark.iter().zip(&src).all(|(a, b)| a.x == b.x && a.y == b.y));
+        }
+        let mut same = src.clone();
+        apply_gain(&mut same, 5.0);
+        assert_eq!(same, src, "never brighter");
+    }
+
+    #[test]
+    fn a_group_master_dims_its_zones_only() {
+        let mut cfg = two_zones();
+        let draw = |cfg: &ProjectionConfig| render(vec![(1, line(0.0), vec![1, 2])], cfg, None, &Mixer::default(), |_, p| p.to_vec(), &Calibration::default()).0;
+        let in_zone = |f: &[Point], x: f32| f.iter().filter(|p| (p.x - x).abs() < 1e-6).cloned().collect::<Vec<_>>();
+        let full = draw(&cfg);
+        cfg.groups = vec![group("Gauche", &[1], 0.5)];
+        let half = draw(&cfg);
+        assert_eq!(half.len(), full.len());
+        let (a, b) = (in_zone(&full, -0.5), in_zone(&half, -0.5));
+        assert!(!a.is_empty() && a.len() == b.len());
+        for (p, q) in a.iter().zip(&b) {
+            assert!((q.r - p.r * 0.5).abs() < 1e-6 && (q.g - p.g * 0.5).abs() < 1e-6 && (q.b - p.b * 0.5).abs() < 1e-6);
+        }
+        assert_eq!(in_zone(&full, 0.5), in_zone(&half, 0.5), "zone 2 unchanged");
+        cfg.groups[0].master = 0.0;
+        let off = draw(&cfg);
+        assert_eq!(off.len(), full.len(), "points kept");
+        assert!(in_zone(&off, -0.5).iter().all(|p| !p.is_lit()), "zone 1 dark");
+        assert_eq!(in_zone(&off, 0.5), in_zone(&full, 0.5), "zone 2 unchanged");
+    }
+
+    #[test]
+    fn groups_load_at_full_and_are_sanitized() {
+        let old: ZoneGroup = serde_json::from_str(r#"{"name":"Côtés","zones":[1,2]}"#).unwrap();
+        assert_eq!(old.master, 1.0);
+        let old_cfg: ProjectionConfig = serde_json::from_str(r#"{"zones":[{"id":1}],"default_zones":[1]}"#).unwrap();
+        assert!(old_cfg.groups.is_empty());
+        let mut cfg = two_zones();
+        cfg.groups = vec![group("  ", &[2, 2, 1], 3.0), group("B", &[1], -1.0)];
+        cfg.validate().unwrap();
+        let s = cfg.sanitized();
+        assert_eq!(s.groups[0], group("Groupe 1", &[1, 2], 1.0));
+        assert_eq!(s.groups[1].master, 0.0);
+        cfg.groups = vec![group("X", &[5], 1.0)];
+        assert!(cfg.validate().is_err(), "a group on a zone that doesn't exist");
+        cfg.groups = vec![group("X", &[1], 1.0); GROUP_MASTER_CONTROLS + 1];
+        assert!(cfg.validate().is_err());
+        // A zone that goes leaves its groups.
+        let mut one = two_zones();
+        one.groups = vec![group("G", &[1, 2], 1.0)];
+        one.zones.pop();
+        assert_eq!(one.sanitized().groups[0].zones, [1]);
+    }
+
+    #[test]
+    fn the_store_keeps_masters_across_a_config_post() {
+        let mut st = ProjectionStore::in_memory();
+        let mut cfg = two_zones();
+        cfg.groups = vec![group("A", &[1], 0.8)];
+        st.set(cfg.clone()).unwrap();
+        assert_eq!(st.master(1), Some(0.8), "a new group takes its level");
+        assert!(st.set_master(1, 0.3));
+        assert!(!st.set_master(2, 0.3));
+        assert_eq!(st.master(2), None);
+        // The page posts a stale copy (0.8): the control's level stays.
+        cfg.groups.push(group("B", &[2], 0.6));
+        st.set(cfg.clone()).unwrap();
+        assert_eq!(st.masters(), [0.3, 0.6]);
+        // Removing the first group: B keeps its own level.
+        cfg.groups.remove(0);
+        st.set(cfg.clone()).unwrap();
+        assert_eq!(st.masters(), [0.6]);
+        cfg.groups.insert(0, group("A", &[1], 0.8));
+        st.set(cfg).unwrap();
+        assert!(st.set_master(1, 0.3));
+        assert!(st.set_master(1, f32::NAN));
+        assert_eq!(st.master(1), Some(0.0));
+        st.set_masters(&[0.5]);
+        assert_eq!(st.masters(), [0.5, 1.0]);
     }
 }

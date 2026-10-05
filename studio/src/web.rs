@@ -1238,6 +1238,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         },
         (Method::Get, "/api/frames") => frames(shared),
         (Method::Get, "/api/projection") => json_response(projection_view(&shared.lock().unwrap())),
+        // Zone groups and their masters (T-420): levels move through
+        // `/api/control` (`group.<n>.master`), never through here.
+        (Method::Get, "/api/groups") => json_response(groups_view(&shared.lock().unwrap())),
         (Method::Post, "/api/projection") => match body::<crate::projection::ProjectionConfig>(request) {
             Ok(cfg) => {
                 let mut s = shared.lock().unwrap();
@@ -2923,6 +2926,19 @@ struct AlignRequest {
     zone: Option<u8>,
 }
 
+/// `GET /api/groups`: each zone group with its master and control id.
+fn groups_view(s: &Shared) -> serde_json::Value {
+    let groups: Vec<_> = s
+        .projection
+        .get()
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| json!({ "n": i + 1, "name": g.name, "zones": g.zones, "master": g.master, "control": format!("group.{}.master", i + 1) }))
+        .collect();
+    json!({ "groups": groups, "max_groups": crate::projection::GROUP_MASTER_CONTROLS })
+}
+
 /// `GET /api/projection`.
 fn projection_view(s: &Shared) -> serde_json::Value {
     json!({ "config": s.projection.get(), "align": s.projection.align, "max_zones": crate::projection::MAX_ZONES })
@@ -3780,7 +3796,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
             "quantize": s.deck.quantize,
             "beat_every": s.deck.beat_every,
         },
-        "layers": { "mixer": s.mixer, "mix": s.mix },
+        // Group masters (T-420) ride with the layers: the LIVE row shows them.
+        "layers": { "mixer": s.mixer, "mix": s.mix, "groups": groups_view(s)["groups"] },
         "tempo": s.tempo.state(s.now_s()),
         // T-409: the timecode state also under `timeline.timecode`.
         "timeline": timeline_with_timecode(s),
@@ -6477,6 +6494,19 @@ mod tests {
         }
         assert_eq!(t.shared.lock().unwrap().projection.get().zones.len(), 2);
 
+        // Zone groups (T-420): their masters move by control only.
+        let grouped = json!({ "zones": [{ "id": 1 }, { "id": 2 }], "groups": [{ "name": "Centre", "zones": [1] }, { "name": "Côtés", "zones": [2], "master": 0.7 }] });
+        assert_eq!(t.request("POST", "/api/projection", &grouped.to_string()).0, 200);
+        let g = js(&t.request("GET", "/api/groups", "").1);
+        assert_eq!(g["groups"][0]["master"], 1.0);
+        assert_eq!(g["groups"][1]["control"], "group.2.master");
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"group.2.master","value":0.5}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/groups", "").1)["groups"][1]["master"], 0.5);
+        // The page's stale copy doesn't move it back.
+        assert_eq!(t.request("POST", "/api/projection", &grouped.to_string()).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/groups", "").1)["groups"][1]["master"], 0.5);
+        let bad = json!({ "zones": [{ "id": 1 }], "groups": [{ "name": "X", "zones": [4] }] });
+        assert_eq!(t.request("POST", "/api/projection", &bad.to_string()).0, 400);
         assert_eq!(t.request("POST", "/api/projection/align", r#"{"zone":5}"#).0, 404);
         assert_eq!(js(&t.request("POST", "/api/projection/align", r#"{"zone":2}"#).1)["align"], 2);
         // Removing the aligned zone ends the alignment.

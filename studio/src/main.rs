@@ -421,6 +421,9 @@ pub struct Shared {
     /// layers.json when changed.
     pub mixer: layers::Mixer,
     pub mixer_dirty: bool,
+    /// A group master (T-420, `group.<n>.master`) moved: the engine writes
+    /// projection.json at most once a second, like `mixer_dirty`.
+    pub groups_dirty: bool,
     /// What the point budget did to the last frame.
     pub mix: layers::MixReport,
     /// Strobe limiter and beam horizon settings (safety.rs, safety.json).
@@ -1342,6 +1345,7 @@ fn startup_state(cli: &Cli) -> Shared {
             m
         },
         mixer_dirty: false,
+        groups_dirty: false,
         mix: layers::MixReport::default(),
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
@@ -1822,13 +1826,16 @@ impl Engine {
                 std::thread::sleep(stall);
             }
             self.frames_since_save += 1;
-            if (s.live_dirty || s.mixer_dirty || s.fx.dirty) && self.frames_since_save >= 60 {
+            if (s.live_dirty || s.mixer_dirty || s.groups_dirty || s.fx.dirty) && self.frames_since_save >= 60 {
                 // At most once a second, so MIDI faders don't hammer the disk.
                 if s.live_dirty {
                     save_json(&self.live_path, &s.live);
                 }
                 if s.mixer_dirty {
                     save_json(&self.layers_path, &s.mixer);
+                }
+                if s.groups_dirty {
+                    s.projection.save();
                 }
                 if s.fx.dirty {
                     if let Err(e) = s.fx.save() {
@@ -1837,6 +1844,7 @@ impl Engine {
                 }
                 s.live_dirty = false;
                 s.mixer_dirty = false;
+                s.groups_dirty = false;
                 self.frames_since_save = 0;
             }
             advance_playlist(&mut s);
@@ -2294,6 +2302,9 @@ impl Engine {
         }
         if s.mixer_dirty {
             save_json(&self.layers_path, &s.mixer);
+        }
+        if s.groups_dirty {
+            s.projection.save();
         }
         if s.fx.dirty {
             if let Err(e) = s.fx.save() {

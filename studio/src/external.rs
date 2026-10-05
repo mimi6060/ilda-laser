@@ -79,7 +79,7 @@ pub struct ScopeSet {
 }
 
 pub const SCOPE_SETS: [ScopeSet; 5] = [
-    ScopeSet { id: "masters", label_fr: "Maîtres", groups: &["master", "look", "layer"] },
+    ScopeSet { id: "masters", label_fr: "Maîtres", groups: &["master", "look", "layer", "group"] },
     ScopeSet { id: "cues", label_fr: "Cues", groups: &["grid", "cue", "page"] },
     ScopeSet { id: "tempo", label_fr: "Tempo", groups: &["tempo"] },
     ScopeSet { id: "timeline", label_fr: "Timeline", groups: &["timeline"] },
@@ -536,7 +536,7 @@ mod tests {
         assert!(!s.external.gate.open);
         for src in SourceKind::ALL {
             let sc = s.external.config().scope(src);
-            let want: &[&str] = if src == SourceKind::Timecode { &["timeline"] } else { &["layer", "look", "master"] };
+            let want: &[&str] = if src == SourceKind::Timecode { &["timeline"] } else { &["group", "layer", "look", "master"] };
             assert_eq!(sc.groups, want);
             assert!(sc.require_access);
         }

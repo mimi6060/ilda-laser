@@ -100,7 +100,7 @@ use crate::output::Output;
 use crate::patterns::Point;
 use crate::power::{OutputLimits, MAIN_OUTPUT};
 use crate::presence::{Presence, PresenceSettings};
-use crate::projection::{Geometry, ProjectionConfig, ProjectionZone, Warp, MAX_ZONES, SQUARE};
+use crate::projection::{Geometry, ProjectionConfig, ProjectionZone, Warp, ZoneGroup, MAX_ZONES, SQUARE};
 use crate::safety::{self, SafetySettings};
 use crate::zones::{self, Horizon, Zone, ZoneKind};
 use crate::transition::{self, Transition, TransitionKind, TransitionLength, LENGTHS, TRANSITION_KINDS};
@@ -443,7 +443,57 @@ fn random_projection(rng: &mut Rng) -> ProjectionConfig {
         })
         .collect::<Vec<_>>();
     let default_zones = (0..1 + rng.below(2)).map(|_| zones[rng.below(zones.len())].id).collect();
-    ProjectionConfig { zones, default_zones }
+    ProjectionConfig { zones, default_zones, groups: Vec::new() }
+}
+
+/// Zone groups with random masters (T-420): zones that may overlap
+/// between groups (products), levels out of range on purpose.
+fn random_groups(rng: &mut Rng, ids: &[u8]) -> Vec<ZoneGroup> {
+    if rng.chance(0.3) {
+        return Vec::new();
+    }
+    (0..1 + rng.below(4))
+        .map(|i| {
+            let zones = (0..1 + rng.below(3)).map(|_| *rng.pick(ids)).collect();
+            ZoneGroup { name: format!("G{i}"), zones, master: random_master(rng) }
+        })
+        .collect()
+}
+
+/// A group master as a control or a damaged file could ask for it.
+fn random_master(rng: &mut Rng) -> f32 {
+    // Mostly lit, so the sessions keep sending light (coverage).
+    match rng.below(20) {
+        0 => 0.0,
+        1 => rng.range(-2.0, 3.0),
+        2..=4 => 1.0,
+        5..=7 => rng.f(),
+        _ => rng.range(0.6, 1.0),
+    }
+}
+
+/// Zone groups on the current zones (T-420), as `POST /api/projection`
+/// would set them (a new group takes the level it comes with).
+fn random_zone_groups(s: &mut Shared, rng: &mut Rng) {
+    let mut cfg = s.projection.get().clone();
+    let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
+    cfg.groups = random_groups(rng, &ids);
+    let _ = s.projection.set(cfg);
+}
+
+/// Group masters moved the way a fader, MIDI, OSC or DMX would (through
+/// the controls, values out of range included), or « Tout à 100 % ».
+fn random_group_masters(s: &mut Shared, rng: &mut Rng) {
+    let n = s.projection.get().groups.len();
+    if n == 0 || rng.chance(0.1) {
+        let _ = controls::apply(s, "group.all_full", ControlInput::Value(1.0), rng.chance(0.5));
+        return;
+    }
+    for _ in 0..1 + rng.below(n) {
+        let id = format!("group.{}.master", 1 + rng.below(n));
+        let input = if rng.chance(0.5) { ControlInput::Norm(random_master(rng)) } else { ControlInput::Value(random_master(rng)) };
+        let _ = controls::apply(s, &id, input, rng.chance(0.5));
+    }
 }
 
 /// Projection zones, cue → zone routing and the alignment zone, changed
@@ -1002,6 +1052,9 @@ struct Coverage {
     lit_with_horizon: usize,
     /// Frames with a lit preview through a non-neutral projection zone.
     lit_with_projection: usize,
+    /// Frames with a lit preview while a zone group's master was below
+    /// 100 % (T-420).
+    lit_with_group_master: usize,
     /// Frames with a lit preview while a DMX fixture instance shaped a zone (T-407).
     lit_with_remote: usize,
     /// Frames with a lit preview and a Public zone, scanning off / on.
@@ -1189,6 +1242,11 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if zrng.chance(0.7) {
         let _ = rig.s().projection.set(random_projection(&mut zrng));
     }
+    // Zone groups and their masters (T-420), from their own stream too.
+    let mut mrng = Rng::new(seed ^ 0x0420_0420);
+    if mrng.chance(0.6) {
+        random_zone_groups(&mut rig.s(), &mut mrng);
+    }
     // The output's colour rendering (T-414), from its own stream too;
     // brighter settings are confirmed, as the operator could (refused
     // while armed: that's the store's rule).
@@ -1334,6 +1392,14 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         }
         if zrng.chance(0.15) {
             random_routing(&mut rig.s(), &mut zrng);
+        }
+        if mrng.chance(0.1) {
+            let mut s = rig.s();
+            if s.projection.get().groups.is_empty() || mrng.chance(0.2) {
+                random_zone_groups(&mut s, &mut mrng);
+            } else {
+                random_group_masters(&mut s, &mut mrng);
+            }
         }
         if fixtures && drng.chance(0.5) {
             random_universe(&mut rig.s(), &mut drng, frame);
@@ -1481,6 +1547,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         cov.lit_with_zones += (preview_lit && cfg.zones.iter().any(|z| z.kind == ZoneKind::Blank)) as usize;
         cov.lit_with_horizon += (preview_lit && cfg.horizon.lines && cfg.horizon.level == 0.0) as usize;
         cov.lit_with_projection += (preview_lit && s.projection.get().zones.iter().any(|z| !z.geometry.is_identity())) as usize;
+        cov.lit_with_group_master += (preview_lit && s.projection.get().groups.iter().any(|g| g.master < 1.0 && !g.zones.is_empty())) as usize;
         cov.lit_with_remote += (preview_lit && !s.netin.fixtures.remotes.is_empty()) as usize;
         cov.lit_with_transition += (preview_lit && !s.deck.transition_fx(t).is_empty()) as usize;
         cov.lit_with_effects += (preview_lit && with_effects) as usize;
@@ -1537,6 +1604,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_zones) > 0.1, "only {} of {} lit frames had a Blank zone", cov.lit_with_zones, cov.frames);
         assert!(share(cov.lit_with_horizon) > 0.05, "only {} of {} lit frames had a full horizon", cov.lit_with_horizon, cov.frames);
         assert!(share(cov.lit_with_projection) > 0.2, "only {} of {} lit frames went through a projection zone", cov.lit_with_projection, cov.frames);
+        assert!(share(cov.lit_with_group_master) > 0.05, "only {} of {} lit frames had a group master below 100 %", cov.lit_with_group_master, cov.frames);
         assert!(share(cov.lit_with_remote) > 0.02, "only {} of {} lit frames went through a DMX fixture instance", cov.lit_with_remote, cov.frames);
         assert!(share(cov.lit_with_public_above) > 0.1, "only {} of {} lit frames had a Public zone, scanning off", cov.lit_with_public_above, cov.frames);
         assert!(share(cov.lit_with_public_scanning) > 0.05, "only {} of {} lit frames had a Public zone while scanning", cov.lit_with_public_scanning, cov.frames);
@@ -2540,6 +2608,135 @@ fn cue_and_layer_modifiers_apply_before_the_safety_stage() {
     assert!(lit(&low).iter().all(|p| p.y >= -1e-3), "a lit point below the horizon");
 }
 
+// ---------- group masters (T-420) ----------
+
+/// One case of `a_group_master_never_brightens_the_output`: the same
+/// random session (look, safety settings, caps, calibration, projection
+/// zones with groups) rendered twice on the same simulated clock, once
+/// with every master at 100 % and once with random masters at or below
+/// it. No frame sent to the output with the masters down has a lit
+/// sample the frame at 100 % doesn't match or beat on every channel: the masters sit before the safety stage, which still dims after them,
+/// and nothing after them can turn a dimmer into more light.
+fn run_group_master_case(seed: u64) -> Result<bool, String> {
+    let session = |masters: Option<u64>| -> Result<Vec<Vec<Point>>, String> {
+        // `random_case` without presence (arming must succeed).
+        let mut rng = Rng::new(seed);
+        let mut s = test_support::shared();
+        s.safety.set(random_safety(&mut rng), true).map_err(|e| format!("setup: safety refused: {e:?}"))?;
+        s.outputs.set(MAIN_OUTPUT, Some(random_limits(&mut rng)), None, false, true).map_err(|e| format!("setup: caps refused: {e:?}"))?;
+        s.calibration = random_calibration(&mut rng);
+        s.settings = random_preset(&s, &mut rng).1;
+        let mut zrng = Rng::new(seed ^ 0x0420_0420);
+        let mut cfg = random_projection(&mut zrng);
+        for z in &mut cfg.zones {
+            z.enabled = true;
+            z.output = None;
+            z.geometry.warp.enabled = false;
+        }
+        let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
+        cfg.default_zones = ids.clone();
+        cfg.groups = random_groups(&mut zrng, &ids);
+        if cfg.groups.is_empty() {
+            cfg.groups = vec![ZoneGroup { name: "G".into(), zones: ids.clone(), master: 1.0 }];
+        }
+        for g in &mut cfg.groups {
+            g.master = 1.0;
+        }
+        s.projection.set(cfg).map_err(|e| format!("setup: projection refused: {e:#}"))?;
+        let mut rig = Rig::new(s, "group-master", seed);
+        rig.tick();
+        rig.s().request_arm(ArmSource::Ui).map_err(|e| format!("setup: arm refused: {e:?}"))?;
+        if let Some(mseed) = masters {
+            let mut mrng = Rng::new(mseed);
+            let mut s = rig.s();
+            for n in 1..=s.projection.get().groups.len() {
+                let input = if mrng.chance(0.5) { ControlInput::Norm(random_master(&mut mrng)) } else { ControlInput::Value(random_master(&mut mrng)) };
+                controls::apply(&mut s, &format!("group.{n}.master"), input, true).map_err(|e| format!("group.{n}.master refused: {e:?}"))?;
+            }
+        }
+        let mut frames = Vec::new();
+        for _ in 0..20 {
+            rig.tick();
+            frames.push(rig.wire.lock().unwrap().last.clone());
+        }
+        if rig.s().gate.is_armed() != rig.wire.lock().unwrap().armed {
+            return Err("the output's arm state left the gate's".into());
+        }
+        Ok(frames)
+    };
+    let full = session(None)?;
+    let dimmed = session(Some(seed ^ 0x5eed))?;
+    // A dark zone's points can be travel for the optimiser and the
+    // safety stage's segment splits, so frames may differ in length: every
+    // lit sample with the masters down must sit where the frame at 100 %
+    // has a sample at least as bright on every channel, and no channel's
+    // peak may rise.
+    let peak = |f: &[Point]| f.iter().fold([0.0f32; 3], |m, p| [m[0].max(p.r), m[1].max(p.g), m[2].max(p.b)]);
+    let energy = |f: &[Point]| f.iter().map(|p| p.r + p.g + p.b).sum::<f32>();
+    let mut dimmer = false;
+    for (i, (a, b)) in full.iter().zip(&dimmed).enumerate() {
+        let (pa, pb) = (peak(a), peak(b));
+        dimmer |= energy(b) < energy(a) - 1e-3;
+        if (0..3).any(|c| pb[c] > pa[c] + 1e-5) {
+            return Err(format!("frame {i}: peak {pb:?} with the masters down, {pa:?} at 100 %"));
+        }
+        for q in b.iter().filter(|q| q.is_lit()) {
+            let covered = a.iter().any(|p| (p.x - q.x).abs() < 1e-4 && (p.y - q.y).abs() < 1e-4 && p.r + 1e-5 >= q.r && p.g + 1e-5 >= q.g && p.b + 1e-5 >= q.b);
+            if !covered {
+                return Err(format!("frame {i}: {q:?} lit with the masters down, nothing as bright there at 100 %"));
+            }
+        }
+    }
+    Ok(dimmer)
+}
+
+#[test]
+fn a_group_master_never_brightens_the_output() {
+    let (cases, dimmed) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    run_property("a_group_master_never_brightens_the_output", 420, 60, |seed| {
+        cases.set(cases.get() + 1);
+        dimmed.set(dimmed.get() + run_group_master_case(seed)? as usize);
+        Ok(())
+    });
+    // Not vacuous: most cases really dim something that reached the output.
+    assert!(dimmed.get() * 3 >= cases.get(), "only {} of {} cases dimmed the output", dimmed.get(), cases.get());
+}
+
+/// The masters sit before the safety stage: a zone's master at 100 %
+/// still has its light cut by a Blank zone and the caps, and a master at
+/// 0 darkens its zone only (points kept).
+#[test]
+fn group_masters_run_before_zones_and_caps() {
+    let mut rig = armed_square_rig("group-master-order");
+    {
+        let mut s = rig.s();
+        let zone = |id: u8, x: f32| ProjectionZone { id, name: format!("Z{id}"), geometry: Geometry { size_x: 0.4, size_y: 0.4, pos_x: x, ..Default::default() }, ..Default::default() };
+        let groups = vec![ZoneGroup { name: "Gauche".into(), zones: vec![1], master: 1.0 }, ZoneGroup { name: "Droite".into(), zones: vec![2], master: 1.0 }];
+        s.projection.set(ProjectionConfig { zones: vec![zone(1, -0.5), zone(2, 0.5)], default_zones: vec![1, 2], groups }).unwrap();
+        // A Blank zone over the right half and a cap of 0.3.
+        let blank = Zone { id: 1, name: "B".into(), kind: ZoneKind::Blank, level: 0.0, points: vec![[0.0, -1.0], [1.0, -1.0], [1.0, 1.0], [0.0, 1.0]], audience: false, ..Default::default() };
+        s.safety.set(SafetySettings { zones: vec![blank], ..Default::default() }, true).unwrap();
+        s.outputs.set(MAIN_OUTPUT, Some(OutputLimits { max_power: 0.3, max_color: [1.0, 1.0, 1.0] }), None, false, true).unwrap();
+    }
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    for _ in 0..3 {
+        rig.tick();
+    }
+    let before = rig.wire.lock().unwrap().last.clone();
+    assert!(before.iter().any(|p| p.is_lit()), "the left zone is lit");
+    assert!(before.iter().filter(|p| p.is_lit()).all(|p| p.x < 0.0), "the Blank zone still cuts the right zone at 100 %");
+    assert!(before.iter().all(|p| p.r.max(p.g).max(p.b) <= 0.3 + 1e-6), "the cap holds");
+    controls::apply(&mut rig.s(), "group.1.master", ControlInput::Value(0.0), true).unwrap();
+    for _ in 0..3 {
+        rig.tick();
+    }
+    let after = rig.wire.lock().unwrap().last.clone();
+    assert!(!after.is_empty(), "points kept: the galvos keep scanning");
+    assert!(after.iter().all(|p| !p.is_lit()), "zone 1 dark, zone 2 still behind the Blank zone");
+    assert!(rig.s().gate.is_armed(), "a master never disarms either");
+}
+
 // ---------- transitions between cues (T-158) ----------
 
 /// Segments `i` (from point `i` to `i + 1`) of `src` that pass within a
@@ -3085,7 +3282,7 @@ fn each_projector_draws_only_its_zones_through_its_own_caps() {
             geometry: Geometry { size_x: 0.4, size_y: 0.4, pos_x: x, ..Default::default() },
             ..Default::default()
         };
-        s.projection.set(ProjectionConfig { zones: vec![zone(1, -0.5, MAIN_OUTPUT), zone(2, 0.5, "p2")], default_zones: vec![1, 2] }).unwrap();
+        s.projection.set(ProjectionConfig { zones: vec![zone(1, -0.5, MAIN_OUTPUT), zone(2, 0.5, "p2")], default_zones: vec![1, 2], ..Default::default() }).unwrap();
         s.outputs.set("p2", Some(OutputLimits { max_power: 0.2, max_color: [1.0, 1.0, 1.0] }), None, false, false).unwrap();
     }
     rig.tick();

@@ -128,6 +128,11 @@ pub struct Project {
     /// saved before T-415: they open with none (the built-in ones are
     /// always there).
     pub scan_presets: Vec<ScanPreset>,
+    /// The zone groups' masters (T-420), in group order: playing values,
+    /// like the layer dimmers (the groups themselves are machine settings,
+    /// projection.json). Missing in projects saved before T-420: every
+    /// group opens at 100 %.
+    pub group_masters: Vec<f32>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -155,6 +160,7 @@ impl Default for Project {
             user_cues: Vec::new(),
             cue_lists: Vec::new(),
             scan_presets: Vec::new(),
+            group_masters: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -591,6 +597,7 @@ pub fn snapshot(s: &Shared) -> Project {
         user_cues: s.user_cues.list().to_vec(),
         cue_lists: s.cue_lists.list().to_vec(),
         scan_presets: s.scan_presets.user().to_vec(),
+        group_masters: s.projection.masters(),
         ..Project::default()
     }
 }
@@ -612,6 +619,10 @@ fn apply(s: &mut Shared, p: &Project) {
     s.live = p.live.clone();
     s.live.release_momentary();
     s.mixer = p.layers.clone();
+    // Group masters by group order (missing: 100 %); projection.json is
+    // written by the engine within the second.
+    s.projection.set_masters(&p.group_masters);
+    s.groups_dirty = true;
     s.lfos.replace_in_memory(p.lfos.clone());
     s.routes.replace_in_memory(p.audio_routes.clone(), &s.controls);
     s.palettes.replace_in_memory(p.palettes.clone());
@@ -1353,6 +1364,39 @@ mod tests {
         // The working copy on disk is the project's too.
         let on_disk: Vec<Scene> = serde_json::from_str(&std::fs::read_to_string(dir.join("scenes.json")).unwrap()).unwrap();
         assert_eq!(on_disk.len(), 2);
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-420: group masters travel with the project; an older project
+    /// (no `group_masters`) opens every group at 100 %.
+    #[test]
+    fn group_masters_are_saved_in_the_project_and_old_projects_open_at_full() {
+        use crate::projection::{ProjectionConfig, ProjectionZone, ZoneGroup};
+        let dir = temp_dir("group-masters");
+        let shared = studio(&dir);
+        {
+            let mut s = shared.lock().unwrap();
+            let cfg = ProjectionConfig {
+                zones: vec![ProjectionZone { id: 1, ..Default::default() }, ProjectionZone { id: 2, ..Default::default() }],
+                default_zones: vec![1],
+                groups: vec![ZoneGroup { name: "Centre".into(), zones: vec![1], master: 1.0 }, ZoneGroup { name: "Côtés".into(), zones: vec![2], master: 1.0 }],
+            };
+            s.projection.set(cfg).unwrap();
+            s.projection.set_master(2, 0.4);
+        }
+        post(&shared, &dir, "save-as", json!({ "path": "Groupes" })).unwrap();
+        let saved = parse(&std::fs::read_to_string(dir.join("projects/Groupes.lsproj")).unwrap()).unwrap();
+        assert_eq!(saved.group_masters, [1.0, 0.4]);
+        shared.lock().unwrap().projection.set_master(2, 1.0);
+        post(&shared, &dir, "open", json!({ "path": "Groupes.lsproj" })).unwrap();
+        assert_eq!(shared.lock().unwrap().projection.masters(), [1.0, 0.4]);
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert!(old.group_masters.is_empty());
+        let mut s = shared.lock().unwrap();
+        apply(&mut s, &old);
+        assert_eq!(s.projection.masters(), [1.0, 1.0]);
+        assert!(!s.gate.is_armed());
         drop(s);
         let _ = std::fs::remove_dir_all(dir);
     }
