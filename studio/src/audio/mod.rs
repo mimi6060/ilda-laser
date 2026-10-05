@@ -28,6 +28,7 @@ pub(crate) mod bench;
 pub mod bpm;
 pub mod capture;
 pub mod decode;
+pub mod downbeat;
 pub mod isolate;
 pub mod media;
 pub mod onsets;
@@ -327,6 +328,8 @@ pub struct NativeSnapshot {
     /// Section (silence / normal / break / build-up / drop), build-up
     /// value, drop counter (T-236). Detection only: nothing reacts to it yet.
     pub sections: SectionState,
+    /// Suggested "1" and phrases (T-235). A proposal only, like the tempo.
+    pub downbeat: downbeat::DownbeatDetection,
     /// Audio time of the end of the last hop, seconds since the studio
     /// epoch (the tempo clock's time base).
     pub t: f64,
@@ -507,6 +510,14 @@ impl AudioHub {
         self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE).map(|n| n.tempo)
     }
 
+    /// The latest native downbeat detection, fresh like `fresh_tempo` (T-235).
+    pub fn fresh_downbeat(&self, now: Instant) -> Option<downbeat::DownbeatDetection> {
+        if lock(&self.config).0.source != AudioInputSource::Native {
+            return None;
+        }
+        self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE).map(|n| n.downbeat)
+    }
+
     /// The LTC channel switch, for the audio callback (capture.rs).
     pub fn ltc_tap(&self) -> Arc<AtomicI32> {
         Arc::clone(&self.ltc_tap)
@@ -648,6 +659,9 @@ impl AudioHub {
             // Section, confidence, build-up 0..1, drop counter and time,
             // last 5 changes (T-236); null when nothing fresh is captured.
             "sections": native.map(|n| n.sections),
+            // Suggested "1", its confidence, phrase start and length
+            // (T-235); null when nothing fresh is captured.
+            "downbeat": native.map(|n| n.downbeat),
             "stats": stats,
             // What the engine uses (T-237), whichever the source: the legacy
             // three, then the whole snapshot. `bands` always present, 0..1.
@@ -681,7 +695,7 @@ mod tests {
         let onsets = Onsets { kick: beat, onset: beat + 2, ..Default::default() };
         let tempo = TempoEstimate { bpm: 128.0, confidence: 0.8, beat_time: 0.9, next_beat: 1.37, state: bpm::DetectState::Locked };
         let sections = SectionState { section: Section::Buildup, buildup: 0.4, drop: 2, ..Default::default() };
-        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], sections, t: 1.0, at }
+        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], sections, downbeat: Default::default(), t: 1.0, at }
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {

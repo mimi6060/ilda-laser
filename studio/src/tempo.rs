@@ -22,8 +22,16 @@
 //! offset. It only moves *what* is computed for a frame, never *when* a
 //! frame goes out: nothing is buffered, and arming, blackout, the e-stop
 //! and every safety stage act on the very next frame as before.
+//!
+//! *Temps 1* (T-235): the detector's suggested "1" (audio/downbeat.rs) is
+//! shown against the clock's bar (`TempoState::downbeat`); *Accepter*
+//! resyncs the bar on it. With *Tempo auto* locked, the bar is realigned by
+//! whole beats on its own, but only when the downbeat confidence rises from
+//! low (< 0.3) to high (≥ 0.5) or on a drop (which starts a phrase), and at
+//! most once every 8 s. Whole beats: the beat phase never moves.
 
 use crate::audio::bpm::{DetectState, TempoEstimate};
+use crate::audio::downbeat::{DownbeatDetection, HIGH_CONFIDENCE, SHOW_CONFIDENCE};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -55,6 +63,10 @@ const DRIFT_GAIN: f64 = 0.02;
 const DRIFT_MAX_ERROR: f64 = 1.0 / 16.0;
 /// Integral term cap, BPM per bar.
 const MAX_DRIFT_PER_BAR: f64 = 0.05;
+/// Automatic bar realigns are at least this far apart (s).
+const MIN_REALIGN_S: f64 = 8.0;
+/// A drop older than this (s) when first seen is not acted on.
+const DROP_FRESH_S: f64 = 4.0;
 
 /// The output offset's range (ms), both ways (T-246).
 pub const MAX_OUTPUT_OFFSET_MS: f32 = 100.0;
@@ -169,6 +181,36 @@ impl Follow {
     }
 }
 
+/// The suggested "1" against the clock (`/api/state.tempo.downbeat`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct DownbeatEstimate {
+    /// The clock's `beat_in_bar` at the detected "1" (0 = already aligned).
+    pub beat_in_bar_offset: u8,
+    pub confidence: f32,
+    /// Start of the current phrase (audio time, studio clock), if any.
+    pub phrase_start: Option<f64>,
+}
+
+/// What the clock keeps of the downbeat detection.
+#[derive(Clone, Copy, Debug)]
+struct DownbeatFollow {
+    det: Option<DownbeatDetection>,
+    /// Hysteresis: the confidence went ≥ `HIGH_CONFIDENCE` and has not
+    /// fallen below `SHOW_CONFIDENCE` since.
+    high: bool,
+    /// The phrase counter already seen.
+    phrases: Option<u64>,
+    last_realign_t: f64,
+    /// Automatic realigns done (tests, log).
+    realigns: u32,
+}
+
+impl Default for DownbeatFollow {
+    fn default() -> Self {
+        Self { det: None, high: false, phrases: None, last_realign_t: f64::NEG_INFINITY, realigns: 0 }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TempoClock {
     pub bpm: f64,
@@ -183,6 +225,7 @@ pub struct TempoClock {
     follow: Follow,
     /// *Décalage de sortie* (s, T-246): only `effect_beat_at` reads it.
     output_offset_s: f64,
+    downbeat: DownbeatFollow,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -205,6 +248,14 @@ pub struct TempoState {
     pub guide_bpm: Option<f64>,
     /// *Décalage de sortie* (T-246): the effects read the beat this far ahead.
     pub output_offset_ms: f32,
+    /// The detected "1" against this clock (T-235); none without a fresh
+    /// detection at this tempo, or outside 4/4.
+    pub downbeat: Option<DownbeatEstimate>,
+    /// Show *Temps 1 suggéré*: confident enough and not where the clock's 1 is.
+    pub downbeat_suggested: bool,
+    /// Bar within the current phrase (0-based), and the phrase length.
+    pub phrase_bar: Option<u8>,
+    pub phrase_bars: u8,
 }
 
 impl Default for TempoClock {
@@ -220,6 +271,7 @@ impl Default for TempoClock {
             guide_bpm: None,
             follow: Follow::default(),
             output_offset_s: 0.0,
+            downbeat: DownbeatFollow::default(),
         }
     }
 }
@@ -288,6 +340,7 @@ impl TempoClock {
 
     pub fn state(&self, t: f64) -> TempoState {
         let beat = self.beat_at(t);
+        let est = self.downbeat_estimate();
         let whole = beat.floor();
         let bpb = self.beats_per_bar as f64;
         TempoState {
@@ -303,6 +356,10 @@ impl TempoClock {
             detected_bpm: self.follow.detected_bpm,
             guide_bpm: self.guide_bpm,
             output_offset_ms: self.output_offset_ms(),
+            downbeat: est,
+            downbeat_suggested: est.is_some_and(|e| e.confidence >= SHOW_CONFIDENCE && (e.beat_in_bar_offset != 0 || self.downbeat_phase_off())),
+            phrase_bar: self.phrase_bar(beat),
+            phrase_bars: self.downbeat.det.map_or(8, |d| d.phrase_bars),
         }
     }
 
@@ -380,12 +437,103 @@ impl TempoClock {
         self.guide_bpm
     }
 
-    /// *Nouveau morceau*: the guide and the follower's history are
-    /// forgotten (the clock keeps its BPM and phase).
+    /// *Nouveau morceau*: the guide, the follower's history and the
+    /// downbeat are forgotten (the clock keeps its BPM and phase).
     pub fn new_track(&mut self) {
         self.guide_bpm = None;
         self.guide_taps.clear();
         self.follow.forget();
+        self.downbeat = DownbeatFollow { phrases: self.downbeat.phrases, last_realign_t: self.downbeat.last_realign_t, realigns: self.downbeat.realigns, ..Default::default() };
+    }
+
+    /// The detection at this clock's tempo (within 4 %) in 4/4.
+    fn matching_downbeat(&self) -> Option<DownbeatDetection> {
+        self.downbeat.det.filter(|d| self.beats_per_bar == 4 && d.bpm > 0.0 && (d.bpm as f64 / self.bpm - 1.0).abs() < PHASE_BPM_RATIO)
+    }
+
+    /// ... with a "1" found.
+    fn usable_downbeat(&self) -> Option<DownbeatDetection> {
+        self.matching_downbeat().filter(|d| d.downbeat_t > 0.0)
+    }
+
+    /// The detected "1" against the clock's bar (T-235's `DownbeatEstimate`).
+    pub fn downbeat_estimate(&self) -> Option<DownbeatEstimate> {
+        let d = self.usable_downbeat()?;
+        let offset = self.beat_at(d.downbeat_t).round().rem_euclid(self.beats_per_bar as f64) as u8;
+        let confidence = (d.confidence.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+        Some(DownbeatEstimate { beat_in_bar_offset: offset, confidence, phrase_start: d.phrase_start })
+    }
+
+    /// The detected "1" falls between the clock's beats (more than ¼ off).
+    fn downbeat_phase_off(&self) -> bool {
+        self.usable_downbeat().is_some_and(|d| wrap_half(self.beat_at(d.downbeat_t)).abs() > BIG_PHASE_ERROR)
+    }
+
+    /// Bar within the phrase at `beat`, counted from the phrase start's
+    /// nearest whole beat.
+    fn phrase_bar(&self, beat: f64) -> Option<u8> {
+        let d = self.matching_downbeat()?;
+        let start = self.beat_at(d.phrase_start?).round();
+        let bars = ((beat - start) / self.beats_per_bar as f64).floor();
+        (bars >= 0.0).then(|| bars.rem_euclid(d.phrase_bars.max(1) as f64) as u8)
+    }
+
+    /// *Accepter* (T-235): a resync on the suggested "1": the detected
+    /// downbeat becomes the nearest bar start, phase included. False (and
+    /// nothing moves) without a usable suggestion.
+    pub fn accept_downbeat(&mut self) -> bool {
+        let Some(d) = self.usable_downbeat() else { return false };
+        let bpb = self.beats_per_bar as f64;
+        let target = (self.beat_at(d.downbeat_t) / bpb).round() * bpb;
+        self.origin_s = d.downbeat_t - target * 60.0 / self.bpm;
+        true
+    }
+
+    /// Shifts the bar by whole beats so the audio time `at` is a bar start
+    /// (the nearer way round). Returns the shift.
+    fn align_bar_on(&mut self, at: f64) -> i64 {
+        let bpb = self.beats_per_bar.max(1) as i64;
+        let off = (self.beat_at(at).round() as i64).rem_euclid(bpb);
+        let shift = if off * 2 <= bpb { -off } else { bpb - off };
+        if shift != 0 {
+            self.nudge(shift as f64);
+        }
+        shift
+    }
+
+    /// Called every engine frame with the latest fresh downbeat detection
+    /// (none when stale). Keeps it for the state; with *Tempo auto* locked,
+    /// realigns the bar on a rise to high confidence or on a fresh drop,
+    /// at most once every `MIN_REALIGN_S`. Never touches the BPM or phase.
+    pub fn apply_downbeat(&mut self, det: Option<DownbeatDetection>, now: f64) {
+        self.downbeat.det = det;
+        let Some(d) = det else { return };
+        let seen = self.downbeat.phrases.replace(d.phrases);
+        let drop = seen.is_some_and(|n| n != d.phrases) && d.phrase_from_drop && d.phrase_start.is_some_and(|p| (now - p).abs() < DROP_FRESH_S);
+        let rising = match self.downbeat_estimate() {
+            Some(e) => {
+                let was = self.downbeat.high;
+                if e.confidence >= HIGH_CONFIDENCE {
+                    self.downbeat.high = true;
+                } else if e.confidence < SHOW_CONFIDENCE {
+                    self.downbeat.high = false;
+                }
+                !was && self.downbeat.high
+            }
+            None => false,
+        };
+        let following = self.source == TempoSource::Audio && self.follow.state == FollowState::Locked;
+        if !following || now - self.downbeat.last_realign_t < MIN_REALIGN_S || self.matching_downbeat().is_none() {
+            return;
+        }
+        let at = if drop { d.phrase_start } else if rising { Some(d.downbeat_t) } else { None };
+        let Some(at) = at else { return };
+        self.downbeat.last_realign_t = now;
+        let shift = self.align_bar_on(at);
+        if shift != 0 {
+            self.downbeat.realigns += 1;
+            log::info!("tempo auto : mesure recalée de {shift:+} temps ({})", if drop { "drop" } else { "temps 1 détecté" });
+        }
     }
 
     /// Called every engine frame while the source is `Audio`, with the
@@ -977,5 +1125,147 @@ mod tests {
         assert!(sim.max_jump() <= CAP + 1e-9, "{}", sim.max_jump());
         let per_beat = sim.max_shift_per_beat();
         assert!(per_beat <= CAP + 1e-9, "{per_beat}");
+    }
+
+    // --- Temps 1 (T-235) ---
+
+    /// A detection at 120 BPM whose "1" is the grid beat `one` (mod 4) of
+    /// `n·0.5 s`, the last one at or before `t`.
+    fn downbeat(t: f64, one: i64, confidence: f32) -> DownbeatDetection {
+        let n = (t / 0.5).floor() as i64;
+        let last = n - (n - one).rem_euclid(4);
+        DownbeatDetection { downbeat_t: last as f64 * 0.5, confidence, bpm: 120.0, bars: 8, ..Default::default() }
+    }
+
+    /// Tempo auto locked at 120 BPM on the grid `n·0.5 s` (clock origin 0).
+    fn locked_clock() -> (TempoClock, f64) {
+        let mut c = TempoClock::default();
+        c.set_auto(true);
+        let est = locked(120.0, 0.0);
+        let mut t = 0.0;
+        while t < 3.0 {
+            t += FRAME;
+            c.apply_detection(&est(t), t);
+        }
+        assert_eq!(c.follow.state, FollowState::Locked);
+        (c, t)
+    }
+
+    /// Runs the engine loop for `seconds`, the detection from `det(t)`.
+    fn run_downbeat(c: &mut TempoClock, t: &mut f64, seconds: f64, det: impl Fn(f64) -> Option<DownbeatDetection>) {
+        let est = locked(120.0, 0.0);
+        let end = *t + seconds;
+        while *t < end {
+            *t += FRAME;
+            c.apply_detection(&est(*t), *t);
+            c.apply_downbeat(det(*t), *t);
+        }
+    }
+
+    #[test]
+    fn the_suggestion_is_shown_against_the_bar_and_accept_resyncs_on_it() {
+        let mut c = TempoClock::default();
+        c.apply_downbeat(Some(downbeat(10.6, 1, 0.7)), 10.6);
+        let s = c.state(10.6);
+        let e = s.downbeat.unwrap();
+        assert_eq!((e.beat_in_bar_offset, e.confidence, s.downbeat_suggested), (1, 0.7, true));
+        // Manual source: shown, never applied by itself.
+        assert_eq!(c.downbeat.realigns, 0);
+        assert!(c.accept_downbeat());
+        let s = c.state(10.6);
+        assert_eq!((s.downbeat.unwrap().beat_in_bar_offset, s.downbeat_suggested), (0, false));
+        // The detected "1" is now a bar start, the beat phase unchanged.
+        assert!((c.beat_at(10.5) / 4.0 - (c.beat_at(10.5) / 4.0).round()).abs() < 1e-9);
+        assert!((c.beat_at(10.6) - c.beat_at(10.6).floor() - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_suggestion_when_stale_unsure_at_another_tempo_or_outside_4_4() {
+        let mut c = TempoClock::default();
+        c.apply_downbeat(None, 1.0);
+        assert!(c.state(1.0).downbeat.is_none());
+        assert!(!c.accept_downbeat());
+        c.apply_downbeat(Some(downbeat(10.6, 1, 0.2)), 10.6);
+        assert!(!c.state(10.6).downbeat_suggested, "below 0.3: no suggestion");
+        c.apply_downbeat(Some(DownbeatDetection { bpm: 140.0, ..downbeat(10.6, 1, 0.9) }), 10.6);
+        assert!(c.state(10.6).downbeat.is_none());
+        assert!(!c.accept_downbeat());
+        c.beats_per_bar = 3;
+        c.apply_downbeat(Some(downbeat(10.6, 1, 0.9)), 10.6);
+        assert!(c.state(10.6).downbeat.is_none());
+    }
+
+    #[test]
+    fn tempo_auto_realigns_once_when_the_confidence_rises() {
+        let (mut c, mut t) = locked_clock();
+        let start = t;
+        // Unsure first, then sure: one realign, at the rise.
+        run_downbeat(&mut c, &mut t, 10.0, |t| Some(downbeat(t, 3, if t - start < 5.0 { 0.2 } else { 0.8 })));
+        assert_eq!(c.downbeat.realigns, 1);
+        assert_eq!(c.state(t).downbeat.unwrap().beat_in_bar_offset, 0);
+        // Still sure, the music's "1" moves (a wrong guess elsewhere): only
+        // suggested, no realign without a new rise.
+        run_downbeat(&mut c, &mut t, 20.0, |t| Some(downbeat(t, 0, 0.8)));
+        assert_eq!(c.downbeat.realigns, 1);
+        assert!(c.state(t).downbeat_suggested);
+    }
+
+    #[test]
+    fn an_unaccented_groove_never_realigns() {
+        let (mut c, mut t) = locked_clock();
+        // Confidence wandering under 0.3 for two minutes, the "1" anywhere.
+        run_downbeat(&mut c, &mut t, 120.0, |t| Some(downbeat(t, (t / 7.0) as i64 % 4, 0.1 + 0.15 * ((t * 0.7).sin() as f32 + 1.0) / 2.0)));
+        assert_eq!(c.downbeat.realigns, 0);
+        assert!(c.downbeat.last_realign_t.is_infinite());
+    }
+
+    #[test]
+    fn a_drop_realigns_on_its_beat_even_unsure() {
+        let (mut c, mut t) = locked_clock();
+        let drop_at = 20.5; // grid beat 41: the clock's beat_in_bar 1
+        let det = move |t: f64| {
+            let mut d = downbeat(t, 0, 0.1);
+            if t > drop_at + 0.2 {
+                d.phrases = 1;
+                d.phrase_start = Some(drop_at);
+                d.phrase_from_drop = true;
+            }
+            Some(d)
+        };
+        let left = 30.0 - t;
+        run_downbeat(&mut c, &mut t, left, det);
+        assert_eq!(c.downbeat.realigns, 1);
+        let b = c.beat_at(drop_at);
+        assert!((b / 4.0 - (b / 4.0).round()).abs() < 1e-3, "the drop is a 1: {b}");
+        // Phrase: counted from the drop.
+        let s = c.state(drop_at + 4.0 * 2.0 + 0.1);
+        assert_eq!((s.phrase_bar, s.phrase_bars), (Some(4), 8));
+        // Not under Tempo auto: a drop only updates the display.
+        let mut m = TempoClock::default();
+        m.apply_downbeat(det(20.0), 20.0);
+        m.apply_downbeat(det(21.0), 21.0);
+        assert_eq!(m.downbeat.realigns, 0);
+    }
+
+    #[test]
+    fn realigns_are_at_least_8_s_apart() {
+        let (mut c, mut t) = locked_clock();
+        // A drop every 2 s (a detector gone wrong), each on another beat.
+        run_downbeat(&mut c, &mut t, 30.0, |t| {
+            let k = (t / 2.0).floor() as u64;
+            let at = k as f64 * 2.0 + 0.5 * (k % 3) as f64;
+            Some(DownbeatDetection { phrases: k, phrase_start: Some(at), phrase_from_drop: true, ..downbeat(t, 0, 0.1) })
+        });
+        assert!(c.downbeat.realigns <= 4, "{}", c.downbeat.realigns);
+    }
+
+    #[test]
+    fn a_realign_moves_whole_beats_only() {
+        let (mut c, mut t) = locked_clock();
+        let before = c.beat_at(t) - c.beat_at(t).floor();
+        run_downbeat(&mut c, &mut t, 6.0, |t| Some(downbeat(t, 2, 0.9)));
+        assert_eq!(c.downbeat.realigns, 1);
+        let after = c.beat_at(t) - c.beat_at(t).floor();
+        assert!((after - before).abs() < 0.02, "phase {before} → {after}");
     }
 }

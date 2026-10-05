@@ -1284,6 +1284,8 @@
   #latMenu button { background: #ffffff0d; color: #fff; }
   #latFlash { width: 16px; height: 16px; border-radius: 50%; background: #2a2f44; }
   #latFlash.on { background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+  .beats span.suggest { outline: 2px dashed var(--warn); outline-offset: 2px; }
+  .tempo #downbeatHint, .tempo #phraseHint { white-space: nowrap; }
   .tb-master { display: flex; flex-direction: column; flex: none; gap: 0; padding: 3px 10px 1px; border-radius: 12px; background: #0b0d15; border: 1px solid #22263a; }
   .tb-master .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0; }
   .tb-master label { margin: 0; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #aeb4cf; }
@@ -1537,6 +1539,10 @@
         <div class="hint">Ne retarde jamais l'arrêt : Échap, noir et désarmement agissent sur l'image suivante.</div>
       </div>
     </span>
+    <!-- Temps 1 (T-235): the detected "1", dotted on its beat dot. -->
+    <span class="hint" id="downbeatHint" style="margin:0" title="Temps 1 suggéré par l'analyse audio (voyant en pointillé). En Tempo auto, la mesure ne se recale seule que sur un drop ou quand la détection devient sûre." hidden>Temps 1 suggéré</span>
+    <button id="downbeatAccept" data-ctl="tempo.downbeat_accept" data-control="tempo.downbeat_accept" title="tempo.downbeat_accept : recaler la mesure sur le temps 1 suggéré" hidden>Accepter</button>
+    <span class="hint tb-extra" id="phraseHint" style="margin:0" title="Mesure dans la phrase (8 ou 16 mesures), comptée depuis le dernier drop ou la dernière fin de break" hidden></span>
   </div>
   <!-- Maître (T-271): the same control as LIVE › Direct › Luminosité maître. -->
   <div class="tb-master" title="Luminosité maître : 100 % au plus, la limite de sécurité s'applique après">
@@ -7673,6 +7679,15 @@ function showTempo(t) {
   // The text stays short (the bar is one row at 1280 px); the value is in the title.
   $('latBtn').title = 'Latence : décalage de sortie ' + (off ? fmtMs(off) : 'aucun') + ', latence estimée, calage à l\'oreille';
   if (LAT && LAT.data && LAT.data.config.output_offset_ms !== off && !LAT.send) { LAT.data.config.output_offset_ms = off; showLatency(); }
+  // Temps 1 suggéré (T-235): a dotted outline on the dot where the music's
+  // "1" falls, the text and *Accepter* (a resync on it).
+  const db = t.downbeat, sugg = !!(db && t.downbeat_suggested);
+  document.querySelectorAll('#beats span').forEach((d, i) => d.classList.toggle('suggest', sugg && i === db.beat_in_bar_offset));
+  $('downbeatHint').hidden = $('downbeatAccept').hidden = !sugg;
+  if (sugg) $('downbeatHint').textContent = `Temps 1 suggéré ${Math.round(100 * db.confidence)} %`;
+  const phrase = t.phrase_bar != null;
+  $('phraseHint').hidden = !phrase;
+  $('phraseHint').textContent = phrase ? `phrase ${t.phrase_bar + 1}/${t.phrase_bars}` : '';
 }
 $('tempoAuto').addEventListener('click', () => post('/api/control', { id: 'tempo.auto', value: $('tempoAuto').classList.contains('active') ? 0 : 1 }));
 document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => { const id = scopedId(b.dataset.ctl); if (id) post('/api/control', { id }); }));

@@ -286,6 +286,8 @@ impl ControlRegistry {
 
         add("tempo.tap".into(), "Tap tempo".into(), "tempo", ControlKind::Trigger, true);
         add("tempo.resync".into(), "Recaler sur le 1".into(), "tempo", ControlKind::Trigger, true);
+        // T-235: resync on the detected "1" (*Temps 1 suggéré › Accepter*).
+        add("tempo.downbeat_accept".into(), "Accepter le temps 1 suggéré".into(), "tempo", ControlKind::Trigger, true);
         add("tempo.bpm".into(), "BPM".into(), "tempo", cont(tempo::MIN_BPM as f32, tempo::MAX_BPM as f32, 120.0, Unit::Bpm), true);
         add("tempo.nudge_up".into(), "Avancer la phase".into(), "tempo", ControlKind::Trigger, true);
         add("tempo.nudge_down".into(), "Retarder la phase".into(), "tempo", ControlKind::Trigger, true);
@@ -497,6 +499,11 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "tempo.resync" => {
             let t = s.now_s();
             s.tempo.resync(t);
+        }
+        "tempo.downbeat_accept" => {
+            if !s.tempo.accept_downbeat() {
+                return Err(ControlError::Refused("aucun temps 1 suggéré"));
+            }
         }
         "tempo.bpm" => {
             let t = s.now_s();
