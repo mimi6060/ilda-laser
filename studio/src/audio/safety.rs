@@ -143,6 +143,10 @@ pub struct FlashLimiter {
     out: f32,
     dimming: bool,
     since_dip: f32,
+    /// Seconds since the last light onset. Starts at 0: whatever the
+    /// output showed before this limiter existed may have just lit up
+    /// (the look appearing, a cue starting), so the first light-up after
+    /// a dip waits a period from the limiter's start too.
     since_light: f32,
     /// Deepest darkness of the current (or last) dip, and whether its
     /// light onset was counted (`since_light` runs from there).
@@ -153,7 +157,7 @@ pub struct FlashLimiter {
 
 impl Default for FlashLimiter {
     fn default() -> Self {
-        Self { out: 0.0, dimming: false, since_dip: f32::INFINITY, since_light: f32::INFINITY, peak: 0.0, onset_seen: true, limited: false }
+        Self { out: 0.0, dimming: false, since_dip: f32::INFINITY, since_light: 0.0, peak: 0.0, onset_seen: true, limited: false }
     }
 }
 
@@ -375,9 +379,34 @@ pub(crate) mod tests {
         }
     }
 
+    /// T-144 report: the studio's first lit frame, then the route's first
+    /// dip and light-up 140 ms later, made a 7 Hz pair on the output's
+    /// meter with a 3 Hz cap. The first light-up waits a period from the
+    /// limiter's start: the light before it may have just come up.
+    #[test]
+    fn the_first_light_up_waits_a_period_from_the_start() {
+        let mut lim = FlashLimiter::default();
+        let (mut t, mut back) = (0.0f32, None);
+        for i in 0..60 {
+            t += FPS60;
+            let dark = if i < 8 { 1.0 } else { 0.0 };
+            if lim.step(dark, FPS60, 3.0, false) == 0.0 && back.is_none() {
+                back = Some(t);
+            }
+        }
+        let back = back.expect("comes back");
+        assert!(back + 1e-3 >= 1.0 / 3.0, "back after {back} s");
+        assert!(back < 1.0 / 3.0 + 2.0 * FPS60, "and not later than needed: {back} s");
+    }
+
     #[test]
     fn the_light_comes_back_at_once_when_its_period_allows() {
         let mut lim = FlashLimiter::default();
+        // Lit for a period first: the light may have come up just before
+        // the limiter started (`since_light` starts at 0).
+        for _ in 0..6 {
+            assert_eq!(lim.step(0.0, FPS60, 10.0, false), 0.0);
+        }
         assert_eq!(lim.step(1.0, FPS60, 10.0, false), 1.0, "the first dip is free");
         assert_eq!(lim.step(0.0, FPS60, 10.0, false), 0.0, "back up at once");
         assert_eq!(lim.step(1.0, FPS60, 10.0, false), 0.0, "a second dip too soon: held lit");
