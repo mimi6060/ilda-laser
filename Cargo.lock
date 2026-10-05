@@ -792,6 +792,7 @@ dependencies = [
  "image",
  "jiff",
  "laser-dac",
+ "libc",
  "libusb1-sys",
  "log",
  "midir",

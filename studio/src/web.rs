@@ -2018,6 +2018,34 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (method, p) if p.starts_with("/api/external") || p.starts_with("/api/dmx/") => external_route(request, shared, method, p),
         (method, p) if p == "/api/timecode" || p == "/api/timecode/arm" => timecode_route(request, shared, method, p),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
+        // The copy to a second location (T-450): settings, and « Copier maintenant ».
+        (Method::Get, "/api/backup") => json_response(shared.lock().unwrap().project.backup.view()),
+        (Method::Post, "/api/backup") => match body::<crate::backup::SettingsRequest>(request) {
+            Ok(req) => {
+                let hub = std::sync::Arc::clone(&shared.lock().unwrap().project.backup);
+                match crate::backup::set_settings(&hub, req) {
+                    Ok(_) => json_response(hub.view()),
+                    Err((code, t)) => text(code, &t),
+                }
+            }
+            Err(r) => r,
+        },
+        (Method::Post, "/api/backup/now") => {
+            let hub = std::sync::Arc::clone(&shared.lock().unwrap().project.backup);
+            if hub.settings().active_dir().is_none() {
+                text(409, "aucun dossier de copie : activez la copie de sauvegarde dans RÉGLAGES")
+            } else {
+                // Serialised here (lock released); written by the copy thread.
+                let p = crate::project::current_project(shared);
+                match crate::project::project_bytes(&p) {
+                    Ok(bytes) => {
+                        hub.queue(crate::backup::Job::project(&p.name, bytes));
+                        json_response(hub.view())
+                    }
+                    Err(e) => text(500, &format!("{e:#}")),
+                }
+            }
+        }
         _ => text(404, "not found"),
     }
 }
@@ -2716,7 +2744,7 @@ fn project_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool,
     let action = path.strip_prefix("/api/project").unwrap_or("").trim_start_matches('/');
     let reply = crate::project::route(shared, post, action, &raw);
     // Another project in memory (T-285): nothing of the previous one can be undone.
-    if post && matches!(action, "new" | "open" | "recover") && matches!(reply, Some(crate::project::Reply::Json(_))) {
+    if post && matches!(action, "new" | "open" | "recover" | "version-open") && matches!(reply, Some(crate::project::Reply::Json(_))) {
         shared.lock().unwrap().history.clear();
     }
     match reply {
@@ -3414,7 +3442,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     s.gate.sync_estop(&s.estop);
     s.sync_audience();
     let arm = s.gate.status(&s.estop);
-    json!({
+    let mut v = json!({
         "settings": s.settings,
         "settings_rev": s.settings_rev,
         "festival": festival_view(s),
@@ -3456,7 +3484,10 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "project_modified": s.project.last_modified,
         "notices_last": s.notices.last(),
         "history": s.history.summary(),
-    })
+    });
+    // T-450: free space and the copy to a second location.
+    v["storage"] = json!(s.project.backup.status());
+    v
 }
 
 /// `GET /api/diagnostics/report[?project=1]` (T-403): a zip to send to

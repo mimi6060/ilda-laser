@@ -46,8 +46,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Current format. T-288 adds migrations from older ones.
+/// Current format (T-288): `MIGRATIONS` leads every older one here.
 pub const PROJECT_FORMAT: u32 = 1;
+/// Project migrations: `MIGRATIONS[i]` takes format `i + 1` to `i + 2`,
+/// on the raw JSON, before decoding (`formats::run_chain`). Format 1 is
+/// the first, so none yet; a new format adds its step here and bumps
+/// `PROJECT_FORMAT` (a test checks they agree), with a fixture of the
+/// previous format in `tests/fixtures/projects/`.
+pub const MIGRATIONS: &[crate::formats::Step] = &[];
 pub const EXTENSION: &str = "lsproj";
 pub const UNTITLED: &str = "Sans titre";
 const MAX_RECENT: usize = 10;
@@ -196,6 +202,11 @@ pub struct ProjectState {
     pub last_modified: bool,
     /// Autosave settings, status and recovery offer (autosave.rs, T-287).
     pub autosave: crate::autosave::AutosaveState,
+    /// The open project's file is from a newer version (its format): read
+    /// only, *Enregistrer* refused so it is never written over (T-288).
+    pub read_only: Option<u32>,
+    /// The copy to a second location (backup.rs, T-450).
+    pub backup: std::sync::Arc<crate::backup::BackupHub>,
 }
 
 impl ProjectState {
@@ -203,7 +214,7 @@ impl ProjectState {
     pub fn load(data_dir: &Path) -> Self {
         let recent_path = data_dir.join("recent.json");
         let file: RecentFile = crate::load_json(&recent_path);
-        Self { data_dir: data_dir.to_path_buf(), dir: data_dir.join("projects"), recent_path, current: file.current, recent: file.recent, extra: Map::new(), saved: 0, last_modified: false, autosave: crate::autosave::AutosaveState::load(data_dir) }
+        Self { data_dir: data_dir.to_path_buf(), dir: data_dir.join("projects"), recent_path, current: file.current, recent: file.recent, extra: Map::new(), saved: 0, last_modified: false, autosave: crate::autosave::AutosaveState::load(data_dir), read_only: None, backup: crate::backup::BackupHub::load(data_dir) }
     }
 
     /// Fingerprint of the project as last opened or saved.
@@ -269,10 +280,14 @@ pub fn startup(s: &mut Shared) {
     let current = s.project.current.clone().filter(|n| valid_name(n) && s.project.path_of(n).is_file());
     s.project.current = current.clone();
     s.project.saved = match current {
-        Some(name) => match read_in_data_dir(&s.project.path_of(&name), &data_dir) {
-            Ok(p) => {
-                s.project.extra = p.extra.clone();
-                p.fingerprint()
+        Some(name) => match open_in_data_dir(&s.project.path_of(&name), &data_dir) {
+            Ok(loaded) => {
+                s.project.extra = loaded.project.extra.clone();
+                s.project.read_only = loaded.newer();
+                if let Some(v) = loaded.newer() {
+                    log::warn!("projet « {name} » : format {v}, plus récent que cette version : lecture seule");
+                }
+                loaded.project.fingerprint()
             }
             Err(e) => {
                 log::warn!("project {name}: {e:#}");
@@ -328,6 +343,11 @@ fn name_of(path: &Path) -> String {
 /// route targets (which need the control registry, see `check_lfos`) is
 /// checked here.
 pub fn read(path: &Path) -> Result<Project> {
+    parse(&read_text(path)?)
+}
+
+/// The text of a project file, checked to be a plain file of sensible size.
+fn read_text(path: &Path) -> Result<String> {
     let meta = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => anyhow::anyhow!("projet introuvable : {}", name_of(path)),
         _ => anyhow::anyhow!("projet illisible : {e}"),
@@ -338,8 +358,7 @@ pub fn read(path: &Path) -> Result<Project> {
     if meta.len() > MAX_BYTES {
         bail!("projet trop gros ({} Mo au plus)", MAX_BYTES >> 20);
     }
-    let text = std::fs::read_to_string(path).context("projet illisible")?;
-    parse(&text)
+    std::fs::read_to_string(path).context("projet illisible")
 }
 
 /// `read` for a file of the data directory (the open project at startup,
@@ -347,30 +366,125 @@ pub fn read(path: &Path) -> Result<Project> {
 /// to the quarantine folder and reported (T-402). A valid JSON file that
 /// fails the checks (e.g. a newer format) stays where it is.
 pub fn read_in_data_dir(path: &Path, data_dir: &Path) -> Result<Project> {
-    read(path).inspect_err(|_| {
-        let q = data_dir.join(crate::datafile::QUARANTINE);
-        let damaged = std::fs::read(path).is_ok_and(|b| serde_json::from_slice::<serde::de::IgnoredAny>(&b).is_err());
-        if damaged {
-            crate::datafile::set_aside(path, &q, "projet illisible (JSON invalide)", false);
-        }
-    })
+    read(path).inspect_err(|_| set_aside_if_damaged(path, data_dir))
 }
 
-/// Parses and checks a project from JSON text.
+/// `load_file` then `upgrade_file`, for the open project at startup, with
+/// the same quarantine as `read_in_data_dir`.
+pub fn open_in_data_dir(path: &Path, data_dir: &Path) -> Result<Loaded> {
+    let (loaded, text) = load_file(path).inspect_err(|_| set_aside_if_damaged(path, data_dir))?;
+    if let Err(e) = upgrade_file(path, &loaded, &text) {
+        log::warn!("projet {} : mise à jour du format non écrite : {e:#}", path.display());
+    }
+    Ok(loaded)
+}
+
+fn set_aside_if_damaged(path: &Path, data_dir: &Path) {
+    let q = data_dir.join(crate::datafile::QUARANTINE);
+    let damaged = std::fs::read(path).is_ok_and(|b| serde_json::from_slice::<serde::de::IgnoredAny>(&b).is_err());
+    if damaged {
+        crate::datafile::set_aside(path, &q, "projet illisible (JSON invalide)", false);
+    }
+}
+
+/// Parses and checks a project from JSON text, migrated to the current
+/// format. A project from a newer version is refused (see `parse_file`
+/// for opening one read only).
 pub fn parse(text: &str) -> Result<Project> {
-    let value: Value = serde_json::from_str(text).map_err(|e| anyhow::anyhow!("projet illisible (JSON invalide : {e})"))?;
-    let Some(obj) = value.as_object() else { bail!("projet illisible : ce n'est pas un fichier projet") };
+    let loaded = parse_file(text)?;
+    if let Some(v) = loaded.newer() {
+        bail!("{} (format {v}, cette version lit le format {PROJECT_FORMAT})", NEWER_FR);
+    }
+    Ok(loaded.project)
+}
+
+/// Why *Enregistrer* is refused on a project from a newer version.
+pub const NEWER_FR: &str = "Projet créé par une version plus récente : ouverture en lecture seule";
+/// Said once a project was migrated on opening.
+pub const MIGRATED_FR: &str = "Projet mis à jour vers le nouveau format (copie de sauvegarde créée)";
+
+/// A project file as read: checked, migrated to the current format, or
+/// (newer format) decoded as is, for a read-only opening.
+pub struct Loaded {
+    pub project: Project,
+    /// The format written in the file.
+    pub from: u32,
+    /// The format this version writes.
+    pub current: u32,
+}
+
+impl Loaded {
+    /// Format of a file from an older version, migrated in memory.
+    pub fn migrated(&self) -> Option<u32> {
+        (self.from < self.current).then_some(self.from)
+    }
+
+    /// Format of a file from a newer version.
+    pub fn newer(&self) -> Option<u32> {
+        (self.from > self.current).then_some(self.from)
+    }
+}
+
+fn version_of(v: &Value) -> Result<u32> {
+    let Some(obj) = v.as_object() else { bail!("projet illisible : ce n'est pas un fichier projet") };
     match obj.get("format_version").and_then(Value::as_u64) {
         None => bail!("projet illisible : « format_version » manquant"),
         Some(0) => bail!("projet illisible : « format_version » invalide"),
-        Some(v) if v > PROJECT_FORMAT as u64 => {
-            bail!("projet créé par une version plus récente de Laser Studio (format {v}, cette version lit le format {PROJECT_FORMAT})")
-        }
-        Some(_) => {}
+        Some(v) => Ok(u32::try_from(v).unwrap_or(u32::MAX)),
     }
-    let mut p: Project = serde_json::from_value(value).map_err(|e| anyhow::anyhow!("projet illisible : {e}"))?;
-    check(&mut p)?;
-    Ok(p)
+}
+
+/// `parse` without refusing a newer format: its JSON is decoded as is, its
+/// unknown sections kept in `extra`; the caller opens it read only. A
+/// newer file whose known sections no longer decode is refused, saying so.
+pub fn parse_file(text: &str) -> Result<Loaded> {
+    parse_with(text, MIGRATIONS)
+}
+
+fn parse_with(text: &str, chain: &[crate::formats::Step]) -> Result<Loaded> {
+    let value: Value = serde_json::from_str(text).map_err(|e| anyhow::anyhow!("projet illisible (JSON invalide : {e})"))?;
+    let from = version_of(&value)?;
+    let current = crate::formats::current_of(chain);
+    let newer = from > current;
+    let value = if newer { value } else { crate::formats::run_chain(value, from, chain).map_err(|e| anyhow::anyhow!("projet illisible : {e:#}"))? };
+    let decoded: Result<Project> = serde_json::from_value(value).map_err(|e| anyhow::anyhow!("projet illisible : {e}")).and_then(|mut p| {
+        check(&mut p)?;
+        Ok(p)
+    });
+    let project = match decoded {
+        Ok(p) => p,
+        Err(e) if newer => bail!("projet créé par une version plus récente de Laser Studio (format {from}, cette version lit le format {current}) : {e:#}"),
+        Err(e) => return Err(e),
+    };
+    Ok(Loaded { project, from, current })
+}
+
+/// Reads a project file for opening (*Ouvrir*, the open project at
+/// startup): its text and what it holds, migrated in memory if older, as
+/// is if newer (`parse_file`). Nothing is written: see `upgrade_file`.
+pub fn load_file(path: &Path) -> Result<(Loaded, String)> {
+    load_file_with(path, MIGRATIONS)
+}
+
+fn load_file_with(path: &Path, chain: &[crate::formats::Step]) -> Result<(Loaded, String)> {
+    let text = read_text(path)?;
+    Ok((parse_with(&text, chain)?, text))
+}
+
+/// Once a migrated project is open: its original is copied to
+/// `<nom>.v<N>.bak.lsproj`, then the file is rewritten in the current
+/// format (header kept). If the copy fails, nothing is written. Returns
+/// the copy, or `None` when the file was current (or newer: never written).
+pub fn upgrade_file(path: &Path, loaded: &Loaded, original: &str) -> Result<Option<PathBuf>> {
+    if loaded.migrated().is_none() {
+        return Ok(None);
+    }
+    let bak = crate::formats::keep_original(path, loaded.from, original.as_bytes())?;
+    let mut p = loaded.project.clone();
+    p.format_version = loaded.current;
+    write_project(path, &p)?;
+    log::info!("Projet {} : format {} mis à jour, original dans {}", name_of(path), loaded.from, bak.display());
+    Ok(Some(bak))
 }
 
 /// Checks every section and brings numbers into range. The scene order
@@ -637,16 +751,24 @@ fn stamp(p: &mut Project) {
     p.saved_at = utc_now();
 }
 
-/// Stamps the header and writes `p` atomically (autosave).
-pub fn write_project_stamped(path: &Path, p: &mut Project) -> Result<()> {
+/// Stamps the header and writes `p` atomically (autosave). Returns the
+/// bytes written (for the copy to a second location, T-450).
+pub fn write_project_stamped(path: &Path, p: &mut Project) -> Result<Vec<u8>> {
     stamp(p);
-    write_project(path, p)
+    let json = project_bytes(p)?;
+    write_atomic(path, &json)?;
+    Ok(json)
+}
+
+/// A project as written to its file: pretty JSON, a final newline.
+pub fn project_bytes(p: &Project) -> Result<Vec<u8>> {
+    let mut json = serde_json::to_vec_pretty(p).context("échec de la mise en forme du projet")?;
+    json.push(b'\n');
+    Ok(json)
 }
 
 fn write_project(path: &Path, p: &Project) -> Result<()> {
-    let mut json = serde_json::to_vec_pretty(p).context("échec de la mise en forme du projet")?;
-    json.push(b'\n');
-    write_atomic(path, &json)
+    write_atomic(path, &project_bytes(p)?)
 }
 
 /// Atomic write (`datafile::write_atomic`, which also never writes over a
@@ -689,29 +811,58 @@ struct PathRequest {
     path: String,
 }
 
-/// `GET /api/project`, `POST /api/project/{new,open,save,save-as}`, and
-/// for autosave (T-287) `POST /api/project/{autosave,recover,recover-ignore}`.
+#[derive(Deserialize)]
+struct VersionRequest {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    file: String,
+}
+
+/// What a successful action adds to the project info it replies with.
+#[derive(Default)]
+struct Done {
+    /// Files that could not be written.
+    warnings: Vec<String>,
+    /// One French line for the page (a migration, read only, a version).
+    notice: Option<String>,
+    /// A name to offer in « Enregistrer sous… » (a version opened as a copy).
+    suggested_name: Option<String>,
+}
+
+impl From<Vec<String>> for Done {
+    fn from(warnings: Vec<String>) -> Self {
+        Done { warnings, ..Done::default() }
+    }
+}
+
+/// `GET /api/project`, `POST /api/project/{new,open,save,save-as}`, for
+/// autosave (T-287) `POST /api/project/{autosave,recover,recover-ignore}`,
+/// and for named versions (T-288) `GET /api/project/versions`,
+/// `POST /api/project/{version-save,version-open,version-delete}`.
 /// Runs on the HTTP worker thread; the lock is held only to copy the
 /// state out or swap it in, never for file I/O.
 pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Option<Reply> {
     let path_req = || serde_json::from_str::<PathRequest>(body).map_err(|e| Reply::Text(400, format!("JSON invalide : {e}")));
-    if post && matches!(action, "new" | "open" | "save" | "save-as") {
+    let version_req = || serde_json::from_str::<VersionRequest>(body).map_err(|e| Reply::Text(400, format!("JSON invalide : {e}")));
+    if post && matches!(action, "new" | "open" | "save" | "save-as" | "version-open") {
         // Another project, or a save: the recovery question is moot.
         shared.lock().unwrap().project.autosave.offer = None;
     }
     let reply = match (post, action) {
         (false, "") => return Some(Reply::Json(info(shared))),
         (false, "quit-check") => return Some(Reply::Json(json!(quit_check(shared)))),
+        (false, "versions") => return Some(Reply::Json(versions_info(shared))),
         (true, "autosave") => match serde_json::from_str::<crate::autosave::SettingsRequest>(body) {
             Ok(req) => crate::autosave::set_settings(shared, req)
-                .map(|()| Vec::new())
+                .map(|()| Done::default())
                 .map_err(|e| Reply::Text(500, format!("impossible d'enregistrer les préférences : {e:#}"))),
             Err(e) => Err(Reply::Text(400, format!("JSON invalide : {e}"))),
         },
-        (true, "recover") => recover(shared),
+        (true, "recover") => recover(shared).map(Done::from),
         (true, "recover-ignore") => {
             crate::autosave::ignore(shared);
-            Ok(Vec::new())
+            Ok(Done::default())
         }
         (true, "new") => open_project(shared, None),
         (true, "open") => match path_req() {
@@ -725,56 +876,97 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
             Err(e) => Err(e),
         },
         (true, "save") => {
-            let current = shared.lock().unwrap().project.current.clone();
-            match current {
-                Some(name) => save_project(shared, &name),
-                None => Err(Reply::Text(409, "projet sans nom : utilisez « Enregistrer sous… »".into())),
+            let (current, read_only) = {
+                let s = shared.lock().unwrap();
+                (s.project.current.clone(), s.project.read_only)
+            };
+            match (current, read_only) {
+                (Some(_), Some(v)) => Err(Reply::Text(409, read_only_fr(v))),
+                (Some(name), None) => save_project(shared, &name).map(Done::from),
+                (None, _) => Err(Reply::Text(409, "projet sans nom : utilisez « Enregistrer sous… »".into())),
             }
         }
         (true, "save-as") => match path_req() {
             Ok(req) => {
-                let dir = shared.lock().unwrap().project.dir.clone();
+                let (dir, current, read_only) = {
+                    let s = shared.lock().unwrap();
+                    (s.project.dir.clone(), s.project.current.clone(), s.project.read_only)
+                };
                 match resolve(&dir, &req.path) {
-                    Ok(path) => save_project(shared, &name_of(&path)),
+                    // Never over the newer file itself.
+                    Ok(path) if read_only.is_some() && current.as_deref() == Some(name_of(&path).as_str()) => {
+                        Err(Reply::Text(409, format!("{NEWER_FR} : choisissez un autre nom pour la copie")))
+                    }
+                    Ok(path) => save_project(shared, &name_of(&path)).map(Done::from),
                     Err(e) => Err(Reply::Text(400, format!("{e:#}"))),
                 }
             }
             Err(e) => Err(e),
         },
+        (true, "version-save") => version_req().and_then(|req| save_version(shared, &req.name)),
+        (true, "version-open") => version_req().and_then(|req| open_version(shared, &req.file)),
+        (true, "version-delete") => version_req().and_then(|req| delete_version(shared, &req.file)),
         _ => return None,
     };
     Some(match reply {
-        Ok(warnings) => {
+        Ok(done) => {
             let mut v = info(shared);
-            v["warnings"] = json!(warnings);
+            v["warnings"] = json!(done.warnings);
+            v["notice"] = json!(done.notice);
+            v["suggested_name"] = json!(done.suggested_name);
             Reply::Json(v)
         }
         Err(r) => r,
     })
 }
 
-/// Opens `path`, or a new empty project with `None`. Atomic: nothing
-/// changes unless the whole file is valid.
-fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Vec<String>, Reply> {
-    let mut p = match path {
-        Some(path) => read(path).map_err(|e| {
-            let code = if path.exists() { 400 } else { 404 };
-            Reply::Text(code, format!("{e:#}"))
-        })?,
-        None => Project::default(),
-    };
-    let name = path.map(name_of);
-    p.name = name.clone().unwrap_or_else(|| UNTITLED.into());
+/// The French line of a read-only project (format `v`).
+fn read_only_fr(v: u32) -> String {
+    format!("{NEWER_FR} (format {v}) : « Enregistrer » est désactivé ; « Enregistrer sous… » en fait une copie au format actuel")
+}
+
+/// Checks `p` against the controls and swaps it in, then writes the
+/// working copy (lock released). Returns the files not written.
+fn swap_in(shared: &Mutex<Shared>, p: &Project) -> Result<Vec<String>, Reply> {
     let w = {
         let mut s = shared.lock().unwrap();
-        check_lfos(&p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
-        apply(&mut s, &p);
+        check_lfos(p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+        apply(&mut s, p);
         let data_dir = s.project.data_dir.clone();
         working_paths(&s, &data_dir)
     };
-    let warnings = persist(&w, &p);
+    let warnings = persist(&w, p);
     for e in &warnings {
         log::warn!("project open: failed to write {e}");
+    }
+    Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
+}
+
+/// Opens `path`, or a new empty project with `None`. Atomic: nothing
+/// changes unless the whole file is valid. An older file is migrated (its
+/// original kept, T-288); a newer one opens read only.
+fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Done, Reply> {
+    let loaded = match path {
+        Some(path) => Some(load_file(path).map_err(|e| {
+            let code = if path.exists() { 400 } else { 404 };
+            Reply::Text(code, format!("{e:#}"))
+        })?),
+        None => None,
+    };
+    let (mut p, migrated, newer) = match &loaded {
+        Some((l, _)) => (l.project.clone(), l.migrated(), l.newer()),
+        None => (Project::default(), None, None),
+    };
+    let name = path.map(name_of);
+    p.name = name.clone().unwrap_or_else(|| UNTITLED.into());
+    let mut warnings = swap_in(shared, &p)?;
+    let mut notice = newer.map(read_only_fr);
+    if let (Some(path), Some((l, text)), Some(_)) = (path, &loaded, migrated) {
+        // The file follows, its original copied first (lock released).
+        match upgrade_file(path, l, text) {
+            Ok(_) => notice = Some(MIGRATED_FR.into()),
+            Err(e) => warnings.push(format!("{e:#} : le fichier garde son ancien format")),
+        }
     }
     let mut s = shared.lock().unwrap();
     let mut now = snapshot(&s);
@@ -782,6 +974,7 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Vec<Strin
     s.project.saved = now.fingerprint();
     s.project.last_modified = false;
     s.project.extra = std::mem::take(&mut p.extra);
+    s.project.read_only = newer;
     match &name {
         Some(name) => s.project.remember(name),
         None => s.project.current = None,
@@ -790,7 +983,7 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Vec<Strin
     let shown = name.clone().unwrap_or_else(|| UNTITLED.into());
     log::info!("Projet ouvert : « {shown} »{}", if warnings.is_empty() { "" } else { " (avec des erreurs d'écriture)" });
     s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": shown, "new": name.is_none(), "armed": s.gate.is_armed() }));
-    Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
+    Ok(Done { warnings, notice, suggested_name: None })
 }
 
 /// *Récupérer* (T-287): opens the offered autosave as the open project,
@@ -819,28 +1012,120 @@ fn recover(shared: &Mutex<Shared>) -> Result<Vec<String>, Reply> {
     Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
 }
 
-/// Saves the current state as project `name` (in `projects/`).
+/// Saves the current state as project `name` (in `projects/`), then hands
+/// the same bytes to the copy to a second location (T-450), which writes
+/// them on its own thread: its result never decides the save's.
 fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply> {
-    let (mut p, path, shows) = {
+    let (mut p, path, shows, backup) = {
         let s = shared.lock().unwrap();
         let mut p = snapshot(&s);
         p.extra = s.project.extra.clone();
-        (p, s.project.path_of(name), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()))
+        (p, s.project.path_of(name), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()), std::sync::Arc::clone(&s.project.backup))
     };
     p.timelines = shows.load_all();
     p.name = name.to_string();
     stamp(&mut p);
-    write_project(&path, &p).map_err(|e| {
+    let bytes = project_bytes(&p).and_then(|json| write_atomic(&path, &json).map(|()| json)).map_err(|e| {
         log::error!("Projet « {name} » : échec de l'enregistrement : {e:#}");
         Reply::Text(500, format!("échec de l'enregistrement : {e:#}"))
     })?;
     log::info!("Projet enregistré : « {name} »");
+    backup.queue(crate::backup::Job::project(name, bytes));
     let mut s = shared.lock().unwrap();
     s.project.saved = p.fingerprint();
     s.project.last_modified = false;
+    s.project.read_only = None;
     s.project.remember(name);
     s.project.save_recent();
     Ok(Vec::new())
+}
+
+/// The current project with its timelines and unknown sections, stamped
+/// and named: what *Enregistrer* would write (lock held only to copy).
+pub fn current_project(shared: &Mutex<Shared>) -> Project {
+    let (mut p, name, shows) = {
+        let s = shared.lock().unwrap();
+        let mut p = snapshot(&s);
+        p.extra = s.project.extra.clone();
+        (p, s.project.current.clone().unwrap_or_else(|| UNTITLED.into()), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()))
+    };
+    p.timelines = shows.load_all();
+    p.name = name;
+    stamp(&mut p);
+    p
+}
+
+// ---------- named versions (T-288) ----------
+
+/// The versions folder of the open project, and its name.
+fn versions_dir(shared: &Mutex<Shared>) -> (PathBuf, String) {
+    let s = shared.lock().unwrap();
+    let project = s.project.current.clone().unwrap_or_else(|| UNTITLED.into());
+    (crate::versions::dir_of(&s.project.data_dir, &project), project)
+}
+
+/// `GET /api/project/versions`: the open project's versions, newest first.
+fn versions_info(shared: &Mutex<Shared>) -> Value {
+    let (dir, project) = versions_dir(shared);
+    json!({ "project": project, "dir": dir, "versions": crate::versions::list(&dir) })
+}
+
+/// *Enregistrer une version…*: the current state, as *Enregistrer* would
+/// write it, under `versions/<projet>/`. The project itself is untouched
+/// (still modified if it was).
+fn save_version(shared: &Mutex<Shared>, label: &str) -> Result<Done, Reply> {
+    let label = label.trim();
+    if !valid_name(label) {
+        return Err(Reply::Text(400, format!("nom de version invalide ({NAME_RULE})")));
+    }
+    let (dir, _) = versions_dir(shared);
+    let p = current_project(shared);
+    let path = crate::versions::new_path(&dir, crate::versions::now_secs(), label);
+    write_project(&path, &p).map_err(|e| Reply::Text(500, format!("échec de l'enregistrement de la version : {e:#}")))?;
+    log::info!("Version « {label} » du projet « {} » enregistrée : {}", p.name, path.display());
+    Ok(Done { notice: Some(format!("Version « {label} » enregistrée")), ..Done::default() })
+}
+
+/// *Ouvrir comme copie*: the version becomes a new *Sans titre* project,
+/// modified; the project it was saved from is never written. Same checks
+/// and swap as opening; a version in a newer format is refused.
+fn open_version(shared: &Mutex<Shared>, file: &str) -> Result<Done, Reply> {
+    let (dir, project) = versions_dir(shared);
+    let (path, label) = crate::versions::resolve(&dir, file).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+    let (loaded, _) = load_file(&path).map_err(|e| Reply::Text(if path.exists() { 400 } else { 404 }, format!("{e:#}")))?;
+    if let Some(v) = loaded.newer() {
+        return Err(Reply::Text(400, format!("version créée par une version plus récente de Laser Studio (format {v}) : ouvrez-la avec celle-ci")));
+    }
+    let mut p = loaded.project;
+    p.name = UNTITLED.into();
+    let warnings = swap_in(shared, &p)?;
+    let mut s = shared.lock().unwrap();
+    // Unsaved: nothing on disk is this copy yet.
+    s.project.saved = 0;
+    s.project.last_modified = true;
+    s.project.extra = std::mem::take(&mut p.extra);
+    s.project.read_only = None;
+    s.project.current = None;
+    s.project.save_recent();
+    log::info!("Version « {label} » du projet « {project} » ouverte comme copie");
+    s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": UNTITLED, "version_of": project, "version": label, "armed": s.gate.is_armed() }));
+    let suggested: String = format!("{project} {label}").chars().take(64).collect::<String>().trim().to_string();
+    Ok(Done {
+        warnings,
+        notice: Some(format!("Version « {label} » ouverte comme copie : « Enregistrer sous… » pour la garder")),
+        suggested_name: valid_name(&suggested).then_some(suggested),
+    })
+}
+
+/// *Supprimer* a version (the page asks first).
+fn delete_version(shared: &Mutex<Shared>, file: &str) -> Result<Done, Reply> {
+    let (dir, _) = versions_dir(shared);
+    let (path, label) = crate::versions::resolve(&dir, file).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(Done { notice: Some(format!("Version « {label} » supprimée")), ..Done::default() }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Reply::Text(404, format!("version introuvable : {label}"))),
+        Err(e) => Err(Reply::Text(500, format!("impossible de supprimer la version : {e}"))),
+    }
 }
 
 /// The current project for a diagnostic report (T-403), without its
@@ -866,10 +1151,11 @@ pub fn diagnostic_snapshot(shared: &Mutex<Shared>) -> Value {
 /// `GET /api/project`: name, file, whether it changed since it was opened
 /// or saved, the projects folder's files and the recent list.
 fn info(shared: &Mutex<Shared>) -> Value {
-    let (mut p, current, saved, dir, recent, shows, autosave) = {
+    let (mut p, current, saved, dir, recent, shows, autosave, read_only, backup) = {
         let s = shared.lock().unwrap();
         let pr = &s.project;
-        (snapshot(&s), pr.current.clone(), pr.saved, pr.dir.clone(), pr.recent.clone(), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()), pr.autosave.status())
+        let shows = crate::timeline::ShowStore::new(s.shows.dir().to_path_buf());
+        (snapshot(&s), pr.current.clone(), pr.saved, pr.dir.clone(), pr.recent.clone(), shows, pr.autosave.status(), pr.read_only, pr.backup.view())
     };
     p.timelines = shows.load_all();
     let projects = list(&dir);
@@ -882,6 +1168,12 @@ fn info(shared: &Mutex<Shared>) -> Value {
         "projects": projects,
         "recent": recent,
         "autosave": autosave,
+        // T-288: the file is from a newer version (its format): read only.
+        "read_only": read_only.is_some(),
+        "file_format": read_only,
+        "read_only_message": read_only.map(read_only_fr),
+        // T-450: the copy to a second location.
+        "backup": backup,
     })
 }
 
@@ -1292,7 +1584,8 @@ mod tests {
         let scenes = json!([{ "name": "A", "settings": Settings::default(), "duration_secs": 1.0 }]);
         let bad = [
             ("json", "{ pas du json".to_string()),
-            ("version", json!({ "format_version": 99, "scenes": scenes }).to_string()),
+            // A newer project opens read only (T-288), unless its known sections no longer decode.
+            ("version", json!({ "format_version": 99, "scenes": 5 }).to_string()),
             ("noversion", json!({ "scenes": scenes }).to_string()),
             ("dup", json!({ "format_version": 1, "scenes": [scenes[0], scenes[0]] }).to_string()),
             ("show", json!({ "format_version": 1, "scenes": scenes, "timelines": [{ "name": "../../evil" }] }).to_string()),
@@ -1524,6 +1817,250 @@ mod tests {
         assert_eq!(s.data_warnings[0].file, "projects/Cassé.lsproj");
         assert!(!s.data_warnings[0].safety);
         assert!(s.gate.interlock_ok(crate::interlock::DATA_ACK), "not a safety file");
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---------- T-288: formats, migrations, named versions ----------
+
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/projects")
+    }
+
+    fn get(shared: &Mutex<Shared>, action: &str) -> Value {
+        match route(shared, false, action, "").expect("known route") {
+            Reply::Json(v) => v,
+            Reply::Text(code, t) => panic!("{code} {t}"),
+        }
+    }
+
+    #[test]
+    fn the_migration_chain_leads_to_the_current_format() {
+        assert_eq!(crate::formats::current_of(MIGRATIONS), PROJECT_FORMAT);
+    }
+
+    /// Every fixture (made by our own code, one or more per format) opens;
+    /// those of our formats open strictly, a newer one only read only.
+    #[test]
+    fn every_fixture_project_opens() {
+        let mut seen = 0;
+        for entry in std::fs::read_dir(fixtures()).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|x| x != EXTENSION) {
+                continue;
+            }
+            seen += 1;
+            let text = std::fs::read_to_string(&path).unwrap();
+            let loaded = parse_file(&text).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+            if loaded.from <= PROJECT_FORMAT {
+                assert!(parse(&text).is_ok(), "{}", path.display());
+            } else {
+                assert!(loaded.newer().is_some() && parse(&text).is_err(), "{}", path.display());
+            }
+            // And through the whole opening path, in a studio of its own.
+            let dir = temp_dir(&format!("fixture-{seen}"));
+            std::fs::create_dir_all(dir.join("projects")).unwrap();
+            std::fs::copy(&path, dir.join("projects").join(path.file_name().unwrap())).unwrap();
+            let shared = studio(&dir);
+            let reply = post(&shared, &dir, "open", json!({ "path": name_of(&path) })).unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+            assert_eq!(reply["read_only"], loaded.newer().is_some(), "{}", path.display());
+            assert!(!shared.lock().unwrap().gate.is_armed());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        assert!(seen >= 3, "fixtures found: {seen}");
+    }
+
+    #[test]
+    fn the_full_fixture_brings_its_sections_back() {
+        let p = read(&fixtures().join("v1-complet.lsproj")).unwrap();
+        assert_eq!(p.playlist, ["Ouverture", "Final"]);
+        assert_eq!(p.timelines.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Intro"]);
+        assert_eq!(p.tempo.bpm, 128.0);
+        assert_eq!((p.pages.cols, p.pages.rows), (6, 4));
+    }
+
+    /// Writes the fixtures of the current format from a studio state (run
+    /// by hand when a format is added: `cargo test -p laser-studio --
+    /// --ignored write_fixtures`). The files are ours: no third-party content.
+    #[test]
+    #[ignore]
+    fn write_fixtures() {
+        let dir = temp_dir("write-fixtures");
+        let shared = studio(&dir);
+        {
+            let mut s = shared.lock().unwrap();
+            s.scenes.upsert(scene("Ouverture", 0.4)).unwrap();
+            s.scenes.upsert(scene("Final", 0.9)).unwrap();
+            s.grid.set_size(6, 4).unwrap();
+            s.live.size = 0.8;
+            let t = s.now_s();
+            s.tempo.set_bpm_manual(128.0, t);
+            s.shows.save(&Show { name: "Intro".into(), ..Default::default() }).unwrap();
+        }
+        post(&shared, &dir, "save-as", json!({ "path": "complet" })).unwrap();
+        let mut p = read(&dir.join("projects/complet.lsproj")).unwrap();
+        p.app_version = "0.1.0".into();
+        p.saved_at = "2026-10-05T12:00:00Z".into();
+        let out = fixtures().join(format!("v{PROJECT_FORMAT}-complet.lsproj"));
+        std::fs::create_dir_all(fixtures()).unwrap();
+        std::fs::write(&out, project_bytes(&p).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_newer_project_opens_read_only_and_is_never_written_over() {
+        let dir = temp_dir("newer-open");
+        let shared = studio(&dir);
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        let future = fixtures().join("v99-futur.lsproj");
+        let original = std::fs::read(&future).unwrap();
+        std::fs::write(dir.join("projects/Futur.lsproj"), &original).unwrap();
+        let v = post(&shared, &dir, "open", json!({ "path": "Futur" })).unwrap();
+        assert_eq!((v["read_only"].as_bool(), v["file_format"].as_u64()), (Some(true), Some(99)));
+        assert!(v["notice"].as_str().unwrap().starts_with(NEWER_FR), "{v}");
+        assert_eq!(shared.lock().unwrap().scenes.list().len(), 1, "its known sections are in");
+        // Enregistrer: refused, also over the same name with « Enregistrer sous… ».
+        shared.lock().unwrap().live.size = 0.3;
+        let (code, t) = post(&shared, &dir, "save", json!({})).unwrap_err();
+        assert_eq!(code, 409);
+        assert!(t.starts_with(NEWER_FR), "{t}");
+        assert_eq!(post(&shared, &dir, "save-as", json!({ "path": "Futur" })).unwrap_err().0, 409);
+        assert_eq!(std::fs::read(dir.join("projects/Futur.lsproj")).unwrap(), original, "untouched");
+        assert!(!dir.join("projects").read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(".bak")), "no migration of a newer file");
+        // A copy under another name: written in our format, no longer read only.
+        let v = post(&shared, &dir, "save-as", json!({ "path": "Copie" })).unwrap();
+        assert_eq!(v["read_only"], false);
+        let copy = read(&dir.join("projects/Copie.lsproj")).unwrap();
+        assert_eq!(copy.format_version, PROJECT_FORMAT);
+        assert!(copy.extra.contains_key("section_du_futur"), "unknown sections kept in the copy");
+        // At startup too: the open project from a newer version is read only.
+        let shared = studio(&dir);
+        post(&shared, &dir, "open", json!({ "path": "Futur" })).unwrap();
+        drop(shared);
+        let shared = studio(&dir);
+        assert_eq!(shared.lock().unwrap().project.read_only, Some(99));
+        assert_eq!(post(&shared, &dir, "save", json!({})).unwrap_err().0, 409);
+        assert_eq!(std::fs::read(dir.join("projects/Futur.lsproj")).unwrap(), original);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_newer_project_that_no_longer_decodes_is_refused_saying_why() {
+        let text = json!({ "format_version": 7, "scenes": "plus une liste" }).to_string();
+        let e = format!("{:#}", parse_file(&text).err().unwrap());
+        assert!(e.contains("version plus récente") && e.contains("format 7"), "{e}");
+        let e = format!("{:#}", parse(&json!({ "format_version": 7 }).to_string()).unwrap_err());
+        assert!(e.contains(NEWER_FR) && e.contains("format 7"), "{e}");
+    }
+
+    fn add_note(mut v: Value) -> Result<Value> {
+        v["note_v2"] = json!("ajoutée par la migration");
+        Ok(v)
+    }
+
+    #[test]
+    fn a_migration_keeps_the_original_before_writing() {
+        const CHAIN: &[crate::formats::Step] = &[add_note];
+        let dir = temp_dir("migrate");
+        let path = dir.join("Ancien.lsproj");
+        let original = std::fs::read_to_string(fixtures().join("v1-minimal.lsproj")).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let (loaded, text) = load_file_with(&path, CHAIN).unwrap();
+        assert_eq!((loaded.from, loaded.current, loaded.migrated(), loaded.newer()), (1, 2, Some(1), None));
+        assert_eq!(loaded.project.extra.get("note_v2"), Some(&json!("ajoutée par la migration")), "migrated before decoding");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "loading writes nothing");
+        // The copy fails (a folder in its place): nothing is written.
+        std::fs::create_dir_all(dir.join("Ancien.v1.bak.lsproj/x")).unwrap();
+        assert!(upgrade_file(&path, &loaded, &text).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_dir_all(dir.join("Ancien.v1.bak.lsproj")).unwrap();
+        let bak = upgrade_file(&path, &loaded, &text).unwrap().unwrap();
+        assert_eq!(bak, dir.join("Ancien.v1.bak.lsproj"));
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), original, "original kept byte for byte");
+        let now: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((now["format_version"].as_u64(), now["note_v2"].as_str()), (Some(2), Some("ajoutée par la migration")));
+        // Reopened: current, nothing more to do; the first original stays.
+        let (again, text) = load_file_with(&path, CHAIN).unwrap();
+        assert_eq!(again.migrated(), None);
+        assert_eq!(upgrade_file(&path, &again, &text).unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), original);
+        // `.bak` files are not projects.
+        assert_eq!(list(&dir), ["Ancien"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_named_version_opens_as_a_copy_without_touching_the_project() {
+        let dir = temp_dir("versions");
+        let shared = studio(&dir);
+        shared.lock().unwrap().scenes.upsert(scene("Avant", 0.5)).unwrap();
+        post(&shared, &dir, "save-as", json!({ "path": "Festival" })).unwrap();
+        // Unsaved change, then a version: the project stays modified.
+        shared.lock().unwrap().scenes.upsert(scene("Version", 0.6)).unwrap();
+        let v = post(&shared, &dir, "version-save", json!({ "name": "avant festival" })).unwrap();
+        assert_eq!(v["notice"], "Version « avant festival » enregistrée");
+        assert_eq!(v["modified"], true);
+        assert_eq!(post(&shared, &dir, "version-save", json!({ "name": "../x" })).unwrap_err().0, 400);
+        let list = get(&shared, "versions");
+        assert_eq!(list["project"], "Festival");
+        let versions = list["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0]["name"], "avant festival");
+        let file = versions[0]["file"].as_str().unwrap().to_string();
+        assert!(dir.join("versions/Festival").join(&file).is_file());
+        // More changes, saved; then the version opens as a copy.
+        shared.lock().unwrap().scenes.upsert(scene("Après", 0.7)).unwrap();
+        post(&shared, &dir, "save", json!({})).unwrap();
+        let saved = std::fs::read(dir.join("projects/Festival.lsproj")).unwrap();
+        let v = post(&shared, &dir, "version-open", json!({ "file": file })).unwrap();
+        assert_eq!((v["name"].as_str(), v["modified"].as_bool(), v["file"].is_null()), (Some(UNTITLED), Some(true), true));
+        assert_eq!(v["suggested_name"], "Festival avant festival");
+        let names: Vec<String> = shared.lock().unwrap().scenes.list().iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"Version".to_string()) && !names.contains(&"Après".to_string()), "{names:?}");
+        assert_eq!(std::fs::read(dir.join("projects/Festival.lsproj")).unwrap(), saved, "the project is untouched");
+        assert!(!shared.lock().unwrap().gate.is_armed());
+        // « Enregistrer sous… » keeps it; the original project is still there.
+        post(&shared, &dir, "save-as", json!({ "path": "Festival avant festival" })).unwrap();
+        assert_eq!(list_names(&dir), ["Festival", "Festival avant festival"]);
+        // Versions of the project, deleted.
+        post(&shared, &dir, "open", json!({ "path": "Festival" })).unwrap();
+        assert_eq!(post(&shared, &dir, "version-delete", json!({ "file": "../../projects/Festival.lsproj" })).unwrap_err().0, 400);
+        assert_eq!(post(&shared, &dir, "version-open", json!({ "file": "20261005-2104-absente.lsproj" })).unwrap_err().0, 404);
+        post(&shared, &dir, "version-delete", json!({ "file": file })).unwrap();
+        assert!(get(&shared, "versions")["versions"].as_array().unwrap().is_empty());
+        assert!(dir.join("projects/Festival.lsproj").is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn list_names(dir: &Path) -> Vec<String> {
+        list(&dir.join("projects"))
+    }
+
+    #[test]
+    fn saving_hands_the_same_bytes_to_the_backup_copy() {
+        let dir = temp_dir("backup-save");
+        let copy = temp_dir("backup-save-copy");
+        let shared = studio(&dir);
+        let hub = std::sync::Arc::clone(&shared.lock().unwrap().project.backup);
+        crate::backup::set_settings(&hub, serde_json::from_value(json!({ "enabled": true, "dir": copy })).unwrap()).unwrap();
+        post(&shared, &dir, "save-as", json!({ "path": "Mon show" })).unwrap();
+        hub.run_pending();
+        let main = std::fs::read(dir.join("projects/Mon show.lsproj")).unwrap();
+        let copy_file = copy.canonicalize().unwrap().join("Laser Studio/Mon show.lsproj");
+        assert_eq!(std::fs::read(&copy_file).unwrap(), main, "identical byte for byte");
+        // The copy folder is gone: the save still works, a warning shows.
+        std::fs::remove_dir_all(&copy).unwrap();
+        shared.lock().unwrap().live.size = 0.2;
+        post(&shared, &dir, "save", json!({})).unwrap();
+        hub.run_pending();
+        assert_ne!(std::fs::read(dir.join("projects/Mon show.lsproj")).unwrap(), main, "main file written");
+        assert!(!copy.exists(), "never recreated");
+        let st = info(&shared)["backup"]["status"].clone();
+        assert_eq!(st["backup_ok"], false);
+        assert!(st["warning"].as_str().unwrap().starts_with("Copie de sauvegarde indisponible"), "{st}");
+        let mut s = shared.lock().unwrap();
+        s.sync_notices();
+        assert!(s.notices.since(0).iter().any(|n| n.key.as_deref() == Some("backup") && !n.resolved));
         drop(s);
         let _ = std::fs::remove_dir_all(dir);
     }

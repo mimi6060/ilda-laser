@@ -18,6 +18,9 @@
 //! *Ignorer*. Recovering goes through the same path as opening a project:
 //! it never arms the laser and never touches calibration or safety.
 //!
+//! With a backup folder (T-450), each autosave is copied there too, by
+//! the copy thread (`backup.rs`), with the same ring.
+//!
 //! The settings (`AutosaveSettings`) are app preferences in
 //! `<data-dir>/prefs.json`, not part of a project.
 
@@ -234,7 +237,7 @@ pub fn spawn(shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>) -> std::threa
 /// One look at the project: writes an autosave if one is due (`flush`:
 /// without waiting for the delay). Returns the file written, if any.
 pub fn tick(shared: &Mutex<Shared>, deb: &mut Debounce, now: f64, flush: bool) -> Option<PathBuf> {
-    let (mut p, name, saved, shows, dir, settings, write) = {
+    let (mut p, name, saved, shows, dir, settings, write, backup) = {
         let s = shared.lock().unwrap_or_else(|e| e.into_inner());
         let a = &s.project.autosave;
         // Disabled, or a recovery offer pending: changes are still
@@ -244,7 +247,7 @@ pub fn tick(shared: &Mutex<Shared>, deb: &mut Debounce, now: f64, flush: bool) -
         p.extra = s.project.extra().clone();
         let name = s.project.current.clone().unwrap_or_else(|| UNTITLED.into());
         let shows = crate::timeline::ShowStore::new(s.shows.dir().to_path_buf());
-        (p, name, s.project.saved_fingerprint(), shows, a.dir.clone(), a.settings.clone(), write)
+        (p, name, s.project.saved_fingerprint(), shows, a.dir.clone(), a.settings.clone(), write, Arc::clone(&s.project.backup))
     };
     // Lock released: disk and serialisation from here on.
     p.timelines = shows.load_all();
@@ -263,8 +266,13 @@ pub fn tick(shared: &Mutex<Shared>, deb: &mut Debounce, now: f64, flush: bool) -
     }
     p.name = name.clone();
     let now_ms = now_ms();
-    let path = dir.join(format!("{name}-{}.{}", stamp(now_ms / 1000), project::EXTENSION));
-    let result = project::write_project_stamped(&path, &mut p).and_then(|()| prune(&dir, &name, settings.keep as usize));
+    let file = format!("{name}-{}.{}", stamp(now_ms / 1000), project::EXTENSION);
+    let path = dir.join(&file);
+    let result = project::write_project_stamped(&path, &mut p).and_then(|bytes| {
+        // The copy to a second location (T-450) gets the same bytes, on its thread.
+        backup.queue(crate::backup::Job::autosave(&file, &name, settings.keep as usize, bytes));
+        prune(&dir, &name, settings.keep as usize)
+    });
     let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
     let a = &mut s.project.autosave;
     match result {

@@ -1,0 +1,216 @@
+{
+  "format_version": 1,
+  "app_version": "0.1.0",
+  "saved_at": "2026-10-05T12:00:00Z",
+  "name": "complet",
+  "scenes": [
+    {
+      "name": "Ouverture",
+      "settings": {
+        "content": {
+          "kind": "shape",
+          "shape": "circle"
+        },
+        "color": [
+          0,
+          255,
+          0
+        ],
+        "scale": 0.4,
+        "rotation_speed": 0.0,
+        "brightness": 0.5,
+        "audio": {
+          "enabled": false,
+          "size": 0.5,
+          "rotate": 0.0,
+          "color_on_beat": true,
+          "flash": 0.0
+        },
+        "gate": "off",
+        "gate_beats": 0.2,
+        "gate_decay": false,
+        "strobe_div": 0.0,
+        "strobe_duty": 0.4
+      },
+      "duration_secs": 4.0
+    },
+    {
+      "name": "Final",
+      "settings": {
+        "content": {
+          "kind": "shape",
+          "shape": "circle"
+        },
+        "color": [
+          0,
+          255,
+          0
+        ],
+        "scale": 0.9,
+        "rotation_speed": 0.0,
+        "brightness": 0.5,
+        "audio": {
+          "enabled": false,
+          "size": 0.5,
+          "rotate": 0.0,
+          "color_on_beat": true,
+          "flash": 0.0
+        },
+        "gate": "off",
+        "gate_beats": 0.2,
+        "gate_decay": false,
+        "strobe_div": 0.0,
+        "strobe_duty": 0.4
+      },
+      "duration_secs": 4.0
+    }
+  ],
+  "playlist": [
+    "Ouverture",
+    "Final"
+  ],
+  "grid": {
+    "click_mode": "toggle",
+    "multi": false,
+    "max_active": 4,
+    "slots": {},
+    "transition": {
+      "kind": "cut",
+      "length": {
+        "beats": 1.0
+      },
+      "in_flash": false
+    },
+    "quantize": "off",
+    "beat_every": 0
+  },
+  "pages": {
+    "cols": 6,
+    "rows": 4,
+    "pages": []
+  },
+  "timelines": [
+    {
+      "name": "Intro",
+      "time_base": "seconds",
+      "tempo_map": [],
+      "audio": null,
+      "tracks": [],
+      "markers": [],
+      "loop_region": null,
+      "timecode": null
+    }
+  ],
+  "tempo": {
+    "bpm": 128.0,
+    "beats_per_bar": 4
+  },
+  "live": {
+    "brightness": 1.0,
+    "size": 0.8,
+    "size_x": 1.0,
+    "size_y": 1.0,
+    "pos_x": 0.0,
+    "pos_y": 0.0,
+    "rot_angle": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rot_speed": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rot_sync": false,
+    "rot_reverse": false,
+    "perspective": 0.3,
+    "speed": 1.0,
+    "color": {
+      "kind": "normal"
+    },
+    "color_params": {
+      "rgb": [
+        255,
+        0,
+        0
+      ],
+      "hue": 0.0,
+      "palette": 0,
+      "palette_mode": "nearest",
+      "offset": 0,
+      "spread": 1.0,
+      "rainbow_rate": {
+        "beats": 4.0
+      },
+      "chase_step": {
+        "beats": 1.0
+      },
+      "chase_spread": "stroke"
+    },
+    "strobe": {
+      "on": false,
+      "hold": false,
+      "rate": {
+        "hz": 8.0
+      },
+      "duty": 0.5
+    },
+    "trace": 1.0,
+    "dots": 0.0,
+    "mirror": "none",
+    "prism": 1,
+    "freeze": false,
+    "black": false,
+    "scan": 1.0
+  },
+  "layers": {
+    "layers": [
+      {
+        "dimmer": 1.0,
+        "mute": false,
+        "solo": false
+      },
+      {
+        "dimmer": 1.0,
+        "mute": false,
+        "solo": false
+      },
+      {
+        "dimmer": 1.0,
+        "mute": false,
+        "solo": false
+      },
+      {
+        "dimmer": 1.0,
+        "mute": false,
+        "solo": false
+      }
+    ],
+    "point_budget": 750,
+    "optimizer": {
+      "enabled": false,
+      "lit_step": 0.025,
+      "blank_step": 0.15,
+      "corner_rad_per_point": 0.6,
+      "corner_min_deg": 30.0,
+      "max_corner_dwell": 8,
+      "endpoint_dwell": 3,
+      "reorder": true,
+      "max_points": 1000
+    }
+  },
+  "lfos": [],
+  "audio_routes": {
+    "mix": 0.5,
+    "routes": []
+  },
+  "palettes": [],
+  "midi": {
+    "profiles": {}
+  },
+  "figures": [],
+  "user_cues": [],
+  "cuelists": [],
+  "scan_presets": []
+}

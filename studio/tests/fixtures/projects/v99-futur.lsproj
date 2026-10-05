@@ -1,0 +1,10 @@
+{
+  "format_version": 99,
+  "app_version": "99.0.0",
+  "saved_at": "2030-01-01T00:00:00Z",
+  "name": "Futur",
+  "scenes": [
+    { "name": "Venue du futur", "duration_secs": 4.0, "settings": {}, "champ_du_futur": 1 }
+  ],
+  "section_du_futur": { "réglage": true }
+}

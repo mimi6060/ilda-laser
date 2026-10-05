@@ -105,6 +105,8 @@ pub fn allowed(path: &str) -> bool {
         "/api/midi/virtual/model",
         // Writing the open project to its own file loses nothing.
         "/api/project/save",
+        // A copy of the open project to the backup folder (T-450): same.
+        "/api/backup/now",
         "/api/project/recover-ignore",
         // Ticking the pre-show checklist is not editing it.
         "/api/checklist/operator",
