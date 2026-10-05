@@ -52,6 +52,7 @@ mod keep_awake;
 mod live;
 mod menubar;
 mod midi;
+mod mpe;
 mod netin;
 mod notices;
 mod onboarding;

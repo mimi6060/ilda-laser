@@ -206,6 +206,9 @@ pub struct OutputConfig {
     /// Scan speed range and points per frame (T-171). Absent in older
     /// files: the defaults.
     pub scan: OutputScan,
+    /// What the exposure estimator (T-257) is given: audience distance and
+    /// attenuation. Informative only. Absent in older files: the defaults.
+    pub exposure: crate::mpe::ExposureSettings,
 }
 
 impl Default for OutputConfig {
@@ -216,6 +219,7 @@ impl Default for OutputConfig {
             projector: ProjectorInfo::default(),
             color: ColorCalibration::default(),
             scan: OutputScan::default(),
+            exposure: crate::mpe::ExposureSettings::default(),
         }
     }
 }
@@ -539,6 +543,7 @@ impl OutputStore {
                 projector: o.projector.sanitized(),
                 color: o.color.sanitized(),
                 scan: o.scan.sanitized(),
+                exposure: o.exposure.sanitized(),
             });
         }
         if !seen.iter().any(|o| o.id == MAIN_OUTPUT) {
@@ -648,6 +653,7 @@ impl OutputStore {
             projector: projector.unwrap_or_else(|| current.projector.clone()),
             color: current.color,
             scan: current.scan,
+            exposure: current.exposure,
         };
         next.limits.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
         next.projector.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
@@ -677,6 +683,30 @@ impl OutputStore {
         }
         self.file = file;
         self.load_error = None;
+        Ok(next)
+    }
+
+    /// Changes what the exposure estimator of an output is given (T-257).
+    /// Informative: never touches a cap or the output, so it applies armed
+    /// or not. Out of range values are refused.
+    pub fn set_exposure(&mut self, id: &str, exposure: crate::mpe::ExposureSettings) -> Result<OutputConfig> {
+        let Some(current) = self.get(id).cloned() else {
+            bail!("Sortie inconnue : « {id} »");
+        };
+        exposure.validate()?;
+        let next = OutputConfig { exposure, ..current.clone() };
+        let mut file = self.file.clone();
+        if let Some(slot) = file.outputs.iter_mut().find(|o| o.id == id) {
+            *slot = next.clone();
+        }
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&file)?;
+            crate::datafile::replace(path, json.as_bytes()).map_err(|e| anyhow::anyhow!("enregistrement impossible de {} : {e:#}", path.display()))?;
+        }
+        if current.exposure != next.exposure {
+            log::info!("output {id}: exposure estimator inputs {:?} -> {:?}", current.exposure, next.exposure);
+        }
+        self.file = file;
         Ok(next)
     }
 
