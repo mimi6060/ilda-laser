@@ -2687,6 +2687,13 @@
         <label class="check"><input type="checkbox" id="kaEnabled"> Empêcher la mise en veille pendant un show</label>
         <div class="hint" id="kaStatus" role="status"></div>
         <div class="hint">Tant que le laser est armé ou qu'une timeline joue, le Mac et son écran ne se mettent pas en veille ; la veille redevient possible 5 s après. Réglage de cette machine (pas du projet).</div>
+        <label for="thumbMode">Vignettes</label>
+        <select id="thumbMode">
+          <option value="animated">Animées</option>
+          <option value="static">Fixes</option>
+          <option value="none">Aucune</option>
+        </select>
+        <div class="hint">Images des cases de la grille de cues. Animées : une mesure de chaque cue en boucle au tempo, seulement pour les cases à l'écran, à l'arrêt quand la fenêtre est cachée. Fixes ou Aucune allègent le processeur. Affichage seulement, rien ne part vers le laser. Réglage de ce navigateur.</div>
       </details>
     </section>
 
@@ -6352,7 +6359,9 @@ async function loadPresets() {
 }
 async function loadThumbs() {
   try { thumbs = await apiJson('GET', '/api/presets/thumbs', undefined, { cache: 'no-store' }); } catch { return; }
+  cueLoops.clear(); // a cue may have changed: its loop is asked for again
   document.querySelectorAll('#cues .cue').forEach(b => drawThumb(b.querySelector('canvas.th'), thumbs[b.dataset.id]));
+  loopsWanted();
 }
 // A thumbnail is one hex string, 5 bytes per point: x, y (0..255 = -1..1), r, g, b.
 function thumbPoints(hex) {
@@ -6365,6 +6374,7 @@ function thumbPoints(hex) {
 }
 function drawThumb(c, hex) {
   if (!c) return;
+  c._loopFrame = -1; // a loop (T-273) draws over it again
   const pts = hex ? thumbPoints(hex) : null;
   const g = c.getContext('2d'), W = c.width, H = c.height, S = H * 0.92;
   g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
@@ -6411,7 +6421,104 @@ function stopCuePreview() {
   clearTimeout(p.timer);
   p.b.classList.remove('previewing');
   drawThumb(p.b.querySelector('canvas.th'), thumbs[p.id]);
+  loopTick(); // its loop takes over again
 }
+
+// Animated thumbnails (T-273): one bar of each cue, 16 small pictures drawn
+// once by the studio aside (GET /api/presets/loops, only for the cells on
+// screen), looped here at the current tempo, on the beat. One timer for
+// the whole grid, which only wakes when a picture changes; nothing runs
+// while the tab is hidden, the grid is off screen or the setting says
+// « Fixes » / « Aucune ». Display only, nothing goes to the laser.
+const THUMB_MODE_KEY = 'laserStudio.thumbs', THUMB_MODES = ['animated', 'static', 'none'];
+let thumbMode = THUMB_MODES.includes(remembered(THUMB_MODE_KEY)) ? remembered(THUMB_MODE_KEY) : 'animated';
+const cueLoops = new Map();   // cue id -> { step, frames: [[x, y, colour or null]…] }
+const loopCells = new Set();  // the grid's canvases on screen
+let loopTimer = 0, loopAsking = false;
+const loopSeen = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+  for (const e of entries) {
+    if (e.isIntersecting) loopCells.add(e.target); else loopCells.delete(e.target);
+  }
+  loopsWanted();
+}) : null;
+// A frame parsed once: pixel positions in a 92 px picture and the colour
+// string of each lit point (null = blanked), so a redraw builds nothing.
+function loopFrame(hex) {
+  const S = 92 * 0.92;
+  return thumbPoints(hex).map(p => [46 + p[0] * S / 2, 46 - p[1] * S / 2,
+    p[2] + p[3] + p[4] === 0 ? null : `rgb(${[2, 3, 4].map(i => Math.round(255 * Math.sqrt(p[i]))).join(',')})`]);
+}
+// Without the halo, and one stroke per run of one colour: cheap enough
+// for a full page at the tempo.
+function drawLoopFrame(c, pts) {
+  const g = c.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+  g.lineWidth = 1.8; g.lineCap = 'round'; g.lineJoin = 'round';
+  let style = null, at = -1;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    if (!a[2] || !b[2]) continue;
+    if (b[2] !== style) {
+      if (style) g.stroke();
+      g.strokeStyle = style = b[2]; g.beginPath(); g.moveTo(a[0], a[1]);
+    } else if (at !== i - 1) g.moveTo(a[0], a[1]);
+    g.lineTo(b[0] + 0.01, b[1]); at = i;
+  }
+  if (style) g.stroke();
+}
+function loopsRunning() { return thumbMode === 'animated' && !document.hidden && loopCells.size > 0; }
+// Ask for the loops of the cells on screen not drawn yet; the studio
+// answers with those it has and draws the others aside (« pending »).
+async function loopsWanted() {
+  if (!loopsRunning() || loopAsking) { loopTick(); return; }
+  const ids = [...new Set([...loopCells].map(c => c.closest('.cue')?.dataset.id).filter(id => id && !cueLoops.has(id)))];
+  if (!ids.length) { loopTick(); return; }
+  loopAsking = true;
+  let r = null;
+  try { r = await apiJson('GET', '/api/presets/loops?ids=' + ids.map(encodeURIComponent).join(','), undefined, { cache: 'no-store' }); } catch { /* the still pictures stay */ }
+  loopAsking = false;
+  if (!r) return;
+  for (const [id, l] of Object.entries(r.loops || {})) {
+    cueLoops.set(id, l.frames.length ? { step: l.step_beats, frames: l.frames.map(loopFrame) } : null);
+  }
+  loopTick();
+  if (r.pending && r.pending.length) setTimeout(loopsWanted, 300);
+}
+function loopTick() {
+  clearTimeout(loopTimer); loopTimer = 0;
+  if (!loopsRunning()) return;
+  const t = tempoNow(), bpm = Math.max(20, (t && t.bpm) || +$('bpm').value || 120);
+  const beat = t ? t.beat : performance.now() / 1000 * bpm / 60;
+  let step = Infinity;
+  for (const c of loopCells) {
+    const b = c.closest('.cue'), l = b && cueLoops.get(b.dataset.id);
+    if (!l || (cuePreview && cuePreview.b === b)) continue;
+    const n = l.frames.length, i = ((Math.floor(beat / l.step) % n) + n) % n;
+    step = Math.min(step, l.step);
+    if (c._loopFrame !== i) { c._loopFrame = i; drawLoopFrame(c, l.frames[i]); }
+  }
+  if (step === Infinity) return;
+  // Wake at the next picture, on the beat grid.
+  const next = (Math.floor(beat / step) + 1) * step;
+  loopTimer = setTimeout(loopTick, Math.max(15, (next - beat) * 60000 / bpm + 2));
+}
+// After each grid render: watch the new canvases.
+function loopsObserve() {
+  loopCells.clear();
+  if (!loopSeen) return;
+  loopSeen.disconnect();
+  if (thumbMode !== 'animated') return;
+  document.querySelectorAll('#cues .cue canvas.th').forEach(c => loopSeen.observe(c));
+}
+document.addEventListener('visibilitychange', () => loopsWanted());
+function setThumbMode(mode) {
+  thumbMode = THUMB_MODES.includes(mode) ? mode : 'animated';
+  remember(THUMB_MODE_KEY, thumbMode);
+  $('thumbMode').value = thumbMode;
+  renderCues();
+}
+$('thumbMode').value = thumbMode;
+$('thumbMode').addEventListener('change', e => setThumbMode(e.target.value));
 async function loadSlots() {
   slots = (await apiJson('GET', '/api/cues')).slots || {};
   renderCues();
@@ -6491,7 +6598,7 @@ function renderCues() {
       const slot = slots[p.id] || {};
       const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '', slot.transition ? 'T' : '']
         .filter(Boolean).join(' ');
-      el.innerHTML = `<span class="key">${key}</span><canvas class="th" width="92" height="92"></canvas><span class="n"></span><span class="tag">${tag}</span>`
+      el.innerHTML = `<span class="key">${key}</span>${thumbMode === 'none' ? '' : '<canvas class="th" width="92" height="92"></canvas>'}<span class="n"></span><span class="tag">${tag}</span>`
         + (slot.protect_stop || slot.protect_solo ? LOCK_SVG.replace('<svg', `<svg class="lock"><title>${slot.protect_stop ? 'Protégé de Tout arrêter' : ''}${slot.protect_stop && slot.protect_solo ? ' · ' : ''}${slot.protect_solo ? 'Protégé du solo' : ''}</title`) : '');
       el.querySelector('.n').textContent = p.name;
       if (TRACK_TAGS[p.tag]) {
@@ -6538,6 +6645,7 @@ function renderCues() {
   $('gridHidden').textContent = pg.hidden
     ? ` · ${pg.hidden} cue${pg.hidden > 1 ? 's' : ''} de cette page hors grille : agrandir la grille pour ${pg.hidden > 1 ? 'les' : 'le'} voir` : '';
   $('gridPageRename').disabled = $('gridPageDelete').disabled = !pg.editable;
+  loopsObserve();
   paintCues();
 }
 function canDropOn(page) {
