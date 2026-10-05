@@ -50,6 +50,7 @@ mod lfo;
 mod interlock;
 mod help;
 mod keep_awake;
+mod latency;
 mod live;
 mod menubar;
 mod midi;
@@ -378,6 +379,9 @@ pub struct Shared {
     pub look_on: bool,
     /// The single tempo clock (see tempo.rs); times are seconds since `epoch`.
     pub tempo: tempo::TempoClock,
+    /// Where the *Décalage de sortie* is saved (latency.rs, T-246);
+    /// `None` in tests.
+    pub latency_path: Option<PathBuf>,
     pub epoch: Instant,
     /// Tests only: the simulated « now » `now_s` reads, set by the test
     /// rigs that drive the engine on a simulated clock (wall-clock time
@@ -846,7 +850,8 @@ impl Shared {
     /// The tempo clock now, for the timeline player.
     pub fn timeline_clock(&self) -> timeline::Clock {
         let t = self.now_s();
-        timeline::Clock { t, beat: self.tempo.beat_at(t), bpm: self.tempo.bpm, beats_per_bar: self.tempo.beats_per_bar }
+        // The effects' beat, like the engine's frame (T-246).
+        timeline::Clock { t, beat: self.tempo.effect_beat_at(t), bpm: self.tempo.bpm, beats_per_bar: self.tempo.beats_per_bar }
     }
 }
 
@@ -1315,7 +1320,13 @@ fn startup_state(cli: &Cli) -> Shared {
         cue_lists: cuelist::CueListStore::load_or_create(cli.data_dir.join("cuelists.json")),
         cue_list: Default::default(),
         look_on: true,
-        tempo: tempo::TempoClock::default(),
+        tempo: {
+            // The *Décalage de sortie* (T-246), clamped on load.
+            let mut tempo = tempo::TempoClock::default();
+            let _ = tempo.set_output_offset_ms(latency::load(&latency::path(&cli.data_dir)).output_offset_ms as f64);
+            tempo
+        },
+        latency_path: Some(latency::path(&cli.data_dir)),
         epoch,
         #[cfg(test)]
         sim_now: None,
@@ -1871,7 +1882,11 @@ impl Engine {
             // Quantised launches due now start, finished transitions end;
             // with the e-stop latched, every transition is cut (T-158/159).
             controls::deck_frame(&mut s, t);
-            let clock = engine::BeatClock { beat: s.tempo.beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
+            // *Décalage de sortie* (T-246): what is rendered reads the beat
+            // ahead by the output latency. Only the content: the gate, the
+            // e-stop, the safety chain and the strobe limiter below run on
+            // this very frame, on real time.
+            let clock = engine::BeatClock { beat: s.tempo.effect_beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
             self.live_state.set_clock(t, clock.beat);
             // « Figer » (T-142): while held, animation, LFOs and colour
             // effects read the time it was pressed at. The strobe, the

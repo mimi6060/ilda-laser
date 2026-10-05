@@ -3359,6 +3359,55 @@ fn the_estop_darkens_every_projector_and_a_lost_one_disarms_all() {
     assert!(lit(&wires[1].1) > 0);
 }
 
+// ---------- latency compensation (T-246) ----------
+
+/// The *Décalage de sortie* moves what the effects draw, never when a
+/// frame goes out: at either end of its range (and asked far beyond it),
+/// Escape, the blackout control and a disarm darken the very next frame,
+/// and the gate is never touched by the offset.
+#[test]
+fn a_large_output_offset_never_delays_a_stop() {
+    for offset in [1_000.0, -1_000.0] {
+        let mut rig = armed_square_rig(if offset > 0.0 { "latency-plus" } else { "latency-minus" });
+        controls::apply(&mut rig.s(), "tempo.output_offset", ControlInput::Value(offset), true).unwrap();
+        let applied = rig.s().tempo.output_offset_ms();
+        assert_eq!(applied.abs(), crate::tempo::MAX_OUTPUT_OFFSET_MS, "clamped to the range");
+        assert!(!rig.s().gate.is_armed(), "the offset never arms");
+        rig.tick();
+        assert_eq!(lit(&rig.wire), 0, "disarmed at start, offset or not");
+        // The effects (deck, timeline) read the predicted beat; the clock doesn't move.
+        {
+            let s = rig.s();
+            let t = s.now_s();
+            assert!((s.timeline_clock().beat - s.tempo.beat_at(t + applied as f64 / 1_000.0)).abs() < 1e-9);
+        }
+        let stops: [fn(&mut Shared); 3] = [
+            |s| s.emergency_stop(ArmSource::Keyboard),
+            |s| controls::apply(s, "transport.blackout", ControlInput::Value(1.0), true).unwrap(),
+            |s| s.gate.disarm(interlock::DisarmReason::User, ArmSource::Ui),
+        ];
+        for (i, stop) in stops.into_iter().enumerate() {
+            {
+                let mut s = rig.s();
+                let estop = Arc::clone(&s.estop);
+                s.gate.reset_estop(&estop);
+                s.request_arm(ArmSource::Ui).unwrap();
+            }
+            rig.tick();
+            assert!(lit(&rig.wire) > 0, "offset {offset}, stop {i}: lit while armed");
+            stop(&mut rig.s());
+            rig.tick();
+            assert_eq!(lit(&rig.wire), 0, "offset {offset}, stop {i}: dark on the very next frame");
+            assert!(!rig.wire.lock().unwrap().armed, "offset {offset}, stop {i}: the output disarmed at once");
+            rig.tick();
+            assert_eq!(lit(&rig.wire), 0, "offset {offset}, stop {i}: and it stays dark");
+        }
+        // A refused value (not a number) changes nothing.
+        assert!(controls::apply(&mut rig.s(), "tempo.output_offset", ControlInput::Value(f32::NAN), true).is_err());
+        assert_eq!(rig.s().tempo.output_offset_ms(), applied);
+    }
+}
+
 // ---------- live effects through the engine (T-142) ----------
 
 /// « Noir » held: the armed output and the preview go dark at once, a

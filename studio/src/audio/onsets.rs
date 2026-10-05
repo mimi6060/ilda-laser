@@ -90,6 +90,30 @@ const PRE_MAX_S: f32 = 0.03;
 const PRE_AVG_S: f32 = 0.1;
 const MIN_SPACING_S: f32 = 0.03;
 pub const MAX_LOOKAHEAD_HOPS: u8 = 2;
+/// A transient lands anywhere in the hop whose flux it lifts (the frame
+/// ending at that hop's end is the first to hold it), so that hop's end is
+/// on average half a hop after it. Without look-ahead the picker takes
+/// that first hop; with it, the ODF's real maximum one hop later (SuperFlux
+/// compares with the frame `LAG` = 2 hops back, so the next hop still sees
+/// the transient against silence, with more of it in the window). T-246.
+const FIRST_HOP_DELAY: f64 = 0.5;
+const PEAK_HOP_DELAY: f64 = 1.5;
+
+/// How late (s) the end of an onset's peak hop is after the transient,
+/// on average: taken off every onset time (T-246).
+pub fn peak_delay_s(sample_rate: u32, config: &OnsetConfig) -> f64 {
+    let hops = if config.lookahead_hops == 0 { FIRST_HOP_DELAY } else { PEAK_HOP_DELAY };
+    hops * HOP as f64 / sample_rate.max(1) as f64
+}
+
+/// The whole known analysis delay of an onset (s), peak delay plus
+/// look-ahead: how long after a transient its event is reported (T-246,
+/// shown next to the output offset). The onset times have it taken off;
+/// the beat tracking corrects its own (bpm.rs, `ODF_DELAY_WINDOWS`).
+pub fn analysis_delay_s(sample_rate: u32, config: &OnsetConfig) -> f64 {
+    let lookahead = config.lookahead_hops.min(MAX_LOOKAHEAD_HOPS) as f64;
+    peak_delay_s(sample_rate, config) + lookahead * HOP as f64 / sample_rate.max(1) as f64
+}
 /// Strength = peak / the band's loudest recent peak, which falls back
 /// with this time constant and never under `MIN_PEAK_REF`.
 const STRENGTH_RELEASE_S: f32 = 5.0;
@@ -186,8 +210,9 @@ pub struct Onsets {
     pub kick_strength: f32,
     pub snare_strength: f32,
     pub hat_strength: f32,
-    /// Audio time of the ODF peak (the end of that hop), before the
-    /// look-ahead: T-246 subtracts the analysis delay from the event time.
+    /// Audio time of the transient: the end of the ODF peak's hop (so
+    /// before the look-ahead) minus the peak delay (`peak_delay_s`,
+    /// T-246), on the clock the beat tracking and the tempo clock use.
     pub last_onset_t: f64,
     pub last_kick_t: f64,
     pub last_snare_t: f64,
@@ -299,6 +324,9 @@ struct HopInfo {
 pub struct OnsetDetector {
     config: OnsetConfig,
     hop_s: f32,
+    /// `peak_delay_s`, taken off every onset time (T-246).
+    peak_delay_s: f64,
+    sample_rate: u32,
     bins: usize,
     odf_bins: [Bins; ODF_COUNT],
     power_bins: [Bins; POWER_COUNT],
@@ -329,9 +357,12 @@ impl OnsetDetector {
         let hz_per_bin = rate / FFT_SIZE as f32;
         let bins = FFT_SIZE / 2 + 1;
         let odf_len = (8.0 / hop_s).ceil() as usize;
+        let config = config.sanitized();
         Self {
-            config: config.sanitized(),
+            config,
             hop_s,
+            peak_delay_s: peak_delay_s(sample_rate, &config),
+            sample_rate,
             bins,
             odf_bins: ODF_BANDS_HZ.map(|(lo, hi)| Bins::new(lo, hi, hz_per_bin, bins)),
             power_bins: POWER_BANDS_HZ.map(|(lo, hi)| Bins::new(lo, hi, hz_per_bin, bins)),
@@ -349,6 +380,7 @@ impl OnsetDetector {
 
     pub fn set_config(&mut self, config: OnsetConfig) {
         self.config = config.sanitized();
+        self.peak_delay_s = peak_delay_s(self.sample_rate, &self.config);
     }
 
     pub fn onsets(&self) -> Onsets {
@@ -447,7 +479,8 @@ impl OnsetDetector {
         let kick_spacing = hops(self.config.kick_refractory_ms / 1_000.0, self.hop_s);
         let decay = (-self.hop_s / STRENGTH_RELEASE_S).exp();
         let delta = self.config.delta as f32;
-        let at = |c: u64| t - (n - c) as f64 * self.hop_s as f64;
+        // The peak hop's end, less the peak delay: the transient (T-246).
+        let at = |c: u64| t - (n - c) as f64 * self.hop_s as f64 - self.peak_delay_s;
         let mut fired = [None; ODF_COUNT];
         for (i, (picker, &v)) in self.pickers.iter_mut().zip(&flux).enumerate() {
             let refractory = if i == ODF_LOW { kick_spacing } else { spacing };
@@ -643,6 +676,8 @@ pub(crate) mod tests {
         hat: Vec<f64>,
         /// The reported audio times of the kicks' ODF peaks.
         kick_t: Vec<f64>,
+        /// The same for any onset.
+        onset_t: Vec<f64>,
     }
 
     fn detect_with(signal: &[f32], rate: u32, config: AnalysisConfig) -> Events {
@@ -664,6 +699,9 @@ pub(crate) mod tests {
             note(o.hat, prev.hat, &mut e.hat);
             if o.kick > prev.kick {
                 e.kick_t.push(o.last_kick_t);
+            }
+            if o.onset > prev.onset {
+                e.onset_t.push(o.last_onset_t);
             }
             prev = o;
         }
@@ -769,6 +807,37 @@ pub(crate) mod tests {
             // A click is flat and broadband: it may read as a snare, never as a kick.
             assert!(e.kick.is_empty() && e.hat.is_empty(), "{e:?}");
         }
+    }
+
+    /// T-246: a transient's reported time is the transient itself, the
+    /// analysis delay (window + look-ahead) taken off, whatever the look-ahead.
+    #[test]
+    fn onset_times_are_corrected_for_the_analysis_delay() {
+        for lookahead_hops in 0..=MAX_LOOKAHEAD_HOPS {
+            let config = AnalysisConfig { onsets: OnsetConfig { lookahead_hops, ..Default::default() }, ..Default::default() };
+            let mut errors = Vec::new();
+            for offset in OFFSETS {
+                let hits: Vec<(f64, Hit)> = (0..8).map(|b| (offset + b as f64 * BEAT, Hit::Kick)).collect();
+                let e = detect_with(&render(4.5, &hits, |i| 0.001 * noise(i, 3)), RATE, config);
+                assert_eq!(e.kick_t.len(), 8, "look-ahead {lookahead_hops}, offset {offset}");
+                errors.extend(hits.iter().zip(&e.kick_t).map(|(h, &t)| t - h.0));
+                // A click: the sharpest transient there is.
+                let clicks: Vec<(f64, Hit)> = (0..8).map(|b| (offset + b as f64 * BEAT, Hit::Click)).collect();
+                let e = detect_with(&render(4.5, &clicks, |_| 0.0), RATE, config);
+                assert_eq!(e.onset_t.len(), 8, "look-ahead {lookahead_hops}, offset {offset}");
+                errors.extend(clicks.iter().zip(&e.onset_t).map(|(h, &t)| t - h.0));
+            }
+            let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+            let worst = errors.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+            assert!(mean.abs() <= 0.002, "look-ahead {lookahead_hops}: mean error {:.1} ms", mean * 1e3);
+            assert!(worst <= 0.005, "look-ahead {lookahead_hops}: worst error {:.1} ms", worst * 1e3);
+        }
+        let delay = |hops| analysis_delay_s(48_000, &OnsetConfig { lookahead_hops: hops, ..Default::default() });
+        let hop = HOP as f64 / 48_000.0;
+        assert!((delay(0) - 0.5 * hop).abs() < 1e-12);
+        assert!((delay(1) - 2.5 * hop).abs() < 1e-12);
+        assert!((delay(2) - 3.5 * hop).abs() < 1e-12);
+        assert_eq!(delay(9), delay(2), "look-ahead capped");
     }
 
     #[test]

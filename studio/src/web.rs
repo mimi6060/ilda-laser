@@ -1628,13 +1628,28 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Err(e) => e,
         },
         (Method::Get, "/api/festival") => json_response(festival_view(&shared.lock().unwrap())),
+        // Latency compensation (T-246): the *Décalage de sortie*, the
+        // analysis delay and the output's indicative latency.
+        (Method::Get, "/api/latency") => json_response(crate::latency::view(&shared.lock().unwrap())),
+        // `{ "output_offset_ms": -100..100 }`: clamped, a non-number refused.
+        // Only what the effects draw moves; never arming nor a frame's timing.
+        (Method::Post, "/api/latency") => match body::<LatencySet>(request) {
+            Ok(set) => {
+                let mut s = shared.lock().unwrap();
+                match crate::latency::set_offset(&mut s, set.output_offset_ms) {
+                    Ok(_) => json_response(crate::latency::view(&s)),
+                    Err(e) => text(400, e),
+                }
+            }
+            Err(e) => e,
+        },
         // A festival palette (T-130): `{ "palette": 0..7 }`, or `null` for
         // the looks' own colours. Lands on the configured boundary.
         (Method::Post, "/api/festival/palette") => match body::<FestivalPick>(request) {
             Ok(pick) => {
                 let mut s = shared.lock().unwrap();
                 let t = s.now_s();
-                let (beat, bpb) = (s.tempo.beat_at(t), s.tempo.beats_per_bar);
+                let (beat, bpb) = (s.tempo.effect_beat_at(t), s.tempo.beats_per_bar);
                 match s.festival.request(pick.palette, beat, bpb) {
                     Ok(()) => json_response(festival_view(&s)),
                     Err(e) => text(400, &e.to_string()),
@@ -3595,6 +3610,11 @@ fn timecode_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
 }
 
 #[derive(serde::Deserialize)]
+struct LatencySet {
+    output_offset_ms: f64,
+}
+
+#[derive(serde::Deserialize)]
 struct FestivalPick {
     palette: Option<usize>,
 }
@@ -3918,7 +3938,8 @@ fn evolving_status(s: &Shared) -> Vec<serde_json::Value> {
 /// animated mini graphs.
 fn lfo_positions(s: &Shared) -> Vec<serde_json::Value> {
     let t = s.now_s();
-    let beat = s.tempo.beat_at(t);
+    // The beat the engine's LFOs read (T-246).
+    let beat = s.tempo.effect_beat_at(t);
     s.lfos.list().iter().map(|m| json!({ "phase": m.position(t, beat).1, "value": m.wave_at(t, beat) })).collect()
 }
 
@@ -4801,6 +4822,32 @@ mod tests {
         for id in ["#armBtn", "#estopBtn", "#blackoutBtn", "#estopReset"] {
             assert!(skip.contains(id), "{id} is out of the long press");
         }
+    }
+
+    /// T-246: the latency API reads and sets the *Décalage de sortie*,
+    /// clamped, refuses a non-number, never arms and never moves the clock.
+    #[test]
+    fn latency_api_sets_the_offset_clamped_without_arming() {
+        let t = TestServer::start(false);
+        let (status, body) = t.request("GET", "/api/latency", "");
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["config"]["output_offset_ms"].as_f64(), v["min_ms"].as_f64(), v["max_ms"].as_f64()), (Some(0.0), Some(-100.0), Some(100.0)));
+        assert!(v["config"]["analysis_delay_ms"].as_f64().unwrap() > 0.0);
+        assert!(v["output"]["ms"].as_f64().unwrap() > 0.0);
+        let bpm = t.shared.lock().unwrap().tempo.bpm;
+        let (status, body) = t.request("POST", "/api/latency", r#"{"output_offset_ms":40}"#);
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["config"]["output_offset_ms"].as_f64(), Some(40.0));
+        assert_eq!(t.request("POST", "/api/latency", r#"{"output_offset_ms":1e6}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().tempo.output_offset_ms(), 100.0);
+        assert_eq!(t.request("POST", "/api/latency", r#"{"output_offset_ms":"x"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/latency", r#"{}"#).0, 400);
+        let s = t.shared.lock().unwrap();
+        assert_eq!(s.tempo.output_offset_ms(), 100.0, "a refused value changes nothing");
+        assert_eq!(s.tempo.bpm, bpm);
+        assert!(!s.gate.is_armed(), "the offset never arms");
     }
 
     /// T-404: the pattern API shows and leaves a pattern, never arms, and
