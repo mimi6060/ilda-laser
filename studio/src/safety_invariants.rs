@@ -1186,6 +1186,8 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // Live effects (T-142), from their own stream.
     let mut erng = Rng::new(seed ^ 0x0142_0142);
     let effects = erng.chance(0.25);
+    // « Préparer » (T-274), from its own stream.
+    let mut prng = Rng::new(seed ^ 0x0274_0274);
     let mut beats = 0;
     for frame in 0..frames {
         {
@@ -1289,6 +1291,17 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                         return Err(format!("frame {frame}: audience scanning unlocked while armed"));
                     }
                 }
+            }
+        }
+        // « Préparer » (T-274), from its own stream: prepare, adjust, the
+        // prepared view rendered, cleared or sent. Only « Envoyer » plays
+        // anything, as a cue press, and nothing of it arms.
+        if prng.chance(0.15) {
+            let mut s = rig.s();
+            let was = s.gate.is_armed();
+            random_prepared(&mut s, &mut prng, true);
+            if s.gate.is_armed() != was {
+                return Err(format!("frame {frame}: « Préparer » changed the arming"));
             }
         }
         for _ in 0..rng.below(3) {
@@ -3078,4 +3091,157 @@ fn prism_and_mirror_copies_go_through_the_safety_stage() {
     assert!(pts.iter().filter(|p| p.is_lit()).all(|p| p.x >= -1e-3), "nothing lit in the Blank zone");
     let runs = (1..pts.len()).filter(|&i| pts[i].is_lit() && !pts[i - 1].is_lit()).count();
     assert!(runs >= 4, "{runs} lit runs");
+}
+
+// ---------- « Préparer » (T-274) ----------
+
+/// One « Préparer » action as the page could send it: a cue prepared
+/// (sometimes one that doesn't exist), adjusted with values past their
+/// ranges, the prepared view rendered (the page polling), cleared, and
+/// with `may_send`, « Envoyer ».
+fn random_prepared(s: &mut Shared, rng: &mut Rng, may_send: bool) {
+    use crate::prepared;
+    match rng.below(if may_send { 6 } else { 5 }) {
+        0 | 1 => {
+            let id = if rng.chance(0.95) { random_preset(s, rng).0 } else { "pas-un-cue".to_string() };
+            let _ = prepared::prepare(s, &id);
+        }
+        2 => {
+            let pick = |rng: &mut Rng, lo: f32, hi: f32| rng.chance(0.6).then(|| rng.range(lo, hi));
+            let a = prepared::Adjust {
+                scale: pick(rng, -1.0, 3.0),
+                brightness: pick(rng, -1.0, 3.0),
+                rotation_speed: pick(rng, -2000.0, 2000.0),
+                color: rng.chance(0.5).then(|| [rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8]),
+            };
+            let _ = prepared::adjust(s, &a);
+        }
+        3 => {
+            for _ in 0..1 + rng.below(3) {
+                let _ = prepared::render(s);
+            }
+        }
+        4 => prepared::clear(s),
+        _ => {
+            let _ = prepared::send(s);
+        }
+    }
+}
+
+/// Rig `n` of a « Préparer » check: armed, with one more projector on a
+/// recording output (T-277).
+fn prepared_rig(seed: u64, n: usize) -> (Rig, Arc<Mutex<Wire>>, Rng) {
+    let mut rng = Rng::new(seed);
+    let mut s = test_support::shared();
+    s.safety.set(random_safety(&mut rng), true).unwrap();
+    s.outputs.set(MAIN_OUTPUT, Some(random_limits(&mut rng)), None, false, true).unwrap();
+    s.calibration = random_calibration(&mut rng);
+    let (_, look) = random_preset(&s, &mut rng);
+    s.settings = look;
+    let mut rig = Rig::new(s, &format!("prepared-{n}"), seed);
+    let (_, wire) = add_projectors(&mut rig, 1, None).pop().unwrap();
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    (rig, wire, rng)
+}
+
+/// Nothing prepared reaches any output before « Envoyer » (T-274): the
+/// same random session (cues, looks, live moves, transitions, arming,
+/// e-stop...) on three armed rigs, each with a second projector; on the
+/// third, a cue is prepared, adjusted, re-prepared, rendered and cleared
+/// at random all along (its own stream). Every frame, the main output and
+/// the other projector's output are the same on the three rigs, bit for
+/// bit (the first two are the control: the session replays exactly).
+/// Then « Envoyer » on the third plays the prepared cue through the deck.
+#[test]
+fn nothing_prepared_reaches_any_output_before_it_is_sent() {
+    let lit = std::cell::Cell::new(0usize);
+    run_property("nothing_prepared_reaches_any_output_before_it_is_sent", 274, 12, |seed| {
+        let mut rigs: Vec<(Rig, Arc<Mutex<Wire>>, Rng, u64)> = (0..3)
+            .map(|n| {
+                let (rig, wire, rng) = prepared_rig(seed, n);
+                (rig, wire, rng, 0)
+            })
+            .collect();
+        let mut prng = Rng::new(seed ^ 0x0274_0274);
+        {
+            let mut s = rigs[2].0.s();
+            let (id, _) = random_preset(&s, &mut prng);
+            let _ = crate::prepared::prepare(&mut s, &id);
+        }
+        for frame in 0..90 {
+            for (rig, _, rng, beats) in &mut rigs {
+                if rng.chance(0.3) {
+                    random_action(rig, rng, beats);
+                }
+            }
+            for _ in 0..1 + prng.below(3) {
+                random_prepared(&mut rigs[2].0.s(), &mut prng, false);
+            }
+            for (rig, _, _, _) in &mut rigs {
+                rig.tick();
+            }
+            let main: Vec<Vec<Point>> = rigs.iter().map(|(r, _, _, _)| r.wire.lock().unwrap().last.clone()).collect();
+            let other: Vec<Vec<Point>> = rigs.iter().map(|(_, w, _, _)| w.lock().unwrap().last.clone()).collect();
+            if main[0] != main[1] || other[0] != other[1] {
+                return Err(format!("frame {frame}: the control session did not replay exactly"));
+            }
+            if main[2] != main[0] {
+                return Err(format!("frame {frame}: the main output changed with a cue prepared ({} vs {} points)", main[2].len(), main[0].len()));
+            }
+            if other[2] != other[0] {
+                return Err(format!("frame {frame}: the second projector's output changed with a cue prepared"));
+            }
+            if rigs[2].0.s().frame != rigs[0].0.s().frame {
+                return Err(format!("frame {frame}: /api/frame's points changed with a cue prepared"));
+            }
+            lit.set(lit.get() + main[0].iter().any(|p| p.is_lit()) as usize);
+        }
+        // « Envoyer »: the prepared cue is pressed like any cue.
+        let mut s = rigs[2].0.s();
+        let (id, _) = random_preset(&s, &mut prng);
+        if s.deck.slot(&id).show.is_none() {
+            crate::prepared::prepare(&mut s, &id).map_err(|e| format!("prepare {id}: {e:?}"))?;
+            crate::prepared::send(&mut s).map_err(|e| format!("send {id}: {e:?}"))?;
+            if !s.deck.active.iter().any(|a| a.cue == id) && !s.deck.pending.iter().any(|p| p.cue == id) {
+                return Err(format!("« Envoyer » did not play {id}"));
+            }
+        }
+        Ok(())
+    });
+    assert!(lit.get() > 0, "the sessions sent light");
+}
+
+/// Armed, nothing on show: a prepared cue, its view rendered every
+/// frame, leaves every output dark; « Envoyer » lights it, through the
+/// same safety stage as any cue.
+#[test]
+fn a_prepared_cue_stays_dark_until_it_is_sent() {
+    let mut rig = armed_square_rig("prepared-dark");
+    let wires = add_projectors(&mut rig, 1, None);
+    rig.s().look_on = false;
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    let id = {
+        let mut s = rig.s();
+        let id = s.presets.iter().find(|p| p.id.starts_with("faisceaux")).unwrap_or(&s.presets[0]).id.clone();
+        crate::prepared::prepare(&mut s, &id).unwrap();
+        crate::prepared::adjust(&mut s, &crate::prepared::Adjust { brightness: Some(1.0), ..Default::default() }).unwrap();
+        id
+    };
+    for frame in 0..60 {
+        let preview = crate::prepared::render(&mut rig.s());
+        assert!(preview.iter().any(|p| p.is_lit()), "frame {frame}: the prepared view draws");
+        rig.tick();
+        assert_eq!(lit(&rig.wire), 0, "frame {frame}: the main output stays dark");
+        assert_eq!(lit(&wires[0].1), 0, "frame {frame}: the second projector stays dark");
+        assert!(rig.s().frame.iter().all(|p| !p.is_lit()), "frame {frame}: /api/frame stays dark");
+    }
+    assert!(rig.s().gate.is_armed(), "still armed");
+    assert_eq!(crate::prepared::send(&mut rig.s()).unwrap(), id);
+    for _ in 0..10 {
+        rig.tick();
+    }
+    assert!(lit(&rig.wire) > 0, "sent: the main output shows the cue");
+    assert!(lit(&wires[0].1) > 0, "sent: the second projector too");
 }

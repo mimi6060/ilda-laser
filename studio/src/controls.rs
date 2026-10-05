@@ -962,7 +962,24 @@ pub fn press_cue_at(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: boo
     press_cue_full(s, id, mode, down, src, ControlSource::from_id(src), t)
 }
 
+/// « Envoyer » (T-274): the prepared cue `id` pressed with the prepared
+/// look `look` instead of its own, through the same deck path as any
+/// press (quantise, transitions, logging). False if no such cue, or if
+/// its cell holds a show (never prepared).
+pub fn send_prepared(s: &mut Shared, id: &str, mode: Option<ClickMode>, look: Settings, src: Option<&'static str>) -> bool {
+    if s.deck.slot(id).show.is_some() {
+        return false;
+    }
+    let now = s.now_s();
+    press_cue_with(s, id, mode, true, src, ControlSource::from_id(src), now, Some(look))
+}
+
 fn press_cue_full(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, source: ControlSource, t: f64) -> bool {
+    press_cue_with(s, id, mode, down, src, source, t, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn press_cue_with(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, source: ControlSource, t: f64, look: Option<Settings>) -> bool {
     if !s.presets.iter().any(|p| p.id == id) {
         return false;
     }
@@ -972,7 +989,7 @@ fn press_cue_full(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool,
         }
         return true;
     }
-    let Some(settings) = cue_settings(s, id) else { return false };
+    let Some(settings) = look.or_else(|| cue_settings(s, id)) else { return false };
     let first_new = s.deck.next_id();
     with_deck_at(s, deck_clock(s, t), |deck, at| {
         if down {
