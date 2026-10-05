@@ -82,8 +82,24 @@ test('with the largest offset, Escape still darkens the laser at once', async ({
   await expect.poll(async () => (await studio.state()).armed).toBe(true);
   await expect.poll(async () => (await studio.frame() as unknown as { output_lit: number }).output_lit).toBeGreaterThan(0);
   await focusPage(page);
+  const stopped = page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/estop');
   await page.keyboard.press('Escape');
+  const stop = await stopped;
+  expect(stop.status()).toBe(200);
+  // Engine frames numbered above this one were sent after the latch; the
+  // one before may still be the lit frame sent just before the stop
+  // (T-475: `armed` reads false at once, `output_lit` only changes with
+  // the next frame, so one read right after could see the previous one).
+  const stoppedAt = Number(stop.headers()['x-frame-seq']);
+  expect(Number.isInteger(stoppedAt)).toBe(true);
   await expect.poll(async () => (await studio.state()).armed).toBe(false);
-  expect((await studio.frame() as unknown as { output_lit: number }).output_lit).toBe(0);
+  // Every frame sent after the stop is dark, from the first one seen on.
+  const after: { seq: number; lit: number }[] = [];
+  await expect.poll(async () => {
+    const f = await studio.frame() as unknown as { output_lit: number; frame_seq: number };
+    if (f.frame_seq > stoppedAt && !after.some((a) => a.seq === f.frame_seq)) after.push({ seq: f.frame_seq, lit: f.output_lit });
+    return after.length;
+  }).toBeGreaterThanOrEqual(3);
+  expect(after.filter((a) => a.lit > 0)).toEqual([]);
   await expect(page.locator('#estopBanner')).toBeVisible();
 });
