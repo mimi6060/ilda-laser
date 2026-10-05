@@ -78,6 +78,10 @@ test('a projector drives its own output: one arm, one e-stop, no output change w
   await expect(page.locator('#vnList button')).toHaveCount(2);
   await page.locator('#vnOutput').selectOption('etherdream:jardin');
   await expect.poll(async () => (await venue()).links[1].output_name).toBe('Ether Dream jardin');
+  // T-474: the focus is still in the panel (« Ajouter » just clicked), so
+  // the form isn't reloaded; the output line still follows the link from
+  // « connexion… » to « connectée ».
+  expect(await page.evaluate(() => document.getElementById('venuePanel')!.contains(document.activeElement))).toBe(true);
   await expect(page.locator('#vnOutState')).toContainText('connectée');
 
   expect(await studio.post('/api/arm', { on: true })).toBe(200);
