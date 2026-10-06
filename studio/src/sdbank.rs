@@ -179,6 +179,9 @@ pub struct JobSlot {
     pub name: String,
     pub seconds: f32,
     pub settings: Settings,
+    /// The cue cell's projection zones (none: the default ones): the file
+    /// draws where the cue draws live on the chosen projector (T-478).
+    pub zones: Vec<u8>,
 }
 
 /// What an export needs, without the lock.
@@ -203,7 +206,7 @@ pub fn prepare(s: &Shared, output: &str) -> Result<ExportJob> {
     let mut slots = Vec::new();
     for slot in &bank.slots {
         match s.presets.iter().find(|p| p.id == slot.cue_id) {
-            Some(p) => slots.push(JobSlot { number: slot.number, cue_id: p.id.clone(), name: p.name.clone(), seconds: slot.seconds, settings: p.settings.clone() }),
+            Some(p) => slots.push(JobSlot { number: slot.number, cue_id: p.id.clone(), name: p.name.clone(), seconds: slot.seconds, settings: p.settings.clone(), zones: s.deck.slot(&p.id).zones }),
             None => missing.push(format!("{:03} ({})", slot.number, slot.cue_id)),
         }
     }
@@ -302,7 +305,7 @@ pub fn export(job: &ExportJob, dir: &Path) -> Result<ExportReport> {
     for slot in &job.slots {
         let file = ilda::shownet_sd_name(slot.number as u32)?;
         let frames = ((slot.seconds * SD_FPS).round() as usize).clamp(1, MAX_EXPORT_FRAMES);
-        let exported = match ilda_library::export_look(&slot.settings, frames, SD_FPS, job.bpm, &job.chain) {
+        let exported = match ilda_library::export_cue(&slot.settings, &slot.zones, frames, SD_FPS, job.bpm, &job.chain) {
             Ok(e) => e,
             Err(e) => {
                 cleanup(&parts);
@@ -505,7 +508,7 @@ mod tests {
         // A chain that cuts everything: no file at all, not even the first.
         s.sdbank.set(SdBank { slots: vec![SdSlot { number: 1, cue_id: cue(&s0, 0), seconds: 0.2 }] }).unwrap();
         let mut job = prepare(&s, crate::power::MAIN_OUTPUT).unwrap();
-        job.slots.push(JobSlot { number: 2, cue_id: "noir".into(), name: "Noir".into(), seconds: 0.2, settings: Settings { brightness: 0.0, ..Settings::default() } });
+        job.slots.push(JobSlot { number: 2, cue_id: "noir".into(), name: "Noir".into(), seconds: 0.2, settings: Settings { brightness: 0.0, ..Settings::default() }, zones: Vec::new() });
         let dir = temp_dir("refused");
         assert!(export(&job, &dir).is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);

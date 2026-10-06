@@ -33,7 +33,9 @@ use crate::ilda::{self, IldaFrame};
 use crate::output::{fit_frame_dark, fit_frame_limits, FrameLimits};
 use crate::patterns::Point;
 use crate::power::{self, OutputLimits};
+use crate::layers::Mixer;
 use crate::presets::Preset;
+use crate::projection::{self, ProjectionConfig, Routed};
 use crate::safety::{self, SafetySettings, StrobeLimiter};
 use crate::timeline::valid_show_name;
 use anyhow::{bail, Context, Result};
@@ -371,6 +373,12 @@ pub struct ExportSafety {
     /// file is thinned or completed to them, on content, before the
     /// safety stage, like the live output (`output::fit_frame_limits`).
     pub frame_limits: FrameLimits,
+    /// The projection zones its live output draws (T-012, T-277), as
+    /// `ProjectionConfig::zones_for` gives them for this output's
+    /// projector: only those zones are kept, with their geometry and
+    /// their group masters (T-420). A look lands where it lands live, at
+    /// no more than the level live gives it, or nowhere (T-478).
+    pub projection: ProjectionConfig,
 }
 
 impl ExportSafety {
@@ -388,7 +396,28 @@ impl ExportSafety {
         let mut safety = crate::audience::effective(&s.safety.get(), false);
         safety.outdoor.sky_off = s.sky_off;
         safety.outdoor.projector = o.id.clone();
-        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety, limits: o.limits, color: o.color, frame_limits: o.scan.frame_limits() })
+        // The projectors the engine draws, as it lists them (main first).
+        let selected = s.output_mgr.prefs().selected;
+        let venue = s.venue.get();
+        let all: Vec<(&str, Option<&str>)> = std::iter::once((power::MAIN_OUTPUT, selected.as_deref())).chain(venue.extras().map(|p| (p.id.as_str(), p.output.as_deref()))).collect();
+        let cfg = s.projection.get();
+        let drawn: Vec<u8> = cfg.zones_for(&o.id, &all).iter().map(|z| z.id).collect();
+        let mut projection = cfg.clone();
+        projection.zones.retain(|z| drawn.contains(&z.id));
+        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety, limits: o.limits, color: o.color, frame_limits: o.scan.frame_limits(), projection })
+    }
+
+    /// Looks routed to zones (`Routed`: layer, points, zone ids; none =
+    /// the default zones) placed as the live output of this projector
+    /// places them (`projection::render_zones`, T-478): each zone drawn
+    /// here mixes the looks routed to it within its share of `mixer`'s
+    /// budget, dims them by its group masters, puts them through its
+    /// geometry and the calibration; zones joined by blanked travel. Only
+    /// content: the output safety chain comes after (`bake_chain`). A look
+    /// routed to no zone of this projector gives an empty frame, as live.
+    pub fn place(&self, rendered: &[Routed], mixer: &Mixer) -> Vec<Point> {
+        let zones = self.projection.zones.iter().collect();
+        projection::render_zones(rendered, &self.projection, zones, mixer, |_, look| look.to_vec(), &self.calibration).0
     }
 
     /// Adds the outdoor cut of `later` (the same output's settings read
@@ -437,7 +466,9 @@ fn floor_to_file_steps(frame: &mut [Point]) {
 /// A look as an ILDA format 5 file: `frames` images rendered `1/fps`
 /// seconds apart at `bpm`, without music or live modifiers, then put
 /// through the same output safety chain as the engine's frames (T-355):
-/// calibration, the output's colour rendering (T-414), beam horizon,
+/// the projection zones of the output's projector with their geometry
+/// and group masters (default zones here, a cue's own with `export_cue`,
+/// T-478), calibration, the output's colour rendering (T-414), beam horizon,
 /// zones and colour calibration, strobe
 /// limiter, static beam guard (as if armed: its « off » profile never
 /// applies), power caps of `chain.output`. The real functions, in the
@@ -453,7 +484,16 @@ fn floor_to_file_steps(frame: &mut [Point]) {
 ///
 /// Refused when the look lights nothing, when the chain leaves nothing
 /// lit, and when the file is too big for the ShowNET SD card.
+#[cfg(test)]
 pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain: &ExportSafety) -> Result<Exported> {
+    export_cue(settings, &[], frames, fps, bpm, chain)
+}
+
+/// `export_look` for a look routed to projection zones `zones` (a cue's
+/// cell zones; none = the default zones): each image is placed as the
+/// chosen output's projector places it live (`ExportSafety::place`: its
+/// zones, their geometry and group masters, then the calibration, T-478).
+pub fn export_cue(settings: &Settings, zones: &[u8], frames: usize, fps: f32, bpm: f64, chain: &ExportSafety) -> Result<Exported> {
     if frames == 0 || frames > MAX_EXPORT_FRAMES {
         bail!("nombre d'images : 1 à {MAX_EXPORT_FRAMES}");
     }
@@ -468,23 +508,25 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
     // big for the card stops here, before it is all in memory. Zone edges
     // may add a few points: the written file is checked again.
     let mut size = 32;
+    // No point budget of its own: the output's points per frame apply in
+    // `bake_chain`. The look alone on its layer: no layer dimmer.
+    let mixer = Mixer { point_budget: usize::MAX, ..Mixer::default() };
+    let mut content_lit = 0;
     for i in 0..frames {
         let clock = BeatClock { beat: i as f64 * dt as f64 * bpm / 60.0, bpm, beats_per_bar: 4 };
-        let points: Vec<Point> = animator
-            .render(settings, AudioFeatures::default(), if i == 0 { 0.0 } else { dt }, &clock)
-            .into_iter()
-            .map(|p| {
-                let (x, y) = chain.calibration.apply(p.x, p.y);
-                Point { x, y, ..p }
-            })
-            .collect();
+        let look = animator.render(settings, AudioFeatures::default(), if i == 0 { 0.0 } else { dt }, &clock);
+        content_lit += look.iter().filter(|p| p.is_lit()).count();
+        let points = chain.place(&[(1, look, zones.to_vec())], &mixer);
         size += 32 + 8 * points.len().max(1);
         ilda::check_shownet_size(size)?;
         raw.push(points);
     }
+    if content_lit == 0 {
+        bail!("Ce look n'allume rien : aucun fichier à exporter");
+    }
     let lit_before = lit_points(&raw);
     if lit_before == 0 {
-        bail!("Ce look n'allume rien : aucun fichier à exporter");
+        bail!("Ce look ne tombe dans aucune zone de projection allumée du projecteur « {} » : rien à exporter", chain.output);
     }
     let out = bake_chain(&raw, fps, chain, "ce look")?;
     let lit_after = lit_points(&out);
@@ -807,6 +849,7 @@ mod tests {
             limits: OutputLimits { max_power: 1.0, max_color: [1.0; 3] },
             color: ColorCalibration::default(),
             frame_limits: FrameLimits::default(),
+            projection: Default::default(),
         }
     }
 

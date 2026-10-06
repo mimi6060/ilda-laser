@@ -2205,7 +2205,8 @@ impl Engine {
             let festival = (s.festival.colors(), s.festival.balance);
             // An ILDA recording (T-442) wants this frame: copied below,
             // before the safety chain; nothing else changes.
-            record_due = s.recorder.due(t);
+            // The projector it records (T-478): its frame, not the main one's.
+            record_due = s.recorder.due(t).then(|| s.recorder.output().to_string());
             (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
         };
 
@@ -2384,25 +2385,17 @@ impl Engine {
                     balance.apply(&mut out);
                     out
                 };
-                if plans.is_empty() {
-                    let (frame, mix) = projection::render(rendered, &routing.config, routing.output.as_deref(), &mixer, finish, &calibration);
-                    (frame, Vec::new(), mix, evolving)
-                } else {
-                    // A venue with several projectors (T-277): each draws
-                    // its own zones (`ProjectionConfig::active_on`), from
-                    // the same rendered looks, through the same geometry
-                    // and calibration. The mix report is the main one's.
-                    let main = (power::MAIN_OUTPUT, routing.output.as_deref());
-                    let all: Vec<(&str, Option<&str>)> = std::iter::once(main).chain(plans.iter().map(|p| (p.id.as_str(), p.output.as_deref()))).collect();
-                    let draw = |me: usize| {
-                        let others: Vec<(&str, Option<&str>)> = all.iter().enumerate().filter(|(i, _)| *i != me).map(|(_, o)| *o).collect();
-                        let zones = routing.config.active_on(all[me].0, all[me].1, &others);
-                        projection::render_zones(&rendered, &routing.config, zones, &mixer, finish, &calibration)
-                    };
-                    let (frame, mix) = draw(0);
-                    let extra = (1..all.len()).map(|i| draw(i).0).collect();
-                    (frame, extra, mix, evolving)
-                }
+                // Each projector of the venue (T-277) draws its own zones
+                // (`ProjectionConfig::zones_for`, the rule the exports use
+                // too, T-478), from the same rendered looks, through the
+                // same geometry and calibration. The mix report is the
+                // main one's. A lone projector draws `active` of its output.
+                let main = (power::MAIN_OUTPUT, routing.output.as_deref());
+                let all: Vec<(&str, Option<&str>)> = std::iter::once(main).chain(plans.iter().map(|p| (p.id.as_str(), p.output.as_deref()))).collect();
+                let draw = |me: usize| projection::render_zones(&rendered, &routing.config, routing.config.zones_for(all[me].0, &all), &mixer, finish, &calibration);
+                let (frame, mix) = draw(0);
+                let extra = (1..all.len()).map(|i| draw(i).0).collect();
+                (frame, extra, mix, evolving)
             }
         };
         // « Noir » held (T-142): every projector's frame dark, a test
@@ -2416,7 +2409,19 @@ impl Engine {
         // calibrated frame, before the safety stage, which the recorder's
         // I/O thread runs itself with its own state (record.rs). Only when
         // an image is due; arming and the output are untouched.
-        let recorded = record_due.then(|| frame.clone());
+        // The projector the recording is for (T-478): its own zones were
+        // drawn above; one the engine does not draw this frame (it left
+        // the venue) gets a dark image, never another projector's.
+        let recorded = record_due.map(|target| {
+            if target == power::MAIN_OUTPUT {
+                frame.clone()
+            } else {
+                match plans.iter().position(|p| p.id == target) {
+                    Some(i) => extra_frames[i].clone(),
+                    None => vec![Point::blanked(0.0, 0.0)],
+                }
+            }
+        });
         // The safety stage (`safety_chain`): frame size, colour rendering,
         // strobe limiter and horizon, static beam guard, power caps, the
         // limiter's check on the output.

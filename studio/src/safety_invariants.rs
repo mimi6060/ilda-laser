@@ -4780,8 +4780,8 @@ fn every_export_keeps_the_outdoor_cut() {
         let event = Event { id: 1, start: 0.0, len: 1.0, source: EventSource::Look { settings: look.clone() }, ..Default::default() };
         show.tracks = vec![Track { name: "Piste 1".into(), layer: 1, events: vec![event], ..Default::default() }];
         show.sanitize();
-        let job = TimelineJob { show, presets: Vec::new(), palettes: Vec::new(), mixer: crate::layers::Mixer::default(), bpm: 120.0, beats_per_bar: 4, from_s: 0.0, to_s: 0.32 };
-        let rendered = record::render_timeline(&job, 25, &chain.calibration, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+        let job = TimelineJob { show, presets: Vec::new(), palettes: Vec::new(), mixer: crate::layers::Mixer::default(), cue_zones: Default::default(), bpm: 120.0, beats_per_bar: 4, from_s: 0.0, to_s: 0.32 };
+        let rendered = record::render_timeline(&job, 25, &chain, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
         match record::bake(&rendered, 25, &chain) {
             Ok((bytes, ..)) => check(&bytes, "timeline export"),
             Err(_) => refused += 1,
@@ -4792,5 +4792,215 @@ fn every_export_keeps_the_outdoor_cut() {
     if seeds.len() >= 30 {
         assert!(lit_files * 4 > files, "only {lit_files} files with light of {files} ({refused} refused)");
         assert!(cut_files * 2 > files, "only {cut_files} files with the outdoor cut active of {files}");
+    }
+}
+
+// ---------- exports against the live output (T-478) ----------
+
+/// Lit points of `file` (read back from an exported file: 16-bit
+/// coordinates, 8-bit colours) that the live output `live` of the same
+/// projector does not light as brightly at the same place: for each lit
+/// point of the file, some lit point of the live frame within `POS_TOL`
+/// at least as bright on each channel (within one file step). Each one
+/// is a place where the file is brighter or less cut than live.
+fn brighter_than_live(file: &[Point], live: &[Point]) -> Vec<String> {
+    const POS_TOL: f32 = 2e-3;
+    const COLOUR_TOL: f32 = 0.5 / 255.0;
+    let lit: Vec<&Point> = live.iter().filter(|q| q.is_lit()).collect();
+    let mut out = Vec::new();
+    for p in file.iter().filter(|p| p.is_lit()) {
+        let near = lit.iter().filter(|q| (q.x - p.x).abs() <= POS_TOL && (q.y - p.y).abs() <= POS_TOL);
+        if !near.clone().any(|q| p.r <= q.r + COLOUR_TOL && p.g <= q.g + COLOUR_TOL && p.b <= q.b + COLOUR_TOL) {
+            let best = near.max_by(|a, b| (a.r + a.g + a.b).total_cmp(&(b.r + b.g + b.b)));
+            out.push(format!("file {p:?} vs live {best:?}"));
+        }
+    }
+    out
+}
+
+/// T-478: a file exported for a projector never lights more, nor more
+/// brightly, than that projector's live output for the same look. Random
+/// venues (the main projector and up to two more), projection zones bound
+/// to projectors or outputs with random geometry (warps included), zone
+/// groups and their masters, cue → zone routing, calibration, safety
+/// zones (Public ones too), horizon, colour gains, outdoor mode and
+/// « Ciel coupé », per-output caps, colour rendering and points per
+/// frame. The reference is what the engine (`Engine::tick`) computes for
+/// each projector after its whole safety chain; the files are those of
+/// every export path, read back: the look export, the SD bank, a live
+/// recording of that projector and a timeline export.
+///
+/// The look is static (no motion, no strobe), so every image of the
+/// file must match the live frame. Performance controls are neutral
+/// (live master, layer dimmers, executor levels): a file carries a look,
+/// not the moves of the moment; the output's caps are its bound. The
+/// mixer's point budget is the largest, as an export has none of its own
+/// (the output's points per frame apply to both, T-476).
+#[test]
+fn every_export_is_never_brighter_than_its_projectors_live_output() {
+    use crate::ilda_library::{export_cue, ExportSafety};
+    use crate::record::{self, RecordRequest, TimelineJob};
+    use crate::timeline::{Event, EventSource, Show, TimeBase, Track};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    let name = "every_export_is_never_brighter_than_its_projectors_live_output";
+    let seeds = seeds(478, 40);
+    let _guard = property_guard(name, seeds.len(), 40);
+    let dir = std::env::temp_dir().join(format!("laser-studio-t478-{}", std::process::id()));
+    let (mut files, mut lit_files, mut placed_cases, mut dimmed_cases, mut extra_files) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for &seed in &seeds {
+        let replay = format!("(replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+        let mut rng = Rng::new(seed);
+        let mut s = test_support::shared();
+        s.tempo.set_bpm_manual(120.0, 0.0);
+        s.mixer.point_budget = crate::layers::MAX_POINT_BUDGET;
+        // The venue: main, then up to two more, some bound to an output.
+        let extras = rng.below(3);
+        let mut venue = s.venue.get().clone();
+        for i in 0..extras {
+            let output = rng.chance(0.5).then(|| format!("rec{}", i + 2));
+            venue.projectors.push(crate::venue::Projector { id: format!("p{}", i + 2), output, ..Default::default() });
+        }
+        s.venue.set(venue).unwrap_or_else(|e| panic!("{name}: venue refused: {e:#} {replay}"));
+        let projectors: Vec<String> = std::iter::once(MAIN_OUTPUT.to_string()).chain((0..extras).map(|i| format!("p{}", i + 2))).collect();
+        for p in &projectors {
+            s.outputs.ensure(p).unwrap();
+            let _ = s.outputs.set(p, Some(random_limits(&mut rng)), None, false, true);
+            let _ = s.outputs.set_color(p, random_color(&mut rng), false, true);
+            let mut scan = random_output_scan(&mut rng);
+            // Thinning is proven by T-476; here both sides keep every point.
+            scan.max_points = 0;
+            let _ = s.outputs.set_scan(p, scan, false);
+        }
+        // Projection zones bound to projectors, outputs or nothing, groups.
+        let mut projection = random_projection(&mut rng);
+        for z in &mut projection.zones {
+            if rng.chance(0.5) {
+                z.output = Some(rng.pick(&["main", "p2", "p3", "rec2", "test"]).to_string());
+            }
+        }
+        let ids: Vec<u8> = projection.zones.iter().map(|z| z.id).collect();
+        projection.groups = random_groups(&mut rng, &ids);
+        let _ = s.projection.set(projection);
+        s.calibration = random_calibration(&mut rng);
+        let mut cfg = random_safety(&mut rng);
+        for z in &mut cfg.zones {
+            z.audience = rng.chance(0.2);
+        }
+        if rng.chance(0.3) {
+            cfg.outdoor = random_outdoor(&mut rng, true);
+        }
+        if s.safety.set(cfg.clone(), true).is_err() {
+            cfg.outdoor = Default::default();
+            let _ = s.safety.set(cfg, true);
+        }
+        s.sky_off = rng.chance(0.3);
+        // A static look, launched as a cue routed to random zones.
+        let shape = rng.pick(&["square", "circle", "triangle", "star"]).to_string();
+        let channel = |rng: &mut Rng| if rng.chance(0.5) { 255 } else { rng.below(256) as u8 };
+        let look = Settings {
+            content: Content::Shape { shape },
+            color: [channel(&mut rng), channel(&mut rng), channel(&mut rng)],
+            scale: rng.range(0.2, 0.9),
+            rotation_speed: 0.0,
+            brightness: 1.0,
+            ..Settings::default()
+        };
+        let k = s.presets.iter().position(|p| !matches!(p.settings.content, Content::Ilda { .. })).unwrap();
+        s.presets[k].settings = look.clone();
+        let cue = s.presets[k].id.clone();
+        let mut zones: Vec<u8> = (0..rng.below(3)).map(|_| *rng.pick(&ids)).collect();
+        if rng.chance(0.1) {
+            zones.push(MAX_ZONES + 1); // a zone that does not exist
+        }
+        let slot = s.deck.slot(&cue);
+        s.deck.set_slot(&cue, CueSlot { zones: zones.clone(), ..slot });
+        assert!(controls::send_prepared(&mut s, &cue, Some(ClickMode::Toggle), look.clone(), None), "{name}: cue not launched {replay}");
+        // The live reference, with a live recording of one projector.
+        let target = rng.pick(&projectors).clone();
+        let mut rig = Rig::new(s, "export-parity", seed);
+        for _ in 0..60 {
+            rig.tick();
+        }
+        let req = RecordRequest { seconds: 0.4, fps: 25, output: Some(target.clone()), ..Default::default() };
+        let rx = {
+            let mut s = rig.s();
+            let now = s.now_s();
+            s.recorder.start(&req, now, &target).unwrap().1
+        };
+        for _ in 0..30 {
+            rig.tick();
+        }
+        let recorded: Vec<Vec<Point>> = rx.try_iter().collect();
+        assert_eq!(recorded.len(), 10, "{name}: recorded images {replay}");
+        let live_of = |s: &Shared, p: &str| -> Vec<Point> {
+            if p == MAIN_OUTPUT {
+                s.frame.clone()
+            } else {
+                s.projector_frames.iter().find(|f| f.id == p).unwrap_or_else(|| panic!("{name}: no live frame for {p} {replay}")).points.clone()
+            }
+        };
+        let mut check = |s: &Shared, bytes: &[u8], p: &str, what: &str| {
+            let live = live_of(s, p);
+            let back = crate::ilda::read(bytes).unwrap_or_else(|e| panic!("{name}: {what}: unreadable: {e} {replay}"));
+            for f in &back {
+                let bad = brighter_than_live(&f.points, &live);
+                assert!(
+                    bad.is_empty(),
+                    "{name}: {what} for « {p} », image {}: {} lit points brighter or less cut than its live output, first: {} {replay}",
+                    f.name,
+                    bad.len(),
+                    bad[0]
+                );
+            }
+            files += 1;
+            extra_files += (p != MAIN_OUTPUT) as usize;
+            lit_files += back.iter().flat_map(|f| &f.points).any(|q| q.is_lit()) as usize;
+        };
+        // The SD bank (every 3rd case) exports this cue in slot 7.
+        if seed % 3 == 0 {
+            rig.s().sdbank.set(crate::sdbank::SdBank { slots: vec![crate::sdbank::SdSlot { number: 7, cue_id: cue.clone(), seconds: 0.2 }] }).unwrap();
+        }
+        let s = rig.s();
+        for p in &projectors {
+            let chain = ExportSafety::of(&s, p).unwrap();
+            // 1. The look export (what `GET /api/media/ilda/export?id=` runs).
+            if let Ok(e) = export_cue(&look, &zones, 6, 25.0, 120.0, &chain) {
+                check(&s, &e.bytes, p, "look export");
+            }
+            // 2. A timeline export of the cue.
+            let mut show = Show::new_empty("t478", TimeBase::Seconds);
+            let event = Event { id: 1, start: 0.0, len: 1.0, source: EventSource::Cue { id: cue.clone() }, ..Default::default() };
+            show.tracks = vec![Track { name: "Piste 1".into(), layer: 1, events: vec![event], ..Default::default() }];
+            show.sanitize();
+            let job = TimelineJob::of(&s, show, 0.0, 0.24);
+            let rendered = record::render_timeline(&job, 25, &chain, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+            if let Ok((bytes, ..)) = record::bake(&rendered, 25, &chain) {
+                check(&s, &bytes, p, "timeline export");
+            }
+        }
+        // 3. The live recording, baked for its projector.
+        let chain = ExportSafety::of(&s, &target).unwrap();
+        if let Ok((bytes, ..)) = record::bake(&recorded, 25, &chain) {
+            check(&s, &bytes, &target, "live recording");
+        }
+        // 4. The SD bank through its own prepare / export.
+        if seed % 3 == 0 {
+            let card = dir.join(format!("card-{seed}"));
+            if crate::sdbank::prepare(&s, &target).and_then(|job| crate::sdbank::export(&job, &card)).is_ok() {
+                check(&s, &std::fs::read(card.join("007.ild")).unwrap(), &target, "SD bank");
+            }
+            let _ = std::fs::remove_dir_all(&card);
+        }
+        // What the case exercised: a placement that moves the look, a dimmer.
+        let cfg = s.projection.get();
+        placed_cases += cfg.zones.iter().any(|z| !z.geometry.is_identity() || z.output.is_some()) as usize;
+        dimmed_cases += cfg.groups.iter().any(|g| g.master < 1.0) as usize;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    if seeds.len() >= 30 {
+        assert!(lit_files * 3 > files, "only {lit_files} files with light of {files}");
+        assert!(extra_files * 5 > files, "only {extra_files} files for other projectors of {files}");
+        assert!(placed_cases * 2 > seeds.len(), "only {placed_cases} cases with zone geometry or binding");
+        assert!(dimmed_cases * 5 > seeds.len(), "only {dimmed_cases} cases with a group master below 100 %");
     }
 }

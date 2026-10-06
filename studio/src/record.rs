@@ -23,8 +23,12 @@
 //! mounting, the declared sectors, the vertical limit, « Ciel coupé »; read
 //! at the start and again at the end, both cuts kept, T-477), strobe
 //! limiter, static beam guard (as if armed), power caps of the chosen
-//! output. The live capture takes the frame before that
-//! chain (after the mixer, master stage and calibration) and the I/O thread
+//! output. The live capture takes the frame of the chosen output's own
+//! projector before that chain (after the mixer, master stage, that
+//! projector's projection zones and group masters, and the calibration,
+//! T-478; a projector outside the venue can't be recorded live), a
+//! timeline export places its events the same way (`ExportSafety::place`),
+//! and the I/O thread
 //! runs the very same chain functions with their own state over the whole
 //! sequence, looped, so the engine's limiter and guard are never touched.
 //! Never raw looks. The projector that plays the file has its own stages,
@@ -44,7 +48,7 @@ use crate::controls::ControlRegistry;
 use crate::engine::{Animator, AudioFeatures, BeatClock};
 use crate::ilda;
 use crate::ilda_library::{self, ExportSafety, IldaLibrary};
-use crate::layers::{self, Mixer};
+use crate::layers::Mixer;
 use crate::live::{self, LiveModifiers, LiveState, Palette};
 use crate::patterns::Point;
 use crate::presets::Preset;
@@ -243,6 +247,12 @@ impl Recorder {
         Ok((ticket, progress))
     }
 
+    /// The output (projector id) the recording is for: the engine hands
+    /// over that projector's frame (T-478).
+    pub fn output(&self) -> &str {
+        &self.status.output
+    }
+
     /// Whether the engine should copy its frame at `now_s`: a live
     /// recording whose next deadline has come.
     pub fn due(&self, now_s: f64) -> bool {
@@ -341,6 +351,9 @@ pub struct TimelineJob {
     pub presets: Vec<Preset>,
     pub palettes: Vec<Palette>,
     pub mixer: Mixer,
+    /// The projection zones of each cue's cell (`CueSlot::zones`), for
+    /// its events; a cue missing: the default zones.
+    pub cue_zones: HashMap<String, Vec<u8>>,
     pub bpm: f64,
     pub beats_per_bar: u8,
     /// Seconds from the show's start.
@@ -378,6 +391,23 @@ pub fn uses_audio(show: &Show, presets: &[Preset]) -> bool {
 }
 
 impl TimelineJob {
+    /// Show `show` between `from_s` and `to_s` with what it needs from
+    /// `s`, copied under the lock: the cues, palettes, mixer, tempo and
+    /// each cue cell's projection zones (T-478).
+    pub fn of(s: &Shared, show: Show, from_s: f64, to_s: f64) -> Self {
+        TimelineJob {
+            show,
+            presets: s.presets.clone(),
+            palettes: s.palettes.list().to_vec(),
+            mixer: s.mixer.clone(),
+            cue_zones: s.deck.slots.iter().filter(|(_, slot)| !slot.zones.is_empty()).map(|(id, slot)| (id.clone(), slot.zones.clone())).collect(),
+            bpm: s.tempo.bpm,
+            beats_per_bar: s.tempo.beats_per_bar,
+            from_s,
+            to_s,
+        }
+    }
+
     /// Images to render at `fps`.
     pub fn frames(&self, fps: u8) -> usize {
         frames_in(self.to_s - self.from_s, fps)
@@ -386,11 +416,15 @@ impl TimelineJob {
 
 /// The show between `job.from_s` and `job.to_s`, image after image at
 /// `fps`, on a simulated clock: its own player, animators and rotation
-/// states, neutral audio, the layers mixed at the mixer's point budget
-/// (layer dimmers and master modifiers neutral), then `calibration`. Only
-/// the content: the output safety chain comes after (`bake_chain`).
+/// states, neutral audio, then placed as `chain`'s projector places them
+/// live (`ExportSafety::place`, T-478): each event in its cue's zones
+/// (`job.cue_zones`; a look event and a cue without zones: the default
+/// ones), the zones drawn on that projector mixing their looks at their
+/// share of the mixer's point budget (layer dimmers and master modifiers
+/// neutral), their group masters, geometry and the calibration. Only the
+/// content: the output safety chain comes after (`bake_chain`).
 /// Deterministic. `progress` counts the images; `cancel` stops early.
-pub fn render_timeline(job: &TimelineJob, fps: u8, calibration: &crate::engine::Calibration, progress: &AtomicUsize, cancel: &AtomicBool) -> Result<Vec<Vec<Point>>> {
+pub fn render_timeline(job: &TimelineJob, fps: u8, chain: &ExportSafety, progress: &AtomicUsize, cancel: &AtomicBool) -> Result<Vec<Vec<Point>>> {
     let frames = job.frames(fps);
     let bpm = if job.bpm.is_finite() { job.bpm.clamp(20.0, 300.0) } else { 120.0 };
     let reg = ControlRegistry::build(&job.presets);
@@ -442,16 +476,14 @@ pub fn render_timeline(job: &TimelineJob, fps: u8, calibration: &crate::engine::
                 st.advance(&cue.modifiers, live_dt, bpm, c.beats_per_bar);
                 pts = live::apply(&pts, &cue.modifiers, st, &job.palettes);
             }
-            rendered.push((cue.layer, pts));
+            // Its zones as the engine routes it (`Routing::read`).
+            let zones = match &cue.source {
+                timeline::EventSource::Cue { id } => job.cue_zones.get(id).cloned().unwrap_or_default(),
+                timeline::EventSource::Look { .. } => Vec::new(),
+            };
+            rendered.push((cue.layer, pts, zones));
         }
-        let (mixed, _) = layers::mix(rendered, &mixer);
-        let frame: Vec<Point> = mixed
-            .into_iter()
-            .map(|p| {
-                let (x, y) = calibration.apply(p.x, p.y);
-                Point { x, y, ..p }
-            })
-            .collect();
+        let frame = chain.place(&rendered, &mixer);
         points += frame.len().max(1);
         if points > MAX_POINTS {
             bail!("Trop de points pour un enregistrement ({MAX_POINTS} au plus) : raccourcissez la plage ou baissez les images par seconde");
@@ -525,7 +557,7 @@ fn run(shared: &Mutex<Shared>, job: Job) {
             Ok(frames)
         }
         Source::Timeline { job: tl, progress } => {
-            let out = render_timeline(&tl, job.fps, &job.chain.calibration, &progress, &job.ticket.cancel);
+            let out = render_timeline(&tl, job.fps, &job.chain, &progress, &job.ticket.cancel);
             shared.lock().unwrap_or_else(|e| e.into_inner()).recorder.writing(gen);
             out
         }
@@ -585,6 +617,11 @@ pub fn start(shared: &Arc<Mutex<Shared>>, req: &RecordRequest) -> Result<RecordS
     let library = Arc::clone(&s.ilda);
     let (ticket, source) = match &req.source {
         RecordSource::Live => {
+            // The engine draws only the venue's projectors (T-478): a live
+            // recording for any other output would have no frame of its own.
+            if output != crate::power::MAIN_OUTPUT && !s.venue.get().extras().any(|p| p.id == output) {
+                return Err((400, format!("Le projecteur « {output} » ne joue pas en direct : ajoutez-le au lieu (RÉGLAGES › Lieu) pour l'enregistrer")));
+            }
             let now = s.now_s();
             let (ticket, rx) = s.recorder.start(req, now, &chain.output).map_err(bad)?;
             (ticket, Source::Live { rx, total: frame_count(req.seconds, req.fps) })
@@ -605,16 +642,7 @@ pub fn start(shared: &Arc<Mutex<Shared>>, req: &RecordRequest) -> Result<RecordS
                 return Err((400, "Plage invalide : le début doit précéder la fin, dans le show".into()));
             }
             check_seconds(to - from).map_err(|_| (400, format!("Durée de la plage : {} à {} s", MIN_SECONDS.to_string().replace('.', ","), MAX_SECONDS)))?;
-            let job = TimelineJob {
-                show,
-                presets: s.presets.clone(),
-                palettes: s.palettes.list().to_vec(),
-                mixer: s.mixer.clone(),
-                bpm,
-                beats_per_bar: s.tempo.beats_per_bar,
-                from_s: from,
-                to_s: to,
-            };
+            let job = TimelineJob::of(&s, show, from, to);
             let total = job.frames(req.fps);
             let (ticket, progress) = s.recorder.start_offline(total, req.fps, &chain.output).map_err(bad)?;
             (ticket, Source::Timeline { job: Box::new(job), progress })
@@ -648,6 +676,7 @@ mod tests {
             limits: OutputLimits { max_power: 1.0, max_color: [1.0; 3] },
             color: Default::default(),
             frame_limits: Default::default(),
+            projection: Default::default(),
         }
     }
 
@@ -848,17 +877,17 @@ mod tests {
 
     fn job(show: Show) -> TimelineJob {
         let to_s = show_seconds(&show, 120.0);
-        TimelineJob { show, presets: Vec::new(), palettes: Vec::new(), mixer: Mixer::default(), bpm: 120.0, beats_per_bar: 4, from_s: 0.0, to_s }
+        TimelineJob { show, presets: Vec::new(), palettes: Vec::new(), mixer: Mixer::default(), cue_zones: HashMap::new(), bpm: 120.0, beats_per_bar: 4, from_s: 0.0, to_s }
     }
 
     #[test]
     fn render_timeline_is_deterministic_and_follows_the_show() {
         let j = job(show());
         let (p, c) = (AtomicUsize::new(0), AtomicBool::new(false));
-        let a = render_timeline(&j, 25, &Calibration::default(), &p, &c).unwrap();
+        let a = render_timeline(&j, 25, &open_chain(), &p, &c).unwrap();
         assert_eq!(a.len(), 50);
         assert_eq!(p.load(Ordering::SeqCst), 50);
-        let b = render_timeline(&j, 25, &Calibration::default(), &AtomicUsize::new(0), &c).unwrap();
+        let b = render_timeline(&j, 25, &open_chain(), &AtomicUsize::new(0), &c).unwrap();
         assert_eq!(a, b, "same show, same frames");
         let (fa, ..) = bake(&a, 25, &open_chain()).unwrap();
         let (fb, ..) = bake(&b, 25, &open_chain()).unwrap();
@@ -871,11 +900,11 @@ mod tests {
         // A range: the second second only.
         let mut j2 = job(show());
         j2.from_s = 1.0;
-        let c2 = render_timeline(&j2, 25, &Calibration::default(), &AtomicUsize::new(0), &c).unwrap();
+        let c2 = render_timeline(&j2, 25, &open_chain(), &AtomicUsize::new(0), &c).unwrap();
         assert_eq!(c2.len(), 25);
         assert!(blue(&c2[10]));
         // Cancel stops it.
-        assert!(render_timeline(&j, 25, &Calibration::default(), &AtomicUsize::new(0), &AtomicBool::new(true)).is_err());
+        assert!(render_timeline(&j, 25, &open_chain(), &AtomicUsize::new(0), &AtomicBool::new(true)).is_err());
     }
 
     /// The live capture point: what the engine offers is the frame before
@@ -885,8 +914,8 @@ mod tests {
     fn calibration_goes_into_the_timeline_render() {
         let j = job(show());
         let cal = Calibration { offset_x: 0.3, ..Calibration::default() };
-        let plain = render_timeline(&j, 25, &Calibration::default(), &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
-        let moved = render_timeline(&j, 25, &cal, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+        let plain = render_timeline(&j, 25, &open_chain(), &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+        let moved = render_timeline(&j, 25, &ExportSafety { calibration: cal, ..open_chain() }, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
         let cx = |f: &Vec<Point>| f.iter().filter(|p| p.is_lit()).map(|p| p.x).sum::<f32>() / f.iter().filter(|p| p.is_lit()).count().max(1) as f32;
         assert!((cx(&moved[10]) - cx(&plain[10]) - 0.3).abs() < 0.05);
     }

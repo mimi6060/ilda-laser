@@ -483,6 +483,26 @@ impl ProjectionConfig {
             .collect()
     }
 
+    /// The zones drawn on projector `projector`, with `all` every projector
+    /// the engine draws this frame, main first, as (id, output). The one
+    /// rule the engine (`Engine::tick`) and the exports (`ExportSafety`,
+    /// T-478) share, so a file made for a projector lands where its live
+    /// output does: a lone projector draws `active` of its output, one of
+    /// several `active_on`. A projector the engine does not draw (not in
+    /// the venue) gets what it would draw if it were added without an
+    /// output: the zones bound to nothing, to it, or to an output no
+    /// projector drives.
+    pub fn zones_for(&self, projector: &str, all: &[(&str, Option<&str>)]) -> Vec<&ProjectionZone> {
+        match all.iter().position(|(id, _)| *id == projector) {
+            Some(me) if all.len() == 1 => self.active(all[me].1),
+            Some(me) => {
+                let others: Vec<(&str, Option<&str>)> = all.iter().enumerate().filter(|(i, _)| *i != me).map(|(_, o)| *o).collect();
+                self.active_on(projector, all[me].1, &others)
+            }
+            None => self.active_on(projector, None, all),
+        }
+    }
+
     /// A cue's zones: its own, else the default ones.
     pub fn resolve<'a>(&'a self, zones: &'a [u8]) -> &'a [u8] {
         if zones.is_empty() {
@@ -598,6 +618,7 @@ type Layered = (u8, Vec<Point>);
 /// through the zone geometry and the calibration, and joins the zones
 /// with blanked travel. With one neutral zone this is exactly
 /// mix → finish → calibration.
+#[cfg(test)]
 pub fn render(
     rendered: Vec<Routed>,
     cfg: &ProjectionConfig,
@@ -683,6 +704,23 @@ mod tests {
         // Mirrored (a projector hung upside down): clockwise.
         [[-0.5, 0.5], [0.5, 0.5], [0.6, -0.7], [-0.6, -0.7]],
     ];
+
+    /// T-478: one rule for the engine and the exports. A lone projector
+    /// draws `active` of its output; one of several `active_on`; one the
+    /// engine does not draw, what it would draw added without an output.
+    #[test]
+    fn zones_for_follows_the_venue() {
+        let zone = |id: u8, output: Option<&str>| ProjectionZone { id, name: format!("Z{id}"), output: output.map(str::to_string), ..Default::default() };
+        let cfg = ProjectionConfig { zones: vec![zone(1, None), zone(2, Some("main")), zone(3, Some("p2")), zone(4, Some("rec2")), zone(5, Some("ailleurs"))], ..Default::default() };
+        let ids = |z: Vec<&ProjectionZone>| z.iter().map(|z| z.id).collect::<Vec<_>>();
+        // Alone, on output « dac »: zones bound to another output are off.
+        assert_eq!(ids(cfg.zones_for("main", &[("main", Some("dac"))])), ids(cfg.active(Some("dac"))));
+        let all = [("main", None), ("p2", Some("rec2"))];
+        assert_eq!(ids(cfg.zones_for("main", &all)), vec![1, 2, 5]);
+        assert_eq!(ids(cfg.zones_for("p2", &all)), vec![1, 3, 4], "an orphan zone only shows on a projector without an output");
+        // Not in the venue: unbound zones, its own, and orphans.
+        assert_eq!(ids(cfg.zones_for("p3", &all)), vec![1, 5]);
+    }
 
     #[test]
     fn identity_by_default_and_clamps() {

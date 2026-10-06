@@ -3048,24 +3048,26 @@ fn export_ilda(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     let frames = num("frames", 60.0);
     let fps = num("fps", 30.0) as f32;
     let output = query_str(url, "output").filter(|o| !o.is_empty()).unwrap_or_else(|| crate::power::MAIN_OUTPUT.to_string());
-    let (settings, bpm, chain) = {
+    let (settings, zones, bpm, chain) = {
         let s = shared.lock().unwrap();
-        let look = match query_str(url, "id").filter(|id| !id.is_empty()) {
+        // A cue draws in its cell's projection zones, the look on show in
+        // the default ones, as live (T-478).
+        let (look, zones) = match query_str(url, "id").filter(|id| !id.is_empty()) {
             Some(id) => match s.presets.iter().find(|p| p.id == id) {
-                Some(p) => p.settings.clone(),
+                Some(p) => (p.settings.clone(), s.deck.slot(&p.id).zones),
                 None => return text(404, "cue introuvable"),
             },
-            None => s.settings.clone(),
+            None => (s.settings.clone(), Vec::new()),
         };
         let chain = match crate::ilda_library::ExportSafety::of(&s, &output) {
             Ok(c) => c,
             Err(e) => return text(400, &format!("{e:#}")),
         };
-        (look, s.tempo.bpm, chain)
+        (look, zones, s.tempo.bpm, chain)
     };
     let frames = if frames >= 1.0 && frames.fract() == 0.0 { frames as usize } else { 0 };
     // Rendered and put through the safety chain with the lock released.
-    match crate::ilda_library::export_look(&settings, frames, fps, bpm, &chain) {
+    match crate::ilda_library::export_cue(&settings, &zones, frames, fps, bpm, &chain) {
         Ok(exported) => {
             let bytes = exported.bytes;
             log::info!(
