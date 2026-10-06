@@ -282,6 +282,9 @@ impl ControlRegistry {
         // is the stop button. Only the UI resets it, and nothing external arms.
         add("transport.blackout".into(), "Blackout".into(), "transport", ControlKind::Trigger, true);
         add("safety.estop".into(), "Arrêt d'urgence".into(), "safety", ControlKind::Trigger, true);
+        // « Ciel coupé » (T-262): a controller pad only cuts the sky; the
+        // sky comes back from the screen or the keyboard only.
+        add("safety.sky_off".into(), "Ciel coupé".into(), "safety", ControlKind::Trigger, true);
         // Hold-to-run pad (T-252): only lets an armed laser emit, never arms.
         add("safety.hold".into(), "Maintien pour émettre (homme mort)".into(), "safety", ControlKind::Momentary, true);
         add("transport.arm".into(), "Allumer le laser".into(), "transport", ControlKind::Toggle { default: false }, false);
@@ -528,6 +531,9 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "audio.triggers.enabled" => crate::audio::triggers::set_enabled(s, truthy(input), src).map_err(ControlError::Refused)?,
         "transport.blackout" | "safety.estop" => s.emergency_stop(src),
         "safety.hold" => s.presence.set_midi_hold(truthy(input)),
+        "safety.sky_off" => {
+            s.set_sky_off(true, src);
+        }
         // Only reachable from the UI (external is false): arming goes
         // through the gate, like the laser button.
         "transport.arm" => {

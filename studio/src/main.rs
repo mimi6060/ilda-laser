@@ -64,6 +64,7 @@ mod notices;
 mod onboarding;
 mod external;
 mod optimize;
+mod outdoor;
 mod output;
 mod output_manager;
 mod patterns;
@@ -524,6 +525,9 @@ pub struct Shared {
     /// Audience scanning mode (audience.rs, T-255). In memory only: every
     /// start is « Au-dessus du public ».
     pub audience: audience::AudienceState,
+    /// « Ciel coupé » (T-262, outdoor.rs): every point above the horizon
+    /// blanked on every projector. In memory only: off at every start.
+    pub sky_off: bool,
     /// `--test-hooks`: allows `POST /api/test/stall`.
     pub test_hooks: bool,
     /// The menu-bar entries in application mode (menubar.rs, T-413), for
@@ -840,6 +844,11 @@ impl Shared {
                 }
             }
         }
+        // Outdoor mode (T-262): no arming without the DGTA reference.
+        let outdoor_ok = self.safety.get().outdoor.authorized();
+        if self.gate.interlock_ok(interlock::OUTDOOR_AUTH) != outdoor_ok {
+            self.gate.register(interlock::OUTDOOR_AUTH, interlock::OUTDOOR_AUTH_LABEL, outdoor_ok);
+        }
         if self.checklist.enforced() {
             let ok = audience::protected(&self.safety.get());
             if !self.gate.has_interlock(interlock::AUDIENCE_ZONE) || self.gate.interlock_ok(interlock::AUDIENCE_ZONE) != ok {
@@ -849,9 +858,28 @@ impl Shared {
     }
 
     /// The safety settings the output stage applies now: Public zones
-    /// blanked outside audience scanning (audience.rs).
+    /// blanked outside audience scanning (audience.rs), « Ciel coupé »
+    /// (T-262) from this session.
     pub fn effective_safety(&self) -> safety::SafetySettings {
-        audience::effective(&self.safety.get(), self.audience.is_scanning())
+        let mut cfg = audience::effective(&self.safety.get(), self.audience.is_scanning());
+        cfg.outdoor.sky_off = self.sky_off;
+        cfg
+    }
+
+    /// « Ciel coupé » on or off (T-262). Cutting is always allowed, from
+    /// any source (it only darkens, from the next frame); restoring is
+    /// the operator's explicit gesture (UI, keyboard, local API). Never
+    /// arms nor disarms. Returns false when refused.
+    pub fn set_sky_off(&mut self, on: bool, src: interlock::ArmSource) -> bool {
+        if !on && !profiles::operator_source(src) {
+            return false;
+        }
+        if self.sky_off != on {
+            self.sky_off = on;
+            log::warn!("Ciel coupé : {}", if on { "activé" } else { "rétabli" });
+            self.gate.log().record("sky_off", Some(src.id()), serde_json::json!({ "on": on }));
+        }
+        true
     }
 
     /// Trips the emergency stop and records it in the gate. Audience
@@ -1468,6 +1496,7 @@ fn startup_state(cli: &Cli) -> Shared {
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
         profiles: profiles::ProfileStore::load(&cli.data_dir),
         audience: Default::default(),
+        sky_off: false,
         test_hooks: cli.test_hooks,
         menu: None,
         test_stall_ms: 0,
@@ -2445,7 +2474,11 @@ impl Engine {
                 }
             };
             let st = &mut self.extras[i];
-            let frame = safety_chain(frame, plan.frame_limits, st.stage.max_points(), &plan.color, t, safety_cfg, &mut st.limiter, &mut st.dwell_guard, armed, &plan.caps);
+            // The outdoor cut (T-262) follows this projector's own mounting;
+            // without one it cuts its whole field while the mode is on.
+            let mut cfg = safety_cfg.clone();
+            cfg.outdoor.projector = plan.id.clone();
+            let frame = safety_chain(frame, plan.frame_limits, st.stage.max_points(), &plan.color, t, &cfg, &mut st.limiter, &mut st.dwell_guard, armed, &plan.caps);
             if let Some(signal) = &plan.cue_signal {
                 st.stage.cue_signal(signal);
             }

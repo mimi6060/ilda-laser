@@ -505,6 +505,9 @@ pub fn describe(e: &SafetyEvent) -> String {
                 _ => format!("Sécurité MIDI modifiée{}", changed()),
             }
         }
+        // « Ciel coupé » (T-262).
+        "sky_off" if d.get("on").and_then(Value::as_bool).unwrap_or(false) => "Ciel coupé : faisceaux au-dessus de l'horizon éteints".into(),
+        "sky_off" => "Ciel rétabli".into(),
         "project_open" => format!("Projet ouvert : {}", str_of(d, "name")),
         "autosave_recovered" => format!("Sauvegarde auto récupérée : {}", str_of(d, "file")),
         "test_pattern" => match d.get("label").and_then(Value::as_str) {

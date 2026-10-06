@@ -137,6 +137,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/safety/profiles", RouteClass::Read),
     ("POST", "/api/safety/profiles", RouteClass::Safety),
     ("POST", "/api/safety/profiles/load", RouteClass::Safety),
+    ("POST", "/api/safety/sky", RouteClass::Safety),
+    ("GET", "/api/safety/outdoor/export", RouteClass::Read),
     ("GET", "/api/audience", RouteClass::Read),
     ("POST", "/api/audience", RouteClass::Safety),
     ("GET", "/api/outputs/limits", RouteClass::Read),
@@ -1200,6 +1202,33 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // « Ciel coupé » (T-262): `{on: bool}` or `{toggle: true}`, with
+        // `source`. Cutting is always accepted (show mode included: it only
+        // darkens); restoring only from the UI, keyboard or local API
+        // (403 otherwise). Never arms nor disarms.
+        (Method::Post, "/api/safety/sky") => match body::<serde_json::Value>(request) {
+            Ok(req) => {
+                let source = ArmSource::parse(req.get("source").and_then(|v| v.as_str()).unwrap_or(""));
+                let mut s = shared.lock().unwrap();
+                let want = match (req.get("on").and_then(|v| v.as_bool()), req.get("toggle").and_then(|v| v.as_bool())) {
+                    (Some(on), _) => on,
+                    (None, Some(true)) => !s.sky_off,
+                    _ => return text(400, "expected \"on\" or \"toggle\""),
+                };
+                if s.set_sky_off(want, source) {
+                    json_response(outdoor_view(&s))
+                } else {
+                    text(403, "Rétablir le ciel se fait depuis l'interface seulement")
+                }
+            }
+            Err(e) => e,
+        },
+        // The declared sectors as on the DGTA form (T-262 / T-263).
+        (Method::Get, "/api/safety/outdoor/export") => {
+            let csv = shared.lock().unwrap().safety.get().outdoor.export_csv();
+            let header = Header::from_bytes(&b"Content-Disposition"[..], &b"attachment; filename=\"secteurs-dgta.csv\""[..]).expect("ASCII header");
+            with_type(Response::from_string(csv), "text/csv; charset=utf-8").with_header(header)
+        }
         // Safety profiles per venue (T-260). Locked in show mode (423,
         // not in `showmode::allowed`); never recorded by undo.
         (Method::Get, "/api/safety/profiles") => json_response(crate::profiles::view(&shared.lock().unwrap())),
@@ -4380,6 +4409,16 @@ fn festival_view(s: &Shared) -> serde_json::Value {
     })
 }
 
+/// The outdoor mode at a glance (T-262), in `/api/state`, every frame and
+/// the « Ciel coupé » reply.
+fn outdoor_view(s: &Shared) -> serde_json::Value {
+    let mut o = s.safety.get().outdoor;
+    o.sky_off = s.sky_off;
+    // What is cut on the main projector (output space), for the preview.
+    let cut: Vec<Vec<[f32; 2]>> = o.blank_zones().into_iter().map(|z| z.points).collect();
+    json!({ "enabled": o.enabled, "sky_off": s.sky_off, "authorized": o.authorized(), "sectors": o.sectors.len(), "cut": cut })
+}
+
 /// `GET /api/state`'s body (also `state.json` in the diagnostic report).
 fn state_json(s: &mut Shared) -> serde_json::Value {
     s.sync_data_warnings();
@@ -4434,6 +4473,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     v["storage"] = json!(s.project.backup.status());
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
+    // T-262: the outdoor mode and « Ciel coupé ».
+    v["outdoor"] = outdoor_view(s);
     v
 }
 
@@ -4633,6 +4674,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["history"] = s.history.summary();
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
+    // T-262: the outdoor mode and « Ciel coupé ».
+    v["outdoor"] = outdoor_view(s);
     // T-418: the executor page shown, its faders, and the pages with
     // something active.
     v["executors"] = crate::executors::view(s);
@@ -7693,6 +7736,68 @@ mod tests {
         assert_eq!(g["scan"]["pps_max"], 60_000);
         // The caps are untouched.
         assert_eq!(t.shared.lock().unwrap().outputs.active_limits(), crate::power::OutputLimits::default());
+    }
+
+    /// T-262: the outdoor mode through `POST /api/safety` (on: at once;
+    /// off or wider: confirmed), the arming lock without the DGTA
+    /// reference, « Ciel coupé » (cut from anywhere, restored by the
+    /// operator only, allowed in show mode) and the sectors' export.
+    #[test]
+    fn outdoor_mode_over_http() {
+        let t = TestServer::start(false);
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let mut cfg = js(&t.request("GET", "/api/safety", "").1)["settings"].clone();
+        assert_eq!(cfg["outdoor"]["enabled"], false);
+        assert_eq!(cfg["outdoor"]["max_from_vertical_deg"], 45.0);
+        cfg["outdoor"]["enabled"] = json!(true);
+        cfg["outdoor"]["sectors"] = json!([{ "az_min": 350.0, "az_max": 10.0, "el_min": 45.0, "el_max": 80.0 }]);
+        let (code, reply) = t.request("POST", "/api/safety", &cfg.to_string());
+        assert_eq!(code, 200, "turning it on tightens: {reply}");
+        // No reference: arming refused, with the reason.
+        let (code, reply) = t.request("POST", "/api/arm", r#"{"on":true}"#);
+        assert_eq!(code, 409, "{reply}");
+        assert!(reply.contains("DGTA"), "{reply}");
+        cfg["outdoor"]["authorization_ref"] = json!("BCAA-2026-42");
+        assert_eq!(t.request("POST", "/api/safety", &cfg.to_string()).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        // Wider sector or the mode off: confirmation needed.
+        let mut wider = cfg.clone();
+        wider["outdoor"]["sectors"][0]["az_max"] = json!(20.0);
+        let (code, reply) = t.request("POST", "/api/safety", &wider.to_string());
+        assert_eq!(code, 409, "{reply}");
+        let mut off = cfg.clone();
+        off["outdoor"]["enabled"] = json!(false);
+        assert_eq!(t.request("POST", "/api/safety", &off.to_string()).0, 409);
+        // Untrusted values refused.
+        let mut bad = cfg.clone();
+        bad["outdoor"]["sectors"][0]["el_min"] = json!(95.0);
+        assert_eq!(t.request("POST", "/api/safety", &bad.to_string()).0, 400);
+        // A runtime field in the body is ignored.
+        let mut sneaky = cfg.clone();
+        sneaky["outdoor"]["sky_off"] = json!(true);
+        assert_eq!(t.request("POST", "/api/safety", &sneaky.to_string()).0, 200);
+        assert!(!t.shared.lock().unwrap().sky_off);
+        // The export: what was entered.
+        let (code, csv) = t.request("GET", "/api/safety/outdoor/export", "");
+        assert_eq!(code, 200);
+        assert_eq!(csv.lines().nth(1), Some("1;350;10;45;80"), "{csv}");
+        // « Ciel coupé »: from a controller it cuts, never restores.
+        t.shared.lock().unwrap().show_mode.on = true;
+        let (code, reply) = t.request("POST", "/api/safety/sky", r#"{"on":true,"source":"midi"}"#);
+        assert_eq!(code, 200, "{reply}");
+        assert_eq!(js(&reply)["sky_off"], true);
+        assert_eq!(t.request("POST", "/api/safety/sky", r#"{"on":false,"source":"osc"}"#).0, 403);
+        assert!(t.shared.lock().unwrap().sky_off);
+        let (code, reply) = t.request("POST", "/api/safety/sky", r#"{"toggle":true,"source":"keyboard"}"#);
+        assert_eq!(code, 200);
+        assert_eq!(js(&reply)["sky_off"], false);
+        assert!(!t.shared.lock().unwrap().gate.is_armed(), "never arms");
+        // Show mode: the settings themselves are locked.
+        assert_eq!(t.request("POST", "/api/safety", &cfg.to_string()).0, 423);
+        let state = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!(state["outdoor"]["enabled"], true);
+        assert_eq!(state["outdoor"]["authorized"], true);
     }
 
     #[test]
