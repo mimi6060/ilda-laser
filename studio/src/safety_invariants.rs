@@ -3777,3 +3777,55 @@ fn a_prepared_cue_stays_dark_until_it_is_sent() {
     assert!(lit(&rig.wire) > 0, "sent: the main output shows the cue");
     assert!(lit(&wires[0].1) > 0, "sent: the second projector too");
 }
+
+/// T-442: an ILDA recording through the real engine. The recorder gets
+/// the calibrated frame from before the safety stage, one per deadline,
+/// disarmed, without arming or lighting the output; the file it makes
+/// carries the safety chain (nothing lit below the full horizon, nothing
+/// over the caps), not the raw look.
+#[test]
+fn a_live_recording_never_arms_and_its_file_carries_the_safety_chain() {
+    use crate::record::{self, RecordRequest, RecordState};
+    let mut s = test_support::shared();
+    s.settings = Settings { content: Content::Shape { shape: "circle".into() }, scale: 0.6, brightness: 1.0, rotation_speed: 90.0, ..Settings::default() };
+    s.calibration = Calibration { offset_x: 0.2, ..Calibration::default() };
+    let horizon = Horizon { y: 0.0, lines: true, ramp: 0.0, level: 0.0 };
+    s.safety.set(SafetySettings { horizon, ..Default::default() }, true).unwrap();
+    let caps = OutputLimits { max_power: 0.4, max_color: [1.0; 3] };
+    s.outputs.set(MAIN_OUTPUT, Some(caps), None, false, true).unwrap();
+    let mut rig = Rig::new(s, "ilda-record", 0);
+    let rx = {
+        let mut s = rig.s();
+        let now = s.now_s();
+        let req = RecordRequest { seconds: 0.4, fps: 25, ..Default::default() };
+        s.recorder.start(&req, now, MAIN_OUTPUT).unwrap().1
+    };
+    for _ in 0..60 {
+        rig.tick();
+        assert!(!rig.s().gate.is_armed(), "recording never arms");
+        let w = rig.wire.lock().unwrap();
+        assert!(!w.armed && w.last.iter().all(|p| !p.is_lit()), "the output stays dark");
+    }
+    assert_eq!(rig.s().recorder.status().state, RecordState::Writing);
+    let raw: Vec<Vec<Point>> = rx.try_iter().collect();
+    assert_eq!(raw.len(), 10);
+    // Captured before the safety stage, after the calibration: lit below
+    // the horizon, above the cap, moved right.
+    let lit: Vec<&Point> = raw.iter().flatten().filter(|p| p.is_lit()).collect();
+    assert!(lit.iter().any(|p| p.y < -0.3), "lit below the horizon before the chain");
+    assert!(lit.iter().any(|p| p.r.max(p.g).max(p.b) > 0.45), "brighter than the cap before the chain");
+    let cx = lit.iter().map(|p| p.x).sum::<f32>() / lit.len() as f32;
+    assert!((cx - 0.2).abs() < 0.05, "calibrated: {cx}");
+    // The file: the output chain baked in.
+    let chain = crate::ilda_library::ExportSafety::of(&rig.s(), MAIN_OUTPUT).unwrap();
+    let (bytes, ..) = record::bake(&raw, 25, &chain).unwrap();
+    let back = crate::ilda::read(&bytes).unwrap();
+    assert_eq!(back.len(), 10);
+    let mut lit_file = 0;
+    for p in back.iter().flat_map(|f| &f.points).filter(|p| p.is_lit()) {
+        assert!(p.y >= -1e-3, "lit below the horizon: {p:?}");
+        assert!(p.r.max(p.g).max(p.b) <= 0.4 + 1e-6, "over the cap: {p:?}");
+        lit_file += 1;
+    }
+    assert!(lit_file > 0, "the upper half still shows");
+}

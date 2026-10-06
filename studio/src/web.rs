@@ -2047,6 +2047,46 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Err(e) => e,
         },
         (Method::Get, "/api/media/ilda/export") => export_ilda(request.url(), shared),
+        // Recording what plays, or a timeline, as an ILDA animation (T-442):
+        // the work runs on its own thread (record.rs); the file lands in the
+        // library. Starting is a file write: show mode locks it; cancelling
+        // is not.
+        (Method::Get, "/api/ilda/record") => {
+            let s = shared.lock().unwrap();
+            // `?show=<name>`: its length and whether it reacts to music
+            // (an export renders the music neutral; the dialog says so).
+            let show = query_str(request.url(), "show").and_then(|name| {
+                let name = name.trim().to_string();
+                s.timeline.show.as_ref().filter(|sh| sh.name == name).cloned().or_else(|| s.shows.load(&name).ok())
+            });
+            let show = show.map(|sh| json!({
+                "name": sh.name,
+                "seconds": crate::record::show_seconds(&sh, s.tempo.bpm),
+                "audio": crate::record::uses_audio(&sh, &s.presets),
+            }));
+            json_response(json!({
+                "show": show,
+                "status": s.recorder.status(),
+                "min_seconds": crate::record::MIN_SECONDS,
+                "max_seconds": crate::record::MAX_SECONDS,
+                "min_fps": crate::record::MIN_FPS,
+                "max_fps": crate::record::MAX_FPS,
+                "default_fps": crate::record::DEFAULT_FPS,
+                "shownet_max_bytes": crate::ilda::SHOWNET_MAX_FILE_BYTES,
+            }))
+        }
+        (Method::Post, "/api/ilda/record") => match body::<crate::record::RecordRequest>(request) {
+            Ok(req) => match crate::record::start(shared, &req) {
+                Ok(status) => json_response(json!(status)),
+                Err((code, msg)) => text(code, &msg),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, "/api/ilda/record/cancel") => {
+            let cancelled = shared.lock().unwrap().recorder.cancel();
+            json_response(json!({ "cancelled": cancelled }))
+        }
+        (Method::Get, "/api/ilda/record/file") => download_ilda(request.url(), shared),
         // The ShowNET SD card bank (T-302): edited here, exported to a
         // folder beside the single worker (`may_decode`). Show mode locks
         // the POSTs (not in its allow-list).
@@ -2423,6 +2463,32 @@ fn export_ilda(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
             with_type(Response::from_data(bytes), "application/octet-stream").with_header(header)
         }
         Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
+/// `GET /api/ilda/record/file?name=<file>.ild`: a file of the ILDA library
+/// (a recording, T-442) as a download. The name is checked like a library
+/// name (no folder, no `..`), and only a regular file is sent.
+fn download_ilda(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let Some(name) = query_str(url, "name") else { return text(400, "expected ?name=<fichier>.ild") };
+    if !crate::ilda_library::valid_file_name(&name) {
+        return text(400, "nom de fichier invalide");
+    }
+    let dir = shared.lock().unwrap().ilda.dir().to_path_buf();
+    let path = dir.join(&name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_file() => {}
+        _ => return text(404, "fichier introuvable"),
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            // The header must stay ASCII: a name with accents goes out plain.
+            let ascii = if name.is_ascii() { name.clone() } else { "enregistrement.ild".into() };
+            let disposition = format!("attachment; filename=\"{ascii}\"");
+            let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+            with_type(Response::from_data(bytes), "application/octet-stream").with_header(header)
+        }
+        Err(e) => text(500, &format!("lecture impossible : {e}")),
     }
 }
 
@@ -6106,6 +6172,104 @@ mod tests {
         assert_eq!(t.request("POST", "/api/timeline/markers/parse", "Name,Start\nA,1\n").0, 423);
         assert_eq!(t.request("GET", "/api/timeline/markers.csv", "").0, 200, "reading is allowed");
         assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+    }
+
+    /// T-442: recordings over the API. A timeline export runs on its own
+    /// thread into the library (twice: the same bytes), downloads by a
+    /// checked name; a second start while one runs is 409, invalid
+    /// parameters 400, show mode 423 (cancel still works); never armed.
+    #[test]
+    fn ilda_recordings_write_into_the_library_without_arming() {
+        use crate::timeline::{Event, EventSource, Show, TimeBase, Track};
+        let t = TestServer::start(false);
+        let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        let look = crate::engine::Settings { content: crate::engine::Content::Shape { shape: "circle".into() }, scale: 0.5, ..Default::default() };
+        let mut show = Show::new_empty("webtest rec", TimeBase::Seconds);
+        show.tracks = vec![Track { name: "P".into(), layer: 1, events: vec![Event { id: 1, start: 0.0, len: 2.0, source: EventSource::Look { settings: look }, ..Default::default() }], ..Default::default() }];
+        t.shared.lock().unwrap().timeline.load(show);
+        let info = json(&t.request("GET", "/api/ilda/record?show=webtest%20rec", "").1);
+        assert_eq!((info["show"]["seconds"].as_f64(), info["show"]["audio"].as_bool()), (Some(2.0), Some(false)));
+        assert_eq!(info["status"]["state"], "idle");
+
+        for bad in [r#"{"fps":5}"#, r#"{"fps":61}"#, r#"{"seconds":0}"#, r#"{"seconds":601}"#, r#"{"name":"../x"}"#, r#"{"sd_number":0}"#, r#"{"sd_number":230}"#, r#"{"output":"ailleurs"}"#] {
+            let (status, body) = t.request("POST", "/api/ilda/record", bad);
+            assert_eq!(status, 400, "{bad}: {body}");
+        }
+        assert_eq!(t.request("POST", "/api/ilda/record", r#"{"source":{"kind":"timeline","show":"inconnu"}}"#).0, 404);
+        assert_eq!(t.request("POST", "/api/ilda/record", r#"{"source":{"kind":"timeline","show":"webtest rec","from_s":1.5,"to_s":1.0}}"#).0, 400);
+
+        let wait_done = || {
+            for _ in 0..500 {
+                let st = json(&t.request("GET", "/api/ilda/record", "").1)["status"].clone();
+                if st["state"] != "recording" && st["state"] != "writing" {
+                    return st;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the recording never ended");
+        };
+        let mut files = Vec::new();
+        for name in ["webtest a", "webtest b"] {
+            let req = json!({ "source": { "kind": "timeline", "show": "webtest rec" }, "fps": 25, "name": name });
+            let (status, body) = t.request("POST", "/api/ilda/record", &req.to_string());
+            assert_eq!(status, 200, "{body}");
+            let st = wait_done();
+            assert_eq!(st["state"], "done", "{st}");
+            assert_eq!((st["frames"].as_u64(), st["total"].as_u64()), (Some(50), Some(50)));
+            let file = st["file"].as_str().unwrap().to_string();
+            assert_eq!(file, format!("{name}.ild"));
+            let (status, bytes) = http_raw(t.addr, &format!("/api/ilda/record/file?name={}", file.replace(' ', "%20")));
+            assert_eq!(status, 200);
+            assert_eq!(&bytes[..4], b"ILDA");
+            assert_eq!(crate::ilda::read(&bytes).unwrap().len(), 50);
+            files.push(bytes);
+        }
+        assert_eq!(files[0], files[1], "the same timeline twice: the same bytes");
+        // In the library, as cues of the « ILDA » page.
+        let lib = json(&t.request("GET", "/api/media/ilda", "").1);
+        assert_eq!(lib["files"].as_array().unwrap().len(), 2);
+        // Download: only library names.
+        assert_eq!(t.request("GET", "/api/ilda/record/file?name=..%2Fsecret.ild", "").0, 400);
+        assert_eq!(t.request("GET", "/api/ilda/record/file?name=absent.ild", "").0, 404);
+
+        // Live (no engine here: it stays recording): a second start is 409.
+        assert_eq!(t.request("POST", "/api/ilda/record", r#"{"seconds":1}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/ilda/record", r#"{"seconds":1}"#).0, 409);
+        // Show mode: starting is a file write (423), cancelling is not.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/ilda/record", r#"{"seconds":1}"#).0, 423);
+        let (status, body) = t.request("POST", "/api/ilda/record/cancel", "");
+        assert_eq!((status, json(&body)["cancelled"].as_bool()), (200, Some(true)));
+        assert_eq!(json(&t.request("GET", "/api/ilda/record", "").1)["status"]["state"], "cancelled");
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap(), "never armed");
+        let dir = t.shared.lock().unwrap().ilda.dir().to_path_buf();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Status and raw body bytes of a GET.
+    fn http_raw(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+        let status = head.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        let body = raw[end + 4..].to_vec();
+        if !head.contains("transfer-encoding: chunked") {
+            return (status, body);
+        }
+        let (mut rest, mut out) = (&body[..], Vec::new());
+        while let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") {
+            let n = usize::from_str_radix(std::str::from_utf8(&rest[..eol]).unwrap().trim(), 16).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&rest[eol + 2..eol + 2 + n]);
+            rest = &rest[eol + 2 + n + 2..];
+        }
+        (status, out)
     }
 
     /// T-011: an ILDA file generated by our own writer is imported, shows

@@ -454,13 +454,47 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
         ilda::check_shownet_size(size)?;
         raw.push(points);
     }
-    let lit = |frames: &[Vec<Point>]| frames.iter().flatten().filter(|p| p.is_lit()).count();
-    let lit_before = lit(&raw);
+    let lit_before = lit_points(&raw);
     if lit_before == 0 {
         bail!("Ce look n'allume rien : aucun fichier à exporter");
     }
+    let out = bake_chain(&raw, fps, chain, "ce look")?;
+    let lit_after = lit_points(&out);
+    let bytes = encode(out)?;
+    ilda::check_shownet_size(bytes.len())?;
+    Ok(Exported { bytes, frames, lit_before, lit_after })
+}
 
-    // The chain, lap after lap; the last lap is the file.
+/// Lit points of a sequence of frames.
+pub fn lit_points(frames: &[Vec<Point>]) -> usize {
+    frames.iter().flatten().filter(|p| p.is_lit()).count()
+}
+
+/// The output safety chain over a sequence of already calibrated frames
+/// played at `fps`, looped (T-355): the output's colour rendering, beam
+/// horizon, zones and colour calibration, strobe limiter, static beam
+/// guard (as if armed: its « off » profile never applies), power caps of
+/// `chain.output`, the limiter's last word, then every channel rounded
+/// down to the file's 8-bit step. The real functions, in the engine's
+/// order (`main.rs`, `safety_chain`). Shared by the look export and the
+/// recordings (`record.rs`, T-442).
+///
+/// The file is looped: the stateful stages (strobe limiter, static beam
+/// guard) first run over the frames lap after lap, long enough for a
+/// burst and its pause, and the lap returned is the next one, so a strobe
+/// that is too fast stays cut across the loop. Then a fresh limiter
+/// watches the returned lap looped: if it would still cut something, the
+/// sequence is refused. Refused too when the chain leaves nothing lit.
+/// `what` names the content in the messages (« ce look »).
+pub fn bake_chain(raw: &[Vec<Point>], fps: f32, chain: &ExportSafety, what: &str) -> Result<Vec<Vec<Point>>> {
+    let frames = raw.len();
+    if frames == 0 {
+        bail!("Aucune image à exporter");
+    }
+    if !fps.is_finite() || fps <= 0.0 {
+        bail!("images par seconde invalides");
+    }
+    let dt = 1.0 / fps;
     let cfg = &chain.safety;
     let laps = warm_up_laps(frames, fps, cfg) + 1;
     let at = |lap: usize, i: usize| (lap * frames + i) as f64 * dt as f64;
@@ -483,10 +517,9 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
             }
         }
     }
-    let lit_after = lit(&out);
-    if lit_after == 0 {
+    if lit_points(&out) == 0 {
         bail!(
-            "La chaîne de sortie (couleurs de la sortie, zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de la sortie « {} ») coupe tout ce look : rien à exporter",
+            "La chaîne de sortie (couleurs de la sortie, zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de la sortie « {} ») coupe tout {what} : rien à exporter",
             chain.output
         );
     }
@@ -495,12 +528,21 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
     for lap in 0..laps {
         for (i, frame) in out.iter().enumerate() {
             if check.would_cut(frame, at(lap, i), cfg) {
-                bail!("Ce look clignote trop vite pour tourner en boucle sur le ShowNET (limiteur de strobe) : ralentissez le strobe ou changez la durée");
+                bail!("{} clignote trop vite pour tourner en boucle sur le ShowNET (limiteur de strobe) : ralentissez le strobe ou changez la durée", capitalised(what));
             }
         }
     }
+    Ok(out)
+}
 
-    let images: Vec<IldaFrame> = out
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
+/// Frames as an ILDA format 5 file, named `LS000000`… by « LaserStd ».
+pub fn encode(frames: Vec<Vec<Point>>) -> Result<Vec<u8>> {
+    let images: Vec<IldaFrame> = frames
         .into_iter()
         .enumerate()
         .map(|(i, points)| {
@@ -509,9 +551,7 @@ pub fn export_look(settings: &Settings, frames: usize, fps: f32, bpm: f64, chain
             f
         })
         .collect();
-    let bytes = ilda::write_format5(&images)?;
-    ilda::check_shownet_size(bytes.len())?;
-    Ok(Exported { bytes, frames, lit_before, lit_after })
+    ilda::write_format5(&images)
 }
 
 #[cfg(test)]

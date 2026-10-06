@@ -46,6 +46,7 @@ pub fn shared() -> Shared {
         pps: 30_000,
         scenes: SceneStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scenes.json")),
         sdbank: crate::sdbank::SdBankStore::in_memory(),
+        recorder: crate::record::Recorder::default(),
         shownet_dmx,
         output_status: None,
         playlist: None,
