@@ -10,9 +10,9 @@
 //! Each file is one of **our** cues rendered offline at `SD_FPS` (the
 //! ShowNET's default playback rate) for the slot's duration, through
 //! `ilda_library::export_look`: the same output safety chain as the engine
-//! (calibration, zones, horizon, strobe limiter, static beam guard, power
-//! caps of the chosen output) is baked into every file (T-355). The
-//! ShowNET plays them without the studio: its own hardware stop stays the
+//! (calibration, zones, horizon, outdoor cut of the output's projector,
+//! strobe limiter, static beam guard, power caps of the chosen output) is
+//! baked into every file (T-355, T-477). The ShowNET plays them without the studio: its own hardware stop stays the
 //! real safety, the page says so.
 //!
 //! The bank is a machine file, `<data-dir>/sdbank.json` (it describes the
