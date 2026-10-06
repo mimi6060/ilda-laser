@@ -52,7 +52,7 @@ test('axe finds nothing serious in any workspace', async ({ page }) => {
   await openWorkspace(page, 'timeline');
   await audit(page, 'TIMELINE');
   await openWorkspace(page, 'creation');
-  for (const tab of ['look', 'figures', 'media', 'program']) {
+  for (const tab of ['look', 'abstract', 'figures', 'media', 'program']) {
     await page.locator(`#creationTabs [data-ctab="${tab}"]`).click();
     await audit(page, 'CRÉATION › ' + tab);
   }

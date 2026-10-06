@@ -49,6 +49,7 @@ pub const PAGES: &[HelpPage] = &[
     HelpPage { slug: "timeline-timecode", title_fr: "Timecode", group_fr: "TIMELINE", body_html: include_str!("timeline-timecode.html") },
     HelpPage { slug: "timeline-lecteur", title_fr: "Lecteur de shows", group_fr: "TIMELINE", body_html: include_str!("timeline-lecteur.html") },
     HelpPage { slug: "creation-look", title_fr: "Look", group_fr: "CRÉATION", body_html: include_str!("creation-look.html") },
+    HelpPage { slug: "creation-abstraits", title_fr: "Abstraits", group_fr: "CRÉATION", body_html: include_str!("creation-abstraits.html") },
     HelpPage { slug: "creation-figures", title_fr: "Figures", group_fr: "CRÉATION", body_html: include_str!("creation-figures.html") },
     HelpPage { slug: "creation-import", title_fr: "Importer un SVG ou une image", group_fr: "CRÉATION", body_html: include_str!("creation-import.html") },
     HelpPage { slug: "creation-macros", title_fr: "Macros", group_fr: "CRÉATION", body_html: include_str!("creation-macros.html") },

@@ -122,7 +122,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
     Some(match path {
         "/api/scenes/save" | "/api/scenes/delete" => &[Scenes],
         "/api/cues/slot" | "/api/cues/program" | "/api/cues/modifiers" => &[CueProps],
-        "/api/cues/store" | "/api/cues/update" | "/api/cues/program/store" | "/api/grid/edit" => &[UserCues, Pages, CueProps],
+        "/api/cues/store" | "/api/cues/update" | "/api/cues/program/store" | "/api/abstracts/store" | "/api/grid/edit" => &[UserCues, Pages, CueProps],
         "/api/grid" | "/api/grid/page" | "/api/grid/pages" | "/api/grid/move" | "/api/grid/clear" => &[Pages, UserCues, CueProps],
         "/api/palettes" => &[Palettes],
         "/api/scan-presets" => &[ScanPresets],

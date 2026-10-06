@@ -44,7 +44,7 @@ test('the « ? » of every panel opens its own page', async ({ page }) => {
   await openWorkspace(page, 'timeline');
   await clickVisibleHelp(page, titles, seen);
   await openWorkspace(page, 'creation');
-  for (const tab of ['look', 'figures', 'media', 'program', 'macros']) {
+  for (const tab of ['look', 'abstract', 'figures', 'media', 'program', 'macros']) {
     await page.locator(`#creationTabs [data-ctab="${tab}"]`).click();
     await clickVisibleHelp(page, titles, seen);
   }

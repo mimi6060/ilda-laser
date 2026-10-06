@@ -378,6 +378,18 @@
   #pgMsg.err { color: var(--danger); font-weight: 600; }
   .pg-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 12px; }
   .pg-pv { display: flex; flex-direction: column; gap: 4px; }
+  /* CRÉATION › Abstraits (T-440): stacked oscillators. */
+  #absPreview { width: 100%; max-width: 400px; aspect-ratio: 1; display: block; margin: 4px auto; border-radius: 6px; background: #000; }
+  #absLimited { color: var(--warn); }
+  #absMsg.err { color: var(--danger); }
+  .abs-osc { border-top: 1px solid var(--line); padding: 8px 0 4px; }
+  .abs-osc.off { opacity: .6; }
+  .abs-osc .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .abs-osc .abs-n { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 1.4em; }
+  .abs-osc .seg { flex: 1; min-width: 150px; }
+  .abs-osc .seg button.active { color: var(--ws-creation); border-color: var(--ws-creation); }
+  .abs-osc .abs-del { margin-left: auto; }
+  .abs-osc input[type=number] { width: 90px; }
   #pgPreview { width: 220px; height: 220px; }
   .pg-lanes { display: flex; flex-direction: column; gap: 6px; min-height: 0; min-width: 0; }
   .pg-lanes-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -3007,6 +3019,7 @@
   <div class="ws-panel" data-ws="creation" id="creationPanel" hidden>
     <div class="ptabs" id="creationTabs" role="tablist" aria-label="Panneau CRÉATION">
       <button role="tab" data-ctab="look">Look</button>
+      <button role="tab" data-ctab="abstract">Abstraits</button>
       <button role="tab" data-ctab="figures">Figures</button>
       <button role="tab" data-ctab="macros">Macros</button>
       <button role="tab" data-ctab="media">Médiathèque</button>
@@ -3203,6 +3216,35 @@
       <div id="pgLfos"></div>
       <div class="row"><button id="pgLfoAdd">Ajouter un modulateur</button></div>
       <div class="hint">L'aperçu ne part jamais vers le laser. Le programme enregistré joue au prochain lancement du cue, puis passe par les maîtres et toute la chaîne de sécurité.</div>
+    </section>
+
+    <!-- CRÉATION › Abstraits (T-440) : oscillateurs empilés, aperçu par le moteur -->
+    <section data-cpanel="abstract" id="absEdit" data-help="creation-abstraits" hidden>
+      <h2>Abstrait</h2>
+      <canvas id="absPreview" width="400" height="400" role="img" aria-label="Aperçu de l'abstrait (jamais envoyé au laser)"></canvas>
+      <div class="hint" id="absPvInfo" role="status"></div>
+      <h3>Oscillateurs</h3>
+      <div id="absOscs"></div>
+      <div class="row">
+        <button id="absAdd" title="Ajoute un oscillateur (6 au plus)">+ Oscillateur</button>
+      </div>
+      <h3>Réglages généraux</h3>
+      <label for="absPoints">Points <span class="v" id="absPointsV"></span></label>
+      <input type="range" id="absPoints" data-default="400" min="16" max="2000" step="1">
+      <div class="hint" id="absBudget"></div>
+      <div class="hint" id="absLimited" hidden>Limité par le budget du calque</div>
+      <label for="absTurns">Tours <span class="v" id="absTurnsV"></span></label>
+      <input type="range" id="absTurns" data-default="1" min="0.25" max="64" step="0.25">
+      <label class="check"><input type="checkbox" id="absAuto"><span>Tours automatiques</span></label>
+      <label for="absColor">Couleur de base</label>
+      <input type="color" id="absColor" value="#00ff00">
+      <div class="row">
+        <button id="absReset" title="Revient au cercle de départ">Réinitialiser</button>
+        <button id="absLoad" title="Reprend l'abstrait du look en cours (onglet Look)">Reprendre le look</button>
+        <button id="absStore" class="primary" title="Crée un cue utilisateur avec cet abstrait dans la première case libre d'une page utilisateur">Enregistrer comme cue…</button>
+      </div>
+      <div class="hint" id="absMsg" role="status"></div>
+      <div class="hint">L'aperçu est dessiné par le moteur et ne part jamais vers le laser : ce qui joue en LIVE ne change pas. Le cue enregistré passe, comme tout contenu, par le budget du calque, les maîtres et toute la chaîne de sécurité.</div>
     </section>
 
     <!-- Médiathèque (T-011) : fichiers ILDA importés, export pour la carte SD du ShowNET -->
@@ -4832,7 +4874,12 @@ function showSettings() {
   $('wavePanel').hidden = kind !== 'wave';
   $('genPanel').hidden = kind !== 'generator';
   $('evoPanel').hidden = kind !== 'evolving';
-  $('figNote').hidden = kind !== 'figure';
+  $('figNote').hidden = kind !== 'figure' && kind !== 'abstract';
+  if (kind === 'abstract') {
+    const n = (s.content.oscs || []).length;
+    $('figNote').textContent = `Abstrait : ${n} oscillateur${n > 1 ? 's' : ''}. Il se modifie dans l'onglet Abstraits (« Reprendre le look »). `
+      + 'Couleur, taille, rotation et luminosité s\'appliquent par-dessus.';
+  }
   if (kind === 'figure') {
     const c = s.content;
     $('figNote').textContent = `Figure « ${c.name} » : ${c.frames.length} image${c.frames.length > 1 ? 's' : ''}. `
@@ -16858,7 +16905,7 @@ const figFrame = () => fe.fig.frames[fe.frame];
 const figStrokes = () => figFrame().strokes;
 
 function setCreationTab(name) {
-  if (name !== 'figures' && name !== 'media' && name !== 'program' && name !== 'macros') name = 'look';
+  if (name !== 'figures' && name !== 'media' && name !== 'program' && name !== 'macros' && name !== 'abstract') name = 'look';
   document.querySelectorAll('#creationTabs [data-ctab]').forEach(b => {
     b.classList.toggle('active', b.dataset.ctab === name);
     b.setAttribute('aria-selected', String(b.dataset.ctab === name));
@@ -16875,6 +16922,7 @@ function syncFigView() {
   if (on) { loadFigLib(); figRender(true); }
   if (activeWs === 'creation' && $('workspace').dataset.ctab === 'media') loadIldaLib();
   pgSync(); // CRÉATION › Cue évolutif (T-164)
+  absSync(); // CRÉATION › Abstraits (T-440)
 }
 document.querySelectorAll('#creationTabs [data-ctab]').forEach(b => b.onclick = () => setCreationTab(b.dataset.ctab));
 
@@ -17905,6 +17953,7 @@ function pgContentFr(c) {
     case 'evolving': return `Cue évolutif (${(c.keys || []).length} clés)`;
     case 'figure': return `Figure « ${c.name || ''} »`;
     case 'ilda': return 'ILDA · ' + c.file;
+    case 'abstract': return `Abstrait (${(c.oscs || []).length} oscillateurs)`;
     default: return c.kind;
   }
 }
@@ -18317,6 +18366,195 @@ $('cueMenuProgram').onclick = () => {
   setWorkspace('creation');
   setCreationTab('program');
   pgOpen(id);
+};
+
+// ---------- CRÉATION › Abstraits: stacked oscillators (T-440) ----------
+// An abstract is a curve made of up to six oscillators on X, Y and the
+// hue (abstracts.rs). The editor keeps its own look, here in the page:
+// every change is drawn by the engine (POST /api/abstracts/preview, its own
+// animator, never the laser, never what plays in LIVE) and « Enregistrer
+// comme cue… » makes a user cue of it (POST /api/abstracts/store, in the
+// history, refused in show mode).
+const ABS_KEY = 'laserStudio.abstract';
+const ABS_MAX = 6;
+const ABS_WAVES = [['sine', 'Sinus'], ['triangle', 'Triangle'], ['square', 'Carré'], ['saw_up', 'Dent de scie ↑'], ['saw_down', 'Dent de scie ↓']];
+const ABS_TARGETS = [['x', 'X'], ['y', 'Y'], ['color', 'Couleur']];
+const absOsc = (target = 'x', ratio = 1, phase_deg = 0) => ({ target, ratio, phase_deg, amp: 1, wave: 'sine', drift: 0, enabled: true });
+const absDefault = () => ({ content: { kind: 'abstract', oscs: [absOsc('x', 1, 90), absOsc('y', 1, 0)], points: 400, turns: 1, auto_turns: true, closed: true }, color: [0, 255, 0], scale: 0.6, brightness: 1 });
+const ab = { look: absDefault(), pv: null, pvAt: 0, pvTimer: 0, pvDebounce: 0, pvSeq: 0 };
+try { const saved = JSON.parse(remembered(ABS_KEY) || 'null'); if (saved && saved.content && saved.content.kind === 'abstract') ab.look = saved; } catch { /* a fresh editor */ }
+const absShape = () => ab.look.content;
+const absNum = (v, def) => Number.isFinite(+v) ? +v : def;
+function absMsg(text, err = false) {
+  $('absMsg').textContent = text;
+  $('absMsg').classList.toggle('err', err);
+}
+
+function absSync() {
+  const on = activeWs === 'creation' && $('workspace').dataset.ctab === 'abstract';
+  if (!on) { clearTimeout(ab.pvTimer); clearTimeout(ab.pvDebounce); return; }
+  absRender();
+  absSchedule(0);
+}
+
+// One row per oscillator: Cible, Rapport, Phase, Amplitude, Forme, Dérive, Actif, Supprimer.
+function absRender() {
+  const sh = absShape(), box = $('absOscs');
+  box.replaceChildren();
+  sh.oscs.forEach((o, i) => {
+    const n = i + 1, row = document.createElement('div');
+    row.className = 'abs-osc' + (o.enabled ? '' : ' off');
+    row.dataset.osc = String(i);
+    const head = document.createElement('div');
+    head.className = 'row';
+    const num = document.createElement('span');
+    num.className = 'abs-n'; num.textContent = String(n);
+    const seg = document.createElement('div');
+    seg.className = 'seg'; seg.setAttribute('role', 'group'); seg.setAttribute('aria-label', `Cible de l'oscillateur ${n}`);
+    for (const [t, fr] of ABS_TARGETS) {
+      const b = document.createElement('button');
+      b.textContent = fr; b.dataset.target = t;
+      b.classList.toggle('active', o.target === t);
+      b.setAttribute('aria-pressed', String(o.target === t));
+      b.onclick = () => absEdit(s => { s.oscs[i].target = t; }, true);
+      seg.append(b);
+    }
+    const on = document.createElement('label');
+    on.className = 'check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = o.enabled; cb.className = 'abs-on';
+    cb.onchange = () => absEdit(s => { s.oscs[i].enabled = cb.checked; }, true);
+    const onTxt = document.createElement('span'); onTxt.textContent = 'Actif';
+    on.append(cb, onTxt);
+    const del = document.createElement('button');
+    del.className = 'abs-del'; del.textContent = 'Supprimer';
+    del.setAttribute('aria-label', `Supprimer l'oscillateur ${n}`);
+    del.onclick = () => absEdit(s => { s.oscs.splice(i, 1); }, true);
+    head.append(num, seg, on, del);
+    row.append(head);
+    // Rapport: typed (entier ou fractionnaire), 0,25 à 16.
+    const field = (label, el, key) => {
+      el.id = `abs${key}${n}`;
+      const l = document.createElement('label');
+      l.htmlFor = el.id; l.textContent = label;
+      row.append(l, el);
+    };
+    const ratio = document.createElement('input');
+    ratio.type = 'number'; ratio.min = '0.25'; ratio.max = '16'; ratio.step = 'any'; ratio.value = String(o.ratio);
+    ratio.className = 'abs-ratio';
+    ratio.onchange = () => absEdit(s => { s.oscs[i].ratio = Math.min(16, Math.max(0.25, absNum(ratio.value, 1))); }, true);
+    field('Rapport', ratio, 'Ratio');
+    const slider = (label, key, min, max, step, def, value, unit, set) => {
+      const el = document.createElement('input');
+      el.type = 'range'; el.min = String(min); el.max = String(max); el.step = String(step);
+      el.dataset.default = String(def); el.value = String(value);
+      el.className = 'abs-' + key.toLowerCase();
+      el.id = `abs${key}${n}`;
+      const l = document.createElement('label');
+      l.htmlFor = el.id; l.textContent = label + ' ';
+      const v = document.createElement('span');
+      v.className = 'v'; v.id = el.id + 'V';
+      const show = () => { v.textContent = unit(+el.value); };
+      show();
+      l.append(v);
+      el.addEventListener('input', () => { show(); absEdit(s => set(s.oscs[i], +el.value)); });
+      row.append(l, el);
+    };
+    const fr = (x, d = 2) => (+x.toFixed(d)).toString().replace('.', ',');
+    slider('Phase', 'Phase', 0, 360, 1, 0, o.phase_deg, x => fr(x, 0) + '°', (oo, x) => { oo.phase_deg = x; });
+    slider('Amplitude', 'Amp', 0, 1, 0.01, 1, o.amp, x => fr(x), (oo, x) => { oo.amp = x; });
+    const wave = document.createElement('select');
+    for (const [w, label] of ABS_WAVES) wave.append(new Option(label, w));
+    wave.value = o.wave === 'random' ? 'sine' : o.wave;
+    wave.className = 'abs-wave';
+    wave.onchange = () => absEdit(s => { s.oscs[i].wave = wave.value; });
+    field('Forme', wave, 'Wave');
+    slider('Dérive (tours par temps)', 'Drift', -4, 4, 0.03125, 0, o.drift, x => fr(x, 3), (oo, x) => { oo.drift = x; });
+    box.append(row);
+  });
+  $('absAdd').disabled = sh.oscs.length >= ABS_MAX;
+  setVal('absPoints', sh.points); $('absPointsV').textContent = String(sh.points);
+  setVal('absTurns', sh.turns); $('absTurnsV').textContent = String(sh.turns).replace('.', ',');
+  $('absTurns').disabled = !!sh.auto_turns;
+  setCheck('absAuto', !!sh.auto_turns);
+  setVal('absColor', hex(ab.look.color));
+  $('absLoad').disabled = !(settings && settings.content && settings.content.kind === 'abstract');
+}
+
+// An edit of the editor's look: kept in the page, previewed by the engine.
+function absEdit(fn, rerender = false) {
+  fn(absShape());
+  remember(ABS_KEY, JSON.stringify(ab.look));
+  if (rerender) absRender();
+  absSchedule();
+}
+
+function absSchedule(delay = 120) {
+  clearTimeout(ab.pvDebounce);
+  ab.pvDebounce = setTimeout(absFetch, delay);
+}
+async function absFetch() {
+  if (activeWs !== 'creation' || $('workspace').dataset.ctab !== 'abstract') return;
+  const seq = ++ab.pvSeq;
+  let r, text;
+  try {
+    r = await api('POST', '/api/abstracts/preview', { look: ab.look }, { quiet: true });
+    text = await r.text();
+  } catch { return; }
+  if (seq !== ab.pvSeq) return;
+  if (!r.ok) { absMsg(r.status === 423 ? LOCKED_FR : `Aperçu impossible (erreur ${r.status}).`, true); return; }
+  let pv;
+  try { pv = JSON.parse(text); } catch { return; }
+  if ($('absMsg').classList.contains('err')) absMsg('');
+  ab.pv = pv; ab.pvAt = 0;
+  $('absBudget').textContent = `${pv.samples} points (budget ${pv.budget})`;
+  $('absLimited').hidden = !pv.limited;
+  absPlay();
+}
+function absPlay() {
+  clearTimeout(ab.pvTimer);
+  if (!ab.pv || !ab.pv.frames.length) return;
+  const step = () => {
+    if (activeWs !== 'creation' || $('workspace').dataset.ctab !== 'abstract' || !ab.pv) return;
+    const n = ab.pv.frames.length, i = ab.pvAt % n, bpm = Math.max(20, +$('bpm').value || 120);
+    drawThumb($('absPreview'), ab.pv.frames[i]);
+    $('absPvInfo').textContent = n > 1
+      ? `Aperçu à ${+bpm.toFixed(1)} BPM · ${ab.pv.points} points tracés · jamais envoyé au laser`
+      : `Figure fixe · ${ab.pv.points} points tracés · jamais envoyée au laser`;
+    ab.pvAt++;
+    if (n > 1) ab.pvTimer = setTimeout(step, 1000 * ab.pv.step_beats * 60 / bpm);
+  };
+  step();
+}
+
+$('absAdd').onclick = () => {
+  if (absShape().oscs.length >= ABS_MAX) return;
+  absEdit(s => { s.oscs.push(absOsc(s.oscs.some(o => o.target === 'y') ? 'x' : 'y', 1, 0)); }, true);
+};
+$('absPoints').addEventListener('input', () => { $('absPointsV').textContent = $('absPoints').value; absEdit(s => { s.points = +$('absPoints').value; }); });
+$('absTurns').addEventListener('input', () => { $('absTurnsV').textContent = $('absTurns').value.replace('.', ','); absEdit(s => { s.turns = +$('absTurns').value; }); });
+$('absAuto').addEventListener('change', () => absEdit(s => { s.auto_turns = $('absAuto').checked; }, true));
+$('absColor').addEventListener('input', () => { ab.look.color = rgb($('absColor').value); absEdit(() => {}); });
+$('absReset').onclick = () => { ab.look = absDefault(); absEdit(() => {}, true); absMsg('Revenu au cercle de départ.'); };
+$('absLoad').onclick = () => {
+  if (!settings || settings.content.kind !== 'abstract') return;
+  ab.look = { content: structuredClone(settings.content), color: settings.color.slice(), scale: settings.scale, brightness: 1 };
+  absEdit(() => {}, true);
+  absMsg('Abstrait du look en cours repris.');
+};
+$('absStore').onclick = async () => {
+  if (showMode) { absMsg(LOCKED_FR, true); return; }
+  const name = prompt('Nom du nouveau cue :', 'Mon abstrait');
+  if (name === null) return;
+  let r, text;
+  try {
+    r = await api('POST', '/api/abstracts/store', { look: ab.look, name: name.trim() || null }, { quiet: true });
+    text = await r.text();
+  } catch { absMsg('Le studio ne répond pas.', true); return; }
+  if (!r.ok) { absMsg(r.status === 423 ? LOCKED_FR : `Enregistrement refusé : ${text}`, true); return; }
+  const g = JSON.parse(text), page = g.pages[g.cell[0]];
+  await loadPresets();
+  absMsg(`Enregistré dans la page « ${page ? page.name : g.cell[0] + 1} », case ${g.cell[1] + 1}.`);
 };
 
 setFigTool('line');

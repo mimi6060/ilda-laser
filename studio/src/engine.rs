@@ -4,6 +4,7 @@
 //! `Animator`, so a `Settings` value stays a plain, saveable description
 //! of a look - the same thing a scene stores.
 
+use crate::abstracts::{self, AbstractShape};
 use crate::beat;
 use crate::evolving::{self, EvolvingCue};
 use crate::figures::Figure;
@@ -45,6 +46,9 @@ pub enum Content {
         #[serde(default = "crate::ilda_library::default_fps")]
         fps: f32,
     },
+    /// An abstract (T-440, `abstracts.rs`): a curve made of stacked
+    /// oscillators on X, Y and the hue, edited in CRÉATION › Abstraits.
+    Abstract(AbstractShape),
 }
 
 impl Content {
@@ -60,6 +64,9 @@ impl Content {
             | (Content::Evolving(_), Content::Evolving(_)) => true,
             (Content::Figure(a), Content::Figure(b)) => a.name == b.name,
             (Content::Ilda { file: a, .. }, Content::Ilda { file: b, .. }) => a == b,
+            // Editing the oscillators reshapes the drawing; it doesn't
+            // start the animation over.
+            (Content::Abstract(_), Content::Abstract(_)) => true,
             _ => false,
         }
     }
@@ -464,9 +471,22 @@ pub struct Animator {
     /// A festival palette on show (T-130): (colour 1, colour 2) standing in
     /// for the look's own `color` and `color2`. `None` = the look's colours.
     palette: Option<([u8; 3], [u8; 3])>,
+    /// The layer's point budget (`layers::Mixer::point_budget`) an
+    /// abstract samples within; `None` = the default budget.
+    point_budget: Option<usize>,
 }
 
 impl Animator {
+    /// Sample abstracts within the mixer's point budget (call before
+    /// `render`). The mixer still thins whatever goes past it.
+    pub fn set_point_budget(&mut self, budget: usize) {
+        self.point_budget = Some(budget);
+    }
+
+    fn point_budget(&self) -> usize {
+        self.point_budget.unwrap_or(crate::layers::DEFAULT_POINT_BUDGET)
+    }
+
     /// Draw with a festival palette's two colours instead of the look's
     /// (call before `render`); `None` gives the look its colours back.
     pub fn set_palette(&mut self, palette: Option<([u8; 3], [u8; 3])>) {
@@ -563,6 +583,7 @@ impl Animator {
                 None => layer.optimizer = None,
             }
             layer.palette = self.palette;
+            layer.point_budget = self.point_budget;
             let look = Settings { content: content.clone(), program: None, ..s.clone() };
             looks.push(layer.render(&look, audio, dt, clock));
         }
@@ -691,6 +712,39 @@ impl Animator {
                     let (r, g, b) = shift_hue(c, hue_shift);
                     (r * gain, g * gain, b * gain)
                 })
+            }
+            // Its own hue offsets on top of the look's colour (T-440); the
+            // drift follows the tempo clock (`beat_pos`).
+            Content::Abstract(shape) => {
+                let draw = |budget: usize| -> Vec<Point> {
+                    abstracts::points(shape, beat_pos, budget)
+                        .into_iter()
+                        .map(|[x, y, hue]| {
+                            let (r, g, b) = if hue == 0.0 {
+                                (r, g, b)
+                            } else {
+                                let (r, g, b) = shift_hue(s.color, hue_shift + hue);
+                                (r * gain, g * gain, b * gain)
+                            };
+                            Point::lit(x * scale, y * scale, r, g, b)
+                        })
+                        .collect()
+                };
+                // Fewer samples while the densified curve (long jumps cut
+                // into steps, corners held) would pass the budget; a path
+                // too long even then is the mixer's to thin.
+                let budget = self.point_budget();
+                let mut samples = budget;
+                let mut points = draw(samples);
+                for _ in 0..8 {
+                    let cost = densify(&points).len();
+                    if cost <= budget || samples <= abstracts::MIN_POINTS as usize {
+                        break;
+                    }
+                    samples = samples.min(points.len()).saturating_sub(cost - budget).max(abstracts::MIN_POINTS as usize);
+                    points = draw(samples);
+                }
+                points
             }
             // The file's own colours, dimmed like any look; its own dwell
             // and blanking (see the end of this function).

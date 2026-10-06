@@ -191,6 +191,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/cues/program", RouteClass::Read),
     ("POST", "/api/cues/program/preview", RouteClass::Edit),
     ("POST", "/api/cues/program/store", RouteClass::Edit),
+    ("POST", "/api/abstracts/preview", RouteClass::Edit),
+    ("POST", "/api/abstracts/store", RouteClass::Edit),
     ("GET", "/api/grid", RouteClass::Read),
     ("POST", "/api/grid", RouteClass::Edit),
     ("POST", "/api/grid/page", RouteClass::Edit),
@@ -1991,6 +1993,39 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Err(e) => e,
         },
         // The cue grid's size and pages (T-272). Every POST is an edit: locked in show mode.
+        // CRÉATION › Abstraits (T-440): the editor's live preview, drawn by
+        // the engine on its own animator within the layer's point budget.
+        // Display only: nothing is stored, nothing reaches the output.
+        (Method::Post, "/api/abstracts/preview") => match body::<AbstractRequest>(request) {
+            Ok(req) => {
+                let Some(look) = crate::abstracts::clean_look(&req.look) else { return text(400, "ce look n'est pas un abstrait") };
+                let (bpm, beats_per_bar, budget) = {
+                    let s = shared.lock().unwrap();
+                    (s.tempo.bpm, s.tempo.beats_per_bar, s.mixer.point_budget)
+                };
+                json_response(json!(crate::abstracts::preview(&look, bpm, beats_per_bar, budget)))
+            }
+            Err(e) => e,
+        },
+        // « Enregistrer comme cue… » (T-440): a new user cue of the
+        // editor's abstract, in the first free cell of a user page. An
+        // edit: in the history, locked in show mode.
+        (Method::Post, "/api/abstracts/store") => match body::<AbstractRequest>(request) {
+            Ok(req) => {
+                let Some(look) = crate::abstracts::clean_look(&req.look) else { return text(400, "ce look n'est pas un abstrait") };
+                let mut s = shared.lock().unwrap();
+                match crate::usercues::store_look(&mut s, look, req.name.as_deref()) {
+                    Ok((id, page, slot)) => {
+                        let mut g = grid_json(&s);
+                        g["cue"] = json!(id);
+                        g["cell"] = json!([page, slot]);
+                        json_response(g)
+                    }
+                    Err((code, msg)) => text(code, &msg),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/grid") => json_response(grid_json(&shared.lock().unwrap())),
         (Method::Post, "/api/grid") => match body::<GridRequest>(request) {
             Ok(req) => grid_edit(shared, |g, _| {
@@ -4075,6 +4110,14 @@ struct CueModifiersRequest {
 struct ProgramRequest {
     id: String,
     program: Option<crate::program::CueProgram>,
+}
+
+/// `POST /api/abstracts/preview` and `/store` (T-440): the editor's look.
+#[derive(Deserialize)]
+struct AbstractRequest {
+    look: Settings,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -8873,6 +8916,59 @@ mod tests {
         assert_eq!((v["own"].clone(), v["user"].clone(), v["program"]["lanes"][0]["keys"][0]["value"].clone()), (json!(false), json!(true), json!(0.5)));
         assert_eq!(t.request("POST", "/api/cues/program/store", r#"{"id":"tunnels-001","program":null}"#).0, 400);
         assert_eq!(t.request("POST", "/api/cues/program/store", r#"{"id":"nope","program":{}}"#).0, 404);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+    }
+
+    /// T-440: the abstract editor's preview never touches what plays; « Enregistrer
+    /// comme cue… » makes a user cue (in the history, undone, 423 in show
+    /// mode) that plays the same abstract.
+    #[test]
+    fn the_abstract_editor_previews_and_stores_cues() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        let before = js(&t.request("GET", "/api/state", "").1);
+        let shape = json!({ "kind": "abstract", "points": 2000,
+            "oscs": [{ "target": "x", "ratio": 3, "phase_deg": 90 }, { "target": "y", "ratio": 2 }] });
+        let look = json!({ "content": shape, "color": [0, 255, 0], "scale": 0.6, "brightness": 1.0 });
+        let (code, body) = t.request("POST", "/api/abstracts/preview", &json!({ "look": look }).to_string());
+        assert_eq!(code, 200, "{body}");
+        let p = js(&body);
+        assert_eq!((p["budget"].clone(), p["requested"].clone(), p["limited"].clone()), (json!(750), json!(2000), json!(true)));
+        assert_eq!(p["samples"], json!(749), "one point kept for the closing one");
+        assert_eq!(p["frames"].as_array().unwrap().len(), 1, "a still figure: one picture");
+        assert!(p["points"].as_u64().unwrap() <= 750);
+        let mut drifting = look.clone();
+        drifting["content"]["oscs"][0]["drift"] = json!(0.25);
+        let p = js(&t.request("POST", "/api/abstracts/preview", &json!({ "look": drifting }).to_string()).1);
+        let frames = p["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 32);
+        assert_ne!(frames[0], frames[1], "the drift animates it");
+        let after = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!((after["settings"].clone(), after["settings_rev"].clone()), (before["settings"].clone(), before["settings_rev"].clone()), "the preview leaves the look alone");
+        assert_eq!(t.request("POST", "/api/abstracts/preview", r#"{"look":{"content":{"kind":"wave"}}}"#).0, 400);
+
+        // Stored: a user cue holding the abstract, sanitized.
+        let mut wild = look.clone();
+        wild["content"]["oscs"][1]["ratio"] = json!(99.0);
+        let (code, body) = t.request("POST", "/api/abstracts/store", &json!({ "look": wild, "name": "Mon abstrait" }).to_string());
+        assert_eq!(code, 200, "{body}");
+        let id = js(&body)["cue"].as_str().unwrap().to_string();
+        {
+            let s = t.shared.lock().unwrap();
+            let cue = s.user_cues.get(&id).unwrap();
+            assert_eq!(cue.name, "Mon abstrait");
+            let crate::engine::Content::Abstract(a) = &cue.settings.content else { panic!("{:?}", cue.settings.content) };
+            assert_eq!((a.oscs[0].ratio, a.oscs[1].ratio), (3.0, crate::abstracts::MAX_RATIO));
+            assert!(s.presets.iter().any(|p| p.id == id));
+        }
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"].as_array().unwrap().len(), 1);
+        assert_eq!(t.request("POST", "/api/undo", "").0, 200);
+        assert!(t.shared.lock().unwrap().user_cues.get(&id).is_none(), "undone");
+        assert_eq!(t.request("POST", "/api/abstracts/store", r#"{"look":{"content":{"kind":"wave"}}}"#).0, 400);
+
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/abstracts/store", &json!({ "look": look }).to_string()).0, 423);
+        assert_eq!(t.request("POST", "/api/abstracts/preview", &json!({ "look": look }).to_string()).0, 423);
         assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
