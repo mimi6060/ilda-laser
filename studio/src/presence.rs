@@ -210,6 +210,12 @@ impl Presence {
         self.last
     }
 
+    /// Pages whose heartbeat is still fresh, as of the last update
+    /// (`GET /api/perf`, T-448).
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
     /// For `/api/state`, `/api/frame` and `/api/presence`, as of the last update.
     pub fn status(&self) -> PresenceStatus {
         PresenceStatus {

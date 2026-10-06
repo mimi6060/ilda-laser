@@ -115,6 +115,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/audio/tempo/new_track", RouteClass::Play),
     ("POST", "/api/heartbeat", RouteClass::Arm),
     ("GET", "/api/presence", RouteClass::Read),
+    ("GET", "/api/perf", RouteClass::Read),
     ("POST", "/api/presence", RouteClass::Safety),
     ("GET", "/api/lock", RouteClass::Read),
     ("POST", "/api/lock", RouteClass::Safety),
@@ -935,6 +936,16 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/perf") => {
+            // T-448: the engine's last report, a copy; the pages counted now.
+            let s = shared.lock().unwrap();
+            let report = crate::perf::PerfReport { clients: s.presence.client_count(), ..s.perf.clone() };
+            drop(s);
+            let mut v = serde_json::to_value(report).unwrap_or_default();
+            v["warn_worst_ms"] = json!(crate::perf::WARN_WORST_MS);
+            v["late_ms"] = json!(crate::perf::LATE_MS);
+            json_response(v)
+        }
         (Method::Get, "/api/presence") => {
             let s = shared.lock().unwrap();
             json_response(json!({ "settings": s.presence.settings, "status": s.presence.status() }))
@@ -4670,6 +4681,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         // T-432: the newest notice's id; the page reads /api/notices when it moves.
         "notices_last": s.notices.last(),
     });
+    // T-448: 0 normal, 1 loaded, 2 late frames (the points indicator).
+    v["perf_level"] = json!(s.perf.level());
     // T-285: undo / redo counts and labels; `rev` moves on every change.
     v["history"] = s.history.summary();
     // T-260: the active safety profile, for the status bar.
@@ -6644,6 +6657,33 @@ mod tests {
         let frame: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
         assert_eq!(frame["keep_awake"]["enabled"], false);
         assert_eq!(t.request("POST", "/api/keep_awake", r#"{}"#).0, 400);
+        assert_eq!(arm_status(&t)["armed"], false, "never arms");
+    }
+
+    /// T-448: `GET /api/perf` returns the engine's report with the pages
+    /// connected now and the thresholds the panel colours with.
+    #[test]
+    fn perf_returns_the_engine_report_and_the_pages_connected() {
+        let t = TestServer::start(false);
+        let mut monitor = crate::perf::PerfMonitor::new();
+        let d = Duration::from_millis;
+        monitor.record(d(2), d(1), d(1), d(4), 1234);
+        monitor.record(d(30), d(1), d(1), d(32), 1500);
+        t.shared.lock().unwrap().perf = monitor.report(0);
+        for id in ["p1", "p2"] {
+            assert_eq!(t.request("POST", "/api/heartbeat", &format!(r#"{{"client_id":"{id}"}}"#)).0, 200);
+        }
+        let (status, body) = t.request("GET", "/api/perf", "");
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for stage in ["render", "safety", "output", "frame"] {
+            assert!(v[stage]["mean_ms"].is_number() && v[stage]["worst_ms"].is_number(), "{stage}: {v}");
+        }
+        assert_eq!(v["frame"]["worst_ms"], 32.0);
+        assert_eq!((v["points"].as_u64(), v["late_frames"].as_u64(), v["late_in_window"].as_u64()), (Some(1500), Some(1), Some(1)));
+        assert_eq!(v["clients"], 2);
+        assert_eq!(v["warn_worst_ms"], 8.0);
+        assert!(v["late_ms"].as_f64().unwrap() > 16.6 && v["window_s"].is_number() && v["frames"] == 2);
         assert_eq!(arm_status(&t)["armed"], false, "never arms");
     }
 

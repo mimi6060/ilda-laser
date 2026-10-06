@@ -68,6 +68,9 @@ mod outdoor;
 mod output;
 mod output_manager;
 mod patterns;
+mod perf;
+#[cfg(test)]
+mod perf_budget;
 mod ponk;
 mod power;
 mod presence;
@@ -569,6 +572,9 @@ pub struct Shared {
     pub projector_outputs: std::collections::BTreeMap<String, venue::Installed>,
     /// The other projectors' last frames (`GET /api/frames`).
     pub projector_frames: Vec<venue::ProjectorFrame>,
+    /// The engine's timings over the last 10 s (perf.rs, T-448): a copy
+    /// written in the critical section that ends every frame.
+    pub perf: perf::PerfReport,
     /// Notification centre (T-432): events without a request, in memory.
     pub notices: notices::Notices,
     /// Undo / redo of edits (history.rs, T-285): in memory, 50 levels,
@@ -1032,6 +1038,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
         log::error!("{e:#}");
         std::process::exit(2);
     }
+    // T-448: one line on the data folder and its disk.
+    log::info!("{}", perf::startup_check(&cli.data_dir));
     let mut state = startup_state(&cli);
     // The output named on the command line opens now, as before (a failure
     // stops the studio); otherwise the remembered one is connected by the
@@ -1509,6 +1517,7 @@ fn startup_state(cli: &Cli) -> Shared {
         venue: venue::VenueStore::load_or_create(cli.data_dir.join("venue.json")),
         projector_outputs: Default::default(),
         projector_frames: Vec::new(),
+        perf: Default::default(),
         notices: Default::default(),
         history: Default::default(),
         prepared: Default::default(),
@@ -1890,6 +1899,9 @@ struct Engine {
     output_gen: u64,
     /// The venue's other projectors (T-277), each with its own stage.
     extras: Vec<ProjectorStage>,
+    /// Stage timings (T-448); `None` only in the budget test's run
+    /// without measuring. Allocated once here, nothing per frame.
+    perf: Option<perf::PerfMonitor>,
 }
 
 impl Engine {
@@ -1923,11 +1935,16 @@ impl Engine {
             output_mgr,
             output_gen,
             extras: Vec::new(),
+            perf: Some(perf::PerfMonitor::new()),
         }
     }
 
     /// One frame at `now`: render, safety stage, gate, output.
     fn tick(&mut self, shared: &Mutex<Shared>, now: Instant) {
+        // T-448: wall-clock stamps (never `now`, which tests simulate);
+        // the lock is not held for any of it.
+        let measuring = self.perf.is_some();
+        let started = measuring.then(Instant::now);
         // A new output from the manager's thread: installed between two
         // frames, never opened here.
         while let Some(change) = self.output_mgr.engine_take() {
@@ -2387,10 +2404,12 @@ impl Engine {
         // I/O thread runs itself with its own state (record.rs). Only when
         // an image is due; arming and the output are untouched.
         let recorded = record_due.then(|| frame.clone());
+        let safety_at = measuring.then(Instant::now);
         // The safety stage (`safety_chain`): frame size, colour rendering,
         // strobe limiter and horizon, static beam guard, power caps, the
         // limiter's check on the output.
         let frame = safety_chain(frame, frame_limits, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps);
+        let output_at = measuring.then(Instant::now);
 
         // Last stage: the gate. `armed` was read under the lock at the top
         // of the frame; the e-stop latch and a watchdog trip (this frame
@@ -2407,7 +2426,20 @@ impl Engine {
         let strobe = self.limiter.status();
         self.strobe_log.update(strobe.active, now, &self.safety_log, || serde_json::json!({ "rate_hz": strobe.rate_hz, "burst_s": strobe.burst_s }));
         let projector_frames = self.emit_projectors(shared, plans, extra_frames, now, t, &safety_cfg, armed && !health.is_tripped(), hold_ok, &estop);
+        // The frame's timings, recorded and summed up before the lock
+        // below, which only copies the report (no allocation either way).
+        let report = match (&mut self.perf, started, safety_at, output_at) {
+            (Some(monitor), Some(start), Some(safety_at), Some(output_at)) => {
+                let done = Instant::now();
+                monitor.record(safety_at - start, output_at - safety_at, done - output_at, done - start, frame.len());
+                Some(monitor.report(0))
+            }
+            _ => None,
+        };
         let mut s = shared.lock().unwrap();
+        if let Some(report) = report {
+            s.perf = report;
+        }
         if let Some(error) = emitted.arm_change {
             if let Some(e) = &error {
                 log::error!("sortie laser : {e}");
