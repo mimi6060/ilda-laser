@@ -79,6 +79,8 @@ pub fn allowed(path: &str) -> bool {
         // The command line (T-424): controls, cues, page, tempo, stops only.
         "/api/command",
         "/api/live",
+        // Speed groups and the *Cadence* (T-419): played live, like the tempo.
+        "/api/speed-groups",
         "/api/scenes/play",
         "/api/playlist/start",
         "/api/playlist/stop",

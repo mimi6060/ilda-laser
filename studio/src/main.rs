@@ -82,6 +82,7 @@ mod safety_log;
 mod showmode;
 #[cfg(feature = "shownet")]
 mod shownet;
+mod speed;
 mod scan;
 mod scenes;
 mod record;
@@ -385,6 +386,11 @@ pub struct Shared {
     /// Where the *Décalage de sortie* is saved (latency.rs, T-246);
     /// `None` in tests.
     pub latency_path: Option<PathBuf>,
+    /// Speed groups A..D and the *Cadence* (speed.rs, T-419), saved to
+    /// `speed.json` (`speed_path`, `None` in tests) when changed.
+    pub speed: tempo::SpeedGroups,
+    pub speed_dirty: bool,
+    pub speed_path: Option<PathBuf>,
     pub epoch: Instant,
     /// Tests only: the simulated « now » `now_s` reads, set by the test
     /// rigs that drive the engine on a simulated clock (wall-clock time
@@ -847,6 +853,30 @@ impl Shared {
             return now.saturating_duration_since(self.epoch).as_secs_f64();
         }
         self.epoch.elapsed().as_secs_f64()
+    }
+
+    /// Where the speed groups (T-419) are measured from now: the effects'
+    /// master beat, the effects' seconds and the bar length.
+    pub fn speed_clock(&self) -> (f64, f64, u8) {
+        let t = self.now_s();
+        (self.tempo.effect_beat_at(t), self.tempo.effect_t(t), self.tempo.beats_per_bar)
+    }
+
+    /// The speed group a look plays in (T-419): its cell's (a cue of the
+    /// deck), else its layer's, else the master clock.
+    pub fn look_speed_group(&self, layer: u8, id: u64) -> u8 {
+        let slot = self.deck.find(id).and_then(|a| self.deck.slots.get(&a.cue)).and_then(|sl| sl.speed_group);
+        speed::resolve(slot, self.mixer.layer(layer).speed_group)
+    }
+
+    /// `speed.json`, when the speed groups changed (T-419).
+    pub fn save_speed(&mut self) {
+        if !std::mem::take(&mut self.speed_dirty) {
+            return;
+        }
+        if let Some(path) = &self.speed_path {
+            save_json(path, &self.speed);
+        }
     }
 
     /// *Nouveau morceau*: the estimator forgets its history and guide, the
@@ -1338,6 +1368,9 @@ fn startup_state(cli: &Cli) -> Shared {
             tempo
         },
         latency_path: Some(latency::path(&cli.data_dir)),
+        speed: load_json::<tempo::SpeedGroups>(&cli.data_dir.join("speed.json")).sanitized(),
+        speed_dirty: false,
+        speed_path: Some(cli.data_dir.join("speed.json")),
         epoch,
         #[cfg(test)]
         sim_now: None,
@@ -1764,6 +1797,8 @@ struct Engine {
     /// and the content beat of each timeline event met while frozen.
     frozen: Option<(f64, f64)>,
     frozen_events: HashMap<u64, f64>,
+    /// The speed group each look was last drawn in (T-419).
+    look_groups: HashMap<u64, u8>,
     frames_since_save: u32,
     last: Instant,
     /// If this thread panics, unwinding drops the stage: dark frame + disarm.
@@ -1802,6 +1837,7 @@ impl Engine {
             smoothers: Default::default(),
             frozen: None,
             frozen_events: HashMap::new(),
+            look_groups: HashMap::new(),
             frames_since_save: 0,
             last: Instant::now(),
             stage: OutputStage::new(output),
@@ -1837,7 +1873,7 @@ impl Engine {
         self.last = now;
 
         let record_due;
-        let (looks, (transition_fx, exec_gains), show_cues, starts, (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
+        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1850,11 +1886,12 @@ impl Engine {
                 std::thread::sleep(stall);
             }
             self.frames_since_save += 1;
-            if (s.live_dirty || s.mixer_dirty || s.groups_dirty || s.fx.dirty) && self.frames_since_save >= 60 {
+            if (s.live_dirty || s.mixer_dirty || s.groups_dirty || s.fx.dirty || s.speed_dirty) && self.frames_since_save >= 60 {
                 // At most once a second, so MIDI faders don't hammer the disk.
                 if s.live_dirty {
                     save_json(&self.live_path, &s.live);
                 }
+                s.save_speed();
                 if s.mixer_dirty {
                     save_json(&self.layers_path, &s.mixer);
                 }
@@ -1907,6 +1944,14 @@ impl Engine {
             // e-stop, the safety chain and the strobe limiter below run on
             // this very frame, on real time.
             let clock = engine::BeatClock { beat: s.tempo.effect_beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar };
+            // Speed groups (T-419): a multiple waiting for its bar lands;
+            // every group's beat is a function of this one clock. The
+            // effects' seconds (`effect_t`) for the free BPMs.
+            let speed_off = s.tempo.effect_t(t) - t;
+            if s.speed.frame(clock.beat, t + speed_off) {
+                s.speed_dirty = true;
+            }
+            let speed = s.speed.clone();
             self.live_state.set_clock(t, clock.beat);
             // « Figer » (T-142): while held, animation, LFOs and colour
             // effects read the time it was pressed at. The strobe, the
@@ -1938,7 +1983,8 @@ impl Engine {
             // modulators move the copy (an LFO is never smoothed).
             live = self.smoothers.master.step(&live, &s.mixer.smoothing, dt);
             let time_share = s.routes.routing().time_share();
-            lfo::modulate_scaled(s.lfos.list(), &s.controls, &mut settings, &mut live, mod_t, mod_beat, time_share);
+            // Each modulator counts the beats of its speed group (T-419).
+            lfo::modulate_grouped(s.lfos.list(), &s.controls, &mut settings, &mut live, mod_t, &|g| speed.beat(g, mod_beat, mod_t + speed_off), time_share);
             // The FX grid (T-146), on top of the LFOs, on the same copies.
             // An e-stop ends every effect (they don't come back after the
             // reset). *Cue sélectionné*: the master-level changes go to the
@@ -1946,7 +1992,8 @@ impl Engine {
             if s.estop.is_latched() && s.fx.any_playing() {
                 s.fx.stop_all();
             }
-            let fx_clock = fx::FxClock { t, beat: clock.beat, mod_t, mod_beat, bpm: clock.bpm, beats_per_bar: clock.beats_per_bar };
+            let fx_groups = std::array::from_fn(|g| (speed.beat(g as u8, mod_beat, mod_t + speed_off), speed.bpm(g as u8, clock.bpm) / clock.bpm.max(1e-9)));
+            let fx_clock = fx::FxClock { t, beat: clock.beat, mod_t, mod_beat, bpm: clock.bpm, beats_per_bar: clock.beats_per_bar, groups: Some(fx_groups) };
             s.fx.frame(&fx_clock);
             let fx_cue = match (s.fx.grid().dest, s.deck.primary()) {
                 (fx::FxDest::Cue, Some(top)) => {
@@ -2003,6 +2050,10 @@ impl Engine {
             let show_scan: Vec<optimize::OptimizeParams> = show_cues.iter().map(|(cue, look)| scan::for_event(&s, cue, look)).collect();
             // Launch beats, so a cue's beat-synced motion counts from its start.
             let starts: HashMap<u64, f64> = s.deck.active.iter().map(|a| (a.id, a.started_beat)).collect();
+            // Speed groups (T-419): each look's (cell > layer > default),
+            // and each layer's for its own modifiers.
+            let look_groups: Vec<u8> = looks.iter().map(|(layer, id, _)| s.look_speed_group(*layer, *id)).collect();
+            let layer_groups: [u8; layers::LAYER_COUNT] = std::array::from_fn(|i| speed::resolve(None, s.mixer.layer(i as u8 + 1).speed_group));
             // User cues stored with master modifiers (T-405): theirs, per cue.
             let mut cue_masters: HashMap<u64, live::LiveModifiers> = s
                 .deck
@@ -2056,7 +2107,7 @@ impl Engine {
             // An ILDA recording (T-442) wants this frame: copied below,
             // before the safety chain; nothing else changes.
             record_due = s.recorder.due(t);
-            (looks, (transition_fx, exec_gains), show_cues, starts, (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
+            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -2067,6 +2118,15 @@ impl Engine {
             None => clock,
         };
         self.live_state.advance(&live, live_dt, clock.bpm, clock.beats_per_bar);
+        // Speed groups (T-419): every group's clock this frame, and while
+        // « Figer » is held the (seconds, beat) each one stood still at.
+        // The master stage, the gate and the safety chain keep real time.
+        let group_clocks = speed.clocks(&render_clock, self.frozen.map_or(t, |(ft, _)| ft) + speed_off);
+        let group_frozen: [Option<(f64, f64)>; speed::SPEED_GROUPS + 1] =
+            std::array::from_fn(|g| self.frozen.map(|(ft, fb)| (ft, speed.beat(g as u8, fb, ft + speed_off))));
+        // The live clock of a group: frozen looks keep their beat, the
+        // rotations and colours of a level read the group's real beat.
+        let live_clocks = speed.clocks(&clock, t + speed_off);
         let (mut frame, mut extra_frames, mix, evolving) = match pattern {
             // The pattern alone, densified and calibrated, without live
             // modifiers (exact geometry). The cue animators are left as
@@ -2090,7 +2150,9 @@ impl Engine {
                 // Cue → layer → master (T-144): the layers' rotations move
                 // once a frame, every look of a layer shares them.
                 let (cue_level_live, layer_live) = (&mut self.cue_level_live, &mut self.layer_live);
-                levels.advance_layers(layer_live, t, &clock, frozen_at, live_dt);
+                let layer_clocks = layer_groups.map(|g| live_clocks[g as usize]);
+                let layer_frozen = layer_groups.map(|g| group_frozen[g as usize]);
+                levels.advance_layers(layer_live, t, &layer_clocks, &layer_frozen, live_dt);
                 cue_level_live.retain(|id, _| levels.cues.contains_key(id));
                 let layer_live = &*layer_live;
                 animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id) || (*id == 0 && look_hidden));
@@ -2139,10 +2201,18 @@ impl Engine {
                     })
                     .collect();
                 // Muted layers keep animating, so they come back in motion.
-                let mut cue_looks: Vec<transition::Rendered<(u8, Vec<u8>)>> = looks.iter().zip(&routing.look_zones).zip(&look_scan).map(|(((layer, id, settings), zones), scan)| {
-                    let animator = animators.entry(*id).or_insert_with(|| match starts.get(id) {
-                        Some(&beat) => Animator::starting_at(beat),
-                        None => Animator::default(),
+                let look_groups_seen = &mut self.look_groups;
+                look_groups_seen.retain(|id, _| looks.iter().any(|(_, i, _)| i == id));
+                let mut cue_looks: Vec<transition::Rendered<(u8, Vec<u8>)>> = looks.iter().zip(&routing.look_zones).zip(&look_scan).zip(&look_groups).map(|((((layer, id, settings), zones), scan), &group)| {
+                    // A look moved to another speed group starts over on
+                    // that group's beat line (a phase jump, never a freeze).
+                    if look_groups_seen.insert(*id, group).is_some_and(|before| before != group) {
+                        animators.remove(id);
+                    }
+                    let (render_clock, clock, frozen_at) = (group_clocks[group as usize], live_clocks[group as usize], group_frozen[group as usize]);
+                    let animator = animators.entry(*id).or_insert_with(|| match starts.get(id).map(|&beat| speed.start_beat(group, beat)) {
+                        Some(Some(beat)) => Animator::starting_at(beat),
+                        _ => Animator::default(),
                     });
                     animator.set_optimizer(scan);
                     animator.set_palette(festival_palette);
@@ -2360,6 +2430,7 @@ impl Engine {
         if s.live_dirty {
             save_json(&self.live_path, &s.live);
         }
+        s.save_speed();
         if s.mixer_dirty {
             save_json(&self.layers_path, &s.mixer);
         }
@@ -2897,6 +2968,77 @@ mod tests {
         s.gate.reset_estop(&s.estop.clone());
         controls::timeline_play(&mut s).unwrap();
         assert!(!s.gate.is_armed(), "resetting the e-stop and playing again doesn't arm");
+    }
+
+    /// T-419: the *Cadence* scales the fades played live, never a
+    /// timeline's: the same show at 50 % and 200 % gives the same gains.
+    #[test]
+    fn timeline_fades_ignore_the_rate_master() {
+        let gains = |rate: f32| {
+            let mut s = test_support::shared();
+            let cue = s.presets[0].id.clone();
+            let mut show = one_event_show(&cue);
+            show.tracks[0].events[0].fade_in = timeline::Dur::Seconds(2.0);
+            s.timeline.load(show);
+            s.speed.set_rate(rate).unwrap();
+            s.sim_now = Some(s.epoch);
+            controls::timeline_play(&mut s).unwrap();
+            (1..=5)
+                .map(|k| {
+                    let t = k as f64 * 0.4;
+                    let cues = timeline_cues(&mut s, t, &engine::BeatClock { beat: t * 2.0, bpm: 120.0, beats_per_bar: 4 });
+                    cues[0].0.gain
+                })
+                .collect::<Vec<f32>>()
+        };
+        let slow = gains(0.5);
+        assert!(slow[0] < 1.0, "the fade is on: {slow:?}");
+        assert_eq!(slow, gains(2.0));
+    }
+
+    /// T-419: the registry's speed controls drive the groups (external,
+    /// read back for MIDI), NaN is refused, the *Cadence* is clamped, and
+    /// `tempo.resync` brings the multiple groups back on the "one".
+    #[test]
+    fn speed_controls_drive_the_groups() {
+        use controls::{apply, ControlInput};
+        use speed::SpeedMode;
+        let mut s = test_support::shared();
+        for n in 1..=4 {
+            for p in ["mult", "free", "bpm"] {
+                assert!(s.controls.get(&format!("speed.{n}.{p}")).is_some_and(|d| d.external), "speed.{n}.{p}");
+            }
+        }
+        assert!(s.controls.get("master.rate").is_some_and(|d| d.external));
+        s.speed.change_on_bar = false;
+        apply(&mut s, "speed.1.mult", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.speed.groups[0], SpeedMode::Multiple { mult: 0.5 });
+        let desc = s.controls.get("speed.1.mult").unwrap().clone();
+        assert_eq!(controls::current(&s, &desc), Some(serde_json::json!(1)));
+        apply(&mut s, "speed.2.bpm", ControlInput::Value(98.0), true).unwrap();
+        assert_eq!(s.speed.groups[1], SpeedMode::FreeBpm { bpm: 98.0 });
+        apply(&mut s, "speed.2.free", ControlInput::Value(0.0), true).unwrap();
+        assert_eq!(s.speed.groups[1], SpeedMode::Multiple { mult: 1.0 });
+        apply(&mut s, "speed.3.free", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.speed.groups[2], SpeedMode::FreeBpm { bpm: 120.0 });
+        for bad in [f32::NAN, f32::INFINITY] {
+            assert!(apply(&mut s, "master.rate", ControlInput::Value(bad), true).is_err());
+            assert!(apply(&mut s, "speed.4.bpm", ControlInput::Value(bad), true).is_err());
+        }
+        apply(&mut s, "master.rate", ControlInput::Value(5.0), true).unwrap();
+        assert_eq!(s.speed.rate(), 2.0);
+        apply(&mut s, "master.rate", ControlInput::Norm(0.0), true).unwrap();
+        assert_eq!(s.speed.rate(), 0.5);
+        let rate = s.controls.get("master.rate").unwrap().clone();
+        assert_eq!(controls::current(&s, &rate), Some(serde_json::json!(0.5)));
+        assert_eq!(s.live, live::LiveModifiers::default(), "master.rate is not a live modifier");
+        // Resync: the master's "1" is group A's "1" too.
+        s.sim_now = Some(s.epoch + Duration::from_millis(2_300));
+        apply(&mut s, "tempo.resync", ControlInput::Value(1.0), true).unwrap();
+        let t = s.now_s();
+        let (bar, g) = (s.tempo.beat_at(t), s.speed.beat(1, s.tempo.beat_at(t), t));
+        assert_eq!((bar % 4.0, g % 4.0), (0.0, 0.0));
+        assert!(!s.gate.is_armed(), "no speed control arms");
     }
 
     /// T-163: an event's envelopes move the frame's copies of its look and

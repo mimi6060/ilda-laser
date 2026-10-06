@@ -49,6 +49,9 @@ pub struct Modulator {
     /// -1..1, added to the wave before `depth` (-1 = only below the base).
     pub offset: f32,
     pub enabled: bool,
+    /// Speed group (T-419, speed.rs) whose beats a `Beats` rate counts:
+    /// 0 = the master clock, 1..=4 = A..D. 0 in older files.
+    pub speed_group: u8,
 }
 
 impl Default for Modulator {
@@ -61,6 +64,7 @@ impl Default for Modulator {
             phase: 0.0,
             offset: 0.0,
             enabled: true,
+            speed_group: 0,
         }
     }
 }
@@ -89,6 +93,9 @@ impl Modulator {
         self.depth = fin(self.depth, d.depth).clamp(0.0, 1.0);
         self.phase = fin(self.phase, 0.0).rem_euclid(1.0);
         self.offset = fin(self.offset, 0.0).clamp(-1.0, 1.0);
+        if crate::speed::check_group(self.speed_group).is_err() {
+            self.speed_group = 0;
+        }
         self.rate = match self.rate {
             Rate::Beats(b) => Rate::Beats(fin(b, 4.0).clamp(1.0 / 16.0, 64.0)),
             Rate::Hz(hz) => Rate::Hz(fin(hz, 1.0).clamp(0.0, 20.0)),
@@ -216,15 +223,24 @@ pub fn modulate(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settin
 }
 
 /// `modulate` with every depth scaled by `share` (0..1): the time side of
-/// the *Temps ↔ Audio* crossfader (audio/routes.rs).
+/// the *Temps ↔ Audio* crossfader (audio/routes.rs). Every modulator on
+/// `beat` (the engine uses `modulate_grouped`).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn modulate_scaled(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settings, live: &mut LiveModifiers, t: f64, beat: f64, share: f32) {
+    modulate_grouped(mods, reg, settings, live, t, &|_| beat, share);
+}
+
+/// `modulate_scaled` with each modulator on its speed group's beat
+/// (T-419): `beat_of(group)` is that group's beat (0 = the master's).
+#[allow(clippy::too_many_arguments)]
+pub fn modulate_grouped(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settings, live: &mut LiveModifiers, t: f64, beat_of: &dyn Fn(u8) -> f64, share: f32) {
     if share <= 0.0 {
         return;
     }
     let mut sums: Vec<(&str, f32)> = Vec::new();
     for m in mods.iter().filter(|m| m.enabled && m.depth > 0.0) {
-        let amount = share.min(1.0) * m.depth * (m.wave_at(t, beat) + m.offset);
+        let amount = share.min(1.0) * m.depth * (m.wave_at(t, beat_of(m.speed_group)) + m.offset);
         match sums.iter_mut().find(|(id, _)| *id == m.target) {
             Some((_, sum)) => *sum += amount,
             None => sums.push((&m.target, amount)),
@@ -577,5 +593,30 @@ mod tests {
         assert!(store.list().is_empty());
         store.set(Vec::new(), &reg).unwrap();
         crate::datafile::tests::check_kept(&dir, "lfos.json", false);
+    }
+    /// T-419: a beat-synced modulator in a ×2 speed group makes two cycles
+    /// where it made one; older files load in the default group.
+    #[test]
+    fn a_modulator_in_a_double_speed_group_makes_two_cycles() {
+        let mut groups = crate::speed::SpeedGroups::default();
+        groups.change_on_bar = false;
+        groups.set_mode(2, crate::speed::SpeedMode::Multiple { mult: 2.0 }, 0.0, 0.0, 4).unwrap();
+        let m = Modulator { rate: Rate::Beats(4.0), ..Default::default() };
+        let fast = Modulator { speed_group: 2, ..m.clone() };
+        let cycles = |m: &Modulator| m.position(0.0, groups.beat(m.speed_group, 4.0, 0.0)).0;
+        assert_eq!((cycles(&m), cycles(&fast)), (1, 2));
+        let sq = |g| Modulator { target: "master.size".into(), wave: Wave::Square, rate: Rate::Beats(4.0), depth: 0.5, speed_group: g, ..Default::default() };
+        // At master beat 1: the default group is in its first half (+),
+        // the ×2 group (beat 2) in its second half (-).
+        let base = LiveModifiers::default().size;
+        let size = |g| {
+            let (mut settings, mut live) = (Settings::default(), LiveModifiers::default());
+            modulate_grouped(&[sq(g)], &reg(), &mut settings, &mut live, 0.0, &|g| groups.beat(g, 1.0, 0.0), 1.0);
+            live.size
+        };
+        assert!(size(0) > base && size(2) < base);
+        let old: Modulator = serde_json::from_str(r#"{"target":"master.size"}"#).unwrap();
+        assert_eq!(old.speed_group, 0);
+        assert_eq!(Modulator { speed_group: 9, ..old }.sanitized().speed_group, 0);
     }
 }

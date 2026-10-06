@@ -185,6 +185,10 @@ pub struct CueSlot {
     /// in older files.
     #[serde(skip_serializing_if = "crate::levels::is_neutral")]
     pub modifiers: crate::live::LiveModifiers,
+    /// Speed group (T-419, speed.rs): 1..=4 = A..D, 0 = the master clock;
+    /// `None` = the layer's group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_group: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -323,9 +327,18 @@ pub struct At {
     /// 0 = unknown (120 is used).
     pub bpm: f64,
     pub beats_per_bar: u8,
+    /// *Cadence* (T-419): live fades last `length / rate`. 0 (or anything
+    /// outside 0.5..=2) = 100 %.
+    pub rate: f64,
 }
 
 impl At {
+    /// A transition's length in seconds at this press, under the *Cadence*.
+    fn fade_len(&self, t: &Transition) -> f64 {
+        let rate = if self.rate.is_finite() && self.rate > 0.0 { self.rate.clamp(0.5, 2.0) } else { 1.0 };
+        t.length.seconds(self.bpm) / rate
+    }
+
     /// Seconds per beat.
     fn beat_len(&self) -> f64 {
         60.0 / if self.bpm.is_finite() && self.bpm > 0.0 { self.bpm } else { 120.0 }
@@ -389,6 +402,7 @@ impl CueDeck {
             slot.transition = slot.transition.map(Transition::sanitized);
             sanitize_notes(&mut slot.notes);
             sanitize_tags(&mut slot.tags);
+            slot.speed_group = slot.speed_group.filter(|g| crate::speed::check_group(*g).is_ok());
         }
         self.slots.retain(|_, slot| *slot != CueSlot::default());
     }
@@ -621,7 +635,7 @@ impl CueDeck {
             (TransitionKind::Morph, None) => TransitionKind::Fade,
             (kind, _) => kind,
         };
-        let length_s = t.length.seconds(at.bpm);
+        let length_s = at.fade_len(&t);
         let start_s = at.s - Fade::out_progress_at(kind, level) as f64 * length_s;
         let fade = Fade { kind, start_s, length_s, partner: into };
         self.ending.push(EndingCue { cue, fade });
@@ -667,7 +681,7 @@ impl CueDeck {
             let into = (Some(a.id) == from).then_some(id);
             self.retire(a, t, at, into);
         }
-        let fade = (!t.is_cut()).then(|| Fade { kind: t.kind, start_s: at.s, length_s: t.length.seconds(at.bpm), partner: from });
+        let fade = (!t.is_cut()).then(|| Fade { kind: t.kind, start_s: at.s, length_s: at.fade_len(&t), partner: from });
         self.active.push(ActiveCue {
             id,
             cue: cue.to_string(),
@@ -1128,7 +1142,7 @@ mod tests {
     // ---------- transitions (T-158) ----------
 
     fn at(s: f64, beat: f64) -> At {
-        At { s, beat, bpm: 120.0, beats_per_bar: 4 }
+        At { s, beat, bpm: 120.0, beats_per_bar: 4, rate: 1.0 }
     }
 
     fn with(kind: TransitionKind, seconds: f32) -> CueDeck {
@@ -1559,5 +1573,24 @@ mod tests {
         d.set_slot("a", CueSlot { tags: vec!["Intro".into(), "drop".into()], ..Default::default() });
         d.set_slot("b", CueSlot { tags: vec!["intro".into()], ..Default::default() });
         assert_eq!(d.tags(), vec![("drop".to_string(), 1), ("Intro".to_string(), 2)]);
+    }
+    /// T-419: the *Cadence* divides a live transition (2 s at 200 % = 1 s,
+    /// 4 s at 50 %); a slot saved before T-419 has no speed group.
+    #[test]
+    fn the_rate_master_scales_live_transitions_and_old_slots_have_no_group() {
+        use crate::transition::TransitionLength;
+        let t = Transition { kind: TransitionKind::Fade, length: TransitionLength::Seconds(2.0), in_flash: false };
+        for (rate, len) in [(0.0, 2.0), (1.0, 2.0), (2.0, 1.0), (0.5, 4.0), (9.0, 1.0), (f64::NAN, 2.0)] {
+            let mut d = CueDeck { transition: t, ..deck(false) };
+            d.press("a", None, At { rate, ..At::default() }, Settings::default);
+            assert_eq!(d.active[0].fade.map(|f| f.length_s), Some(len), "rate {rate}");
+        }
+        let slot: CueSlot = serde_json::from_str(r#"{"layer":2}"#).unwrap();
+        assert_eq!(slot.speed_group, None);
+        let mut d = deck(false);
+        d.set_slot("a", CueSlot { speed_group: Some(9), ..Default::default() });
+        assert_eq!(d.slot("a").speed_group, None, "an unknown group is dropped");
+        d.set_slot("a", CueSlot { speed_group: Some(2), ..Default::default() });
+        assert_eq!(serde_json::from_str::<CueSlot>(&serde_json::to_string(&d.slot("a")).unwrap()).unwrap().speed_group, Some(2));
     }
 }

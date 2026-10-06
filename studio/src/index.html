@@ -953,6 +953,17 @@
   .slider-entry { position: fixed; z-index: 30; height: 26px; padding: 2px 6px; font: inherit; font-size: 12px; text-align: right;
     font-variant-numeric: tabular-nums; color: var(--text); background: var(--panel-2); border: 1px solid var(--accent); border-radius: 6px;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+  /* LIVE › Direct › Vitesses (T-419), Theme (T-299) tokens. */
+  .spg { display: grid; grid-template-columns: 22px 1fr; gap: 4px 6px; align-items: center; margin-top: 6px; }
+  .spg .spg-n { font-weight: 700; color: var(--accent); text-align: center; }
+  .spg .seg button { padding: 4px 2px; font-size: 12px; }
+  .spg .seg button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .spg .seg button.waiting { border-style: dashed; border-color: var(--accent); }
+  .spg .spg-free { grid-column: 2; display: flex; align-items: center; gap: 6px; }
+  .spg .spg-free label { margin: 0; }
+  .spg .spg-free input[type=number] { width: 72px; }
+  .spg .spg-free input[type=number]:disabled { opacity: .45; }
+  #speedHint { color: var(--accent); }
   /* LIVE › Direct › Effets (T-142), Theme (T-299) tokens. */
   #fxBlock button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   #fxBlock .fx-hold { touch-action: none; user-select: none; }
@@ -1554,6 +1565,8 @@
     <button id="tempoAuto" data-control="tempo.auto" title="tempo.auto : le tempo suit la musique détectée (un tap reprend la main)">Auto</button>
     <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" title="tempo.guide : tapez le tempo pour guider la détection, sans l'imposer" hidden>Guider</button>
     <span class="hint" id="tempoSrc" style="margin:0" title="Tempo auto : état du suivi et confiance de la détection" hidden></span>
+    <!-- Groupes de vitesse (T-419): the groups not at ×1, and the Cadence if not 100 %. -->
+    <span class="hint" id="speedHint" role="status" style="margin:0" title="Groupes de vitesse qui ne suivent pas le tempo à ×1, et la cadence des fondus (LIVE › Direct › Vitesses)" hidden></span>
     <!-- Compensation de latence (T-246): the effects read the beat ahead; never a frame held back. -->
     <span class="lat-wrap">
       <button id="latBtn" class="tb-extra" aria-expanded="false" title="Latence : décalage de sortie, latence estimée, calage à l'oreille">Lat.</button>
@@ -1982,6 +1995,13 @@
         <button data-speed="0.25" aria-label="Vitesse × 0,25">¼</button><button data-speed="0.5" aria-label="Vitesse × 0,5">½</button><button data-speed="1" aria-label="Vitesse × 1">1</button>
         <button data-speed="2" aria-label="Vitesse × 2">2</button><button data-speed="4" aria-label="Vitesse × 4">4</button>
       </div>
+
+      <h4 class="dblk">Vitesses</h4>
+      <div class="hint" style="margin:4px 0 0">Groupes A à D : un multiple du tempo ou un BPM libre, pour les cues, calques et modulateurs qui les choisissent. Communs à tous les niveaux.</div>
+      <div id="speedGroups" role="group" aria-label="Groupes de vitesse"></div>
+      <label class="check" title="Un nouveau multiple attend le prochain premier temps de la mesure (sinon : tout de suite)"><input type="checkbox" id="speedOnBar" checked> Appliquer au début de la mesure</label>
+      <label for="speedRate">Cadence <span class="v" id="speedRateV">100 %</span></label>
+      <input type="range" id="speedRate" min="50" max="200" step="1" value="100" data-default="100" data-control="master.rate" title="master.rate : divise la durée des fondus et transitions joués en direct (cues, liste de cues) ; les timelines ne changent pas">
 
       <h4 class="dblk">Luminosité</h4>
       <label>Luminosité <span class="v" id="mBrightV"></span></label>
@@ -3687,6 +3707,10 @@
   <select id="cueMenuLayer">
     <option value="1">Calque 1</option><option value="2">Calque 2</option>
     <option value="3">Calque 3</option><option value="4">Calque 4</option>
+  </select>
+  <label for="cueMenuSpeed">Groupe de vitesse</label>
+  <select id="cueMenuSpeed" title="Groupe de vitesse de ce cue (LIVE › Direct › Vitesses) ; Par défaut = celui de son calque">
+    <option value="">Par défaut</option><option value="1">A</option><option value="2">B</option><option value="3">C</option><option value="4">D</option>
   </select>
   <label for="cueMenuScan">Balayage</label>
   <select id="cueMenuScan" title="Préréglage de balayage de ce cue (RÉGLAGES › Sorties et projecteurs › Préréglages de balayage)"></select>
@@ -7766,9 +7790,72 @@ function showEvolving(list) {
     : (e.keys ? `clé ${e.key + 1}/${e.keys}` : 'programme') + (e.loop ? ` · boucle ${e.pass + 1}` : '');
 }
 
+// ---------- Vitesses : groupes A à D et cadence (T-419) ----------
+// Each group: ×¼ … ×4 of the master tempo, or a free BPM; the server
+// moves a new multiple to the next bar when « Appliquer au début de la
+// mesure » is on (the button waits, dashed). Everything goes through the
+// registry controls (`speed.<n>.*`, `master.rate`), as MIDI learn does.
+const SPEED_NAMES = ['Par défaut', 'A', 'B', 'C', 'D'], SPEED_LABELS = ['×¼', '×½', '×1', '×2', '×4'], SPEED_MULTS = [0.25, 0.5, 1, 2, 4];
+function buildSpeedGroups() {
+  $('speedGroups').innerHTML = [1, 2, 3, 4].map(n => `<div class="spg" data-g="${n}">
+      <span class="spg-n" id="spgName${n}" aria-hidden="true">${SPEED_NAMES[n]}</span>
+      <div class="seg" role="group" aria-label="Groupe ${SPEED_NAMES[n]} : multiple du tempo" data-control="speed.${n}.mult" title="speed.${n}.mult">${SPEED_LABELS.map((l, i) =>
+        `<button data-mult="${i}" aria-label="Groupe ${SPEED_NAMES[n]} ${l}" aria-pressed="false">${l}</button>`).join('')}</div>
+      <div class="spg-free"><label class="check"><input type="checkbox" data-free data-control="speed.${n}.free" title="speed.${n}.free"> BPM libre</label>
+        <input type="number" data-bpm min="40" max="250" step="0.1" value="120" aria-label="BPM libre du groupe ${SPEED_NAMES[n]}" data-control="speed.${n}.bpm" title="speed.${n}.bpm"></div>
+    </div>`).join('');
+  $('speedGroups').querySelectorAll('.spg').forEach(d => {
+    const n = +d.dataset.g;
+    d.querySelectorAll('[data-mult]').forEach(b => b.addEventListener('click', () => post('/api/control', { id: `speed.${n}.mult`, value: +b.dataset.mult })));
+    d.querySelector('[data-free]').addEventListener('change', e => post('/api/control', { id: `speed.${n}.free`, value: e.target.checked }));
+    d.querySelector('[data-bpm]').addEventListener('change', e => {
+      const v = +e.target.value;
+      if (Number.isFinite(v) && v > 0) post('/api/control', { id: `speed.${n}.bpm`, value: v });
+    });
+  });
+}
+buildSpeedGroups();
+$('speedOnBar').addEventListener('change', e => post('/api/speed-groups', { change_on_bar: e.target.checked }));
+$('speedRate').addEventListener('input', () => {
+  $('speedRateV').textContent = $('speedRate').value + ' %';
+  post('/api/control', { id: 'master.rate', value: $('speedRate').value / 100 });
+});
+let speedKey = '';
+function showSpeedGroups(t) {
+  if (!t.groups) return;
+  const key = JSON.stringify([t.groups, t.rate, t.change_on_bar, t.bpm]);
+  if (key === speedKey) return;
+  speedKey = key;
+  const off = [];
+  t.groups.forEach((g, i) => {
+    const d = $('speedGroups').children[i];
+    if (!d) return;
+    const wait = g.pending && g.pending.mode.type === 'multiple' ? SPEED_MULTS.indexOf(g.pending.mode.mult) : -1;
+    d.querySelectorAll('[data-mult]').forEach(b => {
+      const on = !g.free && SPEED_MULTS[+b.dataset.mult] === g.mult;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', String(on));
+      b.classList.toggle('waiting', +b.dataset.mult === wait);
+      b.title = `speed.${g.group}.mult` + (+b.dataset.mult === wait ? ' : au prochain premier temps' : '');
+    });
+    d.querySelector('[data-free]').checked = g.free;
+    const bpm = d.querySelector('[data-bpm]');
+    if (document.activeElement !== bpm) bpm.value = g.bpm.toFixed(1);
+    bpm.disabled = !g.free;
+    if (g.free || g.mult !== 1) off.push(`${g.name} ${g.label}`);
+  });
+  $('speedOnBar').checked = !!t.change_on_bar;
+  const rate = Math.round((t.rate || 1) * 100);
+  setVal('speedRate', rate);
+  if (document.activeElement !== $('speedRate')) $('speedRateV').textContent = rate + ' %';
+  if (rate !== 100) off.push(`Cadence ${rate} %`);
+  $('speedHint').hidden = !off.length;
+  $('speedHint').textContent = off.join(' · ');
+}
 function showTempo(t) {
   pgTempo = t; // the cue editor's ruler (T-164)
   if (!t) return;
+  showSpeedGroups(t);
   if (document.activeElement !== $('bpm')) $('bpm').value = t.bpm.toFixed(1);
   // Light the current beat for the first half of it, so the dots visibly pulse.
   document.querySelectorAll('#beats span, #gBeats span').forEach(d => {
@@ -8684,6 +8771,7 @@ function openCueMenu(p, x, y, at) {
   $('cueMenuMode').value = slot.mode || '';
   $('cueMenuGroup').value = slot.group ? String(slot.group) : '';
   $('cueMenuLayer').value = String(slot.layer || 1);
+  $('cueMenuSpeed').value = slot.speed_group ? String(slot.speed_group) : '';
   fillScanSelect($('cueMenuScan'), 'Par défaut de la sortie', slot.scan || '');
   // T-158: the cue's own transition, else the grid's.
   $('cueMenuTransition').value = slot.transition ? slot.transition.kind : '';
@@ -8731,7 +8819,8 @@ async function saveCueMenu() {
   const protect_stop = $('cueMenuProtStop').checked, protect_solo = $('cueMenuProtSolo').checked;
   const scan = $('cueMenuScan').value || null;
   const notes = $('cueMenuNotes').value, tags = menuTags, color = menuColor;
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color });
+  const speed_group = $('cueMenuSpeed').value ? +$('cueMenuSpeed').value : null;
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group });
   await loadSlots();
 }
 // Tags in the properties menu (T-430): chips, typed with Enter or a comma;
@@ -8790,7 +8879,7 @@ $('cueMenuCellColorNone').addEventListener('click', () => {
   $('cueMenuCellColorNone').disabled = true;
   saveCueMenu();
 });
-['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuSpeed', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 
 // ---------- « En cours » (T-423) ----------
 // The tab's count comes with every frame (cues playing + 1 for a running
@@ -10664,7 +10753,10 @@ function buildLayers() {
       <input type="range" id="layerDim${n}" min="0" max="100" value="100" data-control="layer.${n}.dimmer" title="layer.${n}.dimmer" aria-label="Gradateur calque ${n}">
       <span class="dv">100 %</span>
       <div class="btns"><button class="mute" data-control="layer.${n}.mute" title="layer.${n}.mute">Muet</button><button class="solo" data-control="layer.${n}.solo" title="layer.${n}.solo">Solo</button></div>
-      <button class="clear" data-control="layer.${n}.clear" title="layer.${n}.clear : arrête les cues du calque" style="width:100%;padding:4px;font-size:11px">Vider</button>`;
+      <button class="clear" data-control="layer.${n}.clear" title="layer.${n}.clear : arrête les cues du calque" style="width:100%;padding:4px;font-size:11px">Vider</button>
+      <select class="spd" aria-label="Vitesse du calque ${n}" title="Groupe de vitesse du calque ${n} (LIVE › Direct › Vitesses) : ses cues sans groupe propre et ses réglages" style="width:100%;font-size:11px">
+        <option value="0">Vitesse : tempo</option><option value="1">Vitesse : A</option><option value="2">Vitesse : B</option><option value="3">Vitesse : C</option><option value="4">Vitesse : D</option>
+      </select>`;
     const range = d.querySelector('input');
     range.addEventListener('input', () => {
       d.querySelector('.dv').textContent = range.value + ' %';
@@ -10678,6 +10770,7 @@ function buildLayers() {
     d.querySelector('.clear').addEventListener('click', async () => {
       if (await post('/api/control', { id: `layer.${n}.clear` })) refreshLook();
     });
+    d.querySelector('.spd').addEventListener('change', e => post('/api/speed-groups', { layer: n, layer_group: +e.target.value }));
     $('layers').appendChild(d);
   }
 }
@@ -10737,7 +10830,7 @@ const EXEC_N = 8, EXEC_MAX_PAGES = 8;
 const EXEC_FADER_FR = { level: 'Niveau', fade_in: 'Fondu au curseur', speed: 'Vitesse' };
 const EXEC_BUTTON_FR = { none: 'Aucune', toggle: 'Basculer', flash: 'Flash', temp: 'Temp', black_held: 'Noir tenu', go: 'Go' };
 // What each object accepts (the server checks the same, executors.rs).
-const EXEC_FADERS = { cue: ['fade_in', 'level'], layer: ['level', 'speed'], group_master: ['level'], cue_list: ['level'], none: ['level'] };
+const EXEC_FADERS = { cue: ['fade_in', 'level'], layer: ['level', 'speed'], group_master: ['level'], speed_group: ['speed'], cue_list: ['level'], none: ['level'] };
 const EXEC_BUTTONS = { cue: ['none', 'toggle', 'flash', 'temp', 'black_held'], layer: ['none', 'toggle', 'flash', 'black_held'],
   group_master: ['none', 'toggle', 'flash', 'black_held'], cue_list: ['none', 'go'], none: ['none'] };
 const EXEC = { pages: null, rev: -1, page: 0, key: '', state: null, groups: [], menu: null, keys: new Map(), held: new Map() };
@@ -10748,7 +10841,7 @@ function execTargetName(t) {
     case 'layer': return 'Calque ' + t.n;
     case 'group_master': return EXEC.groups.find(g => g.n === t.group)?.name || 'Groupe ' + t.group;
     case 'cue_list': return 'Liste de cues';
-    case 'speed_group': return 'Vitesse ' + t.n;
+    case 'speed_group': return 'Vitesse ' + (SPEED_NAMES[t.n] || t.n);
     case 'macro': return 'Macro';
     default: return '—';
   }
@@ -10918,6 +11011,8 @@ function fillExecMenu() {
   const others = [opt('{"type":"none"}', 'Aucun', t === 'none')]
     .concat([1, 2, 3, 4].map(l => opt(JSON.stringify({ type: 'layer', n: l }), 'Calque ' + l, cur === JSON.stringify({ type: 'layer', n: l }))))
     .concat(EXEC.groups.map(g => opt(JSON.stringify({ type: 'group_master', group: g.n }), 'Maître : ' + g.name, cur === JSON.stringify({ type: 'group_master', group: g.n }))))
+    // Speed groups (T-419): the fader's fifths are ×¼ … ×4.
+    .concat([1, 2, 3, 4].map(g => opt(JSON.stringify({ type: 'speed_group', n: g }), 'Groupe de vitesse ' + SPEED_NAMES[g], cur === JSON.stringify({ type: 'speed_group', n: g }))))
     .concat([opt('{"type":"cue_list"}', 'Liste de cues', t === 'cue_list')]);
   $('execMenuTarget').innerHTML = others.join('') + cues.join('');
   $('execMenuFader').innerHTML = (EXEC_FADERS[t] || ['level']).map(f => opt(f, EXEC_FADER_FR[f], f === h.fader)).join('');
@@ -11018,6 +11113,8 @@ function showLayers(l) {
     }
     d.querySelector('.mute').classList.toggle('active', x.mute);
     d.querySelector('.solo').classList.toggle('active', x.solo);
+    const spd = d.querySelector('.spd');
+    if (document.activeElement !== spd) spd.value = String(x.speed_group || 0);
     d.classList.toggle('off', x.mute || x.dimmer <= 0 || (anySolo && !x.solo));
     const pts = d.querySelector('.pts');
     const cut = mix.dropped.includes(n);
@@ -11182,7 +11279,8 @@ function renderLfos() {
         <button class="del" data-del="${i}" title="Supprimer ce modulateur" aria-label="Supprimer ce modulateur">×</button></div>
       <div class="row"><select data-f="wave" title="Forme">${opts(LFO_WAVES, m.wave)}</select>
         <select data-f="period" title="Période">${opts([...LFO_PERIODS, ['hz', 'Hz (libre)']], period)}</select>
-        ${period === 'hz' ? `<input type="number" data-f="hz" min="0" max="20" step="0.05" value="${m.rate.hz}" title="Fréquence (Hz)">` : ''}</div>
+        ${period === 'hz' ? `<input type="number" data-f="hz" min="0" max="20" step="0.05" value="${m.rate.hz}" title="Fréquence (Hz)">` : ''}
+        <select data-f="speed_group" aria-label="Groupe de vitesse" title="Groupe de vitesse dont ce modulateur compte les temps (LIVE › Direct › Vitesses)"${period === 'hz' ? ' disabled' : ''}>${opts(SPEED_NAMES.map((t, g) => [g, g ? 'Groupe ' + t : 'Tempo maître']), m.speed_group || 0)}</select></div>
       <label>Profondeur <span class="v">${Math.round(m.depth * 100)} %</span></label>
       <input type="range" data-f="depth" min="0" max="100" data-default="50" value="${Math.round(m.depth * 100)}">
       <label>Phase <span class="v">${Math.round(m.phase * 360)}°</span></label>
@@ -11196,7 +11294,7 @@ function renderLfos() {
 $('lfoHintAdd').onclick = () => $('lfoAdd').click(); // the empty state's first action (T-437)
 $('lfoAdd').addEventListener('click', () => {
   if (lfos.length >= lfoMax) return;
-  lfos.push({ target: 'master.size', wave: 'sine', rate: { beats: 4 }, depth: 0.5, phase: 0, offset: 0, enabled: true });
+  lfos.push({ target: 'master.size', wave: 'sine', rate: { beats: 4 }, depth: 0.5, phase: 0, offset: 0, enabled: true, speed_group: 0 });
   renderLfos(); saveLfos();
 });
 $('lfoList').addEventListener('click', e => {
@@ -11216,6 +11314,7 @@ function lfoEdit(e, final) {
     e.target.previousElementSibling.querySelector('.v').textContent = f === 'depth' ? Math.round(m.depth * 100) + ' %' : Math.round(m.phase * 360) + '°';
   }
   else if (f === 'enabled') m.enabled = e.target.checked;
+  else if (f === 'speed_group') m.speed_group = +v;
   if (final && (f === 'period' || f === 'target')) renderLfos();
   saveLfos();
 }

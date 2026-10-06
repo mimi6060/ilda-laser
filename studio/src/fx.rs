@@ -143,6 +143,22 @@ pub struct FxClock {
     pub mod_beat: f64,
     pub bpm: f64,
     pub beats_per_bar: u8,
+    /// Speed groups (T-419): per group (0 = master, 1..=4 = A..D), its
+    /// beat on the modulation clock and its beats per master beat.
+    /// `None` = everything on the master clock.
+    pub groups: Option<[(f64, f64); crate::speed::SPEED_GROUPS + 1]>,
+}
+
+impl FxClock {
+    /// Group `g`'s beat for a modulator: looping, the group's own beat;
+    /// a drop (`since` = master beats since it started), its share of them.
+    fn group_beat(&self, g: u8, since: Option<f64>) -> f64 {
+        let (beat, ratio) = self.groups.and_then(|gs| gs.get(g as usize).copied()).unwrap_or((self.mod_beat, 1.0));
+        match since {
+            Some(b) => b * ratio,
+            None => beat,
+        }
+    }
 }
 
 fn fin(v: f32, fallback: f32) -> f32 {
@@ -435,8 +451,8 @@ impl FxStore {
             }
             // A drop's waves start with it; a looping effect stays on the
             // tempo clock, in phase with the LFOs.
-            let (t, beat) = if cell.one_shot { (c.mod_t - t0, c.mod_beat - b0) } else { (c.mod_t, c.mod_beat) };
-            lfo::modulate_scaled(&cell.modulators, reg, settings, live, t, beat, share);
+            let (t, since) = if cell.one_shot { (c.mod_t - t0, Some(c.mod_beat - b0)) } else { (c.mod_t, None) };
+            lfo::modulate_grouped(&cell.modulators, reg, settings, live, t, &|g| c.group_beat(g, since), share);
         }
     }
 
@@ -611,7 +627,7 @@ mod tests {
 
     fn clock(beat: f64) -> FxClock {
         // 120 BPM: a beat is half a second.
-        FxClock { t: beat / 2.0, beat, mod_t: beat / 2.0, mod_beat: beat, bpm: 120.0, beats_per_bar: 4 }
+        FxClock { t: beat / 2.0, beat, mod_t: beat / 2.0, mod_beat: beat, bpm: 120.0, beats_per_bar: 4, groups: None }
     }
 
     /// The master copy after the grid's frame at `beat`.

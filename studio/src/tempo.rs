@@ -35,6 +35,9 @@ use crate::audio::downbeat::{DownbeatDetection, HIGH_CONFIDENCE, SHOW_CONFIDENCE
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+/// Speed groups and the rate master (T-419) live in speed.rs.
+pub use crate::speed::SpeedGroups;
+
 pub const MIN_BPM: f64 = 40.0;
 pub const MAX_BPM: f64 = 250.0;
 const MAX_TAPS: usize = 8;
@@ -322,7 +325,13 @@ impl TempoClock {
     /// lands on the beat. Everything rendered reads this one; the clock,
     /// the follower and the operator's own beat display read `beat_at`.
     pub fn effect_beat_at(&self, t: f64) -> f64 {
-        self.beat_at(t + self.output_offset_s)
+        self.beat_at(self.effect_t(t))
+    }
+
+    /// The seconds the effects play at `t` (T-246): what a free-BPM speed
+    /// group (T-419) reads, ahead like `effect_beat_at`.
+    pub fn effect_t(&self, t: f64) -> f64 {
+        t + self.output_offset_s
     }
 
     /// Sets the *Décalage de sortie* (ms): refused when not a number,

@@ -1406,6 +1406,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 // The program and the stored modifiers (T-144) are set on
                 // their own routes: the properties dialog never sends them,
                 // and keeps them.
+                if req.slot.speed_group.is_some_and(|g| crate::speed::check_group(g).is_err()) {
+                    return text(400, "groupe de vitesse inconnu (0 à 4)");
+                }
                 let CueSlot { program, modifiers, .. } = s.deck.slot(&req.id);
                 s.deck.set_slot(&req.id, CueSlot { program, modifiers, ..req.slot });
                 s.deck.save();
@@ -1701,6 +1704,27 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     s.mixer_dirty = true;
                 }
                 json_response(scan_presets_view(&s))
+            }
+            Err(e) => e,
+        },
+        // Speed groups A..D and the *Cadence* (T-419). POST: any of
+        // `groups` (4 modes, `null` = unchanged), `group` + `mode` (one),
+        // `rate`, `change_on_bar`; checked (NaN, unknown multiples and
+        // groups refused), a new multiple waits for its bar when asked.
+        (Method::Get, "/api/speed-groups") => {
+            let s = shared.lock().unwrap();
+            json_response(s.speed.view(s.tempo.bpm))
+        }
+        (Method::Post, "/api/speed-groups") => match body::<SpeedGroupsRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match apply_speed_groups(&mut s, req) {
+                    Ok(()) => {
+                        s.speed_dirty = true;
+                        json_response(s.speed.view(s.tempo.bpm))
+                    }
+                    Err(e) => text(400, e),
+                }
             }
             Err(e) => e,
         },
@@ -3170,6 +3194,68 @@ fn grid_edit(shared: &Mutex<Shared>, edit: impl FnOnce(&mut crate::grid::CueGrid
 }
 
 #[derive(Deserialize)]
+struct SpeedGroupsRequest {
+    #[serde(default)]
+    groups: Option<Vec<Option<crate::speed::SpeedMode>>>,
+    #[serde(default)]
+    group: Option<u8>,
+    #[serde(default)]
+    mode: Option<crate::speed::SpeedMode>,
+    #[serde(default)]
+    rate: Option<f32>,
+    #[serde(default)]
+    change_on_bar: Option<bool>,
+    /// A layer (1..=4) put in `layer_group` (0 = the master clock, 1..=4).
+    #[serde(default)]
+    layer: Option<u8>,
+    #[serde(default)]
+    layer_group: Option<u8>,
+}
+
+/// `POST /api/speed-groups` (T-419): all checked before anything changes.
+fn apply_speed_groups(s: &mut Shared, req: SpeedGroupsRequest) -> Result<(), &'static str> {
+    let mut changes: Vec<(u8, crate::speed::SpeedMode)> = Vec::new();
+    if let Some(groups) = &req.groups {
+        if groups.len() > crate::speed::SPEED_GROUPS {
+            return Err("quatre groupes de vitesse au plus");
+        }
+        for (i, m) in groups.iter().enumerate() {
+            if let Some(m) = m {
+                changes.push((i as u8 + 1, m.checked()?));
+            }
+        }
+    }
+    match (req.group, req.mode) {
+        (Some(g), Some(m)) if (1..=crate::speed::SPEED_GROUPS as u8).contains(&g) => changes.push((g, m.checked()?)),
+        (None, None) => {}
+        _ => return Err("groupe de vitesse inconnu (1 à 4) ou mode manquant"),
+    }
+    if req.rate.is_some_and(|r| !r.is_finite()) {
+        return Err("cadence invalide");
+    }
+    let layer = match (req.layer, req.layer_group) {
+        (Some(n), Some(g)) if (1..=crate::layers::LAYER_COUNT as u8).contains(&n) => Some((n, crate::speed::check_group(g)?)),
+        (None, None) => None,
+        _ => return Err("calque inconnu (1 à 4) ou groupe manquant"),
+    };
+    if let Some((n, g)) = layer {
+        s.mixer.layer_mut(n).speed_group = g;
+        s.mixer_dirty = true;
+    }
+    if let Some(on) = req.change_on_bar {
+        s.speed.change_on_bar = on;
+    }
+    if let Some(r) = req.rate {
+        s.speed.set_rate(r)?;
+    }
+    let (beat, t, bpb) = s.speed_clock();
+    for (g, m) in changes {
+        s.speed.set_mode(g, m, beat, t, bpb)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
 struct SlotRequest {
     id: String,
     #[serde(flatten)]
@@ -3792,7 +3878,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "shapes": SHAPE_NAMES,
         "generators": GENERATOR_NAMES,
         "scenes": s.scenes.list(),
-        "tempo": s.tempo.state(s.now_s()),
+        "tempo": tempo_view(s),
         "playlist": s.playlist.as_ref().map(|p| p.index),
         "evolving": evolving_status(s),
         "timeline": s.timeline.state(&s.timeline_clock()),
@@ -3885,12 +3971,15 @@ fn prepared_reply(shared: &Arc<Mutex<Shared>>, f: impl FnOnce(&mut Shared) -> Re
 }
 
 fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
-    let (mut view, points, version, seq) = {
+    let (mut view, points, version, seq, beats) = {
         let mut s = shared.lock().unwrap();
         let round = |v: f32| (v * 1000.0).round() / 1000.0;
         let points: Vec<[f32; 5]> = s.frame.iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect();
         let seq = s.push.seq();
-        (live_view(&mut s), points, s.push.state_version(), seq)
+        // The master beat and each group's (A..D), at the same instant.
+        let (beat, t, _) = s.speed_clock();
+        let beats = s.speed.beats(beat, t);
+        (live_view(&mut s), points, s.push.state_version(), seq, beats)
     };
     view["points"] = json!(points);
     // The engine frame these points and `output_lit` belong to: the engine
@@ -3899,7 +3988,26 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     // the stop from one finished just before (T-475). Only here, not in the
     // pushed state, which would otherwise change every frame.
     view["frame_seq"] = json!(seq);
+    // Each speed group's beat now (T-419): only here, like `frame_seq`
+    // (it moves every frame; the pushed state keeps the groups' modes).
+    if let Some(groups) = view.pointer_mut("/tempo/groups").and_then(|g| g.as_array_mut()) {
+        for (g, beat) in groups.iter_mut().zip(&beats[1..]) {
+            g["beat"] = json!((beat * 1e4).round() / 1e4);
+        }
+    }
+    view["tempo"]["effect_beat"] = json!((beats[0] * 1e4).round() / 1e4);
     json_response(view).with_header(header("X-State-Version", version))
+}
+
+/// The tempo clock's state, with the speed groups (T-419) as `groups`
+/// (A..D, without their beats), `rate` (the *Cadence*) and `change_on_bar`.
+fn tempo_view(s: &Shared) -> serde_json::Value {
+    let mut v = json!(s.tempo.state(s.now_s()));
+    let speed = s.speed.view(s.tempo.bpm);
+    for key in ["groups", "rate", "change_on_bar"] {
+        v[key] = speed[key].clone();
+    }
+    v
 }
 
 /// What the page shows besides the points: `/api/frame` without them,
@@ -3931,7 +4039,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         "settings_rev": s.settings_rev,
         "festival": festival_view(s),
         "cues": {
-            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer, "phase": s.deck.phase(a.id, now), "level": a.exec_level })).collect::<Vec<_>>(),
+            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer, "phase": s.deck.phase(a.id, now), "level": a.exec_level, "speed_group": s.look_speed_group(a.layer, a.id) })).collect::<Vec<_>>(),
             "shown": s.deck.visible().iter().map(|a| a.cue.as_str()).collect::<Vec<_>>(),
             // T-158: stopped cues still fading out (*Fin*).
             "ending": s.deck.ending.iter().map(|e| json!({ "cue": e.cue.cue, "layer": e.cue.layer, "phase": s.deck.phase(e.cue.id, now) })).collect::<Vec<_>>(),
@@ -3946,7 +4054,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         },
         // Group masters (T-420) ride with the layers: the LIVE row shows them.
         "layers": { "mixer": s.mixer, "mix": s.mix, "groups": groups_view(s)["groups"] },
-        "tempo": s.tempo.state(s.now_s()),
+        "tempo": tempo_view(s),
         // T-409: the timecode state also under `timeline.timecode`.
         "timeline": timeline_with_timecode(s),
         "timeline_audio": song_view(s),
@@ -4521,25 +4629,30 @@ mod tests {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         write!(stream, "{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw).unwrap();
-        let status = raw.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+        // Bytes first: a chunk may end in the middle of a character.
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").map_or((raw.len(), raw.len()), |i| (i, i + 4));
+        let head = String::from_utf8_lossy(&raw[..split.0]).into_owned();
+        let status = head.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        let body = &raw[split.1..];
         // A long answer (over the server's 32 kB threshold) comes chunked.
         let chunked = head.to_ascii_lowercase().contains("transfer-encoding: chunked");
-        (status, if chunked { dechunk(body) } else { body.to_string() })
+        let body = if chunked { dechunk(body) } else { body.to_vec() };
+        (status, String::from_utf8(body).unwrap())
     }
 
     /// The body of a chunked HTTP answer, put back together.
-    fn dechunk(raw: &str) -> String {
-        let (mut rest, mut out) = (raw, String::new());
-        while let Some((size, tail)) = rest.split_once("\r\n") {
-            let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+    fn dechunk(raw: &[u8]) -> Vec<u8> {
+        let (mut rest, mut out) = (raw, Vec::new());
+        while let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") {
+            let n = usize::from_str_radix(String::from_utf8_lossy(&rest[..eol]).trim(), 16).unwrap_or(0);
+            let tail = &rest[eol + 2..];
             if n == 0 || tail.len() < n {
                 break;
             }
-            out.push_str(&tail[..n]);
-            rest = tail[n..].trim_start_matches("\r\n");
+            out.extend_from_slice(&tail[..n]);
+            rest = tail[n..].strip_prefix(b"\r\n").unwrap_or(&tail[n..]);
         }
         out
     }
@@ -4591,6 +4704,54 @@ mod tests {
         // Two projectors on one output: refused.
         venue["projectors"].as_array_mut().unwrap().push(json!({ "id": "p3", "output": "rec" }));
         assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 400);
+    }
+
+    /// T-419: the speed groups over the API: read, changed (bad values
+    /// refused, nothing half applied), allowed in show mode (played live),
+    /// in `/api/frame` as `tempo.groups` with their beats, and a cell's
+    /// group checked.
+    #[test]
+    fn speed_groups_over_the_api() {
+        let t = TestServer::start(false);
+        let g = js(&t.request("GET", "/api/speed-groups", "").1);
+        assert_eq!(g["groups"].as_array().unwrap().len(), 4);
+        assert_eq!((g["rate"].as_f64(), g["change_on_bar"].as_bool()), (Some(1.0), Some(true)));
+        let body = json!({ "change_on_bar": false, "groups": [{ "type": "multiple", "mult": 0.5 }, null, { "type": "free_bpm", "bpm": 98 }], "rate": 2.0 });
+        let (code, reply) = t.request("POST", "/api/speed-groups", &body.to_string());
+        assert_eq!(code, 200, "{reply}");
+        let g = js(&reply);
+        assert_eq!((g["groups"][0]["label"].as_str(), g["groups"][2]["free"].as_bool(), g["rate"].as_f64()), (Some("×½"), Some(true), Some(2.0)));
+        for bad in [
+            json!({ "group": 1, "mode": { "type": "multiple", "mult": 3 } }),
+            json!({ "group": 5, "mode": { "type": "multiple", "mult": 1 } }),
+            json!({ "group": 1, "mode": { "type": "free_bpm", "bpm": -3 } }),
+            json!({ "group": 1 }),
+            json!({ "rate": 0.7, "groups": [{ "type": "multiple", "mult": 7 }] }),
+        ] {
+            assert_eq!(t.request("POST", "/api/speed-groups", &bad.to_string()).0, 400, "{bad}");
+        }
+        assert_eq!(t.shared.lock().unwrap().speed.rate(), 2.0, "a refused request changes nothing");
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/speed-groups", r#"{"rate":1.5}"#).0, 200);
+        let f = js(&t.request("GET", "/api/frame", "").1);
+        let groups = f["tempo"]["groups"].as_array().unwrap();
+        assert_eq!(groups[0]["mult"].as_f64(), Some(0.5));
+        let (master, a) = (f["tempo"]["effect_beat"].as_f64().unwrap(), groups[0]["beat"].as_f64().unwrap());
+        // A carries on from where it was when set, at half the master's pace.
+        let expected = t.shared.lock().unwrap().speed.beat(1, master, 0.0);
+        assert!((a - expected).abs() < 1e-3 && a <= master, "A at ×½: {a} for {master}");
+        assert_eq!(f["tempo"]["rate"].as_f64(), Some(1.5));
+        t.shared.lock().unwrap().show_mode.on = false;
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        assert_eq!(t.request("POST", "/api/cues/slot", &json!({ "id": cue, "speed_group": 9 }).to_string()).0, 400);
+        assert_eq!(t.request("POST", "/api/cues/slot", &json!({ "id": cue, "speed_group": 1 }).to_string()).0, 200);
+        assert_eq!(t.shared.lock().unwrap().deck.slot(&cue).speed_group, Some(1));
+        assert_eq!(t.request("POST", "/api/speed-groups", r#"{"layer":2,"layer_group":3}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().mixer.layer(2).speed_group, 3);
+        for bad in [r#"{"layer":5,"layer_group":1}"#, r#"{"layer":2,"layer_group":5}"#, r#"{"layer":2}"#] {
+            assert_eq!(t.request("POST", "/api/speed-groups", bad).0, 400, "{bad}");
+        }
+        assert_eq!(f["armed"], false);
     }
 
     /// T-146: the FX grid over the API: read, edited (recorded in the
@@ -6821,7 +6982,7 @@ mod tests {
             let mut rng = Rng::new(seed);
             for i in 0..60 {
                 let (preset, look) = rng.pick(&presets).clone();
-                let (path, body): (&str, String) = match rng.below(22) {
+                let (path, body): (&str, String) = match rng.below(23) {
                     0 => ("/api/arm", json!({ "on": true, "source": rng.pick(&["midi", "system"]) }).to_string()),
                     1 => ("/api/arm", json!({ "toggle": true, "source": rng.pick(&["midi", "system"]) }).to_string()),
                     2 => ("/api/arm", json!({ "on": false }).to_string()),
@@ -6845,6 +7006,11 @@ mod tests {
                     18 => ("/api/presets/play", json!({ "id": preset }).to_string()),
                     19 => ("/api/scenes/play", json!({ "name": "inconnue" }).to_string()),
                     20 => ("/api/testpattern", json!({ "pattern": rng.pick(&[json!("grid"), json!("color_bars"), json!(null)]), "brightness": rng.f() }).to_string()),
+                    21 => {
+                        // Speed groups (T-419), mangled now and then.
+                        let mode = if rng.chance(0.5) { json!({ "type": "multiple", "mult": rng.pick(&[0.25, 0.5, 2.0, 3.0, -1.0]) }) } else { json!({ "type": "free_bpm", "bpm": rng.range(-50.0, 500.0) }) };
+                        ("/api/speed-groups", json!({ "group": rng.below(6), "mode": mode, "rate": rng.range(-1.0, 4.0), "change_on_bar": rng.chance(0.5) }).to_string())
+                    }
                     _ => ("/api/data/warnings/ack", json!({ "all": true }).to_string()),
                 };
                 let (status, reply) = t.request("POST", path, &body);

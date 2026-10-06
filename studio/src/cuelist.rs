@@ -326,6 +326,13 @@ impl Timing {
     fn fade_in(&self) -> f64 {
         self.geometry.max(self.color).max(self.brightness)
     }
+
+    /// Under the *Cadence* (T-419): every fade divided by `rate`
+    /// (0.5..=2; anything else is 100 %). Delays and waits keep their time.
+    fn at_rate(self, rate: f64) -> Self {
+        let rate = if rate.is_finite() && rate > 0.0 { rate.clamp(0.5, 2.0) } else { 1.0 };
+        Timing { geometry: self.geometry / rate, color: self.color / rate, brightness: self.brightness / rate, out: self.out / rate, ..self }
+    }
 }
 
 /// 0 at the start, 1 once `len` has gone by (at once for a zero length).
@@ -383,6 +390,9 @@ pub struct ListPlayer {
     pub paused: bool,
     /// Who drove it last (« En cours »).
     pub source: ControlSource,
+    /// *Cadence* (T-419): a step's fades last `length / rate`, taken when
+    /// the step begins. 0 (the default) = 100 %.
+    pub rate: f64,
     /// The player's own seconds: they stop while paused.
     clock: f64,
     /// The tempo clock's beat at the last frame.
@@ -580,7 +590,7 @@ impl ListPlayer {
     /// Step `index` comes in now, with the times of step `timing_of`.
     fn begin(&mut self, index: usize, timing_of: usize, resolve: Resolve) {
         let Some(list) = &self.list else { return };
-        let (step, timing) = (list.steps[index].clone(), Timing::of(&list.steps[timing_of]));
+        let (step, timing) = (list.steps[index].clone(), Timing::of(&list.steps[timing_of]).at_rate(self.rate));
         let mut look = resolve(&step.source);
         // What was on show: it leaves, from where it is.
         let before = self.cur.take().map(|c| {
@@ -902,6 +912,7 @@ pub fn frame(s: &mut Shared, dt: f64, beat: f64, audio: &AudioFeatures) {
     if s.estop.is_latched() {
         s.cue_list.halt();
     }
+    s.cue_list.rate = s.speed.rate();
     with_player(s, ControlSource::System, |p, r| p.tick(dt, beat, audio, r));
 }
 

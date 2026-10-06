@@ -75,6 +75,12 @@
 //!     1-16 hold with executor levels on; they never arm, and every cue's
 //!     executor level stays within 0..1.
 //!
+//! 17. speed groups and the *Cadence* (T-419): random groups (multiples,
+//!     free BPMs, mangled values refused), cells, layers and modulators in
+//!     random groups and random fade rates run in the sessions (1-16 hold
+//!     with them); a ×4 group never gets flashing past the strobe limiter
+//!     (`speed_groups_never_get_past_the_strobe_limiter`).
+//!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
 //! catalogue cue forced onto the default seeds (flashed over itself, and
@@ -616,6 +622,35 @@ fn random_cue_list(s: &Shared, rng: &mut Rng) -> crate::cuelist::CueList {
     CueList { name: "fuzz".into(), layer: 1 + rng.below(crate::layers::LAYER_COUNT) as u8, wrap: rng.chance(0.5), steps }
 }
 
+/// Speed groups and the *Cadence* (T-419) as a client or a file could
+/// set them, mangled now and then (NaN, negative BPMs, unknown multiples
+/// and groups: refused), cells and layers put in random groups (some that
+/// don't exist).
+fn random_speed(s: &mut Shared, rng: &mut Rng) {
+    use crate::speed::{SpeedMode, SPEED_MULTS};
+    let (beat, t, bpb) = s.speed_clock();
+    s.speed.change_on_bar = rng.chance(0.5);
+    for g in 0..6u8 {
+        let mode = match rng.below(5) {
+            0 | 1 => SpeedMode::Multiple { mult: *rng.pick(&SPEED_MULTS) },
+            2 => SpeedMode::Multiple { mult: rng.range(-1.0, 9.0) },
+            3 => SpeedMode::FreeBpm { bpm: rng.range(-100.0, 600.0) as f64 },
+            _ => SpeedMode::FreeBpm { bpm: if rng.chance(0.5) { f64::NAN } else { f64::INFINITY } },
+        };
+        let _ = s.speed.set_mode(g, mode, beat, t, bpb);
+    }
+    let rate = if rng.chance(0.1) { f32::NAN } else { rng.range(-1.0, 4.0) };
+    let _ = s.speed.set_rate(rate);
+    let (id, _) = random_preset(s, rng);
+    let slot = s.deck.slot(&id);
+    s.deck.set_slot(&id, CueSlot { speed_group: rng.chance(0.7).then(|| rng.below(7) as u8), ..slot });
+    s.mixer.layer_mut(1 + rng.below(crate::layers::LAYER_COUNT) as u8).speed_group = rng.below(7) as u8;
+    if rng.chance(0.2) {
+        let (bar_beat, t_eff) = (s.tempo.beat_at(s.now_s()), t);
+        s.speed.resync(bar_beat, t_eff, bpb);
+    }
+}
+
 fn random_preset(s: &Shared, rng: &mut Rng) -> (String, Settings) {
     let p = rng.pick(&s.presets);
     (p.id.clone(), p.settings.clone())
@@ -637,6 +672,8 @@ fn random_lfos(s: &Shared, rng: &mut Rng) -> Vec<lfo::Modulator> {
             phase: rng.f(),
             offset: rng.range(-1.0, 1.0),
             enabled: rng.chance(0.9),
+            // A..D, and now and then a group that doesn't exist (T-419).
+            speed_group: rng.below(6) as u8,
         })
         .collect()
 }
@@ -928,6 +965,9 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
             if rng.chance(0.5) {
                 random_scan(&mut s, rng);
             }
+            if rng.chance(0.5) {
+                random_speed(&mut s, rng);
+            }
         }
         _ => {
             if s.presence.enforced {
@@ -1122,6 +1162,8 @@ fn random_bank(s: &mut Shared, rng: &mut Rng) {
                         7 => ExecTarget::Layer { n: 1 + rng.below(5) as u8 },
                         8 => ExecTarget::GroupMaster { group: 1 + rng.below(3) },
                         9 => ExecTarget::CueList,
+                        // A speed group (T-419), now and then one past D.
+                        10 => ExecTarget::SpeedGroup { n: 1 + rng.below(5) as u8 },
                         _ => ExecTarget::None,
                     };
                     let fader = *rng.pick(&[FaderFn::FadeIn, FaderFn::FadeIn, FaderFn::Level, FaderFn::Speed]);
@@ -1946,6 +1988,24 @@ fn run_strobe_way(seed: u64, way: Option<usize>) -> Result<(), String> {
     strobe_case_full(seed, None, way)
 }
 
+/// T-419: a layer in a ×4 speed group (beat gate, beat-synced square
+/// LFO in the group) flashes no longer than the burst: the limiter acts on
+/// real output time, after the groups.
+#[test]
+fn speed_groups_never_get_past_the_strobe_limiter() {
+    let seeds = env_u64("SAFETY_CASES").map_or(6, |n| (n / 50).clamp(6, 40));
+    let mut failures = Vec::new();
+    for i in 0..seeds {
+        let seed = 7_000_419 + i;
+        for way in [0, 1] {
+            if let Err(e) = strobe_case_sped(seed, None, Some(way), Some(4.0)) {
+                failures.push(format!("{e} (seed {seed})"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A catalogue cue a strobe case is forced onto (T-360).
 #[derive(Clone, Copy)]
 struct Forced<'a> {
@@ -1963,6 +2023,13 @@ fn strobe_case(seed: u64, forced: Option<Forced>) -> Result<(), String> {
 
 /// `strobe_case`, optionally with the way forced too (T-146).
 fn strobe_case_full(seed: u64, forced: Option<Forced>, forced_way: Option<usize>) -> Result<(), String> {
+    strobe_case_sped(seed, forced, forced_way, None)
+}
+
+/// `strobe_case_full` with the look's layer in speed group A at `mult`
+/// (T-419), the beat gate and a beat-synced square LFO in that group: a
+/// fast group must not get the flashing past the limiter.
+fn strobe_case_sped(seed: u64, forced: Option<Forced>, forced_way: Option<usize>, speed: Option<f32>) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let mut s = test_support::shared();
     let mut cfg = SafetySettings { strobe_max_hz: rng.range(1.0, 4.0), strobe_burst_s: rng.range(0.5, 3.0), ..Default::default() };
@@ -2024,6 +2091,16 @@ fn strobe_case_full(seed: u64, forced: Option<Forced>, forced_way: Option<usize>
             s.lfos.replace_in_memory(vec![lfo::Modulator { target: target.into(), wave: lfo::Wave::Square, rate: live::Rate::Hz(hz), depth: 1.0, offset: 0.0, ..Default::default() }]);
         }
         _ => {}
+    }
+    if let Some(mult) = speed {
+        s.speed.change_on_bar = false;
+        s.speed.set_mode(1, crate::speed::SpeedMode::Multiple { mult }, 0.0, 0.0, 4).map_err(str::to_string)?;
+        s.mixer.layer_mut(1).speed_group = 1;
+        if way == 1 {
+            let target = *rng.pick(&["master.brightness", "look.brightness"]);
+            let m = lfo::Modulator { target: target.into(), wave: lfo::Wave::Square, rate: live::Rate::Beats(0.25), depth: 1.0, speed_group: 1, ..Default::default() };
+            s.lfos.replace_in_memory(vec![m]);
+        }
     }
     s.request_arm(ArmSource::Ui).map_err(|e| e.join("; "))?;
     let mut rig = Rig::new(s, &format!("strobe-{}", forced.map_or("any", |f| f.cue)), seed);
@@ -2169,6 +2246,47 @@ fn a_flash_released_goes_back_to_an_evolving_look_where_it_was() {
         }
     }
     assert!(furthest > 8.0, "the look moves on between flashes (reached beat {furthest:.2} of 16 beats played)");
+}
+
+/// T-419: through the real engine, a cue whose cell is in group A at ×½
+/// moves exactly half as far as a cue in the default group over 32 master
+/// beats; the cell wins over its layer's group (C at ×4). Each look gets
+/// its group's `BeatClock` (the evolving cue's local beat is read back).
+#[test]
+fn a_cue_in_a_half_speed_group_moves_half_as_far_through_the_engine() {
+    use crate::speed::SpeedMode;
+    let mut s = test_support::shared();
+    s.tempo.set_bpm_manual(120.0, 0.0);
+    s.speed.change_on_bar = false;
+    s.speed.set_mode(1, SpeedMode::Multiple { mult: 0.5 }, 0.0, 0.0, 4).unwrap();
+    s.speed.set_mode(3, SpeedMode::Multiple { mult: 4.0 }, 0.0, 0.0, 4).unwrap();
+    s.mixer.layer_mut(2).speed_group = 3;
+    let (a, b) = (s.presets[0].id.clone(), s.presets[1].id.clone());
+    s.deck.set_slot(&b, CueSlot { layer: Some(2), speed_group: Some(1), ..Default::default() });
+    let cue = crate::evolving::EvolvingCue { length_beats: 64.0, looped: false, ..crate::evolving::test_cue(false) };
+    let look = Settings { content: Content::Evolving(cue), brightness: 1.0, ..Default::default() };
+    for id in [&a, &b] {
+        assert!(controls::send_prepared(&mut s, id, Some(ClickMode::Toggle), look.clone(), None));
+    }
+    let ids: Vec<(String, u64)> = s.deck.active.iter().map(|c| (c.cue.clone(), c.id)).collect();
+    let id_of = |cue: &str| ids.iter().find(|(c, _)| c == cue).map(|(_, id)| *id).unwrap();
+    let (ia, ib) = (id_of(&a), id_of(&b));
+    assert_eq!((s.look_speed_group(1, ia), s.look_speed_group(2, ib)), (0, 1), "cell > layer > default");
+    let mut rig = Rig::new(s, "speed-groups", 0);
+    let pos = |rig: &Rig, id: u64| rig.s().evolving.iter().find(|(i, _)| *i == id).map(|(_, p)| p.pos).expect("on show");
+    for _ in 0..120 {
+        rig.tick();
+    }
+    let (a0, b0) = (pos(&rig, ia), pos(&rig, ib));
+    // 32 beats at 120 BPM.
+    for _ in 0..16 * 60 {
+        rig.tick();
+    }
+    let (da, db) = (pos(&rig, ia) - a0, pos(&rig, ib) - b0);
+    // The rig's frames are whole nanoseconds: 32 beats give or take a hair.
+    assert!((da - 32.0).abs() < 1e-2, "default group: {da}");
+    // The two phases come from the one clock: exactly half, no drift.
+    assert!((db - da / 2.0).abs() < 1e-9, "group A at ×½: {db} for {da}");
 }
 
 /// Default seed count of the strobe property (and of the cue sweeps).

@@ -13,7 +13,10 @@
 //!   whole safety stage: it only ever dims.
 //! - *Niveau*: a cue's own level while it plays, a layer's dimmer, a zone
 //!   group's master (T-420); all inhibitive, 0..1.
-//! - *Vitesse*: a layer's speed (speed groups, T-419, are not there yet).
+//! - *Vitesse*: a layer's animation speed, or a speed group's multiple
+//!   (T-419, speed.rs): the fader's fifths are ×¼, ×½, ×1, ×2, ×4, applied
+//!   on the next bar when *Appliquer au début de la mesure* is on. Timing
+//!   only: the strobe and flash limiters keep the last word.
 //! - Buttons: *Basculer*, *Flash* (full level while held), *Temp* (on
 //!   while held, at the fader's level), *Noir tenu* (dark while held),
 //!   *Go* (the cue list).
@@ -56,7 +59,7 @@ pub enum ExecTarget {
     Layer { n: u8 },
     /// A zone group's master (T-420), 1-based.
     GroupMaster { group: usize },
-    /// A speed group (T-419): not available yet.
+    /// Speed group 1..=4 = A..D (T-419, speed.rs).
     SpeedGroup { n: u8 },
     /// The loaded cue list (T-410).
     CueList,
@@ -226,7 +229,11 @@ impl ExecutorBank {
                             bail!("exécuteur {p}.{n} : groupe {group} hors limites");
                         }
                     }
-                    ExecTarget::SpeedGroup { .. } => bail!("exécuteur {p}.{n} : les groupes de vitesse ne sont pas encore disponibles"),
+                    ExecTarget::SpeedGroup { n: g } => {
+                        if !(1..=crate::speed::SPEED_GROUPS as u8).contains(g) {
+                            bail!("exécuteur {p}.{n} : groupe de vitesse {g} inexistant (1 à 4)");
+                        }
+                    }
                     ExecTarget::Macro { .. } => bail!("exécuteur {p}.{n} : les macros ne sont pas encore disponibles"),
                 }
                 if !fader_fits(&h.target, h.fader) {
@@ -457,9 +464,26 @@ pub fn fader_value(s: &Shared, page: usize, n: usize) -> f32 {
         (ExecTarget::Layer { n: l }, FaderFn::Level) => s.mixer.layer(*l).dimmer.clamp(0.0, 1.0),
         (ExecTarget::Layer { n: l }, FaderFn::Speed) => (s.mixer.layer(*l).modifiers.speed / 2.0).clamp(0.0, 1.0),
         (ExecTarget::GroupMaster { group }, _) => s.projection.master(*group).unwrap_or(1.0).clamp(0.0, 1.0),
+        // A speed group: where its multiple (or the waiting one) sits on
+        // the fader; a free BPM keeps the fader where it was put.
+        (ExecTarget::SpeedGroup { n: g }, _) => match s.speed.target(*g) {
+            Some(crate::speed::SpeedMode::Multiple { mult }) => speed_fader(mult),
+            _ => s.executors.rt.faders.get(&(page, n)).copied().unwrap_or(0.5),
+        },
         (ExecTarget::Cue { .. }, FaderFn::Level) => s.executors.rt.faders.get(&(page, n)).copied().unwrap_or(1.0),
         _ => s.executors.rt.faders.get(&(page, n)).copied().unwrap_or(0.0),
     }
+}
+
+/// A *Vitesse* fader (0..1) on a speed group: its nearest fifth, ×¼ at 0,
+/// ×1 in the middle, ×4 at the top. Not a number: none.
+fn speed_mult(v: f32) -> Option<f32> {
+    v.is_finite().then(|| crate::speed::SPEED_MULTS[(v.clamp(0.0, 1.0) * 4.0).round() as usize])
+}
+
+/// Where a multiple sits on a *Vitesse* fader.
+fn speed_fader(mult: f32) -> f32 {
+    crate::speed::SPEED_MULTS.iter().position(|&m| m == mult).map_or(0.5, |i| i as f32 / 4.0)
 }
 
 /// The latched instance of `cue` is playing, or its launch waits (T-159).
@@ -506,7 +530,14 @@ fn set_fader(s: &mut Shared, page: usize, n: usize, v: f32, src: Option<&'static
             s.executors.rt.group_off.remove(group);
             s.groups_dirty = true;
         }
-        (ExecTarget::SpeedGroup { .. } | ExecTarget::Macro { .. }, _) => return Err("pas encore disponible"),
+        (ExecTarget::SpeedGroup { n: g }, _) => {
+            let mult = speed_mult(v).ok_or("valeur invalide")?;
+            s.executors.rt.faders.insert((page, n), v);
+            let (beat, t, bpb) = s.speed_clock();
+            s.speed.set_mode(*g, crate::speed::SpeedMode::Multiple { mult }, beat, t, bpb)?;
+            s.speed_dirty = true;
+        }
+        (ExecTarget::Macro { .. }, _) => return Err("pas encore disponible"),
         // A cue's level, the cue list, an empty executor: the position only.
         _ => {
             s.executors.rt.faders.insert((page, n), v);
@@ -795,7 +826,8 @@ mod tests {
             Executor { target: ExecTarget::Layer { n: 5 }, ..Default::default() },
             Executor { target: ExecTarget::Layer { n: 1 }, fader: FaderFn::FadeIn, ..Default::default() },
             Executor { target: ExecTarget::CueList, buttons: [ButtonFn::Flash, ButtonFn::None], ..Default::default() },
-            Executor { target: ExecTarget::SpeedGroup { n: 1 }, fader: FaderFn::Speed, ..Default::default() },
+            Executor { target: ExecTarget::SpeedGroup { n: 5 }, fader: FaderFn::Speed, ..Default::default() },
+            Executor { target: ExecTarget::SpeedGroup { n: 1 }, fader: FaderFn::Level, ..Default::default() },
             Executor { target: ExecTarget::Macro { id: "m".into() }, ..Default::default() },
             Executor { buttons: [ButtonFn::Toggle, ButtonFn::None], ..Default::default() },
         ] {
@@ -937,6 +969,26 @@ mod tests {
         assert_eq!(s.executors.rt.page, 1);
         assert!(controls::apply(&mut s, "exec.page.5", ControlInput::Value(1.0), true).is_err());
         assert!(controls::apply(&mut s, "exec.5.1.fader", ControlInput::Value(1.0), true).is_err());
+    }
+
+    /// T-419: a *Vitesse* executor on a speed group sets its multiple
+    /// (×¼ at the bottom, ×1 in the middle, ×4 at the top) and reads it back.
+    #[test]
+    fn a_speed_group_executor_sets_the_multiple() {
+        use crate::speed::SpeedMode;
+        let mut s = shared();
+        s.speed.change_on_bar = false;
+        let e = Executor { target: ExecTarget::SpeedGroup { n: 1 }, fader: FaderFn::Speed, ..Default::default() };
+        let bank = bank_with(vec![(0, 0, e)]);
+        bank.validate(|_| true).unwrap();
+        s.executors.set_bank(bank);
+        assert_eq!(current(&s, "exec.1.1.fader"), Some(json!(0.5)), "×1 in the middle");
+        ctl(&mut s, "exec.1.1.fader", 0.3);
+        assert_eq!(s.speed.groups[0], SpeedMode::Multiple { mult: 0.5 });
+        assert_eq!(current(&s, "exec.1.1.fader"), Some(json!(0.25)));
+        ctl(&mut s, "exec.1.1.fader", 1.0);
+        assert_eq!(s.speed.groups[0], SpeedMode::Multiple { mult: 4.0 });
+        assert!(!s.gate.is_armed());
     }
 
     #[test]

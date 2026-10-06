@@ -33,11 +33,14 @@ pub struct Layer {
     /// layer draws, between the cue's and the master's. Neutral in older
     /// files.
     pub modifiers: crate::live::LiveModifiers,
+    /// Speed group (T-419, speed.rs) of the layer's looks and of its own
+    /// modifiers: 0 = the master clock, 1..=4 = A..D. 0 in older files.
+    pub speed_group: u8,
 }
 
 impl Default for Layer {
     fn default() -> Self {
-        Self { dimmer: 1.0, mute: false, solo: false, modifiers: Default::default() }
+        Self { dimmer: 1.0, mute: false, solo: false, modifiers: Default::default(), speed_group: 0 }
     }
 }
 
@@ -79,6 +82,9 @@ impl Mixer {
         for l in &mut self.layers {
             l.dimmer = if l.dimmer.is_finite() { l.dimmer.clamp(0.0, 1.0) } else { 1.0 };
             l.modifiers = crate::levels::for_storage(&l.modifiers);
+            if crate::speed::check_group(l.speed_group).is_err() {
+                l.speed_group = 0;
+            }
         }
     }
 
@@ -354,5 +360,13 @@ mod tests {
         assert!(travel.len() < classic.len() - 20, "fewer travel points than the classic 0.03 steps");
         let steps: Vec<f32> = travel.windows(2).map(|w| (w[1].y - w[0].y).abs()).collect();
         assert!(steps[0] < steps[steps.len() / 2] && steps[steps.len() - 1] < steps[steps.len() / 2]);
+    }
+    /// T-419: layers saved before speed groups play in the default group;
+    /// a group that doesn't exist falls back to it.
+    #[test]
+    fn old_layers_are_in_the_default_speed_group() {
+        let mut m: Mixer = serde_json::from_str(r#"{"layers":[{"dimmer":0.5},{},{},{"speed_group":42}]}"#).unwrap();
+        m.sanitize();
+        assert!(m.layers.iter().all(|l| l.speed_group == 0));
     }
 }
