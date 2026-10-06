@@ -94,6 +94,10 @@ type Stamp = (u64, u128);
 pub struct MediaStore {
     dir: PathBuf,
     peaks: Mutex<HashMap<String, (Stamp, Arc<WaveformPeaks>)>>,
+    /// One song decoded ahead (`prepare`, the show player T-444): the next
+    /// show's, so the playback thread finds it ready. One slot only: a
+    /// decoded song can weigh a hundred megabytes.
+    prepared: Mutex<Option<(String, Stamp, Arc<Decoded>)>>,
     isolation: Isolation,
 }
 
@@ -101,7 +105,7 @@ impl MediaStore {
     /// `<data-dir>/media/audio/` (created on the first import). Decodes on
     /// a contained thread; the studio sets a child process (`isolated`).
     pub fn new(data_dir: &Path) -> Self {
-        Self { dir: audio_dir(data_dir), peaks: Mutex::new(HashMap::new()), isolation: Isolation::Thread }
+        Self { dir: audio_dir(data_dir), peaks: Mutex::new(HashMap::new()), prepared: Mutex::new(None), isolation: Isolation::Thread }
     }
 
     pub fn isolated(mut self, isolation: Isolation) -> Self {
@@ -146,6 +150,36 @@ impl MediaStore {
     pub fn decode(&self, name: &str) -> Result<Decoded> {
         self.path(name)?;
         self.isolation.samples(&self.dir, name)
+    }
+
+    /// The song's samples for playback: the copy `prepare` decoded ahead
+    /// if the file hasn't changed since, else decoded now.
+    pub fn decode_shared(&self, name: &str) -> Result<Arc<Decoded>> {
+        let stamp = Self::stamp(&self.path(name)?)?;
+        if let Some((n, s, d)) = self.prepared.lock().unwrap().as_ref() {
+            if n == name && *s == stamp {
+                return Ok(Arc::clone(d));
+            }
+        }
+        Ok(Arc::new(self.decode(name)?))
+    }
+
+    /// Decodes a song ahead of its playback (in isolation, on the caller's
+    /// thread: never the engine's) and keeps it in the single slot. A song
+    /// already there and unchanged is not decoded again.
+    pub fn prepare(&self, name: &str) -> Result<()> {
+        let stamp = Self::stamp(&self.path(name)?)?;
+        if matches!(self.prepared.lock().unwrap().as_ref(), Some((n, s, _)) if n == name && *s == stamp) {
+            return Ok(());
+        }
+        let decoded = Arc::new(self.decode(name)?);
+        *self.prepared.lock().unwrap() = Some((name.to_string(), stamp, decoded));
+        Ok(())
+    }
+
+    /// The song `prepare` holds, if any (tests, the player's state).
+    pub fn prepared_song(&self) -> Option<String> {
+        self.prepared.lock().unwrap().as_ref().map(|(n, _, _)| n.clone())
     }
 
     /// Adds a song. The bytes are written aside and decoded (in isolation)

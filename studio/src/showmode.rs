@@ -110,6 +110,13 @@ pub fn allowed(path: &str) -> bool {
         "/api/macros/run",
         "/api/macros/stop",
         "/api/macros/go",
+        // The show player (T-444): its transport and loop are playback;
+        // saving the list is an edit.
+        "/api/showlist/play",
+        "/api/showlist/stop",
+        "/api/showlist/next",
+        "/api/showlist/prev",
+        "/api/showlist/loop",
         "/api/audio",
         "/api/audio/tempo/new_track",
         "/api/timeline/load",

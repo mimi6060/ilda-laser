@@ -357,6 +357,8 @@ pub fn stop(s: &mut Shared, req: &StopRequest) -> Result<(), String> {
         // The cue list back to *Début* (T-410).
         "cuelist" => s.cue_list.top(),
         "timeline" => {
+            // The show list with it (T-444): nothing chains after the stop.
+            crate::showlist::stop(s);
             s.timeline.stop();
             s.playlist = None;
         }

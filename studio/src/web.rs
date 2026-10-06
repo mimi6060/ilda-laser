@@ -216,6 +216,13 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/macros/run", RouteClass::Play),
     ("POST", "/api/macros/stop", RouteClass::Play),
     ("POST", "/api/macros/go", RouteClass::Play),
+    ("GET", "/api/showlist", RouteClass::Read),
+    ("POST", "/api/showlist", RouteClass::Edit),
+    ("POST", "/api/showlist/play", RouteClass::Play),
+    ("POST", "/api/showlist/stop", RouteClass::Play),
+    ("POST", "/api/showlist/next", RouteClass::Play),
+    ("POST", "/api/showlist/prev", RouteClass::Play),
+    ("POST", "/api/showlist/loop", RouteClass::Play),
     ("GET", "/api/fx", RouteClass::Read),
     ("POST", "/api/fx", RouteClass::Edit),
     ("GET", "/api/audio/routes", RouteClass::Read),
@@ -678,6 +685,8 @@ fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>, hub: 
         // Macros end now (T-425); if the lock is busy, the engine's next
         // frame ends them before any step, as it sees the latch.
         s.macros.player.stop_all();
+        // The show list stops chaining (T-444); the engine halts its show.
+        s.showlist.halt();
     }
     // Binary frames after this one were finished after the latch, so they
     // show the stop (T-411). One more than the last published: the engine
@@ -2162,6 +2171,51 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // The show player (T-444): GET the list and its state; POST
+        // replaces the list (an edit: history, locked in show mode); the
+        // transport and *Boucler la liste* are playback. Never arms.
+        (Method::Get, "/api/showlist") => json_response(crate::showlist::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/showlist") => match body::<crate::showlist::ShowList>(request) {
+            Ok(list) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::showlist::set(s, list) {
+                    Ok(()) => json_response(crate::showlist::view(s)),
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/showlist/play") => match body::<ShowListPlay>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::showlist::play(s, req.index) {
+                    Ok(()) => json_response(crate::showlist::view(s)),
+                    Err(e) => text(409, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/showlist/stop") => {
+            let s = &mut *shared.lock().unwrap();
+            crate::showlist::stop(s);
+            json_response(crate::showlist::view(s))
+        }
+        (Method::Post, "/api/showlist/next") | (Method::Post, "/api/showlist/prev") => {
+            let s = &mut *shared.lock().unwrap();
+            let r = if path == "/api/showlist/next" { crate::showlist::next(s) } else { crate::showlist::prev(s) };
+            match r {
+                Ok(()) => json_response(crate::showlist::view(s)),
+                Err(e) => text(409, &e),
+            }
+        }
+        (Method::Post, "/api/showlist/loop") => match body::<ShowListLoop>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                crate::showlist::set_loop(s, req.on);
+                json_response(crate::showlist::view(s))
+            }
+            Err(e) => e,
+        },
         (Method::Post, "/api/macros/go") => {
             let s = &mut *shared.lock().unwrap();
             let n = crate::macros::go(s);
@@ -2372,10 +2426,17 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         }
         (Method::Get, "/api/shows") => json_response(json!(shared.lock().unwrap().shows.list())),
         (Method::Post, "/api/shows") => match body::<crate::timeline::Show>(request) {
-            Ok(show) => match shared.lock().unwrap().shows.save(&show) {
-                Ok(()) => ok(),
-                Err(e) => text(400, &format!("{e:#}")),
-            },
+            Ok(show) => {
+                let s = &mut *shared.lock().unwrap();
+                match s.shows.save(&show) {
+                    Ok(()) => {
+                        // The show list's times and next show (T-444).
+                        crate::showlist::refresh(s);
+                        ok()
+                    }
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
             Err(e) => e,
         },
         (Method::Get, "/api/figures") => {
@@ -3291,6 +3352,8 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
                 return text(400, &format!("{e:#}"));
             }
             st.timeline.saved();
+            // The show list reads the saved show again (T-444).
+            crate::showlist::refresh(st);
         }
         _ => return text(404, "not found"),
     }
@@ -4469,6 +4532,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "notices_last": s.notices.last(),
         "history": s.history.summary(),
     });
+    // The show player (T-444).
+    v["showlist"] = json!(crate::showlist::summary(s));
     // T-450: free space and the copy to a second location.
     v["storage"] = json!(s.project.backup.status());
     // T-260: the active safety profile, for the status bar.
@@ -4578,6 +4643,19 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 
 /// The tempo clock's state, with the speed groups (T-419) as `groups`
 /// (A..D, without their beats), `rate` (the *Cadence*) and `change_on_bar`.
+/// `POST /api/showlist/play`: from item `index` (none: the current one).
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct ShowListPlay {
+    index: Option<usize>,
+}
+
+/// `POST /api/showlist/loop`.
+#[derive(serde::Deserialize)]
+struct ShowListLoop {
+    on: bool,
+}
+
 /// `POST /api/macros`.
 #[derive(serde::Deserialize)]
 struct MacroListRequest {
@@ -4670,6 +4748,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         // T-432: the newest notice's id; the page reads /api/notices when it moves.
         "notices_last": s.notices.last(),
     });
+    // The show player (T-444): the header's times, every frame.
+    v["showlist"] = json!(crate::showlist::summary(s));
     // T-285: undo / redo counts and labels; `rev` moves on every change.
     v["history"] = s.history.summary();
     // T-260: the active safety profile, for the status bar.
@@ -5462,6 +5542,61 @@ mod tests {
         assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
         let undo = js(&t.request("GET", "/api/macros", "").1);
         assert!(undo["macros"].as_array().unwrap().is_empty(), "{undo}");
+    }
+
+    /// T-444: the show list over the API: saved (history, undone, 423 in
+    /// show mode), played, next / previous / stop (allowed in show mode),
+    /// its state in `/api/state`; never arming, refused under an e-stop.
+    #[test]
+    fn the_show_list_over_the_api() {
+        let t = TestServer::start(false);
+        let dir = std::env::temp_dir().join(format!("laser-studio-web-showlist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        t.shared.lock().unwrap().shows = crate::timeline::ShowStore::new(dir.join("shows"));
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        for name in ["Liste A", "Liste B"] {
+            let show = json!({ "name": name, "tracks": [{ "layer": 1, "events": [{ "id": 1, "start": 0.0, "len": 30.0, "source": { "kind": "cue", "id": cue } }] }] });
+            let (code, body) = t.request("POST", "/api/shows", &show.to_string());
+            assert_eq!(code, 200, "{body}");
+        }
+        let list = json!({ "items": [{ "show": "Liste A" }, { "show": "Liste B", "follow_system_tempo": false }] });
+        let (code, body) = t.request("POST", "/api/showlist", &list.to_string());
+        assert_eq!(code, 200, "{body}");
+        let v = js(&body);
+        assert_eq!((v["items"][0]["id"].as_u64(), v["items"][1]["id"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(v["items"][0]["duration_s"], 30.0);
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Liste de shows modifiée");
+        assert_eq!(t.request("POST", "/api/showlist", r#"{"items":[{"show":"../x"}]}"#).0, 400);
+        // Show mode: the list is locked, playing is not.
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/showlist", &list.to_string()).0, 423);
+        let (code, body) = t.request("POST", "/api/showlist/play", "{}");
+        assert_eq!(code, 200, "{body}");
+        let st = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!((st["showlist"]["transport"].as_str(), st["showlist"]["index"].as_u64()), (Some("playing"), Some(0)));
+        assert_eq!(st["timeline"]["name"], "Liste A");
+        assert_eq!(st["armed"], false);
+        assert_eq!(t.request("POST", "/api/showlist/next", "{}").0, 200);
+        assert_eq!(js(&t.request("GET", "/api/frame", "").1)["showlist"]["index"], 1);
+        assert_eq!(t.request("POST", "/api/showlist/prev", "{}").0, 200);
+        assert_eq!(t.request("POST", "/api/showlist/loop", r#"{"on":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/showlist/stop", "{}").0, 200);
+        assert_eq!(js(&t.request("GET", "/api/showlist", "").1)["state"]["transport"], "stopped");
+        assert_eq!(t.request("POST", "/api/showlist/play", r#"{"index":9}"#).0, 409);
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+        // The e-stop: refused until the reset, and nothing restarts by itself.
+        assert_eq!(t.request("POST", "/api/showlist/play", r#"{"index":1}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/estop?source=keyboard", "").0, 200);
+        assert_eq!(js(&t.request("GET", "/api/showlist", "").1)["state"]["transport"], "stopped");
+        assert_eq!(t.request("POST", "/api/showlist/play", "{}").0, 409);
+        assert_eq!(t.request("POST", "/api/estop/reset", "").0, 200);
+        assert_eq!(js(&t.request("GET", "/api/showlist", "").1)["state"]["transport"], "stopped");
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap());
+        // Undo takes the items back (empty); the loop is a transport switch.
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        let undone = js(&t.request("GET", "/api/showlist", "").1);
+        assert!(undone["items"].as_array().unwrap().is_empty(), "{undone}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

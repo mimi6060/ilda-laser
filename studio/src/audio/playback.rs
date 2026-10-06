@@ -424,8 +424,9 @@ impl<O: AudioOut> Worker<O> {
                 Some(file) => {
                     self.hub.set_status(|s| *s = SongStatus { state: SongState::Loading, file: Some(file.clone()), ..Default::default() });
                     // Decoding takes a moment (≈1 s for a long MP3): only this thread waits.
-                    match self.media.decode(&file) {
-                        Ok(d) => self.loaded = Some((file, Some(Arc::new(d)))),
+                    // The show player (T-444) may have decoded it ahead.
+                    match self.media.decode_shared(&file) {
+                        Ok(d) => self.loaded = Some((file, Some(d))),
                         Err(e) => {
                             // No file name: the application log keeps no audio file names (T-403).
                             log::warn!("morceau : chargement impossible ({})", e.root_cause());
