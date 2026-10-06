@@ -1776,6 +1776,28 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // The custom desk (T-427): GET the tabs; POST replaces them all (an
+        // edit: in the history, locked in show mode; 400 on an overlap, a
+        // bound outside the grid, or a binding to arming or safety).
+        // Playing goes through `/api/control` and `/api/cue`.
+        (Method::Get, "/api/desks") => json_response(desks_view(&shared.lock().unwrap())),
+        (Method::Post, "/api/desks") => match body::<DesksRequest>(request) {
+            Ok(req) => {
+                let tabs = match req {
+                    DesksRequest::Wrapped { tabs } | DesksRequest::Bare(tabs) => tabs,
+                };
+                let s = &mut *shared.lock().unwrap();
+                match crate::desk::validate(&tabs, &s.controls) {
+                    Ok(()) => {
+                        s.desks.set_tabs(tabs);
+                        s.desks.save();
+                        json_response(desks_view(s))
+                    }
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/fx") => {
             let s = shared.lock().unwrap();
             let targets: Vec<_> = s
@@ -3406,6 +3428,18 @@ struct CommandRequest {
     line: String,
 }
 
+/// `POST /api/desks`: `{"tabs": [...]}` or the bare list.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DesksRequest {
+    Wrapped { tabs: Vec<crate::desk::DeskTab> },
+    Bare(Vec<crate::desk::DeskTab>),
+}
+
+fn desks_view(s: &Shared) -> serde_json::Value {
+    json!({ "tabs": s.desks.tabs, "rev": s.desks.rev, "max_tabs": crate::desk::MAX_TABS, "max_items": crate::desk::MAX_ITEMS })
+}
+
 #[derive(Deserialize)]
 struct ControlRequest {
     id: String,
@@ -4163,6 +4197,9 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     // T-418: the executor page shown, its faders, and the pages with
     // something active.
     v["executors"] = crate::executors::view(s);
+    // T-427: the desk's layout revision, its bound controls' values and
+    // its missing bindings.
+    v["desk"] = crate::desk::view(s);
     // T-146: what plays on the FX grid, each line's level now.
     v["fx"] = s.fx.view();
     // T-274: what is prepared (no points: those are `/api/preview-frame`).
@@ -4899,6 +4936,40 @@ mod tests {
         t.shared.lock().unwrap().show_mode.on = false;
         assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
         assert_eq!(t.shared.lock().unwrap().executors.bank, crate::executors::ExecutorBank::default());
+    }
+
+    /// T-427: the desk over the API: saved (recorded in the history,
+    /// refused in show mode), arming and safety bindings refused, an XY
+    /// pad's controls played through `/api/control` (allowed in show mode)
+    /// and read back in `/api/frame`.
+    #[test]
+    fn the_desk_over_the_api() {
+        let t = TestServer::start(false);
+        assert_eq!(js(&t.request("GET", "/api/desks", "").1)["tabs"], json!([]));
+        let xy = json!({ "id": 1, "kind": "xy_pad", "x": 0, "y": 0, "w": 4, "h": 4,
+            "binding": { "type": "control", "id": "master.pos_x" }, "binding_y": { "type": "control", "id": "master.pos_y" } });
+        let stop = json!({ "id": 2, "kind": "button", "x": 4, "y": 0, "w": 2, "h": 1, "binding": { "type": "control", "id": "safety.estop" } });
+        let tabs = json!([{ "name": "Intro", "items": [xy, stop] }]);
+        let (code, body) = t.request("POST", "/api/desks", &json!({ "tabs": tabs }).to_string());
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body)["tabs"][0]["items"][0]["binding_y"]["id"], "master.pos_y");
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Onglet de pupitre « Intro » ajouté");
+        for id in ["transport.arm", "safety.hold"] {
+            let bad = json!([{ "items": [{ "id": 1, "kind": "button", "binding": { "type": "control", "id": id } }] }]);
+            assert_eq!(t.request("POST", "/api/desks", &bad.to_string()).0, 400, "{id}");
+        }
+        let overlap = json!([{ "items": [{ "id": 1, "w": 2 }, { "id": 2, "x": 1 }] }]);
+        assert_eq!(t.request("POST", "/api/desks", &overlap.to_string()).0, 400);
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/desks", &tabs.to_string()).0, 423);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"master.pos_x","norm":0.75}"#).0, 200);
+        let f = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(f["desk"]["values"]["master.pos_x"], 0.5);
+        assert_eq!(f["live"]["pos_x"], 0.5);
+        assert_eq!(f["armed"], false);
+        t.shared.lock().unwrap().show_mode.on = false;
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert!(t.shared.lock().unwrap().desks.tabs.is_empty());
     }
 
     /// T-285: edits are recorded, cue presses are not; undo restores a

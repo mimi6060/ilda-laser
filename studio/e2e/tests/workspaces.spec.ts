@@ -6,7 +6,7 @@ import { test, expect, useStudio, openUi, openWorkspace, reveal, focusPage, type
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
-const WORKSPACES: Workspace[] = ['live', 'timeline', 'creation', 'settings'];
+const WORKSPACES: Workspace[] = ['live', 'timeline', 'creation', 'settings', 'desk'];
 const activeCue = async () => (await studio.controlValues()).active_cue;
 
 /** Where each existing section lives (T-295 « Répartition »). */
@@ -15,6 +15,7 @@ const SECTIONS: Record<Workspace, string[]> = {
     '#colorModes', '#lfoAdd', '#lfoList', '#micBtn', '#aOn', '#sceneList', '#plStart'],
   timeline: ['#timeline', '#tlShow', '#tlPlay', '#tlBar'],
   creation: ['[data-kind="shape"]', '[data-kind="generator"]', '#shapes', '#text', '#gen', '#genPanel', '#evoPanel', '#color', '#scale', '#bright'],
+  desk: ['#deskRegion', '#deskGrid', '#deskMode', '#deskFull'],
   settings: ['#safetyPanel', '#safetyPanel summary', 'details:has(#cOx) > summary', '#midiPanel summary',
     '#sfHz', '#holdToRun', '#cOx', '#midiPanel', '#midiLearnMode', '#midiAllowArm'],
 };
@@ -52,10 +53,10 @@ test.beforeEach(async ({ page }) => {
   await openUi(page, studio);
 });
 
-test('four workspace tabs, LIVE first, each section in its workspace', async ({ page }) => {
+test('five workspace tabs, LIVE first, each section in its workspace', async ({ page }) => {
   const tabs = page.locator('#wsTabs [data-ws-tab]');
-  await expect(tabs).toHaveCount(4);
-  for (const [i, label] of ['LIVE', 'TIMELINE', 'CRÉATION', 'RÉGLAGES'].entries()) await expect(tabs.nth(i)).toContainText(label);
+  await expect(tabs).toHaveCount(5);
+  for (const [i, label] of ['LIVE', 'TIMELINE', 'CRÉATION', 'RÉGLAGES', 'PUPITRE'].entries()) await expect(tabs.nth(i)).toContainText(label);
   await expect(page.locator('#wsTabs [data-ws-tab="live"]')).toHaveClass(/active/);
   await expect(page.locator('#wsTabs [data-ws-tab="live"]')).toHaveAttribute('aria-selected', 'true');
 
@@ -148,7 +149,7 @@ test('Escape stops even while typing in a CRÉATION text field', async ({ page }
 test('cue letters play cues in LIVE only', async ({ page }) => {
   const catalog = await studio.presets();
   const cues = catalog.presets.filter(p => p.category === catalog.categories[0]);
-  for (const ws of ['timeline', 'creation', 'settings'] as Workspace[]) {
+  for (const ws of ['timeline', 'creation', 'settings', 'desk'] as Workspace[]) {
     await openWorkspace(page, ws);
     await focusPage(page);
     await page.keyboard.press('KeyW'); // AZERTY Z: 2nd cue key (T-272: by position)
@@ -288,7 +289,7 @@ test('T-270 layout: at 1440×900 the preview and two rows of cues fit on screen'
   expect(await inView(`#cues .cue >> nth=${secondRow}`)).toBe(true);
   expect(await page.evaluate(() => document.scrollingElement!.scrollTop)).toBe(0);
   await shoot(page, 'live');
-  for (const ws of ['timeline', 'creation', 'settings'] as Workspace[]) {
+  for (const ws of ['timeline', 'creation', 'settings', 'desk'] as Workspace[]) {
     await openWorkspace(page, ws);
     await expect.poll(() => inView('#preview')).toBe(true);
     await shoot(page, ws);

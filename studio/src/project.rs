@@ -140,6 +140,9 @@ pub struct Project {
     /// Speed groups A..D and the *Cadence* (T-419). Missing in projects
     /// saved before T-419: every group at ×1, *Cadence* 100 %.
     pub speed: crate::tempo::SpeedGroups,
+    /// The custom desk's tabs (`desks.json`, T-427). Missing in projects
+    /// saved before T-427: they open with an empty desk.
+    pub desks: Vec<crate::desk::DeskTab>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -170,6 +173,7 @@ impl Default for Project {
             group_masters: Vec::new(),
             executors: ExecutorBank::default(),
             speed: Default::default(),
+            desks: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -263,7 +267,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 13] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json"];
+const WORKING_FILES: [&str; 14] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -526,6 +530,7 @@ fn check(p: &mut Project) -> Result<()> {
     p.grid.sanitize();
     p.pages.sanitize();
     p.executors.sanitize();
+    crate::desk::sanitize(&mut p.desks);
 
     let mut shows = HashSet::new();
     for show in &mut p.timelines {
@@ -610,6 +615,7 @@ pub fn snapshot(s: &Shared) -> Project {
         group_masters: s.projection.masters(),
         executors: s.executors.bank.clone(),
         speed: s.speed.clone(),
+        desks: s.desks.tabs.clone(),
         ..Project::default()
     }
 }
@@ -648,6 +654,7 @@ fn apply(s: &mut Shared, p: &Project) {
     s.user_cues.replace_in_memory(p.user_cues.clone());
     s.cue_lists.replace_in_memory(p.cue_lists.clone());
     s.executors.set_bank(p.executors.clone());
+    s.desks.set_tabs(p.desks.clone());
     // The loaded list follows its new version, or goes (another project).
     match s.cue_list.list.as_ref().and_then(|l| s.cue_lists.get(&l.name)).cloned() {
         Some(l) => {
@@ -680,6 +687,7 @@ struct WorkingPaths {
     user_cues: Option<(PathBuf, Vec<u8>)>,
     cue_lists: Option<PathBuf>,
     executors: Option<PathBuf>,
+    desks: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
 }
@@ -699,6 +707,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.file_bytes().unwrap_or_default())),
         cue_lists: s.cue_lists.path().map(Path::to_path_buf),
         executors: s.executors.path().map(Path::to_path_buf),
+        desks: s.desks.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
     }
@@ -729,6 +738,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(path) = &w.executors {
         put(path, serde_json::to_vec_pretty(&p.executors));
+    }
+    if let Some(path) = &w.desks {
+        put(path, serde_json::to_vec_pretty(&p.desks));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -1488,6 +1500,40 @@ mod tests {
         apply(&mut s, &old);
         assert_eq!(s.executors.bank.pages.len(), 1);
         assert_eq!(s.executors.bank.pages[0].handles[2], Executor::default());
+        assert!(!s.gate.is_armed());
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-427: the desk travels with the project; an older project (no
+    /// `desks`) opens with an empty desk; a forbidden binding in a file
+    /// is dropped on open.
+    #[test]
+    fn desks_are_saved_in_the_project_and_old_projects_open_with_an_empty_desk() {
+        use crate::desk::{Binding, DeskItem, DeskKind, DeskTab};
+        let dir = temp_dir("desks");
+        let shared = studio(&dir);
+        let xy = DeskItem { id: 1, kind: DeskKind::XyPad, w: 4, h: 4, binding: Binding::Control { id: "master.pos_x".into() }, binding_y: Binding::Control { id: "master.pos_y".into() }, spring: true, ..Default::default() };
+        let tabs = vec![DeskTab { name: "Intro".into(), items: vec![xy], ..Default::default() }];
+        shared.lock().unwrap().desks.set_tabs(tabs.clone());
+        assert!(modified(&shared), "a desk is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Pupitre" })).unwrap();
+        let text = std::fs::read_to_string(dir.join("projects/Pupitre.lsproj")).unwrap();
+        assert_eq!(parse(&text).unwrap().desks, tabs);
+        shared.lock().unwrap().desks.set_tabs(Vec::new());
+        post(&shared, &dir, "open", json!({ "path": "Pupitre.lsproj" })).unwrap();
+        assert_eq!(shared.lock().unwrap().desks.tabs, tabs);
+        assert!(!modified(&shared));
+        // A hand-edited file binding the arming: dropped.
+        let mut v: Value = serde_json::from_str(&text).unwrap();
+        v["desks"][0]["items"][0] = json!({ "id": 1, "kind": "button", "binding": { "type": "control", "id": "transport.arm" } });
+        let p = parse(&v.to_string()).unwrap();
+        assert_eq!(p.desks[0].items[0].binding, Binding::None);
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert!(old.desks.is_empty());
+        let mut s = shared.lock().unwrap();
+        apply(&mut s, &old);
+        assert!(s.desks.tabs.is_empty());
         assert!(!s.gate.is_armed());
         drop(s);
         let _ = std::fs::remove_dir_all(dir);

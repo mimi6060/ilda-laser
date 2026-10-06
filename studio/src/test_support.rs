@@ -137,6 +137,7 @@ pub fn shared() -> Shared {
         history: Default::default(),
         prepared: Default::default(),
         executors: crate::executors::Executors::in_memory(),
+        desks: crate::desk::Desks::in_memory(),
     }
 }
 

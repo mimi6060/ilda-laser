@@ -71,11 +71,14 @@ pub enum Section {
     /// The executor bank's assignments (T-418). Not the faders' positions
     /// nor what is held: those are live.
     Executors,
+    /// The custom desk's layout (T-427). Not what its faders hold: those
+    /// are the controls' values.
+    Desks,
 }
 
 use Section::*;
 
-const ALL: [Section; 14] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors];
+const ALL: [Section; 15] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -94,6 +97,7 @@ impl Section {
             Projection => "projection",
             Fx => "fx",
             Executors => "executors",
+            Desks => "desks",
         }
     }
 
@@ -121,6 +125,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/projection" => &[Projection],
         "/api/fx" => &[Fx],
         "/api/executors" => &[Executors],
+        "/api/desks" => &[Desks],
         _ => return None,
     })
 }
@@ -142,6 +147,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         Projection => json!(s.projection.get()),
         Fx => json!(s.fx.grid().cells()),
         Executors => json!(s.executors.bank),
+        Desks => json!(s.desks.tabs),
     }
 }
 
@@ -223,6 +229,10 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         Executors => {
             s.executors.set_bank(from(v)?);
             s.executors.save();
+        }
+        Desks => {
+            s.desks.set_tabs(from(v)?);
+            s.desks.save();
         }
     }
     Ok(())
@@ -502,6 +512,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Projection) => "Zones de projection modifiées".into(),
         (_, Fx) => fx_label(old, new),
         (_, Executors) => exec_label(old, new),
+        (_, Desks) => desk_label(old, new),
     }
 }
 
@@ -553,6 +564,32 @@ fn exec_label(old: &Value, new: &Value) -> String {
         }
     }
     "Exécuteurs modifiés".into()
+}
+
+/// « Onglet de pupitre « Intro » ajouté », « Pupitre modifié »…
+fn desk_label(old: &Value, new: &Value) -> String {
+    let tabs = |v: &Value| v.as_array().cloned().unwrap_or_default();
+    let (a, b) = (tabs(old), tabs(new));
+    let name = |t: &Value| t.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+    if b.len() > a.len() {
+        return format!("Onglet de pupitre « {} » ajouté", b.last().map(name).unwrap_or_default());
+    }
+    if b.len() < a.len() {
+        return "Onglet de pupitre supprimé".into();
+    }
+    for (t, u) in a.iter().zip(&b) {
+        if name(t) != name(u) {
+            return format!("Onglet de pupitre « {} » renommé", name(u));
+        }
+        let n = |v: &Value| v.get("items").and_then(Value::as_array).map_or(0, Vec::len);
+        match n(u).cmp(&n(t)) {
+            std::cmp::Ordering::Greater => return format!("Composant ajouté au pupitre « {} »", name(u)),
+            std::cmp::Ordering::Less => return format!("Composant supprimé du pupitre « {} »", name(u)),
+            _ if t != u => return format!("Pupitre « {} » modifié", name(u)),
+            _ => {}
+        }
+    }
+    "Pupitre modifié".into()
 }
 
 /// « Page 2 renommée », « Page « Intro » ajoutée »…

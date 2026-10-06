@@ -8,7 +8,7 @@ import type { Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
 const studio = useStudio();
-const WORKSPACES: Workspace[] = ['live', 'timeline', 'creation', 'settings'];
+const WORKSPACES: Workspace[] = ['live', 'timeline', 'creation', 'settings', 'desk'];
 const armed = async () => (await studio.state()).armed as boolean;
 /** The fake output's last arm/light event: what the « laser » last did. */
 const lastOutputEvent = () => readFileSync(studio.outputLog, 'utf8').trim().split('\n')

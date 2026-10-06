@@ -278,7 +278,7 @@ export function useStudio(opts: StudioOptions = {}): Studio {
   return studio;
 }
 
-export type Workspace = 'live' | 'timeline' | 'creation' | 'settings';
+export type Workspace = 'live' | 'timeline' | 'creation' | 'settings' | 'desk';
 
 /** Click a workspace tab (T-295: LIVE, TIMELINE, CRÉATION, RÉGLAGES). */
 export async function openWorkspace(page: Page, ws: Workspace) {
