@@ -62,6 +62,9 @@ pub fn allowed(path: &str) -> bool {
         "/api/arm",
         "/api/heartbeat",
         "/api/lock",
+        // Locking the safety settings (T-261) only tightens; the handler
+        // refuses setting or removing the code in show mode.
+        "/api/safety/lock",
         // The tablet remote (T-428): cutting it or a remote is always
         // allowed; the handler refuses opening it in show mode.
         "/api/remote",

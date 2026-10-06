@@ -88,6 +88,7 @@ mod safety;
 #[cfg(test)]
 mod safety_invariants;
 mod safety_log;
+mod safetylock;
 mod showlist;
 mod showmode;
 mod sites;
@@ -528,6 +529,10 @@ pub struct Shared {
     /// Show mode (showmode.rs, T-283): editing routes refused with 423.
     /// Kept in `prefs.json`; never arms anything.
     pub show_mode: showmode::ShowMode,
+    /// Safety lock (safetylock.rs, T-261): Safety-class routes refuse
+    /// loosening edits with 423 while it is on. The code's hash is in
+    /// `safety-lock.json`.
+    pub safety_lock: safetylock::SafetyLock,
     /// Damaged data files moved to `quarantine/` this run (datafile.rs,
     /// T-402), shown until acknowledged. In memory only.
     pub data_warnings: Vec<datafile::DataWarning>,
@@ -896,6 +901,10 @@ impl Shared {
     /// arms nor disarms. Returns false when refused.
     pub fn set_sky_off(&mut self, on: bool, src: interlock::ArmSource) -> bool {
         if !on && !profiles::operator_source(src) {
+            return false;
+        }
+        // Restoring the sky loosens: refused under the safety lock (T-261).
+        if !on && self.sky_off && safetylock::check(self, std::time::Instant::now()) {
             return false;
         }
         if self.sky_off != on {
@@ -1528,6 +1537,7 @@ fn startup_state(cli: &Cli) -> Shared {
         keep_awake: keep_awake::KeepAwakeState::load(&cli.data_dir),
         onboarding: onboarding::OnboardingStore::load(&cli.data_dir),
         show_mode: showmode::ShowMode::load(&cli.data_dir),
+        safety_lock: safetylock::SafetyLock::load(&cli.data_dir),
         data_warnings: Vec::new(),
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
         profiles: profiles::ProfileStore::load(&cli.data_dir),
@@ -1573,6 +1583,7 @@ fn startup_state(cli: &Cli) -> Shared {
     // Site profiles (T-289): the settings in force, with calibration.json,
     // become « Par défaut » on the first start. Never arms.
     sites::startup(&mut state, &cli.data_dir);
+    safetylock::startup(&mut state);
     // Every show is read once, so a damaged one is set aside now (T-402).
     state.shows.list();
     // Damaged files found while loading: the banner, and `data_ack` closed

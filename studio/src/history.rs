@@ -406,6 +406,11 @@ pub fn step(shared: &Mutex<Shared>, redo: bool, to: Option<u64>) -> Result<Value
         let (expected, target) = if redo { (&entry.before, &entry.after) } else { (&entry.after, &entry.before) };
         // Still what the entry left? Otherwise restoring would lose a
         // change made outside the history.
+        // The venue and the projection zones are safety settings: not
+        // undone nor redone under the safety lock (T-261).
+        if target.keys().any(|k| matches!(Section::from_key(k), Some(Venue | Projection))) && crate::safetylock::check(s, std::time::Instant::now()) {
+            return Err((423, crate::safetylock::LOCKED_FR.into()));
+        }
         let moved = expected.iter().any(|(key, v)| Section::from_key(key).is_none_or(|sec| capture(s, sec) != *v));
         if moved {
             s.history.clear();

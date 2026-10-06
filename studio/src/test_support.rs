@@ -119,6 +119,7 @@ pub fn shared() -> Shared {
         keep_awake: crate::keep_awake::KeepAwakeState::in_memory(),
         onboarding: crate::onboarding::OnboardingStore::in_memory(),
         show_mode: crate::showmode::ShowMode::in_memory(),
+        safety_lock: crate::safetylock::SafetyLock::in_memory(),
         data_warnings: Vec::new(),
         // Pure preview: the checklist never blocks unit tests.
         checklist: crate::checklist::Checklist::in_memory(false),
