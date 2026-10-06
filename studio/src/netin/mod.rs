@@ -1638,28 +1638,32 @@ mod tests {
         let mut s = studio();
         let (safety, calibration) = (s.safety.get(), s.calibration);
         let ids: Vec<String> = s.controls.list().iter().map(|d| d.id.clone()).filter(|id| !external::ALWAYS.contains(&id.as_str())).collect();
-        let mut cfg = s.netin.hub.file();
-        cfg.dmx.mappings = ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| DmxMapping { universe: 1 + (i / 512) as u16, channel: 1 + (i % 512) as u16, control: id.clone(), pickup: false, ..DmxMapping::default() })
-            .collect();
-        s.netin.hub.store(cfg).unwrap();
         let t0 = Instant::now();
         let mut rng = crate::safety_invariants::Rng::new(408);
-        for step in 0..60 {
-            let data: Vec<u8> = (0..512).map(|_| (rng.next() & 0xFF) as u8).collect();
-            let proto = if step % 2 == 0 { Proto::ArtNet } else { Proto::Sacn };
-            for u in [1, 2] {
-                universe(&mut s, proto, u, &data, t0);
+        // A patch holds at most `MAX_MAPPINGS`: the registry (the executor
+        // bank, T-418, made it longer) is patched a share at a time.
+        for share in ids.chunks(crate::netin::patch::MAX_MAPPINGS) {
+            let mut cfg = s.netin.hub.file();
+            cfg.dmx.mappings = share
+                .iter()
+                .enumerate()
+                .map(|(i, id)| DmxMapping { universe: 1 + (i / 256) as u16, channel: 1 + (i % 256) as u16 * 2, control: id.clone(), pickup: false, ..DmxMapping::default() })
+                .collect();
+            s.netin.hub.store(cfg).unwrap();
+            for step in 0..60 {
+                let data: Vec<u8> = (0..512).map(|_| (rng.next() & 0xFF) as u8).collect();
+                let proto = if step % 2 == 0 { Proto::ArtNet } else { Proto::Sacn };
+                for u in [1, 2] {
+                    universe(&mut s, proto, u, &data, t0);
+                }
+                assert!(!s.gate.is_armed(), "step {step}");
+                assert!(!s.presence.status().midi_hold, "no hold-to-run from DMX");
             }
-            assert!(!s.gate.is_armed(), "step {step}");
-            assert!(!s.presence.status().midi_hold, "no hold-to-run from DMX");
-        }
-        for v in [0u8, 127, 128, 255] {
-            universe(&mut s, Proto::Sacn, 1, &[v; 512], t0);
-            universe(&mut s, Proto::Sacn, 2, &[v; 512], t0);
-            assert!(!s.gate.is_armed());
+            for v in [0u8, 127, 128, 255] {
+                universe(&mut s, Proto::Sacn, 1, &[v; 512], t0);
+                universe(&mut s, Proto::Sacn, 2, &[v; 512], t0);
+                assert!(!s.gate.is_armed());
+            }
         }
         assert_eq!(s.safety.get(), safety);
         assert_eq!(s.calibration, calibration);

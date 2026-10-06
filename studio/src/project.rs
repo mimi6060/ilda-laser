@@ -27,6 +27,7 @@
 use crate::audio::routes::AudioRouting;
 use crate::cuelist::CueList;
 use crate::cues::CueDeck;
+use crate::executors::ExecutorBank;
 use crate::figures::Figure;
 use crate::grid::CueGrid;
 use crate::layers::Mixer;
@@ -133,6 +134,9 @@ pub struct Project {
     /// projection.json). Missing in projects saved before T-420: every
     /// group opens at 100 %.
     pub group_masters: Vec<f32>,
+    /// The executor bank's assignments (`executors.json`, T-418). Missing
+    /// in projects saved before T-418: they open with one empty page.
+    pub executors: ExecutorBank,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -161,6 +165,7 @@ impl Default for Project {
             cue_lists: Vec::new(),
             scan_presets: Vec::new(),
             group_masters: Vec::new(),
+            executors: ExecutorBank::default(),
             extra: Map::new(),
         }
     }
@@ -254,7 +259,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 12] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json"];
+const WORKING_FILES: [&str; 13] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -516,6 +521,7 @@ fn check(p: &mut Project) -> Result<()> {
 
     p.grid.sanitize();
     p.pages.sanitize();
+    p.executors.sanitize();
 
     let mut shows = HashSet::new();
     for show in &mut p.timelines {
@@ -598,6 +604,7 @@ pub fn snapshot(s: &Shared) -> Project {
         cue_lists: s.cue_lists.list().to_vec(),
         scan_presets: s.scan_presets.user().to_vec(),
         group_masters: s.projection.masters(),
+        executors: s.executors.bank.clone(),
         ..Project::default()
     }
 }
@@ -631,6 +638,7 @@ fn apply(s: &mut Shared, p: &Project) {
     s.figures.replace_in_memory(p.figures.clone());
     s.user_cues.replace_in_memory(p.user_cues.clone());
     s.cue_lists.replace_in_memory(p.cue_lists.clone());
+    s.executors.set_bank(p.executors.clone());
     // The loaded list follows its new version, or goes (another project).
     match s.cue_list.list.as_ref().and_then(|l| s.cue_lists.get(&l.name)).cloned() {
         Some(l) => {
@@ -662,6 +670,7 @@ struct WorkingPaths {
     /// `user_cues.json` and its content (with the id counter) as opened.
     user_cues: Option<(PathBuf, Vec<u8>)>,
     cue_lists: Option<PathBuf>,
+    executors: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
 }
@@ -680,6 +689,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         figures: s.figures.dir().map(Path::to_path_buf),
         user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.file_bytes().unwrap_or_default())),
         cue_lists: s.cue_lists.path().map(Path::to_path_buf),
+        executors: s.executors.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
     }
@@ -707,6 +717,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(path) = &w.cue_lists {
         put(path, serde_json::to_vec_pretty(&p.cue_lists));
+    }
+    if let Some(path) = &w.executors {
+        put(path, serde_json::to_vec_pretty(&p.executors));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -1396,6 +1409,37 @@ mod tests {
         let mut s = shared.lock().unwrap();
         apply(&mut s, &old);
         assert_eq!(s.projection.masters(), [1.0, 1.0]);
+        assert!(!s.gate.is_armed());
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-418: the executor bank travels with the project; an older project
+    /// (no `executors`) opens with one empty page.
+    #[test]
+    fn executors_are_saved_in_the_project_and_old_projects_open_with_one_empty_page() {
+        use crate::executors::{ButtonFn, ExecTarget, Executor, ExecutorBank, FaderFn};
+        let dir = temp_dir("executors");
+        let shared = studio(&dir);
+        let cue = shared.lock().unwrap().presets[0].id.clone();
+        let mut bank = ExecutorBank::default();
+        bank.pages[0].name = "Beams".into();
+        bank.pages[0].handles[2] = Executor { label: "Montée".into(), target: ExecTarget::Cue { id: cue.clone() }, fader: FaderFn::FadeIn, buttons: [ButtonFn::Flash, ButtonFn::BlackHeld] };
+        shared.lock().unwrap().executors.set_bank(bank.clone());
+        assert!(modified(&shared), "an assignment is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Exécuteurs" })).unwrap();
+        let saved = parse(&std::fs::read_to_string(dir.join("projects/Exécuteurs.lsproj")).unwrap()).unwrap();
+        assert_eq!(saved.executors, bank);
+        shared.lock().unwrap().executors.set_bank(ExecutorBank::default());
+        post(&shared, &dir, "open", json!({ "path": "Exécuteurs.lsproj" })).unwrap();
+        assert_eq!(shared.lock().unwrap().executors.bank, bank);
+        assert!(!modified(&shared));
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.executors, ExecutorBank::default());
+        let mut s = shared.lock().unwrap();
+        apply(&mut s, &old);
+        assert_eq!(s.executors.bank.pages.len(), 1);
+        assert_eq!(s.executors.bank.pages[0].handles[2], Executor::default());
         assert!(!s.gate.is_armed());
         drop(s);
         let _ = std::fs::remove_dir_all(dir);
