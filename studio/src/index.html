@@ -2056,6 +2056,7 @@
         <label class="check"><input type="checkbox" id="r3sfAudience"> Zone public</label>
         <label class="check"><input type="checkbox" id="r3sfHorizon"> Horizon</label>
         <label class="check"><input type="checkbox" id="r3sfZones"> Zones de sécurité</label>
+        <label class="check" title="Mode extérieur : ce que les angles déclarés et « Ciel coupé » éteignent, depuis chaque projecteur selon son montage (en bleu). Affichage seulement : la coupure est faite par le studio"><input type="checkbox" id="r3sfOutdoor"> Coupure extérieure</label>
       </div>
     </div>
     <div class="stats">
@@ -3409,7 +3410,7 @@
           <button id="holdKeyPick" style="flex:0;white-space:nowrap">Changer…</button></div>
         <div class="hint">Mode maintien : le laser n'émet que tant que la touche est maintenue (une pédale USB qui envoie une touche fonctionne aussi ; pad MIDI : contrôle safety.hold). Relâcher = sortie noire ; relâché plus de 10 s = désarmé.</div>
       </details>
-      <details id="outdoorPanel" data-search="Mode extérieur ciel coupé DGTA secteurs verticale">
+      <details id="outdoorPanel" data-search="Mode extérieur ciel coupé DGTA secteurs verticale montage projecteurs orientation">
         <summary>Mode extérieur</summary>
         <div class="shownet-help" id="odBanner"><b>Aide logicielle seulement.</b> Projeter un laser dans l'espace aérien demande toujours une autorisation (en Belgique : la DGTA). Le logiciel coupe ce qui sort des angles déclarés, mais l'autorisation, les observateurs du ciel et l'arrêt matériel (interlock, arrêt d'urgence, clé) restent votre responsabilité. Il ne garantit aucune conformité aéronautique.</div>
         <label class="check"><input type="checkbox" id="odEnabled"> Show en extérieur</label>
@@ -3430,6 +3431,9 @@
           <div><label for="odHeight">Hauteur au-dessus du sol (m)</label><input type="number" id="odHeight" min="0" max="10000" step="0.1"></div>
         </div>
         <div class="hint">Un point de sortie (x, y) vise l'azimut + x × angle/2 et l'élévation inclinaison + y × angle/2 (approximation : prévoyez une marge dans les coins). Les autres projecteurs du lieu sans montage déclaré sont entièrement éteints en mode extérieur et quand le ciel est coupé.</div>
+        <div class="sf-sub" id="odMountsTitle">Montage des autres projecteurs</div>
+        <div id="odMounts" role="group" aria-labelledby="odMountsTitle"></div>
+        <div class="hint">Chaque projecteur du lieu (RÉGLAGES › Lieu) a son propre montage : ses coupures suivent son orientation. Déclarer, modifier un montage ou en changer l'orientation demande une confirmation ; retirer un montage éteint ce projecteur entièrement, tout de suite.</div>
         <div class="sf-sub">Secteurs déclarés</div>
         <div id="odSectors"></div>
         <div class="row"><button id="odSectorAdd">Ajouter un secteur</button><button id="odExport">Exporter les secteurs (CSV)</button></div>
@@ -5758,9 +5762,17 @@ function showRender3d() {
 }
 // Safety overlays (T-279): master switch, then each layer. Display only:
 // the counter is worked out here from the frames the page already has.
-const SF3D = ['safety', 'sfAudience', 'sfHorizon', 'sfZones'];
+const SF3D = ['safety', 'sfAudience', 'sfHorizon', 'sfZones', 'sfOutdoor'];
 function safetyTo3d() {
   if (view3d) view3d.setSafety(safety, !!(audienceMode && audienceMode.scanning));
+  outdoorTo3d();
+}
+/** The outdoor cut (T-477) per projector of the 3D view, in the venue's order. */
+function outdoorTo3d() {
+  if (!view3d) return;
+  const o = outdoorState, on = !!(o && (o.enabled || o.sky_off) && o.cut);
+  const ids = venue ? venue.projectors.map(p => p.id) : ['main'];
+  view3d.setOutdoor(on ? ids.map((id, i) => (i === 0 ? o.cut : (o.cuts || {})[id]) || null) : null);
 }
 function showAud3d() {
   const on = show3d && !!view3d && view3d.render.safety;
@@ -7456,7 +7468,7 @@ $('sfLoosenOk').addEventListener('click', () => { if (sfPending) saveSafety(sfPe
 // through POST /api/safety like the zones (tighter at once, looser after
 // « Confirmer l'assouplissement »). « Ciel coupé » is session state:
 // POST /api/safety/sky, the blue button next to ARRÊT and Alt+C.
-let outdoorState = null, odPending = null;
+let outdoorState = null, odPending = null, odBadMount = false;
 const odNum = (id, def) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : def; };
 function showOutdoorSettings(force = false) {
   if (!safety || !safety.outdoor) return;
@@ -7484,6 +7496,56 @@ function showOutdoorSettings(force = false) {
       <label for="odElMax${i}">à</label><input type="number" class="odelmax" id="odElMax${i}" min="-90" max="90" step="1" value="${s.el_max}">
       <button class="oddel" aria-label="Supprimer le secteur ${i + 1}">Supprimer</button>
     </div>`).join('');
+  odMountRows(o);
+}
+// The venue's other projectors' mountings (T-477): one row per projector
+// of the venue (and per mounting left from one that is gone). Without a
+// mounting a projector is fully cut; declaring, changing or moving one
+// goes through the same confirmation as the rest (409 → « Confirmer »).
+const OD_MOUNT_FIELDS = [['scan_angle_deg', 'Angle de balayage (°)', 1, 120, 1], ['tilt_deg', 'Inclinaison (°)', -90, 90, 1],
+  ['azimuth_deg', "Azimut de l'axe (°, 0 = nord)", 0, 360, 1], ['height_m', 'Hauteur au-dessus du sol (m)', 0, 10000, 0.1]];
+function odMountRows(o) {
+  const extras = venue ? venue.projectors.slice(1) : [], mounts = o.mountings || {};
+  const ids = [...extras.map(p => p.id), ...Object.keys(mounts).filter(id => !extras.some(p => p.id === id))];
+  const el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+  if (!ids.length) { $('odMounts').replaceChildren(el('div', { className: 'hint', textContent: 'Aucun autre projecteur dans le lieu (RÉGLAGES › Lieu).' })); return; }
+  $('odMounts').replaceChildren(...ids.map((id, n) => {
+    const p = extras.find(q => q.id === id), m = mounts[id], name = (p && p.name) || id;
+    const row = el('div', { className: 'odmount' });
+    row.dataset.pid = id;
+    row.append(el('div', { className: 'odmount-name', textContent: p ? name : `${name} (n'est plus dans le lieu)` }));
+    if (m) {
+      const grid = el('div', { className: 'row' });
+      for (const [k, label, min, max, step] of OD_MOUNT_FIELDS) {
+        const cell = el('div'), inputId = `odM${n}_${k}`;
+        cell.append(el('label', { htmlFor: inputId, textContent: label }),
+          el('input', { type: 'number', id: inputId, className: 'odm', min, max, step, value: m[k] }));
+        cell.lastChild.dataset.k = k;
+        grid.append(cell);
+      }
+      row.append(grid, el('button', { className: 'odmdel', textContent: 'Retirer le montage', ariaLabel: `Retirer le montage de ${name}` }));
+    } else {
+      row.append(el('div', { className: 'hint sf-warn', textContent: 'Montage non déclaré : entièrement éteint en mode extérieur et quand le ciel est coupé.' }),
+        el('button', { className: 'odmadd', textContent: 'Déclarer un montage', ariaLabel: `Déclarer le montage de ${name}` }));
+    }
+    return row;
+  }));
+}
+/** The other projectors' mountings from their rows; null when a value is not a number. */
+function odMountsFromControls() {
+  const out = {};
+  for (const row of $('odMounts').querySelectorAll('.odmount')) {
+    const inputs = row.querySelectorAll('input.odm');
+    if (!inputs.length) continue;
+    const m = {};
+    for (const i of inputs) {
+      const v = parseFloat(i.value);
+      if (!Number.isFinite(v)) return null;
+      m[i.dataset.k] = v;
+    }
+    out[row.dataset.pid] = m;
+  }
+  return out;
 }
 function odFromControls() {
   const next = structuredClone(safety), o = next.outdoor;
@@ -7495,6 +7557,10 @@ function odFromControls() {
     scan_angle_deg: odNum('odScan', o.mounting.scan_angle_deg), tilt_deg: odNum('odTilt', o.mounting.tilt_deg),
     azimuth_deg: odNum('odAz', o.mounting.azimuth_deg), height_m: odNum('odHeight', o.mounting.height_m),
   };
+  // A mounting value that is not a number is refused, never guessed (T-477).
+  const mounts = odMountsFromControls();
+  odBadMount = !mounts;
+  if (mounts) o.mountings = mounts;
   o.max_from_vertical_deg = odNum('odVert', o.max_from_vertical_deg);
   o.vertical_limit_waived = $('odWaive').checked;
   o.waiver_ref = $('odWaiveRef').value.trim();
@@ -7524,7 +7590,22 @@ async function odSave(next, confirm = false) {
   }
 }
 $('outdoorPanel').addEventListener('change', e => {
-  if (e.target.matches('input')) odSave(odFromControls());
+  if (!e.target.matches('input')) return;
+  const next = odFromControls();
+  if (odBadMount) { $('odError').textContent = 'Montage : chaque valeur doit être un nombre. Rien n\'a été changé.'; return; }
+  odSave(next);
+});
+$('odMounts').addEventListener('click', e => {
+  const row = e.target.closest('.odmount');
+  if (!row || !e.target.matches('.odmadd, .odmdel')) return;
+  const next = odFromControls();
+  if (odBadMount) { $('odError').textContent = 'Montage : chaque valeur doit être un nombre. Rien n\'a été changé.'; return; }
+  const id = row.dataset.pid;
+  // Declared from the main projector's mounting: the operator then sets
+  // this one's own orientation; both steps need the confirmation.
+  if (e.target.matches('.odmadd')) next.outdoor.mountings[id] = { ...next.outdoor.mounting };
+  else delete next.outdoor.mountings[id];
+  odSave(next);
 });
 $('outdoorPanel').addEventListener('toggle', () => { if ($('outdoorPanel').open) showOutdoorSettings(true); });
 $('odSectors').addEventListener('click', e => {
@@ -7559,6 +7640,8 @@ function showOutdoor(o) {
   btn.setAttribute('aria-pressed', String(on));
   btn.title = on ? 'Ciel coupé : rien au-dessus de l\'horizon. Cliquer (ou Alt+C) pour rétablir le ciel.' : 'Ciel coupé (Alt+C) : éteint tout au-dessus de l\'horizon sans désarmer · safety.sky_off';
   if (o && was && JSON.stringify(o.cut) !== JSON.stringify(was.cut) && lastPoints && show2d) draw(lastPoints);
+  const key = o => o ? JSON.stringify([o.enabled, o.sky_off, o.cut, o.cuts]) : '';
+  if (key(o) !== key(was)) outdoorTo3d();
 }
 async function toggleSky(source) {
   const r = await api('POST', '/api/safety/sky', { toggle: true, source }, { quiet: true });
@@ -13931,7 +14014,7 @@ function applyVenue(j) {
   const pre = $('vnPreset');
   if (pre.options.length <= 1) for (const p of j.presets || []) pre.add(new Option(`${p.label_fr} (${p.depth_m} × ${p.width_m}${p.ceiling ? ' × ' + p.height_m : ''} m)`, p.id));
   if (vnSel >= venue.projectors.length) vnSel = 0;
-  showVenue(); vnTargets(); venueTo3d(); pollFrames3d();
+  showVenue(); vnTargets(); venueTo3d(); pollFrames3d(); showOutdoorSettings();
 }
 function vnProj() { return venue && venue.projectors[vnSel]; }
 function vnSet(id, v) { if (document.activeElement !== $(id)) $(id).value = v; }
@@ -14009,6 +14092,7 @@ function venueTo3d() {
     selected: venue.projectors.length > 1 && $('venuePanel').open ? vnSel : -1,
     audience: venue.audience,
   });
+  outdoorTo3d();
 }
 async function pollFrames3d() {
   clearTimeout(vnFramesTimer);

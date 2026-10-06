@@ -19,8 +19,11 @@
 //! ShowNET SD card, other software) without the studio. So it carries the
 //! frames *after* the output safety chain (T-355, `ilda_library::bake_chain`):
 //! calibration, the output's colour rendering, beam horizon, zones (Public
-//! zones blanked), strobe limiter, static beam guard (as if armed), power
-//! caps of the chosen output. The live capture takes the frame before that
+//! zones blanked), the outdoor cut of the output's projector (T-262: its
+//! mounting, the declared sectors, the vertical limit, « Ciel coupé »; read
+//! at the start and again at the end, both cuts kept, T-477), strobe
+//! limiter, static beam guard (as if armed), power caps of the chosen
+//! output. The live capture takes the frame before that
 //! chain (after the mixer, master stage and calibration) and the I/O thread
 //! runs the very same chain functions with their own state over the whole
 //! sequence, looped, so the engine's limiter and guard are never touched.
@@ -530,9 +533,15 @@ fn run(shared: &Mutex<Shared>, job: Job) {
     if cancelled() {
         return;
     }
+    // The outdoor cut as it is now too (T-477): « Ciel coupé » or tighter
+    // angles set during the recording stay in the file.
+    let mut chain = job.chain.clone();
+    if let Ok(later) = ExportSafety::of(&shared.lock().unwrap_or_else(|e| e.into_inner()), &chain.output) {
+        chain.tighten_outdoor(&later.safety.outdoor);
+    }
     let result = raw.and_then(|raw| {
         let frames = raw.len();
-        let (bytes, lit_before, lit_after, mut warnings) = bake(&raw, job.fps, &job.chain)?;
+        let (bytes, lit_before, lit_after, mut warnings) = bake(&raw, job.fps, &chain)?;
         drop(raw);
         if cancelled() {
             bail!("Enregistrement annulé");
@@ -890,5 +899,55 @@ mod tests {
             settings.audio.enabled = true;
         }
         assert!(uses_audio(&sh, &[]));
+    }
+
+    /// T-477: « Ciel coupé » turned on while a live recording runs. The
+    /// chain was copied at the start (sky open); the file still has the
+    /// sky cut, because the I/O thread reads the outdoor cut again before
+    /// baking and keeps both. The real `start` / `run` path.
+    #[test]
+    fn sky_cut_during_a_live_recording_is_in_the_file() {
+        let shared = Arc::new(Mutex::new(crate::test_support::shared()));
+        // Tilt 0: the horizon is y = 0.
+        let frame = vec![
+            Point::blanked(-0.5, 0.5),
+            Point::lit(-0.5, 0.5, 1.0, 1.0, 1.0),
+            Point::lit(0.5, 0.5, 1.0, 1.0, 1.0),
+            Point::blanked(0.5, 0.5),
+            Point::blanked(-0.5, -0.5),
+            Point::lit(-0.5, -0.5, 1.0, 1.0, 1.0),
+            Point::lit(0.5, -0.5, 1.0, 1.0, 1.0),
+            Point::blanked(0.5, -0.5),
+        ];
+        let req = RecordRequest { seconds: 0.4, fps: 25, name: "ciel-coupe-pendant".into(), ..Default::default() };
+        start(&shared, &req).unwrap();
+        let t0 = shared.lock().unwrap().now_s();
+        for k in 0..40 {
+            let mut s = shared.lock().unwrap();
+            if k == 6 {
+                assert!(s.set_sky_off(true, crate::interlock::ArmSource::Midi), "cutting is allowed from anywhere");
+            }
+            let t = t0 + k as f64 / 25.0 + 1e-3;
+            if s.recorder.due(t) {
+                s.recorder.offer(frame.clone(), t);
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let status = loop {
+            let st = shared.lock().unwrap().recorder.status();
+            if !matches!(st.state, RecordState::Recording | RecordState::Writing) || std::time::Instant::now() > deadline {
+                break st;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(status.state, RecordState::Done, "{status:?}");
+        let file = status.file.clone().expect("a file");
+        let dir = shared.lock().unwrap().ilda.dir().to_path_buf();
+        let back = ilda::read(&std::fs::read(dir.join(&file)).unwrap()).unwrap();
+        assert_eq!(back.len(), 10);
+        let lit: Vec<&Point> = back.iter().flat_map(|f| &f.points).filter(|p| p.is_lit()).collect();
+        assert!(lit.iter().any(|p| p.y < -0.4), "the ground show is in the file");
+        assert!(lit.iter().all(|p| p.y < 0.0), "nothing lit above the horizon in any image");
+        let _ = shared.lock().unwrap().ilda.remove(&file);
     }
 }

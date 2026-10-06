@@ -381,12 +381,26 @@ impl OutdoorSettings {
     /// operator's confirmation. Empty = only tighter or equal.
     pub fn loosenings(&self, new: &OutdoorSettings) -> Vec<String> {
         let mut out = Vec::new();
+        // A mounting added or changed moves the cut (or ends a projector's
+        // full cut); one removed only cuts more (a projector without a
+        // mounting is fully cut). « Ciel coupé » follows the mountings
+        // even with the mode off.
+        let others = |out: &mut Vec<String>| {
+            for (id, m) in &new.mountings {
+                match self.mountings.get(id) {
+                    None => out.push(format!("Montage du projecteur « {id} » déclaré : il n'est plus entièrement coupé")),
+                    Some(old) if old != m => out.push(format!("Montage du projecteur « {id} » modifié : ses coupures se déplacent")),
+                    _ => {}
+                }
+            }
+        };
         if !self.enabled {
             // Nothing outdoor is cut today (« Ciel coupé » aside, which
-            // only follows the mounting): turning it on only tightens.
+            // only follows the mountings): turning it on only tightens.
             if self.mounting != new.mounting {
                 out.push("Montage du projecteur modifié (« Ciel coupé » suit le montage)".into());
             }
+            others(&mut out);
             return out;
         }
         if !new.enabled {
@@ -396,9 +410,7 @@ impl OutdoorSettings {
         if self.mounting != new.mounting {
             out.push("Montage du projecteur modifié : les coupures se déplacent".into());
         }
-        if self.mountings != new.mountings {
-            out.push("Montage d'un autre projecteur ajouté, modifié ou retiré".into());
-        }
+        others(&mut out);
         for (i, s) in new.sectors.iter().enumerate() {
             if !self.sectors.iter().any(|o| sector_within(s, o)) {
                 out.push(format!("Secteur {} ajouté ou élargi", i + 1));
@@ -696,6 +708,25 @@ mod tests {
         ] {
             let l = o.loosenings(&new);
             assert!(l.iter().any(|m| m.contains(what)), "{what}: {l:?}");
+        }
+    }
+
+    /// T-477: another projector's mounting, mode on or off (« Ciel coupé »
+    /// follows it): declaring or changing one lets light out, removing
+    /// one only cuts more.
+    #[test]
+    fn another_projectors_mounting_needs_confirmation_unless_removed() {
+        let p2 = Mounting { scan_angle_deg: 30.0, tilt_deg: 10.0, azimuth_deg: 180.0, height_m: 4.0 };
+        for enabled in [true, false] {
+            let base = OutdoorSettings { enabled, ..outdoor(vec![sector(0.0, 90.0, -10.0, 60.0)]) };
+            let with = OutdoorSettings { mountings: [("p2".to_string(), p2)].into_iter().collect(), ..base.clone() };
+            let l = base.loosenings(&with);
+            assert!(l.iter().any(|m| m.contains("« p2 » déclaré")), "{enabled}: {l:?}");
+            let moved = OutdoorSettings { mountings: [("p2".to_string(), Mounting { tilt_deg: 20.0, ..p2 })].into_iter().collect(), ..base.clone() };
+            let l = with.loosenings(&moved);
+            assert!(l.iter().any(|m| m.contains("« p2 » modifié")), "{enabled}: {l:?}");
+            assert!(with.loosenings(&base).is_empty(), "{enabled}: removing a mounting only cuts more");
+            assert!(with.loosenings(&with).is_empty());
         }
     }
 

@@ -10,7 +10,9 @@
 //! worker) or on the start-up loader thread, never on the engine thread.
 //!
 //! An export bakes the output safety chain into the file (T-355,
-//! `export_look`): the ShowNET plays it alone, without the studio.
+//! `export_look`): the ShowNET plays it alone, without the studio. In
+//! outdoor mode that includes the cut of the declared angles for the
+//! output's own projector, and « Ciel coupé » when it is on (T-477).
 //!
 //! An imported file is played as it is: its points skip `densify` (the
 //! file's author already placed its dwell and blanking), but they go
@@ -375,9 +377,30 @@ impl ExportSafety {
     /// The chain of output `output`. Unknown: refused, never a looser default.
     /// A file outlives the session: it never bakes audience scanning in,
     /// its Public zones are blanked (T-255).
+    ///
+    /// The outdoor cut (T-262, T-477) is the live output's: the mounting of
+    /// the projector this output drives (output ids are projector ids; one
+    /// without a mounting is fully cut while the mode is on), and « Ciel
+    /// coupé » when it is on now. A file made while the sky is cut keeps
+    /// the sky cut: it fails towards cutting more.
     pub fn of(s: &crate::Shared, output: &str) -> Result<Self> {
         let Some(o) = s.outputs.get(output) else { bail!("sortie inconnue : {output}") };
-        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: crate::audience::effective(&s.safety.get(), false), limits: o.limits, color: o.color, frame_limits: o.scan.frame_limits() })
+        let mut safety = crate::audience::effective(&s.safety.get(), false);
+        safety.outdoor.sky_off = s.sky_off;
+        safety.outdoor.projector = o.id.clone();
+        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety, limits: o.limits, color: o.color, frame_limits: o.scan.frame_limits() })
+    }
+
+    /// Adds the outdoor cut of `later` (the same output's settings read
+    /// again, e.g. when a live recording ends) to this chain as extra
+    /// Blank zones: a file recorded while the operator tightened the
+    /// declared angles or cut the sky carries both cuts. Never removes one.
+    pub fn tighten_outdoor(&mut self, later: &crate::outdoor::OutdoorSettings) {
+        let now = &self.safety.outdoor;
+        if later == now && later.sky_off == now.sky_off && later.projector == now.projector {
+            return;
+        }
+        self.safety.zones.extend(later.blank_zones());
     }
 }
 

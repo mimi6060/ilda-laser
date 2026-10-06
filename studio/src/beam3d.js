@@ -25,7 +25,7 @@ export const DEFAULT_ROOM = { w: 10, d: 15, h: 5 };
 export const DEFAULT_PROJECTOR = { pos: [0, 3, 11], yaw: 0, pitch: 0, roll: 0, scanDeg: 40 };
 export const DEFAULT_RENDER = { exposure: 1.0, sheets: true, haze: 0.5, hazeNoise: false, roomLight: 0.1, spots: true, bloom: true, quality: 'auto',
   // Safety overlays (T-279): master switch, then each layer.
-  safety: true, sfAudience: true, sfHorizon: true, sfZones: true };
+  safety: true, sfAudience: true, sfHorizon: true, sfZones: true, sfOutdoor: true };
 export const QUALITIES = ['low', 'medium', 'high'];
 
 const DEG = Math.PI / 180;
@@ -40,6 +40,8 @@ export const AUDIENCE_HIT_RGB = [1, 0.08, 0.08];
 // Overlay colours, as on the 2D preview (premultiplied below): red for
 // Blank zones and the horizon, orange for Dim, amber (--warn) for Public.
 const OV_RED = [1, 0.3, 0.31], OV_FILL_BLANK = [1, 0.16, 0.16], OV_FILL_DIM = [1, 0.47, 0.24], OV_AMBER = [1, 0.69, 0.13];
+// The outdoor cut (T-262, T-477): blue, as the 2D preview hatches it.
+const OV_BLUE = [0.18, 0.48, 1];
 const ZONE_EDGE_STEPS = 8, HORIZON_STEPS = 24;
 
 // ---------- geometry (pure, unit-tested from the e2e suite) ----------
@@ -188,9 +190,12 @@ export function buildGeometry(points, projector, room, geo, withSheets = true, a
  * its horizon as a plane fanning out to the walls; the audience box is
  * drawn as a translucent volume. `show` picks the layers; `scanning` (the
  * audience mode, T-255) draws Public zones like the 2D preview does:
- * blanked unless audience scanning is on.
+ * blanked unless audience scanning is on. `outdoor` (T-477): per projector
+ * (same order), the outdoor mode's cut as polygons in its output space
+ * (the state's outdoor › cut / cuts, handed over by the page), drawn in
+ * blue; null: none.
  */
-export function buildSafetyOverlay({ room, projectors = [], audience = null, safety = null, scanning = false, show = {} }) {
+export function buildSafetyOverlay({ room, projectors = [], audience = null, safety = null, scanning = false, show = {}, outdoor = null }) {
   const tris = [], lines = [];
   const vert = (arr, p, c, a) => arr.push(p[0], p[1], p[2], c[0] * a, c[1] * a, c[2] * a, 1);
   const tri = (a, b, c, col, alpha) => { vert(tris, a, col, alpha); vert(tris, b, col, alpha); vert(tris, c, col, alpha); };
@@ -205,15 +210,35 @@ export function buildSafetyOverlay({ room, projectors = [], audience = null, saf
     }
     for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) line(c[a], c[b], OV_AMBER, 0.85);
   }
-  if (!safety) return { tris: new Float32Array(tris), lines: new Float32Array(lines) };
+  if (!safety && !outdoor) return { tris: new Float32Array(tris), lines: new Float32Array(lines) };
   const dir = [0, 0, 0];
-  for (const p of projectors) {
+  for (const [k, p] of projectors.entries()) {
     const o = p.pos, basis = projectorBasis(p), mx = p.mirrorX ? -1 : 1;
     const cast = (x, y) => {
       pointToDir(mx * x, y, p, dir, basis);
       const t = rayBox(o, dir, room).t;
       return [o[0] + dir[0] * t, o[1] + dir[1] * t, o[2] + dir[2] * t];
     };
+    const fan = (pts, fill, stroke, alpha) => {
+      let last = null;
+      pts.forEach((v, n) => {
+        const w = pts[(n + 1) % pts.length];
+        line(o, cast(v[0], v[1]), stroke, 0.35);
+        for (let s = n === 0 ? 0 : 1; s <= ZONE_EDGE_STEPS; s++) {
+          const f = s / ZONE_EDGE_STEPS, q = cast(v[0] + (w[0] - v[0]) * f, v[1] + (w[1] - v[1]) * f);
+          if (last) { tri(o, last, q, fill, alpha); line(last, q, stroke, 0.9); }
+          last = q;
+        }
+      });
+    };
+    // The outdoor cut of this projector (display only: the server cuts).
+    if (show.outdoor !== false && outdoor && Array.isArray(outdoor[k])) {
+      for (const poly of outdoor[k]) {
+        const pts = (Array.isArray(poly) ? poly : []).filter(v => Array.isArray(v) && v.every(Number.isFinite));
+        if (pts.length >= 3) fan(pts, OV_BLUE, OV_BLUE, 0.06);
+      }
+    }
+    if (!safety) continue;
     const h = safety.horizon;
     if (show.horizon !== false && h && Number.isFinite(h.y) && h.y > -1 && h.y < 1) {
       let last = null;
@@ -228,17 +253,7 @@ export function buildSafetyOverlay({ room, projectors = [], audience = null, saf
       const pts = (z.points || []).filter(v => Array.isArray(v) && v.every(Number.isFinite));
       if (pts.length < 3) continue;
       const dim = z.kind === 'dim' && (!z.audience || scanning);
-      const fill = dim ? OV_FILL_DIM : OV_FILL_BLANK, stroke = z.audience ? OV_AMBER : OV_RED;
-      let last = null;
-      pts.forEach((v, k) => {
-        const w = pts[(k + 1) % pts.length];
-        line(o, cast(v[0], v[1]), stroke, 0.35);
-        for (let s = k === 0 ? 0 : 1; s <= ZONE_EDGE_STEPS; s++) {
-          const f = s / ZONE_EDGE_STEPS, q = cast(v[0] + (w[0] - v[0]) * f, v[1] + (w[1] - v[1]) * f);
-          if (last) { tri(o, last, q, fill, dim ? 0.05 : 0.08); line(last, q, stroke, 0.9); }
-          last = q;
-        }
-      });
+      fan(pts, dim ? OV_FILL_DIM : OV_FILL_BLANK, z.audience ? OV_AMBER : OV_RED, dim ? 0.05 : 0.08);
     }
   }
   return { tris: new Float32Array(tris), lines: new Float32Array(lines) };
@@ -414,6 +429,8 @@ export class BeamView {
     // Safety overlays (T-279): the venue's audience area, the safety
     // settings' zones and horizon, the audience mode. Display only.
     this.audience = null; this.safety = null; this.scanning = false; this.inAudience = 0;
+    // The outdoor cut per projector (T-477), set by the page. Display only.
+    this.outdoor = null;
     this.auto = new AutoQuality();
     this.geo = {}; this.counts = { beams: 0, sheets: 0 };
     this.dirty = false;
@@ -484,7 +501,7 @@ export class BeamView {
   buildOverlay() {
     const r = this.render, o = r.safety
       ? buildSafetyOverlay({ room: this.room, projectors: this.projectors, audience: audienceBox(this.audience), safety: this.safety,
-        scanning: this.scanning, show: { audience: r.sfAudience, horizon: r.sfHorizon, zones: r.sfZones } })
+        scanning: this.scanning, show: { audience: r.sfAudience, horizon: r.sfHorizon, zones: r.sfZones, outdoor: r.sfOutdoor }, outdoor: this.outdoor })
       : { tris: new Float32Array(0), lines: new Float32Array(0) };
     this.overlayTris = o.tris.length / 7; this.overlayLines = o.lines.length / 7;
     const all = new Float32Array(o.tris.length + o.lines.length);
@@ -563,12 +580,21 @@ export class BeamView {
     this.buildOverlay();
   }
 
+  /**
+   * The outdoor mode's cut (T-262, T-477): one list of polygons (output
+   * space) per projector, in the venue's order; null: nothing cut.
+   */
+  setOutdoor(cuts) {
+    this.outdoor = Array.isArray(cuts) && cuts.some(c => Array.isArray(c) && c.length) ? cuts : null;
+    this.buildOverlay(); this.dirty = true;
+  }
+
   setRender(patch) {
     const sheetsBefore = this.features().sheets;
     Object.assign(this.render, patch);
     if (patch.quality !== undefined && patch.quality === 'auto') this.auto = new AutoQuality();
     if (this.features().sheets !== sheetsBefore) this.dirty = true;
-    if (['safety', 'sfAudience', 'sfHorizon', 'sfZones'].some(k => k in patch)) { this.buildOverlay(); this.dirty = true; }
+    if (['safety', 'sfAudience', 'sfHorizon', 'sfZones', 'sfOutdoor'].some(k => k in patch)) { this.buildOverlay(); this.dirty = true; }
   }
 
   qualityLevel() { return this.render.quality === 'auto' ? this.auto.level : Math.max(0, QUALITIES.indexOf(this.render.quality)); }

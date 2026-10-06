@@ -4416,7 +4416,17 @@ fn outdoor_view(s: &Shared) -> serde_json::Value {
     o.sky_off = s.sky_off;
     // What is cut on the main projector (output space), for the preview.
     let cut: Vec<Vec<[f32; 2]>> = o.blank_zones().into_iter().map(|z| z.points).collect();
-    json!({ "enabled": o.enabled, "sky_off": s.sky_off, "authorized": o.authorized(), "sectors": o.sectors.len(), "cut": cut })
+    // The venue's other projectors, each from its own mounting (T-477),
+    // for the 3D view; only while something is cut.
+    let mut cuts = serde_json::Map::new();
+    if o.active() {
+        for p in s.venue.get().extras() {
+            o.projector = p.id.clone();
+            let c: Vec<Vec<[f32; 2]>> = o.blank_zones().into_iter().map(|z| z.points).collect();
+            cuts.insert(p.id.clone(), json!(c));
+        }
+    }
+    json!({ "enabled": o.enabled, "sky_off": s.sky_off, "authorized": o.authorized(), "sectors": o.sectors.len(), "cut": cut, "cuts": cuts })
 }
 
 /// `GET /api/state`'s body (also `state.json` in the diagnostic report).
@@ -7798,6 +7808,64 @@ mod tests {
         let state = js(&t.request("GET", "/api/state", "").1);
         assert_eq!(state["outdoor"]["enabled"], true);
         assert_eq!(state["outdoor"]["authorized"], true);
+    }
+
+    /// T-477: another projector's mounting through `POST /api/safety`.
+    /// Declaring or changing one is a loosening (409, then confirmed);
+    /// removing one only cuts more; a value that is not a number or out of
+    /// range is refused; show mode locks it. `/api/state` gives each venue
+    /// projector's cut for the 3D view (the whole field without a mounting).
+    #[test]
+    fn outdoor_mountings_per_projector_over_http() {
+        let t = TestServer::start(false);
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        {
+            let mut s = t.shared.lock().unwrap();
+            let mut venue = s.venue.get().clone();
+            venue.projectors.push(crate::venue::Projector { id: "p2".into(), name: "Jardin".into(), ..Default::default() });
+            s.venue.set(venue).unwrap();
+        }
+        let mut cfg = js(&t.request("GET", "/api/safety", "").1)["settings"].clone();
+        cfg["outdoor"]["enabled"] = json!(true);
+        cfg["outdoor"]["authorization_ref"] = json!("DGTA-1");
+        cfg["outdoor"]["sectors"] = json!([{ "az_min": 0.0, "az_max": 360.0, "el_min": -90.0, "el_max": 30.0 }]);
+        assert_eq!(t.request("POST", "/api/safety", &cfg.to_string()).0, 200);
+        // No mounting for p2: its whole field is cut.
+        let state = js(&t.request("GET", "/api/state", "").1);
+        let p2 = state["outdoor"]["cuts"]["p2"].as_array().unwrap().clone();
+        assert_eq!(p2.len(), 1, "{p2:?}");
+        // Declared: light gets out, so it waits for the confirmation.
+        let mut with = cfg.clone();
+        with["outdoor"]["mountings"] = json!({ "p2": { "scan_angle_deg": 40.0, "tilt_deg": -30.0, "azimuth_deg": 90.0, "height_m": 3.0 } });
+        let (code, reply) = t.request("POST", "/api/safety", &with.to_string());
+        assert_eq!(code, 409, "{reply}");
+        assert!(reply.contains("« p2 » déclaré"), "{reply}");
+        let mut confirmed = with.clone();
+        confirmed["confirm_loosen"] = json!(true);
+        assert_eq!(t.request("POST", "/api/safety", &confirmed.to_string()).0, 200);
+        assert_eq!(t.shared.lock().unwrap().safety.get().outdoor.mountings["p2"].tilt_deg, -30.0);
+        // Pointing below the horizon and within the sector: nothing cut on p2.
+        let state = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!(state["outdoor"]["cuts"]["p2"], json!([]), "{}", state["outdoor"]);
+        // Moved: confirmed again.
+        let mut moved = with.clone();
+        moved["outdoor"]["mountings"]["p2"]["tilt_deg"] = json!(10.0);
+        assert_eq!(t.request("POST", "/api/safety", &moved.to_string()).0, 409);
+        // Not a number, out of range or missing values: refused.
+        for bad in [json!("NaN"), json!(200.0), json!(null)] {
+            let mut b = with.clone();
+            b["outdoor"]["mountings"]["p2"]["tilt_deg"] = bad.clone();
+            let code = t.request("POST", "/api/safety", &b.to_string()).0;
+            assert_eq!(code, 400, "{bad}");
+        }
+        assert_eq!(t.shared.lock().unwrap().safety.get().outdoor.mountings["p2"].tilt_deg, -30.0, "unchanged");
+        // Removed: p2 fully cut again, no confirmation needed.
+        assert_eq!(t.request("POST", "/api/safety", &cfg.to_string()).0, 200);
+        assert!(t.shared.lock().unwrap().safety.get().outdoor.mountings.is_empty());
+        // Show mode: locked.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/safety", &confirmed.to_string()).0, 423);
+        assert!(t.shared.lock().unwrap().safety.get().outdoor.mountings.is_empty());
     }
 
     #[test]

@@ -20,7 +20,9 @@
 //!    declared angles forbid, on every projector (one without a mounting
 //!    is fully cut); « Ciel coupé » toggled from a controller never
 //!    restores the sky, never arms; the mode without its DGTA reference
-//!    keeps arming refused;
+//!    keeps arming refused; every exported file (look, SD bank, live
+//!    recording, timeline, T-477) keeps the same cut for its output's
+//!    projector;
 //! 5. coordinates always finite and within -1..1;
 //! 6. no sequence of controls, MIDI, external inputs (DMX / OSC /
 //!    timecode through the gate, T-408) or API calls arms, except the
@@ -4478,4 +4480,116 @@ fn a_live_recording_never_arms_and_its_file_carries_the_safety_chain() {
         lit_file += 1;
     }
     assert!(lit_file > 0, "the upper half still shows");
+}
+
+/// T-477: every export path in outdoor mode (T-262) keeps the live
+/// output's cut. Random mountings (the main projector's and others'),
+/// sectors, vertical limits, « Ciel coupé », calibrations, looks and
+/// outputs (the main one, projectors with or without a mounting): the
+/// look export, the SD bank, a live recording (frames as the engine hands
+/// them over: calibrated, before the safety stage) and a timeline export
+/// all write files with no lit point, nor lit segment, where the angles
+/// forbid. The reference is built from the settings, not from the chain,
+/// so a chain that forgot the projector or the sky is caught. Points are
+/// read back from the file (16-bit coordinates), hence the tolerance.
+#[test]
+fn every_export_keeps_the_outdoor_cut() {
+    use crate::ilda_library::{export_look, ExportSafety};
+    use crate::record::{self, TimelineJob};
+    use crate::timeline::{Event, EventSource, Show, TimeBase, Track};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    const TOL_DEG: f32 = 0.01;
+    let name = "every_export_keeps_the_outdoor_cut";
+    let seeds = seeds(477, 60);
+    let _guard = property_guard(name, seeds.len(), 60);
+    let (mut files, mut lit_files, mut cut_files, mut refused) = (0usize, 0usize, 0usize, 0usize);
+    let dir = std::env::temp_dir().join(format!("laser-studio-t477-{}", std::process::id()));
+    for &seed in &seeds {
+        let replay = format!("(replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+        let mut rng = Rng::new(seed);
+        let mut s = test_support::shared();
+        for id in ["p2", "p3", "p4"] {
+            s.outputs.ensure(id).unwrap();
+        }
+        let mut cfg = s.safety.get();
+        let on = rng.chance(0.85);
+        cfg.outdoor = random_outdoor(&mut rng, on);
+        s.safety.set(cfg, true).unwrap_or_else(|e| panic!("setup: outdoor refused: {e:?} {replay}"));
+        s.sky_off = rng.chance(0.3);
+        s.calibration = random_calibration(&mut rng);
+        // random_outdoor sometimes declares p2 and p3; never p4.
+        let output = rng.pick(&[MAIN_OUTPUT, MAIN_OUTPUT, "p2", "p3", "p4"]).to_string();
+        let mut reference = s.safety.get().outdoor;
+        reference.sky_off = s.sky_off;
+        reference.projector = output.clone();
+        let chain = ExportSafety::of(&s, &output).unwrap();
+        let (_, mut look) = random_preset(&s, &mut rng);
+        if matches!(look.content, Content::Ilda { .. }) {
+            look = Settings { content: Content::Shape { shape: "circle".into() }, ..Settings::default() };
+        }
+        look.scale = rng.range(0.3, 1.0);
+        look.brightness = 1.0;
+        let mut check = |bytes: &[u8], what: &str| {
+            let back = crate::ilda::read(bytes).unwrap_or_else(|e| panic!("{name}: {what}: unreadable: {e} {replay}"));
+            for f in &back {
+                let v = crate::outdoor::violations(&f.points, &reference, TOL_DEG);
+                assert_eq!(v, 0, "{name}: {what}, image {}: {v} lit samples/segments outside the declared angles of « {output} » ({reference:?}) {replay}", f.name);
+            }
+            files += 1;
+            lit_files += back.iter().flat_map(|f| &f.points).any(|p| p.is_lit()) as usize;
+            cut_files += reference.active() as usize;
+        };
+        // 1. The look export (what the SD bank runs for each slot).
+        match export_look(&look, 8, 25.0, 120.0, &chain) {
+            Ok(e) => check(&e.bytes, "look export"),
+            Err(_) => refused += 1,
+        }
+        // 2. The SD bank through its own prepare / export (every 4th case: files on disk).
+        if seed % 4 == 0 {
+            let id = s.presets.iter().find(|p| !matches!(p.settings.content, Content::Ilda { .. })).unwrap().id.clone();
+            s.sdbank.set(crate::sdbank::SdBank { slots: vec![crate::sdbank::SdSlot { number: 7, cue_id: id, seconds: 0.2 }] }).unwrap();
+            let card = dir.join(format!("card-{seed}"));
+            match crate::sdbank::prepare(&s, &output).and_then(|job| crate::sdbank::export(&job, &card)) {
+                Ok(_) => check(&std::fs::read(card.join("007.ild")).unwrap(), "SD bank"),
+                Err(_) => refused += 1,
+            }
+            let _ = std::fs::remove_dir_all(&card);
+        }
+        // 3. A live recording: the engine's frames, calibrated, before the safety stage.
+        let mut animator = crate::engine::Animator::starting_at(0.0);
+        let clock = crate::engine::BeatClock { beat: 0.0, bpm: 120.0, beats_per_bar: 4 };
+        let raw: Vec<Vec<Point>> = (0..8)
+            .map(|i| {
+                animator
+                    .render(&look, crate::engine::AudioFeatures::default(), if i == 0 { 0.0 } else { 0.04 }, &clock)
+                    .into_iter()
+                    .map(|p| {
+                        let (x, y) = s.calibration.apply(p.x, p.y);
+                        Point { x, y, ..p }
+                    })
+                    .collect()
+            })
+            .collect();
+        match record::bake(&raw, 25, &chain) {
+            Ok((bytes, ..)) => check(&bytes, "live recording"),
+            Err(_) => refused += 1,
+        }
+        // 4. A timeline export: the show rendered offline, then the same chain.
+        let mut show = Show::new_empty("t477", TimeBase::Seconds);
+        let event = Event { id: 1, start: 0.0, len: 1.0, source: EventSource::Look { settings: look.clone() }, ..Default::default() };
+        show.tracks = vec![Track { name: "Piste 1".into(), layer: 1, events: vec![event], ..Default::default() }];
+        show.sanitize();
+        let job = TimelineJob { show, presets: Vec::new(), palettes: Vec::new(), mixer: crate::layers::Mixer::default(), bpm: 120.0, beats_per_bar: 4, from_s: 0.0, to_s: 0.32 };
+        let rendered = record::render_timeline(&job, 25, &chain.calibration, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+        match record::bake(&rendered, 25, &chain) {
+            Ok((bytes, ..)) => check(&bytes, "timeline export"),
+            Err(_) => refused += 1,
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // Both sides of the cut must be exercised: files with light, files cut.
+    if seeds.len() >= 30 {
+        assert!(lit_files * 4 > files, "only {lit_files} files with light of {files} ({refused} refused)");
+        assert!(cut_files * 2 > files, "only {cut_files} files with the outdoor cut active of {files}");
+    }
 }
