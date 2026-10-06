@@ -115,6 +115,9 @@ pub fn allowed(path: &str) -> bool {
         // A copy of the open project to the backup folder (T-450): same.
         "/api/backup/now",
         "/api/project/recover-ignore",
+        // Cancelling an ILDA recording (T-442) writes nothing; starting one is
+        // a file write, locked.
+        "/api/ilda/record/cancel",
         // Ticking the pre-show checklist is not editing it.
         "/api/checklist/operator",
         "/api/checklist/check",

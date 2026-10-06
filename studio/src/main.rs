@@ -83,6 +83,7 @@ mod showmode;
 mod shownet;
 mod scan;
 mod scenes;
+mod record;
 mod sdbank;
 mod sheets;
 mod tempo;
@@ -519,6 +520,9 @@ pub struct Shared {
     /// The ShowNET SD card bank (sdbank.rs, T-302, `sdbank.json`): which
     /// cue is which card file. A machine file, not part of a project.
     pub sdbank: sdbank::SdBankStore,
+    /// Recording what plays, or a timeline, as an ILDA animation (record.rs,
+    /// T-442). Never saved; it never arms nor changes what is sent.
+    pub recorder: record::Recorder,
     /// The ShowNET SD card box over Art-Net (artnet.rs, T-301,
     /// `shownet_artnet.json`), shared with the output backend.
     pub shownet_dmx: Arc<artnet::ShowNetDmxStore>,
@@ -1308,6 +1312,7 @@ fn startup_state(cli: &Cli) -> Shared {
         pps,
         scenes: SceneStore::load_or_create(cli.data_dir.join("scenes.json")),
         sdbank: sdbank::SdBankStore::load(cli.data_dir.join("sdbank.json")),
+        recorder: record::Recorder::default(),
         shownet_dmx,
         output_status: None,
         playlist: None,
@@ -1825,6 +1830,7 @@ impl Engine {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
 
+        let record_due;
         let (looks, transition_fx, show_cues, starts, (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
@@ -2032,6 +2038,9 @@ impl Engine {
                 })
                 .collect();
             let festival = (s.festival.colors(), s.festival.balance);
+            // An ILDA recording (T-442) wants this frame: copied below,
+            // before the safety chain; nothing else changes.
+            record_due = s.recorder.due(t);
             (looks, transition_fx, show_cues, starts, (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
         };
 
@@ -2203,6 +2212,11 @@ impl Engine {
             live::black_out(&mut frame);
             extra_frames.iter_mut().for_each(|f| live::black_out(f));
         }
+        // An ILDA recording's copy (T-442): the mixed, master-staged and
+        // calibrated frame, before the safety stage, which the recorder's
+        // I/O thread runs itself with its own state (record.rs). Only when
+        // an image is due; arming and the output are untouched.
+        let recorded = record_due.then(|| frame.clone());
         // The safety stage (`safety_chain`): frame size, colour rendering,
         // strobe limiter and horizon, static beam guard, power caps, the
         // limiter's check on the output.
@@ -2234,6 +2248,9 @@ impl Engine {
         }
         s.output_lit = emitted.lit;
         s.output_status = output_status;
+        if let Some(copy) = recorded {
+            s.recorder.offer(copy, t);
+        }
         // The pages' binary frames (T-411): a swap in the hub, no network
         // write, no wait on a client. The flags say what the gate is now.
         let estop_latched = s.estop.is_latched();

@@ -191,6 +191,9 @@
   #tlTempoHint[hidden] { display: none; }
   #tlModified.example { color: var(--ws-timeline); }
   #tlExDialog .box { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+  /* Enregistrer une animation ILDA (T-442). */
+  #recDialog .box { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+  #recDialog input[type=text], #recDialog select { width: 100%; }
   #tlExList { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; margin-top: 10px; }
   .tl-ex { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 12px; text-align: left; border-radius: 10px; white-space: normal; height: auto; }
   .tl-ex b { font-size: 14px; color: var(--text); }
@@ -1706,6 +1709,39 @@
     <div id="tlExList"></div>
   </div>
 </div>
+<!-- CRÉATION › Médiathèque et TIMELINE : enregistrer une animation ILDA (T-442). -->
+<div id="recDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="recTitle" hidden>
+  <div class="box">
+    <div class="keys-head"><h3 id="recTitle">Enregistrer une animation ILDA</h3><button id="recClose">Fermer</button></div>
+    <label for="recSource">Source</label>
+    <select id="recSource"><option value="live">Ce qui joue en direct</option></select>
+    <div class="row">
+      <label for="recSeconds">Durée (s)</label><label for="recFps">Images par seconde</label>
+    </div>
+    <div class="row" style="margin-top:2px">
+      <input type="number" id="recSeconds" min="0.1" max="600" step="0.1" value="10">
+      <input type="number" id="recFps" min="10" max="60" step="1" value="25">
+    </div>
+    <label for="recName">Nom du fichier</label>
+    <input type="text" id="recName" maxlength="64" value="enregistrement" autocomplete="off" title="Lettres, chiffres, espaces, - et _ ; enregistré dans la médiathèque ILDA">
+    <label for="recSd">Numéro pour carte SD (facultatif)</label>
+    <input type="number" id="recSd" min="1" max="229" step="1" placeholder="001 à 229" title="Nomme le fichier 001.ild à 229.ild pour la carte SD du ShowNET (remplace le nom)">
+    <label for="recOut">Sécurité appliquée au fichier (sortie)</label>
+    <select id="recOut" class="sd-output"><option value="main">main</option></select>
+    <div class="ilda-rights" id="recSafety" role="note">Les images enregistrées sont celles qui sortent de la <b>chaîne de sécurité</b> de la sortie choisie,
+      jamais le look brut : calibration, couleurs de la sortie, zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de puissance.
+      Le projecteur qui les jouera le fera sans le studio et applique les siens : vérifiez zones, puissance et calibration sur place,
+      essayez d'abord à faible puissance, et gardez l'arrêt d'urgence matériel (clé, interlock) à portée de main : c'est lui la vraie sécurité.
+      Enregistrer n'arme jamais le laser.</div>
+    <div class="hint" id="recAudio" hidden>Les réactions à la musique ne sont pas enregistrées dans un export de timeline.</div>
+    <div id="recMsg" class="hint" role="status" aria-live="polite"></div>
+    <div class="row">
+      <button id="recStart" class="primary">Enregistrer</button>
+      <button id="recCancel" hidden>Annuler</button>
+      <button id="recDownload" hidden>Télécharger</button>
+    </div>
+  </div>
+</div>
 <div id="projDialog" class="modal" hidden>
   <div class="box">
     <h3 id="projDlgTitle">Ouvrir…</h3>
@@ -2331,6 +2367,7 @@
         <button data-ctl="timeline.pause" id="tlPause" title="timeline.pause">❚❚ Pause</button>
         <button data-ctl="timeline.stop" id="tlStop" title="timeline.stop">■ Arrêt</button>
         <button id="tlLoop" title="timeline.loop : rejoue la région de boucle (ou tout le show)">⟲ Boucle</button>
+        <button id="tlRecord" title="Exporter le show en animation ILDA, dans la médiathèque (rendu hors temps réel, sécurité de la sortie incluse ; n'arme jamais le laser)">Exporter en ILDA…</button>
         <span id="tlPos">–</span>
       </div>
       <div class="tl-audio" id="tlAudio">
@@ -2687,6 +2724,7 @@
       <div class="hint">Chaque fichier est aussi un cue de la page « ILDA » de la grille. Il est joué tel quel (sans optimiseur),
         puis passe par toute la chaîne de sécurité : calibration, zones, limiteur de strobe, garde faisceau fixe, plafonds de puissance.
         Jouer un fichier n'arme jamais le laser.</div>
+      <div class="row"><button id="ildaRecord" title="Enregistrer ce qui joue en direct en animation ILDA, dans la médiathèque (n'arme jamais le laser)">Enregistrer en ILDA…</button></div>
 
       <h2 style="margin-top:14px">Exporter pour la carte SD du ShowNET</h2>
       <div class="hint">Le look en cours, en ILDA format 5, nommé pour la carte SD : <b>001.ild</b> à <b>229.ild</b>
@@ -9438,7 +9476,7 @@ function tlOnState(t, tempo, at = performance.now()) {
   if (!TL.inflight) tlShowFlags(t);
   tlTempoHint();
   const has = !!TL.show;
-  for (const id of ['tlSave', 'tlAddMarker', 'tlCsvBtn', 'tlCopy', 'tlPaste', 'tlDup', 'tlDel', 'tlAddTrack', 'tlFit']) $(id).disabled = !has;
+  for (const id of ['tlSave', 'tlRecord', 'tlAddMarker', 'tlCsvBtn', 'tlCopy', 'tlPaste', 'tlDup', 'tlDel', 'tlAddTrack', 'tlFit']) $(id).disabled = !has;
   $('tlLockAll').disabled = !has || !TL.show.tracks.length;
   $('tlUndo').disabled = !has || !TL.undo.length;
   $('tlRedo').disabled = !has || !TL.redo.length;
@@ -14191,6 +14229,99 @@ $('ildaExport').onclick = async () => {
     + (blob.size > 6 * 1024 * 1024 ? ' Plus de 6 Mo : passez par un lecteur de carte.' : ''));
 };
 showIldaSdName();
+
+// ---------- Enregistrer une animation ILDA (T-442) ----------
+// What plays live (n seconds, sampled at a fixed rate) or a whole show
+// (rendered offline, the same file every time), written into the ILDA
+// library through the output safety chain of the chosen output. The
+// server does the work on its own thread; the dialog follows its state.
+// Nothing here arms the laser; Space and Escape keep their roles.
+const rec = { timer: null, show: null, info: null, status: null, wasBusy: false };
+function recMsg(text, err = false) { $('recMsg').textContent = text; $('recMsg').classList.toggle('err', err); }
+const recMo = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} Ko` : `${(n / 1024 / 1024).toFixed(1).replace('.', ',')} Mo`;
+async function openRecord(show) {
+  rec.show = show || null;
+  const sel = $('recSource');
+  sel.replaceChildren(new Option('Ce qui joue en direct', 'live'));
+  if (rec.show) sel.add(new Option(`Timeline : ${rec.show}`, 'timeline'));
+  sel.value = rec.show ? 'timeline' : 'live';
+  recMsg('');
+  $('recDialog').hidden = false;
+  await recRefresh();
+  recSourceChanged();
+}
+function recSourceChanged() {
+  const tl = $('recSource').value === 'timeline', sh = rec.info && rec.info.show;
+  $('recSeconds').disabled = tl;
+  if (tl && sh) $('recSeconds').value = (+sh.seconds).toFixed(1);
+  $('recAudio').hidden = !(tl && sh && sh.audio);
+}
+$('recSource').onchange = recSourceChanged;
+async function recRefresh() {
+  let r;
+  try { r = await apiJson('GET', '/api/ilda/record' + (rec.show ? '?show=' + encodeURIComponent(rec.show) : ''), undefined, { cache: 'no-store', quiet: true }); }
+  catch { return; }
+  rec.info = r;
+  recShow(r.status);
+}
+function recShow(st) {
+  const busy = st.state === 'recording' || st.state === 'writing';
+  $('recStart').disabled = busy;
+  $('recCancel').hidden = !busy;
+  $('recDownload').hidden = st.state !== 'done';
+  if (st.state === 'recording') recMsg(`Enregistrement… ${st.frames} / ${st.total} images`);
+  else if (st.state === 'writing') recMsg(`Écriture du fichier… (${st.total} images)`);
+  else if (st.state === 'done') recMsg(`Fichier prêt : ${st.file} (${st.frames} images, ${recMo(st.bytes)}), sécurité de la sortie « ${st.output} » incluse.`
+    + (st.warnings.length ? ' ' + st.warnings.join(' · ') + '.' : ''));
+  else if (st.state === 'failed') recMsg('Enregistrement impossible : ' + (st.error || ''), true);
+  else if (st.state === 'cancelled') recMsg('Enregistrement annulé : aucun fichier écrit.');
+  clearTimeout(rec.timer);
+  if (busy) rec.timer = setTimeout(recRefresh, 250);
+  // A new file in the library: its list and the « ILDA » cue page.
+  if (st.state === 'done' && rec.wasBusy) { loadIldaLib(); loadPresets(); }
+  rec.wasBusy = busy;
+  rec.status = st;
+}
+$('recStart').onclick = async () => {
+  const tl = $('recSource').value === 'timeline';
+  const body = {
+    source: tl ? { kind: 'timeline', show: rec.show } : { kind: 'live' },
+    seconds: +$('recSeconds').value,
+    fps: Math.max(0, Math.min(255, Math.trunc(+$('recFps').value) || 0)),
+    name: $('recName').value.trim(),
+    output: $('recOut').value || 'main',
+  };
+  const sd = $('recSd').value.trim();
+  if (sd) body.sd_number = Math.max(0, Math.trunc(+sd) || 0);
+  let r;
+  try { r = await api('POST', '/api/ilda/record', body, { quiet: true }); } catch { recMsg('Le studio ne répond pas.', true); return; }
+  if (!r.ok) {
+    const t = await r.text();
+    if (r.status === 423) flash(t);
+    recMsg(r.status === 409 ? 'Un enregistrement est déjà en cours.' : t, true);
+    return;
+  }
+  rec.wasBusy = true;
+  recShow(await r.json());
+};
+$('recCancel').onclick = async () => { await post('/api/ilda/record/cancel'); await recRefresh(); };
+$('recDownload').onclick = async () => {
+  const f = rec.status && rec.status.file;
+  if (!f) return;
+  let r;
+  try { r = await api('GET', '/api/ilda/record/file?name=' + encodeURIComponent(f), undefined, { cache: 'no-store', quiet: true }); } catch { recMsg('Le studio ne répond pas.', true); return; }
+  if (!r.ok) { recMsg('Téléchargement impossible : ' + await r.text(), true); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = f;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+};
+function closeRecord() { $('recDialog').hidden = true; }
+$('recClose').onclick = closeRecord;
+$('recDialog').addEventListener('click', e => { if (e.target === $('recDialog')) closeRecord(); });
+$('ildaRecord').onclick = () => openRecord(null);
+$('tlRecord').onclick = () => openRecord(TL.show && TL.show.name);
 
 // ---------- RÉGLAGES › Carte SD ShowNET (T-302) ----------
 // Which cue the ShowNET plays for which number (001-229), and the export
