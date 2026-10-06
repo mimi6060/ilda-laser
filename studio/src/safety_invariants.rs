@@ -93,6 +93,11 @@
 //!     them); they never arm, no macro runs across a frame with the
 //!     e-stop latched, and a strobe built from timed steps stays within
 //!     the burst (`macros_never_get_past_the_strobe_limiter`).
+//! 20. the show player (T-444): random show lists (short shows, a
+//!     missing one, the loop on or off) played, chained, skipped and
+//!     stopped from the UI, a controller or the external gate run in the
+//!     sessions (1-19 hold with them); they never arm, and with the
+//!     e-stop latched no list plays and no show runs after the frame.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -1257,6 +1262,65 @@ fn random_macros(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
     Ok(())
 }
 
+/// A random show list (T-444): two to four short shows saved in the rig's
+/// own folder, one name that has no show now and then, the loop or not.
+fn random_show_list(s: &mut Shared, rng: &mut Rng, dir: &std::path::Path) {
+    s.shows = timeline::ShowStore::new(dir.join("shows"));
+    let n = 2 + rng.below(3);
+    let mut names = Vec::new();
+    for i in 0..n {
+        let (id, _) = random_preset(s, rng);
+        let mut show = one_event_show(s, rng, &id);
+        show.name = format!("Fuzz {}", i + 1);
+        // Short: the list chains several times per session.
+        for t in &mut show.tracks {
+            for e in &mut t.events {
+                e.start = rng.range(0.0, 0.3) as f64;
+                e.len = rng.range(0.2, 1.5) as f64;
+            }
+        }
+        s.shows.save(&show).expect("fuzz show saved");
+        names.push(show.name);
+    }
+    if rng.chance(0.3) {
+        let at = rng.below(names.len() + 1);
+        names.insert(at, "Fuzz absent".into());
+    }
+    let items = names
+        .into_iter()
+        .map(|show| crate::showlist::ShowListItem { show, follow_system_tempo: rng.chance(0.8), wait_timecode: rng.chance(0.1), ..Default::default() })
+        .collect();
+    crate::showlist::set(s, crate::showlist::ShowList { items, loop_list: rng.chance(0.5) }).expect("valid fuzz show list");
+}
+
+/// One show-player move from the UI, a controller or the external gate.
+fn random_show_list_move(s: &mut Shared, rng: &mut Rng, now: Instant) {
+    let n = s.showlist.list().items.len().max(1);
+    let (id, input) = match rng.below(12) {
+        0..=3 => ("showlist.play", ControlInput::Value(1.0)),
+        4..=6 => ("showlist.next", ControlInput::Value(1.0)),
+        7 => ("showlist.prev", ControlInput::Value(1.0)),
+        8 => ("showlist.stop", ControlInput::Value(1.0)),
+        9 => ("showlist.loop", ControlInput::Norm(if rng.chance(0.5) { 1.0 } else { 0.0 })),
+        10 => {
+            let _ = crate::showlist::play(s, Some(rng.below(n)));
+            return;
+        }
+        _ => {
+            // A show launched by hand: the list is suspended.
+            let _ = controls::timeline_play(s);
+            return;
+        }
+    };
+    if rng.chance(0.2) {
+        let _ = crate::external::set_open(s, true, ArmSource::Ui);
+        let src = *rng.pick(&crate::external::SourceKind::ALL);
+        let _ = crate::external::apply(s, src, "rig", id, input, now);
+    } else {
+        let _ = controls::apply(s, id, input, rng.chance(0.5));
+    }
+}
+
 /// One macro move from the UI, a controller or the external gate:
 /// launched, Go, stopped, all stopped.
 fn random_macro_move(s: &mut Shared, rng: &mut Rng, now: Instant) {
@@ -1636,6 +1700,13 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if macros_on {
         random_macros(&mut rig.s(), &mut krng)?;
     }
+    // The show player (T-444), from its own stream.
+    let mut jrng = Rng::new(seed ^ 0x0444_0444);
+    let showlist_on = jrng.chance(0.4);
+    if showlist_on {
+        let dir = rig.dir.clone();
+        random_show_list(&mut rig.s(), &mut jrng, &dir);
+    }
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
@@ -1715,6 +1786,31 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 }
                 if s.gate.is_armed() && !armed {
                     return Err(format!("frame {frame}: a macro armed"));
+                }
+            }
+        }
+        if showlist_on && jrng.chance(0.1) {
+            let now = rig.now;
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            random_show_list_move(&mut s, &mut jrng, now);
+            if s.gate.is_armed() && !armed {
+                return Err(format!("frame {frame}: a show-player move armed"));
+            }
+        }
+        if showlist_on {
+            // With the stop latched, no list plays and no show runs after
+            // the engine's frame; the chaining never arms.
+            let latched = rig.s().estop.is_latched();
+            let armed = rig.s().gate.is_armed();
+            if latched {
+                rig.tick();
+                let s = rig.s();
+                if s.showlist.is_active() || s.timeline.is_playing() {
+                    return Err(format!("frame {frame}: the show list plays with the e-stop latched"));
+                }
+                if s.gate.is_armed() && !armed {
+                    return Err(format!("frame {frame}: the show list armed"));
                 }
             }
         }

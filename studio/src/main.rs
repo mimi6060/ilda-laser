@@ -82,6 +82,7 @@ mod safety;
 #[cfg(test)]
 mod safety_invariants;
 mod safety_log;
+mod showlist;
 mod showmode;
 #[cfg(feature = "shownet")]
 mod shownet;
@@ -588,6 +589,9 @@ pub struct Shared {
     /// The tablet remote (remote.rs, T-428): off at every start; only
     /// its port is saved (`remote.json`).
     pub remote: remote::Remote,
+    /// The show player (showlist.rs, T-444, `showlist.json`): the list is
+    /// content (projects, history); what plays is memory only.
+    pub showlist: showlist::ShowListRunner,
 }
 
 impl Shared {
@@ -860,6 +864,8 @@ impl Shared {
         self.estop.trip(src);
         // No macro step runs after the stop (T-425).
         self.macros.player.stop_all();
+        // The show list stops chaining until *Lancer* (T-444).
+        self.showlist.halt();
         // Fades end and waiting cues are dropped at once (T-158 / T-159).
         self.deck.cut_transitions();
         // The cue list pauses; it never starts again by itself (T-410).
@@ -1486,12 +1492,15 @@ fn startup_state(cli: &Cli) -> Shared {
         executors: executors::Executors::load(cli.data_dir.join("executors.json")),
         desks: desk::Desks::load(cli.data_dir.join("desks.json")),
         macros: macros::Macros::load(cli.data_dir.join("macros.json")),
+        showlist: showlist::ShowListRunner::load(cli.data_dir.join("showlist.json")),
         remote: remote::Remote::load(cli.data_dir.join("remote.json"), cli.remote_bind),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
     // Macro lines checked against the registry they will run on (T-425).
     macros::revalidate(&mut state);
+    // The show list's times, read by its worker (T-444).
+    showlist::refresh(&mut state);
     if cli.test_hooks {
         state.project.autosave.allow_test_delays();
     }
@@ -2548,6 +2557,9 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
     if s.estop.is_latched() {
         s.timeline.halt(&c);
     }
+    // The show list (T-444): at the end of a show, the next one (ready)
+    // starts in this same frame, before its song is told.
+    showlist::frame(s, &c);
     let song = Arc::clone(&s.song);
     s.song_sync.sync(&song, &mut s.timeline, &c);
     // Incoming timecode (T-168) has the last word on the playhead.
@@ -3019,6 +3031,57 @@ mod tests {
         s.gate.reset_estop(&s.estop.clone());
         controls::timeline_play(&mut s).unwrap();
         assert!(!s.gate.is_armed(), "resetting the e-stop and playing again doesn't arm");
+    }
+
+    /// T-444: the show list chains two shows through the engine's
+    /// timeline step, the second one's events reach the frame, and neither
+    /// the chaining nor an e-stop ever changes the arm state.
+    #[test]
+    fn the_show_list_chains_through_the_frame_without_touching_the_arm_state() {
+        let mut s = test_support::shared();
+        let cue = s.presets[0].id.clone();
+        let dir = std::env::temp_dir().join(format!("laser-studio-main-showlist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        s.shows = timeline::ShowStore::new(dir.join("shows"));
+        for (name, len) in [("Un", 1.0), ("Deux", 5.0)] {
+            let mut show = one_event_show(&cue);
+            show.name = name.into();
+            show.tracks[0].events[0].len = len;
+            s.shows.save(&show).unwrap();
+        }
+        let list = showlist::ShowList { items: ["Un", "Deux"].iter().map(|n| showlist::ShowListItem { show: n.to_string(), ..Default::default() }).collect(), loop_list: false };
+        showlist::set(&mut s, list).unwrap();
+        let clock = |t: f64| engine::BeatClock { beat: t * 2.0, bpm: 120.0, beats_per_bar: 4 };
+        for armed in [false, true] {
+            if armed {
+                controls::apply(&mut s, "transport.arm", controls::ControlInput::Value(1.0), false).unwrap();
+            }
+            let t0 = s.now_s();
+            s.sim_now = Some(s.epoch + std::time::Duration::from_secs_f64(t0));
+            showlist::play(&mut s, Some(0)).unwrap();
+            let mut t = t0;
+            let mut last_one = None;
+            while t < t0 + 1.5 {
+                s.sim_now = Some(s.epoch + std::time::Duration::from_secs_f64(t));
+                let cues = timeline_cues(&mut s, t, &clock(t));
+                assert_eq!(cues.len(), 1, "a frame without a show at {:.3} s", t - t0);
+                if s.timeline.show.as_ref().unwrap().name == "Un" {
+                    last_one = Some(t);
+                }
+                assert_eq!(s.gate.is_armed(), armed, "the list never changes the arm state");
+                t += 1.0 / 60.0;
+            }
+            assert_eq!(s.timeline.show.as_ref().unwrap().name, "Deux");
+            assert!(last_one.is_some_and(|l| l > t0 + 0.9));
+            let gap = showlist::summary(&s).gap_ms.unwrap();
+            assert!(gap < 100.0, "gap {gap} ms");
+        }
+        s.emergency_stop(interlock::ArmSource::Keyboard);
+        let t = s.now_s() + 2.0;
+        assert!(timeline_cues(&mut s, t, &clock(t)).is_empty());
+        assert_eq!(s.showlist.transport, showlist::ListTransport::Stopped);
+        assert!(!s.gate.is_armed());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// T-419: the *Cadence* scales the fades played live, never a

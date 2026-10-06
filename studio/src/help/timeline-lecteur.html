@@ -1,0 +1,10 @@
+<p>Le lecteur de shows enchaîne des shows enregistrés, dans l'ordre de la liste, avec le temps écoulé et restant du show en cours et le temps restant de la liste.</p>
+<ul>
+<li>« + Ajouter un show » ajoute un show enregistré à la fin. La poignée ⋮⋮ réordonne (glisser, ou flèches haut / bas), ⧉ duplique, ✕ retire.</li>
+<li>« Lancer » part du show choisi (cliquez son nom), sinon du premier. « Suivant » et « Précédent » changent de show (<kbd>Page suivante</kbd> et <kbd>Page précédente</kbd> dans TIMELINE), « Arrêter » arrête la liste et son show.</li>
+<li>« Boucler la liste » : après le dernier show, la liste reprend au premier. Sans elle, elle s'arrête à la fin du dernier. Un show en « Boucle » ne passe jamais au suivant.</li>
+<li>Le show suivant est lu et son morceau décodé à l'avance (« Prêt ») : l'enchaînement se fait sans trou. Un show supprimé est marqué <em>Introuvable</em>, un morceau qui ne se lit pas <em>Morceau illisible</em> : ils sont sautés, la liste continue.</li>
+<li>« Suivre le tempo du système » décoché : au démarrage du show, le tempo passe au BPM du show (source Manuel). « Attendre le timecode » : le show est chargé et démarre quand le timecode entrant (TC-IN armé) atteint sa plage.</li>
+<li>Un show lancé à la main suspend la liste : « Reprendre la liste » la relance.</li>
+</ul>
+<p>Le lecteur n'arme jamais le laser : désarmé, il joue dans l'aperçu. <kbd>Échap</kbd> (arrêt d'urgence) ou le désarmement arrêtent la liste ; après la réinitialisation, rien ne repart sans « Lancer ». L'arrêt logiciel ne remplace pas l'arrêt matériel du projecteur.</p>

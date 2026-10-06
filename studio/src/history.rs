@@ -76,11 +76,13 @@ pub enum Section {
     Desks,
     /// The macro list (T-425). Not what runs: that is playback.
     Macros,
+    /// The show list (T-444). Not what plays: that is playback.
+    ShowList,
 }
 
 use Section::*;
 
-const ALL: [Section; 16] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros];
+const ALL: [Section; 17] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -101,6 +103,7 @@ impl Section {
             Executors => "executors",
             Desks => "desks",
             Macros => "macros",
+            ShowList => "showlist",
         }
     }
 
@@ -130,6 +133,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/executors" => &[Executors],
         "/api/desks" => &[Desks],
         "/api/macros" => &[Macros],
+        "/api/showlist" => &[ShowList],
         _ => return None,
     })
 }
@@ -153,6 +157,9 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         Executors => json!(s.executors.bank),
         Desks => json!(s.desks.tabs),
         Macros => json!(s.macros.list()),
+        // The items only: *Boucler la liste* is a transport switch (allowed
+        // in show mode, from MIDI), not an edit.
+        ShowList => json!(s.showlist.list().items),
     }
 }
 
@@ -241,6 +248,10 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         }
         // Checked again (a cue a step names may be gone since).
         Macros => crate::macros::set(s, from(v)?).map_err(|e| (400, e.message_fr))?,
+        ShowList => {
+            let list = crate::showlist::ShowList { items: from(v)?, loop_list: s.showlist.list().loop_list };
+            crate::showlist::set(s, list).map_err(|e| (400, e))?
+        }
     }
     Ok(())
 }
@@ -521,6 +532,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Executors) => exec_label(old, new),
         (_, Desks) => desk_label(old, new),
         (_, Macros) => named(list_change(old, new, "id", "name"), "Macro", "Macros", true, "créé"),
+        (_, ShowList) => "Liste de shows modifiée".into(),
     }
 }
 

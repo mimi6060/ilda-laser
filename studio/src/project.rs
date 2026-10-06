@@ -147,6 +147,9 @@ pub struct Project {
     /// T-425: they open with none. A macro whose line no longer parses
     /// opens disabled, with a warning.
     pub macros: Vec<crate::macros::Macro>,
+    /// The show player's list (`showlist.json`, T-444). Missing in projects
+    /// saved before T-444: they open with an empty list.
+    pub show_list: crate::showlist::ShowList,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -179,6 +182,7 @@ impl Default for Project {
             speed: Default::default(),
             desks: Vec::new(),
             macros: Vec::new(),
+            show_list: Default::default(),
             extra: Map::new(),
         }
     }
@@ -272,7 +276,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 15] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json"];
+const WORKING_FILES: [&str; 16] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json", "showlist.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -537,6 +541,9 @@ fn check(p: &mut Project) -> Result<()> {
     p.executors.sanitize();
     crate::desk::sanitize(&mut p.desks);
     crate::macros::sanitize(&mut p.macros);
+    // A name that can't be a show's is dropped, not refused (T-444).
+    p.show_list.items.retain(|i| valid_show_name(i.show.trim()));
+    p.show_list.sanitize();
 
     let mut shows = HashSet::new();
     for show in &mut p.timelines {
@@ -623,6 +630,7 @@ pub fn snapshot(s: &Shared) -> Project {
         speed: s.speed.clone(),
         desks: s.desks.tabs.clone(),
         macros: s.macros.list().to_vec(),
+        show_list: s.showlist.list().clone(),
         ..Project::default()
     }
 }
@@ -671,6 +679,7 @@ fn apply(s: &mut Shared, p: &Project) {
         None => s.cue_list.unload(),
     }
     s.macros.replace_in_memory(p.macros.clone());
+    s.showlist.replace_in_memory(p.show_list.clone());
     crate::usercues::sync_presets(s);
     crate::figures::refresh(s);
     // Lines checked on the registry just rebuilt (macros included): a bad
@@ -700,6 +709,7 @@ struct WorkingPaths {
     executors: Option<PathBuf>,
     desks: Option<PathBuf>,
     macros: Option<PathBuf>,
+    show_list: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
     /// Macros disabled on opening (T-425), for the open report.
@@ -723,6 +733,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         executors: s.executors.path().map(Path::to_path_buf),
         desks: s.desks.path().map(Path::to_path_buf),
         macros: s.macros.path().map(Path::to_path_buf),
+        show_list: s.showlist.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
         macro_warnings: Vec::new(),
@@ -760,6 +771,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(path) = &w.macros {
         put(path, serde_json::to_vec_pretty(&p.macros));
+    }
+    if let Some(path) = &w.show_list {
+        put(path, serde_json::to_vec_pretty(&p.show_list));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -1008,6 +1022,8 @@ fn swap_in(shared: &Mutex<Shared>, p: &Project) -> Result<Vec<String>, Reply> {
     for e in &warnings {
         log::warn!("project open: failed to write {e}");
     }
+    // The show list's times, from the shows just written (T-444).
+    crate::showlist::refresh(&mut shared.lock().unwrap());
     Ok(w.macro_warnings.iter().cloned().chain(warnings.into_iter().map(|e| format!("impossible d'écrire {e}"))).collect())
 }
 
@@ -1078,6 +1094,7 @@ fn recover(shared: &Mutex<Shared>) -> Result<Vec<String>, Reply> {
     for e in &warnings {
         log::warn!("autosave recovery: failed to write {e}");
     }
+    crate::showlist::refresh(&mut shared.lock().unwrap());
     Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
 }
 
@@ -1330,6 +1347,7 @@ mod tests {
         s.user_cues = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));
         s.cue_lists = crate::cuelist::CueListStore::load_or_create(dir.join("cuelists.json"));
         s.macros = crate::macros::Macros::load(dir.join("macros.json"));
+        s.showlist = crate::showlist::ShowListRunner::load_inline(dir.join("showlist.json"));
         s.project = ProjectState::load(dir);
         startup(&mut s);
         Mutex::new(s)
@@ -1603,6 +1621,37 @@ mod tests {
         assert!(m.steps[1].command.is_empty() && !m.steps[1].enabled);
         assert!(!s.gate.is_armed());
         drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-444: the show list is saved in the project and comes back; a
+    /// project saved before it opens with an empty list.
+    #[test]
+    fn the_show_list_is_saved_in_the_project_and_old_projects_open_empty() {
+        use crate::showlist::{ShowList, ShowListItem};
+        let dir = temp_dir("showlist");
+        let shared = studio(&dir);
+        let list = ShowList { items: vec![ShowListItem { show: "Intro".into(), follow_system_tempo: false, ..Default::default() }, ShowListItem { show: "Final".into(), wait_timecode: true, ..Default::default() }], loop_list: true };
+        crate::showlist::set(&mut shared.lock().unwrap(), list).unwrap();
+        let saved_list = shared.lock().unwrap().showlist.list().clone();
+        assert_eq!(saved_list.items.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 2]);
+        post(&shared, &dir, "save-as", json!({ "path": "Liste" })).unwrap();
+        let path = dir.join("projects/Liste.lsproj");
+        let saved = parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.show_list, saved_list);
+        crate::showlist::set(&mut shared.lock().unwrap(), ShowList::default()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "Liste.lsproj" })).unwrap();
+        assert_eq!(shared.lock().unwrap().showlist.list(), &saved_list);
+        assert_eq!(crate::load_json::<ShowList>(&dir.join("showlist.json")), saved_list, "the working copy too");
+        // Older project: no list.
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert!(old.show_list.items.is_empty() && !old.show_list.loop_list);
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("show_list");
+        std::fs::write(&path, v.to_string()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "Liste.lsproj" })).unwrap();
+        assert!(shared.lock().unwrap().showlist.list().items.is_empty());
+        assert!(!shared.lock().unwrap().gate.is_armed());
         let _ = std::fs::remove_dir_all(dir);
     }
 

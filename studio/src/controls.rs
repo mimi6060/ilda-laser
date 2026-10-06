@@ -320,6 +320,13 @@ impl ControlRegistry {
         // One button for both (the APC40's Play): pause if playing, else play.
         add("timeline.toggle".into(), "Lecture / pause de la timeline".into(), "timeline", ControlKind::Trigger, true);
         add("timeline.loop".into(), "Boucle de la timeline".into(), "timeline", ControlKind::Toggle { default: false }, true);
+        // The show player (T-444): playback only, never the arm state; the
+        // list waits for an e-stop reset like the timeline.
+        add("showlist.play".into(), "Lecteur de shows : lancer".into(), "timeline", ControlKind::Trigger, true);
+        add("showlist.stop".into(), "Lecteur de shows : arrêter".into(), "timeline", ControlKind::Trigger, true);
+        add("showlist.next".into(), "Lecteur de shows : suivant".into(), "timeline", ControlKind::Trigger, true);
+        add("showlist.prev".into(), "Lecteur de shows : précédent".into(), "timeline", ControlKind::Trigger, true);
+        add("showlist.loop".into(), "Lecteur de shows : boucler la liste".into(), "timeline", ControlKind::Toggle { default: false }, true);
 
         add("page.next".into(), "Page de cues suivante".into(), "page", ControlKind::Trigger, true);
         add("page.prev".into(), "Page de cues précédente".into(), "page", ControlKind::Trigger, true);
@@ -591,6 +598,21 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             }
         }
         "timeline.loop" => s.timeline.loop_on = truthy(input),
+        "showlist.play" => {
+            crate::showlist::play(s, None).map_err(|why| {
+                log::warn!("lecteur de shows : {why}");
+                ControlError::Refused("lecteur de shows : lancement refusé")
+            })?
+        }
+        "showlist.stop" => crate::showlist::stop(s),
+        "showlist.next" | "showlist.prev" => {
+            let r = if desc.id == "showlist.next" { crate::showlist::next(s) } else { crate::showlist::prev(s) };
+            r.map_err(|why| {
+                log::warn!("lecteur de shows : {why}");
+                ControlError::Refused("lecteur de shows : refusé")
+            })?
+        }
+        "showlist.loop" => crate::showlist::set_loop(s, truthy(input)),
         "cue.mode" => {
             s.deck.click_mode = CLICK_MODES[choice_index(&desc.kind, input)];
             s.deck.save();
@@ -1000,6 +1022,8 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "timeline.play" => json!(s.timeline.is_playing()),
         "timeline.pause" => json!(s.timeline.transport == crate::timeline::Transport::Paused),
         "timeline.loop" => json!(s.timeline.loop_on),
+        "showlist.play" => json!(s.showlist.is_active()),
+        "showlist.loop" => json!(s.showlist.list().loop_list),
         "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
         "cue.multi" => json!(s.deck.multi),
         "cue.max_active" => json!(s.deck.max_active),
@@ -1082,11 +1106,17 @@ pub fn play_preset(s: &mut Shared, id: &str) -> bool {
 /// scene/playlist; cues played by hand keep playing on top. Refused while
 /// the emergency stop is latched. Never touches the arm state.
 pub fn timeline_play(s: &mut Shared) -> Result<(), &'static str> {
+    let c = s.timeline_clock();
+    timeline_play_at(s, &c)
+}
+
+/// `timeline_play` on a given clock: the engine's frame clock, so a show
+/// the show list (T-444) starts in a frame plays in that very frame.
+pub fn timeline_play_at(s: &mut Shared, c: &crate::timeline::Clock) -> Result<(), &'static str> {
     if s.estop.is_latched() {
         return Err("arrêt d'urgence actif : réinitialiser avant de lancer la timeline");
     }
-    let c = s.timeline_clock();
-    if !s.timeline.play(&c) {
+    if !s.timeline.play(c) {
         return Err("aucun show chargé");
     }
     s.playlist = None;
@@ -1244,6 +1274,8 @@ pub fn stop_running(s: &mut Shared) {
     // The macros first (T-425): none relaunches what this stops.
     crate::macros::stop_all(s);
     stop_cues(s);
+    // The show list first (T-444): nothing chains after this stop.
+    crate::showlist::stop(s);
     s.timeline.stop();
     s.playlist = None;
     s.cue_list.top();
@@ -1852,6 +1884,44 @@ mod tests {
         apply(&mut s, "master.size", ControlInput::Value(0.5), true).unwrap();
         play(&mut s).unwrap();
         assert_eq!(s.live.size, 0.5);
+    }
+
+    /// T-444: the show player's controls exist, are open to controllers,
+    /// play the list and never arm; refused under a latched e-stop.
+    #[test]
+    fn show_list_controls_play_the_list_and_never_arm() {
+        let mut s = shared();
+        for id in ["showlist.play", "showlist.stop", "showlist.next", "showlist.prev", "showlist.loop"] {
+            let d = s.controls.get(id).unwrap_or_else(|| panic!("{id}"));
+            assert!(d.external, "{id}");
+            assert!(!crate::external::forbidden(d), "{id}");
+        }
+        let cue = cue_at(&s, 0, 0);
+        let dir = std::env::temp_dir().join(format!("laser-studio-controls-showlist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        s.shows = crate::timeline::ShowStore::new(dir.join("shows"));
+        for name in ["a", "b"] {
+            s.shows.save(&tiny_show(name, &cue)).unwrap();
+        }
+        let list = crate::showlist::ShowList { items: ["a", "b"].iter().map(|n| crate::showlist::ShowListItem { show: n.to_string(), ..Default::default() }).collect(), loop_list: false };
+        crate::showlist::set(&mut s, list).unwrap();
+        let press = |s: &mut Shared, id: &str| apply(s, id, ControlInput::Value(1.0), true);
+        press(&mut s, "showlist.play").unwrap();
+        assert!(s.timeline.is_playing() && !s.gate.is_armed());
+        assert_eq!(current(&s, s.controls.get("showlist.play").unwrap()), Some(serde_json::json!(true)));
+        press(&mut s, "showlist.next").unwrap();
+        assert_eq!(s.showlist.index(), Some(1));
+        press(&mut s, "showlist.prev").unwrap();
+        assert_eq!(s.showlist.index(), Some(0));
+        apply(&mut s, "showlist.loop", ControlInput::Norm(1.0), true).unwrap();
+        assert!(s.showlist.list().loop_list);
+        press(&mut s, "showlist.stop").unwrap();
+        assert!(!s.timeline.is_playing() && !s.showlist.is_active());
+        apply(&mut s, "safety.estop", ControlInput::Value(1.0), true).unwrap();
+        assert!(press(&mut s, "showlist.play").is_err());
+        assert!(press(&mut s, "showlist.next").is_err());
+        assert!(!s.gate.is_armed() && !s.timeline.is_playing());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

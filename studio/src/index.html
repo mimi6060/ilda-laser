@@ -723,6 +723,26 @@
   #tcStatus { margin: 0; }
   #tcStatus.warn { color: var(--warn); }
   #tcPanel .cue-bar label[hidden] { display: none; }
+  /* Lecteur de shows (T-444), Theme (T-299) tokens. */
+  #slPanel { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+  #slNow { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text); }
+  #slState.warn, #slMsg.warn { color: var(--warn); }
+  #slState.ok { color: var(--ok); }
+  #slList { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  #slList li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); font-size: 12px; }
+  #slList li.current { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  #slList li.drop { border-style: dashed; border-color: var(--accent); }
+  #slList li.bad .sl-name { color: var(--warn); }
+  #slList .sl-grip { cursor: grab; padding: 2px 6px; font-size: 14px; line-height: 1; min-width: 28px; }
+  #slList .sl-name { flex: 1 1 120px; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 8px; }
+  #slList .sl-name[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  #slList .sl-dur { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 52px; text-align: right; }
+  #slList .sl-flag { font-size: 11px; color: var(--warn); }
+  #slList label.check { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: var(--muted); font-size: 11px; }
+  #slList label.check.off { opacity: .55; }
+  #slList .sl-x { padding: 2px 8px; min-width: 28px; }
+  #slLoop[aria-pressed="true"], #slPlay.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  #slAdd { max-width: 220px; padding: 5px; }
   .tl-bar { position: relative; height: 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; overflow: hidden; }
   .tl-bar .region { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .18; }
   #tlHead { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--accent); }
@@ -2665,6 +2685,26 @@
         <label title="Post-roll sans limite : sans timecode, le show continue seul"><input type="checkbox" id="tcKeep"> Continuer</label>
       </div>
       <div class="hint" id="tcMsg"></div>
+    </section>
+    <!-- Lecteur de shows (T-444) : une liste de shows enregistrés qui s'enchaînent -->
+    <section id="slPanel" aria-labelledby="slTitle" data-help="timeline-lecteur">
+      <div class="cue-bar">
+        <span class="tl-track" id="slTitle" data-help-title>Lecteur de shows</span>
+        <span id="slNow" role="status" aria-live="polite">Arrêté</span>
+        <span id="slState" class="hint"></span>
+        <button id="slResume" hidden title="Relance l'élément en cours de la liste">Reprendre la liste</button>
+      </div>
+      <ol id="slList" aria-label="Liste de shows"></ol>
+      <div class="hint" id="slEmpty">Aucun show dans la liste : ajoutez des shows enregistrés, ils s'enchaîneront dans l'ordre.</div>
+      <div class="cue-bar">
+        <select id="slAdd" class="lock-edit" aria-label="Ajouter un show" title="Ajouter un show enregistré à la fin de la liste"><option value="">+ Ajouter un show</option></select>
+        <button id="slPlay" title="Lancer la liste depuis l'élément choisi (sinon le premier). N'arme jamais le laser.">▶ Lancer</button>
+        <button id="slPrev" title="Show précédent (Page précédente)">⏮ Précédent</button>
+        <button id="slNext" title="Show suivant (Page suivante)">⏭ Suivant</button>
+        <button id="slStop" title="Arrêter la liste et son show">■ Arrêter</button>
+        <button id="slLoop" aria-pressed="false" title="Après le dernier show, reprendre au premier">⟲ Boucler la liste</button>
+      </div>
+      <div class="hint" id="slMsg"></div>
     </section>
     <div id="tcBig" hidden role="dialog" aria-label="Grand afficheur du timecode" data-state="off">
       <div id="tcBigShow"></div>
@@ -4874,6 +4914,13 @@ function buildShortcuts() {
     { id: 'list.back', group: 'Liste de cues', codes: ['PageUp'], zones: LIVE_ZONES, show: true,
       label: 'Retour : pas précédent', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('back', 'keyboard'); } },
+    // Lecteur de shows (T-444), TIMELINE: the same remotes' keys.
+    { id: 'showlist.next', group: 'Lecteur de shows', codes: ['PageDown'], zones: ['timeline', 'tl-canvas'], show: true,
+      where: 'TIMELINE', label: 'Show suivant de la liste', when: () => SL.items.length > 0,
+      down: e => { if (!e.repeat) slAct('next'); } },
+    { id: 'showlist.prev', group: 'Lecteur de shows', codes: ['PageUp'], zones: ['timeline', 'tl-canvas'], show: true,
+      where: 'TIMELINE', label: 'Show précédent de la liste', when: () => SL.items.length > 0,
+      down: e => { if (!e.repeat) slAct('prev'); } },
     { id: 'list.top', group: 'Liste de cues', codes: ['Home'], zones: ['live'], where: 'LIVE (hors grille active)', show: true,
       label: 'Début : avant le premier pas, sortie au noir', when: () => !!cqPlayer,
       down: e => { if (!e.repeat) cqAct('top', 'keyboard'); } },
@@ -5661,6 +5708,7 @@ function applyState(f, at, pushed) {
   showTimeline(f.timeline);
   lastTimeline = f.timeline;
   showTimecode(f.timecode);
+  showShowList(f.showlist);
   showSong(f.timeline, f.timeline_audio);
   tlOnState(f.timeline, f.tempo, at);
 }
@@ -9563,6 +9611,166 @@ function showTimeline(t) {
   $('tlRegion').hidden = !r;
   if (r) { $('tlRegion').style.left = pct(r[0]); $('tlRegion').style.width = `calc(${pct(r[1])} - ${pct(r[0])})`; }
 }
+// ---------- Lecteur de shows (T-444) ----------
+// The list (GET /api/showlist, fetched again when its `rev` changes) and
+// its state with every frame (`f.showlist`). Editing the list is an edit
+// (locked in show mode, in the history); Lancer / Suivant / Précédent /
+// Arrêter / Boucler are playback. Nothing here ever arms the laser.
+const SL = { items: [], loop: false, rev: -1, sel: null, state: null, drag: null, loading: false };
+const SL_TRANSPORT_FR = { stopped: 'Arrêté', playing: 'En cours', waiting: 'En attente du timecode', suspended: 'Suspendu' };
+function slClock(s, approx) {
+  if (s == null || !isFinite(s)) return '–';
+  const t = Math.max(0, Math.round(s)), h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, sec = t % 60;
+  const p = v => String(v).padStart(2, '0');
+  return (approx ? '≈ ' : '') + (h ? `${h}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`);
+}
+async function loadShowList() {
+  if (SL.loading) return;
+  SL.loading = true;
+  try { takeShowList(await apiJson('GET', '/api/showlist', undefined, { quiet: true })); } catch { /* the next state tries again */ }
+  finally { SL.loading = false; }
+}
+function takeShowList(v) {
+  SL.items = v.items || [];
+  SL.loop = !!v.loop_list;
+  SL.rev = v.state ? v.state.rev : -1;
+  if (SL.sel != null && SL.sel >= SL.items.length) SL.sel = null;
+  renderShowList();
+  showShowList(v.state);
+}
+function slBody(items) {
+  return { items: items.map(i => ({ id: i.id, show: i.show, follow_system_tempo: i.follow_system_tempo, wait_timecode: i.wait_timecode })), loop_list: SL.loop };
+}
+async function saveShowList(items) {
+  try { takeShowList(await apiJson('POST', '/api/showlist', slBody(items))); } catch { loadShowList(); }
+}
+function renderShowList() {
+  const ol = $('slList');
+  const cur = SL.state && SL.state.transport !== 'stopped' ? SL.state.index : null;
+  ol.innerHTML = SL.items.map((it, i) => {
+    const bad = it.problem ? ` <span class="sl-flag" title="${esc(it.problem.message || '')}">${esc(it.problem.kind)}</span>` : '';
+    const sel = SL.sel === i;
+    return `<li data-i="${i}" class="${i === cur ? 'current' : ''}${it.problem ? ' bad' : ''}">
+      <button class="sl-grip lock-edit" draggable="true" data-i="${i}" aria-label="Déplacer « ${esc(it.show)} » (flèches haut / bas)" title="Glisser pour réordonner (ou flèches haut / bas)">⋮⋮</button>
+      <button class="sl-name" data-i="${i}" aria-pressed="${sel}" title="Choisir : « Lancer » part de ce show">${i + 1}. ${esc(it.show)}</button>${bad}
+      <span class="sl-dur" title="Durée du show${it.approx ? ' (show en temps : au tempo courant)' : ''}">${slClock(it.duration_s, it.approx)}</span>
+      <label class="check lock-edit" title="Coché : le show joue sur l'horloge de tempo en cours. Décoché : le tempo passe au BPM du show (source Manuel) à son démarrage."><input type="checkbox" data-i="${i}" data-opt="follow_system_tempo"${it.follow_system_tempo ? ' checked' : ''}> Suivre le tempo du système</label>
+      <label class="check lock-edit" title="Le show est chargé et attend que le timecode entrant (TC-IN) atteigne sa plage"><input type="checkbox" data-i="${i}" data-opt="wait_timecode"${it.wait_timecode ? ' checked' : ''}> Attendre le timecode</label>
+      <button class="sl-x lock-edit" data-dup="${i}" aria-label="Dupliquer « ${esc(it.show)} »" title="Dupliquer">⧉</button>
+      <button class="sl-x lock-edit" data-del="${i}" aria-label="Retirer « ${esc(it.show)} » de la liste" title="Retirer de la liste">✕</button>
+    </li>`;
+  }).join('');
+  $('slEmpty').hidden = SL.items.length > 0;
+  $('slLoop').setAttribute('aria-pressed', SL.loop);
+}
+function showShowList(st) {
+  if (!st) return;
+  SL.state = st;
+  if (st.rev !== SL.rev) loadShowList();
+  const n = SL.items.length, i = st.index;
+  const it = i != null ? SL.items[i] : null;
+  let now = SL_TRANSPORT_FR[st.transport] || st.transport;
+  if (st.transport !== 'stopped' && it) {
+    now = `${now} : ${i + 1}/${n} — ${it.show} · ${slClock(st.elapsed_s, st.approx)} écoulé · ${slClock(st.remaining_s, st.approx)} restant · liste : ${slClock(st.list_remaining_s, st.approx)}`;
+  } else if (n) {
+    now = `${now} · liste : ${slClock(st.list_remaining_s, st.approx)}`;
+  }
+  $('slNow').textContent = now;
+  let label = '', cls = '';
+  if (st.transport === 'suspended') { label = 'Suspendu : un show a été lancé à la main'; cls = 'warn'; }
+  else if (st.preparing && st.transport !== 'stopped') label = 'Préparation…';
+  else if (st.next_ready && st.transport !== 'stopped') { label = 'Prêt : ' + (SL.items[st.next_index] ? SL.items[st.next_index].show : 'suivant'); cls = 'ok'; }
+  $('slState').textContent = label;
+  $('slState').className = 'hint ' + cls;
+  $('slResume').hidden = st.transport !== 'suspended';
+  $('slMsg').textContent = st.problem || '';
+  $('slMsg').className = 'hint' + (st.problem ? ' warn' : '');
+  $('slPlay').classList.toggle('active', st.transport === 'playing' || st.transport === 'waiting');
+  $('slLoop').setAttribute('aria-pressed', st.loop_list);
+  document.querySelectorAll('#slList li').forEach(li => li.classList.toggle('current', st.transport !== 'stopped' && +li.dataset.i === i));
+}
+async function slAct(what, body) {
+  try { takeShowList(await apiJson('POST', '/api/showlist/' + what, body || {}, { source: 'Lecteur de shows' })); } catch { /* said by api() */ }
+}
+$('slPlay').addEventListener('click', () => slAct('play', SL.sel != null ? { index: SL.sel } : {}));
+$('slResume').addEventListener('click', () => slAct('play', {}));
+$('slNext').addEventListener('click', () => slAct('next'));
+$('slPrev').addEventListener('click', () => slAct('prev'));
+$('slStop').addEventListener('click', () => slAct('stop'));
+$('slLoop').addEventListener('click', () => slAct('loop', { on: !SL.loop }));
+$('slAdd').addEventListener('focus', async () => {
+  try { shows = await apiJson('GET', '/api/shows'); } catch { return; }
+  fillShowSelect($('slAdd'), '+ Ajouter un show', '');
+});
+$('slAdd').addEventListener('change', () => {
+  const name = $('slAdd').value;
+  $('slAdd').value = '';
+  if (name) saveShowList([...SL.items, { id: 0, show: name, follow_system_tempo: true, wait_timecode: false }]);
+});
+function slMove(from, to) {
+  if (from === to || to < 0 || to >= SL.items.length) return;
+  const items = SL.items.slice();
+  const [it] = items.splice(from, 1);
+  items.splice(to, 0, it);
+  if (SL.sel === from) SL.sel = to;
+  saveShowList(items);
+}
+$('slList').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.del != null) {
+    const i = +b.dataset.del;
+    if (SL.sel === i) SL.sel = null;
+    saveShowList(SL.items.filter((_, k) => k !== i));
+  } else if (b.dataset.dup != null) {
+    const i = +b.dataset.dup;
+    const items = SL.items.slice();
+    items.splice(i + 1, 0, { ...SL.items[i], id: 0 });
+    saveShowList(items);
+  } else if (b.classList.contains('sl-name')) {
+    const i = +b.dataset.i;
+    SL.sel = SL.sel === i ? null : i;
+    document.querySelectorAll('#slList .sl-name').forEach(x => x.setAttribute('aria-pressed', +x.dataset.i === SL.sel));
+  }
+});
+$('slList').addEventListener('change', e => {
+  const c = e.target.closest('input[data-opt]');
+  if (!c) return;
+  const items = SL.items.map((it, k) => k === +c.dataset.i ? { ...it, [c.dataset.opt]: c.checked } : it);
+  saveShowList(items);
+});
+$('slList').addEventListener('keydown', e => {
+  const g = e.target.closest('.sl-grip');
+  if (!g || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || e.metaKey || e.altKey || e.ctrlKey) return;
+  e.preventDefault();
+  slMove(+g.dataset.i, +g.dataset.i + (e.key === 'ArrowUp' ? -1 : 1));
+});
+$('slList').addEventListener('dragstart', e => {
+  const g = e.target.closest('.sl-grip');
+  if (!g) return;
+  SL.drag = +g.dataset.i;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(SL.drag));
+});
+$('slList').addEventListener('dragover', e => {
+  const li = e.target.closest('li');
+  if (SL.drag == null || !li) return;
+  e.preventDefault();
+  document.querySelectorAll('#slList li.drop').forEach(x => x.classList.remove('drop'));
+  li.classList.add('drop');
+});
+$('slList').addEventListener('drop', e => {
+  const li = e.target.closest('li');
+  document.querySelectorAll('#slList li.drop').forEach(x => x.classList.remove('drop'));
+  if (SL.drag == null || !li) return;
+  e.preventDefault();
+  const from = SL.drag;
+  SL.drag = null;
+  slMove(from, +li.dataset.i);
+});
+$('slList').addEventListener('dragend', () => { SL.drag = null; document.querySelectorAll('#slList li.drop').forEach(x => x.classList.remove('drop')); });
+loadShowList();
+
 // ---------- Timecode entrant (T-168) ----------
 // The summary comes with every frame (`f.timecode`); the settings, MIDI
 // ports and audio channels from GET /api/timecode when they may have
