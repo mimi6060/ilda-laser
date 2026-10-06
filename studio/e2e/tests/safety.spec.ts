@@ -328,7 +328,11 @@ test('a soft edge ramps the light around an Atténuer zone; narrowing it asks fi
   await page.locator('#sfLoosenCancel').click();
   await page.screenshot({ path: 'test-results/safety-soft-zone-dim.png' });
   // A Masquer zone has no soft edge controls.
+  // Masking it removes the soft edge around it, which lights that band:
+  // a loosening, confirmed (T-260).
   await page.locator('#sfZones .zkind').selectOption('blank');
+  await expect(page.locator('#sfLoosenText')).toContainText('le bord doux autour disparaît');
+  await page.locator('#sfLoosenOk').click();
   await expect.poll(async () => (await safety()).zones[0].kind).toBe('blank');
   await expect(page.locator('#sfZones .zsoft')).toBeHidden();
   await page.screenshot({ path: 'test-results/safety-soft-zone.png' });

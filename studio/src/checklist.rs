@@ -433,7 +433,7 @@ impl Checklist {
 /// missing (a list saved before them, or edited): the ShowNET ones stay for
 /// ShowNET outputs only, always shown there; the audience ones show when
 /// the show scans the audience.
-fn normalise(mut config: ChecklistConfig) -> Result<ChecklistConfig> {
+pub(crate) fn normalise(mut config: ChecklistConfig) -> Result<ChecklistConfig> {
     if config.items.is_empty() {
         bail!("La liste de contrôle doit avoir au moins un élément");
     }

@@ -100,6 +100,8 @@ pub struct Inputs<'a> {
     pub projector: &'a ProjectorInfo,
     pub checklist: &'a Checklist,
     pub hold_to_run: bool,
+    /// The active safety profile allows audience scanning (T-260).
+    pub venue_allows: bool,
 }
 
 /// The conditions to unlock audience scanning, in the order the wizard
@@ -145,6 +147,13 @@ pub fn conditions(i: &Inputs) -> Vec<Condition> {
     };
     let profile = i.safety.dwell.profile;
     vec![
+        Condition {
+            id: "venue_profile",
+            label_fr: "Profil de sécurité du lieu : balayage public autorisé",
+            ok: i.venue_allows,
+            detail_fr: if i.venue_allows { "Autorisé par le profil actif".into() } else { "Non autorisé par le profil actif (Profil de sécurité, en haut de la section Sécurité)".into() },
+            link: "sfpSelect",
+        },
         Condition { id: "dim_zone", label_fr: "Zone Public atténuée (90 % recommandé, 50 % au moins)", ok: best.is_some(), detail_fr: zone_detail, link: "sfZones" },
         Condition { id: "projector", label_fr: "Fiche projecteur complète, anti-défaut de balayage matériel déclaré", ok: sheet_complete(p), detail_fr: sheet_detail, link: "pjName" },
         Condition {
@@ -296,7 +305,7 @@ mod tests {
     }
 
     fn conds(safety: &SafetySettings, projector: &ProjectorInfo, checklist: &Checklist, hold_to_run: bool) -> Vec<Condition> {
-        conditions(&Inputs { safety, projector, checklist, hold_to_run })
+        conditions(&Inputs { safety, projector, checklist, hold_to_run, venue_allows: true })
     }
 
     #[test]
@@ -385,7 +394,7 @@ mod tests {
         assert!(!st.is_scanning());
         let detail = st.unlock(&c, "  je prends   la responsabilité ", false).unwrap();
         assert!(st.is_scanning());
-        assert_eq!(detail["conditions"].as_array().unwrap().len(), 5, "the log lists every condition");
+        assert_eq!(detail["conditions"].as_array().unwrap().len(), 6, "the log lists every condition");
         assert!(st.unlocked_at().is_some());
         assert_eq!(st.view()["mode"], "scanning");
         assert!(st.lock());

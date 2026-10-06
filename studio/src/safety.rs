@@ -355,6 +355,12 @@ impl SafetySettings {
                 Some(n) => {
                     more(z.audience && !n.audience, format!("Zone « {} » : n'est plus une zone Public", z.name));
                     more(z.kind == ZoneKind::Blank && n.kind == ZoneKind::Dim, format!("Zone « {} » : masquée → atténuée", z.name));
+                    // A soft edge darkens around the zone (T-446); a Blank
+                    // zone has none, so masking it lights that band (T-260).
+                    more(
+                        z.kind == ZoneKind::Dim && n.kind == ZoneKind::Blank && z.soft_feather() > 0.0,
+                        format!("Zone « {} » : atténuée → masquée, le bord doux autour disparaît", z.name),
+                    );
                     more(
                         z.kind == ZoneKind::Dim && n.kind == ZoneKind::Dim && n.level > z.level,
                         format!("Zone « {} » : luminosité {:.0} % → {:.0} %", z.name, z.level * 100.0, n.level * 100.0),
@@ -1127,7 +1133,10 @@ mod tests {
         let loosens = |z: Zone| base.loosenings(&with(z));
         assert!(loosens(dim(1, 0.5, 0.3, g(0.2))).is_empty(), "wider soft edge tightens");
         assert!(loosens(dim(1, 0.5, 0.2, g(0.1))).is_empty(), "lower arrival tightens");
-        assert!(loosens(Zone { kind: ZoneKind::Blank, ..dim(1, 0.5, 0.0, None) }).is_empty(), "Blank tightens");
+        // Masked: darker inside, but the soft edge around it goes (T-260).
+        assert!(loosens(Zone { kind: ZoneKind::Blank, ..dim(1, 0.5, 0.0, None) })[0].contains("bord doux"), "the soft edge goes");
+        let hard = SafetySettings { zones: vec![dim(1, 0.5, 0.0, None)], ..Default::default() };
+        assert!(hard.loosenings(&with(Zone { kind: ZoneKind::Blank, ..dim(1, 0.5, 0.0, None) })).is_empty(), "Blank tightens a hard-edged zone");
         assert_eq!(loosens(dim(1, 0.5, 0.08, g(0.2))), vec!["Zone « Public » : bord doux 10 % → 4 %"]);
         assert_eq!(loosens(dim(1, 0.5, 0.2, g(0.5))), vec!["Zone « Public » : luminosité à l'arrivée 20 % → 50 %"]);
         let moved = Zone { gradient: Some(ZoneGradient { from: [0.0, -0.3], to: [0.0, -1.0], level_to: 0.2 }), ..dim(1, 0.5, 0.2, None) };
@@ -1638,6 +1647,22 @@ mod tests {
             lim.finish(&mut f, t, &cfg);
             assert_eq!(level(&f), level(&input), "t = {t}");
         }
+    }
+
+    /// Found by the profile property test (T-260): masking a Dim zone that
+    /// has a soft edge lights the band around it, so it is a loosening.
+    #[test]
+    fn masking_a_soft_dim_zone_is_a_loosening() {
+        let dim = Zone { id: 1, name: "Bord".into(), kind: ZoneKind::Dim, level: 0.5, feather: 0.1, points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], ..Default::default() };
+        let cur = SafetySettings { zones: vec![dim.clone()], ..Default::default() };
+        let masked = SafetySettings { zones: vec![Zone { kind: ZoneKind::Blank, ..dim.clone() }], ..Default::default() };
+        // Just outside the zone, in its soft edge: brighter once masked.
+        assert!(masked.mask().factor(0.55, 0.0) > cur.mask().factor(0.55, 0.0));
+        assert!(cur.loosenings(&masked).iter().any(|m| m.contains("bord doux")));
+        // Without a soft edge, masking only tightens.
+        let hard = SafetySettings { zones: vec![Zone { feather: 0.0, ..dim.clone() }], ..Default::default() };
+        let hard_masked = SafetySettings { zones: vec![Zone { kind: ZoneKind::Blank, feather: 0.0, ..dim }], ..Default::default() };
+        assert!(hard.loosenings(&hard_masked).is_empty());
     }
 
     fn level_max(frame: &[Point]) -> f32 {
