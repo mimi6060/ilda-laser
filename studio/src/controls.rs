@@ -302,6 +302,15 @@ impl ControlRegistry {
         // ahead. Only what is drawn; never when a frame goes out.
         let max = tempo::MAX_OUTPUT_OFFSET_MS;
         add("tempo.output_offset".into(), "Décalage de sortie".into(), "tempo", cont(-max, max, 0.0, Unit::Ms), true);
+        // Speed groups and the *Cadence* (T-419): timing only, never a
+        // level or the gate; the strobe and flash limiters keep the last word.
+        for n in 1..=crate::speed::SPEED_GROUPS {
+            let name = crate::speed::GROUP_NAMES[n];
+            add(format!("speed.{n}.mult"), format!("Vitesse {name} : multiple"), "tempo", ControlKind::Choice { options: crate::speed::MULT_LABELS.to_vec(), default: 2 }, true);
+            add(format!("speed.{n}.free"), format!("Vitesse {name} : BPM libre"), "tempo", ControlKind::Toggle { default: false }, true);
+            add(format!("speed.{n}.bpm"), format!("Vitesse {name} : BPM"), "tempo", cont(tempo::MIN_BPM as f32, tempo::MAX_BPM as f32, 120.0, Unit::Bpm), true);
+        }
+        add("master.rate".into(), "Cadence des fondus".into(), "tempo", cont(crate::speed::MIN_RATE, crate::speed::MAX_RATE, 1.0, Unit::Percent), true);
 
         add("timeline.play".into(), "Lecture de la timeline".into(), "timeline", ControlKind::Trigger, true);
         add("timeline.pause".into(), "Pause de la timeline".into(), "timeline", ControlKind::Trigger, true);
@@ -515,6 +524,10 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "tempo.resync" => {
             let t = s.now_s();
             s.tempo.resync(t);
+            // The multiple speed groups come back on the "one" too (T-419).
+            let (bar_beat, t_eff) = (s.tempo.beat_at(t), s.tempo.effect_t(t));
+            s.speed.resync(bar_beat, t_eff, s.tempo.beats_per_bar);
+            s.speed_dirty = true;
         }
         "tempo.downbeat_accept" => {
             if !s.tempo.accept_downbeat() {
@@ -608,6 +621,11 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "fx.stop" => s.fx.stop_all(),
         "fx.dest" => s.fx.set_dest(crate::fx::DESTS[choice_index(&desc.kind, input)]),
         "fx.mode" => s.fx.set_click(crate::fx::CLICKS[choice_index(&desc.kind, input)]),
+        "master.rate" => {
+            let v = finite(input)?;
+            s.speed.set_rate(native(crate::speed::MIN_RATE, crate::speed::MAX_RATE, v)).map_err(ControlError::Refused)?;
+            s.speed_dirty = true;
+        }
         "page.next" => s.cue_page = (s.cue_page + 1) % s.grid.page_count(),
         "page.prev" => s.cue_page = (s.cue_page + s.grid.page_count() - 1) % s.grid.page_count(),
         other => {
@@ -619,6 +637,21 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
                     }
                     FxParam::Action => s.fx.set_action(line, value(input)),
                 }
+                return Ok(());
+            }
+            if let Some((n, param)) = speed_control(other) {
+                let input = finite(input)?;
+                let (beat, t, bpb) = s.speed_clock();
+                let r = match param {
+                    "mult" => {
+                        let mult = crate::speed::SPEED_MULTS[choice_index(&desc.kind, input)];
+                        s.speed.set_mode(n, crate::speed::SpeedMode::Multiple { mult }, beat, t, bpb)
+                    }
+                    "free" => s.speed.set_free(n, truthy(input), s.tempo.bpm, beat, t, bpb),
+                    _ => s.speed.set_mode(n, crate::speed::SpeedMode::FreeBpm { bpm: value(input) as f64 }, beat, t, bpb),
+                };
+                r.map_err(ControlError::Refused)?;
+                s.speed_dirty = true;
                 return Ok(());
             }
             if let Some(r) = crate::executors::apply(s, other, input, Some(src.id()), source) {
@@ -673,6 +706,21 @@ fn fx_control(id: &str) -> Option<(usize, FxParam)> {
         cell => FxParam::Cell(cell.parse::<usize>().ok()?.checked_sub(1)?),
     };
     Some((line, param))
+}
+
+/// "speed.<n>.<param>" → (n, param), for registered ids only (T-419).
+fn speed_control(id: &str) -> Option<(u8, &str)> {
+    let (n, param) = id.strip_prefix("speed.")?.split_once('.')?;
+    Some((n.parse().ok()?, param))
+}
+
+/// An input that is a number (T-419 refuses NaN and infinities rather
+/// than clamping them to an end of the range).
+fn finite(input: ControlInput) -> Result<ControlInput, ControlError> {
+    match input {
+        ControlInput::Value(v) | ControlInput::Norm(v) if !v.is_finite() => Err(ControlError::Refused("valeur invalide")),
+        i => Ok(i),
+    }
 }
 
 /// "group.<n>.master" → n (1-based), for registered ids only.
@@ -911,6 +959,17 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "tempo.bpm" => json!(s.tempo.bpm),
         "tempo.auto" => json!(s.tempo.source == tempo::TempoSource::Audio),
         "tempo.output_offset" => json!(s.tempo.output_offset_ms()),
+        "master.rate" => json!(s.speed.rate()),
+        id if id.starts_with("speed.") => {
+            let (n, param) = speed_control(id)?;
+            let mode = s.speed.target(n)?;
+            match (param, mode) {
+                ("mult", crate::speed::SpeedMode::Multiple { mult }) => json!(crate::speed::SPEED_MULTS.iter().position(|&m| m == mult)),
+                ("mult", _) => serde_json::Value::Null,
+                ("free", mode) => json!(matches!(mode, crate::speed::SpeedMode::FreeBpm { .. })),
+                (_, _) => json!(s.speed.bpm(n, s.tempo.bpm)),
+            }
+        }
         "timeline.play" => json!(s.timeline.is_playing()),
         "timeline.pause" => json!(s.timeline.transport == crate::timeline::Transport::Paused),
         "timeline.loop" => json!(s.timeline.loop_on),
@@ -1172,7 +1231,7 @@ fn with_deck(s: &mut Shared, f: impl FnOnce(&mut CueDeck, cues::At)) {
 /// The deck's clock at `t` (seconds on the studio clock).
 fn deck_clock(s: &Shared, t: f64) -> cues::At {
     // The effects' beat (T-246): a launch on the beat lands with the light.
-    cues::At { s: t, beat: s.tempo.effect_beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar }
+    cues::At { s: t, beat: s.tempo.effect_beat_at(t), bpm: s.tempo.bpm, beats_per_bar: s.tempo.beats_per_bar, rate: s.speed.rate() }
 }
 
 /// `with_deck` at a given time (the engine's frame clock).

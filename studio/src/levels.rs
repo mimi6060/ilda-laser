@@ -453,11 +453,19 @@ impl FrameLevels {
         self.layers[(layer.clamp(1, crate::layers::LAYER_COUNT as u8) - 1) as usize].as_ref()
     }
 
-    /// Advances the layers' rotations (once a frame, all their looks share it).
-    pub fn advance_layers(&self, states: &mut [LiveState; crate::layers::LAYER_COUNT], t: f64, clock: &crate::engine::BeatClock, frozen: Option<(f64, f64)>, dt: f32) {
-        for (st, m) in states.iter_mut().zip(&self.layers) {
+    /// Advances the layers' rotations (once a frame, all their looks share
+    /// it), each on its speed group's clock (T-419), « Figer » included.
+    pub fn advance_layers(
+        &self,
+        states: &mut [LiveState; crate::layers::LAYER_COUNT],
+        t: f64,
+        clocks: &[crate::engine::BeatClock; crate::layers::LAYER_COUNT],
+        frozen: &[Option<(f64, f64)>; crate::layers::LAYER_COUNT],
+        dt: f32,
+    ) {
+        for (((st, m), clock), frozen) in states.iter_mut().zip(&self.layers).zip(clocks).zip(frozen) {
             st.set_clock(t, clock.beat);
-            st.freeze_colours(frozen);
+            st.freeze_colours(*frozen);
             if let Some(m) = m {
                 st.advance(m, dt, clock.bpm, clock.beats_per_bar);
             }

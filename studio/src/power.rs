@@ -1092,6 +1092,7 @@ mod tests {
                     phase: r(360 + k),
                     offset: 2.0 * r(370 + k) - 1.0,
                     enabled: true,
+                    speed_group: 0,
                 })
                 .collect();
             let mut animator = Animator::default();

@@ -137,6 +137,9 @@ pub struct Project {
     /// The executor bank's assignments (`executors.json`, T-418). Missing
     /// in projects saved before T-418: they open with one empty page.
     pub executors: ExecutorBank,
+    /// Speed groups A..D and the *Cadence* (T-419). Missing in projects
+    /// saved before T-419: every group at ×1, *Cadence* 100 %.
+    pub speed: crate::tempo::SpeedGroups,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -166,6 +169,7 @@ impl Default for Project {
             scan_presets: Vec::new(),
             group_masters: Vec::new(),
             executors: ExecutorBank::default(),
+            speed: Default::default(),
             extra: Map::new(),
         }
     }
@@ -605,6 +609,7 @@ pub fn snapshot(s: &Shared) -> Project {
         scan_presets: s.scan_presets.user().to_vec(),
         group_masters: s.projection.masters(),
         executors: s.executors.bank.clone(),
+        speed: s.speed.clone(),
         ..Project::default()
     }
 }
@@ -630,6 +635,10 @@ fn apply(s: &mut Shared, p: &Project) {
     // written by the engine within the second.
     s.projection.set_masters(&p.group_masters);
     s.groups_dirty = true;
+    // Speed groups (T-419): each group changes from where its beat is.
+    let (beat, t_eff, bpb) = s.speed_clock();
+    s.speed.replace(&p.speed, beat, t_eff, bpb);
+    s.speed_dirty = true;
     s.lfos.replace_in_memory(p.lfos.clone());
     s.routes.replace_in_memory(p.audio_routes.clone(), &s.controls);
     s.palettes.replace_in_memory(p.palettes.clone());
@@ -1377,6 +1386,45 @@ mod tests {
         // The working copy on disk is the project's too.
         let on_disk: Vec<Scene> = serde_json::from_str(&std::fs::read_to_string(dir.join("scenes.json")).unwrap()).unwrap();
         assert_eq!(on_disk.len(), 2);
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-419: the speed groups and the *Cadence* travel with the project;
+    /// an older project opens with every group at ×1 and 100 %, and
+    /// every cell, layer and modulator in the default group.
+    #[test]
+    fn speed_groups_are_saved_in_the_project_and_old_projects_open_at_x1() {
+        use crate::speed::SpeedMode;
+        let dir = temp_dir("speed-groups");
+        let shared = studio(&dir);
+        {
+            let mut s = shared.lock().unwrap();
+            s.speed.change_on_bar = false;
+            s.speed.set_mode(1, SpeedMode::Multiple { mult: 0.5 }, 0.0, 0.0, 4).unwrap();
+            s.speed.set_mode(4, SpeedMode::FreeBpm { bpm: 90.0 }, 0.0, 0.0, 4).unwrap();
+            s.speed.set_rate(1.5).unwrap();
+        }
+        post(&shared, &dir, "save-as", json!({ "path": "Vitesses" })).unwrap();
+        let saved = parse(&std::fs::read_to_string(dir.join("projects/Vitesses.lsproj")).unwrap()).unwrap();
+        assert_eq!(saved.speed.groups[0], SpeedMode::Multiple { mult: 0.5 });
+        shared.lock().unwrap().speed = Default::default();
+        post(&shared, &dir, "open", json!({ "path": "Vitesses.lsproj" })).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.speed.groups[3], SpeedMode::FreeBpm { bpm: 90.0 });
+            assert_eq!(s.speed.rate(), 1.5);
+        }
+        let old: Project = serde_json::from_str(r#"{"grid":{"slots":{"a":{"layer":2}}},"layers":{"layers":[{"dimmer":0.5},{},{},{}]},"lfos":[{"target":"master.size"}]}"#).unwrap();
+        assert_eq!(old.speed, crate::tempo::SpeedGroups::default());
+        assert_eq!(old.grid.slot("a").speed_group, None);
+        assert!(old.layers.layers.iter().all(|l| l.speed_group == 0));
+        assert!(old.lfos.iter().all(|m| m.speed_group == 0));
+        let mut s = shared.lock().unwrap();
+        apply(&mut s, &old);
+        assert!(s.speed.groups.iter().all(|g| *g == SpeedMode::Multiple { mult: 1.0 }));
+        assert_eq!(s.speed.rate(), 1.0);
+        assert!(!s.gate.is_armed());
         drop(s);
         let _ = std::fs::remove_dir_all(dir);
     }
