@@ -88,6 +88,7 @@ mod speed;
 mod scan;
 mod scenes;
 mod record;
+mod remote;
 mod sdbank;
 mod sheets;
 mod tempo;
@@ -156,6 +157,11 @@ struct Cli {
     /// Port for the browser UI.
     #[arg(long, default_value_t = 8080)]
     port: u16,
+    /// Address the tablet remote (T-428) listens on once the operator
+    /// allows it from RÉGLAGES: every interface by default. The browser
+    /// UI itself always stays on 127.0.0.1.
+    #[arg(long, value_name = "IP", default_value = "0.0.0.0")]
+    remote_bind: std::net::IpAddr,
     /// Where scenes and calibration are saved.
     #[arg(long, default_value = "studio-data")]
     data_dir: PathBuf,
@@ -575,6 +581,9 @@ pub struct Shared {
     /// faders and XY pads the operator lays out. Content (projects,
     /// history); playing it goes through the control registry.
     pub desks: desk::Desks,
+    /// The tablet remote (remote.rs, T-428): off at every start; only
+    /// its port is saved (`remote.json`).
+    pub remote: remote::Remote,
 }
 
 impl Shared {
@@ -1470,6 +1479,7 @@ fn startup_state(cli: &Cli) -> Shared {
         prepared: Default::default(),
         executors: executors::Executors::load(cli.data_dir.join("executors.json")),
         desks: desk::Desks::load(cli.data_dir.join("desks.json")),
+        remote: remote::Remote::load(cli.data_dir.join("remote.json"), cli.remote_bind),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);

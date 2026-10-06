@@ -19,8 +19,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Every source, in `to_u8` order.
-const ALL_SOURCES: [ArmSource; 8] =
-    [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System, ArmSource::Network, ArmSource::Osc, ArmSource::Dmx];
+const ALL_SOURCES: [ArmSource; 9] =
+    [ArmSource::Ui, ArmSource::Keyboard, ArmSource::Midi, ArmSource::Api, ArmSource::System, ArmSource::Network, ArmSource::Osc, ArmSource::Dmx, ArmSource::Remote];
 
 /// Who asked for an arm or disarm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -38,6 +38,8 @@ pub enum ArmSource {
     /// A DMX input, Art-Net or sACN (T-406/T-408): only as the source of a
     /// stop, for display.
     Dmx,
+    /// The tablet remote (T-428): may stop, never arms.
+    Remote,
 }
 
 impl ArmSource {
@@ -52,6 +54,7 @@ impl ArmSource {
             ArmSource::Network => "network",
             ArmSource::Osc => "osc",
             ArmSource::Dmx => "dmx",
+            ArmSource::Remote => "remote",
         }
     }
 
@@ -65,6 +68,7 @@ impl ArmSource {
             ArmSource::Network => "réseau (OSC/Art-Net)",
             ArmSource::Osc => "OSC",
             ArmSource::Dmx => "DMX",
+            ArmSource::Remote => "télécommande",
         }
     }
 
@@ -79,6 +83,7 @@ impl ArmSource {
             "network" => ArmSource::Network,
             "osc" => ArmSource::Osc,
             "dmx" => ArmSource::Dmx,
+            "remote" => ArmSource::Remote,
             _ => ArmSource::Api,
         }
     }
@@ -566,7 +571,7 @@ mod tests {
     fn midi_opt_in_still_obeys_the_estop_and_interlocks() {
         let mut gate = ArmGate::default();
         assert!(gate.request_arm(ArmSource::Midi).is_err(), "plain MIDI arming is always refused");
-        for src in [ArmSource::Network, ArmSource::Osc, ArmSource::Dmx, ArmSource::System] {
+        for src in [ArmSource::Network, ArmSource::Osc, ArmSource::Dmx, ArmSource::Remote, ArmSource::System] {
             assert!(gate.request_arm(src).is_err(), "{src:?} never arms");
         }
         let estop = EStop::default();

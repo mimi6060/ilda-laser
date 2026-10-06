@@ -139,6 +139,7 @@ pub fn shared() -> Shared {
         prepared: Default::default(),
         executors: crate::executors::Executors::in_memory(),
         desks: crate::desk::Desks::in_memory(),
+        remote: crate::remote::Remote::in_memory(),
     }
 }
 

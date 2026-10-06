@@ -96,6 +96,7 @@ impl From<ArmSource> for ControlSource {
             ArmSource::Network => ControlSource::Network,
             ArmSource::Osc => ControlSource::Osc,
             ArmSource::Dmx => ControlSource::Dmx,
+            ArmSource::Remote => ControlSource::Remote,
         }
     }
 }
@@ -106,6 +107,7 @@ impl From<crate::external::SourceKind> for ControlSource {
             crate::external::SourceKind::Dmx => ControlSource::Dmx,
             crate::external::SourceKind::Osc => ControlSource::Osc,
             crate::external::SourceKind::Timecode => ControlSource::Timeline,
+            crate::external::SourceKind::Remote => ControlSource::Remote,
         }
     }
 }
