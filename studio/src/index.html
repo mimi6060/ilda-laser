@@ -327,6 +327,15 @@
   #figLib .figitem { display: flex; gap: 4px; }
   #figLib .figitem .n { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #figLib .figitem .del { flex: none; padding: 4px 8px; color: var(--muted); }
+  /* Parties d'une figure (T-441) */
+  #figParts .figpart { display: flex; gap: 4px; align-items: center; margin-top: 4px; border-radius: 6px; }
+  #figParts .figpart.hover { outline: 1px solid var(--accent); }
+  #figParts .figpart label { margin: 0; flex: none; color: var(--muted); }
+  #figParts .figpart input { flex: 1; min-width: 0; }
+  #figParts .figpart small { flex: none; color: var(--muted); white-space: nowrap; }
+  #figParts .figpart button { flex: none; padding: 4px 6px; font-size: 11px; }
+  #impParts { margin-top: 6px; }
+  #impParts label.check { margin: 2px 0; }
   #figStats.bad { color: var(--warn); }
   #figMsg.err { color: var(--danger); }
   /* Import (T-297): a modal over the editor. */
@@ -2347,6 +2356,10 @@
       </div>
       <div id="directCueRow" hidden>
         <div class="row dscope"><label>Cue <select id="directCue"></select></label></div>
+        <div class="row dscope" id="directPartRow" hidden>
+          <label for="directPart">Cible</label>
+          <select id="directPart" title="Une partie de la figure : Taille, Position, Rotation et Luminosité la règlent seule (enregistré dans la case du cue)"></select>
+        </div>
         <div class="row dscope">
           <button id="directStore" class="lock-edit" title="Copie les réglages de ce cue dans sa case : il les reprend à chaque lancement">Enregistrer dans le cue</button>
           <label class="check lock-edit" title="Ajoute aussi les réglages du maître (tailles multipliées, positions et angles additionnés)"><input type="checkbox" id="directStoreMaster"> avec le maître</label>
@@ -3369,10 +3382,13 @@
       <label for="figColor">Couleur (nouveaux tracés et sélection)</label>
       <input type="color" id="figColor" value="#00ff00">
       <label class="check"><input type="checkbox" id="figLit" checked><span>Allumé (décoché : déplacement éteint)</span></label>
+      <label for="figPart">Partie</label>
+      <select id="figPart" title="Partie des tracés sélectionnés : LIVE peut appliquer un effet à une partie seule (T-441)"></select>
       <div class="seg wrap" style="margin-top:8px">
         <button id="figUp" title="Tracer plus tôt">Avant</button>
         <button id="figDown" title="Tracer plus tard">Après</button>
         <button id="figReverse" title="Inverser le sens du tracé">Inverser</button>
+        <button id="figDup" title="Dupliquer la sélection (décalée), avec sa couleur et sa partie">Dupliquer</button>
         <button id="figDelete" title="Supprimer la sélection (Suppr)">Supprimer</button>
       </div>
       <label>Transformer (la sélection, sinon toute l'image)</label>
@@ -3392,6 +3408,11 @@
       <input type="range" id="figTextSize" data-default="30" min="5" max="100" value="30">
       <label for="figSides">Côtés (outil Polygone)</label>
       <input type="number" id="figSides" min="3" max="24" value="5">
+      <h2 style="margin-top:14px">Parties</h2>
+      <div id="figParts" aria-label="Parties de la figure"></div>
+      <div class="hint">Une partie regroupe des tracés (« Yeux », « Roue ») : dans LIVE, un cue de figure peut régler ou moduler une partie seule
+        (luminosité, taille, position, angle), les autres tracés restent identiques. Les numéros de partie valent pour toutes les images.
+        8 parties au plus.</div>
       <h2 style="margin-top:14px">Animation</h2>
       <label for="figRate">Cadence</label>
       <div class="row" style="margin-top:0">
@@ -3512,6 +3533,7 @@
         </div>
         <canvas id="impCanvas" width="600" height="600"></canvas>
         <div id="impStats" class="hint"></div>
+        <div id="impParts" hidden></div>
         <div id="impMsg" class="hint" role="status"></div>
       </div>
       <div class="imp-right">
@@ -8815,6 +8837,7 @@ function showStrobe(st) {
 // (it would e.g. untick « Synchro tempo » right after it was ticked).
 let liveSentAt = 0, liveAnsweredAt = 0;
 async function postLive(body) {
+  if (directScope === 'cue' && directPart) return postPart(body);
   const id = scopedId(body.id);
   if (!id) return;
   liveSentAt = performance.now();
@@ -8830,14 +8853,94 @@ let directScope = 'master', directLayer = 1, directCue = null, directFrame = nul
 function scopedId(id) {
   if (!id || !id.startsWith('master.') || id === 'master.scan' || directScope === 'master') return id;
   if (directScope === 'layer') return `layer.${directLayer}.${id.slice(7)}`;
+  if (directPart) return null; // a part: only `postPart`'s parameters (T-441)
   return directCue ? `cue.${directCue}.${id.slice(7)}` : null;
 }
 // What the Direct panel shows: the master, the chosen layer's or cue's.
 function scopeMods(f) {
   if (directScope === 'layer') return f.layers && f.layers.mixer.layers[directLayer - 1].modifiers;
+  if (directScope === 'cue' && directPart) return partShown(f);
   if (directScope === 'cue') return directCue && f.cue_mods ? f.cue_mods[directCue] : null;
   return f.live;
 }
+
+// ---------- Direct › Cue › Cible : une partie de figure (T-441) ----------
+// A figure cue with parts: « Cible » picks the whole figure (the cue level
+// above) or one part. A part's Taille, Position, Rotation and Luminosité
+// are stored in the cue's cell (`/api/cues/parts`, an edit: undo, refused
+// in show mode) and applied to that part only, before the cue's own
+// modifiers and the whole chain.
+let directPart = 0, partEdit = null, partTimer = null;
+const PART_KEYS = {
+  'master.brightness': 'brightness', 'master.size': 'size', 'master.size_x': 'size_x', 'master.size_y': 'size_y',
+  'master.pos_x': 'pos_x', 'master.pos_y': 'pos_y', 'master.rot_x.angle': 'rot_angle.0', 'master.rot_y.angle': 'rot_angle.1',
+  'master.rot_z.angle': 'rot_angle.2', 'master.rot_x.speed': 'rot_speed.0', 'master.rot_y.speed': 'rot_speed.1', 'master.rot_z.speed': 'rot_speed.2',
+};
+const PART_NEUTRAL = { brightness: 1, size: 1, size_x: 1, size_y: 1, pos_x: 0, pos_y: 0, rot_angle: [0, 0, 0], rot_speed: [0, 0, 0] };
+const directParts = () => (directCue && (presetById.get(directCue) || {}).parts) || [];
+// The part's own values (only what a part sets), being edited or stored.
+function partValues() {
+  if (partEdit) return partEdit;
+  const stored = ((slots[directCue] || {}).part_modifiers || {})[directPart] || {};
+  const v = structuredClone(PART_NEUTRAL);
+  for (const k of Object.keys(PART_NEUTRAL)) if (stored[k] !== undefined) v[k] = structuredClone(stored[k]);
+  return v;
+}
+// What the Direct panel shows for a part: its values over a neutral copy.
+function partShown(f) {
+  const m = structuredClone(f.live);
+  Object.assign(m, { rot_sync: false, rot_reverse: false, speed: 1, trace: 1, dots: 0, prism: 1 }, structuredClone(partValues()));
+  return m;
+}
+function partHint(text, ok) {
+  const hint = $('directScopeHint');
+  hint.dataset.msg = '1'; hint.className = 'hint ' + (ok ? 'ok' : 'bad'); hint.textContent = text;
+  clearTimeout(partHint.t);
+  partHint.t = setTimeout(() => { delete hint.dataset.msg; refreshDirect(); }, 4000);
+}
+function postPart(body) {
+  const key = PART_KEYS[body.id];
+  if (!key || !directCue) { partHint('Sur une partie : Taille, Position, Rotation et Luminosité seulement.', false); return Promise.resolve(); }
+  const v = partEdit || (partEdit = partValues());
+  const value = Number(body.value);
+  if (!Number.isFinite(value)) return Promise.resolve();
+  const [k, i] = key.split('.');
+  if (i === undefined) v[k] = value; else v[k][+i] = value;
+  clearTimeout(partTimer);
+  partTimer = setTimeout(sendPart, 150);
+  return Promise.resolve();
+}
+async function sendPart() {
+  if (!partEdit || !directCue || !directPart) { partEdit = null; return; }
+  const [cue, part, modifiers] = [directCue, directPart, partEdit];
+  const r = await api('POST', '/api/cues/parts', { id: cue, part, modifiers }, { quiet: true });
+  if (partEdit === modifiers) partEdit = null;
+  if (r.ok) {
+    slots[cue] = { ...(slots[cue] || {}), part_modifiers: await r.json() };
+  } else {
+    partHint((await r.text()).trim() || 'Réglage de la partie refusé.', false);
+  }
+  refreshDirect();
+}
+function showDirectParts() {
+  const parts = directParts(), row = $('directPartRow'), sel = $('directPart');
+  row.hidden = directScope !== 'cue' || !parts.length;
+  if (!parts.some(p => p.id === directPart)) directPart = 0;
+  const key = directCue + '|' + parts.map(p => p.id + p.name).join('|');
+  if (sel.dataset.key !== key) {
+    sel.dataset.key = key;
+    sel.replaceChildren();
+    for (const [v, t] of [[0, 'Figure entière'], ...parts.map(p => [p.id, p.name])]) {
+      const o = document.createElement('option'); o.value = String(v); o.textContent = t; sel.appendChild(o);
+    }
+  }
+  if (document.activeElement !== sel) sel.value = String(directPart);
+}
+$('directPart').addEventListener('change', () => {
+  clearTimeout(partTimer); if (partEdit) sendPart();
+  directPart = +$('directPart').value || 0;
+  refreshDirect();
+});
 // The cues on show, newest last; the newest is chosen when ours stopped.
 function showDirectCues(f) {
   const ids = [...new Set([...(f.cues ? f.cues.active : []), ...(f.cues ? f.cues.ending : [])].map(c => c.cue))];
@@ -8852,6 +8955,7 @@ function showDirectCues(f) {
   if (directCue && $('directCue').value !== directCue) $('directCue').value = directCue;
   $('directCue').disabled = !ids.length;
   $('directStore').disabled = !directCue;
+  showDirectParts();
 }
 function showDirectScope(f) {
   if (!f) return;
@@ -8863,7 +8967,9 @@ function showDirectScope(f) {
   if (!hint.dataset.msg) {
     hint.className = 'hint';
     hint.textContent = directScope === 'layer' ? `Réglages du calque ${directLayer}, avant le maître.`
-      : directScope === 'cue' ? (off ? 'Aucun cue en cours : lancez un cue pour le régler.' : 'Réglages de ce cue seul, avant son calque et le maître. Ils reviennent à ceux de sa case à chaque lancement.')
+      : directScope === 'cue' ? (off ? 'Aucun cue en cours : lancez un cue pour le régler.'
+        : directPart ? `Réglages de la partie « ${(directParts().find(p => p.id === directPart) || {}).name || directPart} » seule (Taille, Position, Rotation, Luminosité), enregistrés dans la case du cue.`
+        : 'Réglages de ce cue seul, avant son calque et le maître. Ils reviennent à ceux de sa case à chaque lancement.')
       : '';
   }
   const on = f.levels_on || {}, layerOn = (on.layers || []).some(Boolean), cueOn = !!on.cues;
@@ -8883,6 +8989,7 @@ function setDirectScope(scope) {
   });
   $('directLayerRow').hidden = scope !== 'layer';
   $('directCueRow').hidden = scope !== 'cue';
+  $('directPartRow').hidden = scope !== 'cue' || !directParts().length;
   $('mScan').disabled = scope !== 'master';
   delete $('directScopeHint').dataset.msg;
   refreshDirect();
@@ -8895,7 +9002,7 @@ function refreshDirect() {
 }
 document.querySelectorAll('#directTabs button').forEach(b => b.addEventListener('click', () => setDirectScope(b.dataset.scope)));
 $('directLayer').addEventListener('change', () => { directLayer = +$('directLayer').value; refreshDirect(); });
-$('directCue').addEventListener('change', () => { directCue = $('directCue').value || null; refreshDirect(); });
+$('directCue').addEventListener('change', () => { directCue = $('directCue').value || null; directPart = 0; partEdit = null; refreshDirect(); });
 $('directStore').addEventListener('click', async () => {
   if (!directCue) return;
   const hint = $('directScopeHint'), name = (presetById.get(directCue) || { name: directCue }).name;
@@ -14143,13 +14250,15 @@ $('deskDel').addEventListener('click', deskDelete);
 const LFO_WAVES = [['sine', 'Sinus'], ['triangle', 'Triangle'], ['square', 'Carré'], ['saw_up', 'Dent de scie ↗'],
   ['saw_down', 'Dent de scie ↘'], ['random', 'Aléatoire']];
 const LFO_PERIODS = [[0.25, '1/4 temps'], [0.5, '1/2 temps'], [1, '1 temps'], [2, '2 temps'], [4, '4 temps'], [8, '8 temps'], [16, '16 temps']];
-let lfos = [], lfoTargets = [], lfoMax = 16;
+let lfos = [], lfoTargets = [], lfoMax = 16, lfoParts = [];
+// A part of a figure cue (T-441): its parameters.
+const LFO_PART_PARAMS = [['brightness', 'Luminosité'], ['size', 'Taille'], ['pos_x', 'Position X'], ['pos_y', 'Position Y'], ['angle_z', 'Angle']];
 const lfoEsc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const lfoShape = (wave, p) => ({ sine: Math.sin(2 * Math.PI * p), triangle: p < 0.25 ? 4 * p : p < 0.75 ? 2 - 4 * p : 4 * p - 4,
   square: p < 0.5 ? 1 : -1, saw_up: 2 * p - 1, saw_down: 1 - 2 * p, random: 0 })[wave];
 async function loadLfos() {
   const r = await apiJson('GET', '/api/lfos');
-  lfos = r.lfos; lfoTargets = r.targets; lfoMax = r.max;
+  lfos = r.lfos; lfoTargets = r.targets; lfoMax = r.max; lfoParts = r.parts || [];
   renderLfos();
 }
 async function saveLfos() {
@@ -14159,9 +14268,15 @@ function renderLfos() {
   const opts = (list, sel) => list.map(([v, t]) => `<option value="${v}"${String(v) === String(sel) ? ' selected' : ''}>${lfoEsc(t)}</option>`).join('');
   $('lfoList').innerHTML = lfos.map((m, i) => {
     const period = m.rate.beats !== undefined ? m.rate.beats : 'hz';
+    // « Partie »: the master (a control) or a part of a figure cue (T-441).
+    const partOpts = [['', 'Maître'], ...lfoParts.flatMap(f => f.parts.map(p => [`${f.cue}|${p.id}`, `${f.figure} › ${p.name}`]))];
+    const partVal = m.part ? `${m.part.cue}|${m.part.part}` : '';
+    if (m.part && !partOpts.some(([v]) => v === partVal)) partOpts.push([partVal, `${m.part.cue.replace(/^figure:/, '')} › partie ${m.part.part} (absente)`]);
     return `<div class="lfo" data-i="${i}">
+      <div class="row"><select data-f="part" aria-label="Partie" title="Maître, ou une partie d'un cue de figure">${opts(partOpts, partVal)}</select>
+        ${m.part ? `<select data-f="param" aria-label="Paramètre" title="Paramètre de la partie">${opts(LFO_PART_PARAMS, m.part.param)}</select>` : ''}</div>
       <div class="row"><canvas width="144" height="60" data-graph="${i}"></canvas>
-        <select data-f="target" title="Cible">${opts(lfoTargets.map(t => [t.id, t.label]), m.target)}</select>
+        <select data-f="target" title="Cible" aria-label="Cible"${m.part ? ' hidden' : ''}>${opts(lfoTargets.map(t => [t.id, t.label]), m.target)}</select>
         <button class="del" data-del="${i}" title="Supprimer ce modulateur" aria-label="Supprimer ce modulateur">×</button></div>
       <div class="row"><select data-f="wave" title="Forme">${opts(LFO_WAVES, m.wave)}</select>
         <select data-f="period" title="Période">${opts([...LFO_PERIODS, ['hz', 'Hz (libre)']], period)}</select>
@@ -14193,6 +14308,11 @@ function lfoEdit(e, final) {
   if (!f || !box) return;
   const m = lfos[+box.dataset.i], v = e.target.value;
   if (f === 'target' || f === 'wave') m[f] = v;
+  else if (f === 'part') {
+    if (!v) delete m.part;
+    else { const at = v.lastIndexOf('|'); m.part = { cue: v.slice(0, at), part: +v.slice(at + 1), param: (m.part && m.part.param) || 'brightness' }; }
+  }
+  else if (f === 'param' && m.part) m.part.param = v;
   else if (f === 'period') m.rate = v === 'hz' ? { hz: 1 } : { beats: +v };
   else if (f === 'hz') m.rate = { hz: Math.min(20, Math.max(0, +v || 0)) };
   else if (f === 'depth' || f === 'phase') {
@@ -14201,7 +14321,7 @@ function lfoEdit(e, final) {
   }
   else if (f === 'enabled') m.enabled = e.target.checked;
   else if (f === 'speed_group') m.speed_group = +v;
-  if (final && (f === 'period' || f === 'target')) renderLfos();
+  if (final && (f === 'period' || f === 'target' || f === 'part')) renderLfos();
   saveLfos();
 }
 // Sliders and the Hz field send while moving; menus and the checkbox on change.
@@ -17402,6 +17522,7 @@ const newFigure = () => ({ name: '', frames: [{ strokes: [] }], rate: 1, per: 'b
 const fe = {
   fig: newFigure(), frame: 0, tool: 'line', sel: new Set(), draft: null, drag: null,
   undo: [], redo: [], color: [0, 255, 0], lit: true, playing: null, bpm: 120, budget: 750, lib: [],
+  hoverPart: 0,
 };
 // T-433: the figure as last opened, saved or started; a drawn one that
 // differs is unsaved work (closing the page asks).
@@ -17647,6 +17768,98 @@ function deleteSelected() {
   showFigProps();
 }
 $('figDelete').onclick = deleteSelected;
+// Duplicate the selection, a little to the right and down: colour, lit
+// and part kept (T-441). The copies become the selection.
+$('figDup').onclick = () => {
+  const sel = selected();
+  if (!sel.length) return;
+  figChange(() => {
+    const start = figStrokes().length;
+    for (const i of sel) {
+      const c = structuredClone(figStrokes()[i]);
+      c.points = cleanPts(c.points.map(q => [q[0] + 0.05, q[1] - 0.05]));
+      figStrokes().push(c);
+    }
+    fe.sel = new Set(sel.map((_, k) => start + k));
+  });
+  showFigProps();
+};
+
+// ----- parts (T-441) -----
+// Each stroke carries a part number (absent = « Aucune »); the figure
+// names its parts (1 to 8), common to every frame. LIVE can then set or
+// modulate one part of the figure cue alone.
+const FIG_MAX_PARTS = 8;
+const figParts = () => fe.fig.parts || [];
+const figPartCount = id => fe.fig.frames.reduce((n, f) => n + f.strokes.filter(s => (s.part || 0) === id).length, 0);
+function figAddPart() {
+  const used = new Set(figParts().map(p => p.id));
+  for (let id = 1; id <= FIG_MAX_PARTS; id++) {
+    if (used.has(id)) continue;
+    fe.fig.parts = [...figParts(), { id, name: `Partie ${id}` }].sort((a, b) => a.id - b.id);
+    return id;
+  }
+  return 0;
+}
+function fillFigPart() {
+  const sel = selected(), el = $('figPart');
+  const parts = new Set(sel.map(i => figStrokes()[i].part || 0));
+  el.replaceChildren();
+  const add = (v, t) => { const o = document.createElement('option'); o.value = String(v); o.textContent = t; el.appendChild(o); };
+  if (parts.size > 1) add('mixed', 'Plusieurs');
+  add(0, 'Aucune');
+  figParts().forEach(p => add(p.id, p.name));
+  if (figParts().length < FIG_MAX_PARTS) add('new', 'Nouvelle partie…');
+  el.value = parts.size > 1 ? 'mixed' : String(sel.length ? [...parts][0] : 0);
+  el.disabled = !sel.length;
+}
+$('figPart').onchange = () => {
+  const sel = selected(), v = $('figPart').value;
+  if (!sel.length || v === 'mixed') return;
+  figChange(() => {
+    const id = v === 'new' ? figAddPart() : +v;
+    sel.forEach(i => { const s = figStrokes()[i]; if (id) s.part = id; else delete s.part; });
+  });
+  showFigProps();
+};
+function renderFigParts() {
+  const box = $('figParts');
+  box.replaceChildren();
+  if (!figParts().length) {
+    const h = document.createElement('div'); h.className = 'hint';
+    h.textContent = 'Aucune partie : sélectionnez des tracés, puis Partie › « Nouvelle partie… ».';
+    box.appendChild(h);
+    return;
+  }
+  for (const p of figParts()) {
+    const row = document.createElement('div'); row.className = 'figpart' + (fe.hoverPart === p.id ? ' hover' : ''); row.dataset.part = p.id;
+    const lab = document.createElement('label'); lab.htmlFor = 'figPartName' + p.id; lab.textContent = p.id;
+    const name = document.createElement('input'); name.type = 'text'; name.id = 'figPartName' + p.id; name.maxLength = 32; name.value = p.name;
+    name.autocomplete = 'off'; name.title = 'Nom de la partie';
+    name.onchange = () => figChange(() => { p.name = name.value.trim().slice(0, 32) || `Partie ${p.id}`; });
+    const n = document.createElement('small'); const c = figPartCount(p.id); n.textContent = `${c} tracé${c > 1 ? 's' : ''}`;
+    const pick = document.createElement('button'); pick.textContent = 'Sélectionner les traits';
+    pick.title = `Sélectionner les tracés de « ${p.name} » dans cette image`;
+    pick.onclick = () => {
+      fe.sel = new Set(figStrokes().map((s, i) => [s, i]).filter(([s]) => (s.part || 0) === p.id).map(([, i]) => i));
+      showFigProps(); figRender();
+    };
+    const del = document.createElement('button'); del.textContent = 'Supprimer la partie';
+    del.title = `Supprimer « ${p.name} » : ses tracés restent, sans partie`;
+    del.onclick = () => {
+      figChange(() => {
+        fe.fig.parts = figParts().filter(q => q.id !== p.id);
+        fe.fig.frames.forEach(f => f.strokes.forEach(s => { if (s.part === p.id) delete s.part; }));
+      });
+      fe.hoverPart = 0;
+      showFigProps();
+    };
+    row.onmouseenter = () => { fe.hoverPart = p.id; row.classList.add('hover'); figRender(); };
+    row.onmouseleave = () => { fe.hoverPart = 0; row.classList.remove('hover'); figRender(); };
+    row.append(lab, name, n, pick, del);
+    box.appendChild(row);
+  }
+}
 // Transforms act on the selection, or the whole image, around its centre.
 function transform(f) {
   const idx = selected().length ? selected() : figStrokes().map((_, i) => i);
@@ -17729,6 +17942,11 @@ function drawStrokes(g, strokes, W, alpha, opts = {}) {
       g.beginPath(); g.moveTo(...prev); g.lineTo(...pts[0]); g.stroke(); g.setLineDash([]);
     }
     const sel = opts.sel && opts.sel.has(i);
+    if (opts.hoverPart && (s.part || 0) === opts.hoverPart && pts.length) {
+      // The strokes of the part under the pointer (T-441).
+      g.save(); g.strokeStyle = '#22e3ff80'; g.lineWidth = 9; g.lineCap = 'round'; g.lineJoin = 'round';
+      g.beginPath(); g.moveTo(...pts[0]); pts.slice(1).forEach(q => g.lineTo(...q)); if (pts.length === 1) g.lineTo(pts[0][0] + 0.1, pts[0][1]); g.stroke(); g.restore();
+    }
     if (!s.lit) { g.setLineDash([6, 5]); g.strokeStyle = sel ? '#fff' : `rgba(150,150,150,${alpha})`; g.lineWidth = sel ? 2 : 1.2; }
     else { g.strokeStyle = figCol(s.color, alpha); g.lineWidth = sel ? 4 : 2.5; }
     if (sel && s.lit) { g.shadowColor = '#fff'; g.shadowBlur = 8; }
@@ -17763,7 +17981,7 @@ function figRender(full = false) {
   }
   const shown = fe.playing ? Math.min(fe.playing.frame, fe.fig.frames.length - 1) : fe.frame;
   if (!fe.playing && $('figOnion').checked && shown > 0) drawStrokes(g, fe.fig.frames[shown - 1].strokes, W, 0.22);
-  drawStrokes(g, fe.fig.frames[shown].strokes, W, 1, fe.playing ? {} : { travel: true, order: $('figOrder').checked, sel: fe.sel });
+  drawStrokes(g, fe.fig.frames[shown].strokes, W, 1, fe.playing ? {} : { travel: true, order: $('figOrder').checked, sel: fe.sel, hoverPart: fe.hoverPart });
   // What is being drawn.
   const ghost = [];
   if (fe.draft) ghost.push(fe.draft.points.concat(fe.draft.hover ? [fe.draft.hover] : []));
@@ -17848,7 +18066,9 @@ function showFigProps() {
   setVal('figName', fe.fig.name);
   setVal('figRate', fe.fig.rate); setVal('figPer', fe.fig.per); setVal('figLoop', fe.fig.loop_mode);
   if (document.activeElement !== $('figScan')) fillScanSelect($('figScan'), 'Par défaut de la sortie', fe.fig.scan || '');
-  ['figUp', 'figDown', 'figReverse', 'figDelete'].forEach(id => { $(id).disabled = !sel.length; });
+  ['figUp', 'figDown', 'figReverse', 'figDup', 'figDelete'].forEach(id => { $(id).disabled = !sel.length; });
+  fillFigPart();
+  if (!$('figParts').contains(document.activeElement)) renderFigParts();
 }
 
 // ----- library -----
@@ -17873,7 +18093,7 @@ async function loadFigLib() {
     del.title = `Supprimer « ${f.name} » de la bibliothèque`;
     del.onclick = async () => {
       if (!confirm(`Supprimer la figure « ${f.name} » ?`)) return;
-      if (await post('/api/figures/delete', { name: f.name })) { figMsg(`« ${f.name} » supprimée.`); await loadFigLib(); await loadPresets(); }
+      if (await post('/api/figures/delete', { name: f.name })) { figMsg(`« ${f.name} » supprimée.`); await loadFigLib(); await loadPresets(); loadLfos(); }
     };
     row.append(open, del); box.appendChild(row);
   }
@@ -17897,7 +18117,7 @@ async function saveFigure() {
   const saved = await r.json();
   figMarkSaved();
   figMsg(`« ${saved.name} » enregistrée (cue de la page Figures).`);
-  await loadFigLib(); await loadPresets();
+  await loadFigLib(); await loadPresets(); loadLfos(); // the parts a modulator may target (T-441)
   return saved;
 }
 $('figName').onchange = () => { fe.fig.name = $('figName').value.trim(); };
@@ -17944,6 +18164,7 @@ function impRender() {
 }
 function impFail(text) {
   imp.result = null; $('impCreate').disabled = true;
+  impShowParts(null);
   $('impStats').textContent = ''; $('impStats').classList.remove('bad');
   impMsg(text, true); impRender();
 }
@@ -17973,9 +18194,35 @@ async function impFetch() {
     + ` ; trajets éteints ${s.travel_before.toFixed(1)} → ${s.travel_after.toFixed(1)} (ordre optimisé)`
     + (s.threshold != null ? ` ; seuil ${s.threshold}` : '') + '.';
   $('impStats').classList.toggle('bad', s.over_budget);
+  impShowParts(body.figure);
   impMsg(body.warnings.length ? 'Attention : ' + body.warnings.join(' ; ') + '.' : 'Aperçu prêt. Vérifiez-le puis « Créer la figure ».');
   $('impCreate').disabled = false;
   impRender();
+}
+// Named SVG groups (T-441): one box per group, « Garder comme partie ».
+// An unticked group's strokes go to « Aucune » when the figure is created.
+function impShowParts(fig) {
+  const box = $('impParts'), parts = (fig && fig.parts) || [];
+  const kept = new Map([...box.querySelectorAll('input[data-part-name]')].map(c => [c.dataset.partName, c.checked]));
+  box.replaceChildren();
+  box.hidden = !parts.length;
+  if (!parts.length) return;
+  const head = document.createElement('div'); head.className = 'hint';
+  head.textContent = 'Parties détectées : ' + parts.map(p => p.name).join(', ');
+  box.appendChild(head);
+  for (const p of parts) {
+    const l = document.createElement('label'); l.className = 'check';
+    const c = document.createElement('input'); c.type = 'checkbox'; c.dataset.part = p.id; c.dataset.partName = p.name;
+    c.checked = kept.get(p.name) ?? true;
+    const t = document.createElement('span'); t.textContent = `Garder « ${p.name} » comme partie`;
+    l.append(c, t); box.appendChild(l);
+  }
+}
+function impApplyParts(fig) {
+  const drop = new Set([...$('impParts').querySelectorAll('input[data-part]')].filter(c => !c.checked).map(c => +c.dataset.part));
+  if (!drop.size) return;
+  fig.parts = (fig.parts || []).filter(p => !drop.has(p.id));
+  fig.frames.forEach(f => f.strokes.forEach(s => { if (drop.has(s.part)) delete s.part; }));
 }
 const impSoon = () => { clearTimeout(imp.timer); imp.dirty = true; imp.timer = setTimeout(impPreview, 250); };
 async function impLoad(file) {
@@ -18017,6 +18264,7 @@ $('figImport').onclick = () => {
   imp.bytes = null; imp.result = null; imp.name = '';
   $('impFile').value = ''; $('impFileName').textContent = ''; $('impName').value = ''; $('impName').dataset.auto = '1';
   $('impStats').textContent = ''; impMsg(''); $('impCreate').disabled = true;
+  $('impParts').replaceChildren(); $('impParts').hidden = true;
   $('impBudget').value = fe.budget;
   impModeOpts();
   impLabels(); impRender();
@@ -18031,6 +18279,7 @@ $('impCreate').onclick = async () => {
   if (fe.lib.some(f => f.name === name) && !confirm(`Une figure « ${name} » existe déjà : la remplacer ?`)) return;
   const fig = structuredClone(imp.result.figure);
   fig.name = name;
+  impApplyParts(fig);
   const r = await api('POST', '/api/figures', fig, { quiet: true });
   if (!r.ok) { impMsg(await r.text(), true); return; }
   impCloseDlg();
@@ -18039,7 +18288,7 @@ $('impCreate').onclick = async () => {
   figMarkSaved();
   showFigProps();
   figMsg(`« ${name} » créée depuis l'import (cue de la page Figures) : modifiable ici.`);
-  await loadFigLib(); await loadPresets();
+  await loadFigLib(); await loadPresets(); loadLfos(); // the parts a modulator may target (T-441)
 };
 impLabels();
 

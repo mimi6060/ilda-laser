@@ -128,6 +128,9 @@ impl Default for Track {
 }
 
 /// What an event plays.
+// A look stored in the event is the common case of a show, and events are
+// few: not worth a box (the figure parts of T-441 pushed it over the lint).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventSource {

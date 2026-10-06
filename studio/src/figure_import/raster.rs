@@ -498,7 +498,7 @@ fn finish(polys: Vec<(Vec<Pt>, bool)>, opts: &Options, color: [u8; 3]) -> Vec<Pa
                 }
             }
             let len: f64 = pts.windows(2).map(|w| super::dist(w[0], w[1])).sum();
-            (len >= min_len).then_some(Path { pts, closed, color })
+            (len >= min_len).then_some(Path { pts, closed, color, part: 0 })
         })
         .collect()
 }

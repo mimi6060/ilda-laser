@@ -52,6 +52,55 @@ pub struct Modulator {
     /// Speed group (T-419, speed.rs) whose beats a `Beats` rate counts:
     /// 0 = the master clock, 1..=4 = A..D. 0 in older files.
     pub speed_group: u8,
+    /// A part of a figure cue (T-441) instead of `target`: the modulator
+    /// moves that part's parameter only. `None` in older files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartTarget>,
+}
+
+/// What a part modulator moves (T-441): one parameter of one part of a
+/// figure cue. A cue or a part that no longer exists (the figure deleted
+/// or imported again without it) is kept, and does nothing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PartTarget {
+    /// The figure cue's id, `figure:<name>`.
+    pub cue: String,
+    /// 1..=`figures::MAX_PARTS`.
+    pub part: u8,
+    pub param: PartParam,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartParam {
+    Brightness,
+    Size,
+    PosX,
+    PosY,
+    AngleZ,
+}
+
+impl PartParam {
+    /// (min, max) the parameter is moved within, like the master control
+    /// of the same name.
+    pub fn range(self) -> (f32, f32) {
+        match self {
+            PartParam::Brightness => (0.0, 1.0),
+            PartParam::Size => (0.0, 2.0),
+            PartParam::PosX | PartParam::PosY => (-1.0, 1.0),
+            PartParam::AngleZ => (-180.0, 180.0),
+        }
+    }
+
+    fn slot(self, m: &mut LiveModifiers) -> &mut f32 {
+        match self {
+            PartParam::Brightness => &mut m.brightness,
+            PartParam::Size => &mut m.size,
+            PartParam::PosX => &mut m.pos_x,
+            PartParam::PosY => &mut m.pos_y,
+            PartParam::AngleZ => &mut m.rot_angle[2],
+        }
+    }
 }
 
 impl Default for Modulator {
@@ -65,6 +114,7 @@ impl Default for Modulator {
             offset: 0.0,
             enabled: true,
             speed_group: 0,
+            part: None,
         }
     }
 }
@@ -100,7 +150,22 @@ impl Modulator {
             Rate::Beats(b) => Rate::Beats(fin(b, 4.0).clamp(1.0 / 16.0, 64.0)),
             Rate::Hz(hz) => Rate::Hz(fin(hz, 1.0).clamp(0.0, 20.0)),
         };
+        // The cue id of a part target, bounded (a part out of range or an
+        // unknown cue is kept, inactive: `modulate_parts`).
+        if let Some(p) = &mut self.part {
+            p.cue = p.cue.trim().chars().take(256).collect();
+        }
         self
+    }
+
+    /// Whether this modulator can move something: a master control in the
+    /// allow-list, or a part of a figure cue (an unknown one is accepted,
+    /// inactive).
+    fn valid(&self, reg: &ControlRegistry) -> bool {
+        match &self.part {
+            Some(p) => p.cue.starts_with(crate::figures::ID_PREFIX) && (1..=crate::figures::MAX_PARTS).contains(&p.part),
+            None => modulatable(reg, &self.target).is_some(),
+        }
     }
 }
 
@@ -239,7 +304,8 @@ pub fn modulate_grouped(mods: &[Modulator], reg: &ControlRegistry, settings: &mu
         return;
     }
     let mut sums: Vec<(&str, f32)> = Vec::new();
-    for m in mods.iter().filter(|m| m.enabled && m.depth > 0.0) {
+    // Part modulators (T-441) move their part's modifiers, not a control.
+    for m in mods.iter().filter(|m| m.enabled && m.depth > 0.0 && m.part.is_none()) {
         let amount = share.min(1.0) * m.depth * (m.wave_at(t, beat_of(m.speed_group)) + m.offset);
         match sums.iter_mut().find(|(id, _)| *id == m.target) {
             Some((_, sum)) => *sum += amount,
@@ -303,6 +369,48 @@ pub fn envelope(id: &str, (min, max): (f32, f32), relative: bool, value: f32, se
     id.starts_with("master.color.")
 }
 
+/// Per-part modifiers of figure cues (T-441): cue id → part → modifiers.
+pub type PartMods = std::collections::HashMap<String, std::collections::BTreeMap<u8, LiveModifiers>>;
+
+/// The part modulators (T-441) on `parts` (each cue's stored per-part
+/// modifiers, copies): value = base + depth × (wave + offset) × half the
+/// parameter's range, clamped, several on one parameter adding up; a
+/// brightness only dims. `share` and `beat_of` as for `modulate_grouped`.
+/// A modulator whose cue is not in `is_figure` (no such figure cue) does
+/// nothing; one on a part the figure doesn't use moves nothing visible.
+pub fn modulate_parts(mods: &[Modulator], parts: &mut PartMods, is_figure: &dyn Fn(&str) -> bool, t: f64, beat_of: &dyn Fn(u8) -> f64, share: f32) {
+    if share <= 0.0 {
+        return;
+    }
+    let mut sums: Vec<(&PartTarget, f32)> = Vec::new();
+    for m in mods.iter().filter(|m| m.enabled && m.depth > 0.0) {
+        let Some(p) = &m.part else { continue };
+        if !(1..=crate::figures::MAX_PARTS).contains(&p.part) || !is_figure(&p.cue) {
+            continue;
+        }
+        let amount = share.min(1.0) * m.depth * (m.wave_at(t, beat_of(m.speed_group)) + m.offset);
+        match sums.iter_mut().find(|(q, _)| q.cue == p.cue && q.part == p.part && q.param == p.param) {
+            Some((_, sum)) => *sum += amount,
+            None => sums.push((p, amount)),
+        }
+    }
+    for (p, sum) in sums {
+        let (min, max) = p.param.range();
+        let delta = sum * (max - min) / 2.0;
+        if !delta.is_finite() {
+            continue;
+        }
+        let m = parts.entry(p.cue.clone()).or_default().entry(p.part).or_default();
+        let slot = p.param.slot(m);
+        let base = if slot.is_finite() { *slot } else { 0.0 };
+        let mut value = (base + delta).clamp(min, max);
+        if p.param == PartParam::Brightness {
+            value = value.min(base.clamp(0.0, 1.0));
+        }
+        *slot = value;
+    }
+}
+
 /// Rebuilds the active colour override from the (modulated) colour params.
 pub fn recolor_live(live: &mut LiveModifiers) {
     live.color = live.color_params.build(live.color.mode_index());
@@ -313,8 +421,11 @@ pub fn validate(list: &[Modulator], reg: &ControlRegistry) -> Result<()> {
     if list.len() > MAX_MODULATORS {
         bail!("{MAX_MODULATORS} modulateurs au maximum");
     }
-    if let Some(m) = list.iter().find(|m| modulatable(reg, &m.target).is_none()) {
-        bail!("« {} » ne peut pas être modulé", m.target);
+    if let Some(m) = list.iter().find(|m| !m.valid(reg)) {
+        match &m.part {
+            Some(p) => bail!("partie {} de « {} » : cible de modulateur invalide", p.part, p.cue),
+            None => bail!("« {} » ne peut pas être modulé", m.target),
+        }
     }
     Ok(())
 }
@@ -332,7 +443,7 @@ impl LfoStore {
         let list: Vec<Modulator> = crate::load_json(&path);
         let list = list
             .into_iter()
-            .filter(|m| modulatable(reg, &m.target).is_some())
+            .filter(|m| m.valid(reg))
             .take(MAX_MODULATORS)
             .map(Modulator::sanitized)
             .collect();
@@ -383,6 +494,54 @@ mod tests {
         let (mut settings, mut live) = (Settings::default(), LiveModifiers::default());
         modulate(mods, &reg(), &mut settings, &mut live, t, clock.beat_at(t));
         live.size
+    }
+
+    fn part_lfo(cue: &str, part: u8, param: PartParam) -> Modulator {
+        Modulator { wave: Wave::Square, rate: Rate::Beats(1.0), depth: 0.5, part: Some(PartTarget { cue: cue.into(), part, param }), ..Default::default() }
+    }
+
+    #[test]
+    fn part_modulators_move_their_part_only() {
+        let figure = |c: &str| c == "figure:Visage";
+        let mods = [part_lfo("figure:Visage", 2, PartParam::Brightness), part_lfo("figure:Visage", 1, PartParam::AngleZ)];
+        let mut parts = PartMods::new();
+        // Square at +1 in the first half of the beat: brightness can't go up.
+        modulate_parts(&mods, &mut parts, &figure, 0.0, &|_| 0.1, 1.0);
+        assert_eq!(parts["figure:Visage"][&2].brightness, 1.0, "a brightness only dims");
+        assert_eq!(parts["figure:Visage"][&1].rot_angle[2], 90.0, "half the -180..180 range × 0.5");
+        parts.clear();
+        modulate_parts(&mods, &mut parts, &figure, 0.0, &|_| 0.6, 1.0);
+        assert_eq!(parts["figure:Visage"][&2].brightness, 0.75, "-1 × 0.5 × half of 0..1");
+        assert_eq!(parts["figure:Visage"][&2].size, 1.0, "nothing else moves");
+        // A stored base is moved, not replaced; the crossfader scales it.
+        let mut parts = PartMods::from([("figure:Visage".to_string(), std::collections::BTreeMap::from([(2, LiveModifiers { brightness: 0.8, ..Default::default() })]))]);
+        modulate_parts(&mods, &mut parts, &figure, 0.0, &|_| 0.6, 0.5);
+        assert!((parts["figure:Visage"][&2].brightness - 0.675).abs() < 1e-6);
+        // The master ignores them.
+        let (mut settings, mut live) = (Settings::default(), LiveModifiers::default());
+        modulate(&mods, &reg(), &mut settings, &mut live, 0.0, 0.6);
+        assert_eq!(live, LiveModifiers::default());
+    }
+
+    #[test]
+    fn a_part_modulator_on_a_missing_figure_or_part_is_inactive_without_error() {
+        let mut parts = PartMods::new();
+        let gone = [part_lfo("figure:Disparue", 1, PartParam::Size), Modulator { part: Some(PartTarget { cue: "figure:Visage".into(), part: 12, param: PartParam::Size }), ..part_lfo("", 1, PartParam::Size) }];
+        modulate_parts(&gone, &mut parts, &|c| c == "figure:Visage", 0.0, &|_| 0.1, 1.0);
+        assert!(parts.is_empty());
+        // Accepted and kept when saved and reloaded (the figure may come back).
+        validate(&gone[..1], &reg()).unwrap();
+        assert!(validate(&gone[1..], &reg()).is_err(), "part out of range");
+        assert!(validate(&[part_lfo("tunnels-001", 1, PartParam::Size)], &reg()).is_err(), "not a figure cue");
+        let dir = std::env::temp_dir().join(format!("laser-studio-lfo-parts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lfos.json");
+        std::fs::write(&path, serde_json::to_string(&gone[..1]).unwrap()).unwrap();
+        assert_eq!(LfoStore::load_or_create(path.clone(), &reg()).list(), &gone[..1]);
+        // Older files: no part.
+        std::fs::write(&path, r#"[{"target":"master.size"}]"#).unwrap();
+        assert_eq!(LfoStore::load_or_create(path, &reg()).list()[0].part, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
