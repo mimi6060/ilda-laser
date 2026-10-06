@@ -44,6 +44,12 @@
   #tpBanner { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 6px 16px; background: var(--panel-2); color: var(--ws-settings); border-bottom: 2px solid var(--ws-settings); font-weight: 700; letter-spacing: .03em; }
   #tpBanner[hidden] { display: none; }
   #tpBanner button { border-color: var(--ws-settings); color: var(--ws-settings); }
+  /* Zone trace (T-447): orange, like the RÉGLAGES accent (dimmed at night). */
+  #ztBanner { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 6px 16px; background: var(--panel-2); color: var(--ws-settings); border-bottom: 2px solid var(--ws-settings); font-weight: 700; letter-spacing: .03em; }
+  #ztBanner[hidden] { display: none; }
+  #ztBanner button { border-color: var(--ws-settings); color: var(--ws-settings); min-height: 44px; }
+  #ztBtn, #ztOnly { min-height: 44px; }
+  #ztBtn[aria-pressed="true"] { border-color: var(--ws-settings); color: var(--ws-settings); }
   /* Show mode (T-283): the padlock in the top bar, its 1 s hold ring, and
      what is hidden while locked. Hold-to-confirm fills the button. */
   #lockBtn { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 8px; white-space: nowrap; }
@@ -1773,6 +1779,8 @@
 <div id="holdBanner" hidden></div>
 <div id="tpBanner" role="status" hidden>Mire affichée — cues et timeline en pause
   <button id="tpBannerExit">Quitter la mire</button></div>
+<div id="ztBanner" role="status" hidden><span id="ztBannerText">Vérification des zones</span>
+  <button id="ztBannerExit">Quitter</button></div>
 <div id="lockToast" role="status" hidden></div>
 <div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
 <div id="dmxLost" role="alert">Signal DMX perdu</div>
@@ -3419,6 +3427,11 @@
         <div class="row"><button id="sfZoneAdd">Ajouter une zone</button>
           <label class="check" style="margin:0"><input type="checkbox" id="sfOverlay" checked> Afficher sur l'aperçu</label></div>
         <div class="hint" id="sfDrawHint" hidden>Cliquez les sommets sur l'aperçu 2D, puis « Terminer ».</div>
+        <div class="row"><button id="ztBtn" aria-pressed="false" aria-describedby="ztHelp">Tracer les zones au laser</button>
+          <label for="ztOnly" style="margin:0">Tracer</label><select id="ztOnly"><option value="">Toutes les zones</option></select></div>
+        <div class="hint" id="ztHelp">Le contour est tracé juste à l'extérieur des zones « Masquer », à faible puissance. Vérifiez sur place qu'il correspond à la salle. S'arrête seul après 60 secondes. Vérifiez avec la zone du public vide et l'arrêt d'urgence matériel du projecteur à portée de main : Échap ne remplace pas l'arrêt matériel.</div>
+        <div class="hint" id="ztArmHint">Aperçu seulement : armez le laser pour voir le tracé dans la salle.</div>
+        <div class="hint sf-error" id="ztError" role="alert"></div>
         <div class="hint">Masquer : rien n'est allumé dans la zone, même un trait qui la traverse. Atténuer : luminosité réduite au pourcentage indiqué. Public : là où se trouve le public ; hors « Balayage public », rien n'y est allumé, quel que soit le type ; une zone Public atténuée garde 50 % au plus (10 % recommandé). Coordonnées de sortie, de -1 à 1 (y vers le haut).</div>
         <div class="hint">Le bord doux assombrit autour de la zone ; à l'intérieur, la luminosité ne dépasse jamais le niveau réglé. Les zones « Masquer » gardent un bord net. Dégradé : « Départ » et « Arrivée », puis un clic sur l'aperçu 2D place la poignée.</div>
         <div class="sf-sub">Couleurs</div>
@@ -5729,6 +5742,7 @@ function applyState(f, at, pushed) {
   showAudioGuard(f.audio_guard);
   showDwell(f.dwell);
   showTestPattern(f.test_pattern);
+  showZoneTrace(f.zone_trace, f.armed);
   showShowMode(f.lock);
   // Follow page changes made elsewhere (MIDI controller, API) - only
   // when the server's value changes, so a tab click that the server
@@ -6866,6 +6880,40 @@ $('tpBright').addEventListener('input', () => {
 $('tpExit').addEventListener('click', () => postTestPattern({ pattern: null }));
 $('tpBannerExit').addEventListener('click', () => postTestPattern({ pattern: null }));
 
+// ---------- zone trace (T-447) ----------
+// The server owns the mode (60 s, ends on Échap, a disarm or this page
+// gone); the frame poll reports it (`f.zone_trace`). A mouse action only:
+// no shortcut, no control id.
+let zoneTrace = null;
+function showZoneTrace(zt, isArmed) {
+  if (!zt) return;
+  zoneTrace = zt;
+  const on = !!zt.on;
+  $('ztBanner').hidden = !on;
+  $('ztBannerText').textContent = `Vérification des zones — fin dans ${zt.remaining_s} s`;
+  $('ztBtn').textContent = on ? 'Arrêter le tracé' : 'Tracer les zones au laser';
+  $('ztBtn').setAttribute('aria-pressed', String(on));
+  $('ztArmHint').hidden = !!isArmed;
+  if (on && document.activeElement !== $('ztOnly')) $('ztOnly').value = zt.only == null ? '' : String(zt.only);
+}
+/** The menu: every zone of the safety settings, by name. */
+function renderZoneTraceMenu() {
+  const sel = $('ztOnly');
+  const keep = sel.value;
+  sel.replaceChildren(new Option('Toutes les zones', ''), ...(safety?.zones || []).map((z, i) => new Option(z.name || `Zone ${i + 1}`, String(z.id))));
+  sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
+}
+async function postZoneTrace(on) {
+  $('ztError').textContent = '';
+  const body = { on, client_id: clientId };
+  if (on && $('ztOnly').value !== '') body.only = Number($('ztOnly').value);
+  const r = await api('POST', '/api/safety/trace', body, { quiet: true });
+  if (r.ok) showZoneTrace(await r.json(), armed);
+  else $('ztError').textContent = await r.text();
+}
+$('ztBtn').addEventListener('click', () => postZoneTrace(!(zoneTrace && zoneTrace.on)));
+$('ztBannerExit').addEventListener('click', () => postZoneTrace(false));
+
 // ---------- projection zones (T-012) ----------
 // The server owns the zones: an edit sends the whole set (debounced) and
 // takes back what the server kept (clamped values). The canvas shows the
@@ -7195,6 +7243,7 @@ function showSafety(force = false) {
   if (force || document.activeElement !== $('sfDwellProfile')) $('sfDwellProfile').value = safety.dwell.profile;
   $('sfError').textContent = sfLoadError || '';
   $('sfZoneAdd').disabled = safety.zones.length >= 8;
+  if (document.activeElement !== $('ztOnly')) renderZoneTraceMenu();
   if (force || !$('sfZones').contains(document.activeElement)) renderZones();
   showOutdoorSettings(force);
 }

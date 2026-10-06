@@ -744,6 +744,167 @@ impl Mask {
     }
 }
 
+/// Zone outline tracing (T-447): how far outside a zone its outline is
+/// drawn, in output units.
+pub const TRACE_MARGIN: f32 = 0.02;
+/// The trace's only colour level (green), fixed and low: no look, master,
+/// LFO or MIDI changes it. The output's power caps can only lower it.
+pub const TRACE_LEVEL: f32 = 0.10;
+/// The verification mode ends by itself after this long.
+pub const TRACE_SECONDS: u64 = 60;
+/// Longest step between two samples of a traced outline. Half of it is
+/// well under the margin, so a lit step between two samples that are each
+/// at least the margin away from a Blank zone never reaches it.
+const TRACE_STEP: f32 = 0.01;
+/// Dash length on a Dim zone's outline.
+const TRACE_DASH: f32 = 0.05;
+/// Lit samples are repeated this many times where a stroke starts or ends.
+const TRACE_DWELL: usize = 3;
+
+/// The outlines of the zones and the horizon to check in the room (T-447),
+/// in output coordinates: each Blank zone's outline offset `TRACE_MARGIN`
+/// outwards, each Dim zone's the same in dashes, and with `only == None`
+/// a line `TRACE_MARGIN` above the horizon. Green at `TRACE_LEVEL`,
+/// joined by blanked travel, densified, within -1..1.
+///
+/// Every sample is checked: a sample inside a Blank or a Public zone, or
+/// closer than the margin to one (the offset of a concave corner, two
+/// zones side by side, a point pulled back into the field), is dark, and
+/// a lit step joins only two lit samples at most a step apart. The output
+/// safety stage still applies to the result like to any frame.
+pub fn trace_frame(zones: &[Zone], horizon: Horizon, only: Option<u32>) -> Vec<Point> {
+    let forbidden: Vec<Poly> = zones.iter().filter(|z| z.kind == ZoneKind::Blank || z.audience).filter_map(Poly::new).collect();
+    // Small float tolerance on the margin: the samples sit at exactly the margin.
+    let clear = |x: f32, y: f32| {
+        x.is_finite() && y.is_finite() && forbidden.iter().all(|p| !p.covers(x, y) && p.nearest(x, y).0 >= TRACE_MARGIN * 0.99)
+    };
+    let mut pen = TracePen::default();
+    for zone in zones.iter().filter(|z| only.is_none_or(|id| z.id == id)) {
+        let dashed = zone.kind == ZoneKind::Dim && !zone.audience;
+        for (x, y, on) in outline_samples(zone, dashed) {
+            let (x, y) = (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0));
+            pen.sample(x, y, on && clear(x, y));
+        }
+        pen.lift();
+    }
+    if only.is_none() && horizon.y.is_finite() {
+        let y = horizon.y + TRACE_MARGIN;
+        if y <= 1.0 {
+            let y = y.max(-1.0);
+            let n = (2.0 / TRACE_STEP).ceil() as usize;
+            for k in 0..=n {
+                let x = -1.0 + 2.0 * k as f32 / n as f32;
+                pen.sample(x, y, clear(x, y));
+            }
+            pen.lift();
+        }
+    }
+    crate::engine::densify(&pen.out)
+}
+
+/// The samples of a zone's outline offset `TRACE_MARGIN` outwards, closed,
+/// with round joins at the convex corners: (x, y, wanted lit).
+fn outline_samples(zone: &Zone, dashed: bool) -> Vec<(f32, f32, bool)> {
+    let v: Vec<(f32, f32)> = zone.points.iter().map(|p| (p[0], p[1])).collect();
+    if v.len() < 3 || v.iter().any(|p| !p.0.is_finite() || !p.1.is_finite()) {
+        return Vec::new();
+    }
+    // Twice the signed area: > 0 counter-clockwise.
+    let area: f32 = (0..v.len()).map(|i| {
+        let (p, q) = (v[i], v[(i + 1) % v.len()]);
+        p.0 * q.1 - q.0 * p.1
+    }).sum();
+    if area.abs() < 1e-9 {
+        return Vec::new();
+    }
+    let side = area.signum();
+    // Outward unit normal of each edge (none for a zero-length edge).
+    let normals: Vec<Option<(f32, f32)>> = (0..v.len())
+        .map(|i| {
+            let (p, q) = (v[i], v[(i + 1) % v.len()]);
+            let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+            let len = dx.hypot(dy);
+            (len > 1e-6).then(|| (side * dy / len, -side * dx / len))
+        })
+        .collect();
+    let m = TRACE_MARGIN;
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    for i in 0..v.len() {
+        let Some(n) = normals[i] else { continue };
+        let (p, q) = (v[i], v[(i + 1) % v.len()]);
+        let len = (q.0 - p.0).hypot(q.1 - p.1);
+        let steps = (len / TRACE_STEP).ceil().max(1.0) as usize;
+        for k in 0..=steps {
+            let t = k as f32 / steps as f32;
+            out.push((p.0 + (q.0 - p.0) * t + n.0 * m, p.1 + (q.1 - p.1) * t + n.1 * m));
+        }
+        // Round join around q towards the next edge's normal, at a convex
+        // corner only (a concave one's offsets cross; its samples are
+        // checked and darkened by the caller).
+        if let Some(nn) = (1..v.len()).find_map(|j| normals[(i + j) % v.len()]) {
+            let turn = (n.0 * nn.1 - n.1 * nn.0).atan2(n.0 * nn.0 + n.1 * nn.1);
+            if turn * side > 0.0 {
+                let a0 = n.1.atan2(n.0);
+                let k_max = ((m * turn.abs()) / TRACE_STEP).ceil() as usize;
+                for k in 1..k_max {
+                    let a = a0 + turn * k as f32 / k_max as f32;
+                    out.push((q.0 + m * a.cos(), q.1 + m * a.sin()));
+                }
+            }
+        }
+    }
+    if let Some(&first) = out.first() {
+        out.push(first);
+    }
+    let mut s = 0.0;
+    let mut prev: Option<(f32, f32)> = None;
+    out.into_iter()
+        .map(|(x, y)| {
+            if let Some(p) = prev {
+                s += (x - p.0).hypot(y - p.1);
+            }
+            prev = Some((x, y));
+            let on = !dashed || ((s / TRACE_DASH) as u32).is_multiple_of(2);
+            (x, y, on)
+        })
+        .collect()
+}
+
+/// Draws the traced samples: a lit sample is joined to the previous one
+/// only when both are lit and close; everything else is blanked travel.
+#[derive(Default)]
+struct TracePen {
+    out: Vec<Point>,
+    /// The last lit sample of the stroke being drawn.
+    last: Option<(f32, f32)>,
+}
+
+impl TracePen {
+    fn sample(&mut self, x: f32, y: f32, lit: bool) {
+        let near = self.last.is_some_and(|(px, py)| (x - px).hypot(y - py) <= TRACE_STEP * 1.5);
+        if lit && near {
+            self.out.push(Point::lit(x, y, 0.0, TRACE_LEVEL, 0.0));
+            self.last = Some((x, y));
+            return;
+        }
+        self.lift();
+        if lit {
+            // Dark travel to here, then the stroke starts with a dwell.
+            self.out.extend(std::iter::repeat_n(Point::blanked(x, y), TRACE_DWELL));
+            self.out.extend(std::iter::repeat_n(Point::lit(x, y, 0.0, TRACE_LEVEL, 0.0), TRACE_DWELL));
+            self.last = Some((x, y));
+        }
+    }
+
+    /// Ends the stroke being drawn: a dwell, then dark on the spot.
+    fn lift(&mut self) {
+        if let Some((x, y)) = self.last.take() {
+            self.out.extend(std::iter::repeat_n(Point::lit(x, y, 0.0, TRACE_LEVEL, 0.0), TRACE_DWELL - 1));
+            self.out.push(Point::blanked(x, y));
+        }
+    }
+}
+
 /// Test helper: lit samples inside or on the edge of a Blank zone, plus
 /// lit segments that pass through or touch one (a segment counts as lit if either end is, whichever
 /// end the DAC takes its colour from), checked at 19 points each.
@@ -1320,5 +1481,167 @@ mod tests {
         // even in an unoptimised test build.
         assert!(per_frame.as_secs_f64() < 0.008, "{per_frame:?} per frame");
         eprintln!("mask: {per_frame:?} per 2000-point frame (8 zones × 24 vertices)");
+    }
+
+    // ---- T-447: tracing the zones for verification ----
+
+    /// The lit samples of a trace.
+    fn lit_of(frame: &[Point]) -> Vec<Point> {
+        frame.iter().copied().filter(Point::is_lit).collect()
+    }
+
+    /// Every lit sample is green at `TRACE_LEVEL`, every sample in the field.
+    fn assert_trace_shape(frame: &[Point]) {
+        for p in frame {
+            assert!((-1.0..=1.0).contains(&p.x) && (-1.0..=1.0).contains(&p.y), "{p:?}");
+            if p.is_lit() {
+                assert_eq!((p.r, p.g, p.b), (0.0, TRACE_LEVEL, 0.0), "{p:?}");
+            }
+        }
+    }
+
+    /// Lit samples or lit segments closer than `d` to a Blank or Public zone.
+    fn too_close(frame: &[Point], zones: &[Zone], d: f32) -> usize {
+        let polys: Vec<Poly> = zones.iter().filter(|z| z.kind == ZoneKind::Blank || z.audience).filter_map(Poly::new).collect();
+        let near = |x: f32, y: f32| polys.iter().any(|z| z.covers(x, y) || z.nearest(x, y).0 < d);
+        frame
+            .windows(2)
+            .filter(|w| w[0].is_lit() || w[1].is_lit())
+            .filter(|w| (0..=10).any(|s| {
+                let t = s as f32 / 10.0;
+                near(w[0].x + (w[1].x - w[0].x) * t, w[0].y + (w[1].y - w[0].y) * t)
+            }))
+            .count()
+    }
+
+    #[test]
+    fn trace_of_a_square_runs_just_outside_it() {
+        let zones = [rect(-0.3, -0.3, 0.3, 0.3, ZoneKind::Blank)];
+        let f = trace_frame(&zones, Horizon::default(), Some(0));
+        assert_trace_shape(&f);
+        assert_eq!(blank_violations(&f, &zones), 0);
+        let lit = lit_of(&f);
+        assert!(lit.len() > 200, "the whole outline: {}", lit.len());
+        let poly = Poly::new(&zones[0]).unwrap();
+        for p in &lit {
+            let d = poly.nearest(p.x, p.y).0;
+            assert!(!poly.covers(p.x, p.y) && (d - TRACE_MARGIN).abs() < 1e-3, "{p:?} at {d}");
+        }
+        // Round corners: the outline passes right of, above, left of and
+        // below the square, and around its corners.
+        for (x, y) in [(0.32, 0.0), (0.0, 0.32), (-0.32, 0.0), (0.0, -0.32), (0.3 + TRACE_MARGIN * 0.707, 0.3 + TRACE_MARGIN * 0.707)] {
+            assert!(lit.iter().any(|p| (p.x - x).hypot(p.y - y) < 0.006), "near ({x}, {y})");
+        }
+        // Clockwise the same way.
+        let cw = Zone { points: zones[0].points.iter().rev().copied().collect(), ..zones[0].clone() };
+        let g = trace_frame(std::slice::from_ref(&cw), Horizon::default(), Some(0));
+        assert_eq!(blank_violations(&g, &[cw]), 0);
+        assert!(lit_of(&g).len() > 200);
+    }
+
+    #[test]
+    fn trace_of_a_concave_zone_never_enters_it() {
+        // An L, and a deep U whose arms are closer than twice the margin.
+        let l = Zone { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], ..Default::default() };
+        let u = Zone { id: 1, points: vec![[-0.4, -0.4], [0.4, -0.4], [0.4, 0.4], [0.015, 0.4], [0.015, -0.3], [-0.015, -0.3], [-0.015, 0.4], [-0.4, 0.4]], ..Default::default() };
+        for z in [l, u] {
+            let zones = [z];
+            let f = trace_frame(&zones, Horizon::default(), None);
+            assert_trace_shape(&f);
+            assert_eq!(blank_violations(&f, &zones), 0);
+            assert_eq!(too_close(&f, &zones, TRACE_MARGIN * 0.5), 0);
+            assert!(lit_of(&f).len() > 100);
+        }
+    }
+
+    #[test]
+    fn trace_of_two_zones_side_by_side_lights_neither() {
+        // A gap narrower than twice the margin: nothing can be traced in it.
+        let zones = [rect(-0.5, -0.3, -0.01, 0.3, ZoneKind::Blank), Zone { id: 1, ..rect(0.01, -0.3, 0.5, 0.3, ZoneKind::Blank) }];
+        let f = trace_frame(&zones, Horizon::default(), None);
+        assert_trace_shape(&f);
+        assert_eq!(blank_violations(&f, &zones), 0);
+        assert_eq!(too_close(&f, &zones, TRACE_MARGIN * 0.5), 0);
+        assert!(!lit_of(&f).iter().any(|p| p.x.abs() < 0.01 && p.y.abs() < 0.3), "nothing lit in the gap");
+        // One zone at a time: the other one still forbids its own area.
+        let one = trace_frame(&zones, Horizon::default(), Some(0));
+        assert_eq!(blank_violations(&one, &zones), 0);
+        assert!(lit_of(&one).iter().all(|p| p.x < 0.0), "only the left zone");
+    }
+
+    #[test]
+    fn trace_at_the_edge_of_the_field_stays_inside_it() {
+        let zones = [rect(0.6, 0.6, 1.0, 1.0, ZoneKind::Blank), Zone { id: 1, ..rect(-1.0, -1.0, -0.5, 1.0, ZoneKind::Blank) }];
+        let f = trace_frame(&zones, Horizon::default(), None);
+        assert_trace_shape(&f);
+        assert_eq!(blank_violations(&f, &zones), 0);
+        assert!(lit_of(&f).iter().any(|p| (p.x - 0.58).abs() < 0.005 && p.y > 0.7), "its inner side is drawn");
+    }
+
+    #[test]
+    fn trace_of_a_dim_zone_is_dashed_and_a_public_zone_is_forbidden() {
+        let dim = Zone { kind: ZoneKind::Dim, ..rect(-0.3, -0.3, 0.3, 0.3, ZoneKind::Dim) };
+        // Strokes: runs of lit samples.
+        let strokes = |f: &[Point]| f.windows(2).filter(|w| !w[0].is_lit() && w[1].is_lit()).count();
+        let dashed = strokes(&trace_frame(&[dim], Horizon::default(), Some(0)));
+        let solid = strokes(&trace_frame(&[rect(-0.3, -0.3, 0.3, 0.3, ZoneKind::Blank)], Horizon::default(), Some(0)));
+        assert_eq!(solid, 1);
+        assert!(dashed > 15, "dashes: {dashed}");
+        // A Dim zone marked Public is as forbidden as a Blank one.
+        let public = Zone { kind: ZoneKind::Dim, audience: true, ..rect(-0.3, -0.3, 0.3, 0.3, ZoneKind::Dim) };
+        let near = Zone { id: 1, kind: ZoneKind::Dim, ..rect(-0.29, 0.25, 0.29, 0.6, ZoneKind::Dim) };
+        let zones = [public.clone(), near];
+        let f = trace_frame(&zones, Horizon::default(), None);
+        let as_blank = [Zone { kind: ZoneKind::Blank, ..public }];
+        assert_eq!(blank_violations(&f, &as_blank), 0);
+    }
+
+    #[test]
+    fn trace_of_the_horizon_is_a_line_just_above_it() {
+        let f = trace_frame(&[], Horizon { y: -0.4, ..Default::default() }, None);
+        assert_trace_shape(&f);
+        let lit = lit_of(&f);
+        assert!(lit.len() > 150);
+        assert!(lit.iter().all(|p| (p.y - (-0.4 + TRACE_MARGIN)).abs() < 1e-6));
+        assert!(lit.iter().any(|p| p.x <= -0.99) && lit.iter().any(|p| p.x >= 0.99));
+        // A horizon at the top of the field: nothing to draw above it.
+        assert!(lit_of(&trace_frame(&[], Horizon { y: 1.0, ..Default::default() }, None)).is_empty());
+        // One zone selected: no horizon.
+        assert!(lit_of(&trace_frame(&[], Horizon::default(), Some(3))).is_empty());
+        // The horizon line breaks around a Blank zone it would cross.
+        let zones = [rect(-0.2, -0.5, 0.2, 0.0, ZoneKind::Blank)];
+        let f = trace_frame(&zones, Horizon { y: -0.4, ..Default::default() }, None);
+        assert_eq!(blank_violations(&f, &zones), 0);
+    }
+
+    #[test]
+    fn random_zone_traces_never_light_a_blank_zone() {
+        let r = |seed: u64, i: u64| crate::beat::seeded_rand(seed, i) * 2.0 - 1.0;
+        for seed in 0..200u64 {
+            let zones: Vec<Zone> = (0..4)
+                .map(|z| {
+                    let n = 3 + (seed + z) as usize % 8;
+                    let (cx, cy, s) = (r(seed, z * 100), r(seed, z * 100 + 1), 0.1 + 0.4 * r(seed, z * 100 + 2).abs());
+                    let points = (0..n)
+                        .map(|k| {
+                            let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                            let rad = s * (0.3 + 0.7 * r(seed, z * 100 + 10 + k as u64).abs());
+                            [(cx + rad * a.cos()).clamp(-1.0, 1.0), (cy + rad * a.sin()).clamp(-1.0, 1.0)]
+                        })
+                        .collect();
+                    let kind = if r(seed, z * 100 + 3) > 0.3 { ZoneKind::Dim } else { ZoneKind::Blank };
+                    Zone { id: z as u32, points, kind, audience: r(seed, z * 100 + 4) > 0.6, ..Default::default() }
+                })
+                .collect();
+            let only = (seed % 3 == 0).then_some((seed % 4) as u32);
+            let f = trace_frame(&zones, Horizon { y: r(seed, 999), ..Default::default() }, only);
+            assert_trace_shape(&f);
+            let forbidden: Vec<Zone> = zones.iter().filter(|z| z.kind == ZoneKind::Blank || z.audience).map(|z| Zone { kind: ZoneKind::Blank, ..z.clone() }).collect();
+            assert_eq!(blank_violations(&f, &forbidden), 0, "seed {seed}");
+            assert_eq!(too_close(&f, &zones, TRACE_MARGIN * 0.5), 0, "seed {seed}");
+            // And the mask, applied after, finds nothing to darken.
+            let (_, darkened) = mask(&forbidden).apply(&f);
+            assert_eq!(darkened, 0, "seed {seed}");
+        }
     }
 }

@@ -278,6 +278,13 @@ fn status(s: &Shared) -> Vec<Value> {
         let name = crate::testpattern::LABELS_FR.iter().find(|(q, _)| *q == p).map_or("", |(_, l)| *l);
         add("test_pattern", "Mire de test", name.to_string(), true);
     }
+    if s.zone_trace.is_on() {
+        let what = match s.zone_trace.only {
+            Some(id) => s.safety.get().zones.iter().find(|z| z.id == id).map_or_else(|| format!("zone {id}"), |z| z.name.clone()),
+            None => "Toutes les zones".into(),
+        };
+        add("zone_trace", "Tracé des zones", what, true);
+    }
     if s.audience.is_scanning() {
         add("audience", "Mode public", "Balayage du public autorisé".into(), true);
     }

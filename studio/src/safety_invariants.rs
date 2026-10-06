@@ -103,6 +103,11 @@
 //!     sessions (1-19 hold with them); they never arm, and with the
 //!     e-stop latched no list plays and no show runs after the frame.
 //!
+//! 21. the zone trace (T-447): started and left from the UI at random,
+//!     one zone or all, its frame goes through the same chain (1-20 hold
+//!     with it: nothing lit in a Blank or Public zone, caps), starting or
+//!     leaving it never arms, and it never outlives an e-stop.
+//!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
 //! catalogue cue forced onto the default seeds (flashed over itself, and
@@ -1265,6 +1270,8 @@ struct Coverage {
     /// Frames with a lit preview while a cue played below full executor
     /// level (T-418).
     lit_with_exec: usize,
+    /// Frames that sent light while the zone trace ran (T-447).
+    sent_lit_with_trace: usize,
 }
 
 /// A random executor bank (T-418), as `POST /api/executors` could send it
@@ -1802,6 +1809,11 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         let dir = rig.dir.clone();
         random_show_list(&mut rig.s(), &mut jrng, &dir);
     }
+    // The zone trace (T-447), from its own stream: started from the UI
+    // at a random frame (all zones or one, its page named or not), left
+    // or let run out. It replaces the looks, so only some sessions.
+    let mut yrng = Rng::new(seed ^ 0x0447_0447);
+    let trace_from = yrng.chance(0.15).then(|| yrng.below(frames));
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
@@ -2068,6 +2080,25 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         if orng.chance(0.02) {
             sky_action(&mut rig.s(), &mut orng).map_err(|e| format!("frame {frame}: {e}"))?;
         }
+        if trace_from.is_some_and(|f| frame >= f) && (frame == trace_from.unwrap() || yrng.chance(0.1)) {
+            let now = rig.now;
+            let mut s = rig.s();
+            let was = s.gate.is_armed();
+            if s.zone_trace.is_on() && yrng.chance(0.5) {
+                crate::zonetrace::stop(&mut s, "user");
+            } else {
+                let ids: Vec<u32> = s.safety.get().zones.iter().map(|z| z.id).collect();
+                let only = if !ids.is_empty() && yrng.chance(0.3) { Some(*yrng.pick(&ids)) } else { None };
+                let client = yrng.chance(0.5).then_some("page");
+                let started = crate::zonetrace::start(&mut s, now, only, client);
+                if started.is_ok() == s.estop.is_latched() {
+                    return Err(format!("frame {frame}: zone trace start {started:?} with the e-stop latched = {}", s.estop.is_latched()));
+                }
+            }
+            if s.gate.is_armed() != was {
+                return Err(format!("frame {frame}: the zone trace changed the arming"));
+            }
+        }
         for _ in 0..rng.below(3) {
             let (was, was_scanning) = {
                 let s = rig.s();
@@ -2194,6 +2225,12 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         if s.estop.is_latched() && (!s.deck.ending.is_empty() || !s.deck.pending.is_empty()) {
             return Err(format!("frame {frame}: a transition or a waiting launch survived the e-stop"));
         }
+        // The zone trace (T-447) never outlives an e-stop, and its frame
+        // went through the same checks as any other (above).
+        if s.estop.is_latched() && s.zone_trace.is_on() {
+            return Err(format!("frame {frame}: the zone trace survived the e-stop"));
+        }
+        cov.sent_lit_with_trace += (lit > 0 && s.zone_trace.is_on()) as usize;
     }
     cov.sessions += 1;
     cov.sessions_lit += session_lit as usize;
@@ -2256,6 +2293,8 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_fx) > 0.02, "only {} of {} lit frames went through the FX grid", cov.lit_with_fx, cov.frames);
         assert!(share(cov.lit_with_levels) > 0.05, "only {} of {} lit frames went through a cue or layer level", cov.lit_with_levels, cov.frames);
         assert!(share(cov.lit_with_exec) > 0.035, "only {} of {} lit frames had a cue below full executor level", cov.lit_with_exec, cov.frames);
+        eprintln!("coverage: sent lit with the zone trace {:.4}", share(cov.sent_lit_with_trace));
+        assert!(share(cov.sent_lit_with_trace) > 0.015, "only {} of {} frames sent the zone trace", cov.sent_lit_with_trace, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
@@ -4574,4 +4613,70 @@ fn a_live_recording_never_arms_and_its_file_carries_the_safety_chain() {
         lit_file += 1;
     }
     assert!(lit_file > 0, "the upper half still shows");
+}
+
+// ---------- the zone trace (T-447) ----------
+
+/// Disarmed, the zone trace is in the preview and nothing is sent; armed
+/// by the operator, it is sent through the whole safety stage: nothing
+/// lit in a Blank zone (a concave one, two side by side) nor in a Public
+/// one, green at no more than `TRACE_LEVEL` under the caps whatever the
+/// look and the masters, a lowered cap applied on the next frame. Échap
+/// ends it and darkens the output at once.
+#[test]
+fn the_zone_trace_is_previewed_disarmed_and_sent_through_the_safety_stage() {
+    let mut rig = armed_square_rig("zone-trace");
+    let cfg = SafetySettings {
+        zones: vec![
+            Zone { id: 1, points: vec![[-0.6, -0.6], [0.0, -0.6], [0.0, -0.3], [-0.3, -0.3], [-0.3, 0.0], [-0.6, 0.0]], ..Default::default() },
+            Zone { id: 2, points: vec![[0.01, -0.6], [0.4, -0.6], [0.4, -0.2], [0.01, -0.2]], ..Default::default() },
+            Zone { id: 3, kind: ZoneKind::Dim, level: 0.4, audience: true, points: vec![[-0.5, 0.2], [0.5, 0.2], [0.5, 0.6], [-0.5, 0.6]], ..Default::default() },
+        ],
+        horizon: Horizon { y: -0.8, ..Default::default() },
+        ..SafetySettings::default()
+    };
+    {
+        let mut s = rig.s();
+        s.safety.set(cfg.clone(), true).unwrap();
+        // A bright look and master: the trace ignores them.
+        s.live.brightness = 1.0;
+        s.settings.brightness = 1.0;
+        let now = rig.now;
+        crate::zonetrace::start(&mut s, now, None, None).unwrap();
+    }
+    let check = |frame: &[Point], caps: &OutputLimits, what: &str| {
+        check_points(frame, caps, &cfg, what).unwrap();
+        check_public(frame, caps, &cfg, false, what).unwrap();
+        let ceiling = zones::TRACE_LEVEL * caps.sanitized().ceiling(1) + 1e-6;
+        for p in frame.iter().filter(|p| p.is_lit()) {
+            assert!(p.r == 0.0 && p.b == 0.0 && p.g <= ceiling, "{what}: {p:?} above {ceiling}");
+        }
+        assert!(frame.iter().filter(|p| p.is_lit()).count() > 100, "{what}: the outlines are drawn");
+    };
+    for _ in 0..3 {
+        rig.tick();
+    }
+    {
+        let s = rig.s();
+        assert!(!s.gate.is_armed(), "never arms");
+        check(&s.frame, &s.outputs.active_limits(), "preview, disarmed");
+    }
+    assert_eq!(lit(&rig.wire), 0, "disarmed: nothing sent");
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    rig.tick();
+    let caps = rig.s().outputs.active_limits();
+    let sent = rig.wire.lock().unwrap().last.clone();
+    check(&sent, &caps, "sent, armed");
+    // A lowered cap applies from the next frame.
+    let low = OutputLimits { max_power: 0.2, max_color: [1.0; 3] };
+    rig.s().outputs.set(MAIN_OUTPUT, Some(low), None, true, true).unwrap();
+    rig.tick();
+    let sent = rig.wire.lock().unwrap().last.clone();
+    check(&sent, &low, "sent, lowered cap");
+    // Échap: dark at once, and the trace is over.
+    rig.s().emergency_stop(ArmSource::Keyboard);
+    rig.tick();
+    assert_eq!(lit(&rig.wire), 0);
+    assert!(!rig.s().zone_trace.is_on());
+    assert!(!rig.s().gate.is_armed());
 }
