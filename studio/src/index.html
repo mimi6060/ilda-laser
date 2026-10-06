@@ -1576,6 +1576,16 @@
     background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
   #helpMenu[hidden] { display: none; }
   #helpMenu button { text-align: left; }
+  /* Vues enregistrées (T-426): « Vues ▾ » in the tab bar and its menu. */
+  #wsTabs #viewsBtn { align-self: center; margin-left: 6px; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); font-weight: 600; letter-spacing: 0; font-size: 12px; white-space: nowrap; }
+  #wsTabs #viewsBtn::before { display: none; }
+  #viewsMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 2px; min-width: 240px; max-height: 70vh; overflow-y: auto; padding: 6px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
+  #viewsMenu[hidden] { display: none; }
+  #viewsMenu button { display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; }
+  #viewsMenu button[aria-current="true"] { color: var(--accent); }
+  #viewsMenu hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+  #viewsMenu .hint { padding: 4px 6px; }
   .help-title { display: inline-flex; align-items: center; gap: 6px; }
   .help-q { flex: none; width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; font-weight: 700; line-height: 18px; text-transform: none; letter-spacing: 0;
     color: var(--muted); }
@@ -1884,6 +1894,8 @@
     <button id="redoBtn" disabled aria-label="Rétablir" title="Rien à rétablir"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3l3.5 3.5L10 10"/><path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3"/></svg></button>
     <button id="historyBtn" aria-haspopup="true" aria-expanded="false" aria-label="Historique" title="Historique des modifications (cliquer une ligne annule jusqu'à elle)"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.6"/></svg></button>
   </div>
+  <!-- Vues enregistrées (T-426): the screen's layout, recalled with Alt+F1…; never the output. -->
+  <button id="viewsBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewsMenu" title="Vues enregistrées : rappeler l'arrangement de l'écran (Alt+F1 … F4, F6 … F9). La sortie ne change pas.">Vues ▾</button>
   <!-- Recherche globale (T-429): Cmd+K or Cmd+F, from every workspace; in the tab bar, the top bar is full. -->
   <button id="searchBtn" aria-haspopup="dialog" aria-expanded="false" title="Rechercher un cue, une page, une scène, un show, un contrôle, un réglage ou une page d'aide (Cmd+K ou Cmd+F)">
     <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
@@ -1907,6 +1919,7 @@
   <div class="hint" id="searchHint">↑ ↓ choisir · Entrée : y aller · Maj+Entrée : jouer le cue · Cmd+K : fermer · Échap reste l'arrêt d'urgence</div>
 </div>
 <!-- Aide (T-437, T-438): the menu behind « ? Aide », no shortcut of its own. -->
+<div id="viewsMenu" role="menu" aria-label="Vues enregistrées" hidden></div>
 <div id="helpMenu" role="menu" aria-label="Aide" hidden>
   <button role="menuitem" id="helpMenuToc">Sommaire de l'aide</button>
   <button role="menuitem" id="helpMenuFirst">Premier show avec MadMapper et le ShowNET</button>
@@ -4041,6 +4054,18 @@
         <div class="hint" id="dispTouchInfo" role="status"></div>
         <div class="hint">Cibles d'au moins 44 px et cases de la grille plus hautes. Appui long (½ s) = clic droit : un curseur revient à sa valeur neutre ; sur un cue, ses propriétés ; ailleurs, l'aide du contrôle. Un cue en flash reste actif tant que le doigt est posé. Armer le laser demande toujours le bouton du laser (ou Espace) ; Échap reste l'arrêt d'urgence. Auto : activé sur un écran tactile. Réglages de ce navigateur.</div>
       </details>
+      <!-- Opérateur (T-426): views and interface preferences per person, on this machine. -->
+      <details id="operatorPanel" data-search="Opérateur : vues enregistrées, préférences d'interface, profil">
+        <summary>Opérateur</summary>
+        <label for="opSelect">Opérateur</label>
+        <select id="opSelect"></select>
+        <div class="row">
+          <button id="opNew">Nouvel opérateur…</button>
+          <button id="opDelete">Supprimer</button>
+        </div>
+        <div class="hint" id="opInfo" role="status"></div>
+        <div class="hint">Vues et préférences enregistrées sur cette machine, pas dans le projet. Elles ne règlent que l'écran : jamais la sortie, l'armement ni la sécurité. Un autre navigateur de cette machine ouvre le même profil.</div>
+      </details>
     </section>
 
     <section data-help="projet">
@@ -4871,7 +4896,7 @@ async function apiRefused(method, path, r, opts) {
 // raised by every editing request so a reload within that time is caught),
 // the timeline editor's show, the figure being drawn and the cue program
 // being edited in CRÉATION. An autosave is not a save: the guard stays.
-const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame|onboarding|about|help|prepared)/;
+const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame|onboarding|about|help|prepared|operators)/;
 const DIRTY = { editAt: -1, savedAt: 0, server: false, serverAt: 0 };
 function noteEdit(path) { if (!NOT_EDITS.test(path)) DIRTY.editAt = performance.now(); }
 function takeProjectModified(modified, at) {
@@ -5310,7 +5335,7 @@ const SAFETY_SHORTCUTS = [
 // After the stop, never instead of it: end a hold-key pick, a MIDI learn, the help.
 function afterEscape() {
   pickingHoldKey = false;
-  try { stopLearning(); closeKeysHelp(); closeTlExamples(); closeVapcMenu(); closeSearch(); } catch (err) { console.warn('Échap', err); }
+  try { stopLearning(); closeKeysHelp(); closeTlExamples(); closeVapcMenu(); closeSearch(); closeViewsMenu(); } catch (err) { console.warn('Échap', err); }
 }
 let restShortcuts = null;
 function buildShortcuts() {
@@ -5343,6 +5368,14 @@ function buildShortcuts() {
     { id: 'workspace.desk', group: 'Espaces de travail', codes: ['F5'], alt: true, zones: '*', typing: true, show: true,
       label: 'PUPITRE : votre page de boutons, curseurs et pavés XY',
       down: () => setWorkspace('desk') },
+    // Vues enregistrées (T-426): Alt + F1…F4, F6…F9 (Alt+F5 is PUPITRE,
+    // F alone the workspaces and cue pages). Display only, never the output.
+    { id: 'view.recall', group: 'Vues', codes: VIEW_FKEYS, alt: true, zones: '*', typing: true, show: true,
+      cap: () => 'F1 … F4, F6 … F9', label: 'Rappeler la vue 1 à 8 (l\'écran seulement : la sortie ne change pas)',
+      down: (e, i) => { if (!e.repeat) recallSlot(i + 1); } },
+    { id: 'view.store', group: 'Vues', codes: VIEW_FKEYS, alt: true, shift: true, zones: '*', typing: true, show: true,
+      cap: () => 'F1 … F4, F6 … F9', label: 'Enregistrer l\'écran actuel dans la vue 1 à 8 (confirmation si elle existe)',
+      down: (e, i) => { if (!e.repeat) storeSlot(i + 1); } },
     { id: 'desk.delete', group: 'Pupitre', keys: ['Delete'], alt: '*', shift: '*', zones: ['desk'], show: false,
       where: 'PUPITRE (mode Modifier)', label: 'Supprimer le composant sélectionné',
       when: () => DESK.edit && DESK.sel != null, down: () => deskDelete() },
@@ -5622,7 +5655,7 @@ function shortcutConflicts(list = allShortcuts()) {
 
 // « ? » : the table, grouped. Keys shown as on this keyboard when the
 // browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
-const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Exécuteurs', 'Pupitre', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Recherche', 'Timeline', 'Figures', 'Aide'];
+const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Exécuteurs', 'Pupitre', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Vues', 'Recherche', 'Timeline', 'Figures', 'Aide'];
 const ZONE_FR = { live: 'LIVE', grid: 'LIVE (grille active)', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES', desk: 'PUPITRE' };
 const KEY_CAPS = { Digit0: '0', Numpad0: '0 (pavé)', Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
 const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
@@ -6205,7 +6238,7 @@ function loadRender3d() {
   try { return JSON.parse(localStorage.getItem(R3_KEY) || '{}') || {}; } catch { return {}; }
 }
 function saveRender3d() {
-  try { localStorage.setItem(R3_KEY, JSON.stringify(view3d.render)); } catch { /* private window: not remembered */ }
+  remember(R3_KEY, JSON.stringify(view3d.render));
 }
 const QUALITY_FR = { low: 'Basse', medium: 'Moyenne', high: 'Haute' };
 function showRender3d() {
@@ -6318,7 +6351,7 @@ async function setView(mode) {
   else view3d?.stop();
   showAud3d();
   if (show2d) draw(lastPoints);
-  try { localStorage.setItem(STAGE_KEY, mode); } catch { /* private window: not remembered */ }
+  remember(STAGE_KEY, mode);
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
 
@@ -6545,7 +6578,19 @@ const WS_KEY = 'laserStudio.workspace', PANEL_KEY = 'laserStudio.livePanel';
 const WORKSPACES = ['live', 'timeline', 'creation', 'settings', 'desk'];
 let activeWs = 'live';
 function remembered(key) { try { return localStorage.getItem(key); } catch { return null; } }
-function remember(key, v) { try { localStorage.setItem(key, v); } catch { /* private window: not remembered */ } }
+function remember(key, v) { try { localStorage.setItem(key, v); } catch { /* private window: not remembered */ } opTouched(); }
+// Opérateur (T-426): this browser's localStorage is a cache of the
+// operator's preferences, kept on the studio (<data-dir>/operators). Set
+// up here because remember() runs from the first lines below; the rest is
+// further down (« Vues enregistrées »).
+const OP_MARK_KEY = 'laserStudio.operator', OP_DEFAULT = 'Défaut';
+const OP = { name: OP_DEFAULT, names: [OP_DEFAULT], views: [], prefs: {}, ready: false, timer: 0, chain: Promise.resolve(), last: null };
+/** A preference changed: sent to the studio 500 ms after the last change. */
+function opTouched() {
+  if (!OP.ready) return;
+  clearTimeout(OP.timer);
+  OP.timer = setTimeout(opPushPrefs, 500);
+}
 
 // ---------- Mode nuit et mode tactile (T-282) ----------
 // This browser's display only: nothing reaches the studio or the laser.
@@ -6683,6 +6728,275 @@ $('midiStatus').onclick = () => { if (showMode) return flash(LOCKED_FR); setWork
 setWorkspace(remembered(WS_KEY));
 setLivePanel(remembered(PANEL_KEY));
 { const v = remembered(STAGE_KEY); if (v === '3d' || v === 'both') setView(v); }
+
+// ---------- Vues enregistrées et préférences d'opérateur (T-426) ----------
+// A view is the screen's layout (workspace, LIVE panel tab, CRÉATION tab,
+// 2D/3D and render, cue page, timeline zoom). Recalling one never posts
+// anything but the cue page (control page.<n>: display and MIDI grid
+// only): no cue, look, master, tempo or arming changes. The top bar
+// (laser, Noir, ARRÊT, Ciel coupé, banners) is outside the workspaces and
+// stays on screen whatever the view. Views and the localStorage keys
+// (`laserStudio.*`) belong to the operator, on the studio, outside the
+// project. This browser's copy wins when it was last synced with the
+// same operator; a new browser (or another operator) takes the studio's.
+const VIEW_FKEYS = ['F1', 'F2', 'F3', 'F4', 'F6', 'F7', 'F8', 'F9']; // Alt+F5 = PUPITRE
+const VIEW_MAX = 32, VIEW_SLOTS = 8;
+const STAGE_MODES = ['2d', '3d', 'both'];
+// As operators.rs `valid_name`: never a path, never an API word.
+const opValidName = n => /^[\p{L}\p{N} _-]{1,32}$/u.test(n) && n.trim() === n && !n.startsWith('_') && !['current', 'delete'].includes(n.toLowerCase());
+const viewKey = slot => slot ? 'Alt+' + VIEW_FKEYS[slot - 1] : '';
+/** This browser's `laserStudio.*` keys (the operator mark left out), sorted. */
+function opLocalPrefs() {
+  const out = {};
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+    for (const k of keys.sort()) {
+      if (!k || !k.startsWith('laserStudio.') || k === OP_MARK_KEY) continue;
+      const v = localStorage.getItem(k);
+      if (v !== null && v.length <= 16384) out[k] = v; // 64 Ko for them all on the studio
+    }
+  } catch { /* no storage: nothing to send */ }
+  return out;
+}
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function opSave() {
+  const body = { name: OP.name, views: OP.views, prefs: OP.prefs };
+  const path = '/api/operators/' + encodeURIComponent(OP.name);
+  OP.chain = OP.chain.then(() => api('POST', path, body, { quiet: true })).then(r => r.ok, () => false);
+  return OP.chain;
+}
+function opPushPrefs() {
+  clearTimeout(OP.timer);
+  const p = opLocalPrefs();
+  if (sameJson(p, OP.prefs)) return OP.chain;
+  OP.prefs = p;
+  return opSave();
+}
+/** The studio's preferences replace this browser's (another operator, a new browser). */
+function opReplaceLocal(prefs) {
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+    for (const k of keys) if (k && k.startsWith('laserStudio.') && k !== OP_MARK_KEY && !(k in prefs)) localStorage.removeItem(k);
+    for (const [k, v] of Object.entries(prefs)) if (typeof v === 'string') localStorage.setItem(k, v);
+  } catch { /* no storage: the page keeps what it shows */ }
+}
+/** Shows what the preferences say, as a reload would. */
+function opApplyPrefs() {
+  try {
+    displayPrefs = readDisplayPrefs(); applyDisplay();
+    setWorkspace(remembered(WS_KEY));
+    setLivePanel(remembered(PANEL_KEY));
+    setCreationTab(remembered(CTAB_KEY));
+    if (view3d) { view3d.setRender({ ...beam3d.DEFAULT_RENDER, ...loadRender3d() }); showRender3d(); }
+    const st = remembered(STAGE_KEY);
+    setView(STAGE_MODES.includes(st) ? st : '2d');
+    const tm = remembered(THUMB_MODE_KEY);
+    if (THUMB_MODES.includes(tm) && tm !== thumbMode) setThumbMode(tm);
+    try {
+      const f = JSON.parse(remembered(FILTER_KEY) || '{}') || {};
+      cueFilter = { tags: Array.isArray(f.tags) ? f.tags.filter(t => typeof t === 'string') : [], text: typeof f.text === 'string' ? f.text : '', any: !!f.any };
+      $('cueFilterText').value = cueFilter.text; renderCueFilter(); applyCueFilter();
+    } catch { /* filter kept */ }
+  } catch (e) { console.warn('préférences d\'opérateur', e); }
+}
+/** Loads `name`'s profile; `switching`: chosen here, its preferences replace this browser's. */
+async function opLoad(name, switching = false) {
+  const prof = await apiJson('GET', '/api/operators/' + encodeURIComponent(name), undefined, { quiet: true, cache: 'no-store' });
+  OP.name = prof.name || OP_DEFAULT;
+  OP.views = Array.isArray(prof.views) ? prof.views : [];
+  const server = prof.prefs && typeof prof.prefs === 'object' ? prof.prefs : {};
+  const mark = remembered(OP_MARK_KEY);
+  OP.last = null;
+  OP.ready = false;
+  if (!switching && (mark === OP.name || (mark === null && Object.keys(server).length === 0))) {
+    // Same browser, same operator (or the first time: migrate what this browser has).
+    OP.prefs = server;
+    OP.ready = true;
+    opPushPrefs();
+  } else {
+    opReplaceLocal(server);
+    OP.prefs = opLocalPrefs();
+    opApplyPrefs();
+    OP.ready = true;
+  }
+  remember(OP_MARK_KEY, OP.name);
+  renderViewsMenu(); renderOpPanel();
+}
+async function opInit() {
+  try {
+    const cur = await apiJson('GET', '/api/operators', undefined, { quiet: true, cache: 'no-store' });
+    OP.names = cur.names || [OP_DEFAULT];
+    await opLoad(cur.current || OP_DEFAULT);
+  } catch (e) {
+    console.warn('opérateur', e); // the page works from this browser's copy
+    OP.ready = true;
+  }
+  renderOpPanel();
+}
+async function opRefreshNames() {
+  try { OP.names = (await apiJson('GET', '/api/operators', undefined, { quiet: true, cache: 'no-store' })).names || OP.names; } catch { /* keep the list */ }
+  renderOpPanel();
+}
+async function opSwitch(name) {
+  if (name === OP.name) return;
+  await opPushPrefs(); // the leaving operator's last changes
+  if (!(await api('POST', '/api/operators/current', { name })).ok) { renderOpPanel(); return; }
+  await opLoad(name, true);
+  await opRefreshNames();
+  flash(`Opérateur « ${OP.name} »`);
+}
+function renderOpPanel() {
+  const sel = $('opSelect');
+  const names = OP.names.includes(OP.name) ? OP.names : [...OP.names, OP.name];
+  sel.innerHTML = '';
+  for (const n of names) { const o = document.createElement('option'); o.value = o.textContent = n; sel.appendChild(o); }
+  sel.value = OP.name;
+  $('opDelete').disabled = OP.name === OP_DEFAULT;
+  const n = OP.views.length;
+  $('opInfo').textContent = `${n} vue${n > 1 ? 's' : ''} enregistrée${n > 1 ? 's' : ''} (${VIEW_SLOTS} à touche, ${VIEW_MAX} au plus).`;
+}
+$('opSelect').addEventListener('change', e => opSwitch(e.target.value));
+$('opNew').addEventListener('click', async () => {
+  const name = (prompt('Nom du nouvel opérateur (lettres, chiffres, espaces, - et _) :') || '').trim();
+  if (!name) return;
+  if (!opValidName(name)) return flash('Nom d\'opérateur invalide');
+  if (!OP.names.includes(name)) {
+    await opPushPrefs();
+    // A new operator starts from this screen's preferences, without views.
+    if (!(await api('POST', '/api/operators/' + encodeURIComponent(name), { name, views: [], prefs: OP.prefs })).ok) return;
+  }
+  await opSwitch(name);
+});
+$('opDelete').addEventListener('click', async () => {
+  const name = OP.name;
+  if (name === OP_DEFAULT || !confirm(`Supprimer l'opérateur « ${name} », ses vues et ses préférences ?`)) return;
+  clearTimeout(OP.timer);
+  await OP.chain;
+  if (!(await api('POST', '/api/operators/delete', { name })).ok) return;
+  await opLoad(OP_DEFAULT, true);
+  await opRefreshNames();
+  flash(`Opérateur « ${name} » supprimé`);
+});
+
+// The view on screen now.
+function captureView(name, slot = null) {
+  const panel = document.querySelector('#liveTabs [data-panel-tab].active')?.dataset.panelTab || 'direct';
+  const stage = document.querySelector('#viewSeg button.active')?.dataset.view || '2d';
+  let render3d = {};
+  try { render3d = view3d ? { ...view3d.render } : loadRender3d(); } catch { render3d = {}; }
+  return {
+    name, slot, workspace: activeWs, live_panel: panel, creation_tab: $('workspace').dataset.ctab || 'look',
+    stage_mode: stage, render3d, cue_page: gridPage,
+    timeline: { zoom: TL.pps / 40, scroll: TL.t0, follow: !!TL.follow }, sizes: {},
+  };
+}
+/** Puts a view on screen. Unknown values (a tab that no longer exists) are skipped. */
+function applyView(v) {
+  if (WORKSPACES.includes(v.workspace)) setWorkspace(v.workspace);
+  if (document.querySelector(`#liveTabs [data-panel-tab="${CSS.escape(v.live_panel || '')}"]`)) setLivePanel(v.live_panel);
+  if (document.querySelector(`#creationTabs [data-ctab="${CSS.escape(v.creation_tab || '')}"]`)) setCreationTab(v.creation_tab);
+  if (v.render3d && typeof v.render3d === 'object' && Object.keys(v.render3d).length) {
+    if (view3d) { view3d.setRender(v.render3d); saveRender3d(); showRender3d(); }
+    else remember(R3_KEY, JSON.stringify(v.render3d)); // read when the 3D view starts
+  }
+  if (STAGE_MODES.includes(v.stage_mode)) setView(v.stage_mode);
+  const page = Number(v.cue_page);
+  if (Number.isInteger(page) && grid.pages[page] && page !== gridPage) selectPage(page);
+  const t = v.timeline || {};
+  if (Number.isFinite(t.zoom) && t.zoom > 0 && Number.isFinite(t.scroll)) tlSetView(t.scroll, t.zoom * 40);
+  if (typeof t.follow === 'boolean') { TL.follow = t.follow; $('tlFollow').checked = t.follow; }
+  OP.last = v.name;
+  renderViewsMenu();
+}
+function recallSlot(slot) {
+  const v = OP.views.find(x => x.slot === slot);
+  if (!v) return flash(`Aucune vue sur ${viewKey(slot)}`);
+  applyView(v);
+  flash('Vue rappelée');
+}
+async function storeView(v) {
+  const i = OP.views.findIndex(x => x.name === v.name);
+  if (i >= 0) OP.views[i] = v; else OP.views.push(v);
+  OP.last = v.name;
+  renderViewsMenu(); renderOpPanel();
+  if (await opSave()) flash(`Vue « ${v.name} » enregistrée`);
+  else flash('Vue non enregistrée : le studio a refusé');
+}
+function storeSlot(slot) {
+  const old = OP.views.find(x => x.slot === slot);
+  if (old && !confirm(`Remplacer la vue « ${old.name} » (${viewKey(slot)}) par l'écran actuel ?`)) return;
+  if (!old && OP.views.length >= VIEW_MAX) return flash(`${VIEW_MAX} vues au plus`);
+  let name = old ? old.name : `Vue ${slot}`;
+  for (let n = 2; !old && OP.views.some(x => x.name === name); n++) name = `Vue ${slot} (${n})`;
+  storeView(captureView(name, slot));
+}
+function storeNamed() {
+  if (OP.views.length >= VIEW_MAX) return flash(`${VIEW_MAX} vues au plus`);
+  const name = (prompt('Nom de la vue :', `Vue ${OP.views.length + 1}`) || '').trim().slice(0, 32);
+  if (!name) return;
+  const old = OP.views.find(x => x.name === name);
+  if (old && !confirm(`Remplacer la vue « ${name} » ?`)) return;
+  const used = new Set(OP.views.filter(x => x !== old).map(x => x.slot).filter(Boolean));
+  let slot = old ? old.slot : null;
+  for (let s = 1; !slot && s <= VIEW_SLOTS; s++) if (!used.has(s)) slot = s;
+  storeView(captureView(name, slot || null));
+}
+function renderViewsMenu() {
+  const m = $('viewsMenu');
+  m.innerHTML = '';
+  const item = (text, key, onClick, extra = {}) => {
+    const b = document.createElement('button');
+    b.setAttribute('role', 'menuitem');
+    const t = document.createElement('span'); t.textContent = text; b.appendChild(t);
+    if (key) { const k = document.createElement('kbd'); k.textContent = key; b.appendChild(k); }
+    if (extra.current) b.setAttribute('aria-current', 'true');
+    if (extra.disabled) b.disabled = true;
+    b.onclick = () => { closeViewsMenu(); onClick(); };
+    m.appendChild(b);
+    return b;
+  };
+  const sorted = [...OP.views].sort((a, b) => (a.slot || 99) - (b.slot || 99));
+  if (!sorted.length) item('Aucune vue enregistrée', '', () => {}, { disabled: true });
+  for (const v of sorted) item(v.name, viewKey(v.slot), () => { applyView(v); flash('Vue rappelée'); }, { current: v.name === OP.last });
+  m.appendChild(document.createElement('hr'));
+  item('Enregistrer la vue…', '', storeNamed);
+  const cur = OP.views.find(x => x.name === OP.last);
+  if (cur) {
+    item(`Mettre à jour « ${cur.name} »`, cur.slot ? 'Alt+⇧+' + VIEW_FKEYS[cur.slot - 1] : '', () => storeView(captureView(cur.name, cur.slot ?? null)));
+    item(`Renommer « ${cur.name} »…`, '', () => {
+      const name = (prompt('Nouveau nom de la vue :', cur.name) || '').trim().slice(0, 32);
+      if (!name || name === cur.name) return;
+      if (OP.views.some(x => x.name === name)) return flash(`Une vue s'appelle déjà « ${name} »`);
+      cur.name = name; OP.last = name;
+      renderViewsMenu(); opSave();
+    });
+    item(`Supprimer « ${cur.name} »`, '', () => {
+      if (!confirm(`Supprimer la vue « ${cur.name} » ?`)) return;
+      OP.views = OP.views.filter(x => x !== cur); OP.last = null;
+      renderViewsMenu(); renderOpPanel(); opSave();
+    });
+  }
+}
+function closeViewsMenu() { $('viewsMenu').hidden = true; $('viewsBtn').setAttribute('aria-expanded', 'false'); }
+$('viewsBtn').onclick = e => {
+  e.stopPropagation();
+  if (!$('viewsMenu').hidden) { closeViewsMenu(); return; }
+  renderViewsMenu();
+  const r = $('viewsBtn').getBoundingClientRect();
+  const menu = $('viewsMenu');
+  menu.hidden = false;
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
+  $('viewsBtn').setAttribute('aria-expanded', 'true');
+  menu.querySelector('button:not(:disabled)')?.focus();
+};
+document.addEventListener('click', e => { if (!$('viewsMenu').hidden && !e.target.closest('#viewsMenu, #viewsBtn')) closeViewsMenu(); });
+renderViewsMenu();
+setTimeout(opInit, 0); // once the whole script has run (grid, timeline, filters)
+// The e2e tests read the operator here: read only.
+window.__operator = () => ({ name: OP.name, ready: OP.ready, views: OP.views.map(v => ({ ...v })), last: OP.last });
 // The workspace grid fills the window below the top bar, whose height
 // changes with the banners.
 if (globalThis.ResizeObserver) new ResizeObserver(() => {
@@ -7993,7 +8307,7 @@ function ssEvent() {
 }
 function ssRemember() {
   const { phone, ...kept } = ssEvent();
-  try { localStorage.setItem(SS_KEY, JSON.stringify(kept)); } catch { /* storage unavailable: nothing kept */ }
+  try { localStorage.setItem(SS_KEY, JSON.stringify(kept)); } catch { /* storage unavailable: nothing kept */ } opTouched();
 }
 (function ssInit() {
   let kept = {};
@@ -19347,7 +19661,7 @@ function cmdHistory() {
 }
 function cmdRemember(line) {
   const h = [line, ...cmdHistory().filter(x => x !== line)].slice(0, CMD_HISTORY_MAX);
-  try { localStorage.setItem(CMD_HISTORY_KEY, JSON.stringify(h)); } catch { /* private window: no history */ }
+  try { localStorage.setItem(CMD_HISTORY_KEY, JSON.stringify(h)); } catch { /* private window: no history */ } opTouched();
 }
 const SEARCH_TEXT = {
   search: { label: 'Recherche globale', ph: 'Rechercher… (cue, page, scène, show, contrôle, réglage, aide)', input: 'Rechercher',

@@ -88,6 +88,13 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/diagnostics/report", RouteClass::Read),
     ("GET", "/api/about", RouteClass::Read),
     ("POST", "/api/about/seen", RouteClass::Play),
+    // Vues et préférences d'opérateur (T-426): display only, never the
+    // output; allowed in show mode like a camera move.
+    ("GET", "/api/operators", RouteClass::Read),
+    ("POST", "/api/operators/current", RouteClass::Play),
+    ("POST", "/api/operators/delete", RouteClass::Play),
+    ("GET", "/api/operators/*", RouteClass::Read),
+    ("POST", "/api/operators/*", RouteClass::Play),
     ("GET", "/api/logs/tail", RouteClass::Read),
     ("GET", "/api/frame", RouteClass::Read),
     ("GET", "/api/preview-frame", RouteClass::Read),
@@ -806,6 +813,40 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 Err(e) => text(500, &format!("impossible d'enregistrer les préférences : {e:#}")),
             }
         }
+        // Vues et préférences d'opérateur (T-426): files under
+        // <data-dir>/operators, never Shared.settings, the deck or the output.
+        (Method::Get, "/api/operators") => {
+            let data_dir = shared.lock().unwrap().project.data_dir.clone();
+            json_response(crate::operators::summary(&data_dir))
+        }
+        (Method::Post, "/api/operators/current") => match body::<OperatorRequest>(request) {
+            Ok(r) => {
+                let data_dir = shared.lock().unwrap().project.data_dir.clone();
+                match crate::operators::set_current(&data_dir, r.name.trim()) {
+                    Ok(()) => json_response(json!({ "current": crate::operators::current(&data_dir), "profile": crate::operators::load(&data_dir, r.name.trim()) })),
+                    Err((code, msg)) => text(code, &msg),
+                }
+            }
+            Err(resp) => resp,
+        },
+        (Method::Post, "/api/operators/delete") => match body::<OperatorRequest>(request) {
+            Ok(r) => {
+                let data_dir = shared.lock().unwrap().project.data_dir.clone();
+                match crate::operators::delete(&data_dir, r.name.trim()) {
+                    Ok(()) => json_response(crate::operators::summary(&data_dir)),
+                    Err((code, msg)) => text(code, &msg),
+                }
+            }
+            Err(resp) => resp,
+        },
+        (Method::Get, p) if p.starts_with("/api/operators/") => match operator_name(p) {
+            Some(name) => {
+                let data_dir = shared.lock().unwrap().project.data_dir.clone();
+                json_response(json!(crate::operators::load(&data_dir, &name)))
+            }
+            None => text(400, "nom d'opérateur invalide"),
+        },
+        (Method::Post, p) if p.starts_with("/api/operators/") => save_operator(request, shared, p),
         (Method::Get, "/api/logs/tail") => {
             let n = query_u64(request.url(), "n").unwrap_or(200).clamp(1, 1000) as usize;
             let app = Arc::clone(&shared.lock().unwrap().applog);
@@ -4800,6 +4841,43 @@ struct ProfileLoadRequest {
     source: Option<String>,
 }
 
+/// `POST /api/operators/current`, `/api/operators/delete` (T-426).
+#[derive(serde::Deserialize)]
+struct OperatorRequest {
+    #[serde(default)]
+    name: String,
+}
+
+/// The operator named by `/api/operators/<nom>` (percent-decoded), if valid.
+fn operator_name(path: &str) -> Option<String> {
+    let seg = path.strip_prefix("/api/operators/")?;
+    crate::operators::decode_segment(seg).filter(|n| crate::operators::valid_name(n))
+}
+
+/// `POST /api/operators/<nom>`: replaces that operator's profile (views
+/// and interface preferences). The URL's name wins over the body's.
+fn save_operator(request: &mut Request, shared: &Arc<Mutex<Shared>>, path: &str) -> HttpResponse {
+    use std::io::Read;
+    let Some(name) = operator_name(path) else { return text(400, "nom d'opérateur invalide") };
+    let mut raw = Vec::new();
+    if let Err(e) = request.as_reader().take(crate::operators::MAX_BODY_BYTES as u64 + 1).read_to_end(&mut raw) {
+        return text(400, &format!("unreadable body: {e}"));
+    }
+    if raw.len() > crate::operators::MAX_BODY_BYTES {
+        return text(413, "profil d'opérateur trop grand");
+    }
+    let mut prefs: crate::operators::OperatorPrefs = match serde_json::from_slice(&raw) {
+        Ok(p) => p,
+        Err(e) => return text(400, &format!("invalid JSON: {e}")),
+    };
+    prefs.name = name;
+    let data_dir = shared.lock().unwrap().project.data_dir.clone();
+    match crate::operators::save(&data_dir, &prefs) {
+        Ok(()) => json_response(json!({ "saved": prefs.name, "views": prefs.views.len() })),
+        Err((code, msg)) => text(code, &msg),
+    }
+}
+
 /// `POST /api/sites`, `/api/sites/use-project` (T-289).
 #[derive(serde::Deserialize)]
 struct SiteRequest {
@@ -7498,6 +7576,44 @@ mod tests {
         assert_eq!(t.request("POST", "/api/about/seen", "{}").0, 200, "not an edit: allowed in show mode");
         assert!(js(&t.request("GET", "/api/about", "").1)["unseen"].is_null());
         assert_eq!(arm_status(&t)["armed"], false, "never arms");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// T-426: operator profiles over the API, in show mode too; the
+    /// settings, their revision and the arming never move.
+    #[test]
+    fn operator_profiles_never_touch_the_output() {
+        let t = TestServer::start(false);
+        let js = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let dir = std::env::temp_dir().join(format!("laser-studio-web-operators-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rev0 = {
+            let mut s = t.shared.lock().unwrap();
+            s.project.data_dir = dir.clone();
+            s.show_mode.on = true;
+            s.settings_rev
+        };
+        let v = js(&t.request("GET", "/api/operators", "").1);
+        assert_eq!((v["current"].clone(), v["names"].clone()), (json!("Défaut"), json!(["Défaut"])));
+        let profile = r#"{"views":[{"name":"Jeu","slot":1,"live_panel":"music","stage_mode":"3d","cue_page":2}],"prefs":{"laserStudio.workspace":"live"}}"#;
+        let (code, body) = t.request("POST", "/api/operators/R%C3%A9gie%202", profile);
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(t.request("POST", "/api/operators/current", r#"{"name":"Régie 2"}"#).0, 200);
+        let v = js(&t.request("GET", "/api/operators", "").1);
+        assert_eq!((v["current"].clone(), v["names"].clone()), (json!("Régie 2"), json!(["Défaut", "Régie 2"])));
+        let p = js(&t.request("GET", "/api/operators/R%C3%A9gie%202", "").1);
+        assert_eq!((p["name"].clone(), p["views"][0]["cue_page"].clone(), p["views"][0]["workspace"].clone()), (json!("Régie 2"), json!(2), json!("live")));
+        assert!(dir.join("operators").join("Régie 2.json").exists());
+        assert_eq!(t.request("GET", "/api/operators/..%2Fprefs", "").0, 400);
+        assert_eq!(t.request("POST", "/api/operators/..%2F..%2Fx", "{}").0, 400);
+        assert_eq!(t.request("POST", "/api/operators/delete", r#"{"name":"Défaut"}"#).0, 409);
+        assert_eq!(t.request("POST", "/api/operators/delete", r#"{"name":"Régie 2"}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/operators", "").1)["current"], "Défaut");
+        let s = t.shared.lock().unwrap();
+        assert_eq!(s.settings_rev, rev0, "the look never changes");
+        assert!(!s.gate.is_armed(), "never arms");
+        drop(s);
         std::fs::remove_dir_all(&dir).ok();
     }
 
