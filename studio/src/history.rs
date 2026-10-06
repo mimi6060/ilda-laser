@@ -78,11 +78,13 @@ pub enum Section {
     Macros,
     /// The show list (T-444). Not what plays: that is playback.
     ShowList,
+    /// Referenced presets (T-422).
+    Pools,
 }
 
 use Section::*;
 
-const ALL: [Section; 17] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList];
+const ALL: [Section; 18] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -104,6 +106,7 @@ impl Section {
             Desks => "desks",
             Macros => "macros",
             ShowList => "showlist",
+            Pools => "pools",
         }
     }
 
@@ -134,6 +137,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/desks" => &[Desks],
         "/api/macros" => &[Macros],
         "/api/showlist" => &[ShowList],
+        "/api/pools" | "/api/pools/delete" | "/api/pools/capture" => &[Pools],
         _ => return None,
     })
 }
@@ -160,6 +164,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         // The items only: *Boucler la liste* is a transport switch (allowed
         // in show mode, from MIDI), not an edit.
         ShowList => json!(s.showlist.list().items),
+        Pools => json!(s.pools.list()),
     }
 }
 
@@ -252,6 +257,9 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
             let list = crate::showlist::ShowList { items: from(v)?, loop_list: s.showlist.list().loop_list };
             crate::showlist::set(s, list).map_err(|e| (400, e))?
         }
+        // Straight to the store: undoing a preset's creation removes it
+        // even if a cue refers to it since (that cue plays its own values).
+        Pools => s.pools.set(from(v)?).map_err(bad)?,
     }
     Ok(())
 }
@@ -488,6 +496,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Scenes) => named(list_change(old, new, "name", "name"), "Scène", "Scènes", true, "enregistré"),
         (_, UserCues) => named(list_change(old, new, "id", "name"), "Cue", "Cues", true, "créé"),
         (_, Palettes) => named(list_change(old, new, "name", "name"), "Palette", "Palettes", true, "ajouté"),
+        (_, Pools) => named(list_change(old, new, "id", "name"), "Préréglage", "Préréglages", false, "ajouté"),
         (_, ScanPresets) => named(list_change(old, new, "id", "name"), "Préréglage de balayage", "Préréglages de balayage", false, "ajouté"),
         (_, CueLists) => named(list_change(old, new, "name", "name"), "Liste de cues", "Listes de cues", true, "créé"),
         (_, Figures) => named(list_change(old, new, "name", "name"), "Figure", "Figures", true, "enregistré"),

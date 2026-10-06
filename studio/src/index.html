@@ -1375,6 +1375,15 @@
   .cue-filter:not(.on) .cf-count, .cue-filter:not(.on) #cueFilterClear { visibility: hidden; }
   .cue.dimmed { opacity: .28; filter: saturate(.4); }
   .cue.dimmed:hover { opacity: .6; }
+  #tlRefRow select { width: 8.5em; }
+  .cm-refs { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; margin: 4px 0; }
+  .cm-refs label { margin: 0; }
+  .pool-fam summary { cursor: pointer; font-weight: 600; min-height: 44px; display: flex; align-items: center; }
+  .pool-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+  .pool-chip { min-height: 44px; padding: 4px 10px; border-radius: 999px; }
+  .pool-chip[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, var(--panel)); }
+  .pool-chip small { color: var(--muted); margin-left: 6px; }
+  .pool-edit button, .pool-fam .row button { min-height: 44px; }
   .cue .note { position: absolute; bottom: 5px; left: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 4px var(--warn); pointer-events: none; }
   #cueMenuUser[hidden] { display: none; }
   #cueMenuUser .row input[type=text] { flex: 1; min-width: 0; }
@@ -2107,6 +2116,7 @@
       <button role="tab" data-panel-tab="fx" title="Grille d'effets joués par-dessus les cues">Effets</button>
       <button role="tab" data-panel-tab="music">Musique</button>
       <button role="tab" data-panel-tab="scenes">Scènes</button>
+      <button role="tab" data-panel-tab="pools" title="Préréglages de position, taille, couleur et mouvement que les cues référencent">Préréglages</button>
       <button role="tab" data-panel-tab="cuelist" title="Liste de cues : une séquence de pas, GO pour passer au suivant">Liste de cues</button>
       <button role="tab" data-panel-tab="macros" title="Macros : une suite de commandes lancée d'une touche, d'un pad ou d'un exécuteur">Macros</button>
       <button role="tab" data-panel-tab="running" title="Ce qui joue, qui le pilote, tout arrêter">En cours<span class="run-count" id="runCount" hidden></span></button>
@@ -2471,6 +2481,20 @@
         <button id="plStop">■ Stop</button>
       </div>
     </section>
+    <!-- Préréglages référencés (T-422): the cues that point to one follow its changes. -->
+    <section data-panel="pools" id="poolPanel" data-help="live-prereglages">
+      <h2>Préréglages</h2>
+      <div class="hint">Un cue qui référence un préréglage (clic droit › Propriétés du cue) suit ses modifications, même en cours de lecture. Ils ne règlent jamais la luminosité ni la sécurité.</div>
+      <label for="poolName">Nom du préréglage</label>
+      <input type="text" id="poolName" maxlength="32" placeholder="ex. Plafond" autocomplete="off">
+      <div id="poolFamilies"></div>
+      <div class="row pool-edit lock-edit" id="poolEdit" hidden>
+        <button id="poolUpdate" title="Copie les valeurs actuelles du direct (cette famille seulement) dans le préréglage choisi">Mettre à jour depuis le direct</button>
+        <button id="poolRename" title="Donne au préréglage choisi le nom saisi ci-dessus ; les cues qui le référencent le gardent">Renommer</button>
+        <button id="poolDelete" title="Supprime le préréglage choisi (refusé tant qu'un cue l'utilise)">Supprimer</button>
+      </div>
+      <div class="hint" id="poolMsg" role="status"></div>
+    </section>
     <!-- Macros (T-425): one pad per macro, Go for the ones waiting. -->
     <section data-panel="macros" id="macPanel" data-help="live-macros">
       <h2>Macros <button id="macGo" data-control="macro.go" hidden title="macro.go : les macros qui attendent Go passent à l'étape suivante">Go</button>
@@ -2778,6 +2802,13 @@
       </span>
       <span id="tlScanRow" hidden>
         <label class="tl-knob" title="Préréglage de balayage des événements sélectionnés">Balayage <select id="tlScan"></select></label>
+      </span>
+      <!-- Always laid out (only hidden from view): selecting an event never reflows the canvas under the mouse. -->
+      <span id="tlRefRow" style="visibility:hidden">
+        <label class="tl-knob" title="Préréglage de position de l'événement sélectionné (LIVE › Préréglages)">Position <select id="tlRefPosition" data-family="position"></select></label>
+        <label class="tl-knob" title="Préréglage de taille de l'événement sélectionné">Taille <select id="tlRefSize" data-family="size"></select></label>
+        <label class="tl-knob" title="Préréglage de couleur de l'événement sélectionné">Couleur <select id="tlRefColor" data-family="color"></select></label>
+        <label class="tl-knob" title="Préréglage de mouvement de l'événement sélectionné">Mouvement <select id="tlRefMotion" data-family="motion"></select></label>
       </span>
       <span id="tlNoteRow" hidden>
         <label class="tl-knob" title="Notes de l'événement sélectionné (info-bulle sur la timeline)">Notes <input type="text" id="tlEvNotes" maxlength="500" placeholder="ex. avec brouillard"></label>
@@ -4105,6 +4136,12 @@
   </select>
   <label for="cueMenuScan">Balayage</label>
   <select id="cueMenuScan" title="Préréglage de balayage de ce cue (RÉGLAGES › Sorties et projecteurs › Préréglages de balayage)"></select>
+  <div class="cm-refs" id="cueMenuRefs" role="group" aria-label="Préréglages référencés (LIVE › Préréglages)">
+    <label for="cueMenuRefPosition">Position</label><select id="cueMenuRefPosition" data-family="position"></select>
+    <label for="cueMenuRefSize">Taille</label><select id="cueMenuRefSize" data-family="size"></select>
+    <label for="cueMenuRefColor">Couleur</label><select id="cueMenuRefColor" data-family="color"></select>
+    <label for="cueMenuRefMotion">Mouvement</label><select id="cueMenuRefMotion" data-family="motion"></select>
+  </div>
   <label>Transition (à l'entrée et à l'arrêt de ce cue)</label>
   <div class="row">
     <select id="cueMenuTransition" aria-label="Transition du cue">
@@ -6151,6 +6188,7 @@ function setLivePanel(name) {
   if (name === 'running') setTimeout(pollRunning, 0); // after the script has run
   if (name === 'cuelist') setTimeout(loadCueLists, 0);
   if (name === 'macros') setTimeout(loadMacros, 0);
+  if (name === 'pools') setTimeout(loadPools, 0);
 }
 document.querySelectorAll('#wsTabs [data-ws-tab]').forEach(b => b.onclick = () => setWorkspace(b.dataset.wsTab));
 document.querySelectorAll('#liveTabs [data-panel-tab]').forEach(b => b.onclick = () => setLivePanel(b.dataset.panelTab));
@@ -8594,6 +8632,8 @@ let grid = { cols: 8, rows: 5, pages: [], rev: -1 }, gridPage = 0, gridEditing =
 let gridFocus = 0; // the grid's keyboard cell (T-436)
 // What the server says plays (from /api/frame), and the grid's cue properties.
 let deck = { active: [], shown: [], ending: [], pending: [], click_mode: 'toggle', multi: false, max_active: 4 }, deckKey = '', slots = {};
+// Referenced presets (T-422): `GET /api/pools`, the one chosen in the panel.
+let pools = { presets: [], uses: {} }, poolSel = null, poolRev = 0;
 // T-158: the grid bar's transition lengths, in the server's order (cue.transition_length).
 const TRANS_LENGTHS = [{ beats: 0.25 }, { beats: 0.5 }, { beats: 1 }, { beats: 2 }, { beats: 4 }, { seconds: 0.5 }, { seconds: 1 }, { seconds: 2 }, { seconds: 4 }];
 const TRANS_KINDS = ['cut', 'fade', 'fade_through_black', 'morph'];
@@ -8619,6 +8659,7 @@ async function loadPresets() {
   presets = r.presets; cueCategories = r.categories;
   presetById = new Map(presets.map(p => [p.id, p]));
   await loadGrid(false);
+  await loadPools(false);
   await loadSlots();
   loadScanPresets();
   loadThumbs(); // not awaited: the grid works before its pictures arrive
@@ -8957,7 +8998,9 @@ function renderCues() {
       // cell (T-430) wins over both.
       el.style.setProperty('--cat', slot.color ? hex(slot.color) : p.user && p.color ? hex(p.color) : catColor(p.category));
       el.classList.toggle('user', !!p.user);
-      const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '', slot.transition ? 'T' : '']
+      // T-422: « ↗ » when the cue refers to presets (their names on hover).
+      const refNames = Object.values(slot.refs || {}).filter(Boolean).map(id => poolName(id) || id + ' (inconnu)');
+      const tag = [slot.mode ? MODE_TAGS[slot.mode] : '', slot.group ? 'G' + slot.group : '', slot.layer > 1 ? 'C' + slot.layer : '', slot.zones?.length ? 'Z' + slot.zones.join('') : '', slot.transition ? 'T' : '', refNames.length ? '↗' : '']
         .filter(Boolean).join(' ');
       el.innerHTML = `<span class="key">${key}</span>${thumbMode === 'none' ? '' : '<canvas class="th" width="92" height="92"></canvas>'}<span class="n"></span><span class="tag">${tag}</span>`
         + (slot.protect_stop || slot.protect_solo ? LOCK_SVG.replace('<svg', `<svg class="lock"><title>${slot.protect_stop ? 'Protégé de Tout arrêter' : ''}${slot.protect_stop && slot.protect_solo ? ' · ' : ''}${slot.protect_solo ? 'Protégé du solo' : ''}</title`) : '');
@@ -8967,6 +9010,7 @@ function renderCues() {
         dot.className = 'ftag'; dot.dataset.tag = p.tag; dot.title = TRACK_TAGS[p.tag];
         el.appendChild(dot);
       }
+      if (refNames.length) el.title += '\nPréréglages : ' + refNames.join(', ');
       if (slot.notes || slot.tags?.length) {
         // Annotated (T-430): a dot, and the note and tags on hover.
         const dot = document.createElement('span');
@@ -9369,6 +9413,8 @@ function openCueMenu(p, x, y, at) {
   $('cueMenuLayer').value = String(slot.layer || 1);
   $('cueMenuSpeed').value = slot.speed_group ? String(slot.speed_group) : '';
   fillScanSelect($('cueMenuScan'), 'Par défaut de la sortie', slot.scan || '');
+  // T-422: the presets this cue refers to; « Valeurs du cue » = none.
+  $('cueMenuRefs').querySelectorAll('select').forEach(sel => fillPoolSelect(sel, 'Valeurs du cue', slot.refs?.[sel.dataset.family] || ''));
   // T-158: the cue's own transition, else the grid's.
   $('cueMenuTransition').value = slot.transition ? slot.transition.kind : '';
   const li = lengthIndex((slot.transition || deck.transition || {}).length);
@@ -9416,9 +9462,98 @@ async function saveCueMenu() {
   const scan = $('cueMenuScan').value || null;
   const notes = $('cueMenuNotes').value, tags = menuTags, color = menuColor;
   const speed_group = $('cueMenuSpeed').value ? +$('cueMenuSpeed').value : null;
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group });
+  const refs = {};
+  $('cueMenuRefs').querySelectorAll('select').forEach(sel => { if (sel.value) refs[sel.dataset.family] = sel.value; });
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group, refs });
+  if (Object.keys(refs).length || Object.keys(slots[menuCue]?.refs || {}).length) loadPools(false);
   await loadSlots();
 }
+// ---------- referenced presets (T-422) ----------
+// Position, size, colour and motion presets that cues and timeline events
+// refer to: change one, and every cue using it follows at the next frame.
+// They are edits (refused in show mode, undone with Annuler); they never
+// set the brightness, a cap or a safety setting.
+const POOL_FAMILIES = [['position', 'Position'], ['size', 'Taille'], ['color', 'Couleur'], ['motion', 'Mouvement']];
+const poolName = id => pools.presets.find(p => p.id === id)?.name;
+async function loadPools(render = true) {
+  try { pools = await apiJson('GET', '/api/pools', undefined, { quiet: true }); } catch { return; }
+  poolRev++;
+  renderPools();
+  if (render) loadSlots();
+}
+function fillPoolSelect(sel, none, value) {
+  const fam = sel.dataset.family;
+  const opt = (v, t) => `<option value="${esc(v)}">${esc(t)}</option>`;
+  sel.innerHTML = opt('', none) + pools.presets.filter(p => p.family === fam).map(p => opt(p.id, p.name)).join('');
+  if (value && !pools.presets.some(p => p.id === value && p.family === fam)) sel.insertAdjacentHTML('beforeend', opt(value, 'Préréglage inconnu (valeurs propres)'));
+  sel.value = value;
+}
+function renderPools() {
+  const box = $('poolFamilies');
+  if (poolSel && !pools.presets.some(p => p.id === poolSel)) poolSel = null;
+  const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.family));
+  const first = !box.children.length;
+  box.innerHTML = POOL_FAMILIES.map(([f, label]) => {
+    const list = pools.presets.filter(p => p.family === f);
+    const chips = list.map(p => {
+      const users = pools.uses[p.id] || [];
+      return `<button class="pool-chip" data-pool="${esc(p.id)}" aria-pressed="${p.id === poolSel}" title="${esc(users.length ? 'Utilisé par :\n' + users.join('\n') : 'Aucun cue ne l\'utilise')}">${esc(p.name)}<small>${users.length} cue${users.length > 1 ? 's' : ''}</small></button>`;
+    }).join('');
+    return `<details class="pool-fam" data-family="${f}"${first || open.has(f) ? ' open' : ''}><summary>${label} (${list.length})</summary>`
+      + `<div class="pool-chips">${chips || '<span class="hint">Aucun préréglage</span>'}</div>`
+      + `<div class="row lock-edit"><button data-pool-add="${f}" title="Crée un préréglage « ${label} » avec les valeurs actuelles du direct (cette famille seulement), nommé comme saisi ci-dessus">+ Depuis le direct</button></div></details>`;
+  }).join('');
+  $('poolEdit').hidden = !poolSel;
+}
+function poolMsg(text) { $('poolMsg').textContent = text; }
+// The answer's message: `{ error, users }` or plain text.
+async function poolRefusal(r) {
+  const t = await r.text();
+  try { const j = JSON.parse(t); return j.users?.length ? 'Préréglage utilisé par : ' + j.users.join(' ; ') : j.error || t; } catch { return t; }
+}
+async function poolSend(path, body) {
+  const r = await api('POST', path, body, { quiet: true });
+  if (!r.ok) { poolMsg(await poolRefusal(r)); return null; }
+  const text = await r.text();
+  await loadPools();
+  try { return JSON.parse(text); } catch { return {}; }
+}
+$('poolFamilies').addEventListener('click', async e => {
+  const chip = e.target.closest('[data-pool]');
+  if (chip) {
+    poolSel = chip.dataset.pool === poolSel ? null : chip.dataset.pool;
+    if (poolSel) $('poolName').value = poolName(poolSel) || '';
+    poolMsg('');
+    renderPools();
+    return;
+  }
+  const add = e.target.closest('[data-pool-add]');
+  if (!add) return;
+  const family = add.dataset.poolAdd;
+  const label = POOL_FAMILIES.find(([f]) => f === family)[1];
+  const taken = new Set(pools.presets.filter(p => p.family === family).map(p => p.name.toLowerCase()));
+  let name = $('poolName').value.trim();
+  if (!name || (poolSel && name === poolName(poolSel))) name = [...Array(65).keys()].map(n => `${label} ${n + 1}`).find(n => !taken.has(n.toLowerCase()));
+  const p = await poolSend('/api/pools/capture', { family, name });
+  if (p) { poolSel = p.id; $('poolName').value = p.name; poolMsg(`« ${p.name} » enregistré depuis le direct`); renderPools(); }
+});
+$('poolUpdate').onclick = async () => {
+  const p = pools.presets.find(x => x.id === poolSel);
+  if (!p) return;
+  if (await poolSend('/api/pools/capture', { family: p.family, id: p.id })) poolMsg(`« ${p.name} » mis à jour depuis le direct`);
+};
+$('poolRename').onclick = async () => {
+  const name = $('poolName').value.trim();
+  if (!poolSel || !name) return;
+  const list = pools.presets.map(p => p.id === poolSel ? { ...p, name } : p);
+  if (await poolSend('/api/pools', list)) poolMsg(`Renommé en « ${name} »`);
+};
+$('poolDelete').onclick = async () => {
+  const p = pools.presets.find(x => x.id === poolSel);
+  if (!p) return;
+  if (await poolSend('/api/pools/delete', { id: p.id })) { poolSel = null; $('poolName').value = ''; renderPools(); poolMsg(`« ${p.name} » supprimé`); }
+};
+
 // Tags in the properties menu (T-430): chips, typed with Enter or a comma;
 // 8 at most, repeats (without case or accents) ignored, like cues.rs.
 let menuTags = [], menuColor = null;
@@ -9475,6 +9610,7 @@ $('cueMenuCellColorNone').addEventListener('click', () => {
   $('cueMenuCellColorNone').disabled = true;
   saveCueMenu();
 });
+['cueMenuRefPosition', 'cueMenuRefSize', 'cueMenuRefColor', 'cueMenuRefMotion'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 ['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuSpeed', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 
 // ---------- « En cours » (T-423) ----------
@@ -10488,7 +10624,7 @@ function tlChange(fn) {
   if (JSON.stringify(TL.show) === before) return false;
   if (tlLockBroken(JSON.parse(before), TL.show)) {
     TL.show = JSON.parse(before);
-    TL.headsKey = tlScanKey = tlNoteKey = ''; TL.need = true;
+    TL.headsKey = tlScanKey = tlNoteKey = tlRefKey = ''; TL.need = true;
     tlMsg('Piste verrouillée', true);
     return false;
   }
@@ -11139,6 +11275,38 @@ $('tlScan').addEventListener('change', () => {
   if (free.length < items.length) tlMsg(tlIgnoredMsg(items.length - free.length));
 });
 
+// Referenced presets of the selected events (T-422): « Valeurs de
+// l'événement » = none; a mixed selection shows that choice.
+let tlRefKey = '';
+const TL_REFS = ['tlRefPosition', 'tlRefSize', 'tlRefColor', 'tlRefMotion'];
+function tlRefRow() {
+  const items = TL.show ? tlSelected() : [];
+  const key = items.map(x => x.e.id + ':' + JSON.stringify(x.e.refs || {})).join(',') + '|' + poolRev;
+  if (key === tlRefKey) return;
+  tlRefKey = key;
+  $('tlRefRow').style.visibility = items.length ? 'visible' : 'hidden';
+  if (!items.length) return;
+  for (const id of TL_REFS) {
+    const sel = $(id);
+    if (document.activeElement === sel) continue;
+    const vals = [...new Set(items.map(x => x.e.refs?.[sel.dataset.family] || ''))];
+    fillPoolSelect(sel, 'Valeurs de l\'événement', vals.length === 1 ? vals[0] : '');
+  }
+}
+TL_REFS.forEach(id => $(id).addEventListener('change', () => {
+  const sel = $(id), fam = sel.dataset.family, v = sel.value;
+  const items = tlSelected(), free = items.filter(x => !x.t.locked);
+  if (!free.length) { tlMsg('Piste verrouillée', true); tlRefKey = ''; return; }
+  tlChange(() => {
+    for (const x of free) {
+      const refs = { ...(x.e.refs || {}) };
+      if (v) refs[fam] = v; else delete refs[fam];
+      if (Object.keys(refs).length) x.e.refs = refs; else delete x.e.refs;
+    }
+  });
+  if (free.length < items.length) tlMsg(tlIgnoredMsg(items.length - free.length));
+}));
+
 // Notes and tags of the selected event (T-430): one event at a time.
 let tlNoteKey = '';
 function tlNoteRow() {
@@ -11589,6 +11757,7 @@ function tlLoop() {
     tlHeads();
     tlScanRow();
     tlNoteRow();
+    tlRefRow();
     if (TL.fitPending && tlCanvas().clientWidth) { TL.fitPending = false; tlFit(); }
     tlWaveWanted();
     if (TL.need || (t && t.playing)) { TL.need = false; tlDraw(); }

@@ -150,6 +150,9 @@ pub struct Project {
     /// The show player's list (`showlist.json`, T-444). Missing in projects
     /// saved before T-444: they open with an empty list.
     pub show_list: crate::showlist::ShowList,
+    /// Referenced presets (`pools.json`, T-422). Missing in projects saved
+    /// before T-422: they open with none (and cues without references).
+    pub pools: Vec<crate::pools::PoolPreset>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -183,6 +186,7 @@ impl Default for Project {
             desks: Vec::new(),
             macros: Vec::new(),
             show_list: Default::default(),
+            pools: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -276,7 +280,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 16] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json", "showlist.json"];
+const WORKING_FILES: [&str; 17] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json", "showlist.json", "pools.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -583,6 +587,10 @@ fn check(p: &mut Project) -> Result<()> {
     p.layers.sanitize();
     crate::live::validate_palettes(&p.palettes).map_err(|e| anyhow::anyhow!("palettes : {e}"))?;
     crate::scan::validate(&mut p.scan_presets).map_err(|e| anyhow::anyhow!("préréglages de balayage : {e}"))?;
+    crate::pools::validate(&mut p.pools).map_err(|e| anyhow::anyhow!("préréglages : {e}"))?;
+    for slot in p.grid.slots.values_mut() {
+        slot.refs.normalize();
+    }
 
     let builtin = ProfileStore::in_memory();
     for (slug, profile) in &p.midi.profiles {
@@ -631,6 +639,7 @@ pub fn snapshot(s: &Shared) -> Project {
         desks: s.desks.tabs.clone(),
         macros: s.macros.list().to_vec(),
         show_list: s.showlist.list().clone(),
+        pools: s.pools.list().to_vec(),
         ..Project::default()
     }
 }
@@ -680,6 +689,7 @@ fn apply(s: &mut Shared, p: &Project) {
     }
     s.macros.replace_in_memory(p.macros.clone());
     s.showlist.replace_in_memory(p.show_list.clone());
+    s.pools.replace_in_memory(p.pools.clone());
     crate::usercues::sync_presets(s);
     crate::figures::refresh(s);
     // Lines checked on the registry just rebuilt (macros included): a bad
@@ -710,9 +720,10 @@ struct WorkingPaths {
     desks: Option<PathBuf>,
     macros: Option<PathBuf>,
     show_list: Option<PathBuf>,
+    pools: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
-    /// Macros disabled on opening (T-425), for the open report.
+    /// Macros disabled on opening (T-425) and references to unknown presets (T-422), for the open report.
     macro_warnings: Vec<String>,
 }
 
@@ -734,6 +745,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         desks: s.desks.path().map(Path::to_path_buf),
         macros: s.macros.path().map(Path::to_path_buf),
         show_list: s.showlist.path().map(Path::to_path_buf),
+        pools: s.pools.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
         macro_warnings: Vec::new(),
@@ -774,6 +786,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(path) = &w.show_list {
         put(path, serde_json::to_vec_pretty(&p.show_list));
+    }
+    if let Some(path) = &w.pools {
+        put(path, serde_json::to_vec_pretty(&p.pools));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -1013,6 +1028,9 @@ fn swap_in(shared: &Mutex<Shared>, p: &Project) -> Result<Vec<String>, Reply> {
         let data_dir = s.project.data_dir.clone();
         let mut w = working_paths(&s, &data_dir);
         w.macro_warnings = s.macros.warnings.clone();
+        // References to presets the project doesn't hold (T-422): ignored
+        // when rendering (the cues' own values), said once here.
+        w.macro_warnings.extend(crate::pools::dangling(&p.grid, &p.timelines, &p.pools, &|cue| crate::pools::cue_label(&s, cue)));
         w
     };
     // The macros as revalidated (some may be disabled) go to the working copy.
@@ -1348,6 +1366,7 @@ mod tests {
         s.cue_lists = crate::cuelist::CueListStore::load_or_create(dir.join("cuelists.json"));
         s.macros = crate::macros::Macros::load(dir.join("macros.json"));
         s.showlist = crate::showlist::ShowListRunner::load_inline(dir.join("showlist.json"));
+        s.pools = crate::pools::PoolStore::load_or_create(dir.join("pools.json"));
         s.project = ProjectState::load(dir);
         startup(&mut s);
         Mutex::new(s)
@@ -1652,6 +1671,69 @@ mod tests {
         post(&shared, &dir, "open", json!({ "path": "Liste.lsproj" })).unwrap();
         assert!(shared.lock().unwrap().showlist.list().items.is_empty());
         assert!(!shared.lock().unwrap().gate.is_armed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-422: presets and the references to them come back identical; a
+    /// preset change changes the fingerprint; an older project (no pools,
+    /// no refs) opens with none; a reference to an unknown preset opens
+    /// with a warning, never an error.
+    #[test]
+    fn pools_and_references_round_trip_and_unknown_ones_warn() {
+        use crate::pools::{PoolPreset, PoolValues, PresetRefs};
+        let dir = temp_dir("pools");
+        let shared = studio(&dir);
+        let preset = PoolPreset { id: "size:petit".into(), name: "Petit".into(), values: PoolValues::Size { size: 0.4, size_x: 1.0, size_y: 1.0 } };
+        let cue = shared.lock().unwrap().presets[0].id.clone();
+        let refs = PresetRefs { size: Some("size:petit".into()), ..Default::default() };
+        {
+            let mut s = shared.lock().unwrap();
+            let before = snapshot(&s).fingerprint();
+            s.pools.set(vec![preset.clone()]).unwrap();
+            assert_ne!(snapshot(&s).fingerprint(), before, "a preset is a change");
+            let mut slot = s.deck.slot(&cue);
+            slot.refs = refs.clone();
+            s.deck.set_slot(&cue, slot);
+        }
+        post(&shared, &dir, "save-as", json!({ "path": "Prereglages" })).unwrap();
+        let path = dir.join("projects/Prereglages.lsproj");
+        let saved = parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.pools, vec![preset.clone()]);
+        assert_eq!(saved.grid.slots[&cue].refs, refs);
+        {
+            let mut s = shared.lock().unwrap();
+            let f = snapshot(&s).fingerprint();
+            s.pools.set(vec![PoolPreset { name: "Renommé".into(), ..preset.clone() }]).unwrap();
+            assert_ne!(snapshot(&s).fingerprint(), f, "a rename is a change too");
+            s.deck.set_slot(&cue, Default::default());
+            s.pools.set(Vec::new()).unwrap();
+        }
+        let r = post(&shared, &dir, "open", json!({ "path": "Prereglages.lsproj" })).unwrap();
+        assert!(r["warnings"].as_array().is_none_or(|w| w.is_empty()), "{r}");
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.pools.list(), std::slice::from_ref(&preset));
+            assert_eq!(s.deck.slot(&cue).refs, refs);
+        }
+        assert!(!modified(&shared), "opened as saved");
+        assert_eq!(crate::load_json::<Vec<PoolPreset>>(&dir.join("pools.json")), vec![preset.clone()], "the working copy too");
+        // The preset gone from the file: the reference stays, ignored, said.
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("pools");
+        std::fs::write(&path, v.to_string()).unwrap();
+        let r = post(&shared, &dir, "open", json!({ "path": "Prereglages.lsproj" })).unwrap();
+        let warnings = r["warnings"].as_array().cloned().unwrap_or_default();
+        assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("préréglage inconnu « size:petit »")), "{r}");
+        {
+            let s = shared.lock().unwrap();
+            assert!(s.pools.list().is_empty());
+            let base = crate::live::LiveModifiers::default();
+            assert_eq!(crate::pools::resolve(&s.deck.slot(&cue).refs, &s.pools, &base), base, "rendered with the cue's own values");
+            assert!(!s.gate.is_armed());
+        }
+        // An older project: no pools, no refs.
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert!(old.pools.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

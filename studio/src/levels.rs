@@ -422,14 +422,21 @@ impl Smoothers {
             let m = self.layers[i].step(&for_stage(&layer.modifiers), &sm, dt);
             out.layers[i] = (m != neutral).then_some(m);
         }
-        self.cues.retain(|id, _| s.cue_mods.contains_key(id));
+        // Referenced presets (T-422, pools.rs): resolved here every frame,
+        // so a preset changed moves the cues playing it at the next frame.
+        let refs = |cue: &str| s.deck.slots.get(cue).map(|slot| &slot.refs).filter(|r| !r.is_empty());
+        self.cues.retain(|id, _| s.cue_mods.contains_key(id) || refs(id).is_some());
         let mut done: HashMap<&str, Option<LiveModifiers>> = HashMap::new();
         for (instance, cue) in s.deck.active.iter().map(|a| (a.id, &a.cue)).chain(s.deck.ending.iter().map(|e| (e.cue.id, &e.cue.cue))) {
-            let Some(working) = s.cue_mods.get(cue) else { continue };
+            let working = match (s.cue_mods.get(cue), refs(cue)) {
+                (None, None) => continue,
+                (Some(w), None) => std::borrow::Cow::Borrowed(w),
+                (w, Some(r)) => std::borrow::Cow::Owned(crate::pools::resolve(r, &s.pools, &w.cloned().unwrap_or_default())),
+            };
             let m = done
                 .entry(cue.as_str())
                 .or_insert_with(|| {
-                    let m = self.cues.entry(cue.clone()).or_default().step(&for_stage(working), &sm, dt);
+                    let m = self.cues.entry(cue.clone()).or_default().step(&for_stage(&working), &sm, dt);
                     (m != neutral).then_some(m)
                 })
                 .clone();

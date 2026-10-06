@@ -496,6 +496,7 @@ mod tests {
             envelopes: Vec::new(),
             elapsed_s: 0.0,
             scan: None,
+            refs: Default::default(),
         };
         assert_eq!(for_event(&s, &ev, &fig), params(BEAMS));
         ev.scan = Some(GRAPHICS.into());

@@ -290,6 +290,10 @@ pub struct Event {
     pub notes: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Referenced presets (T-422, pools.rs): replace their families in
+    /// `modifiers`, every frame. None in older shows.
+    #[serde(skip_serializing_if = "crate::pools::PresetRefs::is_empty")]
+    pub refs: crate::pools::PresetRefs,
 }
 
 impl Default for Event {
@@ -310,6 +314,7 @@ impl Default for Event {
             scan: None,
             notes: String::new(),
             tags: Vec::new(),
+            refs: Default::default(),
         }
     }
 }
@@ -629,6 +634,8 @@ pub struct TimelineCue {
     pub elapsed_s: f64,
     /// The event's own scan preset (T-415).
     pub scan: Option<String>,
+    /// The event's referenced presets (T-422), resolved by the engine.
+    pub refs: crate::pools::PresetRefs,
 }
 
 struct Instance {
@@ -1153,6 +1160,7 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
                         TimeBase::Beats => local_c * 60.0 / c.bpm.max(1.0),
                     },
                     scan: e.scan.clone(),
+                    refs: e.refs.clone(),
                 },
                 accumulate_seconds,
                 seconds_estimate: local_c * 60.0 / c.bpm.max(1.0),
@@ -1728,6 +1736,7 @@ mod tests {
             envelopes: Vec::new(),
             elapsed_s: 0.0,
             scan: None,
+            refs: Default::default(),
         };
         let s = look_of(&c, &presets).unwrap();
         assert!((s.brightness - presets[0].settings.brightness * 0.5).abs() < 1e-6);

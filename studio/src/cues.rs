@@ -189,6 +189,11 @@ pub struct CueSlot {
     /// `None` = the layer's group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed_group: Option<u8>,
+    /// Referenced presets (T-422, pools.rs): per family, a preset whose
+    /// values replace the cue's own, resolved every frame. None in older
+    /// files.
+    #[serde(skip_serializing_if = "crate::pools::PresetRefs::is_empty")]
+    pub refs: crate::pools::PresetRefs,
 }
 
 #[derive(Clone, Debug, PartialEq)]
