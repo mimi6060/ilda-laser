@@ -74,11 +74,13 @@ pub enum Section {
     /// The custom desk's layout (T-427). Not what its faders hold: those
     /// are the controls' values.
     Desks,
+    /// The macro list (T-425). Not what runs: that is playback.
+    Macros,
 }
 
 use Section::*;
 
-const ALL: [Section; 15] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks];
+const ALL: [Section; 16] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -98,6 +100,7 @@ impl Section {
             Fx => "fx",
             Executors => "executors",
             Desks => "desks",
+            Macros => "macros",
         }
     }
 
@@ -126,6 +129,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/fx" => &[Fx],
         "/api/executors" => &[Executors],
         "/api/desks" => &[Desks],
+        "/api/macros" => &[Macros],
         _ => return None,
     })
 }
@@ -148,6 +152,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         Fx => json!(s.fx.grid().cells()),
         Executors => json!(s.executors.bank),
         Desks => json!(s.desks.tabs),
+        Macros => json!(s.macros.list()),
     }
 }
 
@@ -234,6 +239,8 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
             s.desks.set_tabs(from(v)?);
             s.desks.save();
         }
+        // Checked again (a cue a step names may be gone since).
+        Macros => crate::macros::set(s, from(v)?).map_err(|e| (400, e.message_fr))?,
     }
     Ok(())
 }
@@ -513,6 +520,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Fx) => fx_label(old, new),
         (_, Executors) => exec_label(old, new),
         (_, Desks) => desk_label(old, new),
+        (_, Macros) => named(list_change(old, new, "id", "name"), "Macro", "Macros", true, "créé"),
     }
 }
 

@@ -63,7 +63,7 @@ pub enum ExecTarget {
     SpeedGroup { n: u8 },
     /// The loaded cue list (T-410).
     CueList,
-    /// A macro: not available yet.
+    /// A macro (T-425): « Go » launches it (again from its first step).
     Macro { id: String },
 }
 
@@ -140,7 +140,7 @@ pub fn button_fits(target: &ExecTarget, b: ButtonFn) -> bool {
     match target {
         ExecTarget::Cue { .. } => matches!(b, ButtonFn::Toggle | ButtonFn::Flash | ButtonFn::Temp | ButtonFn::BlackHeld),
         ExecTarget::Layer { .. } | ExecTarget::GroupMaster { .. } => matches!(b, ButtonFn::Toggle | ButtonFn::Flash | ButtonFn::BlackHeld),
-        ExecTarget::CueList => b == ButtonFn::Go,
+        ExecTarget::CueList | ExecTarget::Macro { .. } => b == ButtonFn::Go,
         _ => false,
     }
 }
@@ -194,8 +194,8 @@ impl ExecutorBank {
     }
 
     /// `POST /api/executors`: refused rather than repaired. `cue_known`
-    /// says whether a preset id exists.
-    pub fn validate(&self, cue_known: impl Fn(&str) -> bool) -> Result<()> {
+    /// says whether a preset id exists, `macro_known` a macro id (T-425).
+    pub fn validate(&self, cue_known: impl Fn(&str) -> bool, macro_known: impl Fn(&str) -> bool) -> Result<()> {
         if self.pages.is_empty() || self.pages.len() > EXEC_MAX_PAGES {
             bail!("de 1 à {EXEC_MAX_PAGES} pages d'exécuteurs");
         }
@@ -234,7 +234,11 @@ impl ExecutorBank {
                             bail!("exécuteur {p}.{n} : groupe de vitesse {g} inexistant (1 à 4)");
                         }
                     }
-                    ExecTarget::Macro { .. } => bail!("exécuteur {p}.{n} : les macros ne sont pas encore disponibles"),
+                    ExecTarget::Macro { id } => {
+                        if !macro_known(id) {
+                            bail!("exécuteur {p}.{n} : macro inconnue « {id} »");
+                        }
+                    }
                 }
                 if !fader_fits(&h.target, h.fader) {
                     bail!("exécuteur {p}.{n} : fonction de curseur impossible pour cet objet");
@@ -537,7 +541,6 @@ fn set_fader(s: &mut Shared, page: usize, n: usize, v: f32, src: Option<&'static
             s.speed.set_mode(*g, crate::speed::SpeedMode::Multiple { mult }, beat, t, bpb)?;
             s.speed_dirty = true;
         }
-        (ExecTarget::Macro { .. }, _) => return Err("pas encore disponible"),
         // A cue's level, the cue list, an empty executor: the position only.
         _ => {
             s.executors.rt.faders.insert((page, n), v);
@@ -592,6 +595,14 @@ fn press(s: &mut Shared, page: usize, n: usize, b: usize, down: bool, src: Optio
         (ExecTarget::CueList, ButtonFn::Go) => {
             if down {
                 crate::cuelist::go(s, source)
+            } else {
+                Ok(())
+            }
+        }
+        // A macro (T-425): launched on the press, like its `macro.<id>.go`.
+        (ExecTarget::Macro { id }, ButtonFn::Go) => {
+            if down {
+                crate::macros::start(s, id, source)
             } else {
                 Ok(())
             }
@@ -743,6 +754,7 @@ fn is_active(s: &Shared, page: usize, n: usize, e: &Executor) -> bool {
     match &e.target {
         ExecTarget::Cue { id } => s.deck.active.iter().any(|a| a.cue == *id) || s.deck.pending.iter().any(|p| p.cue == *id),
         ExecTarget::CueList => s.cue_list.is_active(),
+        ExecTarget::Macro { id } => s.macros.player.is_running(id),
         _ => false,
     }
 }
@@ -820,7 +832,7 @@ mod tests {
     fn validation_refuses_what_cannot_run() {
         let known = |id: &str| id == "a";
         let ok = bank_with(vec![(0, 0, fade_in("a")), (1, 2, Executor { target: ExecTarget::CueList, buttons: [ButtonFn::Go, ButtonFn::None], ..Default::default() })]);
-        ok.validate(known).unwrap();
+        ok.validate(known, |id| id == "m1").unwrap();
         for bad in [
             Executor { target: ExecTarget::Cue { id: "zz".into() }, ..fade_in("a") },
             Executor { target: ExecTarget::Layer { n: 5 }, ..Default::default() },
@@ -829,13 +841,14 @@ mod tests {
             Executor { target: ExecTarget::SpeedGroup { n: 5 }, fader: FaderFn::Speed, ..Default::default() },
             Executor { target: ExecTarget::SpeedGroup { n: 1 }, fader: FaderFn::Level, ..Default::default() },
             Executor { target: ExecTarget::Macro { id: "m".into() }, ..Default::default() },
+            Executor { target: ExecTarget::Macro { id: "m1".into() }, buttons: [ButtonFn::Flash, ButtonFn::None], ..Default::default() },
             Executor { buttons: [ButtonFn::Toggle, ButtonFn::None], ..Default::default() },
         ] {
             let b = bank_with(vec![(0, 3, bad.clone())]);
-            assert!(b.validate(known).is_err(), "{bad:?}");
+            assert!(b.validate(known, |id| id == "m1").is_err(), "{bad:?}");
         }
-        assert!(ExecutorBank { pages: Vec::new() }.validate(known).is_err());
-        assert!(ExecutorBank { pages: vec![ExecPage::default(); EXEC_MAX_PAGES + 1] }.validate(known).is_err());
+        assert!(ExecutorBank { pages: Vec::new() }.validate(known, |_| true).is_err());
+        assert!(ExecutorBank { pages: vec![ExecPage::default(); EXEC_MAX_PAGES + 1] }.validate(known, |_| true).is_err());
     }
 
     #[test]
@@ -980,7 +993,7 @@ mod tests {
         s.speed.change_on_bar = false;
         let e = Executor { target: ExecTarget::SpeedGroup { n: 1 }, fader: FaderFn::Speed, ..Default::default() };
         let bank = bank_with(vec![(0, 0, e)]);
-        bank.validate(|_| true).unwrap();
+        bank.validate(|_| true, |_| true).unwrap();
         s.executors.set_bank(bank);
         assert_eq!(current(&s, "exec.1.1.fader"), Some(json!(0.5)), "×1 in the middle");
         ctl(&mut s, "exec.1.1.fader", 0.3);

@@ -121,8 +121,8 @@
   button.hold-confirm, button.hold-confirm:hover { background: linear-gradient(90deg, var(--danger) calc(var(--hold, 0) * 100%), transparent 0), var(--panel-2); }
   button.hold-confirm.holding { color: #fff; border-color: var(--danger); }
   body.show-mode #wsTabs [data-ws-tab="creation"], body.show-mode #wsTabs [data-ws-tab="settings"],
-  body.show-mode #liveTabs [data-panel-tab]:not([data-panel-tab="direct"]):not([data-panel-tab="running"]):not([data-panel-tab="cuelist"]):not([data-panel-tab="fx"]),
-  body.show-mode #livePanel [data-panel]:not([data-panel="direct"]):not([data-panel="running"]):not([data-panel="cuelist"]):not([data-panel="fx"]),
+  body.show-mode #liveTabs [data-panel-tab]:not([data-panel-tab="direct"]):not([data-panel-tab="running"]):not([data-panel-tab="cuelist"]):not([data-panel-tab="fx"]):not([data-panel-tab="macros"]),
+  body.show-mode #livePanel [data-panel]:not([data-panel="direct"]):not([data-panel="running"]):not([data-panel="cuelist"]):not([data-panel="fx"]):not([data-panel="macros"]),
   body.show-mode #tlEditor, body.show-mode .lock-edit, body.show-mode #palettes .del,
   body.show-mode #projMenu [data-proj="new"], body.show-mode #projMenu [data-proj="open"], body.show-mode #projMenu [data-proj="save-as"],
   body.show-mode #projMenu [data-proj="version-save"], body.show-mode #projMenu [data-proj="versions"],
@@ -560,6 +560,27 @@
   .ptabs .run-count { display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 4px; border-radius: 8px; background: var(--ws-live); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; }
   .ptabs .run-count[hidden] { display: none; }
   #runPanel h3 { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin: 12px 0 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  /* Macros (T-425): LIVE pads, CRÉATION editor. */
+  .mac-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 6px; margin-top: 8px; }
+  .mac-pad { display: flex; gap: 4px; min-width: 0; }
+  .mac-btn { flex: 1; min-width: 0; min-height: 44px; position: relative; overflow: hidden; text-align: left; display: flex; align-items: center; gap: 6px; }
+  .mac-btn .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mac-btn.on { border-color: var(--accent); color: var(--accent); }
+  .mac-btn.wait { border-color: var(--warn); }
+  .mac-btn .prog { position: absolute; left: 0; bottom: 0; height: 4px; background: var(--accent); }
+  .mac-stop { flex: none; min-width: 44px; min-height: 44px; }
+  #macGo { border-color: var(--warn); color: var(--warn); font-weight: 700; }
+  .mac-empty { color: var(--muted); font-size: 12px; padding: 6px 0; }
+  .mac-step { border-top: 1px solid var(--line); padding: 6px 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+  .mac-step.off { opacity: .6; }
+  .mac-step .mac-n { grid-row: span 3; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 1.6em; }
+  .mac-step .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
+  .mac-step .row label { font-size: 11px; color: var(--muted); margin: 0; }
+  .mac-step input[type=text] { flex: 1; min-width: 0; }
+  .mac-step input[type=number] { width: 80px; }
+  .mac-step .row button { flex: none; padding: 3px 8px; min-width: 32px; }
+  .mac-err { grid-column: 2; color: var(--danger); font-size: 12px; }
+  #macErr { color: var(--danger); font-weight: 600; }
   #runPanel h3 button, #runPanel .run-row button { flex: none; padding: 3px 8px; font-size: 11px; }
   #runAll { border-color: var(--danger); color: var(--danger); font-weight: 700; }
   .run-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); font-size: 12px; min-width: 0; }
@@ -2033,6 +2054,7 @@
       <button role="tab" data-panel-tab="music">Musique</button>
       <button role="tab" data-panel-tab="scenes">Scènes</button>
       <button role="tab" data-panel-tab="cuelist" title="Liste de cues : une séquence de pas, GO pour passer au suivant">Liste de cues</button>
+      <button role="tab" data-panel-tab="macros" title="Macros : une suite de commandes lancée d'une touche, d'un pad ou d'un exécuteur">Macros</button>
       <button role="tab" data-panel-tab="running" title="Ce qui joue, qui le pilote, tout arrêter">En cours<span class="run-count" id="runCount" hidden></span></button>
     </div>
     <section data-panel="direct" data-help="live-direct">
@@ -2369,6 +2391,8 @@
       <div id="runCues"></div>
       <h3>Timeline <button data-run-stop="timeline">Arrêter la timeline</button></h3>
       <div id="runTimeline"></div>
+      <h3>Macros <button data-run-stop="macros" title="Toutes les macros en cours">Arrêter les macros</button></h3>
+      <div id="runMacros"></div>
       <h3>Modulateurs <button data-run-stop="lfos" title="Désactive les LFO, sans en supprimer aucun">Couper les modulateurs</button></h3>
       <div id="runLfos"></div>
       <h3>Liens audio <button data-run-stop="audio" title="Désactive les liens audio, sans en supprimer aucun">Couper les liens audio</button></h3>
@@ -2392,6 +2416,14 @@
         <button id="plStart">▶ Playlist</button>
         <button id="plStop">■ Stop</button>
       </div>
+    </section>
+    <!-- Macros (T-425): one pad per macro, Go for the ones waiting. -->
+    <section data-panel="macros" id="macPanel" data-help="live-macros">
+      <h2>Macros <button id="macGo" data-control="macro.go" hidden title="macro.go : les macros qui attendent Go passent à l'étape suivante">Go</button>
+        <button id="macStopAll" data-control="macro.stop_all" title="macro.stop_all : arrête toutes les macros en cours (Échap arrête tout, macros comprises)">Arrêter les macros</button></h2>
+      <div id="macButtons" class="mac-grid"></div>
+      <div class="hint" id="macMsg" role="status"></div>
+      <div class="hint">Alt + lettre lance la macro liée à cette lettre. Les créer et les modifier : CRÉATION › Macros. Une macro n'arme jamais le laser.</div>
     </section>
     <!-- Liste de cues (T-410): a sequence of steps played with GO. -->
     <section data-panel="cuelist" id="cqPanel" data-help="live-liste-cues">
@@ -2706,6 +2738,7 @@
     <div class="ptabs" id="creationTabs" role="tablist" aria-label="Panneau CRÉATION">
       <button role="tab" data-ctab="look">Look</button>
       <button role="tab" data-ctab="figures">Figures</button>
+      <button role="tab" data-ctab="macros">Macros</button>
       <button role="tab" data-ctab="media">Médiathèque</button>
       <button role="tab" data-ctab="program">Cue évolutif</button>
     </div>
@@ -2939,6 +2972,35 @@
         limiteur de strobe (prévu pour une lecture à ce nombre d'images/s), garde anti-point fixe, plafonds de puissance. Mais le ShowNET
         le joue seul, sans le studio : il peut ajouter ses propres effets en mode DMX. Essayez-le d'abord à faible puissance, et gardez
         l'arrêt d'urgence matériel (clé, interlock) à portée de main : c'est lui la vraie sécurité.</div>
+    </section>
+
+    <!-- Macros (T-425) : une liste de lignes de commande avec des attentes -->
+    <section data-cpanel="macros" id="macEdit" data-help="creation-macros" hidden>
+      <h2>Macros</h2>
+      <label for="macSel">Macro</label>
+      <select id="macSel"></select>
+      <div class="row">
+        <button id="macAdd" title="Nouvelle macro vide">+ Macro</button>
+        <button id="macDup" title="Copier la macro choisie">Dupliquer</button>
+        <button id="macDel" title="Supprimer la macro choisie (Enregistrer pour confirmer)">Supprimer</button>
+      </div>
+      <div id="macFields">
+        <label for="macName">Nom</label>
+        <input type="text" id="macName" maxlength="32" autocomplete="off" placeholder="Montée">
+        <label for="macKey">Touche</label>
+        <select id="macKey" title="Alt + cette lettre lance la macro en LIVE (Alt+P, S, T et X sont déjà pris)"></select>
+        <label class="check"><input type="checkbox" id="macOn"><span>Active</span></label>
+        <h3>Étapes</h3>
+        <div id="macSteps"></div>
+        <datalist id="macCmdList"></datalist>
+        <div class="row">
+          <button id="macAddStep" title="Une ligne de commande suivie d'une attente">+ Étape</button>
+          <button id="macSave" class="primary" title="Chaque ligne est vérifiée ; une commande refusée (armement, sécurité) empêche d'enregistrer">Enregistrer</button>
+        </div>
+      </div>
+      <div class="hint" id="macErr" role="alert" hidden></div>
+      <div class="hint" id="macState" role="status"></div>
+      <div class="hint">Une étape = une ligne de la ligne de commande (master.size 80, cue 2.14 go, page 3, tempo 128, macro "Nom" go…) puis une attente. Les attentes en temps tombent sur le temps. Une macro n'arme jamais le laser et s'arrête avec l'arrêt d'urgence.</div>
     </section>
 
     <!-- Figures (T-296) : propriétés, bibliothèque, animation -->
@@ -4677,6 +4739,10 @@ const SHORTCUT_ZONES = ['live', 'grid', 'timeline', 'tl-canvas', 'creation', 'fi
 const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas' && z !== 'ask');
 const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live' && z !== 'grid');
 const LIVE_ZONES = ['live', 'grid'];
+// Macros (T-425): Alt + letter, read by position (e.code). Alt+P, S, T
+// and X already have a role in LIVE.
+const MACRO_TAKEN = ['P', 'S', 'T', 'X'];
+const MACRO_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter(l => !MACRO_TAKEN.includes(l));
 const SAFETY_SHORTCUTS = [
   { id: 'estop', group: 'Sécurité', keys: ['Escape'], meta: '*', alt: '*', zones: '*', typing: true, show: true,
     label: "Arrêt d'urgence (verrouillé : réinitialiser pour réarmer) ; ferme aussi cette aide",
@@ -4852,6 +4918,11 @@ function buildShortcuts() {
       label: "Page d'exécuteurs suivante", down: e => { if (!e.repeat) control('exec.page.next', 1); } },
     { id: 'exec.page.prev', group: 'Exécuteurs', codes: ['PageUp'], alt: true, zones: LIVE_ZONES, show: true,
       label: "Page d'exécuteurs précédente", down: e => { if (!e.repeat) control('exec.page.prev', 1); } },
+    // Macros (T-425): Alt + the macro's letter, LIVE only (letters alone
+    // are the cues, Alt + digit the pages).
+    { id: 'macro', group: 'Macros', codes: MACRO_LETTERS.map(l => 'Key' + l), alt: true, zones: LIVE_ZONES, show: true,
+      cap: () => 'A … Z', label: 'Lancer la macro liée à cette lettre (CRÉATION › Macros ; sauf P, S, T, X)',
+      down: (e, i) => { const m = macroForKey(MACRO_LETTERS[i]); if (!m) return false; if (!e.repeat) macRun(m.id, 'keyboard'); } },
     // Cue letters, LIVE only (T-272); Maj = flash.
     { id: 'cue', group: 'Cues et pages', codes: CUE_CODES, shift: '*', zones: LIVE_ZONES, show: true,
       cap: cueCaps, label: 'Jouer la cue de la case (Maj : flash, tant que la touche est tenue)',
@@ -5511,6 +5582,7 @@ function applyState(f, at, pushed) {
   // A cell « en attente » (T-159) blinks with the beat.
   if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
   showRunCount(f);
+  showMacros(f.macros);
   // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
   // control); our own requests update settingsRev themselves.
   if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
@@ -5891,7 +5963,7 @@ function setWorkspace(ws) {
 }
 function setLivePanel(name) {
   const tabs = [...document.querySelectorAll('#liveTabs [data-panel-tab]')];
-  if (!tabs.some(b => b.dataset.panelTab === name) || (showMode && name !== 'running' && name !== 'cuelist' && name !== 'fx')) name = 'direct';
+  if (!tabs.some(b => b.dataset.panelTab === name) || (showMode && name !== 'running' && name !== 'cuelist' && name !== 'fx' && name !== 'macros')) name = 'direct';
   tabs.forEach(b => {
     b.classList.toggle('active', b.dataset.panelTab === name);
     b.setAttribute('aria-selected', String(b.dataset.panelTab === name));
@@ -5900,6 +5972,7 @@ function setLivePanel(name) {
   remember(PANEL_KEY, name);
   if (name === 'running') setTimeout(pollRunning, 0); // after the script has run
   if (name === 'cuelist') setTimeout(loadCueLists, 0);
+  if (name === 'macros') setTimeout(loadMacros, 0);
 }
 document.querySelectorAll('#wsTabs [data-ws-tab]').forEach(b => b.onclick = () => setWorkspace(b.dataset.wsTab));
 document.querySelectorAll('#liveTabs [data-panel-tab]').forEach(b => b.onclick = () => setLivePanel(b.dataset.panelTab));
@@ -9069,7 +9142,8 @@ $('cueMenuCellColorNone').addEventListener('click', () => {
 const LOCK_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>';
 function showRunCount(f) {
   const n = ((f.cues && f.cues.active) || []).length + (f.timeline && (f.timeline.playing || f.timeline.paused) ? 1 : 0)
-    + (f.cuelist && (f.cuelist.index != null || f.cuelist.waiting != null) ? 1 : 0);
+    + (f.cuelist && (f.cuelist.index != null || f.cuelist.waiting != null) ? 1 : 0)
+    + ((f.macros && f.macros.running) || []).length;
   const b = $('runCount');
   b.hidden = !n;
   b.textContent = n;
@@ -9125,6 +9199,10 @@ function showRunning(r) {
     cl.paused ? 'pause' : cl.phase.phase === 'fading' ? `fondu ${Math.round(cl.phase.t * 100)} %` : cl.phase.phase === 'delay' ? 'délai' : '',
     'C' + cl.layer].filter(Boolean).join(' · '), { source: cl.source_label, stop: () => runStop({ kind: 'cuelist' }) }));
   fillRun('runTimeline', rows);
+  // Macros (T-425): the step reached, what it waits for, who launched it.
+  fillRun('runMacros', (r.macros || []).map(m => runRow(m.name,
+    [`étape ${Math.min(m.step, m.steps)}/${m.steps}`, macWaitText(m.waiting), m.error ? '⚠ ' + m.error : ''].filter(Boolean).join(' · '),
+    { source: m.source_label, warn: !!m.error, stop: () => runStop({ kind: 'macro', id: m.id }) })));
   fillRun('runLfos', r.lfos.map(m => runRow(m.target_label, `${m.wave_label} · ${m.rate}`, { stop: () => runStop({ kind: 'lfo', index: m.index }), stopLabel: 'Couper' })));
   fillRun('runAudio', r.audio_links.map(a => runRow(a.target_label, a.source_label, { stop: () => runStop({ kind: 'audio_link', index: a.index }), stopLabel: 'Couper' })));
   const fmt = v => typeof v === 'boolean' ? (v ? 'oui' : 'non') : typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : v;
@@ -9149,6 +9227,223 @@ async function runStop(body) {
 }
 document.querySelectorAll('#runPanel [data-run-stop]').forEach(b => { b.onclick = () => runStop({ kind: b.dataset.runStop }); });
 $('runAll').onclick = () => runStop({ kind: 'all' });
+
+// ---------- macros (T-425) ----------
+// LIVE › Macros: one pad per macro (click = launch, again = from the
+// start, ■ = stop, Go for the ones waiting). CRÉATION › Macros: the list
+// edited as a draft, then « Enregistrer » sends it whole (POST
+// /api/macros): every line is checked by the studio, a refused one (arming,
+// safety) or an unknown word is shown under its step. The frame carries
+// the list's revision and what runs (`f.macros`).
+const MAC = { list: [], draft: [], sel: 0, dirty: false, rev: -1, running: [], runKey: '', err: null, cmds: [] };
+const macClone = v => JSON.parse(JSON.stringify(v));
+function macroForKey(letter) { return MAC.list.find(m => m.enabled && m.key === letter); }
+function macWaitText(w) {
+  if (!w) return '';
+  if (w.kind === 'go') return 'attend Go';
+  return `encore ${String(w.left).replace('.', ',')} ${w.kind === 'beats' ? 'temps' : 's'}`;
+}
+async function loadMacros(force) {
+  const j = await apiJson('GET', '/api/macros', undefined, { cache: 'no-store', quiet: true }).catch(() => null);
+  if (!j) return;
+  MAC.list = j.macros; MAC.rev = j.rev;
+  if (!MAC.dirty || force === true && !MAC.draft.length) { MAC.draft = macClone(j.macros); MAC.dirty = false; MAC.sel = Math.min(MAC.sel, Math.max(0, MAC.draft.length - 1)); }
+  if (j.warnings && j.warnings.length) $('macState').textContent = j.warnings.join(' · ');
+  renderMacButtons();
+  renderMacEdit();
+}
+function showMacros(m) {
+  if (!m) return;
+  if (m.rev !== MAC.rev) { MAC.rev = m.rev; loadMacros(); }
+  const key = JSON.stringify(m.running);
+  if (key === MAC.runKey) return;
+  MAC.runKey = key; MAC.running = m.running;
+  renderMacButtons();
+}
+function renderMacButtons() {
+  const box = $('macButtons');
+  const pads = MAC.list.map(m => {
+    const run = MAC.running.find(r => r.id === m.id);
+    const pad = document.createElement('div');
+    pad.className = 'mac-pad';
+    const b = document.createElement('button');
+    b.className = 'mac-btn' + (run ? ' on' : '') + (run && run.go ? ' wait' : '');
+    b.dataset.mac = m.id;
+    b.dataset.control = `macro.${m.id}.go`;
+    b.disabled = !m.enabled;
+    b.title = `macro.${m.id}.go : ${run ? 'relancer depuis la première étape' : 'lancer'}${m.enabled ? '' : ' (désactivée)'}`;
+    const n = document.createElement('span'); n.className = 'n'; n.textContent = m.name; b.appendChild(n);
+    if (m.key) { const k = document.createElement('kbd'); k.textContent = (IS_MAC ? '⌥' : 'Alt+') + m.key; b.appendChild(k); }
+    if (run) {
+      const pr = document.createElement('span'); pr.className = 'prog';
+      pr.style.width = (m.steps.length ? Math.min(100, run.step / m.steps.length * 100) : 100) + '%';
+      b.appendChild(pr);
+    }
+    b.onclick = () => macRun(m.id, 'ui');
+    pad.appendChild(b);
+    if (run) {
+      const st = document.createElement('button');
+      st.className = 'mac-stop'; st.textContent = '■'; st.setAttribute('aria-label', `Arrêter la macro ${m.name}`);
+      st.onclick = () => macStop(m.id);
+      pad.appendChild(st);
+    }
+    return pad;
+  });
+  if (!pads.length) { const e = document.createElement('div'); e.className = 'mac-empty'; e.textContent = 'Aucune macro : les créer dans CRÉATION › Macros'; pads.push(e); }
+  box.replaceChildren(...pads);
+  $('macGo').hidden = !MAC.running.some(r => r.go);
+}
+async function macRun(id, source) {
+  const r = await api('POST', '/api/macros/run', { id, source }, { quiet: true });
+  $('macMsg').textContent = r.ok ? '' : await r.text();
+}
+async function macStop(id) {
+  await api('POST', '/api/macros/stop', id ? { id } : {}, { quiet: true });
+}
+$('macGo').onclick = () => api('POST', '/api/macros/go', {}, { quiet: true });
+$('macStopAll').onclick = () => macStop(null);
+// The editor.
+const MAC_WAITS = [['none', 'Aucune'], ['seconds', 'Secondes'], ['beats', 'Temps'], ['go', 'Attendre Go']];
+const waitKind = w => typeof w === 'string' ? w : Object.keys(w || {})[0] || 'none';
+const waitVal = w => typeof w === 'object' && w ? Object.values(w)[0] : '';
+async function macLoadCommands() {
+  const j = await apiJson('GET', '/api/command/actions', undefined, { cache: 'no-store', quiet: true }).catch(() => null);
+  if (!j) return;
+  MAC.cmds = [...new Set(j.actions.map(a => a.command))];
+  macFillCommands();
+}
+function macFillCommands() {
+  const names = MAC.draft.map(m => `macro "${m.name}" go`);
+  $('macCmdList').replaceChildren(...[...MAC.cmds, ...names].map(c => { const o = document.createElement('option'); o.value = c; return o; }));
+}
+function macTouched() {
+  MAC.dirty = true;
+  $('macState').textContent = 'Modifications non enregistrées : « Enregistrer » pour les garder';
+}
+function macCur() { return MAC.draft[MAC.sel]; }
+function renderMacEdit() {
+  const sel = $('macSel');
+  sel.replaceChildren(...MAC.draft.map((m, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (m.name || '(sans nom)') + (m.enabled ? '' : ' (désactivée)'); return o; }));
+  if (!MAC.draft.length) { const o = document.createElement('option'); o.textContent = 'Aucune macro'; o.value = ''; sel.appendChild(o); }
+  sel.value = MAC.draft.length ? String(MAC.sel) : '';
+  const m = macCur();
+  $('macFields').hidden = !m;
+  $('macDup').disabled = $('macDel').disabled = !m;
+  const err = MAC.err;
+  const errOf = m && err && err.macro_id === m.id;
+  $('macErr').hidden = !(err && !(errOf && err.step));
+  $('macErr').textContent = err && !(errOf && err.step) ? err.message_fr || String(err) : '';
+  if (!m) return;
+  $('macName').value = m.name;
+  $('macKey').replaceChildren(...[['', 'Aucune'], ...MACRO_LETTERS.map(l => [l, l])].map(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; return o; }));
+  $('macKey').value = m.key && MACRO_LETTERS.includes(m.key) ? m.key : '';
+  $('macOn').checked = m.enabled !== false;
+  $('macSteps').replaceChildren(...m.steps.map((st, i) => macStepRow(m, st, i, errOf && err.step === i + 1 ? err : null)));
+  macFillCommands();
+}
+function macStepRow(m, st, i, err) {
+  const row = document.createElement('div');
+  row.className = 'mac-step' + (st.enabled === false ? ' off' : '');
+  row.dataset.step = i + 1;
+  const kind = waitKind(st.wait);
+  row.innerHTML = `<span class="mac-n">${i + 1}</span>
+    <div class="row"><label for="macCmd${i}">Commande</label><input type="text" id="macCmd${i}" list="macCmdList" maxlength="200" autocomplete="off" spellcheck="false" placeholder="master.size 80"></div>
+    <div class="row"><label for="macWait${i}">Attente</label><select id="macWait${i}">${MAC_WAITS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>
+      <label for="macVal${i}">Valeur</label><input type="number" id="macVal${i}" min="0.05" max="600" step="0.25">
+      <label class="check"><input type="checkbox" id="macStepOn${i}"><span>Active</span></label></div>
+    <div class="row"><button data-act="up" aria-label="Monter l'étape ${i + 1}" title="Monter">↑</button><button data-act="down" aria-label="Descendre l'étape ${i + 1}" title="Descendre">↓</button><button data-act="del" aria-label="Supprimer l'étape ${i + 1}" title="Supprimer l'étape">✕</button></div>`;
+  const cmd = row.querySelector('input[type=text]'), wait = row.querySelector('select'), val = row.querySelector('input[type=number]'), on = row.querySelector('input[type=checkbox]');
+  cmd.value = st.command || '';
+  wait.value = kind;
+  val.value = waitVal(st.wait);
+  val.hidden = val.previousElementSibling.hidden = kind === 'none' || kind === 'go';
+  on.checked = st.enabled !== false;
+  const setWait = () => {
+    const k = wait.value, v = parseFloat(String(val.value).replace(',', '.'));
+    if (k === 'seconds' || k === 'beats') {
+      const n = Number.isFinite(v) && v > 0 ? v : 1;
+      st.wait = { [k]: n };
+      if (!(Number.isFinite(v) && v > 0)) val.value = n;
+    } else st.wait = k;
+    val.hidden = val.previousElementSibling.hidden = k === 'none' || k === 'go';
+  };
+  cmd.addEventListener('input', () => { st.command = cmd.value; macTouched(); });
+  wait.addEventListener('change', () => { setWait(); macTouched(); });
+  val.addEventListener('change', () => { setWait(); macTouched(); });
+  on.addEventListener('change', () => { st.enabled = on.checked; row.classList.toggle('off', !on.checked); macTouched(); });
+  row.querySelectorAll('[data-act]').forEach(b => b.onclick = () => {
+    const to = b.dataset.act === 'up' ? i - 1 : i + 1;
+    if (b.dataset.act === 'del') m.steps.splice(i, 1);
+    else if (to >= 0 && to < m.steps.length) [m.steps[i], m.steps[to]] = [m.steps[to], m.steps[i]];
+    else return;
+    MAC.err = null; macTouched(); renderMacEdit();
+  });
+  if (err) {
+    const e = document.createElement('div');
+    e.className = 'mac-err'; e.setAttribute('role', 'alert');
+    e.textContent = `Étape ${err.step} : ` + String(err.message_fr || '').replace(/^Macro « .* », étape \d+ : /, '');
+    row.appendChild(e);
+  }
+  return row;
+}
+$('macSel').addEventListener('change', () => { if ($('macSel').value !== '') { MAC.sel = +$('macSel').value; renderMacEdit(); } });
+// The list's entry follows the name; the steps are left alone (a full
+// render here would replace the field the focus is moving to).
+$('macName').addEventListener('input', () => {
+  const m = macCur(); if (!m) return;
+  m.name = $('macName').value; macTouched();
+  const o = $('macSel').selectedOptions[0]; if (o) o.textContent = (m.name || '(sans nom)') + (m.enabled ? '' : ' (désactivée)');
+});
+$('macKey').addEventListener('change', () => { const m = macCur(); if (m) { m.key = $('macKey').value || null; macTouched(); } });
+$('macOn').addEventListener('change', () => { const m = macCur(); if (m) { m.enabled = $('macOn').checked; macTouched(); } });
+// A new macro's id, chosen here so an error names it (`m` + number).
+function macNewId() {
+  const taken = new Set([...MAC.draft, ...MAC.list].map(m => m.id));
+  for (let n = 1; ; n++) if (!taken.has('m' + n)) return 'm' + n;
+}
+function macFreeName(base) {
+  const taken = new Set(MAC.draft.map(m => m.name.toLowerCase()));
+  for (let n = 1; ; n++) { const name = (n === 1 ? base : `${base} ${n}`).slice(0, 32); if (!taken.has(name.toLowerCase())) return name; }
+}
+$('macAdd').onclick = () => {
+  MAC.draft.push({ id: macNewId(), name: macFreeName('Macro'), steps: [{ command: '', wait: 'none', enabled: true }], key: null, enabled: true });
+  MAC.sel = MAC.draft.length - 1; MAC.err = null; macTouched(); renderMacEdit();
+  $('macName').focus();
+};
+$('macDup').onclick = () => {
+  const m = macCur(); if (!m) return;
+  MAC.draft.push({ ...macClone(m), id: macNewId(), key: null, name: macFreeName(m.name.slice(0, 24) + ' (copie)') });
+  MAC.sel = MAC.draft.length - 1; MAC.err = null; macTouched(); renderMacEdit();
+};
+$('macDel').onclick = () => {
+  if (!macCur()) return;
+  MAC.draft.splice(MAC.sel, 1);
+  MAC.sel = Math.max(0, Math.min(MAC.sel, MAC.draft.length - 1)); MAC.err = null; macTouched(); renderMacEdit();
+};
+$('macAddStep').onclick = () => {
+  const m = macCur(); if (!m) return;
+  if (m.steps.length >= 64) { $('macState').textContent = '64 étapes au plus'; return; }
+  m.steps.push({ command: '', wait: 'none', enabled: true });
+  macTouched(); renderMacEdit();
+  $('macCmd' + (m.steps.length - 1))?.focus();
+};
+$('macSave').onclick = async () => {
+  const r = await api('POST', '/api/macros', { macros: MAC.draft }, { quiet: true });
+  if (r.ok) {
+    const j = await r.json();
+    MAC.list = j.macros; MAC.rev = j.rev; MAC.draft = macClone(j.macros); MAC.dirty = false; MAC.err = null;
+    $('macState').textContent = 'Macros enregistrées';
+  } else {
+    const text = await r.text();
+    let e; try { e = JSON.parse(text); } catch { e = { message_fr: r.status === 423 ? LOCKED_FR : text }; }
+    MAC.err = e;
+    const at = e.macro_id ? MAC.draft.findIndex(m => m.id === e.macro_id) : -1;
+    if (at >= 0) MAC.sel = at;
+    $('macState').textContent = 'Non enregistré';
+  }
+  renderMacButtons();
+  renderMacEdit();
+};
 $('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
 $('cueMenuRemove').onclick = async () => {
   $('cueMenu').hidden = true; menuCue = null;
@@ -11662,7 +11957,7 @@ const deskCopy = () => JSON.parse(JSON.stringify(DESK.tabs || []));
 function deskBindName(b) {
   if (!b || b.type === 'none') return '';
   if (b.type === 'cue') return presetById.get(b.id)?.name || b.id;
-  if (b.type === 'macro') return 'Macro ' + b.id;
+  if (b.type === 'macro') return MAC.list.find(m => m.id === b.id)?.name || 'Macro ' + b.id;
   return labelOf(b.id);
 }
 const deskMissing = b => !!b && b.type !== 'none' && DESK.missing.has(deskBindKey(b));
@@ -11856,6 +12151,8 @@ function deskPlayDown(e, el, it) {
   e.preventDefault();
   if (it.kind === 'button') {
     if (b.type === 'cue') cueDown(b.id, null);
+    // A macro (T-425): launched (again from its first step) on the press.
+    else if (b.type === 'macro') macRun(b.id, 'ui');
     else if (b.type === 'control') {
       const k = controlKinds[b.id]?.type;
       if (k === 'toggle') deskSendNow(b.id, DESK.values[b.id] !== true);
@@ -12002,6 +12299,7 @@ function deskBindOptions(list, kind) {
     ? ['trigger', 'toggle', 'momentary'].includes(c.kind?.type) : c.kind?.type === 'continuous');
   const opts = [...regs.values()].filter(fits).map(c => `<option value="${esc(c.id)}">${esc(c.label_fr)}</option>`);
   if (kind === 'button') for (const p of presets) opts.push(`<option value="cue:${esc(p.id)}">Cue « ${esc(p.name)} »</option>`);
+  if (kind === 'button') for (const m of MAC.list) opts.push(`<option value="macro:${esc(m.id)}">Macro « ${esc(m.name)} »</option>`);
   list.innerHTML = opts.join('');
 }
 const deskBindText = b => !b || b.type === 'none' ? '' : b.type === 'control' ? b.id : `${b.type}:${b.id}`;
@@ -12037,6 +12335,10 @@ function deskParseBind(text, kind) {
   if (t.startsWith('cue:')) {
     if (kind !== 'button') throw new Error('Seul un bouton se lie à un cue');
     return { type: 'cue', id: t.slice(4) };
+  }
+  if (t.startsWith('macro:')) {
+    if (kind !== 'button') throw new Error('Seul un bouton se lie à une macro');
+    return { type: 'macro', id: t.slice(6) };
   }
   if (deskForbidden(t)) throw new Error('Ce contrôle ne peut pas être placé sur un pupitre (armement et sécurité restent hors pupitre)');
   const c = DESK.regs?.get(t.startsWith('live.') ? 'master.' + t.slice(5) : t);
@@ -14918,7 +15220,7 @@ const figFrame = () => fe.fig.frames[fe.frame];
 const figStrokes = () => figFrame().strokes;
 
 function setCreationTab(name) {
-  if (name !== 'figures' && name !== 'media' && name !== 'program') name = 'look';
+  if (name !== 'figures' && name !== 'media' && name !== 'program' && name !== 'macros') name = 'look';
   document.querySelectorAll('#creationTabs [data-ctab]').forEach(b => {
     b.classList.toggle('active', b.dataset.ctab === name);
     b.setAttribute('aria-selected', String(b.dataset.ctab === name));
@@ -14927,6 +15229,7 @@ function setCreationTab(name) {
   $('workspace').dataset.ctab = name;
   remember(CTAB_KEY, name);
   syncFigView();
+  if (name === 'macros') setTimeout(() => { loadMacros(true); macLoadCommands(); }, 0);
 }
 function syncFigView() {
   const on = activeWs === 'creation' && $('workspace').dataset.ctab === 'figures';

@@ -354,6 +354,11 @@ impl ControlRegistry {
         add("list.back".into(), "Liste de cues : Retour".into(), "list", ControlKind::Trigger, true);
         add("list.pause".into(), "Liste de cues : Pause".into(), "list", ControlKind::Trigger, true);
         add("list.top".into(), "Liste de cues : Début".into(), "list", ControlKind::Trigger, true);
+        // Macros (T-425): Go for the ones waiting, stop them all; each
+        // macro's own `macro.<id>.go` comes with the list (`add_macros`).
+        // Playback only: a macro never arms.
+        add("macro.go".into(), "Go macro".into(), "macro", ControlKind::Trigger, true);
+        add("macro.stop_all".into(), "Arrêter les macros".into(), "macro", ControlKind::Trigger, true);
 
         // The FX grid (T-146): a cell plays like a cue pad (down / up), a
         // drop on each press; all playback, none of them arms.
@@ -416,6 +421,19 @@ impl ControlRegistry {
 
     pub fn list(&self) -> &[ControlDesc] {
         &self.descs
+    }
+
+    /// `macro.<id>.go` for each macro (T-425), labelled with its name: a
+    /// trigger controllers may use (it never arms).
+    pub fn add_macros(&mut self, macros: &[crate::macros::Macro]) {
+        for m in macros {
+            let id = format!("macro.{}.go", m.id);
+            if self.by_id.contains_key(&id) {
+                continue;
+            }
+            self.by_id.insert(id.clone(), self.descs.len());
+            self.descs.push(ControlDesc { id, label_fr: m.name.clone(), group: "macro", kind: ControlKind::Trigger, external: true });
+        }
     }
 
     /// Looks up an id, accepting `live.<param>` as an alias of `master.<param>`.
@@ -589,6 +607,10 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "list.back" => crate::cuelist::back(s, source).map_err(ControlError::Refused)?,
         "list.pause" => crate::cuelist::pause(s, source).map_err(ControlError::Refused)?,
         "list.top" => crate::cuelist::top(s, source).map_err(ControlError::Refused)?,
+        "macro.go" => {
+            crate::macros::go(s);
+        }
+        "macro.stop_all" => crate::macros::stop_all(s),
         "cue.transition" => {
             s.deck.transition.kind = TRANSITION_KINDS[choice_index(&desc.kind, input)];
             s.deck.save();
@@ -672,6 +694,9 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
                     _ => with_deck(s, |d, _| d.clear_layer(n)),
                 }
                 return Ok(());
+            }
+            if let Some(m) = other.strip_prefix("macro.").and_then(|r| r.strip_suffix(".go")) {
+                return crate::macros::start(s, m, source).map_err(ControlError::Refused);
             }
             if let Some(n) = other.strip_prefix("page.").and_then(|n| n.parse::<usize>().ok()) {
                 if (1..=s.grid.page_count()).contains(&n) {
@@ -1210,10 +1235,12 @@ pub fn stop_cues(s: &mut Shared) {
     with_deck(s, |d, _| d.stop_unprotected());
 }
 
-/// « Tout arrêter » (`running.stop_all`): unprotected cues, the timeline,
-/// the playlist and the cue list (back to *Début*, T-410). Leaves the arm
+/// « Tout arrêter » (`running.stop_all`): the macros, unprotected cues, the
+/// timeline, the playlist and the cue list (back to *Début*, T-410). Leaves the arm
 /// state, the modulators, the audio links and the masters alone.
 pub fn stop_running(s: &mut Shared) {
+    // The macros first (T-425): none relaunches what this stops.
+    crate::macros::stop_all(s);
     stop_cues(s);
     s.timeline.stop();
     s.playlist = None;

@@ -92,7 +92,7 @@ pub enum Binding {
     None,
     Control { id: String },
     Cue { id: String },
-    /// A macro (T-425): shown as a missing binding until macros exist.
+    /// A macro (T-425), by id: a button launches it (`macro.<id>.go`).
     Macro { id: String },
 }
 
@@ -324,8 +324,9 @@ impl Desks {
 
 /// What the desk shows, in every state (`/api/frame`): the layout's
 /// revision, the value of every bound control (read back from the server,
-/// so a move from MIDI or the Direct panel is seen), and the bindings
-/// that point at nothing (`control:<id>`, `cue:<id>`, `macro:<id>`).
+/// so a move from MIDI or the Direct panel is seen), whether each bound
+/// macro runs (`macro:<id>`, T-425), and the bindings that point at
+/// nothing (`control:<id>`, `cue:<id>`, `macro:<id>`).
 pub fn view(s: &Shared) -> Value {
     let mut values = Map::new();
     let mut missing: Vec<String> = Vec::new();
@@ -348,7 +349,12 @@ pub fn view(s: &Shared) -> Value {
                         missing.push(format!("cue:{id}"));
                     }
                 }
-                Binding::Macro { id } => missing.push(format!("macro:{id}")),
+                Binding::Macro { id } => match s.macros.get(id) {
+                    Some(_) => {
+                        values.insert(format!("macro:{id}"), json!(s.macros.player.is_running(id)));
+                    }
+                    None => missing.push(format!("macro:{id}")),
+                },
             }
         }
     }
@@ -499,5 +505,12 @@ mod tests {
         assert_eq!(v["values"]["master.pos_x"], 0.25);
         assert_eq!(v["missing"], json!(["control:grid.9.9.9", "cue:gone", "macro:m1"]));
         assert_eq!(v["rev"], 1);
+        // T-425: once the macro exists, it is no longer missing, and the
+        // view says whether it runs.
+        let m = crate::macros::Macro { id: "m1".into(), name: "Montée".into(), ..Default::default() };
+        crate::macros::set(&mut s, vec![m]).unwrap();
+        let v = view(&s);
+        assert_eq!(v["missing"], json!(["control:grid.9.9.9", "cue:gone"]));
+        assert_eq!(v["values"]["macro:m1"], false);
     }
 }

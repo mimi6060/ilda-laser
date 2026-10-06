@@ -129,6 +129,8 @@ test('Jouer moves nothing; Modifier moves, resizes and drops from the palette', 
   await page.mouse.up();
   await expect.poll(async () => (await desks())[0].items[0]).toMatchObject({ x: 3, y: 1, w: 4, h: 4 });
   // Resize with the handle: one column narrower, one row taller.
+  // The desk is drawn again after the move is saved: wait for its handle.
+  await expect(page.locator(`${pad}.sel .desk-resize`)).toBeVisible();
   const handle = (await page.locator(`${pad} .desk-resize`).boundingBox())!;
   await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
   await page.mouse.down();

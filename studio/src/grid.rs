@@ -476,6 +476,7 @@ fn category_pages(presets: &[Preset], category: &str, cap: usize) -> Vec<CuePage
 pub fn refresh(s: &mut crate::Shared) {
     s.grid.resolve(&s.presets);
     s.controls = crate::controls::ControlRegistry::build_for(&s.presets, &s.grid);
+    s.controls.add_macros(s.macros.list());
     s.cue_page = s.cue_page.min(s.grid.page_count() - 1);
 }
 

@@ -26,6 +26,8 @@ pub fn snapshot(s: &Shared) -> Value {
         "timeline": timeline(s),
         "playlist": playlist(s),
         "cuelist": cuelist(s),
+        // Running macros (T-425), with the step they are at.
+        "macros": crate::macros::running(s),
         "lfos": lfos(s),
         "audio_links": audio_links(s),
         "masters": masters(s),
@@ -323,6 +325,9 @@ pub struct StopRequest {
     pub cue: Option<String>,
     /// A modulator's or audio link's index (`kind: "lfo"` / `"audio_link"`).
     pub index: Option<usize>,
+    /// A macro's id (`kind: "macro"`, T-425).
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// One stop button of the panel. Every kind is playback, allowed in show
@@ -342,6 +347,13 @@ pub fn stop(s: &mut Shared, req: &StopRequest) -> Result<(), String> {
             }
         }
         "cues" => controls::stop_cues(s),
+        "macro" => {
+            let id = req.id.as_deref().ok_or("macro manquante")?;
+            if !crate::macros::stop(s, id) {
+                return Err("cette macro ne tourne plus".into());
+            }
+        }
+        "macros" => crate::macros::stop_all(s),
         // The cue list back to *Début* (T-410).
         "cuelist" => s.cue_list.top(),
         "timeline" => {
@@ -437,7 +449,7 @@ mod tests {
         let row = &snapshot(&s)["cuelist"];
         assert_eq!((row["name"].as_str(), row["index"].as_u64(), row["label"].as_str()), (Some("Acte"), Some(0), Some("Intro")));
         assert_eq!(row["source_label"], "MIDI");
-        stop(&mut s, &StopRequest { cue: None, kind: "cuelist".into(), instance: None, index: None }).unwrap();
+        stop(&mut s, &StopRequest { cue: None, kind: "cuelist".into(), instance: None, index: None, id: None }).unwrap();
         assert_eq!(snapshot(&s)["cuelist"], Value::Null);
     }
 
@@ -452,7 +464,7 @@ mod tests {
         // Back at its default: gone.
         apply(&mut s, "master.size", ControlInput::Value(1.0), false).unwrap();
         assert_eq!(ids(&masters(&s), "id"), ["layer.2.dimmer"]);
-        stop(&mut s, &StopRequest { cue: None, kind: "masters".into(), instance: None, index: None }).unwrap();
+        stop(&mut s, &StopRequest { cue: None, kind: "masters".into(), instance: None, index: None, id: None }).unwrap();
         assert!(masters(&s).is_empty());
         assert!(!s.touches.keys().any(|k| k.starts_with("master.") || k.starts_with("layer.")));
     }
@@ -482,10 +494,10 @@ mod tests {
         assert_eq!(c[0]["mode_label"], "Basculer");
         assert_eq!(c[0]["page"], json!(page.map(|p| p + 1)));
         let instance = c[0]["instance"].as_u64().unwrap();
-        assert!(stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(instance), index: None }).is_ok());
+        assert!(stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(instance), index: None, id: None }).is_ok());
         assert!(s.deck.active.is_empty());
-        assert!(stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(instance), index: None }).is_err());
-        assert!(stop(&mut s, &StopRequest { cue: None, kind: "nope".into(), instance: None, index: None }).is_err());
+        assert!(stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(instance), index: None, id: None }).is_err());
+        assert!(stop(&mut s, &StopRequest { cue: None, kind: "nope".into(), instance: None, index: None, id: None }).is_err());
     }
 
     #[test]
@@ -505,7 +517,7 @@ mod tests {
         apply(&mut s, "cue.stop_all", ControlInput::Value(1.0), true).unwrap();
         assert_eq!(s.deck.active.len(), 1);
         let id = s.deck.active[0].id;
-        stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(id), index: None }).unwrap();
+        stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(id), index: None, id: None }).unwrap();
         assert!(s.deck.active.is_empty());
     }
 
@@ -542,16 +554,16 @@ mod tests {
         assert_eq!(phases(&rows), [(b.clone(), "démarrage".to_string()), (a.clone(), "en fondu".to_string())]);
         assert!(rows[1]["progress"].as_f64().is_some());
         let ending = rows[1]["instance"].as_u64().unwrap();
-        stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(ending), index: None }).unwrap();
+        stop(&mut s, &StopRequest { cue: None, kind: "cue".into(), instance: Some(ending), index: None, id: None }).unwrap();
         assert!(s.deck.ending.is_empty());
         // A waiting launch is cancelled by its cue id.
         s.deck.quantize = Quantize::Bar;
         controls::press_cue_from(&mut s, &a, None, true, Some("ui"));
         if !s.deck.pending.is_empty() {
-            stop(&mut s, &StopRequest { cue: Some(a.clone()), kind: "pending".into(), instance: None, index: None }).unwrap();
+            stop(&mut s, &StopRequest { cue: Some(a.clone()), kind: "pending".into(), instance: None, index: None, id: None }).unwrap();
             assert!(s.deck.pending.is_empty());
         }
-        assert!(stop(&mut s, &StopRequest { cue: Some(a), kind: "pending".into(), instance: None, index: None }).is_err());
+        assert!(stop(&mut s, &StopRequest { cue: Some(a), kind: "pending".into(), instance: None, index: None, id: None }).is_err());
     }
 
     /// The e-stop cuts the output whatever the flags: a protected cue keeps
@@ -596,14 +608,14 @@ mod tests {
         s.routes.set(routing, &s.controls).unwrap();
         assert_eq!(lfos(&s).len(), 2);
         assert_eq!(audio_links(&s).len(), 2);
-        stop(&mut s, &StopRequest { cue: None, kind: "lfo".into(), instance: None, index: Some(1) }).unwrap();
+        stop(&mut s, &StopRequest { cue: None, kind: "lfo".into(), instance: None, index: Some(1), id: None }).unwrap();
         assert_eq!(lfos(&s).len(), 1);
-        stop(&mut s, &StopRequest { cue: None, kind: "lfos".into(), instance: None, index: None }).unwrap();
-        stop(&mut s, &StopRequest { cue: None, kind: "audio".into(), instance: None, index: None }).unwrap();
+        stop(&mut s, &StopRequest { cue: None, kind: "lfos".into(), instance: None, index: None, id: None }).unwrap();
+        stop(&mut s, &StopRequest { cue: None, kind: "audio".into(), instance: None, index: None, id: None }).unwrap();
         assert!(lfos(&s).is_empty() && audio_links(&s).is_empty());
         assert_eq!(s.lfos.list().len(), 2, "nothing deleted");
         assert_eq!(s.routes.routing().routes.len(), 2);
-        assert!(stop(&mut s, &StopRequest { cue: None, kind: "lfo".into(), instance: None, index: Some(9) }).is_err());
+        assert!(stop(&mut s, &StopRequest { cue: None, kind: "lfo".into(), instance: None, index: Some(9), id: None }).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

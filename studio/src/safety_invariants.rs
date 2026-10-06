@@ -81,6 +81,14 @@
 //!     with them); a ×4 group never gets flashing past the strobe limiter
 //!     (`speed_groups_never_get_past_the_strobe_limiter`).
 //!
+//! 18. macros (T-425): random macro lists (any line the command line
+//!     accepts, macros launching macros, waits in seconds, beats and Go,
+//!     refused lines that must not save) launched, advanced and stopped
+//!     from the UI or a controller run in the sessions (1-17 hold with
+//!     them); they never arm, no macro runs across a frame with the
+//!     e-stop latched, and a strobe built from timed steps stays within
+//!     the burst (`macros_never_get_past_the_strobe_limiter`).
+//!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
 //! catalogue cue forced onto the default seeds (flashed over itself, and
@@ -875,7 +883,9 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
             // `run_case`) moves them more often, this one like any other.
             // The executors (T-418) have their own stream (`brng`): 226
             // ids would otherwise take a third of these picks.
-            let ids: Vec<String> = s.controls.list().iter().filter(|d| d.group != "exec").map(|d| d.id.clone()).collect();
+            // The macros (T-425) too (`grng`-like stream `krng`), so this
+            // stream's picks stay what they were.
+            let ids: Vec<String> = s.controls.list().iter().filter(|d| d.group != "exec" && d.group != "macro").map(|d| d.id.clone()).collect();
             let id = rng.pick(&ids).clone();
             let external = rng.chance(0.5);
             let input = if rng.chance(0.5) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-3.0, 3.0)) };
@@ -1173,6 +1183,79 @@ fn random_bank(s: &mut Shared, rng: &mut Rng) {
         })
         .collect();
     s.executors.set_bank(ExecutorBank { pages });
+}
+
+/// A random macro list (T-425), as `POST /api/macros` could send it:
+/// lines from the palette (values drawn at random, kept only when they
+/// parse), macros launching others, random waits; now and then a refused
+/// line, which must make the whole list refused.
+fn random_macros(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
+    use crate::macros::{Macro, MacroStep, Wait};
+    let actions = crate::command::actions(&s.controls, &s.presets);
+    let n = 1 + rng.below(4);
+    let mut refused = false;
+    let mut list = Vec::new();
+    for i in 0..n {
+        let mut steps = Vec::new();
+        for _ in 0..1 + rng.below(8) {
+            let command = match rng.below(12) {
+                0 if rng.chance(0.3) => {
+                    refused = true;
+                    rng.pick(&["armer", "transport.arm on", "safety.hold on", "estop.reset"]).to_string()
+                }
+                // Only later macros: no cycle.
+                1 if i + 1 < n => format!("macro.m{}.go", i + 2 + rng.below(n - i - 1)),
+                2 => String::new(),
+                3 => "noir".to_string(),
+                _ => {
+                    let a = rng.pick(&actions);
+                    let line = if a.needs_value {
+                        let v = if rng.chance(0.3) { rng.pick(&["on", "off", "1", "2"]).to_string() } else { format!("{:.1}", rng.range(-20.0, 220.0)) };
+                        format!("{} {v}", a.command)
+                    } else {
+                        a.command.clone()
+                    };
+                    if crate::command::parse(&line, &s.controls, &s.presets).is_ok() { line } else { String::new() }
+                }
+            };
+            let wait = match rng.below(6) {
+                0 | 1 => Wait::None,
+                2 | 3 => Wait::Seconds(rng.range(0.05, 1.5)),
+                4 => Wait::Beats(*rng.pick(&[0.125, 0.25, 0.5, 1.0, 2.0])),
+                _ => Wait::Go,
+            };
+            steps.push(MacroStep { command, wait, enabled: rng.chance(0.9) });
+        }
+        list.push(Macro { id: format!("m{}", i + 1), name: format!("Fuzz {}", i + 1), steps, ..Default::default() });
+    }
+    let r = crate::macros::set(s, list);
+    if refused && r.is_ok() {
+        return Err("a macro with a refused line was saved".into());
+    }
+    Ok(())
+}
+
+/// One macro move from the UI, a controller or the external gate:
+/// launched, Go, stopped, all stopped.
+fn random_macro_move(s: &mut Shared, rng: &mut Rng, now: Instant) {
+    let n = s.macros.list().len().max(1);
+    let (id, input) = match rng.below(10) {
+        0..=5 => (format!("macro.m{}.go", 1 + rng.below(n)), ControlInput::Value(1.0)),
+        6 | 7 => ("macro.go".to_string(), ControlInput::Value(1.0)),
+        8 => ("macro.stop_all".to_string(), ControlInput::Value(1.0)),
+        _ => {
+            let id = format!("m{}", 1 + rng.below(n));
+            crate::macros::stop(s, &id);
+            return;
+        }
+    };
+    if rng.chance(0.2) {
+        let _ = crate::external::set_open(s, true, ArmSource::Ui);
+        let src = *rng.pick(&crate::external::SourceKind::ALL);
+        let _ = crate::external::apply(s, src, "rig", &id, input, now);
+    } else {
+        let _ = controls::apply(s, &id, input, rng.chance(0.5));
+    }
 }
 
 /// One executor move from the UI, a controller or the external gate:
@@ -1512,6 +1595,12 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if exec_on {
         random_bank(&mut rig.s(), &mut brng);
     }
+    // Macros (T-425), from their own stream.
+    let mut krng = Rng::new(seed ^ 0x0425_0425);
+    let macros_on = krng.chance(0.4);
+    if macros_on {
+        random_macros(&mut rig.s(), &mut krng)?;
+    }
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
@@ -1563,6 +1652,35 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             }
             if s.gate.is_armed() != armed {
                 return Err(format!("frame {frame}: an executor changed the arming"));
+            }
+        }
+        if macros_on && krng.chance(0.2) {
+            let now = rig.now;
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            if krng.chance(0.05) {
+                random_macros(&mut s, &mut krng).map_err(|e| format!("frame {frame}: {e}"))?;
+            } else {
+                random_macro_move(&mut s, &mut krng, now);
+            }
+            if s.gate.is_armed() && !armed {
+                return Err(format!("frame {frame}: a macro move armed"));
+            }
+        }
+        if macros_on {
+            // A macro never runs a frame with the stop latched: the engine
+            // ends them all before any step.
+            let latched = rig.s().estop.is_latched();
+            if latched {
+                let armed = rig.s().gate.is_armed();
+                rig.tick();
+                let s = rig.s();
+                if !s.macros.player.runs.is_empty() {
+                    return Err(format!("frame {frame}: a macro runs with the e-stop latched"));
+                }
+                if s.gate.is_armed() && !armed {
+                    return Err(format!("frame {frame}: a macro armed"));
+                }
             }
         }
         if lists && lrng.chance(0.08) {
@@ -2003,6 +2121,61 @@ fn speed_groups_never_get_past_the_strobe_limiter() {
             }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// T-425: a strobe built from a macro's timed steps (brightness full /
+/// off every 50-120 ms, two macros chained: longer than any burst) is
+/// cut by the limiter like any other: it acts on the output, after
+/// everything a macro can change.
+fn macro_strobe_case(seed: u64) -> Result<(), String> {
+    use crate::macros::{Macro, MacroStep, Wait};
+    let mut rng = Rng::new(seed);
+    let mut s = test_support::shared();
+    let cfg = SafetySettings { strobe_max_hz: rng.range(1.0, 4.0), strobe_burst_s: rng.range(0.5, 3.0), ..Default::default() };
+    s.safety.set(cfg.clone(), true).map_err(|e| format!("{e:?}"))?;
+    let presets: Vec<_> = s.presets.iter().filter(|p| p.settings.gate == crate::engine::GateMode::Off).map(|p| p.settings.clone()).collect();
+    s.settings = rng.pick(&presets).clone();
+    let half = rng.range(crate::macros::SECONDS.0, 0.12);
+    let target = *rng.pick(&["master.brightness", "look.brightness"]);
+    let strobe = |last: Option<&str>| {
+        let mut steps: Vec<MacroStep> = (0..crate::macros::MAX_STEPS - 1)
+            .map(|i| MacroStep { command: format!("{target} {}", if i % 2 == 0 { 100 } else { 0 }), wait: Wait::Seconds(half), enabled: true })
+            .collect();
+        steps.push(MacroStep { command: last.unwrap_or("").to_string(), wait: Wait::None, enabled: true });
+        steps
+    };
+    let list = vec![
+        Macro { id: "m1".into(), name: "Stroboscope".into(), steps: strobe(Some("macro.m2.go")), ..Default::default() },
+        Macro { id: "m2".into(), name: "Encore".into(), steps: strobe(None), ..Default::default() },
+    ];
+    crate::macros::set(&mut s, list).map_err(|e| e.message_fr)?;
+    s.request_arm(ArmSource::Ui).map_err(|e| e.join("; "))?;
+    let mut rig = Rig::new(s, "macro-strobe", seed);
+    let epoch = rig.s().epoch;
+    rig.now = epoch;
+    crate::macros::start(&mut rig.s(), "m1", controls::ControlSource::Midi).map_err(str::to_string)?;
+    let mut meter = FlashMeter { peak: 0.0, on: false, onsets: Vec::new() };
+    let secs = 2.0 * crate::macros::MAX_STEPS as f64 * half as f64 + 1.0;
+    for _ in 0..(secs * 60.0) as usize {
+        rig.tick();
+        let w = rig.wire.lock().unwrap();
+        meter.feed(&w.last, rig.now.saturating_duration_since(rig.s().epoch).as_secs_f64(), 1.0 / 60.0);
+    }
+    if meter.onsets.len() < 4 {
+        return Err(format!("the macro strobe never flashed ({} onsets)", meter.onsets.len()));
+    }
+    let run = meter.longest_fast_run(1.0 / cfg.strobe_max_hz as f64);
+    if run > cfg.strobe_burst_s as f64 + 0.1 {
+        return Err(format!("{run:.2} s of output flashing faster than {:.2} Hz from a macro (burst limit {:.2} s)", cfg.strobe_max_hz, cfg.strobe_burst_s));
+    }
+    Ok(())
+}
+
+#[test]
+fn macros_never_get_past_the_strobe_limiter() {
+    let seeds = env_u64("SAFETY_CASES").map_or(4, |n| (n / 100).clamp(4, 20));
+    let failures: Vec<String> = (0..seeds).map(|i| 9_000_425 + i).filter_map(|seed| macro_strobe_case(seed).err().map(|e| format!("{e} (seed {seed})"))).collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
