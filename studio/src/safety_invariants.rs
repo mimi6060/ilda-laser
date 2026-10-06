@@ -3496,6 +3496,59 @@ fn a_large_output_offset_never_delays_a_stop() {
     }
 }
 
+/// T-475: lit frames sent to the output after an e-stop, counted, with
+/// the offset at -100, 0 and +100 ms: none. Both ways a stop lands: the
+/// HTTP handler (latch only, the gate not synced because the lock was
+/// busy) and Escape through the shared state. Every frame after the stop
+/// reaches the output dark, and what `/api/frame` reports (`output_lit`)
+/// is 0 from that first frame on.
+#[test]
+fn no_lit_frame_reaches_the_output_after_an_estop_whatever_the_offset() {
+    for offset in [-100.0, 0.0, 100.0] {
+        for via_http in [true, false] {
+            let mut rig = armed_square_rig(&format!("estop-count-{offset}-{via_http}"));
+            controls::apply(&mut rig.s(), "tempo.output_offset", ControlInput::Value(offset), true).unwrap();
+            assert_eq!(rig.s().tempo.output_offset_ms(), offset);
+            rig.s().request_arm(ArmSource::Ui).unwrap();
+            for _ in 0..5 {
+                rig.tick();
+            }
+            assert!(lit(&rig.wire) > 0, "offset {offset}: lit while armed");
+            let estop = Arc::clone(&rig.s().estop);
+            if via_http {
+                estop.trip(ArmSource::Api);
+            } else {
+                rig.s().emergency_stop(ArmSource::Keyboard);
+            }
+            let before = rig.wire.lock().unwrap().frames;
+            let (mut sent, mut lit_frames) = (0, 0);
+            for _ in 0..60 {
+                rig.tick();
+                sent += 1;
+                if lit(&rig.wire) > 0 {
+                    lit_frames += 1;
+                }
+                assert_eq!(rig.s().output_lit, 0, "offset {offset}, http {via_http}: the reported frame is dark");
+            }
+            assert_eq!(rig.wire.lock().unwrap().frames - before, sent, "every tick sent a frame");
+            assert_eq!(lit_frames, 0, "offset {offset}, http {via_http}: lit frames sent after the e-stop");
+            assert!(!rig.wire.lock().unwrap().armed, "offset {offset}, http {via_http}: the output disarmed");
+        }
+    }
+    // A stop that lands while a frame renders: the engine read the gate
+    // armed under the lock before the trip; the stage re-reads the latch
+    // and sends that frame, and every later one, dark.
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    let mut stage = crate::output::OutputStage::new(Some(Box::new(Recorder(Arc::clone(&wire), None))));
+    let estop = interlock::EStop::default();
+    let frame = vec![Point::lit(0.0, 0.0, 1.0, 1.0, 1.0), Point::lit(0.5, 0.5, 1.0, 1.0, 1.0)];
+    assert_eq!(stage.emit(&frame, true, true, &estop).lit, 2);
+    estop.trip(ArmSource::Api);
+    let lit_frames = (0..10).filter(|_| stage.emit(&frame, true, true, &estop).lit > 0 || lit(&wire) > 0).count();
+    assert_eq!(lit_frames, 0, "lit frames sent after the e-stop with a stale gate");
+    assert!(!wire.lock().unwrap().armed);
+}
+
 // ---------- live effects through the engine (T-142) ----------
 
 /// « Noir » held: the armed output and the preview go dark at once, a

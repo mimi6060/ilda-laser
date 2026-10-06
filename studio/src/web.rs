@@ -3794,13 +3794,20 @@ fn prepared_reply(shared: &Arc<Mutex<Shared>>, f: impl FnOnce(&mut Shared) -> Re
 }
 
 fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
-    let (mut view, points, version) = {
+    let (mut view, points, version, seq) = {
         let mut s = shared.lock().unwrap();
         let round = |v: f32| (v * 1000.0).round() / 1000.0;
         let points: Vec<[f32; 5]> = s.frame.iter().map(|p| [round(p.x), round(p.y), round(p.r), round(p.g), round(p.b)]).collect();
-        (live_view(&mut s), points, s.push.state_version())
+        let seq = s.push.seq();
+        (live_view(&mut s), points, s.push.state_version(), seq)
     };
     view["points"] = json!(points);
+    // The engine frame these points and `output_lit` belong to: the engine
+    // sets both and publishes this sequence under one lock. Compared with
+    // `X-Frame-Seq` from `POST /api/estop`, it tells a frame finished after
+    // the stop from one finished just before (T-475). Only here, not in the
+    // pushed state, which would otherwise change every frame.
+    view["frame_seq"] = json!(seq);
     json_response(view).with_header(header("X-State-Version", version))
 }
 
@@ -7013,10 +7020,13 @@ mod tests {
         assert!(!first.is_empty() && first.len() <= 2, "{first:?}");
         let (_, state) = &first[0];
         let frame = js(&t.request("GET", "/api/frame", "").1);
-        for key in frame.as_object().unwrap().keys().filter(|k| *k != "points") {
+        // The points and their frame number (T-475) belong to one engine
+        // frame: the pushed state has neither.
+        for key in frame.as_object().unwrap().keys().filter(|k| *k != "points" && *k != "frame_seq") {
             assert!(state.get(key).is_some(), "the pushed state has {key}");
         }
         assert!(state.get("points").is_none(), "no points in the state");
+        assert!(state.get("frame_seq").is_none(), "no frame number in the state");
         assert_eq!(state["armed"], false);
         let v1 = first.last().unwrap().0;
         assert!(read_events(&mut stream, &mut carry, Duration::from_millis(400)).is_empty(), "no change, no event (the beat runs on)");
@@ -7077,6 +7087,7 @@ mod tests {
         let (seq, flags, bin) = push::decode_frame(&bytes).unwrap();
         assert_eq!((seq, flags), (1, push::flags::ENGINE_OK));
         let frame = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(frame["frame_seq"], 1, "the JSON frame names its sequence (T-475)");
         let json_points = frame["points"].as_array().unwrap();
         assert_eq!(bin.len(), json_points.len());
         for (b, j) in bin.iter().zip(json_points) {
