@@ -534,6 +534,19 @@ pub fn describe(e: &SafetyEvent) -> String {
                 "Mode spectacle désactivé".into()
             }
         }
+        // The safety lock (T-261): never the code.
+        "safety_lock" => match str_of(d, "event") {
+            "locked" => "Réglages de sécurité verrouillés".into(),
+            "relocked" => "Réglages de sécurité reverrouillés (inactivité)".into(),
+            "unlocked" => "Réglages de sécurité déverrouillés avec le code".into(),
+            "failed" => "Code de sécurité incorrect".into(),
+            "code_set" => "Code de sécurité défini (réglages verrouillés)".into(),
+            "code_changed" => "Code de sécurité changé (réglages verrouillés)".into(),
+            "code_removed" => "Code de sécurité retiré".into(),
+            "file_removed" => format!("{} supprimé à la main : démarrage déverrouillé", crate::safetylock::FILE),
+            "damaged" => format!("{} illisible : réglages de sécurité verrouillés", crate::safetylock::FILE),
+            other => format!("Verrou de sécurité : {other}"),
+        },
         "checklist_reset" if str_of(d, "reason") == "shownet" => "Liste de contrôle avant show recommencée : sortie ShowNET, nouveaux points à cocher".into(),
         "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
         "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),

@@ -1021,6 +1021,11 @@
   .sfzone button { flex: 0; white-space: nowrap; }
   #dwellLed.on { opacity: 1; background: #ff9628; border-color: #ff9628; color: #2b1400; box-shadow: 0 0 8px #ff9628; }
   .sf-warn { color: var(--warn); }
+  /* Safety lock (T-261): the guarded settings greyed (the server still
+     takes what tightens), the lock's own buttons never. */
+  body.safety-locked .slk-guard :is(input, select, textarea, button):not(.slk-btn) { opacity: .5; }
+  #slkLed { margin-left: 6px; padding: 0 6px; border-radius: 4px; font-size: 11px; color: var(--warn); border: 1px solid var(--warn); }
+  .slk-btn, #slkDialog button, #slkDialog input { min-height: 44px; }
   #strobeLed.on { opacity: 1; background: var(--warn); border-color: var(--warn); color: #2b1d00; box-shadow: 0 0 8px var(--warn); }
   /* MIDI learn (T-203) */
   #learnBanner { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; padding: 6px 12px; background: #0f3d24; color: #fff; font-size: 13px; }
@@ -2037,6 +2042,21 @@
   </div>
 </div>
 <!-- CRÉATION › Médiathèque et TIMELINE : enregistrer une animation ILDA (T-442). -->
+<!-- Safety lock (T-261): the code typed here never stays in the page. -->
+<div id="slkDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="slkTitle" hidden>
+  <form class="box" id="slkForm" novalidate>
+    <h3 id="slkTitle">Verrouiller la sécurité</h3>
+    <div class="hint" id="slkHint"></div>
+    <label for="slkCode">Code (4 à 8 chiffres)</label>
+    <input type="password" id="slkCode" inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" autocomplete="off">
+    <div id="slkCode2Box">
+      <label for="slkCode2">Confirmer le code</label>
+      <input type="password" id="slkCode2" inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" autocomplete="off">
+    </div>
+    <div class="hint sf-warn" id="slkError" role="alert"></div>
+    <div class="row"><button type="submit" id="slkOk">Verrouiller</button><button type="button" id="slkCancel">Annuler</button></div>
+  </form>
+</div>
 <div id="recDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="recTitle" hidden>
   <div class="box">
     <div class="keys-head"><h3 id="recTitle">Enregistrer une animation ILDA</h3><button id="recClose">Fermer</button></div>
@@ -3608,8 +3628,15 @@
     </section>
 
     <section data-help="reglages-securite">
-      <details id="safetyPanel" data-search="Sécurité">
-        <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span><span id="dwellLed" title="Garde anti-point fixe">Garde active</span></summary>
+      <details class="slk-guard" id="safetyPanel" data-search="Sécurité">
+        <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span><span id="dwellLed" title="Garde anti-point fixe">Garde active</span><span id="slkLed" hidden>Verrouillé</span></summary>
+        <!-- Safety lock (T-261): never greyed, never refused. -->
+        <div class="slk-keep">
+          <div class="sf-sub">Verrouillage par code</div>
+          <div class="row"><button id="slkLockBtn" class="slk-btn">Verrouiller…</button><button id="slkUnlockBtn" class="slk-btn" hidden>Déverrouiller…</button><button id="slkChangeBtn" class="slk-btn" hidden>Changer le code…</button><button id="slkRemoveBtn" class="slk-btn" hidden>Retirer le code</button></div>
+          <div class="hint" id="slkStatus" role="status"></div>
+          <div class="hint">Verrouillés, les réglages de sécurité (zones, horizon, plafonds, profils, sites, présence, balayage public, extérieur, sorties, calibration, lieu, entrées) ne peuvent que se resserrer. L'arrêt d'urgence, le désarmement, « Ciel coupé », le retour au-dessus du public et la luminosité générale marchent toujours. Reverrouillage automatique après 10 min sans réglage de sécurité ; 5 codes faux font attendre 60 s. Code oublié : quittez le studio, supprimez le fichier <code>safety-lock.json</code> du dossier de données, relancez (démarrage déverrouillé, noté dans le journal). Ce verrou évite les erreurs : l'arrêt réel reste matériel (interlock, arrêt d'urgence, clé du projecteur).</div>
+        </div>
         <div class="sf-sub">Profil de sécurité du lieu</div>
         <label for="sfpSelect">Profil de sécurité</label>
         <select id="sfpSelect"></select>
@@ -3703,7 +3730,7 @@
           <button id="holdKeyPick" style="flex:0;white-space:nowrap">Changer…</button></div>
         <div class="hint">Mode maintien : le laser n'émet que tant que la touche est maintenue (une pédale USB qui envoie une touche fonctionne aussi ; pad MIDI : contrôle safety.hold). Relâcher = sortie noire ; relâché plus de 10 s = désarmé.</div>
       </details>
-      <details id="outdoorPanel" data-search="Mode extérieur ciel coupé DGTA secteurs verticale montage projecteurs orientation">
+      <details class="slk-guard" id="outdoorPanel" data-search="Mode extérieur ciel coupé DGTA secteurs verticale montage projecteurs orientation">
         <summary>Mode extérieur</summary>
         <div class="shownet-help" id="odBanner"><b>Aide logicielle seulement.</b> Projeter un laser dans l'espace aérien demande toujours une autorisation (en Belgique : la DGTA). Le logiciel coupe ce qui sort des angles déclarés, mais l'autorisation, les observateurs du ciel et l'arrêt matériel (interlock, arrêt d'urgence, clé) restent votre responsabilité. Il ne garantit aucune conformité aéronautique.</div>
         <label class="check"><input type="checkbox" id="odEnabled"> Show en extérieur</label>
@@ -3748,7 +3775,7 @@
     </section>
 
     <section data-help="reglages-securite">
-      <details id="exposurePanel" data-search="Estimation d'exposition">
+      <details class="slk-guard" id="exposurePanel" data-search="Estimation d'exposition">
         <summary>Estimation d'exposition</summary>
         <div class="ex-banner" id="exBanner">Estimation théorique — ne remplace pas une mesure avec un appareil étalonné, l'évaluation d'une personne compétente en sécurité laser ni le respect de la réglementation. L'arrêt réel reste matériel (interlock, arrêt d'urgence, clé).</div>
         <div class="hint">Calcul à partir de la fiche projecteur (RÉGLAGES › Sorties et projecteurs) et du plafond de puissance de la sortie : <span id="exProjector"></span>. Aucun effet sur la sortie : rien n'est armé ni modifié.</div>
@@ -3854,7 +3881,7 @@
     </section>
 
     <section data-help="reglages-calibration">
-      <details id="sitePanel" data-search="Profils de site profil actif lieu calibration zones">
+      <details class="slk-guard" id="sitePanel" data-search="Profils de site profil actif lieu calibration zones">
         <summary>Profils de site</summary>
         <label for="siteSelect">Profil actif</label>
         <select id="siteSelect"></select>
@@ -3877,7 +3904,7 @@
         <div class="hint sf-error" id="siteError" role="alert"></div>
         <div class="hint">Un profil de site garde ce qui appartient au lieu : calibration, sécurité (zones, horizon, plafonds) et zones de projection. Charger un profil désarme le laser ; ce qui assouplit la sécurité demande une confirmation. L'arrêt réel reste matériel (interlock, arrêt d'urgence, clé).</div>
       </details>
-      <details data-search="Calibration">
+      <details class="slk-guard" data-search="Calibration">
         <summary>Calibration</summary>
         <label>Décalage X <span class="v" id="cOxV"></span></label><input type="range" id="cOx" data-default="0" data-display-k="0.01" min="-100" max="100">
         <label>Décalage Y <span class="v" id="cOyV"></span></label><input type="range" id="cOy" data-default="0" data-display-k="0.01" min="-100" max="100">
@@ -3895,7 +3922,7 @@
     </section>
 
     <section data-help="reglages-calibration">
-      <details id="pzPanel" data-search="Zones de projection">
+      <details class="slk-guard" id="pzPanel" data-search="Zones de projection">
         <summary>Zones de projection</summary>
         <div class="hint">Chaque zone a sa propre correction géométrique ; un cue joue sur les zones choisies dans « Propriétés du cue » (clic droit), sinon sur les zones par défaut. Ordre : contenu → contrôles live → zone → calibration → sécurité. Les zones de sécurité et l'horizon restent dans l'espace de sortie : ils protègent toujours la même zone réelle, quelle que soit la géométrie.</div>
         <div class="pz-tabs" id="pzList" role="tablist"></div>
@@ -3936,7 +3963,7 @@
     </section>
 
     <section data-help="reglages-calibration">
-      <details id="venuePanel" data-search="Lieu et projecteurs">
+      <details class="slk-guard" id="venuePanel" data-search="Lieu et projecteurs">
         <summary>Lieu et projecteurs</summary>
         <div class="hint">Chaque projecteur est une sortie laser à part entière : ses zones de projection (« Sortie » d'une zone), ses plafonds et ses couleurs (« Sorties et projecteurs », choisir le projecteur) et toute la sécurité. Un seul armement et un seul arrêt d'urgence pour tous ; perdre la sortie d'un projecteur désarme tout. Changer la sortie d'un projecteur se fait laser désarmé. Position, angles, luminosité et miroir servent seulement à la vue 3D.</div>
         <label for="vnPreset">Préréglage</label>
@@ -4107,7 +4134,7 @@
     </section>
 
     <section data-help="reglages-entrees">
-      <details id="netinPanel" data-search="Entrées réseau OSC Art-Net sACN DMX">
+      <details class="slk-guard" id="netinPanel" data-search="Entrées réseau OSC Art-Net sACN DMX">
         <summary>Entrées réseau (OSC, Art-Net, sACN, DMX)</summary>
         <div class="hint">Pilotage depuis une console lumière ou une autre application. Rien de ce qui arrive par le réseau ne peut armer le laser ; le blackout et l'arrêt d'urgence sont toujours acceptés. Art-Net et sACN : écoute seule. L'OSC n'envoie que le <b>Retour OSC</b> (ci-dessous), coupé par défaut. Réglage de cette machine (pas du projet).</div>
         <div class="mdev">
@@ -6373,6 +6400,7 @@ function flash(text) {
   toastTimer = setTimeout(() => { $('lockToast').hidden = true; }, 2500);
 }
 function showShowMode(lock) {
+  showSafetyLock(lock && lock.safety);
   const on = !!(lock && lock.show_mode);
   if (on === showMode) return;
   showMode = on;
@@ -6394,6 +6422,84 @@ function showShowMode(lock) {
   setStoreMode(false);
   if (typeof DESK !== 'undefined' && DESK.edit) { DESK.edit = false; DESK.sel = null; DESK.key = ''; buildDesk(); }
 }
+// Safety lock (T-261): the safety settings locked with a code. The
+// server refuses what loosens (423); the page greys the guarded panels
+// and offers lock / unlock / change / remove. Échap stays the e-stop.
+const SLK_LOCKED_FR = 'Verrouillé par le responsable sécurité';
+let slkState = null, slkSet = false, slkMode = 'set';
+function showSafetyLock(sl) {
+  if (!sl) return;
+  const key = JSON.stringify([sl.set, sl.locked, sl.damaged, sl.wait_s, sl.relock_in_s == null ? null : Math.ceil(sl.relock_in_s / 60)]);
+  if (key === slkState) return;
+  slkState = key;
+  slkSet = !!sl.set;
+  const locked = !!sl.locked;
+  document.body.classList.toggle('safety-locked', locked);
+  document.querySelectorAll('.slk-guard').forEach(d => { if (locked) d.title = SLK_LOCKED_FR; else d.removeAttribute('title'); });
+  $('slkLed').hidden = !locked;
+  $('slkLockBtn').hidden = locked;
+  $('slkLockBtn').textContent = sl.set ? 'Verrouiller maintenant' : 'Verrouiller…';
+  $('slkUnlockBtn').hidden = !(locked && sl.set && !sl.damaged);
+  $('slkChangeBtn').hidden = $('slkRemoveBtn').hidden = !(sl.set && !locked);
+  let text;
+  if (sl.damaged) text = 'Fichier du code illisible : réglages verrouillés. Supprimez safety-lock.json (studio arrêté) pour déverrouiller.';
+  else if (!sl.set) text = 'Aucun code : les réglages de sécurité sont modifiables.';
+  else if (locked) text = SLK_LOCKED_FR + (sl.wait_s ? ` · trop d'essais : attendez ${sl.wait_s} s` : '');
+  else text = `Déverrouillé : reverrouillage dans ${Math.max(1, Math.ceil((sl.relock_in_s || 0) / 60))} min sans réglage de sécurité.`;
+  $('slkStatus').textContent = text;
+}
+function openSafetyLockDialog(mode) {
+  slkMode = mode;
+  const asking = mode === 'unlock';
+  $('slkTitle').textContent = asking ? 'Déverrouiller la sécurité' : mode === 'change' ? 'Changer le code de sécurité' : 'Verrouiller la sécurité';
+  $('slkHint').textContent = asking ? 'Le code du responsable sécurité.' : 'Choisissez un code de 4 à 8 chiffres. Il n\'est jamais enregistré en clair : notez-le en lieu sûr.';
+  $('slkOk').textContent = asking ? 'Déverrouiller' : 'Verrouiller';
+  $('slkCode2Box').hidden = asking;
+  $('slkError').textContent = '';
+  $('slkDialog').hidden = false;
+  $('slkCode').focus();
+}
+function closeSafetyLockDialog() {
+  $('slkCode').value = $('slkCode2').value = '';
+  $('slkDialog').hidden = true;
+}
+// The lock's state from an answer, if it carries one; the answer's JSON.
+async function slkAnswer(r) {
+  let j = null;
+  try { j = await r.json(); } catch { /* plain text */ }
+  if (j && j.set !== undefined) { slkState = null; showSafetyLock(j); }
+  return j;
+}
+$('slkForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const code = $('slkCode').value.trim();
+  if (!/^[0-9]{4,8}$/.test(code)) { $('slkError').textContent = 'Le code doit compter 4 à 8 chiffres.'; return; }
+  if (slkMode !== 'unlock' && code !== $('slkCode2').value.trim()) { $('slkError').textContent = 'Les deux codes diffèrent.'; return; }
+  const unlock = slkMode === 'unlock';
+  try {
+    const r = unlock
+      ? await api('POST', '/api/safety/unlock', { code, source: 'ui' }, { quiet: true, ignore: [403, 409, 429] })
+      : await api('POST', '/api/safety/lock', { action: 'set', code, source: 'ui' }, { quiet: true, ignore: [400, 409] });
+    const text = await r.clone().text();
+    const j = await slkAnswer(r);
+    if (r.ok) { closeSafetyLockDialog(); flash(unlock ? 'Sécurité déverrouillée' : 'Sécurité verrouillée'); return; }
+    $('slkError').textContent = (j && j.error) || text || `erreur ${r.status}`;
+    $('slkCode').value = $('slkCode2').value = '';
+    $('slkCode').focus();
+  } catch { $('slkError').textContent = 'Studio injoignable'; }
+});
+$('slkCancel').addEventListener('click', closeSafetyLockDialog);
+$('slkLockBtn').addEventListener('click', async () => {
+  if (!slkSet) { openSafetyLockDialog('set'); return; }
+  const r = await api('POST', '/api/safety/lock', { action: 'lock', source: 'ui' }, { quiet: true });
+  if (r.ok) { await slkAnswer(r); flash('Sécurité verrouillée'); }
+});
+$('slkUnlockBtn').addEventListener('click', () => openSafetyLockDialog('unlock'));
+$('slkChangeBtn').addEventListener('click', () => openSafetyLockDialog('change'));
+$('slkRemoveBtn').addEventListener('click', async () => {
+  const r = await api('POST', '/api/safety/lock', { action: 'remove', source: 'ui' }, { quiet: true });
+  if (r.ok) { await slkAnswer(r); flash('Code de sécurité retiré'); }
+});
 async function postLock(on) {
   try {
     const r = await api('POST', '/api/lock', { show_mode: on, source: 'ui' }, { quiet: true });
@@ -7750,7 +7856,7 @@ function sfFromControls() {
 const SL_GROUPS = {
   arm: ['arm', 'arm_refused', 'disarm'],
   estop: ['estop', 'estop_reset'],
-  locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_reset', 'checklist_edit', 'show_mode', 'input_lost', 'input_back'],
+  locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_reset', 'checklist_edit', 'show_mode', 'safety_lock', 'input_lost', 'input_back'],
   limiter: ['limiter'],
   play: ['cue', 'scene', 'show'],
   settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings', 'audience_mode', 'safety_profile'],

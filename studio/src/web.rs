@@ -137,6 +137,9 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/estop/reset", RouteClass::Arm),
     ("GET", "/api/safety", RouteClass::Read),
     ("POST", "/api/safety", RouteClass::Safety),
+    ("GET", "/api/safety/lock", RouteClass::Read),
+    ("POST", "/api/safety/lock", RouteClass::Safety),
+    ("POST", "/api/safety/unlock", RouteClass::Safety),
     ("GET", "/api/safety/profiles", RouteClass::Read),
     ("POST", "/api/safety/profiles", RouteClass::Safety),
     ("POST", "/api/safety/profiles/load", RouteClass::Safety),
@@ -326,7 +329,12 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
 
 /// Whether `method path` is a route of the main UI (`ROUTES`).
 pub fn is_known_route(method: &str, path: &str) -> bool {
-    ROUTES.iter().any(|&(m, p, _)| (m == "*" || m == method) && p.strip_suffix('*').map_or(path == p, |prefix| path.starts_with(prefix)))
+    route_class(method, path).is_some()
+}
+
+/// The class of `method path` in `ROUTES` (the first matching line).
+pub fn route_class(method: &str, path: &str) -> Option<RouteClass> {
+    ROUTES.iter().find(|&&(m, p, _)| (m == "*" || m == method) && p.strip_suffix('*').map_or(path == p, |prefix| path.starts_with(prefix))).map(|&(_, _, c)| c)
 }
 
 pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) -> anyhow::Result<()> {
@@ -731,6 +739,18 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
     // Show mode (T-283): only playback and safety routes run (showmode.rs).
     if method == Method::Post && !crate::showmode::allowed(&path) && shared.lock().unwrap().show_mode.on {
         return locked();
+    }
+    // Safety lock (T-261): a Safety-class change other than a stop is
+    // refused while locked; the `HANDLER` routes refuse only loosening.
+    // While unlocked, it restarts the relock countdown.
+    if method != Method::Get && !crate::safetylock::ALWAYS.contains(&path.as_str()) && route_class(method.as_str(), &path) == Some(RouteClass::Safety) {
+        let now = Instant::now();
+        let mut s = shared.lock().unwrap();
+        if !crate::safetylock::check(&mut s, now) {
+            s.safety_lock.touch(now);
+        } else if !crate::safetylock::passes_gate(&path) {
+            return safety_locked();
+        }
     }
     // An edit (T-285): the sections it may change, before and after, make
     // one history entry if it succeeded and changed something.
@@ -1243,8 +1263,10 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     Err(e) => text(400, &format!("invalid JSON: {e}")),
                     Ok(cfg) => {
                         let mut s = shared.lock().unwrap();
+                        // Safety lock (T-261): tighter only, no confirmation.
+                        let lock_on = safety_lock_on(&mut s);
                         let before = s.safety.get();
-                        match s.safety.set(cfg, confirm) {
+                        match s.safety.set(cfg, confirm && !lock_on) {
                             Ok(stored) => {
                                 // Before and after, and whether a loosening was confirmed (T-259).
                                 if let Some(mut change) = crate::safety_log::settings_change(&before, &stored) {
@@ -1256,6 +1278,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                                 json_response(json!({ "settings": stored }))
                             }
                             Err(crate::safety::SetError::Invalid(msg)) => text(400, &msg),
+                            Err(crate::safety::SetError::Loosens(list)) if lock_on => safety_locked_list(&list),
                             Err(crate::safety::SetError::Loosens(list)) => with_status(
                                 json_response(json!({ "error": "Ces changements assouplissent la sécurité : confirmation requise", "loosen": list })),
                                 409,
@@ -1266,6 +1289,24 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // Safety lock (T-261, safetylock.rs).
+        (Method::Get, "/api/safety/lock") => json_response(shared.lock().unwrap().safety_lock.view(Instant::now())),
+        (Method::Post, "/api/safety/lock") => {
+            let local = request.remote_addr().is_none_or(|a| a.ip().is_loopback());
+            match body::<SafetyLockRequest>(request) {
+                Ok(req) if local => safety_lock_route(shared, req),
+                Ok(_) => text(403, "le verrou de sécurité se règle depuis l'interface de ce Mac"),
+                Err(e) => e,
+            }
+        }
+        (Method::Post, "/api/safety/unlock") => {
+            let local = request.remote_addr().is_none_or(|a| a.ip().is_loopback());
+            match body::<SafetyUnlockRequest>(request) {
+                Ok(req) if local => safety_unlock_route(shared, req),
+                Ok(_) => text(403, "le verrou de sécurité s'ouvre depuis l'interface de ce Mac"),
+                Err(e) => e,
+            }
+        }
         // « Ciel coupé » (T-262): `{on: bool}` or `{toggle: true}`, with
         // `source`. Cutting is always accepted (show mode included: it only
         // darkens); restoring only from the UI, keyboard or local API
@@ -1279,6 +1320,10 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     (None, Some(true)) => !s.sky_off,
                     _ => return text(400, "expected \"on\" or \"toggle\""),
                 };
+                // Safety lock (T-261): cutting always, restoring never.
+                if !want && s.sky_off && safety_lock_on(&mut s) {
+                    return safety_locked();
+                }
                 if s.set_sky_off(want, source) {
                     json_response(outdoor_view(&s))
                 } else {
@@ -1336,8 +1381,11 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Ok(req) => {
                 let mut s = shared.lock().unwrap();
                 let src = ArmSource::parse(req.source.as_deref().unwrap_or("ui"));
-                match crate::profiles::load(&mut s, &req.name, req.confirm_loosen, src) {
+                // Safety lock (T-261): a tighter profile only.
+                let lock_on = safety_lock_on(&mut s);
+                match crate::profiles::load(&mut s, &req.name, req.confirm_loosen && !lock_on, src) {
                     Ok(_) => json_response(crate::profiles::view(&s)),
+                    Err(crate::profiles::LoadError::Loosens(list)) if lock_on => safety_locked_list(&list),
                     Err(e) => profile_error(e),
                 }
             }
@@ -1408,6 +1456,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                         if s.show_mode.on {
                             return locked();
                         }
+                        if safety_lock_on(&mut s) {
+                            return safety_locked();
+                        }
                         if !matches!(source, ArmSource::Ui | ArmSource::Keyboard | ArmSource::Api) {
                             return text(403, "le balayage public se déverrouille depuis l'interface seulement");
                         }
@@ -1449,7 +1500,13 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 let armed = s.gate.is_armed();
                 let id = b.id.as_deref().unwrap_or(crate::power::MAIN_OUTPUT);
                 let before = s.outputs.get(id).cloned();
-                match s.outputs.set(id, b.limits, b.projector, armed, b.confirm_loosen) {
+                // Safety lock (T-261): lower caps only; the projector sheet
+                // (what the exposure and the class come from) stays.
+                let lock_on = safety_lock_on(s);
+                if lock_on && b.projector.as_ref().is_some_and(|p| before.as_ref().is_none_or(|o| o.projector != *p)) {
+                    return safety_locked();
+                }
+                match s.outputs.set(id, b.limits, b.projector, armed || lock_on, b.confirm_loosen && !lock_on) {
                     Ok(out) => {
                         // Power caps and projector sheet, before/after (T-259).
                         if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out)) {
@@ -1462,6 +1519,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                         json_response(json!({ "output": out, "max_brightness_effective": s.outputs.max_brightness_effective() }))
                     }
                     Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
+                    Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) if lock_on => safety_locked_list(&list),
                     Err(crate::power::SetError::Raises(list)) => with_status(
                         json_response(json!({ "error": "Relever un plafond de puissance : confirmation requise", "loosen": list })),
                         409,
@@ -1526,7 +1584,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     s.gate.sync_estop(&s.estop);
                     let armed = s.gate.is_armed();
                     let before = s.outputs.get(&id).map(|o| o.color);
-                    match s.outputs.set_color(&id, b.color, armed, b.confirm_loosen) {
+                    // Safety lock (T-261): darker only.
+                    let lock_on = safety_lock_on(s);
+                    match s.outputs.set_color(&id, b.color, armed || lock_on, b.confirm_loosen && !lock_on) {
                         Ok(out) => {
                             if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out.color)) {
                                 change["output"] = json!(id);
@@ -1536,6 +1596,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                             json_response(color_view(s, &id))
                         }
                         Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
+                        Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) if lock_on => safety_locked_list(&list),
                         Err(crate::power::SetError::Raises(list)) => with_status(
                             json_response(json!({ "error": "Ce réglage augmente la lumière émise : confirmation requise", "loosen": list })),
                             409,
@@ -1574,7 +1635,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     s.gate.sync_estop(&s.estop);
                     let armed = s.gate.is_armed();
                     let before = s.outputs.get(&id).map(|o| o.scan);
-                    match s.outputs.set_scan(&id, b.scan, armed) {
+                    // Safety lock (T-261): slower only.
+                    let lock_on = safety_lock_on(s);
+                    match s.outputs.set_scan(&id, b.scan, armed || lock_on) {
                         Ok(out) => {
                             if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out.scan)) {
                                 change["output"] = json!(id);
@@ -1583,6 +1646,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                             json_response(scan_limits_view(s, &id))
                         }
                         Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
+                        Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) if lock_on => safety_locked_list(&list),
                         Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) => with_status(
                             json_response(json!({ "error": "Désarmez le laser pour relever la vitesse max", "loosen": list, "armed": true })),
                             409,
@@ -1625,6 +1689,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 if s.show_mode.on {
                     return locked();
                 }
+                if safety_lock_on(&mut s) {
+                    return safety_locked();
+                }
                 if let Err(e) = crate::zonetrace::start(&mut s, now, only, client) {
                     return text(409, &e);
                 }
@@ -1659,6 +1726,10 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 // Show mode (T-283): leaving a pattern only.
                 if s.show_mode.on && (matches!(pattern, Some(Some(_))) || brightness.is_some()) {
                     return locked();
+                }
+                // Safety lock (T-261): leaving a pattern or dimming it only.
+                if (matches!(pattern, Some(Some(_))) || brightness.is_some_and(|b| b > s.test_pattern.brightness)) && safety_lock_on(&mut s) {
+                    return safety_locked();
                 }
                 if let Some(b) = brightness {
                     s.test_pattern.brightness = b;
@@ -2963,6 +3034,10 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             if req.enabled && shared.lock().unwrap().show_mode.on {
                 return locked();
             }
+            // Safety lock (T-261): same, cutting only.
+            if req.enabled && safety_lock_on(&mut shared.lock().unwrap()) {
+                return safety_locked();
+            }
             match crate::remote::set_enabled(shared, req.enabled, req.port) {
                 Ok(()) => json_response(crate::remote::view(&shared.lock().unwrap(), Instant::now())),
                 Err(e) => text(409, &e),
@@ -3740,6 +3815,10 @@ fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
                 (None, Some(true)) => !s.external.gate.open,
                 _ => return text(400, "expected \"on\" or \"toggle\""),
             };
+            // Safety lock (T-261): closing only.
+            if want && !s.external.gate.open && safety_lock_on(&mut s) {
+                return safety_locked();
+            }
             match crate::external::set_open(&mut s, want, source) {
                 Ok(()) => json_response(external_view(&mut s)),
                 Err(why) => with_status(json_response(json!({ "open": false, "error": why })), 409),
@@ -4533,7 +4612,159 @@ struct LockRequest {
 
 /// `GET /api/lock`, also `lock` in `/api/state` and `/api/frame`.
 fn lock_view(s: &Shared) -> serde_json::Value {
-    json!({ "show_mode": s.show_mode.on })
+    json!({ "show_mode": s.show_mode.on, "safety": s.safety_lock.view(Instant::now()) })
+}
+
+/// `POST /api/safety/lock`. The code never reaches a log.
+#[derive(Deserialize)]
+struct SafetyLockRequest {
+    action: String,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    relock_min: Option<u32>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// `POST /api/safety/unlock` `{code, source?}`.
+#[derive(Deserialize)]
+struct SafetyUnlockRequest {
+    code: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// `{action: "lock"}` locks now (from anyone: it only tightens).
+/// From the UI, keyboard or local API only, with the lock open and not
+/// in show mode: `{action: "set", code, relock_min?}` sets or changes the
+/// code (4 to 8 digits) and locks; `{action: "remove"}` removes it;
+/// `{action: "relock", relock_min}` changes the delay. Logged (T-259).
+fn safety_lock_route(shared: &Arc<Mutex<Shared>>, req: SafetyLockRequest) -> HttpResponse {
+    let src = ArmSource::parse(req.source.as_deref().unwrap_or("ui"));
+    let now = Instant::now();
+    let reply = |s: &Shared| json_response(s.safety_lock.view(Instant::now()));
+    if req.action == "lock" {
+        let mut s = shared.lock().unwrap();
+        let was = crate::safetylock::check(&mut s, now);
+        return match s.safety_lock.lock_now() {
+            Ok(()) => {
+                if !was {
+                    log::info!("sécurité verrouillée");
+                    s.gate.log().record("safety_lock", Some(src.id()), json!({ "event": "locked" }));
+                }
+                reply(&s)
+            }
+            Err(e) => text(409, &format!("{e:#}")),
+        };
+    }
+    if !crate::profiles::operator_source(src) {
+        return text(403, "le verrou de sécurité se règle depuis l'interface seulement");
+    }
+    {
+        let mut s = shared.lock().unwrap();
+        if s.show_mode.on {
+            return locked();
+        }
+        if crate::safetylock::check(&mut s, now) {
+            return safety_locked();
+        }
+    }
+    match req.action.as_str() {
+        "set" => {
+            let code = req.code.unwrap_or_default();
+            if !crate::safetylock::valid_code(&code) {
+                return text(400, "Le code doit compter 4 à 8 chiffres");
+            }
+            // Slow hash, studio lock released.
+            let relock = req.relock_min.unwrap_or(crate::safetylock::DEFAULT_RELOCK_MIN);
+            let file = match crate::safetylock::new_file(&code, relock) {
+                Ok(f) => f,
+                Err(e) => return text(500, &format!("{e:#}")),
+            };
+            let mut s = shared.lock().unwrap();
+            let changed = s.safety_lock.is_set();
+            match s.safety_lock.set_code(file, Instant::now()) {
+                Ok(()) => {
+                    log::info!("code de sécurité {} ; sécurité verrouillée", if changed { "changé" } else { "défini" });
+                    s.gate.log().record("safety_lock", Some(src.id()), json!({ "event": if changed { "code_changed" } else { "code_set" } }));
+                    reply(&s)
+                }
+                Err(e) => text(409, &format!("{e:#}")),
+            }
+        }
+        "remove" => {
+            let mut s = shared.lock().unwrap();
+            match s.safety_lock.remove(now) {
+                Ok(()) => {
+                    log::info!("code de sécurité retiré");
+                    s.gate.log().record("safety_lock", Some(src.id()), json!({ "event": "code_removed" }));
+                    reply(&s)
+                }
+                Err(e) => text(409, &format!("{e:#}")),
+            }
+        }
+        "relock" => {
+            let mut s = shared.lock().unwrap();
+            match s.safety_lock.set_relock_min(req.relock_min.unwrap_or(crate::safetylock::DEFAULT_RELOCK_MIN), now) {
+                Ok(()) => reply(&s),
+                Err(e) => text(409, &format!("{e:#}")),
+            }
+        }
+        _ => text(400, "expected \"action\": \"lock\", \"set\", \"remove\" or \"relock\""),
+    }
+}
+
+/// Unlocks with the code, from the UI, keyboard or local API only (MIDI,
+/// OSC, DMX and the remote never reach this; a declared source of theirs
+/// is 403). Wrong: 403 `{error, attempts_left}`; the fifth wrong code in a
+/// row, and every attempt for 60 s after: 429 `{error, wait_s}`. Logged
+/// without the code.
+fn safety_unlock_route(shared: &Arc<Mutex<Shared>>, req: SafetyUnlockRequest) -> HttpResponse {
+    use crate::safetylock::UnlockError;
+    let src = ArmSource::parse(req.source.as_deref().unwrap_or("ui"));
+    if !crate::profiles::operator_source(src) {
+        return text(403, "le verrou de sécurité s'ouvre depuis l'interface seulement");
+    }
+    let attempt = {
+        let mut s = shared.lock().unwrap();
+        if !crate::safetylock::check(&mut s, Instant::now()) {
+            return json_response(s.safety_lock.view(Instant::now()));
+        }
+        s.safety_lock.begin_unlock(Instant::now())
+    };
+    // Slow hash, studio lock released.
+    let result = attempt.and_then(|a| {
+        let hash = crate::safetylock::hash_code(&req.code, &a);
+        shared.lock().unwrap().safety_lock.finish_unlock(&hash, Instant::now())
+    });
+    let s = shared.lock().unwrap();
+    let mut view = s.safety_lock.view(Instant::now());
+    match result {
+        Ok(()) => {
+            log::info!("sécurité déverrouillée");
+            s.gate.log().record("safety_lock", Some(src.id()), json!({ "event": "unlocked" }));
+            json_response(view)
+        }
+        Err(e) => {
+            view["error"] = json!(e.message_fr());
+            let status = match e {
+                UnlockError::Wrong(left) => {
+                    log::warn!("code de sécurité incorrect");
+                    s.gate.log().record("safety_lock", Some(src.id()), json!({ "event": "failed", "attempts_left": left }));
+                    view["attempts_left"] = json!(left);
+                    if left == 0 {
+                        429
+                    } else {
+                        403
+                    }
+                }
+                UnlockError::Wait(_) => 429,
+                UnlockError::NotSet | UnlockError::Damaged => 409,
+            };
+            with_status(json_response(view), status)
+        }
+    }
 }
 
 /// `GET /api/audience` (T-255): the mode, every unlock condition, the
@@ -4678,6 +4909,22 @@ fn profile_error(e: crate::profiles::LoadError) -> HttpResponse {
 
 fn locked() -> HttpResponse {
     text(423, crate::showmode::LOCKED_FR)
+}
+
+/// 423 Locked: a loosening refused under the safety lock (T-261).
+fn safety_locked() -> HttpResponse {
+    text(423, crate::safetylock::LOCKED_FR)
+}
+
+/// 423 with what the change would have loosened.
+fn safety_locked_list(list: &[String]) -> HttpResponse {
+    with_status(json_response(json!({ "error": crate::safetylock::LOCKED_FR, "loosen": list, "safety_locked": true })), 423)
+}
+
+/// Whether the safety lock is on now (T-261), for the handlers that let
+/// tightening through.
+fn safety_lock_on(s: &mut Shared) -> bool {
+    crate::safetylock::check(s, Instant::now())
 }
 
 #[derive(Deserialize)]
@@ -6976,7 +7223,8 @@ mod tests {
         assert_eq!(t.request("POST", "/api/scenes/delete", r#"{"name":"Garde"}"#).0, 200);
         assert!(t.shared.lock().unwrap().scenes.list().is_empty());
         let (code, body) = t.request("GET", "/api/lock", "");
-        assert_eq!((code, body.as_str()), (200, r#"{"show_mode":false}"#));
+        assert_eq!(code, 200);
+        assert_eq!(js(&body)["show_mode"], false);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -9454,5 +9702,192 @@ mod tests {
         // Noir latches the stop at once.
         assert_eq!(cmd("noir").0, 200);
         assert!(t.shared.lock().unwrap().estop.is_latched());
+    }
+
+    /// T-261: with the safety lock on, every Safety-class route refuses
+    /// what loosens (423, nothing changed), while stopping and tightening
+    /// keep working: e-stop, disarm, « Ciel coupé », above the audience,
+    /// leaving a pattern, stopping the trace, cutting the remote, closing
+    /// the external inputs, lower caps, a higher horizon.
+    #[test]
+    fn the_safety_lock_refuses_loosening_on_every_safety_route() {
+        let t = TestServer::start(false);
+        let post = |p: &str, b: &serde_json::Value| t.request("POST", p, &b.to_string());
+        // Before locking: a tighter horizon, and a looser profile saved.
+        let mut cfg = js(&t.request("GET", "/api/safety", "").1)["settings"].clone();
+        assert_eq!(post("/api/safety/profiles", &json!({ "action": "save", "name": "Large" })).0, 200);
+        cfg["horizon"]["y"] = json!(0.3);
+        let (code, body) = post("/api/safety", &cfg);
+        assert_eq!(code, 200, "{body}");
+        let mut venue = js(&t.request("GET", "/api/venue", "").1)["venue"].clone();
+        venue["projectors"][0]["name"] = json!("Cour");
+        assert_eq!(post("/api/venue", &venue).0, 200);
+        // Lock with a code.
+        let (code, body) = post("/api/safety/lock", &json!({ "action": "set", "code": "2468" }));
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body)["locked"], true);
+        assert!(!body.contains("2468"));
+        let state = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!(state["lock"]["safety"]["locked"], true);
+        let settings_before = serde_json::to_value(t.shared.lock().unwrap().safety.get()).unwrap();
+
+        // Every Safety route the gate refuses outright.
+        let concrete = |p: &str| match p {
+            "/api/checklist/*" => "/api/checklist/items".to_string(),
+            "/api/external*" => "/api/external/scopes".to_string(),
+            "/api/dmx/*" => "/api/dmx/patch".to_string(),
+            p => p.to_string(),
+        };
+        let mut refused = 0;
+        for &(m, p, class) in ROUTES {
+            if class != RouteClass::Safety || m == "GET" {
+                continue;
+            }
+            let path = concrete(p);
+            if crate::safetylock::passes_gate(&path) {
+                continue;
+            }
+            let (code, body) = t.request(if m == "*" { "POST" } else { m }, &path, "{}");
+            assert_eq!((code, body.as_str()), (423, crate::safetylock::LOCKED_FR), "{m} {path}");
+            refused += 1;
+        }
+        assert!(refused >= 20, "{refused}");
+        // Every route the lock lets through is a Safety route of the table.
+        for p in crate::safetylock::ALWAYS.iter().chain(crate::safetylock::HANDLER) {
+            assert_eq!(route_class("POST", p), Some(RouteClass::Safety), "{p}");
+        }
+
+        // The routes that check the direction: loosening refused...
+        let mut looser = cfg.clone();
+        looser["horizon"]["y"] = json!(0.1);
+        looser["confirm_loosen"] = json!(true);
+        let (code, body) = post("/api/safety", &looser);
+        assert_eq!(code, 423, "{body}");
+        assert!(js(&body)["loosen"].as_array().is_some_and(|l| !l.is_empty()));
+        let (code, body) = post("/api/safety/profiles/load", &json!({ "name": "Large", "confirm_loosen": true }));
+        assert_eq!(code, 423, "{body}");
+        let high = json!({ "limits": { "max_power": 0.9, "max_color": [1.0, 1.0, 1.0] }, "confirm_loosen": true });
+        assert_eq!(post("/api/outputs/limits", &high).0, 423);
+        assert_eq!(post("/api/outputs/scan_limits", &json!({ "scan": { "pps_max": 60000 } })).0, 423);
+        assert_eq!(post("/api/audience", &json!({ "mode": "scanning", "phrase": crate::audience::PHRASE })).0, 423);
+        assert_eq!(post("/api/testpattern", &json!({ "pattern": "grid" })).0, 423);
+        assert_eq!(post("/api/safety/trace", &json!({ "on": true })).0, 423);
+        assert_eq!(post("/api/remote", &json!({ "enabled": true, "port": 0 })).0, 423);
+        assert_eq!(post("/api/external/gate", &json!({ "on": true })).0, 423);
+        assert_eq!(serde_json::to_value(t.shared.lock().unwrap().safety.get()).unwrap(), settings_before, "nothing loosened");
+        // Undoing the venue change is refused too.
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 423);
+        assert_eq!(t.shared.lock().unwrap().venue.get().projectors[0].name, "Cour");
+        assert_eq!(js(&t.request("GET", "/api/remote", "").1)["enabled"], false);
+
+        // ...tightening and stopping run.
+        let mut tighter = cfg.clone();
+        tighter["horizon"]["y"] = json!(0.5);
+        let (code, body) = post("/api/safety", &tighter);
+        assert_eq!(code, 200, "{body}");
+        let low = json!({ "limits": { "max_power": 0.3, "max_color": [1.0, 1.0, 1.0] } });
+        assert_eq!(post("/api/outputs/limits", &low).0, 200);
+        assert_eq!(post("/api/safety/sky", &json!({ "on": true })).0, 200);
+        assert_eq!(post("/api/safety/sky", &json!({ "on": false })).0, 423, "restoring the sky loosens");
+        assert!(t.shared.lock().unwrap().sky_off);
+        for (p, b) in [
+            ("/api/audience", json!({ "mode": "above" })),
+            ("/api/testpattern", json!({ "pattern": null })),
+            ("/api/safety/trace", json!({ "on": false })),
+            ("/api/remote", json!({ "enabled": false })),
+            ("/api/external/gate", json!({ "on": false })),
+            ("/api/lock", json!({ "show_mode": true })),
+            ("/api/lock", json!({ "show_mode": false })),
+            ("/api/arm", json!({ "on": true })),
+            ("/api/arm", json!({ "on": false })),
+            ("/api/estop", json!({})),
+            ("/api/estop/reset", json!({})),
+        ] {
+            let (code, body) = post(p, &b);
+            assert_eq!(code, 200, "{p} {b}: {body}");
+        }
+        assert!(t.shared.lock().unwrap().safety.get().horizon.y > 0.45);
+        // Show mode on top: the e-stop still runs.
+        assert_eq!(post("/api/lock", &json!({ "show_mode": true })).0, 200);
+        assert_eq!(post("/api/estop", &json!({})).0, 200);
+        assert!(t.shared.lock().unwrap().estop.is_latched());
+    }
+
+    /// T-261: the code unlocks (local UI, keyboard or API only); 5 wrong
+    /// codes in a row make every attempt wait (429); the code is never
+    /// echoed nor logged; changing or removing it needs the lock open.
+    #[test]
+    fn the_safety_code_is_rate_limited_and_never_echoed() {
+        let t = TestServer::start(false);
+        let post = |p: &str, b: &serde_json::Value| t.request("POST", p, &b.to_string());
+        assert_eq!(post("/api/safety/lock", &json!({ "action": "set", "code": "12" })).0, 400);
+        assert_eq!(post("/api/safety/lock", &json!({ "action": "lock" })).0, 409, "no code yet");
+        assert_eq!(post("/api/safety/lock", &json!({ "action": "set", "code": "907312", "source": "midi" })).0, 403);
+        assert_eq!(post("/api/safety/lock", &json!({ "action": "set", "code": "907312" })).0, 200);
+        // Locked: changing or removing the code is refused.
+        assert_eq!(post("/api/safety/lock", &json!({ "action": "remove" })).0, 423);
+        assert_eq!(post("/api/safety/lock", &json!({ "action": "set", "code": "1111" })).0, 423);
+        // Never from MIDI, OSC, DMX or the remote, even with the code.
+        for src in ["midi", "osc", "dmx", "remote", "network"] {
+            assert_eq!(post("/api/safety/unlock", &json!({ "code": "907312", "source": src })).0, 403, "{src}");
+        }
+        let (code, body) = post("/api/safety/unlock", &json!({ "code": "907312" }));
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body)["locked"], false);
+        assert!(js(&body)["relock_in_s"].as_u64().is_some_and(|s| s > 590));
+        assert_eq!(post("/api/safety", &js(&t.request("GET", "/api/safety", "").1)["settings"]).0, 200, "unlocked: edits run");
+        assert_eq!(post("/api/safety/lock", &json!({ "action": "lock", "source": "midi" })).0, 200, "locking from anywhere");
+        // Five wrong codes: then even the right one waits.
+        for left in (1..crate::safetylock::MAX_FAILURES).rev() {
+            let (code, body) = post("/api/safety/unlock", &json!({ "code": "000000" }));
+            assert_eq!(code, 403, "{body}");
+            assert_eq!(js(&body)["attempts_left"], left);
+        }
+        assert_eq!(post("/api/safety/unlock", &json!({ "code": "000000" })).0, 429);
+        let (code, body) = post("/api/safety/unlock", &json!({ "code": "907312" }));
+        assert_eq!(code, 429, "{body}");
+        assert!(js(&body)["wait_s"].as_u64().is_some_and(|s| s > 50));
+        assert_eq!(js(&t.request("GET", "/api/safety/lock", "").1)["locked"], true);
+        // Nowhere in the answers, the state or the log.
+        for p in ["/api/safety/lock", "/api/state", "/api/lock", "/api/safety/log"] {
+            assert!(!t.request("GET", p, "").1.contains("907312"), "{p}");
+        }
+    }
+
+    /// T-261 with the safety invariants' generator: random safety settings
+    /// and power caps posted with `confirm_loosen` while locked never
+    /// loosen anything (`SAFETY_CASES` cases).
+    #[test]
+    fn safety_lock_random_edits_never_loosen() {
+        use crate::safety_invariants::{mutated, seeds, Rng};
+        use crate::zones::{Horizon, Zone, ZoneKind};
+        let t = TestServer::start(false);
+        {
+            let mut s = t.shared.lock().unwrap();
+            let mut cfg = s.safety.get();
+            cfg.horizon = Horizon { y: 0.2, lines: true, ramp: 0.1, level: 0.0 };
+            let square = |x: f32| vec![[x, -0.9], [x + 0.4, -0.9], [x + 0.4, -0.5], [x, -0.5]];
+            cfg.zones = vec![
+                Zone { id: 1, name: "Public".into(), kind: ZoneKind::Blank, points: square(-0.6), audience: true, ..Default::default() },
+                Zone { id: 2, name: "Bar".into(), kind: ZoneKind::Dim, level: 0.4, points: square(0.2), ..Default::default() },
+            ];
+            s.safety.set(cfg, true).unwrap();
+            s.safety_lock.set_code(crate::safetylock::new_file("5555", 10).unwrap(), Instant::now()).unwrap();
+        }
+        for seed in seeds(2610, 150) {
+            let mut rng = Rng::new(seed);
+            let before = t.shared.lock().unwrap().safety.get();
+            let mut body = serde_json::to_value(mutated(&before, &mut rng, 0.2)).unwrap();
+            body["confirm_loosen"] = json!(true);
+            let code = t.request("POST", "/api/safety", &body.to_string()).0;
+            let after = t.shared.lock().unwrap().safety.get();
+            assert!(before.loosenings(&after).is_empty(), "seed {seed} ({code}): {:?}", before.loosenings(&after));
+            let caps = t.shared.lock().unwrap().outputs.active().limits;
+            let body = json!({ "limits": mutated(&caps, &mut rng, 0.5), "confirm_loosen": true });
+            t.request("POST", "/api/outputs/limits", &body.to_string());
+            let now = t.shared.lock().unwrap().outputs.active().limits;
+            assert!(now.max_power <= caps.max_power && (0..3).all(|i| now.max_color[i] <= caps.max_color[i]), "seed {seed}: {caps:?} -> {now:?}");
+        }
+        assert!(t.shared.lock().unwrap().safety_lock.locked(Instant::now()));
     }
 }
