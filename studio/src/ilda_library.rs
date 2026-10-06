@@ -28,6 +28,7 @@ use crate::datafile;
 use crate::dwell::{DwellState, StrictArea};
 use crate::engine::{Animator, AudioFeatures, BeatClock, Calibration, Content, Settings};
 use crate::ilda::{self, IldaFrame};
+use crate::output::{fit_frame_dark, fit_frame_limits, FrameLimits};
 use crate::patterns::Point;
 use crate::power::{self, OutputLimits};
 use crate::presets::Preset;
@@ -364,6 +365,10 @@ pub struct ExportSafety {
     pub limits: OutputLimits,
     /// Colour rendering of `output` (T-414), before the safety stage.
     pub color: ColorCalibration,
+    /// Points per frame of `output` (T-171, T-476): every frame of the
+    /// file is thinned or completed to them, on content, before the
+    /// safety stage, like the live output (`output::fit_frame_limits`).
+    pub frame_limits: FrameLimits,
 }
 
 impl ExportSafety {
@@ -372,7 +377,7 @@ impl ExportSafety {
     /// its Public zones are blanked (T-255).
     pub fn of(s: &crate::Shared, output: &str) -> Result<Self> {
         let Some(o) = s.outputs.get(output) else { bail!("sortie inconnue : {output}") };
-        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: crate::audience::effective(&s.safety.get(), false), limits: o.limits, color: o.color })
+        Ok(Self { output: o.id.clone(), calibration: s.calibration, safety: crate::audience::effective(&s.safety.get(), false), limits: o.limits, color: o.color, frame_limits: o.scan.frame_limits() })
     }
 }
 
@@ -471,7 +476,8 @@ pub fn lit_points(frames: &[Vec<Point>]) -> usize {
 }
 
 /// The output safety chain over a sequence of already calibrated frames
-/// played at `fps`, looped (T-355): the output's colour rendering, beam
+/// played at `fps`, looped (T-355): the output's points per frame
+/// (T-476, on content, before the safety stage: see below), the output's colour rendering, beam
 /// horizon, zones and colour calibration, strobe limiter, static beam
 /// guard (as if armed: its « off » profile never applies), power caps of
 /// `chain.output`, the limiter's last word, then every channel rounded
@@ -486,6 +492,16 @@ pub fn lit_points(frames: &[Vec<Point>]) -> usize {
 /// watches the returned lap looped: if it would still cut something, the
 /// sequence is refused. Refused too when the chain leaves nothing lit.
 /// `what` names the content in the messages (« ce look »).
+///
+/// Points per frame (T-476): the file is played by a projector without
+/// the studio, so its frames must already be within the output's
+/// `frame_limits`. As in the live output (`main.rs`, `safety_chain`),
+/// they are fitted on content, before the safety stage, with
+/// `fit_frame_limits` (thinning never lights a blanked travel, padding
+/// never adds a lit segment). The output's maximum is the file's hard
+/// frame size, like a DAC's: content is fitted to its `content_budget`
+/// so the zone mask has room, and a frame the safety stage still made
+/// longer is thinned with `fit_frame_dark`, which only removes light.
 pub fn bake_chain(raw: &[Vec<Point>], fps: f32, chain: &ExportSafety, what: &str) -> Result<Vec<Vec<Point>>> {
     let frames = raw.len();
     if frames == 0 {
@@ -501,9 +517,11 @@ pub fn bake_chain(raw: &[Vec<Point>], fps: f32, chain: &ExportSafety, what: &str
     let mut limiter = StrobeLimiter::default();
     let mut dwell = DwellState::default();
     let area = StrictArea::new(cfg.horizon.y, &cfg.zones);
+    // Fitted once: the same frames go round every lap.
+    let fitted: Vec<Vec<Point>> = raw.iter().map(|f| fit_frame_limits(f.clone(), chain.frame_limits, chain.frame_limits.max)).collect();
     let mut out = Vec::with_capacity(frames);
     for lap in 0..laps {
-        for (i, points) in raw.iter().enumerate() {
+        for (i, points) in fitted.iter().enumerate() {
             let mut frame = points.clone();
             chain.color.apply(&mut frame);
             let frame = safety::apply(frame, at(lap, i), cfg, &mut limiter);
@@ -511,6 +529,13 @@ pub fn bake_chain(raw: &[Vec<Point>], fps: f32, chain: &ExportSafety, what: &str
             power::cap(&mut frame, &chain.limits);
             // The limiter's check on the output, as the engine ends its chain (T-360).
             limiter.finish(&mut frame, at(lap, i), cfg);
+            // The file's frame size, as the DAC output ends (T-353): only
+            // ever darkens, so everything the chain decided still holds.
+            if let Some(max) = chain.frame_limits.max {
+                if frame.len() > max {
+                    frame = fit_frame_dark(&frame, max).into_owned();
+                }
+            }
             floor_to_file_steps(&mut frame);
             if lap + 1 == laps {
                 out.push(frame);
@@ -758,6 +783,7 @@ mod tests {
             safety: SafetySettings::default(),
             limits: OutputLimits { max_power: 1.0, max_color: [1.0; 3] },
             color: ColorCalibration::default(),
+            frame_limits: FrameLimits::default(),
         }
     }
 
@@ -860,5 +886,97 @@ mod tests {
         assert!(export_look(&white_circle(), 2, 25.0, 120.0, &open_chain()).is_ok());
         let e = export_look(&white_circle(), 2, 25.0, 120.0, &ExportSafety { color, ..open_chain() }).unwrap_err().to_string();
         assert!(e.contains("couleurs de la sortie"), "{e}");
+    }
+
+    /// 5 000 points along a slanted line, x unique per index (`index_of`):
+    /// ten lit strokes of 400 points, each reached by a blanked travel of
+    /// 100 points.
+    fn long_frame() -> Vec<Point> {
+        (0..5000)
+            .map(|i| {
+                let (x, y) = (-0.9 + 1.8 * i as f32 / 4999.0, -0.5 + i as f32 / 4999.0);
+                if i % 500 < 100 { Point::blanked(x, y) } else { Point::lit(x, y, 1.0, 1.0, 1.0) }
+            })
+            .collect()
+    }
+
+    fn index_of(p: &Point) -> usize {
+        ((p.x + 0.9) / 1.8 * 4999.0).round() as usize
+    }
+
+    /// T-476: a 5 000-point frame exported for an output that takes 1 000
+    /// points at most comes out with 1 000 points or fewer, and every lit
+    /// segment of the file was a lit stretch of the frame: thinning never
+    /// lights a blanked travel.
+    #[test]
+    fn exported_frames_fit_the_output_points_per_frame_without_new_lit_segments() {
+        let raw = vec![long_frame(); 3];
+        let chain = ExportSafety { frame_limits: FrameLimits { min: 0, max: Some(1000) }, ..open_chain() };
+        let out = bake_chain(&raw, 25.0, &chain, "ce test").unwrap();
+        let back = ilda::read(&encode(out.clone()).unwrap()).unwrap();
+        for (f, read) in out.iter().zip(&back) {
+            assert!(f.len() <= 1000 && read.points.len() <= 1000, "{} points", f.len());
+            assert!(f.len() > 500, "thinned, not emptied: {}", f.len());
+            for w in f.windows(2) {
+                if w[1].is_lit() {
+                    let (a, b) = (index_of(&w[0]), index_of(&w[1]));
+                    assert!(a < b, "in order");
+                    assert!(raw[0][a + 1..=b].iter().all(Point::is_lit), "lit segment {a} → {b} over a blanked travel");
+                }
+            }
+        }
+        // Each stroke still shows, each travel stays dark.
+        assert_eq!(f_strokes(&out[0]), 10);
+        // Without a limit of its own, the frame is left whole.
+        let whole = bake_chain(&raw, 25.0, &open_chain(), "ce test").unwrap();
+        assert_eq!(whole[0].len(), 5000);
+    }
+
+    /// Lit strokes of a frame: runs of lit points.
+    fn f_strokes(f: &[Point]) -> usize {
+        (0..f.len()).filter(|&i| f[i].is_lit() && (i == 0 || !f[i - 1].is_lit())).count()
+    }
+
+    /// T-476: thinning runs before the zones, and the zones still have the
+    /// last word: a Blank zone over the right half stays dark in the
+    /// thinned file, chords included, and the file stays within the limit.
+    #[test]
+    fn a_blank_zone_stays_dark_after_thinning() {
+        let blank = zone(crate::zones::ZoneKind::Blank, &[[0.0, -1.0], [1.0, -1.0], [1.0, 1.0], [0.0, 1.0]]);
+        let mut chain = ExportSafety { frame_limits: FrameLimits { min: 0, max: Some(1000) }, ..open_chain() };
+        chain.safety.zones = vec![blank];
+        let raw = vec![long_frame(); 3];
+        let out = bake_chain(&raw, 25.0, &chain, "ce test").unwrap();
+        let back = ilda::read(&encode(out).unwrap()).unwrap();
+        for f in &back {
+            assert!(f.points.len() <= 1000, "{} points", f.points.len());
+            assert_eq!(crate::zones::blank_violations(&f.points, &chain.safety.zones), 0);
+            assert!(f.points.iter().any(|p| p.is_lit() && p.x < -0.1), "the left half still shows");
+        }
+        // The same with a circle look through the whole export.
+        let got = export_look(&white_circle(), 10, 25.0, 120.0, &ExportSafety { frame_limits: FrameLimits { min: 0, max: Some(40) }, ..chain.clone() }).unwrap();
+        for f in &ilda::read(&got.bytes).unwrap() {
+            assert!(f.points.len() <= 40, "{} points", f.points.len());
+            assert_eq!(crate::zones::blank_violations(&f.points, &chain.safety.zones), 0);
+        }
+    }
+
+    /// T-476: a frame below the output's minimum is completed without a
+    /// new lit segment (an open stroke waits dark on its end).
+    #[test]
+    fn exported_frames_are_completed_to_the_output_minimum() {
+        let stroke = vec![Point::blanked(-0.5, 0.0), Point::lit(-0.5, 0.0, 1.0, 1.0, 1.0), Point::lit(0.5, 0.2, 1.0, 1.0, 1.0)];
+        let chain = ExportSafety { frame_limits: FrameLimits { min: 300, max: Some(1000) }, ..open_chain() };
+        let out = bake_chain(&[stroke], 25.0, &chain, "ce test").unwrap();
+        assert_eq!(out[0].len(), 300);
+        assert_eq!(out[0].iter().filter(|p| p.is_lit()).count(), 2);
+    }
+
+    #[test]
+    fn the_chain_carries_the_output_points_per_frame() {
+        let mut s = crate::test_support::shared();
+        let scan = power::OutputScan { min_points: 300, max_points: 1000, ..Default::default() };
+        s.outputs.set_scan(power::MAIN_OUTPUT, scan, false).unwrap();
+        assert_eq!(ExportSafety::of(&s, power::MAIN_OUTPUT).unwrap().frame_limits, FrameLimits { min: 300, max: Some(1000) });
     }
 }

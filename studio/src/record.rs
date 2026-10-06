@@ -638,6 +638,7 @@ mod tests {
             safety: SafetySettings::default(),
             limits: OutputLimits { max_power: 1.0, max_color: [1.0; 3] },
             color: Default::default(),
+            frame_limits: Default::default(),
         }
     }
 
