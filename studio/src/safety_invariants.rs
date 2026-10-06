@@ -3473,6 +3473,80 @@ fn an_executor_level_dims_its_cue_only() {
 
 // ---------- group masters (T-420) ----------
 
+/// One session of `run_group_master_case`: every master at 100 %
+/// (`masters` = None) or moved by a seeded rng, then 20 frames as sent
+/// to the output. `stall` is wall-clock time spent in the setup before the
+/// cue press (the T-479 regression test uses it).
+fn group_master_session(seed: u64, masters: Option<u64>, stall: Duration) -> Result<Vec<Vec<Point>>, String> {
+    // `random_case` without presence (arming must succeed).
+    let mut rng = Rng::new(seed);
+    let mut s = test_support::shared();
+    // T-479: the simulated clock from the very first line, not only from
+    // `Rig::new`. Without it the cue press below reads the wall clock
+    // (`now_s` = however long this setup took, 0.2 to 1.2 ms). An evolving
+    // cue pressed within `ON_THE_BEAT` (1e-3 beat, 0.5 ms at 120 BPM) of
+    // beat 0 starts at once, later it waits for the next beat holding its
+    // first key: the two sessions then showed the look at different
+    // phases and the point-by-point comparison failed although the dimmed
+    // frame was darker everywhere.
+    s.sim_now = Some(s.epoch);
+    std::thread::sleep(stall);
+    s.safety.set(random_safety(&mut rng), true).map_err(|e| format!("setup: safety refused: {e:?}"))?;
+    s.outputs.set(MAIN_OUTPUT, Some(random_limits(&mut rng)), None, false, true).map_err(|e| format!("setup: caps refused: {e:?}"))?;
+    s.calibration = random_calibration(&mut rng);
+    s.settings = random_preset(&s, &mut rng).1;
+    let mut zrng = Rng::new(seed ^ 0x0420_0420);
+    let mut cfg = random_projection(&mut zrng);
+    for z in &mut cfg.zones {
+        z.enabled = true;
+        z.output = None;
+        z.geometry.warp.enabled = false;
+    }
+    let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
+    cfg.default_zones = ids.clone();
+    cfg.groups = random_groups(&mut zrng, &ids);
+    if cfg.groups.is_empty() {
+        cfg.groups = vec![ZoneGroup { name: "G".into(), zones: ids.clone(), master: 1.0 }];
+    }
+    for g in &mut cfg.groups {
+        g.master = 1.0;
+    }
+    s.projection.set(cfg).map_err(|e| format!("setup: projection refused: {e:#}"))?;
+    // A playing cue with cue and layer levels (T-144) in some cases,
+    // the same in both sessions: the group masters dim on top of the
+    // whole level chain (cue → layer → FX → master).
+    let mut vrng = Rng::new(seed ^ 0x0144_0420);
+    if vrng.chance(0.5) {
+        let (id, _) = random_preset(&s, &mut vrng);
+        controls::press_cue(&mut s, &id, None, true);
+        for _ in 0..1 + vrng.below(3) {
+            random_level(&mut s, &mut vrng);
+        }
+    }
+    let mut rig = Rig::new(s, "group-master", seed);
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).map_err(|e| format!("setup: arm refused: {e:?}"))?;
+    if let Some(mseed) = masters {
+        let mut mrng = Rng::new(mseed);
+        let mut s = rig.s();
+        for n in 1..=s.projection.get().groups.len() {
+            // Anywhere below 100 % here (0 and out of range included).
+            let level = if mrng.chance(0.3) { random_master(&mut mrng) } else { mrng.f() };
+            let input = if mrng.chance(0.5) { ControlInput::Norm(level) } else { ControlInput::Value(level) };
+            controls::apply(&mut s, &format!("group.{n}.master"), input, true).map_err(|e| format!("group.{n}.master refused: {e:?}"))?;
+        }
+    }
+    let mut frames = Vec::new();
+    for _ in 0..20 {
+        rig.tick();
+        frames.push(rig.wire.lock().unwrap().last.clone());
+    }
+    if rig.s().gate.is_armed() != rig.wire.lock().unwrap().armed {
+        return Err("the output's arm state left the gate's".into());
+    }
+    Ok(frames)
+}
+
 /// One case of `a_group_master_never_brightens_the_output`: the same
 /// random session (look, safety settings, caps, calibration, projection
 /// zones with groups, sometimes a cue with T-144 cue and layer levels) rendered twice on the same simulated clock, once
@@ -3481,67 +3555,8 @@ fn an_executor_level_dims_its_cue_only() {
 /// sample the frame at 100 % doesn't match or beat on every channel: the masters sit before the safety stage, which still dims after them,
 /// and nothing after them can turn a dimmer into more light.
 fn run_group_master_case(seed: u64) -> Result<bool, String> {
-    let session = |masters: Option<u64>| -> Result<Vec<Vec<Point>>, String> {
-        // `random_case` without presence (arming must succeed).
-        let mut rng = Rng::new(seed);
-        let mut s = test_support::shared();
-        s.safety.set(random_safety(&mut rng), true).map_err(|e| format!("setup: safety refused: {e:?}"))?;
-        s.outputs.set(MAIN_OUTPUT, Some(random_limits(&mut rng)), None, false, true).map_err(|e| format!("setup: caps refused: {e:?}"))?;
-        s.calibration = random_calibration(&mut rng);
-        s.settings = random_preset(&s, &mut rng).1;
-        let mut zrng = Rng::new(seed ^ 0x0420_0420);
-        let mut cfg = random_projection(&mut zrng);
-        for z in &mut cfg.zones {
-            z.enabled = true;
-            z.output = None;
-            z.geometry.warp.enabled = false;
-        }
-        let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
-        cfg.default_zones = ids.clone();
-        cfg.groups = random_groups(&mut zrng, &ids);
-        if cfg.groups.is_empty() {
-            cfg.groups = vec![ZoneGroup { name: "G".into(), zones: ids.clone(), master: 1.0 }];
-        }
-        for g in &mut cfg.groups {
-            g.master = 1.0;
-        }
-        s.projection.set(cfg).map_err(|e| format!("setup: projection refused: {e:#}"))?;
-        // A playing cue with cue and layer levels (T-144) in some cases,
-        // the same in both sessions: the group masters dim on top of the
-        // whole level chain (cue → layer → FX → master).
-        let mut vrng = Rng::new(seed ^ 0x0144_0420);
-        if vrng.chance(0.5) {
-            let (id, _) = random_preset(&s, &mut vrng);
-            controls::press_cue(&mut s, &id, None, true);
-            for _ in 0..1 + vrng.below(3) {
-                random_level(&mut s, &mut vrng);
-            }
-        }
-        let mut rig = Rig::new(s, "group-master", seed);
-        rig.tick();
-        rig.s().request_arm(ArmSource::Ui).map_err(|e| format!("setup: arm refused: {e:?}"))?;
-        if let Some(mseed) = masters {
-            let mut mrng = Rng::new(mseed);
-            let mut s = rig.s();
-            for n in 1..=s.projection.get().groups.len() {
-                // Anywhere below 100 % here (0 and out of range included).
-                let level = if mrng.chance(0.3) { random_master(&mut mrng) } else { mrng.f() };
-                let input = if mrng.chance(0.5) { ControlInput::Norm(level) } else { ControlInput::Value(level) };
-                controls::apply(&mut s, &format!("group.{n}.master"), input, true).map_err(|e| format!("group.{n}.master refused: {e:?}"))?;
-            }
-        }
-        let mut frames = Vec::new();
-        for _ in 0..20 {
-            rig.tick();
-            frames.push(rig.wire.lock().unwrap().last.clone());
-        }
-        if rig.s().gate.is_armed() != rig.wire.lock().unwrap().armed {
-            return Err("the output's arm state left the gate's".into());
-        }
-        Ok(frames)
-    };
-    let full = session(None)?;
-    let dimmed = session(Some(seed ^ 0x5eed))?;
+    let full = group_master_session(seed, None, Duration::ZERO)?;
+    let dimmed = group_master_session(seed, Some(seed ^ 0x5eed), Duration::ZERO)?;
     // A dark zone's points can be travel for the optimiser and the
     // safety stage's segment splits, so frames may differ in length: every
     // lit sample with the masters down must sit where the frame at 100 %
@@ -3576,6 +3591,28 @@ fn a_group_master_never_brightens_the_output() {
     });
     // Not vacuous: most cases really dim something that reached the output.
     assert!(dimmed.get() * 3 >= cases.get(), "only {} of {} cases dimmed the output", dimmed.get(), cases.get());
+}
+
+/// T-479: seed 420001627 presses an evolving cue during the setup. The
+/// press read the wall clock before the rig's simulated clock existed, so
+/// whether the cue caught beat 0 (and moved) or waited for the next beat
+/// (and held still) depended on the machine's speed, and the two sessions
+/// compared different phases. A session now replays bit for bit however
+/// long its setup takes, its cue starts at once, and the case passes and
+/// really dims.
+#[test]
+fn group_master_seed_420001627_replays_and_never_brightens() {
+    const SEED: u64 = 420001627;
+    // Warm up first, so the next session's setup is as quick as it gets.
+    let _ = group_master_session(SEED, None, Duration::ZERO).unwrap();
+    let quick = group_master_session(SEED, None, Duration::ZERO).unwrap();
+    let slow = group_master_session(SEED, None, Duration::from_millis(5)).unwrap();
+    assert!(quick.iter().flatten().any(|p| p.is_lit()), "the session sends light");
+    assert_eq!(quick, slow, "setup time leaked into the session");
+    // Pressed on beat 0 of the simulated clock: the cue plays at once.
+    let moved = quick.iter().any(|f| f.len() != quick[0].len() || f.iter().zip(&quick[0]).any(|(p, q)| (p.x - q.x).abs() > 1e-4 || (p.y - q.y).abs() > 1e-4));
+    assert!(moved, "the evolving cue waited for the next beat");
+    assert!(run_group_master_case(SEED).unwrap(), "the masters dim the output");
 }
 
 /// The masters sit before the safety stage: a zone's master at 100 %
