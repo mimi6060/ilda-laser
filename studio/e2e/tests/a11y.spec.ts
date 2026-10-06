@@ -60,6 +60,22 @@ test('axe finds nothing serious in any workspace', async ({ page }) => {
   await openWorkspace(page, 'settings');
   await page.evaluate(() => document.querySelectorAll('#settingsPanel details').forEach(d => { (d as HTMLDetailsElement).open = true; }));
   await audit(page, 'RÉGLAGES');
+  // PUPITRE (T-427): played and edited, with one of each component.
+  expect(await studio.post('/api/desks', { tabs: [{ name: 'A11y', items: [
+    { id: 1, kind: 'button', x: 0, y: 0, w: 2, h: 1, binding: { type: 'control', id: 'tempo.tap' } },
+    { id: 2, kind: 'fader', x: 2, y: 0, w: 1, h: 4, binding: { type: 'control', id: 'master.size' } },
+    { id: 3, kind: 'xy_pad', x: 3, y: 0, w: 3, h: 3, binding: { type: 'control', id: 'master.pos_x' }, binding_y: { type: 'control', id: 'master.pos_y' } },
+    { id: 4, kind: 'label', x: 6, y: 0, w: 3, h: 1, label: 'Intro' },
+    { id: 5, kind: 'preview', x: 6, y: 1, w: 3, h: 3 },
+    { id: 6, kind: 'button', x: 0, y: 1, w: 2, h: 1, binding: { type: 'control', id: 'grid.9.9.9' } },
+  ] }] })).toBe(200);
+  await openWorkspace(page, 'desk');
+  await audit(page, 'PUPITRE');
+  await page.locator('#deskMode').click();
+  await page.locator('#deskGrid .k-fader').click();
+  await audit(page, 'PUPITRE › Modifier');
+  await page.locator('#deskMode').click();
+  expect(await studio.post('/api/desks', { tabs: [] })).toBe(200);
   await openWorkspace(page, 'live');
 });
 
@@ -125,7 +141,9 @@ test('workspace tabs: one tab stop, ← / → move and select', async ({ page })
   await expect(page.locator('#wsTabs [data-ws-tab="timeline"]')).toHaveAttribute('tabindex', '0');
   await expect(page.locator('#wsTabs [data-ws-tab="live"]')).toHaveAttribute('tabindex', '-1');
   await page.keyboard.press('ArrowLeft');
-  await page.keyboard.press('ArrowLeft'); // wraps round to RÉGLAGES
+  await page.keyboard.press('ArrowLeft'); // wraps round to PUPITRE (T-427)
+  await expect(page.locator('#wsTabs [data-ws-tab="desk"]')).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('ArrowLeft');
   await expect(page.locator('#wsTabs [data-ws-tab="settings"]')).toHaveAttribute('aria-selected', 'true');
   await openWorkspace(page, 'live');
   // The LIVE panel tabs too.

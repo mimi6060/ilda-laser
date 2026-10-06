@@ -32,6 +32,7 @@ mod dwell;
 mod engine;
 mod evolving;
 mod examples;
+mod desk;
 mod executors;
 mod fans;
 mod fx;
@@ -562,6 +563,10 @@ pub struct Shared {
     /// assignments are content (projects, history); what the hands hold
     /// is memory only.
     pub executors: executors::Executors,
+    /// The custom desk (desk.rs, T-427, `desks.json`): tabs of buttons,
+    /// faders and XY pads the operator lays out. Content (projects,
+    /// history); playing it goes through the control registry.
+    pub desks: desk::Desks,
 }
 
 impl Shared {
@@ -1449,6 +1454,7 @@ fn startup_state(cli: &Cli) -> Shared {
         history: Default::default(),
         prepared: Default::default(),
         executors: executors::Executors::load(cli.data_dir.join("executors.json")),
+        desks: desk::Desks::load(cli.data_dir.join("desks.json")),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
