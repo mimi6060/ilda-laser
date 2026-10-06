@@ -325,7 +325,14 @@ pub fn refresh(s: &mut Shared) {
 /// The master modifiers stored with `cue`, if it is a user cue that has
 /// any that do something.
 pub fn master_of(s: &Shared, cue: &str) -> Option<LiveModifiers> {
-    s.user_cues.get(cue)?.master.clone().filter(|m| *m != LiveModifiers::default())
+    let m = s.user_cues.get(cue)?.master.clone()?;
+    // Families its cell references (T-422) are left to the preset, applied
+    // at the cue level.
+    let m = match s.deck.slots.get(cue).map(|slot| &slot.refs) {
+        Some(refs) if !refs.is_empty() => crate::pools::strip(refs, &s.pools, &m),
+        _ => m,
+    };
+    (m != LiveModifiers::default()).then_some(m)
 }
 
 /// An edit refused: HTTP status and French message.
@@ -687,6 +694,26 @@ mod tests {
         store.save().unwrap();
         assert_eq!(UserCueStore::load_or_create(path).list().len(), 1);
         crate::datafile::tests::check_kept(&dir, "user_cues.json", false);
+    }
+
+    /// T-422: the families a user cue's cell references are left to the
+    /// preset; an unknown reference keeps the stored master.
+    #[test]
+    fn the_stored_master_leaves_referenced_families_to_the_preset() {
+        use crate::pools::{PoolPreset, PoolValues, PresetRefs};
+        let mut s = crate::test_support::shared();
+        let n = with_user_page(&mut s);
+        s.live.size = 0.5;
+        s.live.pos_y = -0.5;
+        let id = store(&mut s, n, 3, Some("Réf"), StoreFilter::ColorOnly, true).unwrap();
+        assert_eq!(master_of(&s, &id).unwrap().pos_y, -0.5);
+        let mut slot = s.deck.slot(&id);
+        slot.refs = PresetRefs { position: Some("position:haut".into()), ..Default::default() };
+        s.deck.set_slot(&id, slot);
+        assert_eq!(master_of(&s, &id).unwrap().pos_y, -0.5, "unknown: the stored values");
+        s.pools.set(vec![PoolPreset { id: "position:haut".into(), name: "Haut".into(), values: PoolValues::Position { pos_x: 0.0, pos_y: 0.5, rot_angle: [0.0; 3] } }]).unwrap();
+        let m = master_of(&s, &id).unwrap();
+        assert_eq!((m.pos_y, m.size), (0.0, 0.5), "position left to the preset, size kept");
     }
 
     #[test]

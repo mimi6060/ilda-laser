@@ -38,6 +38,7 @@ pub const PAGES: &[HelpPage] = &[
     HelpPage { slug: "live-effets", title_fr: "Grille d'effets", group_fr: "LIVE", body_html: include_str!("live-effets.html") },
     HelpPage { slug: "live-musique", title_fr: "Musique", group_fr: "LIVE", body_html: include_str!("live-musique.html") },
     HelpPage { slug: "live-scenes", title_fr: "Scènes", group_fr: "LIVE", body_html: include_str!("live-scenes.html") },
+    HelpPage { slug: "live-prereglages", title_fr: "Préréglages", group_fr: "LIVE", body_html: include_str!("live-prereglages.html") },
     HelpPage { slug: "live-liste-cues", title_fr: "Liste de cues", group_fr: "LIVE", body_html: include_str!("live-liste-cues.html") },
     HelpPage { slug: "live-en-cours", title_fr: "En cours", group_fr: "LIVE", body_html: include_str!("live-en-cours.html") },
     HelpPage { slug: "live-cues", title_fr: "Grille de cues", group_fr: "LIVE", body_html: include_str!("live-cues.html") },

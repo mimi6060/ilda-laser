@@ -109,6 +109,13 @@
 //!     one zone or all, its frame goes through the same chain (1-20 hold
 //!     with it: nothing lit in a Blank or Public zone, caps), starting or
 //!     leaving it never arms, and it never outlives an e-stop.
+//! 22. referenced presets (T-422): random position, size, colour and
+//!     motion presets (mangled values, some stored past validation),
+//!     references on cells and timeline events (unknown ids and ids of
+//!     another family included), captured from the live, edited and
+//!     deleted while the cues play, run in the sessions (1-21 hold with
+//!     them); they never arm, and every stored preset stays within the
+//!     master controls' ranges.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -1514,6 +1521,81 @@ fn random_level(s: &mut Shared, rng: &mut Rng) {
     }
 }
 
+/// Referenced presets (T-422) as the page or a bad client could set
+/// them: mangled lists (refused or clamped by the store), values pushed
+/// in past validation (the engine clamps them on apply), references on
+/// cells and timeline events (unknown ones and ones of another family
+/// included), « Enregistrer depuis le direct », deletes.
+fn random_pools(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
+    use crate::pools::{self, PoolPreset, PoolValues, PresetRefs, FAMILIES};
+    let family = *rng.pick(&FAMILIES);
+    let ids: Vec<String> = s.pools.list().iter().map(|p| p.id.clone()).chain(["position:absent".to_string(), "size:x".to_string()]).collect();
+    // Whether the store just took a validated change.
+    let stored = match rng.below(8) {
+        0 | 1 => {
+            let base: Vec<PoolPreset> = FAMILIES
+                .iter()
+                .map(|&f| {
+                    let mut m = live::LiveModifiers::default();
+                    (m.pos_x, m.pos_y, m.size, m.rot_speed[2], m.speed) = (rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(0.3, 1.5), rng.range(-200.0, 200.0), rng.range(0.0, 3.0));
+                    m.color = live::ColorParams::default().build(rng.below(6));
+                    PoolPreset { id: format!("{}:fuzz", f.key()), name: f.label_fr().into(), values: PoolValues::from_live(f, &m) }
+                })
+                .collect();
+            let list: Vec<PoolPreset> = mutated(&base, rng, 0.3);
+            if rng.chance(0.3) {
+                // Past validation, as a damaged file read by a bug would.
+                s.pools.replace_in_memory(list);
+                false
+            } else {
+                pools::set_all(s, list).is_ok()
+            }
+        }
+        2 => {
+            let req = pools::CaptureRequest { family, id: rng.chance(0.5).then(|| rng.pick(&ids).clone()), name: format!("Direct {}", rng.below(4)) };
+            pools::capture(s, &req).is_ok()
+        }
+        3 => {
+            let id = rng.pick(&ids).clone();
+            pools::delete(s, &id).is_ok()
+        }
+        4 if s.timeline.show.is_some() => {
+            let refs = PresetRefs { position: Some(rng.pick(&ids).clone()), size: Some(rng.pick(&ids).clone()), color: Some(rng.pick(&ids).clone()), motion: Some(rng.pick(&ids).clone()) };
+            if let Some(show) = s.timeline.show.as_mut() {
+                for e in show.tracks.iter_mut().flat_map(|t| t.events.iter_mut()) {
+                    if rng.chance(0.5) {
+                        e.refs = refs.clone();
+                    }
+                }
+            }
+            false
+        }
+        _ => {
+            let cue = match s.deck.active.first() {
+                Some(a) if rng.chance(0.7) => a.cue.clone(),
+                _ => random_preset(s, rng).0,
+            };
+            let mut slot = s.deck.slot(&cue);
+            for f in FAMILIES {
+                *slot.refs.slot_mut(f) = rng.chance(0.5).then(|| rng.pick(&ids).clone());
+            }
+            s.deck.set_slot(&cue, slot);
+            false
+        }
+    };
+    // What the store holds after a validated change is in range.
+    if stored {
+        for p in s.pools.list() {
+            let mut v = p.values.clone();
+            v.sanitize();
+            if v != p.values {
+                return Err(format!("preset {} stored out of range: {:?}", p.id, p.values));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The live effects of T-142 as a controller would drive them: latched
 /// effects set, momentary ones pressed and released.
 fn random_live_effect(s: &mut Shared, rng: &mut Rng) {
@@ -1816,6 +1898,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // or let run out. It replaces the looks, so only some sessions.
     let mut yrng = Rng::new(seed ^ 0x0447_0447);
     let trace_from = yrng.chance(0.15).then(|| yrng.below(frames));
+    // Referenced presets (T-422), from their own stream.
+    let mut grng = Rng::new(seed ^ 0x0422_0422);
+    let pools_on = grng.chance(0.35);
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
@@ -1846,6 +1931,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             if level_mods && vrng.chance(0.4) {
                 random_level(&mut s, &mut vrng);
             }
+            if pools_on && grng.chance(0.3) {
+                random_pools(&mut s, &mut grng).map_err(|e| format!("frame {frame}: {e}"))?;
+            }
             // Held buttons are let go of: « Noir » and « Figer » don't
             // stay down for the whole session.
             if (s.live.black || s.live.freeze || s.live.strobe.hold) && erng.chance(0.7) {
@@ -1853,7 +1941,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 let _ = controls::apply(&mut s, id, ControlInput::Value(0.0), erng.chance(0.5));
             }
             if s.gate.is_armed() != armed {
-                return Err(format!("frame {frame}: a live effect or a level changed the arming"));
+                return Err(format!("frame {frame}: a live effect, a level or a preset changed the arming"));
             }
         }
         if exec_on && brng.chance(0.35) {

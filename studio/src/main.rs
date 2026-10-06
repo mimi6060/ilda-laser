@@ -72,6 +72,7 @@ mod patterns;
 mod perf;
 #[cfg(test)]
 mod perf_budget;
+mod pools;
 mod ponk;
 mod power;
 mod presence;
@@ -424,6 +425,9 @@ pub struct Shared {
     pub palettes: live::PaletteStore,
     /// User scan presets (scan_presets.json, T-415).
     pub scan_presets: scan::ScanPresetStore,
+    /// Referenced presets (pools.json, T-422): position, size, colour and
+    /// motion presets cues and timeline events point to.
+    pub pools: pools::PoolStore,
     /// Festival palettes on show and perceived balance (T-130,
     /// festival.json; the palette on show is memory only).
     pub festival: festival::Festival,
@@ -1466,6 +1470,7 @@ fn startup_state(cli: &Cli) -> Shared {
         cue_mods: HashMap::new(),
         palettes: live::PaletteStore::load_or_create(cli.data_dir.join("palettes.json")),
         scan_presets: scan::ScanPresetStore::load_or_create(cli.data_dir.join("scan_presets.json")),
+        pools: pools::PoolStore::load_or_create(cli.data_dir.join("pools.json")),
         festival: festival::Festival::load(festival::path(&cli.data_dir)),
         midi: {
             let mut m = midi::MidiState::new(!cli.no_midi || cli.midi_test, midi::profile::ProfileStore::load(cli.data_dir.join("midi")));
@@ -2665,6 +2670,11 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
         .into_iter()
         .filter_map(|mut cue| {
             let mut look = with_program(&cue, timeline::look_of(&cue, &s.presets)?);
+            // Referenced presets (T-422): every frame, so a preset changed
+            // during playback moves the event at the next frame.
+            if !cue.refs.is_empty() {
+                cue.modifiers = pools::resolve(&cue.refs, &s.pools, &cue.modifiers);
+            }
             // Envelopes (T-163): on these per-frame copies only, before
             // the master live stage and the safety chain.
             timeline::apply_envelopes(&cue.envelopes, &s.controls, &mut look, &mut cue.modifiers);

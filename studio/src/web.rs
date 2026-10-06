@@ -205,6 +205,10 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/festival", RouteClass::Edit),
     ("GET", "/api/palettes", RouteClass::Read),
     ("POST", "/api/palettes", RouteClass::Edit),
+    ("GET", "/api/pools", RouteClass::Read),
+    ("POST", "/api/pools", RouteClass::Edit),
+    ("POST", "/api/pools/delete", RouteClass::Edit),
+    ("POST", "/api/pools/capture", RouteClass::Edit),
     ("GET", "/api/scan-presets", RouteClass::Read),
     ("POST", "/api/scan-presets", RouteClass::Edit),
     ("GET", "/api/speed-groups", RouteClass::Read),
@@ -1817,8 +1821,12 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 if req.slot.speed_group.is_some_and(|g| crate::speed::check_group(g).is_err()) {
                     return text(400, "groupe de vitesse inconnu (0 à 4)");
                 }
-                let CueSlot { program, modifiers, .. } = s.deck.slot(&req.id);
-                s.deck.set_slot(&req.id, CueSlot { program, modifiers, ..req.slot });
+                let CueSlot { program, modifiers, refs: before, .. } = s.deck.slot(&req.id);
+                let mut slot = req.slot;
+                if let Err(e) = crate::pools::check_refs(&s.pools, &before, &mut slot.refs) {
+                    return text(400, &e);
+                }
+                s.deck.set_slot(&req.id, CueSlot { program, modifiers, ..slot });
                 s.deck.save();
                 ok()
             }
@@ -2085,6 +2093,30 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Ok(list) => match shared.lock().unwrap().palettes.set(list) {
                 Ok(()) => ok(),
                 Err(e) => text(400, &e.to_string()),
+            },
+            Err(e) => e,
+        },
+        // Referenced presets (T-422, pools.rs). Edits only (never in show
+        // mode); none of them arms or touches a safety setting.
+        (Method::Get, "/api/pools") => json_response(crate::pools::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/pools") => match body::<Vec<crate::pools::PoolPreset>>(request) {
+            Ok(list) => match crate::pools::set_all(&mut shared.lock().unwrap(), list) {
+                Ok(()) => ok(),
+                Err((code, v)) => with_status(json_response(v), code),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, "/api/pools/delete") => match body::<IdRequest>(request) {
+            Ok(req) => match crate::pools::delete(&mut shared.lock().unwrap(), &req.id) {
+                Ok(()) => ok(),
+                Err((code, v)) => with_status(json_response(v), code),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, "/api/pools/capture") => match body::<crate::pools::CaptureRequest>(request) {
+            Ok(req) => match crate::pools::capture(&mut shared.lock().unwrap(), &req) {
+                Ok(p) => json_response(json!(p)),
+                Err((code, v)) => with_status(json_response(v), code),
             },
             Err(e) => e,
         },

@@ -72,6 +72,7 @@ pub fn shared() -> Shared {
         cue_mods: Default::default(),
         palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
         scan_presets: crate::scan::ScanPresetStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scan_presets.json")),
+        pools: crate::pools::PoolStore::in_memory(),
         festival: Default::default(),
         midi: midi::MidiState::new(false, midi::profile::ProfileStore::in_memory()),
         netin: crate::netin::NetInState::new(crate::netin::NetHub::in_memory(estop)),
