@@ -17,8 +17,10 @@
 //! - Off by default, listening on 127.0.0.1 by default; the operator picks
 //!   another address (a console on the LAN) in RÉGLAGES or with `--osc` /
 //!   `--artnet`. sACN joins its multicast groups only when the operator
-//!   ticks it, on the interface they picked. Listen only: nothing is ever
-//!   sent (no ArtPollReply, no sACN discovery).
+//!   ticks it, on the interface they picked. Art-Net and sACN only listen
+//!   (no ArtPollReply, no sACN discovery). OSC sends only the feedback
+//!   (feedback.rs, T-416): off by default, to the destinations the
+//!   operator typed and the clients that subscribed, never a broadcast.
 //! - Signal loss (Art-Net and sACN are streams): no packet for
 //!   `loss.timeout_ms` applies `loss.policy`: « neutre » (default) puts the
 //!   chart's channels back to neutral — intensity 0, size 100 %, centred,
@@ -38,7 +40,9 @@
 //! Neither the engine nor the HTTP worker ever waits on a socket.
 
 pub mod artnet;
+pub mod feedback;
 pub mod listener;
+pub mod monitor;
 pub mod osc;
 pub mod patch;
 pub mod sacn;
@@ -208,6 +212,8 @@ pub struct NetInConfig {
     /// The free DMX patch (patch.rs).
     pub dmx: PatchConfig,
     pub loss: LossConfig,
+    /// OSC feedback (T-416).
+    pub feedback: feedback::OscFeedback,
 }
 
 /// A local address to listen on: an IP literal, never a name, never a
@@ -255,6 +261,7 @@ impl NetInConfig {
             return Err("multidiffusion sACN : choisissez l'adresse IPv4 de l'interface reliée à la console (ni 127.0.0.1, ni 0.0.0.0)".into());
         }
         self.dmx.validate()?;
+        self.feedback.validate()?;
         if !(LOSS_TIMEOUT_MIN_MS..=LOSS_TIMEOUT_MAX_MS).contains(&self.loss.timeout_ms) {
             return Err(format!("délai de perte du signal invalide : {} ms ({} à {} ms)", self.loss.timeout_ms, LOSS_TIMEOUT_MIN_MS, LOSS_TIMEOUT_MAX_MS));
         }
@@ -351,6 +358,7 @@ struct HubInner {
     sacn: ListenStatus,
     sources: Vec<DmxSource>,
     timecode: TimecodeIn,
+    feedback: feedback::FeedbackStatus,
 }
 
 /// ArtTimeCode readings received (`TIMECODE_QUEUE` newest at most).
@@ -400,6 +408,7 @@ impl NetHub {
             sacn: ListenStatus::default(),
             sources: Vec::new(),
             timecode: TimecodeIn::default(),
+            feedback: feedback::FeedbackStatus::default(),
         };
         NetHub { inner: Mutex::new(inner), estop }
     }
@@ -515,6 +524,15 @@ impl NetHub {
         });
     }
 
+    /// The "osc-out" thread's counters (T-416).
+    pub fn feedback_status(&self) -> feedback::FeedbackStatus {
+        self.lock().feedback.clone()
+    }
+
+    pub fn update_feedback(&self, f: impl FnOnce(&mut feedback::FeedbackStatus)) {
+        f(&mut self.lock().feedback);
+    }
+
     /// Replaces what a listener knows of one universe's sources.
     pub fn set_sources(&self, proto: Proto, universe: u16, list: Vec<DmxSource>) {
         let mut inner = self.lock();
@@ -579,6 +597,10 @@ pub struct NetInState {
     pub gain: f32,
     /// The DMX fixture instances, one per projection zone (T-407).
     pub fixtures: crate::dmx::fixture::FixtureState,
+    /// OSC feedback: subscribers and the sending queue (T-416).
+    pub feedback: feedback::FeedbackState,
+    /// The OSC monitor: the last 200 messages in and out (T-416).
+    pub monitor: monitor::Monitor,
 }
 
 impl NetInState {
@@ -594,6 +616,8 @@ impl NetInState {
             patch: PatchState::default(),
             gain: 1.0,
             fixtures: Default::default(),
+            feedback: Default::default(),
+            monitor: Default::default(),
         }
     }
 
@@ -650,6 +674,8 @@ pub fn frame(s: &mut Shared, now: Instant) {
         patch::release_held(s);
     }
     s.netin.gain = gain(s, &cfg, now);
+    // Last: what changed this frame, whoever changed it, goes back out.
+    feedback::tick(s, &cfg, now);
 }
 
 /// The output gain of the « fondu au noir » and « noir immédiat » policies:
@@ -679,15 +705,27 @@ fn gain(s: &Shared, cfg: &NetInConfig, now: Instant) -> f32 {
 fn osc_message(s: &mut Shared, from: IpAddr, msg: OscMessage, cmd: Result<OscCommand, String>, now: Instant) {
     let client = from.to_string();
     external::touch(s, SourceKind::Osc, &client, now);
-    let error = cmd.and_then(|c| osc_command(s, &client, c, now)).err();
+    s.netin.feedback.seen(from, now);
+    let error = cmd.and_then(|c| osc_command(s, from, c, now)).err();
     if let Some(e) = &error {
         log::debug!("OSC {} : {e}", msg.address);
     }
+    let result = match &error {
+        None => monitor::APPLIED,
+        Some(e) if is_unknown(e) => monitor::UNKNOWN,
+        Some(_) => monitor::REFUSED,
+    };
+    s.netin.monitor.push(true, client, &msg.address, &monitor::args_text(&msg.args), result, error.clone());
     let recent = &mut s.netin.recent;
     if recent.len() >= RECENT_LEN {
         recent.pop_front();
     }
     recent.push_back(OscLog { at: now, from, address: msg.address, args: msg.args, error });
+}
+
+/// An address or a control we don't know (the monitor's « inconnu »).
+fn is_unknown(error: &str) -> bool {
+    ["contrôle inconnu", "cue inconnu", "adresse inconnue", "adresse hors de /ls"].iter().any(|p| error.starts_with(p))
 }
 
 fn refused(id: &str, why: external::Refusal) -> String {
@@ -698,11 +736,27 @@ fn refused(id: &str, why: external::Refusal) -> String {
     }
 }
 
-fn osc_command(s: &mut Shared, client: &str, cmd: OscCommand, now: Instant) -> Result<(), String> {
+fn osc_command(s: &mut Shared, from: IpAddr, cmd: OscCommand, now: Instant) -> Result<(), String> {
+    let client = &from.to_string();
     match cmd {
         OscCommand::Control { id, input } => {
             let desc = s.controls.get(&id).cloned();
+            // T-416: a value equal to the current one (a client echoing the
+            // feedback) changes nothing and sends nothing back; the gate
+            // still answers.
+            if let Some(d) = &desc {
+                let want = feedback::native(&d.kind, input);
+                if let (Some(want), Some(cur)) = (want, feedback::value_of(s, d)) {
+                    if feedback::same(&d.kind, want, cur) {
+                        return external::check(s, SourceKind::Osc, client, d, now).map_err(|why| refused(&id, why));
+                    }
+                }
+            }
             external::apply(s, SourceKind::Osc, client, &id, input, now).map_err(|why| refused(&id, why))?;
+            // The sender has this value: it is not sent back to it.
+            if let Some(v) = desc.as_ref().and_then(|d| feedback::value_of(s, d)) {
+                s.netin.feedback.echoed(from, &desc.as_ref().unwrap().id, v);
+            }
             if let Some(desc) = desc.filter(|d| d.kind == ControlKind::Momentary) {
                 let pressed = matches!(input, ControlInput::Value(v) | ControlInput::Norm(v) if v >= 0.5);
                 if pressed {
@@ -733,6 +787,14 @@ fn osc_command(s: &mut Shared, client: &str, cmd: OscCommand, now: Instant) -> R
             Ok(())
         }
         OscCommand::Ping => Ok(()),
+        OscCommand::Subscribe(port) => {
+            let cfg = s.netin.hub.effective().feedback;
+            s.netin.feedback.subscribe(&cfg, SocketAddr::new(from, port), now)
+        }
+        OscCommand::Unsubscribe => {
+            s.netin.feedback.unsubscribe(from);
+            Ok(())
+        }
     }
 }
 
@@ -1018,6 +1080,43 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<Vec<String>, String> {
     Ok(changed)
 }
 
+/// `GET /api/osc/config` (T-416): the feedback settings, where it is sent
+/// from, the subscribers and the sending counters.
+pub fn osc_view(s: &Shared, now: Instant) -> Value {
+    let (file, eff) = (s.netin.hub.file(), s.netin.hub.effective());
+    let fb = &s.netin.feedback;
+    let subscribers: Vec<Value> = fb
+        .subscribers
+        .iter()
+        .map(|sub| json!({ "addr": sub.addr.to_string(), "fixed": sub.fixed, "age_ms": now.saturating_duration_since(sub.last_seen).as_millis() as u64 }))
+        .collect();
+    json!({
+        "config": file.feedback,
+        "osc": { "enabled": eff.osc.enabled, "bind": eff.osc.bind, "port": eff.osc.port },
+        "subscribers": subscribers,
+        "status": s.netin.hub.feedback_status(),
+        "queued": fb.queued,
+        "dropped": fb.dropped,
+        "limits": {
+            "max_targets": feedback::MAX_TARGETS,
+            "max_subscribers": feedback::MAX_SUBSCRIBERS,
+            "min_rate_hz": feedback::MIN_RATE_HZ,
+            "max_rate_hz": feedback::MAX_RATE_HZ,
+            "subscriber_timeout_s": feedback::SUBSCRIBER_TIMEOUT.as_secs(),
+        },
+    })
+}
+
+/// `GET /api/osc/monitor?dir=in|out` (T-416): newest first.
+pub fn osc_monitor(s: &Shared, dir: Option<&str>) -> Value {
+    let incoming = match dir {
+        Some("in") => Some(true),
+        Some("out") => Some(false),
+        _ => None,
+    };
+    json!({ "entries": s.netin.monitor.list(incoming), "capacity": monitor::MONITOR_LEN })
+}
+
 fn changed_keys(a: &Value, b: &Value) -> Vec<String> {
     let mut out = Vec::new();
     if let (Value::Object(a), Value::Object(b)) = (a, b) {
@@ -1111,6 +1210,35 @@ mod tests {
         osc(&mut s, "/ls/control/no.such", &[OscArg::Float(1.0)]);
         assert!(last_error(&s).unwrap().contains("inconnu"));
         assert_eq!(s.netin.recent.len(), 4);
+    }
+
+    /// T-416: the monitor's results, the listed addresses as input, and
+    /// an echo of the current value changes nothing.
+    #[test]
+    fn the_monitor_tells_applied_refused_and_unknown() {
+        let mut s = studio();
+        osc(&mut s, "/ls/master/size", &[OscArg::Float(1.5)]);
+        osc(&mut s, "/ls/no/such", &[OscArg::Float(1.0)]);
+        osc(&mut s, "/elsewhere", &[]);
+        osc(&mut s, "/ls/transport/arm", &[OscArg::Int(1)]);
+        let results: Vec<&str> = s.netin.monitor.list(Some(true)).iter().rev().map(|e| e.result).collect();
+        assert_eq!(results, ["appliqué", "inconnu", "inconnu", "refusé"]);
+        assert_eq!(s.live.size, 1.5);
+        assert!(!s.gate.is_armed());
+        // The gate closed: refused, even an echo of the current value.
+        external::set_open(&mut s, false, ArmSource::Ui).unwrap();
+        osc(&mut s, "/ls/master/size", &[OscArg::Float(1.5)]);
+        assert_eq!(s.netin.monitor.list(Some(true))[0].result, "refusé");
+        // Open: an echo changes nothing.
+        external::set_open(&mut s, true, ArmSource::Ui).unwrap();
+        s.live_dirty = false;
+        osc(&mut s, "/ls/master/size", &[OscArg::Float(1.5)]);
+        assert_eq!(s.netin.monitor.list(Some(true))[0].result, "appliqué");
+        assert!(!s.live_dirty, "nothing changed");
+        // Subscribing needs the feedback on.
+        osc(&mut s, "/ls/subscribe", &[OscArg::Int(9000)]);
+        assert_eq!(s.netin.monitor.list(Some(true))[0].result, "refusé");
+        assert!(s.netin.feedback.subscribers.is_empty());
     }
 
     #[test]

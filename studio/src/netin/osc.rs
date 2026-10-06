@@ -12,6 +12,12 @@
 //! - `/ls/ping`: does nothing; shows as activity.
 //! - `/ls/access 1|0`: raises or lowers this client's access (T-408); it
 //!   drops by itself 10 s after the client's last message.
+//! - `/ls/subscribe <port>`, `/ls/unsubscribe`: OSC feedback (T-416,
+//!   feedback.rs) to this client's address and that port.
+//! - `/ls/<id with / for .> [v]` (T-416): a control in native units, the
+//!   address `feedback::address_of` lists (`/ls/master/size`,
+//!   `/ls/tempo/bpm 128`, `/ls/tempo/resync`). The words above come first;
+//!   no control id starts with one of them (checked by a test).
 //!
 //! Bundle time tags are ignored: everything runs on arrival.
 
@@ -168,7 +174,13 @@ pub enum OscCommand {
     Ping,
     /// Raise (true) or lower this client's access (T-408).
     Access(bool),
+    /// Feedback to the sender's address and this port (T-416).
+    Subscribe(u16),
+    Unsubscribe,
 }
+
+/// The first words of `/ls/…` that are commands, not control ids.
+pub const RESERVED: [&str; 10] = ["control", "norm", "cue/play", "cue/stop", "blackout", "arm", "ping", "access", "subscribe", "unsubscribe"];
 
 /// Our address space → a command. Errors are French, for the monitor.
 pub fn command(msg: &OscMessage) -> Result<OscCommand, String> {
@@ -198,6 +210,17 @@ pub fn command(msg: &OscMessage) -> Result<OscCommand, String> {
             let v = number().ok_or("argument 0 ou 1 attendu")?;
             Ok(OscCommand::Access(v >= 0.5))
         }
+        ("subscribe", "") => {
+            let port = first.and_then(OscArg::number).filter(|p| p.fract() == 0.0 && (1.0..=65535.0).contains(p));
+            Ok(OscCommand::Subscribe(port.ok_or("port de retour attendu (1 à 65535)")? as u16))
+        }
+        ("unsubscribe", "") => Ok(OscCommand::Unsubscribe),
+        // T-416: `/ls/master/size v`, the address listed for the control.
+        _ if !rest.ends_with('/') && !rest.contains("//") && !RESERVED.iter().any(|r| rest == *r || rest.starts_with(&format!("{r}/"))) => {
+            let id = super::feedback::control_of(&msg.address).ok_or_else(|| format!("adresse inconnue : {}", msg.address))?;
+            let v = number().ok_or("argument numérique attendu")?;
+            Ok(control_or_safety(id, ControlInput::Value(v)))
+        }
         _ => Err(format!("adresse inconnue : {}", msg.address)),
     }
 }
@@ -214,45 +237,51 @@ fn control_or_safety(id: String, input: ControlInput) -> OscCommand {
     }
 }
 
+fn pad(out: &mut Vec<u8>, s: &[u8]) {
+    out.extend_from_slice(s);
+    out.push(0);
+    while !out.len().is_multiple_of(4) {
+        out.push(0);
+    }
+}
+
+/// Encodes one message (feedback, T-416). Supports i, f, s, T, F; any
+/// other argument goes out as nil.
+pub fn encode(address: &str, args: &[OscArg]) -> Vec<u8> {
+    let mut out = Vec::new();
+    pad(&mut out, address.as_bytes());
+    let mut tags = String::from(",");
+    let mut data = Vec::new();
+    for a in args {
+        match a {
+            OscArg::Int(i) => {
+                tags.push('i');
+                data.extend_from_slice(&i.to_be_bytes());
+            }
+            OscArg::Float(f) => {
+                tags.push('f');
+                data.extend_from_slice(&f.to_bits().to_be_bytes());
+            }
+            OscArg::Str(s) => {
+                tags.push('s');
+                pad(&mut data, s.as_bytes());
+            }
+            OscArg::Bool(b) => tags.push(if *b { 'T' } else { 'F' }),
+            _ => tags.push('N'),
+        }
+    }
+    pad(&mut out, tags.as_bytes());
+    out.extend(data);
+    out
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
 
-    fn pad(out: &mut Vec<u8>, s: &[u8]) {
-        out.extend_from_slice(s);
-        out.push(0);
-        while !out.len().is_multiple_of(4) {
-            out.push(0);
-        }
-    }
-
-    /// Encodes a message (tests and the UDP round trip). Supports i, f, s, T, F.
+    /// Encodes a message (tests and the UDP round trip).
     pub fn encode(address: &str, args: &[OscArg]) -> Vec<u8> {
-        let mut out = Vec::new();
-        pad(&mut out, address.as_bytes());
-        let mut tags = String::from(",");
-        let mut data = Vec::new();
-        for a in args {
-            match a {
-                OscArg::Int(i) => {
-                    tags.push('i');
-                    data.extend_from_slice(&i.to_be_bytes());
-                }
-                OscArg::Float(f) => {
-                    tags.push('f');
-                    data.extend_from_slice(&f.to_bits().to_be_bytes());
-                }
-                OscArg::Str(s) => {
-                    tags.push('s');
-                    pad(&mut data, s.as_bytes());
-                }
-                OscArg::Bool(b) => tags.push(if *b { 'T' } else { 'F' }),
-                _ => tags.push('N'),
-            }
-        }
-        pad(&mut out, tags.as_bytes());
-        out.extend(data);
-        out
+        super::encode(address, args)
     }
 
     pub fn bundle(elems: &[Vec<u8>]) -> Vec<u8> {
@@ -340,6 +369,14 @@ pub mod tests {
         assert_eq!(cmd("/ls/access", &[OscArg::Int(1)]), Ok(OscCommand::Access(true)));
         assert_eq!(cmd("/ls/access", &[OscArg::Float(0.0)]), Ok(OscCommand::Access(false)));
         assert_eq!(cmd("/ls/access", &[]), Ok(OscCommand::Access(true)), "no argument: a press");
+        // T-416: the listed addresses, and feedback subscriptions.
+        assert_eq!(cmd("/ls/master/size", &[OscArg::Float(1.5)]), Ok(OscCommand::Control { id: "master.size".into(), input: ControlInput::Value(1.5) }));
+        assert_eq!(cmd("/ls/tempo/bpm", &[OscArg::Int(128)]), Ok(OscCommand::Control { id: "tempo.bpm".into(), input: ControlInput::Value(128.0) }));
+        assert_eq!(cmd("/ls/tempo/resync", &[]), Ok(OscCommand::Control { id: "tempo.resync".into(), input: ControlInput::Value(1.0) }));
+        assert_eq!(cmd("/ls/cue/mode", &[OscArg::Int(1)]), Ok(OscCommand::Control { id: "cue.mode".into(), input: ControlInput::Value(1.0) }));
+        assert_eq!(cmd("/ls/unknown", &[]), Ok(OscCommand::Control { id: "unknown".into(), input: ControlInput::Value(1.0) }), "refused later: unknown control");
+        assert_eq!(cmd("/ls/subscribe", &[OscArg::Int(9000)]), Ok(OscCommand::Subscribe(9000)));
+        assert_eq!(cmd("/ls/unsubscribe", &[]), Ok(OscCommand::Unsubscribe));
     }
 
     #[test]
@@ -348,7 +385,9 @@ pub mod tests {
             assert_eq!(cmd(a, &[]), Ok(OscCommand::Blackout), "{a}");
         }
         assert_eq!(cmd("/ls/control/transport.blackout", &[OscArg::Int(0)]), Ok(OscCommand::Ping), "a pad release is no blackout");
-        for a in ["/ls/arm", "/ls/control/transport.arm", "/ls/norm/transport/arm"] {
+        assert_eq!(cmd("/ls/transport/blackout", &[]), Ok(OscCommand::Blackout));
+        assert_eq!(cmd("/ls/safety/estop", &[]), Ok(OscCommand::Blackout));
+        for a in ["/ls/arm", "/ls/control/transport.arm", "/ls/norm/transport/arm", "/ls/transport/arm"] {
             assert_eq!(cmd(a, &[OscArg::Float(1.0)]), Ok(OscCommand::Arm), "{a}");
         }
     }
@@ -356,7 +395,13 @@ pub mod tests {
     #[test]
     fn bad_addresses_and_args_are_explained() {
         assert!(cmd("/beyond/master/livecontrol/brightness", &[OscArg::Float(1.0)]).unwrap_err().contains("hors de /ls"));
-        assert!(cmd("/ls/unknown", &[]).is_err());
+        assert!(cmd("/ls/", &[]).is_err());
+        assert!(cmd("/ls/control", &[]).is_err(), "a command word is never a control");
+        assert!(cmd("/ls/cue/play/x", &[]).is_err());
+        assert!(cmd("/ls/master//size", &[]).is_err());
+        assert!(cmd("/ls/subscribe", &[]).is_err());
+        assert!(cmd("/ls/subscribe", &[OscArg::Int(70000)]).is_err());
+        assert!(cmd("/ls/master/size", &[OscArg::Str("x".into())]).is_err());
         assert!(cmd("/ls/control/", &[]).is_err());
         assert!(cmd("/ls/control/master.size", &[OscArg::Str("x".into())]).is_err());
         assert!(cmd("/ls/norm/master.size", &[]).is_err());

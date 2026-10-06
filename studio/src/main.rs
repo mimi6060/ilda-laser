@@ -1097,6 +1097,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
     let sim = state.midi.sim.clone();
     let (netin_hub, netin_tx) = (Arc::clone(&state.netin.hub), state.netin.sender());
+    // OSC feedback (T-416): the queue the engine fills and "osc-out" empties.
+    let osc_out_rx = state.netin.feedback.take_receiver();
     let audio_hub = Arc::clone(&state.audio_in);
     let (song_hub, media) = (Arc::clone(&state.song), Arc::clone(&state.media));
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
@@ -1180,7 +1182,9 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     };
 
     // OSC / Art-Net listeners: idle (no socket) until switched on.
-    let netin_threads = netin::listener::spawn(netin_hub, netin_tx, Arc::clone(&running));
+    let mut netin_threads = netin::listener::spawn(Arc::clone(&netin_hub), netin_tx, Arc::clone(&running));
+    // OSC feedback: idle (no socket) until switched on and a destination exists.
+    netin_threads.extend(osc_out_rx.and_then(|rx| netin::feedback::spawn(rx, netin_hub, Arc::clone(&running))));
 
     let audio_threads = if cli.no_audio {
         println!("--no-audio: no audio input opened (the browser source still works), no song played (the timeline runs on the system clock).");

@@ -290,6 +290,11 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/timeline/templates/render", RouteClass::Edit),
     ("GET", "/api/netin", RouteClass::Read),
     ("POST", "/api/netin", RouteClass::Safety),
+    ("GET", "/api/osc/addresses", RouteClass::Read),
+    ("GET", "/api/osc/monitor", RouteClass::Read),
+    ("POST", "/api/osc/monitor/clear", RouteClass::Edit),
+    ("GET", "/api/osc/config", RouteClass::Read),
+    ("POST", "/api/osc/config", RouteClass::Safety),
     ("GET", "/api/backup", RouteClass::Read),
     ("POST", "/api/backup", RouteClass::Edit),
     ("POST", "/api/backup/now", RouteClass::Play),
@@ -2800,6 +2805,36 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                             hub.save();
                         }
                         json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now()))
+                    }
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        // OSC feedback, addresses and monitor (T-416).
+        (Method::Get, "/api/osc/addresses") => json_response(json!(crate::netin::feedback::addresses(&shared.lock().unwrap().controls))),
+        (Method::Get, "/api/osc/monitor") => {
+            let dir = query_str(request.url(), "dir");
+            json_response(crate::netin::osc_monitor(&shared.lock().unwrap(), dir.as_deref()))
+        }
+        (Method::Post, "/api/osc/monitor/clear") => {
+            let mut s = shared.lock().unwrap();
+            s.netin.monitor.clear();
+            json_response(crate::netin::osc_monitor(&s, None))
+        }
+        (Method::Get, "/api/osc/config") => json_response(crate::netin::osc_view(&shared.lock().unwrap(), Instant::now())),
+        (Method::Post, "/api/osc/config") => match body::<serde_json::Value>(request) {
+            Ok(patch) => {
+                let (result, hub) = {
+                    let mut s = shared.lock().unwrap();
+                    (crate::netin::update(&mut s, &json!({ "feedback": patch })), Arc::clone(&s.netin.hub))
+                };
+                match result {
+                    Ok(changed) => {
+                        if !changed.is_empty() {
+                            hub.save();
+                        }
+                        json_response(crate::netin::osc_view(&shared.lock().unwrap(), Instant::now()))
                     }
                     Err(e) => text(400, &e),
                 }
@@ -6887,6 +6922,32 @@ mod tests {
         assert!(body.contains("adresse d'écoute invalide"), "{body}");
         assert_eq!(t.request("POST", "/api/netin", "[]").0, 400);
         assert_eq!(arm_status(&t)["armed"], false, "never arms");
+    }
+
+    /// T-416: the address list, the feedback settings (off by default,
+    /// validated, Safety class) and the monitor.
+    #[test]
+    fn osc_feedback_routes() {
+        let t = TestServer::start(false);
+        let list = js(&t.request("GET", "/api/osc/addresses", "").1);
+        let list = list.as_array().unwrap();
+        let size = list.iter().find(|a| a["control"] == "master.size").unwrap();
+        assert_eq!((size["address"].as_str(), size["kind"].as_str(), size["max"].as_f64()), (Some("/ls/master/size"), Some("continuous"), Some(2.0)));
+        assert!(list.iter().all(|a| a["control"] != "transport.arm" && a["control"] != "safety.hold"));
+        let cfg = js(&t.request("GET", "/api/osc/config", "").1);
+        assert_eq!((cfg["config"]["enabled"].as_bool(), cfg["config"]["allow_subscribe"].as_bool()), (Some(false), Some(true)));
+        let (code, body) = t.request("POST", "/api/osc/config", r#"{"enabled":true,"targets":["127.0.0.1:9000"]}"#);
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body)["config"]["targets"][0], "127.0.0.1:9000");
+        for bad in [r#"{"targets":["255.255.255.255:9000"]}"#, r#"{"targets":["console.local:9000"]}"#, r#"{"max_rate_hz":500}"#, r#"{"nope":1}"#] {
+            assert_eq!(t.request("POST", "/api/osc/config", bad).0, 400, "{bad}");
+        }
+        assert!(ROUTES.contains(&("POST", "/api/osc/config", RouteClass::Safety)));
+        let mon = js(&t.request("GET", "/api/osc/monitor?dir=out", "").1);
+        assert_eq!(mon["capacity"], 200);
+        assert_eq!(t.request("POST", "/api/osc/monitor/clear", "").0, 200);
+        assert_eq!(t.request("POST", "/api/osc/config", r#"{"enabled":false,"targets":[]}"#).0, 200);
+        assert_eq!(arm_status(&t)["armed"], false);
     }
 
     /// T-437: the tour is offered on a fresh data folder, recorded once
