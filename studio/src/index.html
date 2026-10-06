@@ -407,6 +407,17 @@
   #pgLayerRow button { flex: none; }
   @media (max-width: 900px) { #pgEditor { order: 4; } .pg-body { grid-template-columns: minmax(0, 1fr); } }
   /* RÉGLAGES › Carte SD ShowNET (T-302), Theme (T-299) tokens. */
+  #perfTable { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  #perfTable caption { text-align: left; }
+  #perfTable th, #perfTable td { text-align: left; padding: 2px 4px; }
+  #perfTable thead th { font-weight: 600; color: var(--muted); }
+  #perfTable tbody th { font-weight: 400; }
+  #perfTable td { border-top: 1px solid var(--line); }
+  #perfState { font-weight: 600; }
+  #perfState[data-level="1"], .stats .perf-warn { color: var(--warn); }
+  #perfState[data-level="2"], .stats .perf-late { color: var(--danger); }
+  .perf-kv { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .perf-kv b { color: var(--text); font-weight: 600; }
   #sdTable { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
   #sdTable th { text-align: left; font-weight: 600; color: var(--muted); padding: 2px 4px; }
   #sdTable td { padding: 2px 4px; border-top: 1px solid var(--line); }
@@ -4099,6 +4110,30 @@
       <div class="hint">Informative : sert aux estimations d'exposition et à la fiche de sécurité. 0 = inconnu. Choisir l'interface « ShowNET » ajoute ses rappels de sécurité à la liste « Avant le show ».</div>
     </section>
 
+    <!-- Performance du moteur (T-448) : temps par étape sur 10 s, lecture seule -->
+    <section data-help="reglages-sorties">
+      <details id="perfPanel" data-search="Performance moteur temps par image rendu sécurité sortie images en retard points pages connectées">
+        <summary>Performance</summary>
+        <div id="perfState" role="status" data-level="0">Normal</div>
+        <table id="perfTable">
+          <caption class="hint">Temps du moteur par image, sur les 10 dernières secondes</caption>
+          <thead><tr><th scope="col">Étape</th><th scope="col">Moyenne</th><th scope="col">Pire (10 s)</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Rendu</th><td id="perfRenderMean">–</td><td id="perfRenderWorst">–</td></tr>
+            <tr><th scope="row">Sécurité</th><td id="perfSafetyMean">–</td><td id="perfSafetyWorst">–</td></tr>
+            <tr><th scope="row">Sortie</th><td id="perfOutputMean">–</td><td id="perfOutputWorst">–</td></tr>
+            <tr><th scope="row">Image</th><td id="perfFrameMean">–</td><td id="perfFrameWorst">–</td></tr>
+          </tbody>
+        </table>
+        <div class="perf-kv">
+          <span>Points par image <b id="perfPoints">–</b></span>
+          <span>Images en retard <b id="perfLate">–</b></span>
+          <span>Pages connectées <b id="perfClients">–</b></span>
+        </div>
+        <div class="hint">Une image doit tenir en 16,7 ms (60 images/s). <b>Chargé</b> (orange) : une image a pris plus de 8 ms ces 10 dernières secondes. <b>Images en retard</b> (rouge) : au moins une image a dépassé 16,7 ms ces 10 dernières secondes. Ce panneau informe seulement et ne change rien à la sortie ; si le moteur se bloque plus de 100 ms laser armé, le chien de garde coupe la sortie. L'arrêt matériel du projecteur reste le seul arrêt sûr.</div>
+      </details>
+    </section>
+
     <!-- Carte SD ShowNET (T-302) : banque de cues numérotés, export d'un dossier prêt à copier -->
     <section id="sdBankPanel" data-help="reglages-sorties" data-search="Carte SD ShowNET">
       <h2>Carte SD ShowNET</h2>
@@ -5766,6 +5801,7 @@ function applyState(f, at, pushed) {
   if (checklist && f.checklist && f.checklist.complete !== checklist.complete) reloadChecklist();
   else if (checklist && f.shownet && (f.shownet.active !== (checklist.output === 'shownet') || f.shownet.hw_stop_ok !== checklist.hw_stop_ok)) reloadChecklist();
   showArmed(); showPresence(f); showKeepAwake(f.keep_awake);
+  if (f.perf_level !== undefined) showPerfLevel(f.perf_level);
   $('output').textContent = f.output_state === 'lost' ? 'Sortie perdue'
     : f.output_state === 'connecting' ? 'Connexion de la sortie…'
     : f.output_error ? '⚠ ' + f.output_error
@@ -7521,6 +7557,37 @@ async function loadDiag() {
   if (atEnd) tail.scrollTop = tail.scrollHeight;
 }
 $('diagPanel').addEventListener('toggle', () => { if ($('diagPanel').open) loadDiag(); });
+
+// RÉGLAGES › Performance (T-448): the engine's stage timings over 10 s,
+// read once a second while the section is open and shown.
+const PERF_LABELS = ['Normal', 'Chargé', 'Images en retard'];
+const perfMs = v => (+v || 0).toFixed(2).replace('.', ',') + ' ms';
+async function loadPerf() {
+  let j;
+  try { j = await apiJson('GET', '/api/perf', undefined, { quiet: true }); } catch { return; }
+  for (const [id, key] of [['Render', 'render'], ['Safety', 'safety'], ['Output', 'output'], ['Frame', 'frame']]) {
+    $('perf' + id + 'Mean').textContent = perfMs(j[key].mean_ms);
+    $('perf' + id + 'Worst').textContent = perfMs(j[key].worst_ms);
+  }
+  $('perfPoints').textContent = j.points;
+  $('perfLate').textContent = `${j.late_in_window} sur 10 s · ${j.late_frames} depuis le démarrage`;
+  $('perfClients').textContent = j.clients;
+  const level = j.late_in_window > 0 ? 2 : j.frame.worst_ms > j.warn_worst_ms ? 1 : 0;
+  $('perfState').dataset.level = level;
+  $('perfState').textContent = PERF_LABELS[level];
+  showPerfLevel(level);
+}
+// The points indicator under the preview: orange or red like the panel
+// (`perf_level` of the pushed state, or the panel's own reading).
+function showPerfLevel(level) {
+  const el = $('stPoints');
+  el.classList.toggle('perf-warn', level === 1);
+  el.classList.toggle('perf-late', level === 2);
+  if (level) el.title = (level === 2 ? 'Images en retard' : 'Moteur chargé') + ' : voir Réglages › Performance';
+  else el.removeAttribute('title');
+}
+$('perfPanel').addEventListener('toggle', () => { if ($('perfPanel').open) loadPerf(); });
+setInterval(() => { if (activeWs === 'settings' && $('perfPanel').open && !document.hidden) loadPerf(); }, 1000);
 $('diagExport').onclick = () => {
   const a = document.createElement('a');
   a.href = '/api/diagnostics/report' + ($('diagProject').checked ? '?project=1' : '');
