@@ -89,6 +89,7 @@ mod safety;
 #[cfg(test)]
 mod safety_invariants;
 mod safety_log;
+mod safetysheet;
 mod showlist;
 mod showmode;
 mod sites;
