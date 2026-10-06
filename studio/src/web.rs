@@ -140,6 +140,11 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/safety/profiles", RouteClass::Read),
     ("POST", "/api/safety/profiles", RouteClass::Safety),
     ("POST", "/api/safety/profiles/load", RouteClass::Safety),
+    ("GET", "/api/sites", RouteClass::Read),
+    ("POST", "/api/sites", RouteClass::Safety),
+    ("POST", "/api/sites/use-project", RouteClass::Safety),
+    ("GET", "/api/pack/export", RouteClass::Read),
+    ("POST", "/api/pack/import", RouteClass::Edit),
     ("POST", "/api/safety/sky", RouteClass::Safety),
     ("GET", "/api/safety/outdoor/export", RouteClass::Read),
     ("GET", "/api/audience", RouteClass::Read),
@@ -639,6 +644,10 @@ fn may_decode(method: &Method, url: &str) -> bool {
             | (Method::Get, "/api/media/ilda/export")
             // A whole SD bank: up to 229 cues rendered and written (T-302).
             | (Method::Post, "/api/sdbank/export")
+            // A package: media read and zipped, or unzipped, checked,
+            // decoded and written (T-289).
+            | (Method::Get, "/api/pack/export")
+            | (Method::Post, "/api/pack/import")
     )
 }
 
@@ -1329,6 +1338,47 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // Site profiles (T-289): calibration, safety and projection zones of
+        // a venue. Locked in show mode (423); never recorded by undo.
+        (Method::Get, "/api/sites") => json_response(crate::sites::view(&shared.lock().unwrap())),
+        // `{action: "load", name, confirm_loosen?}`: disarms; looser than
+        // what is in force: 409 `{error, loosen}` without `confirm_loosen`,
+        // nothing changed. `{action: "save", name}` (« Enregistrer sous… »,
+        // the settings in force), `{action: "delete", name}`.
+        (Method::Post, "/api/sites") => match body::<SiteRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let src = ArmSource::parse(req.source.as_deref().unwrap_or("ui"));
+                if !crate::profiles::operator_source(src) {
+                    return text(403, &crate::profiles::LoadError::Source.message_fr());
+                }
+                let done = match req.action.as_str() {
+                    "load" => crate::sites::load(&mut s, &req.name, req.confirm_loosen, src).map(|_| ()),
+                    "save" => crate::sites::save(&mut s, &req.name).map(|_| ()).map_err(|e| crate::profiles::LoadError::Damaged(format!("{e:#}"))),
+                    "delete" => crate::sites::delete(&mut s, &req.name).map_err(|e| crate::profiles::LoadError::Damaged(format!("{e:#}"))),
+                    _ => return text(400, "expected \"action\": \"load\", \"save\" or \"delete\""),
+                };
+                match done {
+                    Ok(()) => json_response(crate::sites::view(&s)),
+                    Err(e) => site_error(e),
+                }
+            }
+            Err(e) => e,
+        },
+        // *Utiliser celui du projet*: the open project's site, `{confirm_loosen?}`.
+        (Method::Post, "/api/sites/use-project") => match body::<SiteRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let src = ArmSource::parse(req.source.as_deref().unwrap_or("ui"));
+                match crate::sites::use_project(&mut s, req.confirm_loosen, src) {
+                    Ok(_) => json_response(crate::sites::view(&s)),
+                    Err(e) => site_error(e),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/pack/export") => export_pack(request.url(), shared),
+        (Method::Post, "/api/pack/import") => import_pack(request, shared),
         (Method::Get, "/api/audience") => {
             let mut s = shared.lock().unwrap();
             s.sync_audience();
@@ -1624,13 +1674,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (Method::Get, "/api/safety/log") | (Method::Get, "/api/safety/log.csv") => safety_log_view(request.url(), shared, path.ends_with(".csv")),
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
-                let cal = Calibration {
-                    offset_x: cal.offset_x.clamp(-1.0, 1.0),
-                    offset_y: cal.offset_y.clamp(-1.0, 1.0),
-                    scale_x: cal.scale_x.clamp(0.1, 2.0),
-                    scale_y: cal.scale_y.clamp(0.1, 2.0),
-                    rotation_deg: cal.rotation_deg.clamp(-180.0, 180.0),
-                };
+                let cal = cal.sanitized();
                 shared.lock().unwrap().calibration = cal;
                 save_calibration(calibration_path, &cal);
                 ok()
@@ -3747,8 +3791,10 @@ fn project_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool,
     }
     let action = path.strip_prefix("/api/project").unwrap_or("").trim_start_matches('/');
     let reply = crate::project::route(shared, post, action, &raw);
-    // Another project in memory (T-285): nothing of the previous one can be undone.
-    if post && matches!(action, "new" | "open" | "recover" | "version-open") && matches!(reply, Some(crate::project::Reply::Json(_))) {
+    // Another project in memory (T-285): nothing of the previous one can be
+    // undone; a partial import (T-289) replaces sections the history can't.
+    let real = !(action == "import-partial" && body_says_dry_run(&raw));
+    if post && real && matches!(action, "new" | "open" | "recover" | "version-open" | "import-partial") && matches!(reply, Some(crate::project::Reply::Json(_))) {
         shared.lock().unwrap().history.clear();
     }
     match reply {
@@ -4452,6 +4498,100 @@ struct ProfileLoadRequest {
     #[serde(default)]
     confirm_loosen: bool,
     source: Option<String>,
+}
+
+/// `POST /api/sites`, `/api/sites/use-project` (T-289).
+#[derive(serde::Deserialize)]
+struct SiteRequest {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    confirm_loosen: bool,
+    source: Option<String>,
+}
+
+/// The reply to a refused site action: as a safety profile's.
+fn site_error(e: crate::profiles::LoadError) -> HttpResponse {
+    match e {
+        crate::profiles::LoadError::Unknown(m) => text(404, &m),
+        crate::profiles::LoadError::Failed(m) => text(500, &format!("Profil de site appliqué en partie : {m}. Laser désarmé.")),
+        crate::profiles::LoadError::Loosens(list) => with_status(json_response(json!({ "error": "Ce profil de site assouplit la sécurité : confirmation requise", "loosen": list })), 409),
+        other => profile_error(other),
+    }
+}
+
+fn body_says_dry_run(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw).ok().and_then(|v| v.get("dry_run").and_then(|d| d.as_bool())).unwrap_or(false)
+}
+
+/// `GET /api/pack/export[?site=1]` (T-289): the open project as
+/// *Enregistrer* would write it, the media it names and, with `site=1`,
+/// the site profile in force, as a `.lspack` download. The lock is held
+/// only to copy the state; media are read and zipped after.
+fn export_pack(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let project = crate::project::current_project(shared);
+    let (site, ilda_dir, audio_dir) = {
+        let s = shared.lock().unwrap();
+        let with_site = query_u64(url, "site").unwrap_or(0) == 1;
+        let name = s.sites.active().unwrap_or(crate::sites::DEFAULT_SITE).to_string();
+        (with_site.then(|| crate::sites::capture(&s, &name)), s.ilda.dir().to_path_buf(), s.media.dir().to_path_buf())
+    };
+    match crate::lspack::build(&project, site.as_ref(), &ilda_dir, &audio_dir) {
+        Ok((bytes, manifest)) => {
+            let ascii: String = project.name.chars().map(|c| if c.is_ascii_alphanumeric() || " -_".contains(c) { c } else { '_' }).collect();
+            let disposition = format!("attachment; filename=\"{ascii}.{}\"", crate::lspack::EXTENSION);
+            let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+            let missing = Header::from_bytes(&b"X-Pack-Missing"[..], manifest.missing.len().to_string().as_bytes()).expect("ASCII");
+            with_type(Response::from_data(bytes), "application/zip").with_header(header).with_header(missing)
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
+/// `POST /api/pack/import[?name=<projet>]`, the package's bytes as the
+/// body (T-289): checked whole (lspack.rs), then its media go into the
+/// libraries and its project becomes a new project of the folder (not
+/// opened). Runs beside the HTTP worker, lock released. Never arms, never
+/// changes a safety setting: an embedded site is offered at opening.
+fn import_pack(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    use crate::lspack::MAX_PACK_BYTES;
+    use std::io::Read;
+    let too_big = || text(413, &format!("paquet trop gros ({} Mo au plus)", MAX_PACK_BYTES >> 20));
+    if request.body_length().is_some_and(|n| n as u64 > MAX_PACK_BYTES) {
+        return too_big();
+    }
+    let wanted = query_str(request.url(), "name");
+    let mut bytes = Vec::new();
+    if let Err(e) = request.as_reader().take(MAX_PACK_BYTES + 1).read_to_end(&mut bytes) {
+        return text(400, &format!("unreadable body: {e}"));
+    }
+    if bytes.len() as u64 > MAX_PACK_BYTES {
+        return too_big();
+    }
+    let unpacked = match crate::lspack::unpack(&bytes) {
+        Ok(u) => u,
+        Err(e) => return text(400, &format!("{e:#}")),
+    };
+    drop(bytes);
+    let (projects_dir, ilda, audio) = {
+        let s = shared.lock().unwrap();
+        (s.project.dir.clone(), Arc::clone(&s.ilda), Arc::clone(&s.media))
+    };
+    let targets = crate::lspack::Targets { projects_dir: &projects_dir, ilda: &ilda, audio: &audio };
+    match crate::lspack::install(unpacked, wanted.as_deref(), &targets) {
+        Ok(done) => {
+            {
+                let mut s = shared.lock().unwrap();
+                crate::ilda_library::refresh(&mut s);
+                log::info!("Paquet importé : projet « {} », {} média(s)", done.project, done.media.len());
+                s.gate.log().record("pack_import", Some("ui"), json!({ "project": done.project, "media": done.media.len(), "site": done.site, "armed": s.gate.is_armed() }));
+            }
+            json_response(json!(done))
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
 }
 
 /// The reply to a refused profile action (T-260).
@@ -7609,6 +7749,61 @@ mod tests {
         stream.read_to_string(&mut raw).unwrap();
         let status = raw.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
         (status, raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    /// T-289: site profiles and packages over HTTP: a site saved and
+    /// loaded (disarmed), a looser one refused without confirmation, a
+    /// package downloaded as a zip, a « zip slip » package refused, all of
+    /// it locked in show mode. Nothing arms.
+    #[test]
+    fn site_profiles_and_packages_over_http() {
+        let t = TestServer::start(false);
+        let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        let v = json(&t.request("GET", "/api/sites", "").1);
+        assert!(v["sites"].as_array().unwrap().is_empty() && v["project_site"].is_null());
+        assert_eq!(t.request("POST", "/api/sites", r#"{"action":"save","name":"Club"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/sites", r#"{"action":"load","name":"Club","source":"midi"}"#).0, 403);
+        let v = json(&t.request("POST", "/api/sites", r#"{"action":"load","name":"Club"}"#).1);
+        assert_eq!(v["active"], "Club");
+        assert_eq!(t.request("POST", "/api/sites", r#"{"action":"load","name":"Nulle part"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/sites/use-project", "{}").0, 404, "no site in the project");
+        // A looser site: 409 with the list, nothing changed.
+        {
+            let mut s = t.shared.lock().unwrap();
+            let mut cfg = s.safety.get();
+            cfg.zones = vec![crate::zones::Zone { id: 1, name: "Z1".into(), kind: crate::zones::ZoneKind::Blank, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, -0.5]], ..Default::default() }];
+            s.safety.set(cfg, true).unwrap();
+        }
+        let (code, body) = t.request("POST", "/api/sites", r#"{"action":"load","name":"Club"}"#);
+        assert_eq!(code, 409, "{body}");
+        assert!(!json(&body)["loosen"].as_array().unwrap().is_empty());
+        assert_eq!(t.shared.lock().unwrap().safety.get().zones.len(), 1);
+        // The package download.
+        let mut stream = TcpStream::connect(t.addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "GET /api/pack/export?site=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&raw[..split]).to_lowercase();
+        assert!(head.starts_with("http/1.1 200") && head.contains("application/zip") && head.contains(".lspack"), "{head}");
+        assert!(raw[split + 4..].starts_with(b"PK"));
+        // A package with `../`: refused, nothing written.
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("../../evil.lsproj", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"{}").unwrap();
+        let evil = zip.finish().unwrap().into_inner();
+        let (code, body) = http_bytes(t.addr, "/api/pack/import", &evil);
+        assert_eq!(code, 400);
+        assert!(body.contains("chemin interdit"), "{body}");
+        assert_eq!(http_bytes(t.addr, "/api/pack/import", b"not a zip").0, 400);
+        // Show mode: every change refused.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(http_bytes(t.addr, "/api/pack/import", &evil).0, 423);
+        assert_eq!(t.request("POST", "/api/sites", r#"{"action":"load","name":"Club","confirm_loosen":true}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/sites/use-project", "{}").0, 423);
+        assert_eq!(t.request("POST", "/api/project/import-partial", r#"{"from":"x","sections":["midi"]}"#).0, 423);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     /// T-443: markers go out as CSV and a CSV is read back without changing

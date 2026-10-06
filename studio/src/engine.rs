@@ -370,6 +370,21 @@ impl Default for Calibration {
 }
 
 impl Calibration {
+    /// Brought into the ranges the calibration panel allows (offsets
+    /// -1..1, scales 0.1..2, rotation ±180°); a value that is not a number
+    /// takes the identity's. Every calibration that reaches the engine
+    /// goes through here (the panel, a site profile, T-289).
+    pub fn sanitized(&self) -> Self {
+        let c = |v: f32, lo: f32, hi: f32, neutral: f32| if v.is_finite() { v.clamp(lo, hi) } else { neutral };
+        Self {
+            offset_x: c(self.offset_x, -1.0, 1.0, 0.0),
+            offset_y: c(self.offset_y, -1.0, 1.0, 0.0),
+            scale_x: c(self.scale_x, 0.1, 2.0, 1.0),
+            scale_y: c(self.scale_y, 0.1, 2.0, 1.0),
+            rotation_deg: c(self.rotation_deg, -180.0, 180.0, 0.0),
+        }
+    }
+
     /// Rotate around the origin, scale, then offset, clamped to the valid
     /// -1.0..=1.0 range.
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {

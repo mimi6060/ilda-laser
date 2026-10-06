@@ -123,6 +123,7 @@ pub fn shared() -> Shared {
         // Pure preview: the checklist never blocks unit tests.
         checklist: crate::checklist::Checklist::in_memory(false),
         profiles: crate::profiles::ProfileStore::in_memory(),
+        sites: crate::sites::SiteStore::in_memory(),
         audience: Default::default(),
         sky_off: false,
         test_hooks: false,

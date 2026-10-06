@@ -90,6 +90,8 @@ mod safety_invariants;
 mod safety_log;
 mod showlist;
 mod showmode;
+mod sites;
+mod lspack;
 #[cfg(feature = "shownet")]
 mod shownet;
 mod speed;
@@ -535,6 +537,9 @@ pub struct Shared {
     /// Safety profiles per venue (profiles.rs, T-260): the active one is a
     /// label over the settings in force; loading one disarms.
     pub profiles: profiles::ProfileStore,
+    /// Site profiles (sites.rs, T-289): calibration, safety and projection
+    /// zones of a venue; the active one is a label, loading one disarms.
+    pub sites: sites::SiteStore,
     /// Audience scanning mode (audience.rs, T-255). In memory only: every
     /// start is « Au-dessus du public ».
     pub audience: audience::AudienceState,
@@ -1526,6 +1531,7 @@ fn startup_state(cli: &Cli) -> Shared {
         data_warnings: Vec::new(),
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
         profiles: profiles::ProfileStore::load(&cli.data_dir),
+        sites: sites::SiteStore::load(&cli.data_dir),
         audience: Default::default(),
         sky_off: false,
         test_hooks: cli.test_hooks,
@@ -1564,6 +1570,9 @@ fn startup_state(cli: &Cli) -> Shared {
     // Safety profiles (T-260): existing settings kept as « Réglages
     // actuels », a fresh install on « Aperçu sûr ». Never arms.
     profiles::startup(&mut state, &cli.data_dir, fresh_install);
+    // Site profiles (T-289): the settings in force, with calibration.json,
+    // become « Par défaut » on the first start. Never arms.
+    sites::startup(&mut state, &cli.data_dir);
     // Every show is read once, so a damaged one is set aside now (T-402).
     state.shows.list();
     // Damaged files found while loading: the banner, and `data_ack` closed

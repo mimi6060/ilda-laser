@@ -12,9 +12,12 @@
 //! calibration, the safety settings (strobe limiter, horizon, hold-to-run,
 //! heartbeat), the output power caps and projector sheets (`outputs.json`),
 //! the MIDI safety options (`midi/devices.json`), the arming
-//! state and the e-stop. They belong to the rig and the venue (the future
-//! site profile, T-289), so a project made elsewhere can't loosen them.
-//! Nothing here can arm the laser.
+//! state and the e-stop. They belong to the rig and the venue (the site
+//! profile, sites.rs, T-289), so a project made elsewhere can't loosen
+//! them. A project may carry a site profile (key `site`, kept with its
+//! unknown sections): opening never applies it, the operator chooses.
+//! *Importer depuis un projet…* (T-289) merges chosen sections of another
+//! project into the open one. Nothing here can arm the laser.
 //!
 //! Opening is atomic: the file is read and every section checked before
 //! anything changes; on error the current state is untouched and the
@@ -29,7 +32,7 @@ use crate::cuelist::CueList;
 use crate::cues::CueDeck;
 use crate::executors::ExecutorBank;
 use crate::figures::Figure;
-use crate::grid::CueGrid;
+use crate::grid::{CueGrid, CuePage, CueRef};
 use crate::layers::Mixer;
 use crate::lfo::Modulator;
 use crate::live::{LiveModifiers, Palette};
@@ -254,9 +257,14 @@ impl ProjectState {
         self.saved
     }
 
-    /// Unknown fields of the open project.
+    /// Unknown fields of the open project (and its site profile, T-289).
     pub fn extra(&self) -> &Map<String, Value> {
         &self.extra
+    }
+
+    #[cfg(test)]
+    pub fn set_extra_for_tests(&mut self, extra: Map<String, Value>) {
+        self.extra = extra;
     }
 
     fn remember(&mut self, name: &str) {
@@ -921,6 +929,12 @@ struct Done {
     notice: Option<String>,
     /// A name to offer in « Enregistrer sous… » (a version opened as a copy).
     suggested_name: Option<String>,
+    /// The opened project carries a site profile that differs from the one
+    /// in force (T-289): its name, for « Garder le profil actuel » /
+    /// « Utiliser celui du projet ». Never applied by opening.
+    site_offer: Option<String>,
+    /// What a partial import did, or would do (`dry_run`).
+    import: Option<Value>,
 }
 
 impl From<Vec<String>> for Done {
@@ -999,6 +1013,10 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
         (true, "version-save") => version_req().and_then(|req| save_version(shared, &req.name)),
         (true, "version-open") => version_req().and_then(|req| open_version(shared, &req.file)),
         (true, "version-delete") => version_req().and_then(|req| delete_version(shared, &req.file)),
+        (true, "import-partial") => match serde_json::from_str::<PartialRequest>(body) {
+            Ok(req) => import_partial(shared, &req),
+            Err(e) => Err(Reply::Text(400, format!("JSON invalide : {e}"))),
+        },
         _ => return None,
     };
     Some(match reply {
@@ -1007,6 +1025,8 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
             v["warnings"] = json!(done.warnings);
             v["notice"] = json!(done.notice);
             v["suggested_name"] = json!(done.suggested_name);
+            v["site_offer"] = json!(done.site_offer);
+            v["import"] = json!(done.import);
             Reply::Json(v)
         }
         Err(r) => r,
@@ -1086,7 +1106,16 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Done, Rep
     let shown = name.clone().unwrap_or_else(|| UNTITLED.into());
     log::info!("Projet ouvert : « {shown} »{}", if warnings.is_empty() { "" } else { " (avec des erreurs d'écriture)" });
     s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": shown, "new": name.is_none(), "armed": s.gate.is_armed() }));
-    Ok(Done { warnings, notice, suggested_name: None })
+    // A site profile in the project (T-289): offered, never applied here.
+    let site_offer = match crate::sites::of_project(&s) {
+        Ok(Some(site)) if !crate::sites::differences(&s, &site).is_empty() || !crate::sites::loosenings(&s, &site).is_empty() => Some(site.name),
+        Ok(_) => None,
+        Err(e) => {
+            warnings.push(format!("profil de site du projet ignoré : {e:#}"));
+            None
+        }
+    };
+    Ok(Done { warnings, notice, site_offer, ..Done::default() })
 }
 
 /// *Récupérer* (T-287): opens the offered autosave as the open project,
@@ -1218,6 +1247,7 @@ fn open_version(shared: &Mutex<Shared>, file: &str) -> Result<Done, Reply> {
         warnings,
         notice: Some(format!("Version « {label} » ouverte comme copie : « Enregistrer sous… » pour la garder")),
         suggested_name: valid_name(&suggested).then_some(suggested),
+        ..Done::default()
     })
 }
 
@@ -1231,6 +1261,282 @@ fn delete_version(shared: &Mutex<Shared>, file: &str) -> Result<Done, Reply> {
         Err(e) => Err(Reply::Text(500, format!("impossible de supprimer la version : {e}"))),
     }
 }
+
+// ---------- partial import (T-289) ----------
+
+/// What *Importer depuis un projet…* may take, by key.
+pub const PARTIAL_SECTIONS: [&str; 6] = ["pages", "user_cues", "scenes", "midi", "site", "timelines"];
+
+/// A name already used: *Renommer* (« nom 2 »), *Remplacer* or *Ignorer*.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Conflict {
+    #[default]
+    Rename,
+    Replace,
+    Skip,
+}
+
+#[derive(Deserialize)]
+struct PartialRequest {
+    /// A project of the projects folder.
+    from: String,
+    #[serde(default)]
+    sections: Vec<String>,
+    #[serde(default)]
+    conflict: Conflict,
+    /// Only say what would happen.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// What a partial import did to one section.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct SectionReport {
+    /// Items in the other project.
+    pub found: usize,
+    pub added: usize,
+    pub replaced: usize,
+    pub skipped: usize,
+    /// (name in the other project, name here).
+    pub renamed: Vec<(String, String)>,
+    /// Names already used here.
+    pub conflicts: Vec<String>,
+}
+
+/// `base 2`, `base 3`… (`sep` between): the first that `ok` accepts and
+/// `taken` doesn't hold, cut to `max` characters.
+fn free_name(base: &str, max: usize, sep: &str, taken: &dyn Fn(&str) -> bool, ok: &dyn Fn(&str) -> bool) -> Option<String> {
+    (2..1000).find_map(|n| {
+        let suffix = format!("{sep}{n}");
+        let stem: String = base.chars().take(max.saturating_sub(suffix.chars().count())).collect();
+        let name = format!("{}{suffix}", stem.trim_end());
+        (!taken(&name) && ok(&name)).then_some(name)
+    })
+}
+
+/// How a section's items are named, for `merge_named`.
+struct Naming<'a, T> {
+    get: &'a dyn Fn(&T) -> String,
+    set: &'a dyn Fn(&mut T, &str),
+    max: usize,
+    sep: &'a str,
+    ok: &'a dyn Fn(&str) -> bool,
+}
+
+/// Merges `items` of the other project into `cur`, by name.
+fn merge_named<T: Clone>(cur: &mut Vec<T>, items: &[T], conflict: Conflict, n: &Naming<T>) -> SectionReport {
+    let mut r = SectionReport { found: items.len(), ..Default::default() };
+    for item in items {
+        let name = (n.get)(item);
+        let Some(i) = cur.iter().position(|c| (n.get)(c) == name) else {
+            cur.push(item.clone());
+            r.added += 1;
+            continue;
+        };
+        r.conflicts.push(name.clone());
+        match conflict {
+            Conflict::Skip => r.skipped += 1,
+            Conflict::Replace => {
+                cur[i] = item.clone();
+                r.replaced += 1;
+            }
+            Conflict::Rename => {
+                let names: Vec<String> = cur.iter().map(|c| (n.get)(c)).collect();
+                match free_name(&name, n.max, n.sep, &|c| names.iter().any(|x| x == c), n.ok) {
+                    Some(new) => {
+                        let mut it = item.clone();
+                        (n.set)(&mut it, &new);
+                        cur.push(it);
+                        r.renamed.push((name, new));
+                    }
+                    None => r.skipped += 1,
+                }
+            }
+        }
+    }
+    r
+}
+
+/// Merges the chosen `sections` of `src` into `cur` (`PARTIAL_SECTIONS`),
+/// then checks `cur` like an opened project. The pages of `cur` must be
+/// materialised (not the built-in default ones). Only the chosen sections
+/// of `cur` change.
+pub fn merge(cur: &mut Project, src: &Project, sections: &[String], conflict: Conflict) -> Result<BTreeMap<String, SectionReport>> {
+    for sec in sections {
+        if !PARTIAL_SECTIONS.contains(&sec.as_str()) {
+            bail!("partie inconnue : « {sec} »");
+        }
+    }
+    if sections.is_empty() {
+        bail!("rien à importer : cochez au moins une partie");
+    }
+    let want = |k: &str| sections.iter().any(|s| s == k);
+    let named = |s: &str| !s.trim().is_empty();
+    let mut out = BTreeMap::new();
+    if want("scenes") {
+        let n = Naming::<Scene> { get: &|s| s.name.clone(), set: &|s, n| s.name = n.to_string(), max: 64, sep: " ", ok: &named };
+        out.insert("scenes".to_string(), merge_named(&mut cur.scenes, &src.scenes, conflict, &n));
+    }
+    if want("timelines") {
+        let n = Naming::<Show> { get: &|s| s.name.clone(), set: &|s, n| s.name = n.to_string(), max: 64, sep: " ", ok: &valid_show_name };
+        out.insert("timelines".to_string(), merge_named(&mut cur.timelines, &src.timelines, conflict, &n));
+    }
+    if want("midi") {
+        let builtin = ProfileStore::in_memory();
+        let ok = |slug: &str| valid_slug(slug) && !builtin.is_builtin(slug);
+        let mut list: Vec<(String, Profile)> = cur.midi.profiles.clone().into_iter().collect();
+        let theirs: Vec<(String, Profile)> = src.midi.profiles.clone().into_iter().collect();
+        let n = Naming::<(String, Profile)> {
+            get: &|(slug, _)| slug.clone(),
+            set: &|(slug, p), n| {
+                *slug = n.to_string();
+                let k = n.rsplit('-').next().unwrap_or("2");
+                p.name = format!("{} {k}", p.name).trim().to_string();
+            },
+            max: 64,
+            sep: "-",
+            ok: &ok,
+        };
+        out.insert("midi".to_string(), merge_named(&mut list, &theirs, conflict, &n));
+        cur.midi.profiles = list.into_iter().collect();
+    }
+    // User cues: matched by name; every cue taken gets an id of this
+    // project (ids are per project), and the imported pages follow.
+    let mut ids: BTreeMap<String, String> = BTreeMap::new();
+    if want("user_cues") {
+        let mut r = SectionReport { found: src.user_cues.len(), ..Default::default() };
+        let mut next = cur.user_cues.iter().filter_map(|c| c.id.strip_prefix("u-").and_then(|n| n.parse::<u64>().ok())).max().unwrap_or(0) + 1;
+        let mut fresh = || {
+            let id = format!("u-{next}");
+            next += 1;
+            id
+        };
+        for cue in &src.user_cues {
+            let Some(i) = cur.user_cues.iter().position(|c| c.name == cue.name) else {
+                let id = fresh();
+                ids.insert(cue.id.clone(), id.clone());
+                cur.user_cues.push(UserCue { id, ..cue.clone() });
+                r.added += 1;
+                continue;
+            };
+            r.conflicts.push(cue.name.clone());
+            match conflict {
+                Conflict::Skip => {
+                    ids.insert(cue.id.clone(), cur.user_cues[i].id.clone());
+                    r.skipped += 1;
+                }
+                Conflict::Replace => {
+                    let id = cur.user_cues[i].id.clone();
+                    ids.insert(cue.id.clone(), id.clone());
+                    cur.user_cues[i] = UserCue { id, ..cue.clone() };
+                    r.replaced += 1;
+                }
+                Conflict::Rename => {
+                    let names: Vec<String> = cur.user_cues.iter().map(|c| c.name.clone()).collect();
+                    match free_name(&cue.name, 40, " ", &|c| names.iter().any(|x| x == c), &named) {
+                        Some(new) => {
+                            let id = fresh();
+                            ids.insert(cue.id.clone(), id.clone());
+                            r.renamed.push((cue.name.clone(), new.clone()));
+                            cur.user_cues.push(UserCue { id, name: new, ..cue.clone() });
+                        }
+                        None => r.skipped += 1,
+                    }
+                }
+            }
+        }
+        out.insert("user_cues".to_string(), r);
+    }
+    if want("pages") {
+        // The operator's pages only (library pages follow the libraries).
+        let theirs: Vec<CuePage> = src
+            .pages
+            .pages
+            .iter()
+            .filter(|p| p.category.is_none())
+            .map(|p| {
+                let mut p = p.clone();
+                for slot in &mut p.slots {
+                    // A user cue of the other project: its cue here, or nothing.
+                    if let Some(CueRef::User(id)) = slot.clone() {
+                        if id.starts_with("u-") {
+                            *slot = ids.get(&id).map(|n| CueRef::User(n.clone()));
+                        }
+                    }
+                }
+                p
+            })
+            .collect();
+        let n = Naming::<CuePage> { get: &|p| p.name.clone(), set: &|p, n| p.name = n.to_string(), max: 40, sep: " ", ok: &named };
+        let mut r = merge_named(&mut cur.pages.pages, &theirs, conflict, &n);
+        if cur.pages.pages.len() > crate::grid::MAX_PAGES {
+            let extra = cur.pages.pages.len() - crate::grid::MAX_PAGES;
+            cur.pages.pages.truncate(crate::grid::MAX_PAGES);
+            r.skipped += extra;
+            r.added = r.added.saturating_sub(extra);
+        }
+        out.insert("pages".to_string(), r);
+    }
+    if want("site") {
+        let mut r = SectionReport::default();
+        if let Some(site) = src.extra.get(crate::sites::PROJECT_KEY) {
+            r.found = 1;
+            let name = site.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+            match cur.extra.get(crate::sites::PROJECT_KEY) {
+                Some(_) if conflict == Conflict::Skip => {
+                    r.conflicts.push(name);
+                    r.skipped = 1;
+                }
+                Some(_) => {
+                    r.conflicts.push(name);
+                    r.replaced = 1;
+                    cur.extra.insert(crate::sites::PROJECT_KEY.into(), site.clone());
+                }
+                None => {
+                    r.added = 1;
+                    cur.extra.insert(crate::sites::PROJECT_KEY.into(), site.clone());
+                }
+            }
+        }
+        out.insert("site".to_string(), r);
+    }
+    check(cur)?;
+    Ok(out)
+}
+
+/// *Importer depuis un projet…*: the chosen sections of another project
+/// of the folder merged into the open one, which becomes modified (not
+/// saved). Same checks and swap as opening. An embedded site is only
+/// carried (offered later), never applied. Never arms.
+fn import_partial(shared: &Mutex<Shared>, req: &PartialRequest) -> Result<Done, Reply> {
+    let dir = shared.lock().unwrap().project.dir.clone();
+    let path = resolve(&dir, &req.from).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+    let (loaded, _) = load_file(&path).map_err(|e| Reply::Text(if path.exists() { 400 } else { 404 }, format!("{e:#}")))?;
+    if let Some(v) = loaded.newer() {
+        return Err(Reply::Text(400, format!("projet créé par une version plus récente de Laser Studio (format {v}) : import impossible")));
+    }
+    let src = loaded.project;
+    let mut cur = current_project(shared);
+    if req.sections.iter().any(|s| s == "pages") {
+        let presets = shared.lock().unwrap().presets.clone();
+        cur.pages.materialize(&presets);
+    }
+    let name = cur.name.clone();
+    let report = merge(&mut cur, &src, &req.sections, req.conflict).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+    let report = json!(report);
+    if req.dry_run {
+        return Ok(Done { import: Some(report), ..Done::default() });
+    }
+    let warnings = swap_in(shared, &cur)?;
+    let mut s = shared.lock().unwrap();
+    s.project.extra = cur.extra.clone();
+    s.project.last_modified = true;
+    log::info!("Projet « {name} » : import partiel depuis « {} » ({})", name_of(&path), req.sections.join(", "));
+    s.gate.log().record("project_import", Some("ui"), serde_json::json!({ "from": name_of(&path), "sections": req.sections, "armed": s.gate.is_armed() }));
+    Ok(Done { warnings, import: Some(report), notice: Some(format!("Importé depuis « {} »", name_of(&path))), ..Done::default() })
+}
+
 
 /// The current project for a diagnostic report (T-403), without its
 /// media: the figure library is left out (only how many there were).
@@ -2442,6 +2748,129 @@ mod tests {
         s.sync_notices();
         assert!(s.notices.since(0).iter().any(|n| n.key.as_deref() == Some("backup") && !n.resolved));
         drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---------- partial import and site offer (T-289) ----------
+
+    fn midi(name: &str) -> Profile {
+        Profile::parse(&format!(r#"{{ "name": "{name}" }}"#)).unwrap()
+    }
+
+    fn page(name: &str, cells: &[Option<CueRef>]) -> CuePage {
+        CuePage { name: name.into(), slots: cells.to_vec(), category: None, user: true }
+    }
+
+    fn user_cue(id: &str, name: &str) -> UserCue {
+        UserCue { id: id.into(), name: name.into(), ..Default::default() }
+    }
+
+    /// The open project and another one with clashing names.
+    fn pair() -> (Project, Project) {
+        let mut cur = Project { scenes: vec![scene("A", 0.5)], ..Project::default() };
+        cur.midi.profiles.insert("pad".into(), midi("Pad"));
+        cur.user_cues = vec![user_cue("u-1", "Logo")];
+        cur.pages.pages = vec![page("Intro", &[Some(CueRef::User("u-1".into()))])];
+        let mut src = Project { scenes: vec![scene("A", 0.9), scene("B", 0.3)], timelines: vec![Show { name: "Final".into(), ..Default::default() }], ..Project::default() };
+        src.midi.profiles.insert("pad".into(), midi("Leur pad"));
+        src.midi.profiles.insert("knobs".into(), midi("Knobs"));
+        src.user_cues = vec![user_cue("u-1", "Logo"), user_cue("u-2", "Vague")];
+        src.pages.pages = vec![page("Intro", &[Some(CueRef::User("u-2".into())), Some(CueRef::User("u-9".into())), Some(CueRef::Builtin("circle".into()))])];
+        (cur, src)
+    }
+
+    #[test]
+    fn importing_only_midi_touches_neither_pages_nor_scenes() {
+        let (mut cur, src) = pair();
+        let before = (cur.scenes.iter().map(|s| (s.name.clone(), s.settings.scale)).collect::<Vec<_>>(), cur.pages.clone(), cur.user_cues.clone(), cur.timelines.len());
+        let r = merge(&mut cur, &src, &["midi".into()], Conflict::Rename).unwrap();
+        assert_eq!(before, (cur.scenes.iter().map(|s| (s.name.clone(), s.settings.scale)).collect::<Vec<_>>(), cur.pages.clone(), cur.user_cues.clone(), cur.timelines.len()));
+        let midi = &r["midi"];
+        assert_eq!((midi.found, midi.added), (2, 1));
+        assert_eq!(midi.renamed, [("pad".to_string(), "pad-2".to_string())]);
+        assert_eq!(cur.midi.profiles["pad"].name, "Pad", "ours kept");
+        assert_eq!(cur.midi.profiles["pad-2"].name, "Leur pad 2");
+        assert!(cur.midi.profiles.contains_key("knobs"));
+    }
+
+    #[test]
+    fn conflicts_are_renamed_replaced_or_skipped() {
+        let (cur0, src) = pair();
+        let scenes = |p: &Project| p.scenes.iter().map(|s| (s.name.clone(), s.settings.scale)).collect::<Vec<_>>();
+        let mut cur = cur0.clone();
+        let r = merge(&mut cur, &src, &["scenes".into()], Conflict::Rename).unwrap();
+        assert_eq!(scenes(&cur), [("A".to_string(), 0.5), ("A 2".to_string(), 0.9), ("B".to_string(), 0.3)]);
+        assert_eq!(r["scenes"].conflicts, ["A"]);
+        let mut cur = cur0.clone();
+        merge(&mut cur, &src, &["scenes".into()], Conflict::Replace).unwrap();
+        assert_eq!(scenes(&cur), [("A".to_string(), 0.9), ("B".to_string(), 0.3)]);
+        let mut cur = cur0.clone();
+        let r = merge(&mut cur, &src, &["scenes".into()], Conflict::Skip).unwrap();
+        assert_eq!(scenes(&cur), [("A".to_string(), 0.5), ("B".to_string(), 0.3)]);
+        assert_eq!(r["scenes"].skipped, 1);
+        // Nothing chosen, or an unknown part: refused.
+        assert!(merge(&mut cur0.clone(), &src, &[], Conflict::Skip).is_err());
+        assert!(merge(&mut cur0.clone(), &src, &["calibration".into()], Conflict::Skip).is_err());
+    }
+
+    #[test]
+    fn imported_pages_point_at_the_imported_cues_or_at_nothing() {
+        let (mut cur, src) = pair();
+        merge(&mut cur, &src, &["user_cues".into(), "pages".into()], Conflict::Rename).unwrap();
+        // « Logo » renamed « Logo 2 » with a new id, « Vague » added.
+        let names: Vec<(&str, &str)> = cur.user_cues.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
+        assert_eq!(names, [("u-1", "Logo"), ("u-2", "Logo 2"), ("u-3", "Vague")]);
+        let intro2 = cur.pages.pages.iter().find(|p| p.name == "Intro 2").unwrap();
+        assert_eq!(intro2.slots, [Some(CueRef::User("u-3".into())), None, Some(CueRef::Builtin("circle".into()))]);
+        assert_eq!(cur.pages.pages[0].slots, [Some(CueRef::User("u-1".into()))], "our page untouched");
+        // Pages alone: their user cues don't exist here, the cells empty.
+        let (mut cur, src) = pair();
+        merge(&mut cur, &src, &["pages".into()], Conflict::Replace).unwrap();
+        assert_eq!(cur.pages.pages.len(), 1);
+        assert_eq!(cur.pages.pages[0].slots, [None, None, Some(CueRef::Builtin("circle".into()))]);
+    }
+
+    #[test]
+    fn the_partial_import_route_previews_merges_and_leaves_the_project_modified() {
+        let dir = temp_dir("partial");
+        let shared = studio(&dir);
+        shared.lock().unwrap().scenes.replace_in_memory(vec![scene("Ici", 1.0)]);
+        post(&shared, &dir, "save-as", json!({ "path": "Autre" })).unwrap();
+        shared.lock().unwrap().scenes.replace_in_memory(vec![scene("Là", 1.0)]);
+        post(&shared, &dir, "save-as", json!({ "path": "Courant" })).unwrap();
+        let preview = post(&shared, &dir, "import-partial", json!({ "from": "Autre", "sections": ["scenes"], "dry_run": true })).unwrap();
+        assert_eq!(preview["import"]["scenes"]["added"], 1);
+        assert_eq!(shared.lock().unwrap().scenes.list().len(), 1, "a preview changes nothing");
+        assert!(!modified(&shared));
+        let done = post(&shared, &dir, "import-partial", json!({ "from": "Autre", "sections": ["scenes"] })).unwrap();
+        assert_eq!(done["name"], "Courant");
+        let names: Vec<String> = shared.lock().unwrap().scenes.list().iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, ["Là", "Ici"]);
+        assert!(modified(&shared));
+        assert!(!shared.lock().unwrap().gate.is_armed());
+        assert_eq!(post(&shared, &dir, "import-partial", json!({ "from": "../x", "sections": ["scenes"] })).unwrap_err().0, 400);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn opening_a_project_with_a_site_offers_it_and_changes_no_calibration() {
+        let dir = temp_dir("site-offer");
+        let shared = studio(&dir);
+        let mut site = crate::sites::capture(&shared.lock().unwrap(), "Club");
+        site.calibration.offset_x = 0.4;
+        let p = Project { name: "Avec lieu".into(), extra: Map::from_iter([(crate::sites::PROJECT_KEY.to_string(), serde_json::to_value(&site).unwrap())]), ..Project::default() };
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        write_project(&dir.join("projects/Avec lieu.lsproj"), &p).unwrap();
+        let before = shared.lock().unwrap().calibration;
+        let v = post(&shared, &dir, "open", json!({ "path": "Avec lieu" })).unwrap();
+        assert_eq!(v["site_offer"], "Club");
+        assert_eq!(shared.lock().unwrap().calibration, before, "« Garder le profil actuel » is the default");
+        // Saved again, the site stays with the project.
+        post(&shared, &dir, "save", json!({})).unwrap();
+        assert!(read(&dir.join("projects/Avec lieu.lsproj")).unwrap().extra.contains_key(crate::sites::PROJECT_KEY));
+        // « Utiliser celui du projet ».
+        crate::sites::use_project(&mut shared.lock().unwrap(), false, crate::interlock::ArmSource::Ui).unwrap();
+        assert_eq!(shared.lock().unwrap().calibration.offset_x, 0.4);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
