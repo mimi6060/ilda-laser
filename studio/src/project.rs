@@ -143,6 +143,10 @@ pub struct Project {
     /// The custom desk's tabs (`desks.json`, T-427). Missing in projects
     /// saved before T-427: they open with an empty desk.
     pub desks: Vec<crate::desk::DeskTab>,
+    /// Macros (`macros.json`, T-425). Missing in projects saved before
+    /// T-425: they open with none. A macro whose line no longer parses
+    /// opens disabled, with a warning.
+    pub macros: Vec<crate::macros::Macro>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -174,6 +178,7 @@ impl Default for Project {
             executors: ExecutorBank::default(),
             speed: Default::default(),
             desks: Vec::new(),
+            macros: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -267,7 +272,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 14] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json"];
+const WORKING_FILES: [&str; 15] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -531,6 +536,7 @@ fn check(p: &mut Project) -> Result<()> {
     p.pages.sanitize();
     p.executors.sanitize();
     crate::desk::sanitize(&mut p.desks);
+    crate::macros::sanitize(&mut p.macros);
 
     let mut shows = HashSet::new();
     for show in &mut p.timelines {
@@ -616,6 +622,7 @@ pub fn snapshot(s: &Shared) -> Project {
         executors: s.executors.bank.clone(),
         speed: s.speed.clone(),
         desks: s.desks.tabs.clone(),
+        macros: s.macros.list().to_vec(),
         ..Project::default()
     }
 }
@@ -663,8 +670,12 @@ fn apply(s: &mut Shared, p: &Project) {
         }
         None => s.cue_list.unload(),
     }
+    s.macros.replace_in_memory(p.macros.clone());
     crate::usercues::sync_presets(s);
     crate::figures::refresh(s);
+    // Lines checked on the registry just rebuilt (macros included): a bad
+    // one disables its macro, with a warning the open report carries.
+    crate::macros::revalidate(s);
     // Saved below, not by the engine thread.
     s.live_dirty = false;
     s.mixer_dirty = false;
@@ -688,8 +699,11 @@ struct WorkingPaths {
     cue_lists: Option<PathBuf>,
     executors: Option<PathBuf>,
     desks: Option<PathBuf>,
+    macros: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
+    /// Macros disabled on opening (T-425), for the open report.
+    macro_warnings: Vec<String>,
 }
 
 fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
@@ -708,8 +722,10 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         cue_lists: s.cue_lists.path().map(Path::to_path_buf),
         executors: s.executors.path().map(Path::to_path_buf),
         desks: s.desks.path().map(Path::to_path_buf),
+        macros: s.macros.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
+        macro_warnings: Vec::new(),
     }
 }
 
@@ -741,6 +757,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(path) = &w.desks {
         put(path, serde_json::to_vec_pretty(&p.desks));
+    }
+    if let Some(path) = &w.macros {
+        put(path, serde_json::to_vec_pretty(&p.macros));
     }
     put(&w.lfos, serde_json::to_vec_pretty(&p.lfos));
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
@@ -978,13 +997,18 @@ fn swap_in(shared: &Mutex<Shared>, p: &Project) -> Result<Vec<String>, Reply> {
         check_lfos(p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
         apply(&mut s, p);
         let data_dir = s.project.data_dir.clone();
-        working_paths(&s, &data_dir)
+        let mut w = working_paths(&s, &data_dir);
+        w.macro_warnings = s.macros.warnings.clone();
+        w
     };
-    let warnings = persist(&w, p);
+    // The macros as revalidated (some may be disabled) go to the working copy.
+    let mut p = p.clone();
+    p.macros = shared.lock().unwrap().macros.list().to_vec();
+    let warnings = persist(&w, &p);
     for e in &warnings {
         log::warn!("project open: failed to write {e}");
     }
-    Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
+    Ok(w.macro_warnings.iter().cloned().chain(warnings.into_iter().map(|e| format!("impossible d'écrire {e}"))).collect())
 }
 
 /// Opens `path`, or a new empty project with `None`. Atomic: nothing
@@ -1305,6 +1329,7 @@ mod tests {
         s.figures = crate::figures::FigureStore::load(dir.join("figures"));
         s.user_cues = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));
         s.cue_lists = crate::cuelist::CueListStore::load_or_create(dir.join("cuelists.json"));
+        s.macros = crate::macros::Macros::load(dir.join("macros.json"));
         s.project = ProjectState::load(dir);
         startup(&mut s);
         Mutex::new(s)
@@ -1534,6 +1559,48 @@ mod tests {
         let mut s = shared.lock().unwrap();
         apply(&mut s, &old);
         assert!(s.desks.tabs.is_empty());
+        assert!(!s.gate.is_armed());
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-425: macros are saved in the project and come back; a project
+    /// without `macros` opens with none; one whose macro holds a line that
+    /// no longer parses opens, that macro disabled, with a warning; a
+    /// refused line is emptied, never kept.
+    #[test]
+    fn macros_are_saved_in_the_project_and_a_bad_line_opens_disabled() {
+        use crate::macros::{Macro, MacroStep, Wait};
+        let dir = temp_dir("macros");
+        let shared = studio(&dir);
+        let m = Macro { id: "m1".into(), name: "Montée".into(), key: Some("M".into()), steps: vec![MacroStep { command: "master.size 50".into(), wait: Wait::Beats(1.0), enabled: true }], ..Default::default() };
+        crate::macros::set(&mut shared.lock().unwrap(), vec![m.clone()]).unwrap();
+        assert!(modified(&shared), "a macro is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Macros" })).unwrap();
+        let path = dir.join("projects/Macros.lsproj");
+        let saved = parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.macros, vec![m.clone()]);
+        crate::macros::set(&mut shared.lock().unwrap(), Vec::new()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "Macros.lsproj" })).unwrap();
+        assert_eq!(shared.lock().unwrap().macros.list(), std::slice::from_ref(&m));
+        assert!(shared.lock().unwrap().controls.get("macro.m1.go").is_some());
+        assert!(!modified(&shared));
+        // Older project: no macros.
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert!(old.macros.is_empty());
+        // A line that no longer parses, and a refused one written by hand.
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["macros"][0]["steps"][0]["command"] = json!("cue \"Plus là\" go");
+        v["macros"][0]["steps"].as_array_mut().unwrap().push(json!({ "command": "armer" }));
+        std::fs::write(&path, v.to_string()).unwrap();
+        let r = post(&shared, &dir, "open", json!({ "path": "Macros.lsproj" })).unwrap();
+        let warnings = r["warnings"].as_array().cloned().unwrap_or_default();
+        assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("macro désactivée")), "{r}");
+        let s = shared.lock().unwrap();
+        let m = &s.macros.list()[0];
+        assert!(!m.enabled);
+        assert_eq!(m.steps[0].command, "cue \"Plus là\" go");
+        assert!(m.steps[1].command.is_empty() && !m.steps[1].enabled);
         assert!(!s.gate.is_armed());
         drop(s);
         let _ = std::fs::remove_dir_all(dir);

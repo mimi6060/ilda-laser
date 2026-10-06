@@ -429,6 +429,9 @@ fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>, hub: 
         let s = &mut *s;
         s.gate.sync_estop(&s.estop);
         s.sync_audience();
+        // Macros end now (T-425); if the lock is busy, the engine's next
+        // frame ends them before any step, as it sees the latch.
+        s.macros.player.stop_all();
     }
     // Binary frames after this one were finished after the latch, so they
     // show the stop (T-411). One more than the last published: the engine
@@ -1815,7 +1818,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (Method::Post, "/api/executors") => match body::<crate::executors::ExecutorBank>(request) {
             Ok(bank) => {
                 let s = &mut *shared.lock().unwrap();
-                match bank.validate(|id| s.presets.iter().any(|p| p.id == id)) {
+                match bank.validate(|id| s.presets.iter().any(|p| p.id == id), |id| s.macros.get(id).is_some()) {
                     Ok(()) => {
                         s.executors.set_bank(bank);
                         s.executors.save();
@@ -1848,6 +1851,49 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // Macros (T-425): GET the list and what runs; POST replaces the
+        // list (checked line by line: an edit, in the history, locked in
+        // show mode). Running, stopping and Go are playback.
+        (Method::Get, "/api/macros") => json_response(crate::macros::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/macros") => match body::<MacroListRequest>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::macros::set(s, req.macros) {
+                    Ok(()) => json_response(crate::macros::view(s)),
+                    Err(e) => with_status(json_response(json!(e)), 400),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/macros/run") => match body::<MacroIdRequest>(request) {
+            Ok(MacroIdRequest { id: Some(id), source }) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::macros::start(s, &id, controls::ControlSource::from_id(source.as_deref())) {
+                    Ok(()) => json_response(crate::macros::view(s)),
+                    Err(why) => text(409, why),
+                }
+            }
+            Ok(_) => text(400, "macro manquante"),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/macros/stop") => match body::<MacroIdRequest>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                match req.id {
+                    Some(id) => {
+                        crate::macros::stop(s, &id);
+                    }
+                    None => crate::macros::stop_all(s),
+                }
+                json_response(crate::macros::view(s))
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/macros/go") => {
+            let s = &mut *shared.lock().unwrap();
+            let n = crate::macros::go(s);
+            json_response(json!({ "advanced": n }))
+        }
         (Method::Get, "/api/fx") => {
             let s = shared.lock().unwrap();
             let targets: Vec<_> = s
@@ -4200,6 +4246,21 @@ fn frame(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 
 /// The tempo clock's state, with the speed groups (T-419) as `groups`
 /// (A..D, without their beats), `rate` (the *Cadence*) and `change_on_bar`.
+/// `POST /api/macros`.
+#[derive(serde::Deserialize)]
+struct MacroListRequest {
+    macros: Vec<crate::macros::Macro>,
+}
+
+/// `POST /api/macros/run` / `stop` (no id: every macro).
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct MacroIdRequest {
+    id: Option<String>,
+    /// Who launched it (« En cours »): `keyboard`, else the page.
+    source: Option<String>,
+}
+
 fn tempo_view(s: &Shared) -> serde_json::Value {
     let mut v = json!(s.tempo.state(s.now_s()));
     let speed = s.speed.view(s.tempo.bpm);
@@ -4287,6 +4348,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     // T-427: the desk's layout revision, its bound controls' values and
     // its missing bindings.
     v["desk"] = crate::desk::view(s);
+    // Macros (T-425): the list's revision and what runs (step, Go).
+    v["macros"] = crate::macros::live_view(s);
     // T-146: what plays on the FX grid, each line's level now.
     v["fx"] = s.fx.view();
     // T-274: what is prepared (no points: those are `/api/preview-frame`).
@@ -4987,6 +5050,86 @@ mod tests {
     /// the history and undone, refused in show mode, bad assignments
     /// refused), played through `/api/control` (allowed in show mode), its
     /// state and the cue level in `/api/frame`.
+    /// T-425: macros over the API: saved (in the history and undone,
+    /// refused in show mode, refused lines and cycles refused with the
+    /// step), run, waited on Go, stopped and shown in « En cours » (all
+    /// allowed in show mode), launched from an executor; never arming.
+    #[test]
+    fn macros_over_the_api() {
+        let t = TestServer::start(false);
+        let m = |name: &str, steps: serde_json::Value| json!({ "id": "", "name": name, "steps": steps });
+        let list = json!({ "macros": [m("Montée", json!([{ "command": "master.size 50", "wait": "go" }, { "command": "master.size 90" }]))] });
+        let (code, body) = t.request("POST", "/api/macros", &list.to_string());
+        assert_eq!(code, 200, "{body}");
+        let v = js(&body);
+        assert_eq!(v["macros"][0]["id"], "m1");
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Macro « Montée » créée");
+        // A refused line: 400 with the step.
+        let bad = json!({ "macros": [m("X", json!([{ "command": "tempo 120" }, { "command": "armer" }]))] });
+        let (code, body) = t.request("POST", "/api/macros", &bad.to_string());
+        assert_eq!(code, 400);
+        let e = js(&body);
+        assert_eq!((e["step"].as_u64(), e["refused"].as_bool()), (Some(2), Some(true)), "{e}");
+        assert!(e["message_fr"].as_str().unwrap().starts_with("Macro « X », étape 2 : Commande refusée"));
+        // A cycle.
+        let cycle = json!({ "macros": [
+            { "id": "m1", "name": "A", "steps": [{ "command": "macro \"B\" go" }] },
+            { "id": "m2", "name": "B", "steps": [{ "command": "macro.m1.go" }] },
+        ] });
+        let (code, body) = t.request("POST", "/api/macros", &cycle.to_string());
+        assert_eq!(code, 400);
+        assert!(js(&body)["message_fr"].as_str().unwrap().starts_with("Cycle refusé"), "{body}");
+        // Show mode: the list is locked, playing is not.
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/macros", &list.to_string()).0, 423);
+        assert_eq!(t.request("POST", "/api/macros/run", r#"{"id":"m1"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/macros/run", r#"{"id":"zz"}"#).0, 409);
+        {
+            let mut s = t.shared.lock().unwrap();
+            let now = s.now_s();
+            crate::macros::frame(&mut s, now, 0.0);
+            assert!((s.live.size - 0.5).abs() < 1e-6);
+        }
+        let running = js(&t.request("GET", "/api/running", "").1);
+        assert_eq!(running["macros"][0]["name"], "Montée");
+        assert_eq!(running["macros"][0]["waiting"]["kind"], "go");
+        assert_eq!(js(&t.request("GET", "/api/frame", "").1)["macros"]["running"][0]["go"], true);
+        assert_eq!(js(&t.request("POST", "/api/macros/go", "{}").1)["advanced"], 1);
+        {
+            let mut s = t.shared.lock().unwrap();
+            let now = s.now_s();
+            crate::macros::frame(&mut s, now, 0.0);
+            assert!((s.live.size - 0.9).abs() < 1e-6);
+        }
+        assert_eq!(t.request("POST", "/api/macros/run", r#"{"id":"m1"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/running/stop", r#"{"kind":"macro","id":"m1"}"#).0, 200);
+        assert!(t.shared.lock().unwrap().macros.player.runs.is_empty());
+        assert_eq!(t.request("POST", "/api/macros/run", r#"{"id":"m1"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/macros/stop", "{}").0, 200);
+        assert!(t.shared.lock().unwrap().macros.player.runs.is_empty());
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+        // An executor's Go launches it.
+        let mut pages = js(&t.request("GET", "/api/executors", "").1)["pages"].clone();
+        pages[0]["handles"][0] = json!({ "target": { "type": "macro", "id": "m1" }, "fader": "level", "buttons": ["go", "none"] });
+        let (code, body) = t.request("POST", "/api/executors", &json!({ "pages": pages }).to_string());
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"exec.1.1.button","value":1}"#).0, 200);
+        assert!(t.shared.lock().unwrap().macros.player.is_running("m1"));
+        assert_eq!(js(&t.request("GET", "/api/frame", "").1)["executors"]["active"][0], true);
+        // The e-stop stops it.
+        assert_eq!(t.request("POST", "/api/estop?source=keyboard", "").0, 200);
+        assert!(t.shared.lock().unwrap().macros.player.runs.is_empty());
+        assert_eq!(t.request("POST", "/api/macros/run", r#"{"id":"m1"}"#).0, 409);
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap());
+        // Undo takes the macro back.
+        assert_eq!(t.request("POST", "/api/estop/reset", "").0, 200);
+        // The executor first, then the macro.
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        let undo = js(&t.request("GET", "/api/macros", "").1);
+        assert!(undo["macros"].as_array().unwrap().is_empty(), "{undo}");
+    }
+
     #[test]
     fn the_executor_bank_over_the_api() {
         let t = TestServer::start(false);
@@ -5003,7 +5146,7 @@ mod tests {
             json!({ "target": { "type": "cue", "id": "nope" } }),
             json!({ "target": { "type": "layer", "n": 1 }, "fader": "fade_in" }),
             json!({ "target": { "type": "cue_list" }, "buttons": ["flash", "none"] }),
-            json!({ "target": { "type": "macro", "id": "m" } }),
+            json!({ "target": { "type": "macro", "id": "m9" }, "fader": "level", "buttons": ["go", "none"] }),
         ] {
             let mut p = pages.clone();
             p[0]["handles"][1] = bad.clone();

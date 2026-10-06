@@ -1,0 +1,9 @@
+<p>Créez et modifiez les macros jouées dans LIVE › Macros.</p>
+<ul>
+<li>« + Macro » en crée une, « Dupliquer » la copie, « Supprimer » l'enlève ; « Nom » et « Touche » (<kbd>Alt</kbd> + lettre) la décrivent.</li>
+<li>Chaque étape est une ligne de commande (comme la ligne de commande : <code>master.size 80</code>, <code>cue 2.14 go</code>, <code>page 3</code>, <code>tempo 128</code>, <code>macro "Nom" go</code>) suivie d'une attente : aucune, des secondes, des temps ou « Attendre Go ».</li>
+<li>Les attentes en temps tombent sur le temps de l'horloge de tempo, même si la macro est lancée entre deux temps.</li>
+<li>« + Étape » ajoute une ligne ; « Active » la garde sans la jouer ; les flèches la déplacent.</li>
+<li>« Enregistrer » vérifie chaque ligne : une commande inconnue ou refusée (armer, réinitialiser, sécurité) est signalée sous l'étape et rien n'est enregistré. Une macro qui en lance une autre qui la relance est refusée.</li>
+</ul>
+<p>64 macros de 64 étapes au plus ; 8 tournent en même temps. Annuler (<kbd>Cmd</kbd>+<kbd>Z</kbd>) reprend une modification ; le mode spectacle bloque l'édition, pas la lecture.</p>

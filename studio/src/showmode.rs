@@ -99,6 +99,11 @@ pub fn allowed(path: &str) -> bool {
         "/api/cuelist/goto",
         // « En cours » (T-423): stop buttons, playback only.
         "/api/running/stop",
+        // Macros (T-425): running, stopping and Go are playback; saving
+        // the list is an edit.
+        "/api/macros/run",
+        "/api/macros/stop",
+        "/api/macros/go",
         "/api/audio",
         "/api/audio/tempo/new_track",
         "/api/timeline/load",

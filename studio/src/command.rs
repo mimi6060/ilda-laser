@@ -14,6 +14,8 @@
 //!   the order of `grid.<page>.<row>.<col>`), `cue "<name>" go|stop`.
 //! - `page <n>`, `tempo <bpm>`, `tap`, `tout arrêter` (or `stop`), `noir`
 //!   (= `transport.blackout`, the latching stop).
+//! - `macro "<nom>" go|stop` (T-425): a macro by its name (the label of
+//!   its `macro.<id>.go` control).
 //!
 //! Safety: a line never arms the laser. Two barriers: the parser refuses
 //! the arming and reset words, `transport.arm`, every `safety.*` id but
@@ -59,6 +61,8 @@ pub enum Command {
     Page(usize),
     Tempo(f64),
     StopAll,
+    /// A macro (T-425) by id: launched (`Go`) or stopped.
+    Macro { id: String, action: CueAction },
 }
 
 /// What went wrong, naming the word (`token`) and where it starts in the
@@ -267,6 +271,7 @@ pub fn parse(line: &str, reg: &ControlRegistry, presets: &[Preset]) -> Result<Co
             Ok(Command::Page(n))
         }
         "cue" => parse_cue(&toks, presets),
+        "macro" => parse_macro(&toks, reg),
         _ => parse_control(&toks, reg),
     }
 }
@@ -301,6 +306,34 @@ fn parse_cue(toks: &[Tok], presets: &[Preset]) -> Result<Command, CommandError> 
         }
     };
     Ok(Command::Cue { target, action })
+}
+
+/// `macro "<nom>" go|stop`: the name is the label of a `macro.<id>.go`
+/// control of the registry.
+fn parse_macro(toks: &[Tok], reg: &ControlRegistry) -> Result<Command, CommandError> {
+    let first = &toks[0];
+    if toks.len() < 3 {
+        return Err(match toks.get(1) {
+            None => value_expected(first, " (un nom de macro entre guillemets)"),
+            Some(t) => value_expected(t, " (go ou stop)"),
+        });
+    }
+    let last = &toks[toks.len() - 1];
+    let action = match (last.quoted, fold(&last.text).as_str()) {
+        (false, "go") => CueAction::Go,
+        (false, "stop") => CueAction::Stop,
+        _ => return Err(CommandError::new(last, format!("« go » ou « stop » attendu : « {} »", last.text))),
+    };
+    let what = &toks[1..toks.len() - 1];
+    let name = what.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
+    let folded = fold(&name);
+    let id = reg
+        .list()
+        .iter()
+        .filter(|d| d.group == "macro")
+        .find_map(|d| d.id.strip_prefix("macro.").and_then(|r| r.strip_suffix(".go")).filter(|_| fold(&d.label_fr) == folded))
+        .ok_or_else(|| CommandError::new(&what[0], format!("Macro inconnue : « {name} »")))?;
+    Ok(Command::Macro { id: id.to_string(), action })
 }
 
 fn parse_control(toks: &[Tok], reg: &ControlRegistry) -> Result<Command, CommandError> {
@@ -395,6 +428,19 @@ pub fn execute(s: &mut Shared, cmd: &Command, source: ControlSource) -> Result<S
         Command::StopAll => {
             apply(s, "running.stop_all", ControlInput::Value(1.0))?;
             Ok("Tout arrêté".to_string())
+        }
+        Command::Macro { id, action } => {
+            let name = s.macros.get(id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone());
+            match action {
+                CueAction::Go => {
+                    crate::macros::start(s, id, source).map_err(|why| CommandError { token: name.clone(), pos: 6, message_fr: format!("Commande refusée : {why}"), refused: true })?;
+                    Ok(format!("macro « {name} » : go"))
+                }
+                CueAction::Stop => {
+                    crate::macros::stop(s, id);
+                    Ok(format!("macro « {name} » : stop"))
+                }
+            }
         }
         Command::Cue { target, action } => {
             let (id, what) = match target {

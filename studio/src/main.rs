@@ -55,6 +55,7 @@ mod help;
 mod keep_awake;
 mod latency;
 mod live;
+mod macros;
 mod menubar;
 mod midi;
 mod mpe;
@@ -575,6 +576,9 @@ pub struct Shared {
     /// faders and XY pads the operator lays out. Content (projects,
     /// history); playing it goes through the control registry.
     pub desks: desk::Desks,
+    /// Macros (macros.rs, T-425, `macros.json`): the list is content
+    /// (projects, history); what runs is memory only.
+    pub macros: macros::Macros,
 }
 
 impl Shared {
@@ -845,6 +849,8 @@ impl Shared {
     /// scanning ends with it (T-255).
     pub fn emergency_stop(&mut self, src: interlock::ArmSource) {
         self.estop.trip(src);
+        // No macro step runs after the stop (T-425).
+        self.macros.player.stop_all();
         // Fades end and waiting cues are dropped at once (T-158 / T-159).
         self.deck.cut_transitions();
         // The cue list pauses; it never starts again by itself (T-410).
@@ -1470,9 +1476,12 @@ fn startup_state(cli: &Cli) -> Shared {
         prepared: Default::default(),
         executors: executors::Executors::load(cli.data_dir.join("executors.json")),
         desks: desk::Desks::load(cli.data_dir.join("desks.json")),
+        macros: macros::Macros::load(cli.data_dir.join("macros.json")),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
+    // Macro lines checked against the registry they will run on (T-425).
+    macros::revalidate(&mut state);
     if cli.test_hooks {
         state.project.autosave.allow_test_delays();
     }
@@ -1957,6 +1966,11 @@ impl Engine {
             // any source; the bar moves by itself only under Tempo auto.
             let downbeat = s.audio_in.fresh_downbeat(now);
             s.tempo.apply_downbeat(downbeat, t);
+            // Macros (T-425): the steps due now, on the tempo clock, before
+            // the deck so a cue they launch starts in this frame. The e-stop
+            // and a disarm end them first.
+            let macro_beat = s.tempo.beat_at(t);
+            macros::frame(&mut s, t, macro_beat);
             // Quantised launches due now start, finished transitions end;
             // with the e-stop latched, every transition is cut (T-158/159).
             controls::deck_frame(&mut s, t);
