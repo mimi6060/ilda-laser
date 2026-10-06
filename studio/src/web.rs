@@ -2204,6 +2204,30 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             hub.cancel();
             json_response(json!(hub.view()))
         }
+        // Modèles de timeline (T-165): list, save the selection, delete,
+        // and render (computes the show with the phrase laid on a region;
+        // the page sends it through /api/timeline/edit). Edits: locked in
+        // show mode. Nothing here arms anything.
+        (Method::Get, "/api/timeline/templates") => {
+            let s = shared.lock().unwrap();
+            let categories: Vec<&str> = crate::presets::CATEGORIES.iter().copied().filter(|c| s.presets.iter().any(|p| p.category == *c)).collect();
+            json_response(json!({ "templates": s.templates.all(), "categories": categories }))
+        }
+        (Method::Post, "/api/timeline/templates") => match body::<TemplateSave>(request) {
+            Ok(req) => save_template(req, shared),
+            Err(e) => e,
+        },
+        (Method::Post, "/api/timeline/templates/delete") => match body::<TemplateSave>(request) {
+            Ok(req) => match shared.lock().unwrap().templates.delete(&req.name) {
+                Ok(()) => ok(),
+                Err(e) => text(404, &format!("{e:#}")),
+            },
+            Err(e) => e,
+        },
+        (Method::Post, "/api/timeline/templates/render") => match body::<TemplateRender>(request) {
+            Ok(req) => render_template(req, shared),
+            Err(e) => e,
+        },
         (Method::Post, p) if p.starts_with("/api/timeline/") => timeline_route(request, shared, &p["/api/timeline/".len()..]),
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
         (Method::Get, "/api/netin") => json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now())),
@@ -2848,6 +2872,62 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
         _ => return text(404, "not found"),
     }
     json_response(json!(s.timeline.state(&c)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct TemplateSave {
+    name: String,
+    description: String,
+    /// Ids of the selected events.
+    events: Vec<u64>,
+    /// The page's copy of the show; default: the loaded show.
+    show: Option<crate::timeline::Show>,
+    /// Replace a user template of the same name.
+    overwrite: bool,
+}
+
+/// `POST /api/timeline/templates`: *Enregistrer la sélection comme modèle*.
+fn save_template(req: TemplateSave, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let s = shared.lock().unwrap();
+    let Some(mut show) = req.show.or_else(|| s.timeline.show.clone()) else { return text(409, "aucun show chargé") };
+    show.sanitize();
+    let (t, warnings) = match crate::templates::from_selection(&show, &req.events, &req.name, &req.description) {
+        Ok(r) => r,
+        Err(e) => return text(400, &format!("{e:#}")),
+    };
+    if !req.overwrite && s.templates.exists(&t.name) {
+        return text(409, &format!("un modèle s'appelle déjà « {} »", t.name));
+    }
+    if let Err(e) = s.templates.save(&t) {
+        return text(400, &format!("{e:#}"));
+    }
+    json_response(json!({ "template": t, "warnings": warnings }))
+}
+
+#[derive(Deserialize)]
+struct TemplateRender {
+    name: String,
+    #[serde(flatten)]
+    options: crate::templates::ApplyOptions,
+    show: Option<crate::timeline::Show>,
+}
+
+/// `POST /api/timeline/templates/render`: the show with the template laid
+/// on the region, and how many events it adds and removes. Nothing is
+/// changed here: the page sends that show through `/api/timeline/edit`.
+fn render_template(req: TemplateRender, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let s = shared.lock().unwrap();
+    let t = match s.templates.find(&req.name) {
+        Ok(t) => t,
+        Err(e) => return text(404, &format!("{e:#}")),
+    };
+    let Some(mut show) = req.show.or_else(|| s.timeline.show.clone()) else { return text(409, "aucun show chargé") };
+    show.sanitize();
+    match crate::templates::render(&show, &t, &req.options, &s.presets) {
+        Ok(a) => json_response(json!({ "show": a.show, "added": a.added, "removed": a.removed })),
+        Err(e) => text(400, &format!("{e:#}")),
+    }
 }
 
 /// `POST /api/timeline/autoshow`: a song of the library, and a seed
@@ -6333,6 +6413,63 @@ mod tests {
         assert_eq!(t.request("POST", "/api/timeline/save", r#"{"name":"Entree copie"}"#).0, 423);
         assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
         t.request("POST", "/api/timeline/stop", "");
+    }
+
+    /// T-165: a selection saved as a template, rendered on another region
+    /// (nothing changes until the edit route), locked tracks refused,
+    /// show mode refuses the edits, never arms.
+    #[test]
+    fn timeline_templates_over_the_api() {
+        let t = TestServer::start(false);
+        let json = |b: &str| serde_json::from_str::<serde_json::Value>(b).unwrap();
+        let dir = std::env::temp_dir().join(format!("laser-studio-test-tpl-api-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cue = {
+            let mut s = t.shared.lock().unwrap();
+            s.templates = crate::templates::TemplateStore::new(dir.join("templates"));
+            s.presets[0].id.clone()
+        };
+        assert_eq!(t.request("POST", "/api/timeline/templates/render", r#"{"name":"X","from":0,"to":8}"#).0, 404);
+        let mut show = crate::timeline::Show::new_empty("Modeles", crate::timeline::TimeBase::Beats);
+        show.tracks[0].events.push(crate::timeline::Event { id: 1, start: 0.0, len: 4.0, source: crate::timeline::EventSource::Cue { id: cue.clone() }, ..Default::default() });
+        show.tracks[1].events.push(crate::timeline::Event { id: 2, start: 4.0, len: 4.0, source: crate::timeline::EventSource::Cue { id: cue.clone() }, ..Default::default() });
+        assert_eq!(t.request("POST", "/api/timeline/load", &json!({ "show": show }).to_string()).0, 200);
+
+        let (status, body) = t.request("POST", "/api/timeline/templates", r#"{"name":"Deux temps","events":[1,2]}"#);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(json(&body)["template"]["slots"], json!(["A"]));
+        assert_eq!(t.request("POST", "/api/timeline/templates", r#"{"name":"Deux temps","events":[1]}"#).0, 409);
+        assert_eq!(t.request("POST", "/api/timeline/templates", r#"{"name":"Vide","events":[]}"#).0, 400);
+        let list = json(&t.request("GET", "/api/timeline/templates", "").1);
+        assert_eq!((list["templates"][0]["name"].as_str(), list["templates"][0]["builtin"].as_bool()), (Some("Deux temps"), Some(false)));
+        assert!(list["categories"].as_array().unwrap().len() > 3);
+
+        let req = json!({ "name": "Deux temps", "from": 8.0, "to": 16.0, "fit": "crop", "slots": { "A": { "cue": cue } } });
+        let (status, body) = t.request("POST", "/api/timeline/templates/render", &req.to_string());
+        assert_eq!(status, 200, "{body}");
+        let r = json(&body);
+        assert_eq!(r["added"], 2);
+        assert_eq!((r["show"]["tracks"][0]["events"][1]["start"].as_f64(), r["show"]["tracks"][1]["events"][1]["start"].as_f64()), (Some(8.0), Some(12.0)));
+        assert_eq!(t.shared.lock().unwrap().timeline.show.as_ref().unwrap().tracks[0].events.len(), 1, "render changes nothing");
+        assert_eq!(t.request("POST", "/api/timeline/edit", &json!({ "show": r["show"] }).to_string()).0, 200);
+        assert_eq!(t.shared.lock().unwrap().timeline.show.as_ref().unwrap().tracks[0].events.len(), 2);
+        let no_slot = json!({ "name": "Deux temps", "from": 8.0, "to": 16.0 });
+        assert_eq!(t.request("POST", "/api/timeline/templates/render", &no_slot.to_string()).0, 400);
+
+        t.shared.lock().unwrap().timeline.show.as_mut().unwrap().tracks[1].locked = true;
+        let (status, body) = t.request("POST", "/api/timeline/templates/render", &req.to_string());
+        assert_eq!((status, body.contains("verrouillée")), (400, true), "{body}");
+
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        for (path, body) in [("/api/timeline/templates", r#"{"name":"Autre","events":[1]}"#), ("/api/timeline/templates/render", "{}"), ("/api/timeline/templates/delete", r#"{"name":"Deux temps"}"#)] {
+            assert_eq!(t.request("POST", path, body).0, 423, "{path}");
+        }
+        assert_eq!(t.request("GET", "/api/timeline/templates", "").0, 200, "the list is a read");
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/templates/delete", r#"{"name":"Deux temps"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/timeline/templates/delete", r#"{"name":"Deux temps"}"#).0, 404);
+        assert_eq!(json(&t.request("GET", "/api/state", "").1)["armed"], false, "templates never arm");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Like `http`, with a binary body.

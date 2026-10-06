@@ -557,6 +557,19 @@ impl Show {
         0.0
     }
 
+    /// Seconds at a bar (0-based, fractional): the inverse of `bar_at_s`.
+    pub fn s_at_bar(&self, bar: f64) -> f64 {
+        let mut bars = 0.0;
+        for (from, to, bpm, bpb) in self.segments() {
+            let span = (to - from) * bpm / 60.0 / bpb;
+            if bar < bars + span {
+                return from + (bar - bars) * bpb * 60.0 / bpm;
+            }
+            bars += span;
+        }
+        0.0
+    }
+
     /// Bars since 0 s (fractional, 0-based), with the meter of each section.
     pub fn bar_at_s(&self, s: f64) -> f64 {
         let mut bars = 0.0;
