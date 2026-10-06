@@ -32,6 +32,7 @@ mod dwell;
 mod engine;
 mod evolving;
 mod examples;
+mod executors;
 mod fans;
 mod fx;
 mod festival;
@@ -551,6 +552,10 @@ pub struct Shared {
     /// rendered only by `GET /api/preview-frame`. The engine never reads
     /// it; only « Envoyer » plays it, as a cue press. Memory only.
     pub prepared: prepared::PreviewSlot,
+    /// The executor bank (executors.rs, T-418, `executors.json`): the
+    /// assignments are content (projects, history); what the hands hold
+    /// is memory only.
+    pub executors: executors::Executors,
 }
 
 impl Shared {
@@ -1410,6 +1415,7 @@ fn startup_state(cli: &Cli) -> Shared {
         notices: Default::default(),
         history: Default::default(),
         prepared: Default::default(),
+        executors: executors::Executors::load(cli.data_dir.join("executors.json")),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
@@ -1831,7 +1837,7 @@ impl Engine {
         self.last = now;
 
         let record_due;
-        let (looks, transition_fx, show_cues, starts, (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
+        let (looks, (transition_fx, exec_gains), show_cues, starts, (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -1893,6 +1899,9 @@ impl Engine {
             // Quantised launches due now start, finished transitions end;
             // with the e-stop latched, every transition is cut (T-158/159).
             controls::deck_frame(&mut s, t);
+            // The executor bank (T-418): each playing cue's level from the
+            // faders and buttons that hold it.
+            executors::frame(&mut s);
             // *Décalage de sortie* (T-246): what is rendered reads the beat
             // ahead by the output latency. Only the content: the gate, the
             // e-stop, the safety chain and the strobe limiter below run on
@@ -1981,7 +1990,11 @@ impl Engine {
             // in for the whole look; the cues wait in the deck.
             let pattern = testpattern::hold_timeline(&mut s);
             let show_cues = timeline_cues(&mut s, t, &clock);
-            let mixer = s.mixer.clone();
+            // Executors (T-418): a layer flashed or blacked while a button
+            // is held, on the copy the mixer draws with.
+            let mut mixer = s.mixer.clone();
+            executors::layer_overrides(&s, &mut mixer);
+            let exec_gains = executors::gains(&s);
             // Scan presets (T-415): the optimiser settings each look is
             // traced with (event > cell > figure > the output's default;
             // « Auto » = `mixer.optimizer`), before the mixer and the
@@ -2004,7 +2017,9 @@ impl Engine {
             levels::frame(&mut s);
             let levels = self.smoothers.frame(&s, dt);
             let armed = s.gate.is_armed();
-            let routing = Routing::read(&s, &looks, &show_cues);
+            let mut routing = Routing::read(&s, &looks, &show_cues);
+            // A zone group flashed or blacked by an executor (T-418), held.
+            executors::group_overrides(&s, &mut routing.config);
             let caps = s.outputs.active_limits();
             // The ShowNET SD card over Art-Net (T-301) plays the cue's bank
             // number itself: it needs the cue, not only the points.
@@ -2041,7 +2056,7 @@ impl Engine {
             // An ILDA recording (T-442) wants this frame: copied below,
             // before the safety chain; nothing else changes.
             record_due = s.recorder.due(t);
-            (looks, transition_fx, show_cues, starts, (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
+            (looks, (transition_fx, exec_gains), show_cues, starts, (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -2162,6 +2177,14 @@ impl Engine {
                 // the mixer, live stage, zones, calibration and the whole
                 // safety stage still come after.
                 transition::apply(&mut cue_looks, &transition_fx);
+                // Executor levels (T-418): a gain of at most 1 on each
+                // cue's colours, still before the mixer, the master stage
+                // and the whole safety chain.
+                for (id, points, _) in cue_looks.iter_mut() {
+                    if let Some(&g) = exec_gains.get(id) {
+                        transition::scale(points, g);
+                    }
+                }
                 rendered.extend(cue_looks.into_iter().map(|(_, points, (layer, zones))| (layer, points, zones)));
                 let evolving: Vec<(u64, evolving::Progress)> =
                     looks.iter().filter_map(|(_, id, _)| Some((*id, animators.get(id)?.progress()?.clone()))).collect();

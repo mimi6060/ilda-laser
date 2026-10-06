@@ -211,6 +211,11 @@ pub struct ActiveCue {
     pub fade: Option<Fade>,
     /// Who started it (« En cours »), set by `controls::press_cue_as`.
     pub source: ControlSource,
+    /// Its executor level (T-418, *Fondu au curseur*, *Temp*, *Noir
+    /// tenu*), 0..1, 1 for a cue started from the grid: a gain on its
+    /// colours before the mixer and the safety stage. Set every frame by
+    /// `executors::sync_levels`.
+    pub exec_level: f32,
 }
 
 impl ActiveCue {
@@ -675,6 +680,7 @@ impl CueDeck {
             settings,
             fade,
             source: ControlSource::Ui,
+            exec_level: 1.0,
         });
         self.enforce_limit(Some(at));
     }

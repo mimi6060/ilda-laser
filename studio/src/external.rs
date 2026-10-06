@@ -102,11 +102,14 @@ fn group_allowed(group: &str) -> bool {
 /// masters (T-420, registry group `group`) are dimmers like the layer
 /// dimmers and go with them (« Maîtres »), so scopes saved before them
 /// keep their meaning.
+///
+/// The executor bank (T-418, registry group `exec`) plays cues: it goes
+/// with the cue grid (« Cues »).
 fn scope_group(group: &str) -> &str {
-    if group == "group" {
-        "layer"
-    } else {
-        group
+    match group {
+        "group" => "layer",
+        "exec" => "grid",
+        _ => group,
     }
 }
 

@@ -1731,6 +1731,27 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // modulators may use, our starter effects. Playing goes through
         // `/api/control` (`fx.*`); POST replaces the cells (an edit:
         // recorded in the history, locked in show mode).
+        // The executor bank (T-418): GET the pages and what the hands hold;
+        // POST replaces the pages (an edit: in the history, locked in show
+        // mode). Playing goes through `/api/control` (`exec.*`).
+        (Method::Get, "/api/executors") => {
+            let s = shared.lock().unwrap();
+            json_response(json!({ "pages": s.executors.bank.pages, "state": crate::executors::view(&s), "per_page": crate::executors::EXEC_PER_PAGE, "max_pages": crate::executors::EXEC_MAX_PAGES }))
+        }
+        (Method::Post, "/api/executors") => match body::<crate::executors::ExecutorBank>(request) {
+            Ok(bank) => {
+                let s = &mut *shared.lock().unwrap();
+                match bank.validate(|id| s.presets.iter().any(|p| p.id == id)) {
+                    Ok(()) => {
+                        s.executors.set_bank(bank);
+                        s.executors.save();
+                        json_response(json!({ "pages": s.executors.bank.pages, "state": crate::executors::view(s) }))
+                    }
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/fx") => {
             let s = shared.lock().unwrap();
             let targets: Vec<_> = s
@@ -3906,7 +3927,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         "settings_rev": s.settings_rev,
         "festival": festival_view(s),
         "cues": {
-            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer, "phase": s.deck.phase(a.id, now) })).collect::<Vec<_>>(),
+            "active": s.deck.active.iter().map(|a| json!({ "cue": a.cue, "held": a.held, "layer": a.layer, "phase": s.deck.phase(a.id, now), "level": a.exec_level })).collect::<Vec<_>>(),
             "shown": s.deck.visible().iter().map(|a| a.cue.as_str()).collect::<Vec<_>>(),
             // T-158: stopped cues still fading out (*Fin*).
             "ending": s.deck.ending.iter().map(|e| json!({ "cue": e.cue.cue, "layer": e.cue.layer, "phase": s.deck.phase(e.cue.id, now) })).collect::<Vec<_>>(),
@@ -3947,6 +3968,9 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     });
     // T-285: undo / redo counts and labels; `rev` moves on every change.
     v["history"] = s.history.summary();
+    // T-418: the executor page shown, its faders, and the pages with
+    // something active.
+    v["executors"] = crate::executors::view(s);
     // T-146: what plays on the FX grid, each line's level now.
     v["fx"] = s.fx.view();
     // T-274: what is prepared (no points: those are `/api/preview-frame`).
@@ -4588,6 +4612,48 @@ mod tests {
         let f = js(&t.request("GET", "/api/frame", "").1);
         assert_eq!(f["fx"]["lines"][3]["active"], 0);
         assert_eq!(f["armed"], false);
+    }
+
+    /// T-418: the executor bank over the API: read, assigned (recorded in
+    /// the history and undone, refused in show mode, bad assignments
+    /// refused), played through `/api/control` (allowed in show mode), its
+    /// state and the cue level in `/api/frame`.
+    #[test]
+    fn the_executor_bank_over_the_api() {
+        let t = TestServer::start(false);
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        let g = js(&t.request("GET", "/api/executors", "").1);
+        assert_eq!(g["pages"].as_array().unwrap().len(), 1);
+        assert_eq!(g["pages"][0]["handles"].as_array().unwrap().len(), 8);
+        let mut pages = g["pages"].clone();
+        pages[0]["handles"][0] = json!({ "target": { "type": "cue", "id": cue }, "fader": "fade_in", "buttons": ["flash", "black_held"] });
+        let (code, body) = t.request("POST", "/api/executors", &json!({ "pages": pages }).to_string());
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Exécuteur 1.1 affecté");
+        for bad in [
+            json!({ "target": { "type": "cue", "id": "nope" } }),
+            json!({ "target": { "type": "layer", "n": 1 }, "fader": "fade_in" }),
+            json!({ "target": { "type": "cue_list" }, "buttons": ["flash", "none"] }),
+            json!({ "target": { "type": "macro", "id": "m" } }),
+        ] {
+            let mut p = pages.clone();
+            p[0]["handles"][1] = bad.clone();
+            assert_eq!(t.request("POST", "/api/executors", &json!({ "pages": p }).to_string()).0, 400, "{bad}");
+        }
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/executors", &json!({ "pages": pages }).to_string()).0, 423);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"exec.1.1.fader","value":0.5}"#).0, 200);
+        let f = js(&t.request("GET", "/api/frame", "").1);
+        assert_eq!(f["executors"]["levels"][0], 0.5);
+        assert_eq!(f["executors"]["active_pages"], json!([true]));
+        assert_eq!(f["cues"]["active"][0]["cue"], cue.as_str());
+        assert_eq!(f["cues"]["active"][0]["level"], 0.5);
+        assert_eq!(f["armed"], false);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"exec.1.1.fader","value":0}"#).0, 200);
+        assert!(t.shared.lock().unwrap().deck.active.is_empty());
+        t.shared.lock().unwrap().show_mode.on = false;
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert_eq!(t.shared.lock().unwrap().executors.bank, crate::executors::ExecutorBank::default());
     }
 
     /// T-285: edits are recorded, cue presses are not; undo restores a

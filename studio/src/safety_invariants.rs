@@ -68,6 +68,12 @@
 //!     and the smoothing run in the sessions, so 1-15 hold with every
 //!     level on; they never arm, and they apply before the safety stage
 //!     (`cue_and_layer_modifiers_apply_before_the_safety_stage`).
+//! 17. the executor bank (T-418): random banks (cues, layers, group
+//!     masters, the cue list; mangled ones sanitised) played from the UI,
+//!     a controller or the external gate (faders, Flash / Temp / Noir
+//!     tenu held and let go, pages, `exec.cur.*`) run in the sessions, so
+//!     1-16 hold with executor levels on; they never arm, and every cue's
+//!     executor level stays within 0..1.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -830,7 +836,9 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
             // is an explicit arm request).
             // Group masters (T-420) included: their own stream (`mrng` in
             // `run_case`) moves them more often, this one like any other.
-            let ids: Vec<String> = s.controls.list().iter().map(|d| d.id.clone()).collect();
+            // The executors (T-418) have their own stream (`brng`): 226
+            // ids would otherwise take a third of these picks.
+            let ids: Vec<String> = s.controls.list().iter().filter(|d| d.group != "exec").map(|d| d.id.clone()).collect();
             let id = rng.pick(&ids).clone();
             let external = rng.chance(0.5);
             let input = if rng.chance(0.5) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-3.0, 3.0)) };
@@ -1094,6 +1102,69 @@ struct Coverage {
     /// Frames with a lit preview while a cue or layer level was not
     /// neutral (T-144).
     lit_with_levels: usize,
+    /// Frames with a lit preview while a cue played below full executor
+    /// level (T-418).
+    lit_with_exec: usize,
+}
+
+/// A random executor bank (T-418), as `POST /api/executors` could send it
+/// (or a mangled file: `set_bank` sanitises).
+fn random_bank(s: &mut Shared, rng: &mut Rng) {
+    use crate::executors::{ButtonFn, ExecPage, ExecTarget, Executor, ExecutorBank, FaderFn};
+    const BUTTONS: [ButtonFn; 6] = [ButtonFn::None, ButtonFn::Toggle, ButtonFn::Flash, ButtonFn::Temp, ButtonFn::BlackHeld, ButtonFn::Go];
+    let pages = (0..1 + rng.below(3))
+        .map(|_| ExecPage {
+            name: String::new(),
+            handles: (0..crate::executors::EXEC_PER_PAGE)
+                .map(|_| {
+                    let target = match rng.below(12) {
+                        0..=6 => ExecTarget::Cue { id: random_preset(s, rng).0 },
+                        7 => ExecTarget::Layer { n: 1 + rng.below(5) as u8 },
+                        8 => ExecTarget::GroupMaster { group: 1 + rng.below(3) },
+                        9 => ExecTarget::CueList,
+                        _ => ExecTarget::None,
+                    };
+                    let fader = *rng.pick(&[FaderFn::FadeIn, FaderFn::FadeIn, FaderFn::Level, FaderFn::Speed]);
+                    Executor { label: String::new(), target, fader, buttons: [*rng.pick(&BUTTONS), *rng.pick(&BUTTONS)] }
+                })
+                .collect(),
+        })
+        .collect();
+    s.executors.set_bank(ExecutorBank { pages });
+}
+
+/// One executor move from the UI, a controller or the external gate:
+/// faders (mostly lit), buttons pressed and let go, pages.
+fn random_exec_move(s: &mut Shared, rng: &mut Rng, now: Instant) {
+    let pages = s.executors.bank.pages.len();
+    // Now and then a page the bank doesn't have (refused).
+    let p = if rng.chance(0.05) { pages + 1 } else { 1 + rng.below(pages) };
+    let n = 1 + rng.below(crate::executors::EXEC_PER_PAGE);
+    let page = if rng.chance(0.3) { "cur".to_string() } else { p.to_string() };
+    let (id, input) = match rng.below(10) {
+        0..=4 => {
+            let v = match rng.below(10) {
+                0 | 1 => 0.0,
+                2 => rng.range(-2.0, 3.0),
+                _ => rng.range(0.2, 1.0),
+            };
+            (format!("exec.{page}.{n}.fader"), ControlInput::Value(v))
+        }
+        5..=7 => {
+            let b = if rng.chance(0.5) { "button" } else { "button2" };
+            // Held buttons are mostly let go of.
+            (format!("exec.{page}.{n}.{b}"), ControlInput::Value(if rng.chance(0.4) { 1.0 } else { 0.0 }))
+        }
+        8 => (rng.pick(&["exec.page.next", "exec.page.prev"]).to_string(), ControlInput::Value(1.0)),
+        _ => (format!("exec.page.{}", 1 + rng.below(crate::executors::EXEC_MAX_PAGES)), ControlInput::Value(1.0)),
+    };
+    if rng.chance(0.2) {
+        let _ = crate::external::set_open(s, true, ArmSource::Ui);
+        let src = *rng.pick(&crate::external::SourceKind::ALL);
+        let _ = crate::external::apply(s, src, "rig", &id, input, now);
+    } else {
+        let _ = controls::apply(s, &id, input, rng.chance(0.5));
+    }
 }
 
 /// Cue and layer modifiers (T-144) as the page, a controller or a bad
@@ -1393,11 +1464,32 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         start..start + show_len
     };
     let mut session_lit = false;
+    // The executor bank (T-418), from its own stream.
+    let mut brng = Rng::new(seed ^ 0x0418_0418);
+    let exec_on = brng.chance(0.6);
+    if exec_on {
+        random_bank(&mut rig.s(), &mut brng);
+    }
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
         if in_show {
             keep_show_on(&mut rig, &mut orng, frame == show.start);
+            if exec_on && frame == show.start {
+                // The show runs through an executor (T-418): a held Noir
+                // tenu let go, a cue faded in part-way, from `brng`.
+                let mut s = rig.s();
+                crate::executors::release_all(&mut s);
+                let p = s.executors.rt.page;
+                let fade = (0..crate::executors::EXEC_PER_PAGE).find(|&n| {
+                    let e = &s.executors.bank.pages[p].handles[n];
+                    matches!(e.target, crate::executors::ExecTarget::Cue { .. }) && e.fader == crate::executors::FaderFn::FadeIn
+                });
+                if let Some(n) = fade {
+                    let v = brng.range(0.4, 0.9);
+                    let _ = controls::apply(&mut s, &format!("exec.cur.{}.fader", n + 1), ControlInput::Value(v), brng.chance(0.5));
+                }
+            }
         }
         {
             let mut s = rig.s();
@@ -1416,6 +1508,19 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             }
             if s.gate.is_armed() != armed {
                 return Err(format!("frame {frame}: a live effect or a level changed the arming"));
+            }
+        }
+        if exec_on && brng.chance(0.35) {
+            let now = rig.now;
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            if brng.chance(0.03) {
+                random_bank(&mut s, &mut brng);
+            } else {
+                random_exec_move(&mut s, &mut brng, now);
+            }
+            if s.gate.is_armed() != armed {
+                return Err(format!("frame {frame}: an executor changed the arming"));
             }
         }
         if lists && lrng.chance(0.08) {
@@ -1637,6 +1742,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         }
         let levels_on = s.mixer.layers.iter().any(|l| !crate::levels::is_neutral(&l.modifiers)) || s.cue_mods.values().any(|m| !crate::levels::is_neutral(m));
         cov.lit_with_levels += (preview_lit && levels_on) as usize;
+        if let Some(a) = s.deck.active.iter().chain(s.deck.ending.iter().map(|e| &e.cue)).find(|a| !(0.0..=1.0).contains(&a.exec_level)) {
+            return Err(format!("frame {frame}: cue {} at executor level {}", a.cue, a.exec_level));
+        }
+        cov.lit_with_exec += (preview_lit && s.deck.active.iter().any(|a| a.exec_level > 0.0 && a.exec_level < 1.0)) as usize;
         if black_held && preview_lit && !limiter_holding {
             return Err(format!("frame {frame}: the preview is lit while « Noir » is held"));
         }
@@ -1684,7 +1793,7 @@ fn random_sessions_keep_every_output_invariant() {
         let show = cov.show_sent_lit as f64 / cov.show_frames.max(1) as f64;
         let sessions = cov.sessions_lit as f64 / cov.sessions.max(1) as f64;
         eprintln!("coverage: sessions lit {sessions:.3}, show phase lit {show:.3}, sent lit with a group master dimmed {:.3}", share(cov.sent_lit_with_group_master));
-        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}; sent lit {:.3}, effects {:.3}, levels {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition), share(cov.sent_lit), share(cov.lit_with_effects), share(cov.lit_with_levels));
+        eprintln!("coverage: Public zones lit {:.3} above, {:.3} scanning; transitions {:.3}; sent lit {:.3}, effects {:.3}, levels {:.3}, executors {:.3}", share(cov.lit_with_public_above), share(cov.lit_with_public_scanning), share(cov.lit_with_transition), share(cov.sent_lit), share(cov.lit_with_effects), share(cov.lit_with_levels), share(cov.lit_with_exec));
         // Gates at about half of what the fuzz measures (T-473): sent lit
         // ~0.33, show phase ~0.55, sessions ~0.87, group masters ~0.23 at
         // 1000 cases. A new dimming feature that eats the margin must
@@ -1704,6 +1813,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_effects) > 0.05, "only {} of {} lit frames went through a live effect", cov.lit_with_effects, cov.frames);
         assert!(share(cov.lit_with_fx) > 0.02, "only {} of {} lit frames went through the FX grid", cov.lit_with_fx, cov.frames);
         assert!(share(cov.lit_with_levels) > 0.05, "only {} of {} lit frames went through a cue or layer level", cov.lit_with_levels, cov.frames);
+        assert!(share(cov.lit_with_exec) > 0.035, "only {} of {} lit frames had a cue below full executor level", cov.lit_with_exec, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
@@ -2698,6 +2808,53 @@ fn cue_and_layer_modifiers_apply_before_the_safety_stage() {
     let low = frame_of(&[("cue.{cue}.pos_y", -0.3), ("layer.1.pos_y", -0.5)], Some(0.0));
     assert!(!lit(&low).is_empty());
     assert!(lit(&low).iter().all(|p| p.y >= -1e-3), "a lit point below the horizon");
+}
+
+/// T-418: a cue at executor level 0,5 is drawn at half its colours,
+/// before the mixer and the safety stage; another cue playing beside it
+/// is untouched. Two squares, left and right, through the real engine.
+#[test]
+fn an_executor_level_dims_its_cue_only() {
+    use crate::executors::{ExecTarget, Executor, ExecutorBank, FaderFn};
+    let frame_of = |level: Option<f32>| -> Vec<Point> {
+        let mut s = test_support::shared();
+        s.deck.multi = true;
+        let mut g = s.grid.clone();
+        let page = g.new_page("Mes looks", &s.presets).unwrap();
+        s.grid = g;
+        crate::usercues::refresh(&mut s);
+        s.settings = Settings { content: crate::engine::Content::Shape { shape: "square".into() }, scale: 0.4, rotation_speed: 0.0, ..Settings::default() };
+        let a = crate::usercues::store(&mut s, page, 0, None, crate::usercues::StoreFilter::All, false).unwrap();
+        let b = crate::usercues::store(&mut s, page, 1, None, crate::usercues::StoreFilter::All, false).unwrap();
+        s.settings = Settings::default();
+        let mut bank = ExecutorBank::default();
+        bank.pages[0].handles[0] = Executor { target: ExecTarget::Cue { id: a.clone() }, fader: FaderFn::FadeIn, ..Default::default() };
+        s.executors.set_bank(bank);
+        match level {
+            Some(v) => controls::apply(&mut s, "exec.1.1.fader", ControlInput::Value(v), true).unwrap(),
+            None => assert!(controls::press_cue(&mut s, &a, None, true)),
+        }
+        assert!(controls::press_cue(&mut s, &b, None, true));
+        controls::apply(&mut s, &format!("cue.{a}.pos_x"), ControlInput::Value(-0.5), false).unwrap();
+        controls::apply(&mut s, &format!("cue.{b}.pos_x"), ControlInput::Value(0.5), false).unwrap();
+        let mut rig = Rig::new(s, "executors", 0);
+        for _ in 0..3 {
+            rig.tick();
+        }
+        assert!(!rig.s().gate.is_armed(), "never armed");
+        assert_eq!(rig.s().deck.active.len(), 2);
+        let frame = rig.s().frame.clone();
+        frame
+    };
+    let peak = |f: &[Point], left: bool| f.iter().filter(|p| p.is_lit() && (p.x < 0.0) == left).fold(0.0f32, |m, p| m.max(p.r).max(p.g).max(p.b));
+    let (full, half) = (frame_of(None), frame_of(Some(0.5)));
+    let (l1, r1, l2, r2) = (peak(&full, true), peak(&full, false), peak(&half, true), peak(&half, false));
+    assert!(l1 > 0.1 && r1 > 0.1, "both lit at full: {l1} {r1}");
+    assert!((l2 - l1 * 0.5).abs() < 0.03, "the executor's cue at half: {l2} vs {l1}");
+    assert!((r2 - r1).abs() < 1e-3, "the other cue untouched: {r2} vs {r1}");
+    // Never above full, whatever the fader is sent.
+    let over = frame_of(Some(4.0));
+    assert!(peak(&over, true) <= l1 + 1e-3);
 }
 
 // ---------- group masters (T-420) ----------

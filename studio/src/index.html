@@ -869,6 +869,31 @@
   body.learning [data-control] { outline: 2px dashed var(--accent); outline-offset: 2px; cursor: crosshair; }
   body.learning [data-control][data-midi] { outline-style: solid; }
   body.learning [data-midi-pill]::after { content: attr(data-midi-pill); margin-left: 6px; padding: 0 5px; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-size: 10px; font-weight: 600; white-space: nowrap; }
+  /* Exécuteurs (T-418), Theme (T-299) tokens. */
+  #execBank { margin-top: 4px; }
+  .exec-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+  .exec-tabs button { padding: 4px 9px; font-size: 11px; position: relative; }
+  .exec-tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--text); background: var(--panel-2); }
+  .exec-tabs button.live::after { content: ''; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 5px var(--accent); }
+  .exec-row { display: grid; grid-template-columns: repeat(8, minmax(36px, 1fr)); gap: 4px; overflow-x: auto; }
+  .exec-col { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); min-width: 0; }
+  .exec-col.on { border-color: var(--accent); }
+  .exec-col.empty { opacity: .6; }
+  .exec-col.drop { outline: 2px dashed var(--accent); outline-offset: 1px; }
+  .exec-col .t { font-size: 10px; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; display: block; color: var(--text); }
+  .exec-col input[type=range] { writing-mode: vertical-lr; direction: rtl; width: 22px; height: 80px; }
+  .exec-col .dv { font-size: 10px; font-variant-numeric: tabular-nums; color: var(--muted); margin: 0; display: block; }
+  .exec-col button { width: 100%; padding: 3px 1px; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .exec-col button.held { background: var(--accent); border-color: var(--accent); color: #fff; }
+  html.touch .exec-row { grid-template-columns: repeat(8, minmax(44px, 1fr)); }
+  #execMenu { position: fixed; z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 250px; box-shadow: 0 8px 24px #0008; max-height: calc(100vh - 16px); overflow-y: auto; }
+  #execMenu[hidden] { display: none; }
+  #execMenu h3 { margin: 0 0 2px; font-size: 12px; font-weight: 600; }
+  #execMenu label { margin: 6px 0 2px; }
+  #execMenu select, #execMenu input { width: 100%; box-sizing: border-box; }
+  #execMenu .exec-menu-row { display: flex; gap: 6px; margin-top: 8px; }
+  #execMenu .exec-menu-row button { flex: 1; }
+  #execMenu .midi button { display: block; width: 100%; text-align: left; margin-top: 4px; }
   #midiMenu { position: fixed; z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 240px; box-shadow: 0 8px 24px #0008; }
   #midiMenu[hidden], #midiMenu button[hidden] { display: none; }
   #midiMenu h3 { margin: 0 0 2px; font-size: 12px; font-weight: 600; }
@@ -1244,7 +1269,7 @@
   .cue-bar .seg button.active { background: #22e3ff22; color: var(--accent); border-color: #22e3ff55; }
   .meter > div, #musDbFill, .mus-bands .bar > div { background: linear-gradient(90deg, #22e3ff, #8b5cf6, #ff3dc8); background-size: 100vw 100%; }
   .mus-bands .bar > div { background: linear-gradient(0deg, #22e3ff, #8b5cf6, #ff3dc8); }
-  .modal .box, #cueMenu, #midiMenu, #projMenu, #figImportDlg { border-radius: 14px; border-color: #2a2f44; background: #141725; box-shadow: 0 20px 60px #000c; }
+  .modal .box, #cueMenu, #midiMenu, #execMenu, #projMenu, #figImportDlg { border-radius: 14px; border-color: #2a2f44; background: #141725; box-shadow: 0 20px 60px #000c; }
   .modal { backdrop-filter: blur(4px); }
   /* Raccourcis (T-284): the « ? » overlay and its button in the tab bar. */
   #wsTabs #keysBtn { align-self: center; margin-left: 8px; padding: 4px 10px; border-radius: 8px; border: 1px solid #2a2f44; font-weight: 600; letter-spacing: 0; font-size: 12px; }
@@ -1670,6 +1695,30 @@
   <div class="h-foot">Ne s'annulent pas : cues jouées, maîtres, tempo, armement, noir et réglages de sécurité. La timeline et l'éditeur de figures ont leur propre Annuler.</div>
 </div>
 <div id="toasts" aria-live="polite"></div>
+<!-- Exécuteurs (T-418): « Affecter » au clic droit sur une colonne. -->
+<div id="execMenu" role="dialog" aria-label="Affecter l'exécuteur" hidden>
+  <h3 id="execMenuTitle">Exécuteur</h3>
+  <label for="execMenuTarget">Objet</label>
+  <select id="execMenuTarget"></select>
+  <label for="execMenuFader">Fonction du curseur</label>
+  <select id="execMenuFader"></select>
+  <label for="execMenuB1">Bouton 1</label>
+  <select id="execMenuB1"></select>
+  <label for="execMenuB2">Bouton 2</label>
+  <select id="execMenuB2"></select>
+  <label for="execMenuLabel">Libellé</label>
+  <input type="text" id="execMenuLabel" maxlength="32" placeholder="le nom de l'objet">
+  <div class="exec-menu-row">
+    <button id="execMenuClear" title="Ne plus rien affecter à cette colonne">Vider</button>
+    <button id="execMenuClose">Fermer</button>
+  </div>
+  <div class="midi">
+    <button id="execMenuLearnF">Apprendre MIDI : curseur</button>
+    <button id="execMenuLearnB1">Apprendre MIDI : bouton 1</button>
+    <button id="execMenuLearnB2">Apprendre MIDI : bouton 2</button>
+  </div>
+  <div class="hint" id="execMenuMsg" role="status" style="margin:4px 0 0"></div>
+</div>
 <div id="midiMenu" hidden>
   <h3>MIDI</h3>
   <div class="hint" id="midiMenuName" style="margin:0"></div>
@@ -2354,6 +2403,16 @@
         <button id="gmAllFull" data-control="group.all_full" title="group.all_full : tous les maîtres de groupe à 100 %">Tout à 100 %</button>
       </div>
       <div class="gm-row" id="gmRow"></div>
+    </div>
+    <!-- Exécuteurs (T-418): pages of 8 faders + 2 buttons, assigned by the operator. -->
+    <div id="execBank" role="region" aria-label="Exécuteurs">
+      <div class="layers-head">
+        <span title="Chaque colonne : un curseur et deux boutons affectés à un cue, un calque, un maître de groupe ou la liste de cues (clic droit pour affecter). Changer de page ne coupe rien. Aucun exécuteur n'arme le laser.">Exécuteurs</span>
+        <button id="execPageAdd" class="lock-edit" title="Nouvelle page d'exécuteurs (8 au plus)">+ Page</button>
+      </div>
+      <div class="exec-tabs" id="execTabs" role="tablist" aria-label="Pages d'exécuteurs"></div>
+      <div class="exec-row" id="execRow"></div>
+      <div class="hint" style="margin:4px 0 0">Clic droit sur une colonne : affecter · <kbd>1</kbd>–<kbd>8</kbd> : bouton 1 (tenu) · <kbd>Alt</kbd>+<kbd>Page</kbd> : page</div>
     </div>
   </section>
 
@@ -3954,7 +4013,7 @@ const API_SOURCES = [
   [/^\/api\/(midi|dmx|netin|external)/, 'MIDI'],
   [/^\/api\/(arm|estop|safety|audience|checklist|presence|heartbeat|lock|data\/warnings|outputs\/limits|outputs\/color|venue)/, 'Sécurité'],
   [/^\/api\/audio/, 'Audio'],
-  [/^\/api\/(cue|grid|presets|scan-presets|running|scenes|playlist|palettes|festival|control|live|lfos|layers)/, 'Cues'],
+  [/^\/api\/(cue|grid|presets|scan-presets|running|scenes|playlist|palettes|festival|control|live|lfos|layers|executors)/, 'Cues'],
 ];
 const apiSource = path => (API_SOURCES.find(([re]) => re.test(path)) || [null, 'Réglages'])[1];
 async function api(method, path, body, opts = {}) {
@@ -4586,6 +4645,16 @@ function buildShortcuts() {
     { id: 'help', group: 'Aide', keys: ['?'], shift: '*', zones: '*', show: true,
       label: 'Afficher / masquer cette aide',
       down: e => { if (!e.repeat) toggleKeysHelp(); } },
+    // Exécuteurs (T-418), LIVE: the top-row digits (read by position, so
+    // AZERTY needs no Maj) hold button 1 of the page shown; Alt + Page
+    // changes the executor page (Page alone is the cue list's Go / Retour).
+    { id: 'exec.button', group: 'Exécuteurs', codes: ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8'], zones: LIVE_ZONES, show: true,
+      cap: () => '1 … 8', label: "Bouton 1 de l'exécuteur 1 à 8 de la page affichée (tenu tant que la touche est enfoncée)",
+      down: (e, i) => execKeyDown(e, i), up: execKeyUp },
+    { id: 'exec.page.next', group: 'Exécuteurs', codes: ['PageDown'], alt: true, zones: LIVE_ZONES, show: true,
+      label: "Page d'exécuteurs suivante", down: e => { if (!e.repeat) control('exec.page.next', 1); } },
+    { id: 'exec.page.prev', group: 'Exécuteurs', codes: ['PageUp'], alt: true, zones: LIVE_ZONES, show: true,
+      label: "Page d'exécuteurs précédente", down: e => { if (!e.repeat) control('exec.page.prev', 1); } },
     // Cue letters, LIVE only (T-272); Maj = flash.
     { id: 'cue', group: 'Cues et pages', codes: CUE_CODES, shift: '*', zones: LIVE_ZONES, show: true,
       cap: cueCaps, label: 'Jouer la cue de la case (Maj : flash, tant que la touche est tenue)',
@@ -4711,7 +4780,7 @@ function shortcutConflicts(list = allShortcuts()) {
 
 // « ? » : the table, grouped. Keys shown as on this keyboard when the
 // browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
-const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Recherche', 'Timeline', 'Figures', 'Aide'];
+const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Exécuteurs', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Recherche', 'Timeline', 'Figures', 'Aide'];
 const ZONE_FR = { live: 'LIVE', grid: 'LIVE (grille active)', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES' };
 const KEY_CAPS = { Digit0: '0', Numpad0: '0 (pavé)', Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
 const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
@@ -4811,6 +4880,8 @@ window.addEventListener('blur', () => {
   holdStrobe(false);
   // Live effect hold buttons (T-142), defined further down.
   try { FX_HOLDS.forEach(id => fxHold(id, false)); } catch (err) { console.warn('effets', err); }
+  // Executor buttons held by a key or the pointer (T-418).
+  try { execReleaseAll(); } catch (err) { console.warn('exécuteurs', err); }
 });
 // The look's strobe before S was held (null = not held). Released, the
 // look gets its own strobe back.
@@ -5246,6 +5317,7 @@ function applyState(f, at, pushed) {
   // control); our own requests update settingsRev themselves.
   if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
   showLayers(f.layers);
+  showExecutors(f.executors);
   figFrameInfo(f);
   showEvolving(f.evolving);
   showTimeline(f.timeline);
@@ -10615,6 +10687,7 @@ function buildLayers() {
 let gmKey = '';
 function showGroupMasters(groups) {
   groups = groups || [];
+  EXEC.groups = groups.map(g => ({ n: g.n, name: g.name }));
   $('groupMasters').hidden = !groups.length;
   const key = groups.map(g => g.n + ':' + g.name).join('|');
   if (key !== gmKey) {
@@ -10652,6 +10725,282 @@ function showGroupMasters(groups) {
   });
 }
 $('gmAllFull').addEventListener('click', () => post('/api/control', { id: 'group.all_full' }));
+
+// ---------- executors (T-418) ----------
+// Pages of 8 executors: a fader and two buttons each, assigned with a
+// right click (« Affecter ») or a cue dropped from the grid. The handles
+// on screen drive the page shown (`exec.cur.*`), like a controller's;
+// changing page cuts nothing and a dot marks the pages where something
+// is active. Assigning is an edit (history, locked in show mode); playing
+// is not. No executor ever arms.
+const EXEC_N = 8, EXEC_MAX_PAGES = 8;
+const EXEC_FADER_FR = { level: 'Niveau', fade_in: 'Fondu au curseur', speed: 'Vitesse' };
+const EXEC_BUTTON_FR = { none: 'Aucune', toggle: 'Basculer', flash: 'Flash', temp: 'Temp', black_held: 'Noir tenu', go: 'Go' };
+// What each object accepts (the server checks the same, executors.rs).
+const EXEC_FADERS = { cue: ['fade_in', 'level'], layer: ['level', 'speed'], group_master: ['level'], cue_list: ['level'], none: ['level'] };
+const EXEC_BUTTONS = { cue: ['none', 'toggle', 'flash', 'temp', 'black_held'], layer: ['none', 'toggle', 'flash', 'black_held'],
+  group_master: ['none', 'toggle', 'flash', 'black_held'], cue_list: ['none', 'go'], none: ['none'] };
+const EXEC = { pages: null, rev: -1, page: 0, key: '', state: null, groups: [], menu: null, keys: new Map(), held: new Map() };
+const execTarget = (t = {}) => t.type || 'none';
+function execTargetName(t) {
+  switch (execTarget(t)) {
+    case 'cue': return presetById.get(t.id)?.name || t.id;
+    case 'layer': return 'Calque ' + t.n;
+    case 'group_master': return EXEC.groups.find(g => g.n === t.group)?.name || 'Groupe ' + t.group;
+    case 'cue_list': return 'Liste de cues';
+    case 'speed_group': return 'Vitesse ' + t.n;
+    case 'macro': return 'Macro';
+    default: return '—';
+  }
+}
+const execHandle = n => EXEC.pages?.[EXEC.page]?.handles?.[n] || { target: { type: 'none' }, fader: 'level', buttons: ['none', 'none'], label: '' };
+async function loadExecutors() {
+  let r;
+  try { r = await apiJson('GET', '/api/executors', undefined, { quiet: true }); } catch { return; }
+  EXEC.pages = r.pages; EXEC.rev = r.state.rev; EXEC.key = '';
+  showExecutors(r.state);
+}
+// The 8 columns of the page shown, rebuilt when the page or its
+// assignments change; values follow the server (MIDI, OSC, DMX).
+function buildExecRow() {
+  const key = JSON.stringify([EXEC.page, EXEC.pages?.[EXEC.page], presets.length, EXEC.groups.map(g => g.name)]);
+  if (key === EXEC.key) return;
+  EXEC.key = key;
+  $('execRow').replaceChildren(...Array.from({ length: EXEC_N }, (_, n) => {
+    const h = execHandle(n), t = execTarget(h.target), i = n + 1;
+    const d = document.createElement('div');
+    d.className = 'exec-col' + (t === 'none' ? ' empty' : '');
+    d.dataset.n = i;
+    const name = h.label || execTargetName(h.target);
+    const fn = t === 'none' ? '' : EXEC_FADER_FR[h.fader] || '';
+    // The object's name (right click: « Affecter »), then the fader's
+    // value, which is also its label (right click: back to 0).
+    d.innerHTML = `<span class="t"></span>
+      <label class="dv" id="execF${i}V" for="execF${i}">0 %</label>
+      <input type="range" id="execF${i}" min="0" max="100" value="0" data-control="exec.cur.${i}.fader">
+      <button class="b1" data-control="exec.cur.${i}.button"></button>
+      <button class="b2" data-control="exec.cur.${i}.button2"></button>`;
+    const lab = d.querySelector('.t');
+    lab.textContent = name;
+    lab.title = `${i}. ${name}${fn ? ' · ' + fn : ''} · clic droit : affecter`;
+    const range = d.querySelector('input');
+    range.setAttribute('aria-label', `Exécuteur ${i} : ${name}${fn ? ', ' + fn : ''}`);
+    range.title = `exec.cur.${i}.fader${fn ? ' · ' + fn : ''}`;
+    range.addEventListener('input', () => {
+      d.querySelector('.dv').textContent = range.value + ' %';
+      post('/api/control', { id: `exec.cur.${i}.fader`, value: range.value / 100 });
+    });
+    ['b1', 'b2'].forEach((c, b) => {
+      const btn = d.querySelector('.' + c), f = h.buttons?.[b] || 'none';
+      btn.textContent = f === 'none' ? '—' : EXEC_BUTTON_FR[f];
+      btn.title = `exec.cur.${i}.button${b ? '2' : ''} · bouton ${b + 1} : ${EXEC_BUTTON_FR[f]}`;
+      btn.setAttribute('aria-label', `Exécuteur ${i}, bouton ${b + 1} : ${EXEC_BUTTON_FR[f]}`);
+    });
+    return d;
+  }));
+}
+function showExecutors(st) {
+  if (!st) return;
+  EXEC.state = st;
+  if (st.rev !== EXEC.rev || !EXEC.pages) {
+    // Assignments changed (another page, undo, a project opened).
+    if (EXEC.loading !== st.rev) { EXEC.loading = st.rev; loadExecutors(); }
+    return;
+  }
+  EXEC.page = st.page;
+  const pages = EXEC.pages.length;
+  const tabKey = JSON.stringify([EXEC.pages.map(p => p.name), st.page, st.active_pages]);
+  if (tabKey !== EXEC.tabKey) {
+    EXEC.tabKey = tabKey;
+    $('execTabs').replaceChildren(...EXEC.pages.map((p, i) => {
+      const b = document.createElement('button');
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', String(i === st.page));
+      b.dataset.page = i + 1;
+      b.dataset.control = `exec.page.${i + 1}`;
+      b.textContent = p.name;
+      const live = !!st.active_pages?.[i];
+      b.classList.toggle('live', live);
+      b.title = `exec.page.${i + 1}${live ? ' · quelque chose y est actif' : ''}`;
+      return b;
+    }));
+  }
+  $('execPageAdd').disabled = pages >= EXEC_MAX_PAGES;
+  buildExecRow();
+  document.querySelectorAll('#execRow .exec-col').forEach((d, n) => {
+    const range = d.querySelector('input'), v = Math.round((st.levels?.[n] ?? 0) * 100);
+    if (document.activeElement !== range) {
+      range.value = v;
+      d.querySelector('.dv').textContent = v + ' %';
+    }
+    d.classList.toggle('on', !!st.active?.[n]);
+    d.querySelector('.b1').classList.toggle('held', !!st.held?.[n]?.[0]);
+    d.querySelector('.b2').classList.toggle('held', !!st.held?.[n]?.[1]);
+  });
+}
+// Buttons: held while the pointer is down (Flash, Temp, Noir tenu);
+// Basculer / Go act on the press.
+function execPress(id) { EXEC.held.set(id, true); return post('/api/control', { id, value: 1 }); }
+function execRelease(id) { if (!EXEC.held.delete(id)) return; post('/api/control', { id, value: 0 }); }
+function execReleaseAll() {
+  for (const id of [...EXEC.held.keys()]) execRelease(id);
+  EXEC.keys.clear();
+}
+const execPointers = new Map();
+$('execRow').addEventListener('pointerdown', e => {
+  const b = e.target.closest('.exec-col button');
+  if (!b || e.button !== 0 || learnMode) return;
+  try { b.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+  execPointers.set(e.pointerId, b.dataset.control);
+  execPress(b.dataset.control);
+});
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => $('execRow').addEventListener(ev, e => {
+  const id = execPointers.get(e.pointerId);
+  if (!id) return;
+  execPointers.delete(e.pointerId);
+  execRelease(id);
+}));
+function execKeyDown(e, i) {
+  if (e.repeat || EXEC.keys.has(e.code)) return;
+  const id = `exec.cur.${i + 1}.button`;
+  EXEC.keys.set(e.code, id);
+  execPress(id);
+}
+function execKeyUp(e) {
+  const id = EXEC.keys.get(e.code);
+  if (!id) return;
+  EXEC.keys.delete(e.code);
+  execRelease(id);
+}
+$('execTabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-page]');
+  if (b && !learnMode) post('/api/control', { id: `exec.page.${b.dataset.page}` });
+});
+// Assignments: the whole bank goes back to the server (validated there).
+async function saveExecBank(pages, msg) {
+  if (showMode) { flash(LOCKED_FR); return false; }
+  const r = await api('POST', '/api/executors', { pages }, { quiet: true });
+  if (!r.ok) {
+    const text = await r.text();
+    if (msg) $('execMenuMsg').textContent = text;
+    else flash(text);
+    return false;
+  }
+  const j = await r.json();
+  EXEC.pages = j.pages; EXEC.rev = j.state.rev; EXEC.key = ''; EXEC.tabKey = '';
+  showExecutors(j.state);
+  return true;
+}
+function setExecHandle(page, n, h) {
+  const pages = structuredClone(EXEC.pages);
+  pages[page].handles[n] = h;
+  return saveExecBank(pages, !$('execMenu').hidden);
+}
+$('execPageAdd').addEventListener('click', async () => {
+  if (!EXEC.pages || EXEC.pages.length >= EXEC_MAX_PAGES) return;
+  const pages = structuredClone(EXEC.pages);
+  pages.push({ name: 'Page ' + (pages.length + 1), handles: [] });
+  if (await saveExecBank(pages)) post('/api/control', { id: `exec.page.${pages.length}` });
+});
+// « Affecter »: the menu of one column.
+function fillExecMenu() {
+  const { page, n } = EXEC.menu, h = execHandle(n), t = execTarget(h.target);
+  $('execMenuTitle').textContent = `Exécuteur ${page + 1}.${n + 1}`;
+  const opt = (v, text, sel) => `<option value="${esc(v)}"${sel ? ' selected' : ''}>${esc(text)}</option>`;
+  const cur = JSON.stringify(h.target || { type: 'none' });
+  const cues = [];
+  for (const pg of grid.pages || []) {
+    const ids = (pg.cells || []).filter(id => id && presetById.has(id));
+    if (ids.length) cues.push(`<optgroup label="${esc(pg.name)}">${ids.map(id => opt(JSON.stringify({ type: 'cue', id }), presetById.get(id).name, cur === JSON.stringify({ type: 'cue', id }))).join('')}</optgroup>`);
+  }
+  // A cue not on any page (set elsewhere) stays choosable.
+  if (t === 'cue' && !(grid.pages || []).some(pg => (pg.cells || []).includes(h.target.id))) cues.unshift(opt(cur, execTargetName(h.target), true));
+  const others = [opt('{"type":"none"}', 'Aucun', t === 'none')]
+    .concat([1, 2, 3, 4].map(l => opt(JSON.stringify({ type: 'layer', n: l }), 'Calque ' + l, cur === JSON.stringify({ type: 'layer', n: l }))))
+    .concat(EXEC.groups.map(g => opt(JSON.stringify({ type: 'group_master', group: g.n }), 'Maître : ' + g.name, cur === JSON.stringify({ type: 'group_master', group: g.n }))))
+    .concat([opt('{"type":"cue_list"}', 'Liste de cues', t === 'cue_list')]);
+  $('execMenuTarget').innerHTML = others.join('') + cues.join('');
+  $('execMenuFader').innerHTML = (EXEC_FADERS[t] || ['level']).map(f => opt(f, EXEC_FADER_FR[f], f === h.fader)).join('');
+  $('execMenuFader').disabled = t === 'none' || t === 'cue_list';
+  for (const [b, el] of [[0, 'execMenuB1'], [1, 'execMenuB2']]) {
+    $(el).innerHTML = (EXEC_BUTTONS[t] || ['none']).map(f => opt(f, EXEC_BUTTON_FR[f], f === (h.buttons?.[b] || 'none'))).join('');
+    $(el).disabled = t === 'none';
+  }
+  if (document.activeElement !== $('execMenuLabel')) $('execMenuLabel').value = h.label || '';
+}
+function openExecMenu(n, x, y) {
+  if (showMode) return flash(LOCKED_FR);
+  if (!EXEC.pages) return;
+  EXEC.menu = { page: EXEC.page, n };
+  $('execMenuMsg').textContent = '';
+  fillExecMenu();
+  const m = $('execMenu');
+  m.hidden = false;
+  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 8)) + 'px';
+  $('execMenuTarget').focus();
+}
+function closeExecMenu() { $('execMenu').hidden = true; EXEC.menu = null; }
+$('execRow').addEventListener('contextmenu', e => {
+  const col = e.target.closest('.exec-col');
+  if (!col) return;
+  e.preventDefault();
+  openExecMenu(+col.dataset.n - 1, e.clientX, e.clientY);
+});
+async function execMenuChange(edit) {
+  if (!EXEC.menu) return;
+  const { page, n } = EXEC.menu;
+  const h = structuredClone(execHandle(n));
+  edit(h);
+  const t = execTarget(h.target);
+  // Functions the new object doesn't take fall back to its first one.
+  if (!(EXEC_FADERS[t] || ['level']).includes(h.fader)) h.fader = (EXEC_FADERS[t] || ['level'])[0];
+  h.buttons = (h.buttons || ['none', 'none']).map(f => (EXEC_BUTTONS[t] || ['none']).includes(f) ? f : 'none');
+  if (await setExecHandle(page, n, h) && EXEC.menu) { $('execMenuMsg').textContent = ''; fillExecMenu(); }
+}
+$('execMenuTarget').addEventListener('change', e => execMenuChange(h => {
+  const t = JSON.parse(e.target.value);
+  const was = execTarget(h.target);
+  h.target = t;
+  // A cue just set: a fader that fades it in, Flash on button 1.
+  if (t.type === 'cue' && was !== 'cue') { h.fader = 'fade_in'; h.buttons = ['flash', 'none']; }
+  if (t.type === 'cue_list') h.buttons = ['go', 'none'];
+}));
+$('execMenuFader').addEventListener('change', e => execMenuChange(h => { h.fader = e.target.value; }));
+$('execMenuB1').addEventListener('change', e => execMenuChange(h => { h.buttons = [e.target.value, h.buttons?.[1] || 'none']; }));
+$('execMenuB2').addEventListener('change', e => execMenuChange(h => { h.buttons = [h.buttons?.[0] || 'none', e.target.value]; }));
+$('execMenuLabel').addEventListener('change', e => execMenuChange(h => { h.label = e.target.value.trim(); }));
+$('execMenuClear').addEventListener('click', () => execMenuChange(h => { h.target = { type: 'none' }; h.label = ''; h.buttons = ['none', 'none']; h.fader = 'level'; }));
+$('execMenuClose').addEventListener('click', closeExecMenu);
+for (const [el, which] of [['execMenuLearnF', 'fader'], ['execMenuLearnB1', 'button'], ['execMenuLearnB2', 'button2']]) {
+  $(el).addEventListener('click', () => { const n = EXEC.menu?.n; closeExecMenu(); if (n != null) startLearn(`exec.cur.${n + 1}.${which}`, false); });
+}
+document.addEventListener('pointerdown', e => {
+  if (!$('execMenu').hidden && !e.target.closest('#execMenu, #execRow')) closeExecMenu();
+}, true);
+$('execMenu').addEventListener('keydown', e => { if (e.key === 'Escape') closeExecMenu(); });
+// A cue dropped on a column (from « Réorganiser » or the timeline's library).
+$('execRow').addEventListener('dragover', e => {
+  const col = e.target.closest('.exec-col');
+  if (!col || showMode) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  document.querySelectorAll('#execRow .drop').forEach(x => x !== col && x.classList.remove('drop'));
+  col.classList.add('drop');
+});
+$('execRow').addEventListener('dragleave', e => { e.target.closest?.('.exec-col')?.classList.remove('drop'); });
+$('execRow').addEventListener('drop', e => {
+  const col = e.target.closest('.exec-col');
+  document.querySelectorAll('#execRow .drop').forEach(x => x.classList.remove('drop'));
+  if (!col) return;
+  e.preventDefault();
+  const id = e.dataTransfer.getData('text/plain');
+  if (!presetById.has(id) || !EXEC.pages) return;
+  const n = +col.dataset.n - 1, h = structuredClone(execHandle(n));
+  const keep = execTarget(h.target) === 'cue';
+  setExecHandle(EXEC.page, n, { ...h, target: { type: 'cue', id }, fader: keep ? h.fader : 'fade_in', buttons: keep ? h.buttons : ['flash', 'none'] });
+});
+loadExecutors();
 function showLayers(l) {
   if (!l) return;
   const key = JSON.stringify(l);
@@ -12482,8 +12831,9 @@ function openMidiMenu(id, x, y) {
 function closeMidiMenu() { $('midiMenu').hidden = true; }
 document.addEventListener('contextmenu', e => {
   const el = e.target.closest?.('[data-control]');
-  // Cues keep their own menu (« Propriétés du cue »), which has the MIDI entries.
-  if (!el || el.closest('#cues')) return;
+  // Cues keep their own menu (« Propriétés du cue »), which has the MIDI
+  // entries; so do the executors (« Affecter », T-418).
+  if (!el || el.closest('#cues, #execRow')) return;
   e.preventDefault(); e.stopPropagation();
   if (showMode) return flash(LOCKED_FR); // T-283: no MIDI learn
   openMidiMenu(el.dataset.control, e.clientX, e.clientY);

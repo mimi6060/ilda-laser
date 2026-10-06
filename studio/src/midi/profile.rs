@@ -22,9 +22,14 @@ pub const GENERIC: &str = "generic";
 /// After `generic`, starter templates for common controllers (T-211),
 /// written by us from the makers' public MIDI charts; none is needed for
 /// a device to work (MIDI learn on `generic` is enough).
-const BUILTIN: [(&str, &str); 7] = [
+///
+/// `apc40-mk2-exec` (T-418) is optional: never chosen by itself, it puts
+/// the 8 track faders and Track Select buttons on the executor bank of
+/// the page shown (`exec.cur.*`); the default `apc40-mk2` is unchanged.
+const BUILTIN: [(&str, &str); 8] = [
     ("apc40-mk2", include_str!("../../profiles/apc40-mk2.json")),
     ("apc40", include_str!("../../profiles/apc40.json")),
+    ("apc40-mk2-exec", include_str!("../../profiles/apc40-mk2-exec.json")),
     (GENERIC, include_str!("../../profiles/generic.json")),
     ("apc-mini", include_str!("../../profiles/apc-mini.json")),
     ("launchpad", include_str!("../../profiles/launchpad.json")),
@@ -485,7 +490,7 @@ mod tests {
         assert_eq!(store.get("apc40-mk2").unwrap().host_mode, 0x41);
         assert_eq!(store.get(GENERIC).unwrap().driver, Driver::Generic);
         let list = store.list();
-        assert_eq!(list.len(), 7);
+        assert_eq!(list.len(), 8);
         let templates: Vec<&str> = list.iter().filter(|p| p.template).map(|p| p.slug.as_str()).collect();
         assert_eq!(templates, ["apc-mini", "launchpad", "nanokontrol2", "x-touch-mini"]);
         assert!(list.iter().all(|p| p.builtin));

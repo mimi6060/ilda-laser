@@ -524,7 +524,7 @@ mod tests {
     fn profiles_and_preferences() {
         let mut s = test_support::shared();
         let list = json(route(&mut s, false, "/api/midi/profiles", ""));
-        assert_eq!(list.as_array().unwrap().len(), 7);
+        assert_eq!(list.as_array().unwrap().len(), 8);
         assert_eq!(status(route(&mut s, true, "/api/midi/profile", r#"{"port":"APC40 mkII","profile":"generic"}"#)), 200);
         assert_eq!(s.midi.store.choose("APC40 mkII", crate::midi::Model::Apc40Mk2).slug, "generic");
         assert_eq!(status(route(&mut s, true, "/api/midi/profile", r#"{"port":"APC40 mkII","profile":null}"#)), 200);

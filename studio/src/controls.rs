@@ -373,6 +373,22 @@ impl ControlRegistry {
         }
         add("group.all_full".into(), "Maîtres de groupe : tout à 100 %".into(), "group", ControlKind::Trigger, true);
 
+        // The executor bank (T-418): every page's handles, the page shown
+        // and its `exec.cur.*` aliases. Playback only: none of them arms,
+        // and their dimming stays before the safety stage.
+        for (id, label, handle) in crate::executors::control_ids() {
+            let kind = match handle {
+                crate::executors::Handle::Fader => cont(0.0, 1.0, 0.0, Unit::Percent),
+                crate::executors::Handle::Button(_) => ControlKind::Momentary,
+            };
+            add(id, label, "exec", kind, true);
+        }
+        add("exec.page.next".into(), "Page d'exécuteurs suivante".into(), "exec", ControlKind::Trigger, true);
+        add("exec.page.prev".into(), "Page d'exécuteurs précédente".into(), "exec", ControlKind::Trigger, true);
+        for p in 1..=crate::executors::EXEC_MAX_PAGES {
+            add(format!("exec.page.{p}"), format!("Page d'exécuteurs {p}"), "exec", ControlKind::Trigger, true);
+        }
+
         // Momentary: pad down (value 1) presses, pad up (value 0) releases -
         // what flash and solo need. Toggle/restart cues ignore the release.
         let names: HashMap<&str, &str> = presets.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
@@ -604,6 +620,9 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
                     FxParam::Action => s.fx.set_action(line, value(input)),
                 }
                 return Ok(());
+            }
+            if let Some(r) = crate::executors::apply(s, other, input, Some(src.id()), source) {
+                return r.map_err(ControlError::Refused);
             }
             if let Some(n) = group_master_control(other) {
                 if !s.projection.set_master(n, value(input)) {
@@ -919,6 +938,7 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
             (line, FxParam::Cell(cell)) => json!(s.fx.active(line) == Some(cell)),
             (line, FxParam::Action) => json!(s.fx.action(line)),
         },
+        id if id.starts_with("exec.") => crate::executors::current(s, id)?,
         id if id.starts_with("group.") => json!(s.projection.master(group_master_control(id)?)?),
         id if id.starts_with("layer.") => {
             let (n, param) = layer_control(id)?;
@@ -1190,6 +1210,8 @@ pub fn release_held(s: &mut Shared) {
     if s.deck.active.iter().any(|a| a.held) {
         with_deck(s, |deck, _| deck.release_all_held());
     }
+    // Executor buttons held from that page too (T-418).
+    crate::executors::release_all(s);
 }
 
 /// Once per engine frame, at `t` (T-158 / T-159): with the e-stop latched,

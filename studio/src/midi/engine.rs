@@ -1043,7 +1043,8 @@ mod tests {
     #[test]
     fn builtin_apc_profiles_only_use_registered_controls() {
         let s = shared();
-        for slug in APC_PROFILES {
+        // T-418: the optional executor layout keeps every rule of the default one.
+        for slug in APC_PROFILES.into_iter().chain(["apc40-mk2-exec"]) {
             let p = s.midi.store.get(slug).unwrap();
             assert_eq!(p.host_mode, 0x41, "{slug}");
             assert_eq!(p.shift_key, Some(MidiInput { kind: InputKind::Note, channel: None, number: 0x62 }), "{slug}");
@@ -1190,6 +1191,37 @@ mod tests {
             batch_at(&mut s, &[off(STOP_ALL), off(SHIFT), on(STOP_ALL)], t + Duration::from_secs(2));
             assert!(!s.gate.is_armed(), "{slug}: Stop All alone is still the blackout");
         }
+    }
+
+    /// T-418: the optional « exécuteurs » profile puts the track faders and
+    /// Track Select buttons on the executors of the page shown; it is never
+    /// picked by itself, and the default profile keeps its faders.
+    #[test]
+    fn the_executor_profile_drives_the_page_shown() {
+        use crate::executors::{ButtonFn, ExecPage, ExecTarget, Executor, ExecutorBank, FaderFn};
+        let mut s = builtin("apc40-mk2-exec");
+        let cue = s.presets[0].id.clone();
+        let mut bank = ExecutorBank { pages: vec![ExecPage::default()] };
+        bank.sanitize();
+        bank.pages[0].handles[0] = Executor { target: ExecTarget::Cue { id: cue.clone() }, fader: FaderFn::FadeIn, buttons: [ButtonFn::Flash, ButtonFn::None], ..Default::default() };
+        s.executors.set_bank(bank);
+        // Fader 1 at rest, then up: the cue starts at the fader's level.
+        send_msgs(&mut s, &[cc_msg(0x07, 0)]);
+        tick(&mut s);
+        send_msgs(&mut s, &[cc_msg(0x07, 64)]);
+        tick(&mut s);
+        let a = s.deck.active.iter().find(|a| a.cue == cue).expect("started by the fader");
+        assert!((a.exec_level - 64.0 / 127.0).abs() < 1e-3, "{}", a.exec_level);
+        assert_eq!(s.live.size, 1.0, "not the master size any more");
+        // Track Select 1: Flash, held while pressed.
+        send_msgs(&mut s, &[MidiMsg::NoteOn { channel: 0, note: 51, velocity: 127 }]);
+        assert_eq!(s.deck.active.iter().find(|a| a.cue == cue).unwrap().exec_level, 1.0);
+        send_msgs(&mut s, &[MidiMsg::NoteOff { channel: 0, note: 51 }]);
+        assert!(s.deck.active.iter().find(|a| a.cue == cue).unwrap().exec_level < 1.0);
+        assert!(!s.gate.is_armed());
+        // Never chosen by itself.
+        let store = crate::midi::profile::ProfileStore::in_memory();
+        assert_eq!(store.choose("APC40 mkII", crate::midi::detect::Model::Apc40Mk2).slug, "apc40-mk2");
     }
 
     #[test]

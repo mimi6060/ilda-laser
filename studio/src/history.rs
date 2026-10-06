@@ -68,11 +68,14 @@ pub enum Section {
     /// The FX grid's cells (T-146). Not what plays, nor the *Action*
     /// faders, destination and click mode: those are live controls.
     Fx,
+    /// The executor bank's assignments (T-418). Not the faders' positions
+    /// nor what is held: those are live.
+    Executors,
 }
 
 use Section::*;
 
-const ALL: [Section; 13] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx];
+const ALL: [Section; 14] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -90,6 +93,7 @@ impl Section {
             Venue => "venue",
             Projection => "projection",
             Fx => "fx",
+            Executors => "executors",
         }
     }
 
@@ -116,6 +120,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/venue" | "/api/venue/preset" => &[Venue],
         "/api/projection" => &[Projection],
         "/api/fx" => &[Fx],
+        "/api/executors" => &[Executors],
         _ => return None,
     })
 }
@@ -136,6 +141,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         Venue => json!(s.venue.get()),
         Projection => json!(s.projection.get()),
         Fx => json!(s.fx.grid().cells()),
+        Executors => json!(s.executors.bank),
     }
 }
 
@@ -213,6 +219,10 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         Fx => {
             let cells = from(v)?;
             s.fx.set_cells(cells, &s.controls).map_err(bad)?;
+        }
+        Executors => {
+            s.executors.set_bank(from(v)?);
+            s.executors.save();
         }
     }
     Ok(())
@@ -491,6 +501,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Venue) => "Lieu et projecteurs modifiés".into(),
         (_, Projection) => "Zones de projection modifiées".into(),
         (_, Fx) => fx_label(old, new),
+        (_, Executors) => exec_label(old, new),
     }
 }
 
@@ -515,6 +526,33 @@ fn fx_label(old: &Value, new: &Value) -> String {
         }
     }
     "Grille d'effets modifiée".into()
+}
+
+/// « Exécuteur 1.3 affecté », « Page d'exécuteurs « Beams » ajoutée »…:
+/// the first difference.
+fn exec_label(old: &Value, new: &Value) -> String {
+    let pages = |v: &Value| v.get("pages").and_then(Value::as_array).cloned().unwrap_or_default();
+    let (a, b) = (pages(old), pages(new));
+    let name = |p: &Value| p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+    if b.len() > a.len() {
+        return format!("Page d'exécuteurs « {} » ajoutée", b.last().map(name).unwrap_or_default());
+    }
+    if b.len() < a.len() {
+        return "Page d'exécuteurs supprimée".into();
+    }
+    for (i, (p, q)) in a.iter().zip(&b).enumerate() {
+        if name(p) != name(q) {
+            return format!("Page d'exécuteurs {} renommée", i + 1);
+        }
+        let (hp, hq) = (p.get("handles").and_then(Value::as_array), q.get("handles").and_then(Value::as_array));
+        if let (Some(hp), Some(hq)) = (hp, hq) {
+            if let Some(n) = hp.iter().zip(hq).position(|(x, y)| x != y) {
+                let empty = hq[n].get("target").and_then(|t| t.get("type")).and_then(Value::as_str) == Some("none");
+                return format!("Exécuteur {}.{} {}", i + 1, n + 1, if empty { "vidé" } else { "affecté" });
+            }
+        }
+    }
+    "Exécuteurs modifiés".into()
 }
 
 /// « Page 2 renommée », « Page « Intro » ajoutée »…
