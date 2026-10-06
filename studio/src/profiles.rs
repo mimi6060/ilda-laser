@@ -143,7 +143,7 @@ impl SafetyProfile {
     }
 }
 
-fn check_name(name: &str) -> Result<()> {
+pub(crate) fn check_name(name: &str) -> Result<()> {
     let n = name.trim();
     if n.is_empty() {
         bail!("Nom de profil vide");
@@ -158,7 +158,7 @@ fn check_name(name: &str) -> Result<()> {
 }
 
 /// The file name of a profile: letters and digits, the rest as dashes.
-fn slug(name: &str) -> String {
+pub(crate) fn slug(name: &str) -> String {
     let mut out = String::new();
     for c in name.trim().to_lowercase().chars() {
         if c.is_alphanumeric() {
@@ -552,6 +552,17 @@ pub fn load(s: &mut Shared, name: &str, confirm_loosen: bool, src: ArmSource) ->
             return Err(err);
         }
     };
+    apply(s, profile, confirm_loosen, src)
+}
+
+/// Applies a profile already read and validated (`load`, or the safety
+/// part of a site profile, T-289): the same loosening check, disarm,
+/// checklist restart and safety log as `load`. Never arms.
+pub fn apply(s: &mut Shared, profile: SafetyProfile, confirm_loosen: bool, src: ArmSource) -> std::result::Result<Value, LoadError> {
+    if !operator_source(src) {
+        return Err(LoadError::Source);
+    }
+    profile.validate().map_err(|e| LoadError::Damaged(e.to_string()))?;
     let loosen = loosenings(s, &profile);
     if !loosen.is_empty() && !confirm_loosen {
         return Err(LoadError::Loosens(loosen));

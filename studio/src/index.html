@@ -1198,6 +1198,10 @@
   .modal[hidden] { display: none; }
   .modal .box { width: min(440px, 92vw); padding: 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
   .modal h3 { margin: 0 0 8px; font-size: 15px; }
+  /* T-289: the parts of a partial import, and long site/package dialogs. */
+  .partial-parts { border: 0; margin: 8px 0 0; padding: 0; }
+  .partial-parts legend { padding: 0; font-size: 12px; color: var(--muted); }
+  #siteAsk .box, #partialDialog .box, #packImportDialog .box { max-height: 90vh; overflow-y: auto; }
   /* Autosave (T-287): a quiet status next to the project name, orange on failure. */
   #autosaveStatus { font-size: 11px; color: var(--muted); white-space: nowrap; }
   #autosaveStatus.err { color: var(--warn); font-weight: 600; }
@@ -1730,6 +1734,9 @@
       <button data-proj="save-as">Enregistrer sous…</button>
       <button data-proj="version-save">Enregistrer une version…</button>
       <button data-proj="versions">Versions…</button>
+      <button data-proj="pack-export">Exporter un paquet…</button>
+      <button data-proj="pack-import">Importer un paquet…</button>
+      <button data-proj="partial">Importer depuis un projet…</button>
       <button data-proj="about">À propos de Laser Studio…</button>
     </div>
   </div>
@@ -2091,6 +2098,69 @@
     <div class="hint" id="recoverWhen"></div>
     <div id="recoverError" class="merr" role="alert"></div>
     <div class="row"><button id="recoverOk" class="primary">Récupérer</button><button id="recoverIgnore">Ignorer</button></div>
+  </div>
+</div>
+<div id="siteAsk" class="modal" role="dialog" aria-modal="true" aria-labelledby="siteAskTitle" hidden>
+  <div class="box">
+    <h3 id="siteAskTitle">Ce projet contient un profil de site</h3>
+    <div class="hint" id="siteAskWhat"></div>
+    <ul id="siteAskDiff"></ul>
+    <div id="siteAskLoosen" hidden>
+      <div class="hint sf-warn" id="siteAskLoosenText"></div>
+      <div class="row"><button id="siteAskConfirm">Confirmer l'assouplissement</button></div>
+    </div>
+    <div id="siteAskError" class="merr" role="alert"></div>
+    <div class="hint">Utiliser le profil du projet désarme le laser et remet la liste « Avant le show » à zéro. Un profil ne rend pas un lieu sûr : vérifiez sur place, l'arrêt réel reste matériel (interlock, arrêt d'urgence, clé).</div>
+    <div class="row"><button id="siteAskKeep" class="primary">Garder le profil actuel</button><button id="siteAskUse">Utiliser celui du projet</button></div>
+  </div>
+</div>
+<div id="packDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="packTitle" hidden>
+  <div class="box">
+    <h3 id="packTitle">Exporter un paquet…</h3>
+    <div class="hint">Un fichier .lspack contient le projet ouvert (tel qu'« Enregistrer » l'écrirait) et les fichiers ILDA et audio qu'il utilise, avec leurs empreintes.</div>
+    <label class="check"><input type="checkbox" id="packSite"> Inclure le profil de site (calibration, sécurité, zones de projection ; jamais les adresses des sorties)</label>
+    <div class="hint sf-warn">Les fichiers ILDA et audio sont les vôtres : vous êtes responsable des droits qui permettent de les copier et de les emporter.</div>
+    <div class="row"><button id="packExportOk" class="primary">Exporter</button><button id="packExportClose">Fermer</button></div>
+  </div>
+</div>
+<div id="packImportDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="packImportTitle" hidden>
+  <div class="box">
+    <h3 id="packImportTitle">Importer un paquet…</h3>
+    <label for="packFile">Paquet (.lspack)</label>
+    <input type="file" id="packFile" accept=".lspack">
+    <label for="packName">Nom du projet importé (facultatif)</label>
+    <input type="text" id="packName" autocomplete="off" maxlength="56" placeholder="Nom du paquet">
+    <div class="hint">Le projet devient un nouveau projet (aucun projet existant n'est remplacé) ; ses médias rejoignent la médiathèque. Un profil de site éventuel n'est jamais appliqué : il est proposé à l'ouverture du projet. L'import n'arme jamais le laser.</div>
+    <div class="hint sf-warn">Vous êtes responsable des droits sur les fichiers ILDA et audio du paquet.</div>
+    <div class="hint" id="packImportMsg" role="status"></div>
+    <div id="packImportError" class="merr" role="alert"></div>
+    <div class="row"><button id="packImportOk" class="primary">Importer</button><button id="packImportOpen" hidden>Ouvrir le projet importé</button><button id="packImportClose">Fermer</button></div>
+  </div>
+</div>
+<div id="partialDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="partialTitle" hidden>
+  <div class="box">
+    <h3 id="partialTitle">Importer depuis un projet…</h3>
+    <label for="partialFrom">Projet source</label>
+    <select id="partialFrom"></select>
+    <fieldset id="partialParts" class="partial-parts">
+      <legend>Parties à importer</legend>
+      <label class="check"><input type="checkbox" value="pages"> Pages</label>
+      <label class="check"><input type="checkbox" value="user_cues"> Cues utilisateur</label>
+      <label class="check"><input type="checkbox" value="scenes"> Scènes</label>
+      <label class="check"><input type="checkbox" value="midi"> Correspondances MIDI</label>
+      <label class="check"><input type="checkbox" value="site"> Lieu</label>
+      <label class="check"><input type="checkbox" value="timelines"> Timelines</label>
+    </fieldset>
+    <label for="partialConflict">Si un nom existe déjà</label>
+    <select id="partialConflict">
+      <option value="rename">Renommer</option>
+      <option value="replace">Remplacer</option>
+      <option value="skip">Ignorer</option>
+    </select>
+    <div class="hint" id="partialPreview" role="status"></div>
+    <div id="partialError" class="merr" role="alert"></div>
+    <div class="hint">Le projet ouvert est modifié (pas enregistré) ; seules les parties cochées changent. « Lieu » emporte le profil de site du projet source sans l'appliquer.</div>
+    <div class="row"><button id="partialCheck">Vérifier</button><button id="partialOk" class="primary">Importer</button><button id="partialClose">Fermer</button></div>
   </div>
 </div>
 <div id="projAsk" class="modal" hidden>
@@ -3680,6 +3750,29 @@
     </section>
 
     <section data-help="reglages-calibration">
+      <details id="sitePanel" data-search="Profils de site profil actif lieu calibration zones">
+        <summary>Profils de site</summary>
+        <label for="siteSelect">Profil actif</label>
+        <select id="siteSelect"></select>
+        <div class="row"><button id="siteLoad">Charger ce profil</button><button id="siteSaveAs">Enregistrer sous…</button><button id="siteDelete">Supprimer</button></div>
+        <div class="hint" id="siteInfo" role="status"></div>
+        <div id="siteSaveBox" hidden>
+          <label for="siteName">Nom du profil de site</label>
+          <input type="text" id="siteName" maxlength="60" autocomplete="off" placeholder="Ex. : Salle des fêtes">
+          <div class="row"><button id="siteSaveOk" class="primary">Enregistrer</button><button id="siteSaveCancel">Annuler</button></div>
+          <div class="hint">Enregistre la calibration, les réglages de sécurité et les zones de projection en vigueur ; la sortie choisie est seulement notée.</div>
+        </div>
+        <div id="siteLoosen" hidden>
+          <div class="hint sf-warn" id="siteLoosenText"></div>
+          <div class="row"><button id="siteLoosenOk">Confirmer l'assouplissement</button><button id="siteLoosenCancel">Annuler</button></div>
+        </div>
+        <div id="siteProject" hidden>
+          <div class="hint" id="siteProjectText"></div>
+          <div class="row"><button id="siteProjectUse">Utiliser celui du projet</button></div>
+        </div>
+        <div class="hint sf-error" id="siteError" role="alert"></div>
+        <div class="hint">Un profil de site garde ce qui appartient au lieu : calibration, sécurité (zones, horizon, plafonds) et zones de projection. Charger un profil désarme le laser ; ce qui assouplit la sécurité demande une confirmation. L'arrêt réel reste matériel (interlock, arrêt d'urgence, clé).</div>
+      </details>
       <details data-search="Calibration">
         <summary>Calibration</summary>
         <label>Décalage X <span class="v" id="cOxV"></span></label><input type="range" id="cOx" data-default="0" data-display-k="0.01" min="-100" max="100">
@@ -15954,6 +16047,197 @@ async function loadProject() {
   const at = performance.now();
   try { project = await apiJson('GET', '/api/project'); takeProjectModified(project.modified, at); showProject(); } catch { /* studio restarting */ }
 }
+// ---------- site profiles and packages (T-289) ----------
+// A site profile holds the venue's calibration, safety settings and
+// projection zones. Loading one disarms; a looser one needs the
+// confirmation, as a safety profile. A project may carry one: opening the
+// project never applies it, the page asks (« Garder le profil actuel »
+// by default). Packages (.lspack) carry a project and its media.
+let siteView = null, sitePending = null;
+async function loadSites() {
+  try { siteView = await apiJson('GET', '/api/sites', undefined, { quiet: true }); showSites(); } catch { /* studio restarting */ }
+}
+function showSites() {
+  const v = siteView;
+  if (!v) return;
+  const sel = $('siteSelect'), keep = sel.value;
+  sel.replaceChildren(...v.sites.map(e => {
+    const o = document.createElement('option');
+    o.value = e.name; o.textContent = e.name + (e.damaged ? ' (abîmé)' : '') + (e.name === v.active ? ' (actif)' : '');
+    return o;
+  }));
+  sel.value = v.sites.some(e => e.name === keep) ? keep : (v.active || '');
+  const cur = v.sites.find(e => e.name === sel.value);
+  $('siteInfo').textContent = v.active
+    ? `Profil actif : ${v.active}${v.modified ? ' (réglages modifiés depuis, à enregistrer)' : ''}.`
+    : 'Aucun profil de site actif.';
+  if (cur && cur.damaged) $('siteInfo').textContent += ` « ${cur.name} » : ${cur.damaged}`;
+  $('siteLoad').disabled = !cur || !!cur.damaged;
+  $('siteDelete').disabled = !cur;
+  const ps = v.project_site;
+  $('siteProject').hidden = !ps;
+  if (ps) {
+    $('siteProjectText').textContent = ps.error ? 'Profil de site du projet illisible : ' + ps.error
+      : `Le projet contient le profil « ${ps.name} »` + (ps.differences.length ? ' : ' + ps.differences.join(' · ') : ' (identique aux réglages en vigueur).');
+    $('siteProjectUse').disabled = !!ps.error;
+  }
+}
+// After a site change: calibration, safety, zones and the pill follow.
+async function afterSiteChange() {
+  try { await loadState(); } catch { /* studio restarting */ }
+  loadProjection();
+}
+/** The answer of a site route: 409 → the loosening list and confirmation. */
+async function siteReply(r, retry, box) {
+  $('siteError').textContent = '';
+  if (r.ok) {
+    sitePending = null; $('siteLoosen').hidden = true;
+    siteView = await r.json(); showSites();
+    await afterSiteChange();
+    return true;
+  }
+  if (r.status === 409) {
+    const j = await r.json();
+    sitePending = retry;
+    const text = 'Le profil est moins restrictif : ' + j.loosen.join(' · ');
+    if (box === 'ask') { $('siteAskLoosenText').textContent = text.replace('Le profil', 'Le profil du projet'); $('siteAskLoosen').hidden = false; $('siteAskConfirm').focus(); }
+    else { $('siteLoosenText').textContent = text; $('siteLoosen').hidden = false; }
+  } else {
+    const msg = r.status === 423 ? LOCKED_FR : await r.text();
+    if (box === 'ask') $('siteAskError').textContent = msg; else $('siteError').textContent = msg;
+    loadSites();
+  }
+  return false;
+}
+async function siteLoad(name, confirm = false) {
+  const r = await api('POST', '/api/sites', { action: 'load', name, confirm_loosen: confirm, source: 'ui' }, { quiet: true });
+  await siteReply(r, () => siteLoad(name, true));
+}
+async function siteUseProject(confirm = false, box = 'panel') {
+  const r = await api('POST', '/api/sites/use-project', { confirm_loosen: confirm, source: 'ui' }, { quiet: true });
+  const ok = await siteReply(r, () => siteUseProject(true, box), box);
+  if (ok && box === 'ask') $('siteAsk').hidden = true;
+  return ok;
+}
+$('sitePanel').addEventListener('toggle', () => { if ($('sitePanel').open) loadSites(); });
+$('siteSelect').addEventListener('change', () => { sitePending = null; $('siteLoosen').hidden = true; showSites(); });
+$('siteLoad').addEventListener('click', () => siteLoad($('siteSelect').value));
+$('siteLoosenOk').addEventListener('click', () => { const f = sitePending; sitePending = null; if (f) f(); });
+$('siteLoosenCancel').addEventListener('click', () => { sitePending = null; $('siteLoosen').hidden = true; });
+$('siteSaveAs').addEventListener('click', () => { $('siteName').value = (siteView && siteView.active) || ''; $('siteSaveBox').hidden = false; $('siteName').focus(); });
+$('siteSaveCancel').addEventListener('click', () => { $('siteSaveBox').hidden = true; });
+$('siteSaveOk').addEventListener('click', async () => {
+  const name = $('siteName').value.trim();
+  if (!name) { $('siteError').textContent = 'Donnez un nom au profil de site.'; return; }
+  if (siteView && siteView.sites.some(e => e.name === name) && name !== siteView.active && !confirm(`Remplacer le profil de site « ${name} » ?`)) return;
+  const r = await api('POST', '/api/sites', { action: 'save', name, source: 'ui' }, { quiet: true });
+  if (await siteReply(r, null)) $('siteSaveBox').hidden = true;
+});
+$('siteDelete').addEventListener('click', async () => {
+  const name = $('siteSelect').value;
+  if (!name || !confirm(`Supprimer le profil de site « ${name} » ? Les réglages en vigueur ne changent pas.`)) return;
+  const r = await api('POST', '/api/sites', { action: 'delete', name, source: 'ui' }, { quiet: true });
+  await siteReply(r, null);
+});
+$('siteProjectUse').addEventListener('click', () => siteUseProject(false, 'panel'));
+// After opening a project that carries a different site profile.
+async function offerSite() {
+  if (!project.site_offer) return;
+  await loadSites();
+  const ps = siteView && siteView.project_site;
+  if (!ps || ps.error) return;
+  $('siteAskWhat').textContent = `Profil du projet : « ${ps.name} ». Profil en vigueur : « ${siteView.active || 'aucun'} ». Rien n'a changé tant que vous ne choisissez pas « Utiliser celui du projet ».`;
+  $('siteAskDiff').replaceChildren(...ps.differences.map(d => { const li = document.createElement('li'); li.textContent = d; return li; }));
+  $('siteAskLoosen').hidden = true; $('siteAskError').textContent = '';
+  $('siteAsk').hidden = false;
+  $('siteAskKeep').focus();
+}
+$('siteAskKeep').addEventListener('click', () => { sitePending = null; $('siteAsk').hidden = true; });
+$('siteAskUse').addEventListener('click', () => siteUseProject(false, 'ask'));
+$('siteAskConfirm').addEventListener('click', () => { const f = sitePending; sitePending = null; if (f) f(); });
+// Exporter un paquet… : a download (no fetch: the browser saves the file).
+$('packExportOk').addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = '/api/pack/export?site=' + ($('packSite').checked ? 1 : 0);
+  a.download = (project.name || 'projet') + '.lspack';
+  document.body.append(a); a.click(); a.remove();
+  $('packDialog').hidden = true;
+});
+$('packExportClose').addEventListener('click', () => { $('packDialog').hidden = true; });
+// Importer un paquet… : the file's bytes; the studio checks everything.
+let packImported = null;
+function packImportDialog() {
+  packImported = null;
+  $('packFile').value = ''; $('packName').value = '';
+  $('packImportMsg').textContent = ''; $('packImportError').textContent = '';
+  $('packImportOpen').hidden = true;
+  $('packImportDialog').hidden = false;
+  $('packFile').focus();
+}
+$('packImportOk').addEventListener('click', async () => {
+  const file = $('packFile').files[0];
+  $('packImportError').textContent = '';
+  if (!file) { $('packImportError').textContent = 'Choisissez un fichier .lspack.'; return; }
+  $('packImportMsg').textContent = `Lecture de « ${file.name} »…`;
+  const name = $('packName').value.trim();
+  let r;
+  try { r = await api('POST', '/api/pack/import' + (name ? '?name=' + encodeURIComponent(name) : ''), file, { quiet: true }); }
+  catch { $('packImportMsg').textContent = ''; $('packImportError').textContent = 'Le studio ne répond pas.'; return; }
+  if (!r.ok) { $('packImportMsg').textContent = ''; $('packImportError').textContent = 'Import impossible : ' + (r.status === 423 ? LOCKED_FR : await r.text()); return; }
+  const d = await r.json();
+  packImported = d.project;
+  const parts = [`Projet « ${d.project} » importé avec ${d.media.length} média${d.media.length > 1 ? 's' : ''}.`];
+  if (d.renamed.length) parts.push('Renommés : ' + d.renamed.map(([a, b]) => `${a} → ${b}`).join(', ') + '.');
+  if (d.missing.length) parts.push('Absents du paquet : ' + d.missing.join(', ') + '.');
+  if (d.site) parts.push(`Profil de site « ${d.site} » proposé à l'ouverture.`);
+  $('packImportMsg').textContent = parts.join(' ');
+  $('packImportOpen').hidden = false; $('packImportOpen').focus();
+  loadProject(); loadIldaLib(); loadSongs();
+});
+$('packImportOpen').addEventListener('click', async () => {
+  if (!packImported) return;
+  $('packImportDialog').hidden = true;
+  await projOpen(packImported);
+});
+$('packImportClose').addEventListener('click', () => { $('packImportDialog').hidden = true; });
+// Importer depuis un projet… : chosen parts, conflicts by name.
+async function partialDialog() {
+  await loadProject();
+  const others = project.projects.filter(n => n !== project.name);
+  $('partialFrom').replaceChildren(...others.map(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; return o; }));
+  $('partialPreview').textContent = others.length ? '' : 'Aucun autre projet enregistré.';
+  $('partialError').textContent = '';
+  $('partialOk').disabled = $('partialCheck').disabled = !others.length;
+  $('partialDialog').hidden = false;
+  $('partialFrom').focus();
+}
+const PARTIAL_LABELS = { pages: 'Pages', user_cues: 'Cues utilisateur', scenes: 'Scènes', midi: 'Correspondances MIDI', site: 'Lieu', timelines: 'Timelines' };
+function partialBody(dry) {
+  const sections = [...$('partialParts').querySelectorAll('input:checked')].map(i => i.value);
+  return { from: $('partialFrom').value, sections, conflict: $('partialConflict').value, dry_run: dry };
+}
+function partialSummary(rep) {
+  return Object.entries(rep || {}).map(([k, r]) => {
+    const bits = [`${r.added} ajouté${r.added > 1 ? 's' : ''}`];
+    if (r.replaced) bits.push(`${r.replaced} remplacé${r.replaced > 1 ? 's' : ''}`);
+    if (r.renamed.length) bits.push(`${r.renamed.length} renommé${r.renamed.length > 1 ? 's' : ''}`);
+    if (r.skipped) bits.push(`${r.skipped} ignoré${r.skipped > 1 ? 's' : ''}`);
+    return `${PARTIAL_LABELS[k] || k} : ${bits.join(', ')}` + (r.conflicts.length ? ` (noms déjà pris : ${r.conflicts.join(', ')})` : '');
+  }).join(' · ');
+}
+async function partialRun(dry) {
+  $('partialError').textContent = '';
+  const body = partialBody(dry);
+  if (!body.sections.length) { $('partialError').textContent = 'Cochez au moins une partie.'; return; }
+  try {
+    await projPost('import-partial', body);
+    $('partialPreview').textContent = (dry ? 'Aperçu — ' : 'Importé — ') + partialSummary(project.import);
+    if (!dry) { await afterOpen(); }
+  } catch (e) { $('partialError').textContent = e.message; }
+}
+$('partialCheck').addEventListener('click', () => partialRun(true));
+$('partialOk').addEventListener('click', () => partialRun(false));
+$('partialClose').addEventListener('click', () => { $('partialDialog').hidden = true; });
 // ---------- autosave and recovery (T-287) ----------
 // The studio writes autosaves on its own thread; the page only shows the
 // status, the settings and, after a crash, the recovery question.
@@ -16079,7 +16363,7 @@ async function projDialogOk() {
   if (!path) { $('projError').textContent = 'Donnez un nom au projet.'; return; }
   try {
     if (projDialogMode === 'open') {
-      await projPost('open', { path }); $('projDialog').hidden = true; await afterOpen();
+      await projPost('open', { path }); $('projDialog').hidden = true; await afterOpen(); offerSite();
     } else {
       const exists = project.projects.includes(path.replace(/\.lsproj$/, '')) && path !== project.name;
       if (exists && !confirm(`Remplacer le projet « ${path} » ?`)) return;
@@ -16090,7 +16374,7 @@ async function projDialogOk() {
 async function projOpen(name) {
   if (showMode) return flash(LOCKED_FR);
   if (!await askUnsaved()) return;
-  try { await projPost('open', { path: name }); await afterOpen(); } catch (e) { alert(e.message); }
+  try { await projPost('open', { path: name }); await afterOpen(); offerSite(); } catch (e) { alert(e.message); }
 }
 async function projAction(kind) {
   $('projMenu').hidden = true;
@@ -16112,6 +16396,12 @@ async function projAction(kind) {
     try { await projPost('new'); await afterOpen(); } catch (e) { alert(e.message); }
   } else if (kind === 'version-save' || kind === 'versions') {
     verDialog(kind === 'version-save');
+  } else if (kind === 'pack-export') {
+    $('packDialog').hidden = false; $('packExportOk').focus();
+  } else if (kind === 'pack-import') {
+    packImportDialog();
+  } else if (kind === 'partial') {
+    partialDialog();
   }
 }
 $('projBtn').onclick = e => { e.stopPropagation(); $('projMenu').hidden = !$('projMenu').hidden; if (!$('projMenu').hidden) loadProject(); };
