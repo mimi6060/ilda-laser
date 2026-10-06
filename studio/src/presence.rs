@@ -164,6 +164,11 @@ impl Presence {
         }
     }
 
+    /// Page `id` beat within the timeout (as of the last update).
+    pub fn is_beating(&self, id: &str) -> bool {
+        self.clients.contains_key(id)
+    }
+
     /// The page is closing (its `pagehide` beacon).
     pub fn leave(&mut self, id: &str) {
         self.clients.remove(id);

@@ -514,6 +514,15 @@ pub fn describe(e: &SafetyEvent) -> String {
             Some(label) => format!("Mire affichée : {label}"),
             None => "Mire quittée".into(),
         },
+        "zone_trace" => match (d.get("on").and_then(Value::as_bool), d.get("reason").and_then(Value::as_str)) {
+            (Some(true), _) => "Tracé des zones de sécurité lancé".into(),
+            (_, Some("timeout")) => "Tracé des zones terminé (60 s écoulées)".into(),
+            (_, Some("estop")) => "Tracé des zones arrêté : arrêt d'urgence".into(),
+            (_, Some("disarm")) => "Tracé des zones arrêté : laser désarmé".into(),
+            (_, Some("ui_lost")) => "Tracé des zones arrêté : interface perdue".into(),
+            (_, Some("zone")) => "Tracé des zones arrêté : zone supprimée".into(),
+            _ => "Tracé des zones quitté".into(),
+        },
         "checklist" => {
             let n = d.get("items").and_then(Value::as_array).map_or(0, |a| a.len());
             format!("Liste de contrôle avant show terminée par {} ({n} élément(s))", str_of(d, "operator"))

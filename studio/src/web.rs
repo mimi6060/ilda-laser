@@ -151,6 +151,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/outputs/scan_limits", RouteClass::Safety),
     ("GET", "/api/testpattern", RouteClass::Read),
     ("POST", "/api/testpattern", RouteClass::Safety),
+    ("POST", "/api/safety/trace", RouteClass::Safety),
     ("GET", "/api/checklist", RouteClass::Read),
     ("GET", "/api/safety/log", RouteClass::Read),
     ("GET", "/api/safety/log.csv", RouteClass::Read),
@@ -1486,6 +1487,47 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 }
                 Err(e) => e,
             }
+        }
+        // T-447: `{"on": true, "only": <zone id> | null, "client_id": "…"}`
+        // traces the zones' outlines for 60 s, `{"on": false}` stops it.
+        // The local UI only: not a control, no remote, no external input.
+        // Never arms; refused under the e-stop; in show mode, stopping only.
+        (Method::Post, "/api/safety/trace") => {
+            let local = request.remote_addr().is_some_and(|a| a.ip().is_loopback());
+            let req = match body::<serde_json::Value>(request) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            if !local {
+                return text(403, "le tracé des zones ne se lance que depuis l'interface de ce Mac");
+            }
+            let Some(on) = req.get("on").and_then(|v| v.as_bool()) else {
+                return text(400, "on: true ou false");
+            };
+            let only = match req.get("only") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(v) => match v.as_u64().and_then(|id| u32::try_from(id).ok()) {
+                    Some(id) => Some(id),
+                    None => return text(400, "only: identifiant de zone ou null"),
+                },
+            };
+            let now = Instant::now();
+            let client = req.get("client_id").and_then(|v| v.as_str());
+            let mut s = shared.lock().unwrap();
+            if let Some(id) = client {
+                s.presence.touch(id, now);
+            }
+            if on {
+                if s.show_mode.on {
+                    return locked();
+                }
+                if let Err(e) = crate::zonetrace::start(&mut s, now, only, client) {
+                    return text(409, &e);
+                }
+            } else {
+                crate::zonetrace::stop(&mut s, "user");
+            }
+            json_response(crate::zonetrace::view(&s, now))
         }
         (Method::Get, "/api/testpattern") =>json_response(test_pattern_view(&shared.lock().unwrap())),
         // T-404: `{"pattern": "grid" | null, "brightness": 0.2}`, both
@@ -4471,6 +4513,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     });
     // T-450: free space and the copy to a second location.
     v["storage"] = json!(s.project.backup.status());
+    // T-447: the zone trace, its seconds left and its zone.
+    v["zone_trace"] = crate::zonetrace::view(s, Instant::now());
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
     // T-262: the outdoor mode and « Ciel coupé ».
@@ -4672,6 +4716,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     });
     // T-285: undo / redo counts and labels; `rev` moves on every change.
     v["history"] = s.history.summary();
+    // T-447: the zone trace, its seconds left and its zone.
+    v["zone_trace"] = crate::zonetrace::view(s, Instant::now());
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
     // T-262: the outdoor mode and « Ciel coupé ».
@@ -6102,6 +6148,42 @@ mod tests {
         assert_eq!(t.shared.lock().unwrap().test_pattern.brightness, 1.0);
         assert_eq!(t.request("POST", "/api/testpattern", r#"{"pattern":null}"#).0, 200);
         assert_eq!(t.shared.lock().unwrap().test_pattern.active, None);
+    }
+
+    /// T-447: the zone trace starts and stops from the local UI, never
+    /// arms, refuses a bad body and an unknown zone, shows in the state,
+    /// and in show mode can only be stopped.
+    #[test]
+    fn zone_trace_api_starts_and_stops_without_arming() {
+        let t = TestServer::start(false);
+        let zone = crate::zones::Zone { points: vec![[-0.2, -0.2], [0.2, -0.2], [0.2, 0.2], [-0.2, 0.2]], ..Default::default() };
+        let id = {
+            let mut s = t.shared.lock().unwrap();
+            let saved = s.safety.set(crate::safety::SafetySettings { zones: vec![zone], ..Default::default() }, true).unwrap();
+            saved.zones[0].id
+        };
+        assert_eq!(t.request("POST", "/api/safety/trace", "{}").0, 400);
+        assert_eq!(t.request("POST", "/api/safety/trace", r#"{"on":true,"only":"x"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/safety/trace", r#"{"on":true,"only":999}"#).0, 409);
+        assert!(!t.shared.lock().unwrap().zone_trace.is_on(), "a refused body changes nothing");
+        let (status, body) = t.request("POST", "/api/safety/trace", &format!(r#"{{"on":true,"only":{id},"client_id":"p"}}"#));
+        assert_eq!(status, 200, "{body}");
+        let v = js(&body);
+        assert_eq!((v["on"].clone(), v["only"].clone()), (json!(true), json!(id)));
+        assert!(v["remaining_s"].as_u64().unwrap() > 55);
+        let state = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!(state["zone_trace"]["on"], true, "{}", state["zone_trace"]);
+        assert!(!t.shared.lock().unwrap().gate.is_armed(), "the trace never arms");
+        // Show mode: stopping only.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/safety/trace", r#"{"on":true}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/safety/trace", r#"{"on":false}"#).0, 200);
+        assert!(!t.shared.lock().unwrap().zone_trace.is_on());
+        t.shared.lock().unwrap().show_mode.on = false;
+        // Under the e-stop: refused.
+        t.request("POST", "/api/estop", "");
+        assert_eq!(t.request("POST", "/api/safety/trace", r#"{"on":true}"#).0, 409);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub fn allowed(path: &str) -> bool {
         "/api/timecode/arm",
         // Leaving a pattern is allowed; the handler refuses showing one.
         "/api/testpattern",
+        // Stopping the zone trace (T-447) too; the handler refuses starting it.
+        "/api/safety/trace",
         "/api/data/warnings/ack",
         // Back above the audience is allowed; the handler refuses unlocking.
         "/api/audience",

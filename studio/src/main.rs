@@ -107,6 +107,7 @@ mod versions;
 mod venue;
 mod watchdog;
 mod zones;
+mod zonetrace;
 mod web;
 mod wifi;
 
@@ -506,6 +507,9 @@ pub struct Shared {
     pub project: project::ProjectState,
     /// Test pattern mode (testpattern.rs, T-404): memory only, off at start.
     pub test_pattern: testpattern::TestPatternState,
+    /// Tracing the zones for verification (zonetrace.rs, T-447): memory
+    /// only, off at start.
+    pub zone_trace: zonetrace::ZoneTrace,
     /// Prevent sleep during a show (keep_awake.rs): setting and status.
     pub keep_awake: keep_awake::KeepAwakeState,
     /// First launch (onboarding.rs, T-437): whether the tour was seen.
@@ -888,6 +892,8 @@ impl Shared {
         self.estop.trip(src);
         // No macro step runs after the stop (T-425).
         self.macros.player.stop_all();
+        // The zone trace ends at once (T-447); starting it again takes a click.
+        zonetrace::stop(self, "estop");
         // Fades end and waiting cues are dropped at once (T-158 / T-159).
         self.deck.cut_transitions();
         // The cue list pauses; it never starts again by itself (T-410).
@@ -1489,6 +1495,7 @@ fn startup_state(cli: &Cli) -> Shared {
         health: Arc::new(watchdog::EngineHealth::default()),
         project: project::ProjectState::load(&cli.data_dir),
         test_pattern: Default::default(),
+        zone_trace: Default::default(),
         keep_awake: keep_awake::KeepAwakeState::load(&cli.data_dir),
         onboarding: onboarding::OnboardingStore::load(&cli.data_dir),
         show_mode: showmode::ShowMode::load(&cli.data_dir),
@@ -1945,12 +1952,15 @@ impl Engine {
         self.last = now;
 
         let record_due;
-        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan)) = {
+        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan), trace) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
             let hold_ok = s.sync_safety(now);
             s.sync_audience();
+            // The zone trace (T-447) ends on its time, an e-stop, a disarm
+            // or its page gone, before this frame's output is chosen.
+            zonetrace::sync(&mut s, now);
             s.health.tick(s.gate.is_armed());
             if s.test_stall_ms > 0 {
                 // `--test-hooks` only: a stall while holding the lock.
@@ -2113,6 +2123,8 @@ impl Engine {
             // A test pattern (T-404) holds the timeline paused and stands
             // in for the whole look; the cues wait in the deck.
             let pattern = testpattern::hold_timeline(&mut s);
+            // The zone trace (T-447) does the same, and wins over a pattern.
+            let trace = zonetrace::hold(&mut s);
             let show_cues = timeline_cues(&mut s, t, &clock);
             // Executors (T-418): a layer flashed or blacked while a button
             // is held, on the copy the mixer draws with.
@@ -2158,7 +2170,7 @@ impl Engine {
                 });
                 // The cue on show after transitions (T-158) and the beat
                 // mode; a launch still waiting (T-159) is not on show.
-                artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some(), &caps)
+                artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some() || trace.is_some(), &caps)
             });
             // The venue's other projectors (T-277): each its own caps and
             // colour rendering (`outputs.json` under its id; the cautious
@@ -2175,7 +2187,7 @@ impl Engine {
                             timeline::EventSource::Cue { id } => Some(id.as_str()),
                             timeline::EventSource::Look { .. } => None,
                         });
-                        artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some(), &cfg.limits)
+                        artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some() || trace.is_some(), &cfg.limits)
                     });
                     ProjectorPlan { id: p.id.clone(), output: p.output.clone(), caps: cfg.limits, color: cfg.color, frame_limits: cfg.scan.frame_limits(), cue_signal }
                 })
@@ -2184,7 +2196,7 @@ impl Engine {
             // An ILDA recording (T-442) wants this frame: copied below,
             // before the safety chain; nothing else changes.
             record_due = s.recorder.due(t);
-            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan))
+            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -2204,17 +2216,25 @@ impl Engine {
         // The live clock of a group: frozen looks keep their beat, the
         // rotations and colours of a level read the group's real beat.
         let live_clocks = speed.clocks(&clock, t + speed_off);
-        let (mut frame, mut extra_frames, mix, evolving) = match pattern {
+        let (mut frame, mut extra_frames, mix, evolving) = match (trace, pattern) {
+            // The zone trace (T-447): the outlines, already in output
+            // coordinates (no look, no live stage, no calibration), at
+            // their fixed low level; the whole safety stage and the gate
+            // below apply to it. Every projector of the venue shows it.
+            (Some(only), _) => {
+                let frame = zones::trace_frame(&safety_cfg.zones, safety_cfg.horizon, only);
+                (frame.clone(), vec![frame; plans.len()], layers::MixReport::default(), Vec::new())
+            }
             // The pattern alone, densified and calibrated, without live
             // modifiers (exact geometry). The cue animators are left as
             // they are, so the cues carry on where they were afterwards.
             // While aligning a projection zone, through that zone's geometry.
             // Every projector of the venue shows it (T-277).
-            Some((p, brightness)) => {
+            (None, Some((p, brightness))) => {
                 let frame = testpattern::output_frame(p, brightness, routing.align.as_ref(), &calibration);
                 (frame.clone(), vec![frame; plans.len()], layers::MixReport::default(), Vec::new())
             }
-            None => {
+            (None, None) => {
                 let anim_dt = live_dt * live.speed.clamp(0.0, 4.0);
                 let (animators, event_live, cue_live, frozen_events) = (&mut self.animators, &mut self.event_live, &mut self.cue_live, &mut self.frozen_events);
                 let frozen_at = self.frozen;
@@ -3359,6 +3379,106 @@ mod tests {
         testpattern::select(&mut s, None);
         assert!(!s.timeline.is_playing());
         assert!(!s.gate.is_armed());
+    }
+
+    /// A `Shared` with one Blank zone (id 1).
+    fn with_a_zone(mut s: Shared) -> Shared {
+        let zone = zones::Zone { id: 1, points: vec![[-0.2, -0.2], [0.2, -0.2], [0.2, 0.2], [-0.2, 0.2]], ..Default::default() };
+        s.safety.set(safety::SafetySettings { zones: vec![zone], ..Default::default() }, true).unwrap();
+        s
+    }
+
+    /// T-447: the zone trace pauses the timeline and leaves the deck alone,
+    /// ends by itself after 60 s (simulated), and everything resumes.
+    #[test]
+    fn a_zone_trace_pauses_the_timeline_and_ends_after_60_s() {
+        let mut s = with_a_zone(test_support::shared());
+        assert!(controls::press_cue(&mut s, "tunnels-001", Some(ClickMode::Toggle), true));
+        let cues_before: Vec<String> = s.deck.active.iter().map(|a| a.cue.clone()).collect();
+        let cue = s.presets[0].id.clone();
+        s.timeline.load(one_event_show(&cue));
+        controls::timeline_play(&mut s).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(zonetrace::start(&mut s, t0, Some(9), None), Err("zone inconnue : 9".into()));
+        zonetrace::start(&mut s, t0, None, None).unwrap();
+        assert!(!s.timeline.is_playing(), "paused under the trace");
+        // Played again from elsewhere: held paused.
+        controls::timeline_play(&mut s).unwrap();
+        assert_eq!(zonetrace::hold(&mut s), Some(None));
+        assert!(!s.timeline.is_playing());
+        zonetrace::sync(&mut s, t0 + Duration::from_secs(zones::TRACE_SECONDS - 1));
+        assert!(s.zone_trace.is_on());
+        assert_eq!(zonetrace::view(&s, t0 + Duration::from_millis(16_500))["remaining_s"], 44);
+        zonetrace::sync(&mut s, t0 + Duration::from_secs(zones::TRACE_SECONDS));
+        assert!(!s.zone_trace.is_on(), "ends by itself");
+        assert_eq!(zonetrace::hold(&mut s), None);
+        assert!(s.timeline.is_playing(), "the timeline resumes");
+        assert_eq!(s.deck.active.iter().map(|a| a.cue.clone()).collect::<Vec<_>>(), cues_before);
+        assert!(!s.gate.is_armed());
+        // One zone only, then that zone removed: the trace ends.
+        zonetrace::start(&mut s, t0, Some(1), None).unwrap();
+        s.safety.set(safety::SafetySettings::default(), true).unwrap();
+        zonetrace::sync(&mut s, t0);
+        assert!(!s.zone_trace.is_on());
+    }
+
+    /// T-447: the e-stop ends the trace at once and refuses a new one; a
+    /// disarm while it runs ends it; starting it never arms.
+    #[test]
+    fn a_zone_trace_ends_on_the_estop_and_on_a_disarm_and_never_arms() {
+        let mut s = with_a_zone(test_support::shared());
+        let cue = s.presets[0].id.clone();
+        s.timeline.load(one_event_show(&cue));
+        controls::timeline_play(&mut s).unwrap();
+        let t0 = Instant::now();
+        zonetrace::start(&mut s, t0, None, None).unwrap();
+        assert!(!s.gate.is_armed(), "never arms");
+        s.emergency_stop(ArmSource::Keyboard);
+        assert!(!s.zone_trace.is_on(), "Échap ends it at once");
+        assert!(!s.timeline.is_playing(), "and nothing resumes");
+        assert!(zonetrace::start(&mut s, t0, None, None).is_err(), "refused under the e-stop");
+        s.gate.reset_estop(&s.estop.clone());
+        // Armed by the operator, then disarmed: the trace ends.
+        s.request_arm(ArmSource::Ui).unwrap();
+        zonetrace::start(&mut s, t0, None, None).unwrap();
+        zonetrace::sync(&mut s, t0);
+        assert!(s.zone_trace.is_on() && s.gate.is_armed());
+        s.gate.disarm(interlock::DisarmReason::User, ArmSource::Ui);
+        zonetrace::sync(&mut s, t0);
+        assert!(!s.zone_trace.is_on());
+        // Started disarmed: it runs (preview only) and stays disarmed.
+        zonetrace::start(&mut s, t0, None, None).unwrap();
+        zonetrace::sync(&mut s, t0 + Duration::from_secs(1));
+        assert!(s.zone_trace.is_on() && !s.gate.is_armed());
+    }
+
+    /// T-447: the page that started the trace stops beating: it ends.
+    #[test]
+    fn a_zone_trace_ends_when_its_page_is_gone() {
+        let mut s = with_a_zone(with_presence(PresenceSettings::default()));
+        let t0 = Instant::now();
+        s.presence.beat("page", t0, true, false);
+        s.presence.beat("other", t0, true, false);
+        s.sync_safety(t0);
+        zonetrace::start(&mut s, t0, None, Some("page")).unwrap();
+        // The other page keeps beating, this one stops.
+        for step in 1..=10u64 {
+            let now = t0 + ms(step * 500);
+            s.presence.beat("other", now, true, false);
+            s.sync_safety(now);
+            zonetrace::sync(&mut s, now);
+        }
+        assert!(!s.zone_trace.is_on(), "ended with its page");
+    }
+
+    /// T-447: nothing in the control registry (MIDI, DMX, OSC, timeline,
+    /// macros) reaches the trace, and the route is a safety route (refused
+    /// by the tablet remote).
+    #[test]
+    fn the_zone_trace_is_no_control_and_a_safety_route() {
+        let s = test_support::shared();
+        assert!(!s.controls.list().iter().any(|d| d.id.contains("zone_trace") || d.id.contains("safety.trace") || d.id.contains("zones.trace")));
+        assert!(web::ROUTES.iter().any(|(m, p, c)| *m == "POST" && *p == "/api/safety/trace" && *c == web::RouteClass::Safety));
     }
 
     /// The pattern mode is never part of the start-up state.
