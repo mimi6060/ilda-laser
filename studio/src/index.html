@@ -133,6 +133,7 @@
   body.show-mode #tlEditor, body.show-mode .lock-edit, body.show-mode #palettes .del,
   body.show-mode #projMenu [data-proj="new"], body.show-mode #projMenu [data-proj="open"], body.show-mode #projMenu [data-proj="save-as"],
   body.show-mode #projMenu [data-proj="version-save"], body.show-mode #projMenu [data-proj="versions"],
+  body.show-mode #projMenu [data-proj="new-template"], body.show-mode #projMenu [data-proj="save-template"], body.show-mode #projTemplates,
   body.show-mode #projMenu .sub, body.show-mode #projRecent { display: none !important; }
   body.show-mode main[data-ws-active="timeline"] { grid-template-rows: minmax(0, 1fr); grid-template-areas: "stage panel"; }
   .tp-sub { margin: 14px 0 2px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
@@ -1238,6 +1239,11 @@
   /* T-289: the parts of a partial import, and long site/package dialogs. */
   .partial-parts { border: 0; margin: 8px 0 0; padding: 0; }
   .partial-parts legend { padding: 0; font-size: 12px; color: var(--muted); }
+  .new-proj-always { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); }
+  #projTemplates { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; }
+  #projTemplates[hidden] { display: none; }
+  #projTemplates .tpl-row { display: flex; gap: 4px; }
+  #projTemplates .tpl-row [data-template] { flex: 1; }
   #siteAsk .box, #partialDialog .box, #packImportDialog .box { max-height: 90vh; overflow-y: auto; }
   /* Autosave (T-287): a quiet status next to the project name, orange on failure. */
   #autosaveStatus { font-size: 11px; color: var(--muted); white-space: nowrap; }
@@ -1763,7 +1769,10 @@
     <span id="autosaveStatus" role="status" hidden></span>
     <span id="backupStatus" role="status" hidden></span>
     <div id="projMenu" hidden>
-      <button data-proj="new">Nouveau</button>
+      <button data-proj="new">Nouveau projet…</button>
+      <button data-proj="new-template" aria-haspopup="true" aria-expanded="false" aria-controls="projTemplates">Nouveau depuis un modèle ▸</button>
+      <div id="projTemplates" hidden></div>
+      <button data-proj="save-template">Enregistrer comme modèle…</button>
       <button data-proj="open">Ouvrir…</button>
       <div class="sub">Récents</div>
       <div id="projRecent"></div>
@@ -2214,6 +2223,33 @@
     <div id="partialError" class="merr" role="alert"></div>
     <div class="hint">Le projet ouvert est modifié (pas enregistré) ; seules les parties cochées changent. « Lieu » emporte le profil de site du projet source sans l'appliquer.</div>
     <div class="row"><button id="partialCheck">Vérifier</button><button id="partialOk" class="primary">Importer</button><button id="partialClose">Fermer</button></div>
+  </div>
+</div>
+<div id="newProjDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="newProjTitle" hidden>
+  <div class="box">
+    <h3 id="newProjTitle">Nouveau projet</h3>
+    <fieldset id="newProjKeep" class="partial-parts">
+      <legend>Reprendre du projet ouvert :</legend>
+      <label class="check"><input type="checkbox" value="midi" checked> Correspondances MIDI</label>
+      <label class="check"><input type="checkbox" value="palettes" checked> Palettes de couleurs</label>
+      <label class="check"><input type="checkbox" value="pages"> Pages utilisateur de la grille</label>
+      <label class="check"><input type="checkbox" value="venue" checked> Lieu</label>
+    </fieldset>
+    <div class="hint">Tout le reste repart vide : scènes, timelines, figures, modulateurs, calques, tempo. « Lieu » reprend le profil de site joint au projet, sans l'appliquer.</div>
+    <div class="hint new-proj-always" role="note">Toujours conservés : calibration, sécurité, sorties (réglages de cette machine)</div>
+    <div class="hint">Créer un projet n'arme jamais le laser et ne change pas son état.</div>
+    <div id="newProjError" class="merr" role="alert"></div>
+    <div class="row"><button id="newProjOk" class="primary">Créer</button><button id="newProjCancel">Annuler</button></div>
+  </div>
+</div>
+<div id="tplDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="tplTitle" hidden>
+  <div class="box">
+    <h3 id="tplTitle">Enregistrer comme modèle…</h3>
+    <label for="tplName">Nom du modèle</label>
+    <input type="text" id="tplName" autocomplete="off" maxlength="64">
+    <div class="hint">Le projet ouvert, tel qu'« Enregistrer » l'écrirait, devient un modèle : « Nouveau depuis un modèle » en crée une copie sans titre.</div>
+    <div id="tplError" class="merr" role="alert"></div>
+    <div class="row"><button id="tplOk" class="primary">Enregistrer</button><button id="tplCancel">Annuler</button></div>
   </div>
 </div>
 <div id="projAsk" class="modal" hidden>
@@ -6417,7 +6453,7 @@ function showShowMode(lock) {
   if (activeWs === 'creation' || activeWs === 'settings') setWorkspace('live');
   if ([$('runPanel'), $('cqPanel'), $('fgPanel')].every(p => !p || p.hidden)) setLivePanel('direct');
   else if ($('cqPanel') && !$('cqPanel').hidden) renderCueList();
-  ['cueMenu', 'pageMenu', 'midiMenu', 'projMenu', 'projDialog'].forEach(id => { $(id).hidden = true; });
+  ['cueMenu', 'pageMenu', 'midiMenu', 'projMenu', 'projDialog', 'newProjDialog', 'tplDialog'].forEach(id => { $(id).hidden = true; });
   stopLearning();
   setStoreMode(false);
   if (typeof DESK !== 'undefined' && DESK.edit) { DESK.edit = false; DESK.sel = null; DESK.key = ''; buildDesk(); }
@@ -16846,7 +16882,9 @@ async function projAction(kind) {
     if (await askUnsaved()) projDialog('open');
   } else if (kind === 'new') {
     if (!await askUnsaved()) return;
-    try { await projPost('new'); await afterOpen(); } catch (e) { alert(e.message); }
+    newProjDialog();
+  } else if (kind === 'save-template') {
+    projTplDialog();
   } else if (kind === 'version-save' || kind === 'versions') {
     verDialog(kind === 'version-save');
   } else if (kind === 'pack-export') {
@@ -16857,8 +16895,89 @@ async function projAction(kind) {
     partialDialog();
   }
 }
+// Nouveau projet (T-451): what is taken from the open project. The
+// machine's settings (calibration, safety, outputs) are never part of a
+// project, so they always stay; creating a project never arms. The last
+// choices are remembered in this browser only.
+const NEW_KEEP_KEY = 'ls.newProjectKeep';
+function newProjDialog() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(NEW_KEEP_KEY) || 'null'); } catch { saved = null; }
+  if (saved && typeof saved === 'object') {
+    $('newProjKeep').querySelectorAll('input').forEach(i => { if (typeof saved[i.value] === 'boolean') i.checked = saved[i.value]; });
+  }
+  $('newProjError').textContent = '';
+  $('newProjDialog').hidden = false;
+  $('newProjOk').focus();
+}
+$('newProjOk').addEventListener('click', async () => {
+  const keep = {};
+  $('newProjKeep').querySelectorAll('input').forEach(i => { keep[i.value] = i.checked; });
+  try { localStorage.setItem(NEW_KEEP_KEY, JSON.stringify(keep)); } catch { /* private window: not remembered */ }
+  try { await projPost('new', { keep }); $('newProjDialog').hidden = true; await afterOpen(); offerSite(); }
+  catch (e) { $('newProjError').textContent = e.message; }
+});
+$('newProjCancel').addEventListener('click', () => { $('newProjDialog').hidden = true; });
+// Templates (T-451): projects in <data-dir>/templates/. « Nouveau depuis
+// un modèle » opens an untitled copy (the template is never written over
+// by « Enregistrer »).
+async function showProjTemplates() {
+  const box = $('projTemplates');
+  const btn = $('projMenu').querySelector('[data-proj="new-template"]');
+  if (!box.hidden) { box.hidden = true; btn.setAttribute('aria-expanded', 'false'); return; }
+  let names = [];
+  try { names = (await apiJson('GET', '/api/project/templates', undefined, { quiet: true })).templates || []; } catch (e) { flash(e.message); }
+  box.replaceChildren();
+  if (!names.length) {
+    const d = document.createElement('div'); d.className = 'hint'; d.textContent = 'Aucun modèle'; box.append(d);
+  }
+  for (const n of names) {
+    const row = document.createElement('div'); row.className = 'tpl-row';
+    const open = document.createElement('button'); open.dataset.template = n; open.textContent = n;
+    open.onclick = () => newFromTemplate(n);
+    const del = document.createElement('button'); del.dataset.templateDelete = n; del.textContent = '✕';
+    del.setAttribute('aria-label', `Supprimer le modèle « ${n} »`); del.title = 'Supprimer ce modèle';
+    del.onclick = e => { e.stopPropagation(); deleteProjTemplate(n); };
+    row.append(open, del); box.append(row);
+  }
+  box.hidden = false; btn.setAttribute('aria-expanded', 'true');
+}
+async function newFromTemplate(name) {
+  $('projMenu').hidden = true; $('projTemplates').hidden = true;
+  if (showMode) return flash(LOCKED_FR);
+  await loadProject();
+  if (!await askUnsaved()) return;
+  try { await projPost('new', { template: name }); await afterOpen(); offerSite(); } catch (e) { alert(e.message); }
+}
+async function deleteProjTemplate(name) {
+  if (!confirm(`Supprimer le modèle « ${name} » ?`)) return;
+  try { await projPost('delete-template', { name }); } catch (e) { alert(e.message); }
+  $('projTemplates').hidden = true; showProjTemplates();
+}
+function projTplDialog() {
+  $('tplName').value = project.file ? project.name : '';
+  $('tplError').textContent = '';
+  $('tplDialog').hidden = false;
+  $('tplName').focus();
+}
+async function projTplSave() {
+  const name = $('tplName').value.trim();
+  if (!name) { $('tplError').textContent = 'Donnez un nom au modèle.'; return; }
+  const save = async replace => {
+    const r = await api('POST', '/api/project/save-template', { name, replace }, { quiet: true });
+    if (r.status === 409 && !replace) return confirm('Un modèle porte déjà ce nom : le remplacer ?') ? save(true) : false;
+    if (!r.ok) throw new Error(await r.text());
+    const v = await r.json();
+    if (v.notice) flash(v.notice);
+    return true;
+  };
+  try { if (await save(false)) $('tplDialog').hidden = true; } catch (e) { $('tplError').textContent = e.message; }
+}
+$('tplOk').addEventListener('click', projTplSave);
+$('tplName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); projTplSave(); } });
+$('tplCancel').addEventListener('click', () => { $('tplDialog').hidden = true; });
 $('projBtn').onclick = e => { e.stopPropagation(); $('projMenu').hidden = !$('projMenu').hidden; if (!$('projMenu').hidden) loadProject(); };
-$('projMenu').querySelectorAll('[data-proj]').forEach(b => b.onclick = () => projAction(b.dataset.proj));
+$('projMenu').querySelectorAll('[data-proj]').forEach(b => b.onclick = () => b.dataset.proj === 'new-template' ? (showMode ? flash(LOCKED_FR) : showProjTemplates()) : projAction(b.dataset.proj));
 document.addEventListener('click', e => { if (!e.target.closest('.proj')) $('projMenu').hidden = true; });
 // À propos de Laser Studio (T-452): everything comes from the studio
 // itself (version, folders, licences, release notes); no update check.

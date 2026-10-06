@@ -3777,7 +3777,10 @@ fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, pa
     }
 }
 
-/// `GET /api/project`, `POST /api/project/{new,open,save,save-as}` (T-286).
+/// `GET /api/project`, `POST /api/project/{new,open,save,save-as}` (T-286);
+/// templates (T-451) `GET /api/project/templates`,
+/// `POST /api/project/{save-template,delete-template}`, all through the
+/// `/api/project/*` line of `ROUTES` (Edit: 423 in show mode).
 /// Nothing here can arm, or change calibration or safety settings.
 /// `GET /api/external`: the gate, each source's scope, access and
 /// refusals, plus the DMX summary (the top bar polls it).
@@ -7164,6 +7167,9 @@ mod tests {
             ("/api/testpattern", r#"{"pattern":"grid"}"#),
             ("/api/testpattern", r#"{"brightness":0.5}"#),
             ("/api/project/new", "{}"),
+            ("/api/project/new", r#"{"keep":{"midi":true}}"#),
+            ("/api/project/save-template", r#"{"name":"x"}"#),
+            ("/api/project/delete-template", r#"{"name":"x"}"#),
             ("/api/project/open", r#"{"path":"x"}"#),
             ("/api/midi/learn", r#"{"target":"master.size"}"#),
             ("/api/cues/slot", r#"{"id":"tunnels-001"}"#),
@@ -7191,6 +7197,7 @@ mod tests {
 
         // Reading is never locked.
         assert_eq!(t.request("GET", "/api/safety", "").0, 200);
+        assert_eq!(t.request("GET", "/api/project/templates", "").0, 200);
         // Playing and safety still work.
         assert_eq!(t.request("POST", "/api/scenes/play", r#"{"name":"Garde"}"#).0, 200);
         assert_eq!(t.request("POST", "/api/cue", r#"{"id":"tunnels-001"}"#).0, 200);
