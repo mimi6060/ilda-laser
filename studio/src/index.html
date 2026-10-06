@@ -1102,6 +1102,14 @@
   @media (min-width: 1800px) { #extGate .long { display: inline; } #extGate .short { display: none; } }
   #dmxPill { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; flex: none; }
   #dmxPill[hidden] { display: none; }
+  /* T-428: the tablet remote's pill, shown while the access is on. */
+  #remotePill { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; flex: none; color: var(--warn); font-size: 11px; min-height: 16px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--warn); background: transparent; }
+  #remotePill[hidden] { display: none; }
+  #remotePill::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+  #remoteCode { font-size: 40px; font-weight: 800; letter-spacing: .25em; font-variant-numeric: tabular-nums; margin: 6px 0; }
+  #remoteList li { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  #remoteList li span { flex: 1; }
+  #remoteList button, #remoteKickAll { min-height: 44px; }
   #dmxPill::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   #dmxPill.ok { color: var(--ok); }
   #dmxPill.ok::before { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
@@ -1715,6 +1723,8 @@
       <span id="engineLed" class="led ok" role="status" title="Chien de garde du moteur">Moteur</span>
       <div id="midiStatus" title="Contrôleurs MIDI : clic = RÉGLAGES › Contrôleur">MIDI : …</div>
       <span id="dmxPill" title="Entrée DMX (Art-Net / sACN) : clic = RÉGLAGES › Entrées réseau" hidden>DMX</span>
+      <!-- Télécommande (T-428): only while the access is on. -->
+      <button id="remotePill" title="Télécommande autorisée sur le réseau local : clic = RÉGLAGES › Télécommande" hidden>Télécommande : 0</button>
     </div>
   </div>
   <!-- Notifications (T-432): the list behind the bell, no shortcut. -->
@@ -3682,6 +3692,27 @@
         <div class="hint">La porte <b>Entrées externes</b> (barre du haut, <kbd>Alt</kbd>+<kbd>X</kbd>) est fermée à chaque démarrage et après un arrêt d'urgence : seul l'opérateur la rouvre. Ouverte, chaque source n'agit que sur les groupes cochés, et seulement si son accès est levé quand « Exiger l'accès » est coché (DMX : canal d'accès ≥ 128 ; OSC : <code>/ls/access 1</code>, retombe après 10 s sans message de ce client). Le MIDI garde ses propres règles.</div>
         <table id="extTable"></table>
         <div class="hint sf-error" id="extError" role="alert"></div>
+      </details>
+    </section>
+
+    <section data-help="reglages-entrees">
+      <details id="remotePanel" data-search="Télécommande tablette réseau appairage">
+        <summary>Télécommande (tablette)</summary>
+        <div class="hint"><b>La télécommande peut jouer et arrêter. Elle ne peut pas allumer le laser.</b> Ni armement, ni réinitialisation d'arrêt d'urgence, ni sécurité, ni réglages, ni projet. Elle passe par la porte <b>Entrées externes</b> : fermée, seul l'arrêt est accepté.</div>
+        <label class="check"><input type="checkbox" id="remoteOn"> Autoriser une télécommande sur le réseau local</label>
+        <label for="remotePort">Port</label>
+        <input type="number" id="remotePort" min="1024" max="65535" step="1" inputmode="numeric">
+        <div id="remoteActive" hidden>
+          <div class="hint">Code d'appairage</div>
+          <div id="remoteCode" role="status" aria-live="polite">––––––</div>
+          <div class="hint">Adresse à ouvrir sur la tablette : <b id="remoteUrls"></b></div>
+          <div class="hint" id="remoteBlocked" role="alert"></div>
+          <div class="hint">Télécommandes connectées (<span id="remoteCount">0</span>/4)</div>
+          <ul id="remoteList"></ul>
+          <button id="remoteKickAll">Tout déconnecter</button>
+        </div>
+        <div id="remoteError" class="merr" role="alert"></div>
+        <div class="hint">Désactivée à chaque démarrage. Le trafic n'est pas chiffré : n'utilisez ce port que sur le réseau local de la régie, jamais sur Internet. Un pad maintenu depuis une tablette qui se tait est relâché. Ce n'est pas un arrêt matériel : gardez l'arrêt d'urgence physique et la clé du projecteur à portée de main.</div>
       </details>
     </section>
 
@@ -15026,6 +15057,53 @@ $('dmxPill').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspa
 $('extPanel').addEventListener('toggle', () => { if ($('extPanel').open) { extKey = ''; loadExt(); } });
 setInterval(() => { if (!document.hidden) loadExt(); }, 1000);
 loadExt();
+// Télécommande (T-428): RÉGLAGES › Télécommande and the top-bar pill.
+// Off at every start; the code and the remotes are shown here only.
+let remote = null;
+function showRemote(v) {
+  remote = v;
+  const pill = $('remotePill');
+  pill.hidden = !v.enabled;
+  pill.textContent = 'Télécommande : ' + v.sessions.length;
+  if (document.activeElement !== $('remoteOn')) $('remoteOn').checked = v.enabled;
+  if (document.activeElement !== $('remotePort')) $('remotePort').value = v.bound_port || v.port;
+  $('remoteActive').hidden = !v.enabled;
+  $('remoteCode').textContent = v.enabled ? v.code : '––––––';
+  $('remoteUrls').textContent = v.urls.length ? v.urls.join(' · ') : 'aucune adresse réseau trouvée';
+  $('remoteBlocked').textContent = v.blocked_s ? `Trop de codes faux : nouveau code, appairage bloqué ${Math.ceil(v.blocked_s)} s` : '';
+  $('remoteCount').textContent = v.sessions.length;
+  const key = JSON.stringify(v.sessions.map(r => [r.name, r.addr, Math.round(r.idle_s)]));
+  if ($('remoteList').dataset.key !== key && !$('remoteList').contains(document.activeElement)) {
+    $('remoteList').dataset.key = key;
+    $('remoteList').innerHTML = v.sessions.map(r => `<li><span>${esc(r.name)} — ${esc(r.addr)} — il y a ${Math.round(r.idle_s)} s</span>`
+      + `<button data-kick="${esc(r.name)}" aria-label="Déconnecter ${esc(r.name)}">Déconnecter</button></li>`).join('');
+  }
+}
+async function loadRemote() {
+  try { const r = await api('GET', '/api/remote', undefined, { quiet: true }); if (r.ok) showRemote(await r.json()); } catch { /* studio restarting */ }
+}
+async function setRemote(body) {
+  try {
+    const r = await api('POST', '/api/remote', body, { quiet: true });
+    $('remoteError').textContent = r.ok ? '' : await r.text();
+    if (r.ok) return showRemote(await r.json());
+  } catch {}
+  loadRemote();
+}
+$('remoteOn').addEventListener('change', () => setRemote({ enabled: $('remoteOn').checked, port: Number($('remotePort').value) || undefined }));
+$('remotePort').addEventListener('change', () => {
+  const port = Number($('remotePort').value);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) { $('remoteError').textContent = 'Port : 1024 à 65535'; return; }
+  setRemote({ enabled: !!(remote && remote.enabled), port });
+});
+async function kickRemote(body) {
+  try { const r = await api('POST', '/api/remote/kick', body, { quiet: true }); if (r.ok) showRemote(await r.json()); } catch {}
+}
+$('remoteList').addEventListener('click', e => { const b = e.target.closest('[data-kick]'); if (b) kickRemote({ name: b.dataset.kick }); });
+$('remoteKickAll').onclick = () => kickRemote({});
+$('remotePill').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('remotePanel').open = true; $('remotePanel').scrollIntoView({ block: 'nearest' }); };
+setInterval(() => { if (!document.hidden) loadRemote(); }, 1000);
+loadRemote();
 // Apprendre DMX (right-click menu): the first channel that moves is mapped.
 let dmxLearnTimer = null;
 async function dmxLearnWatch() {

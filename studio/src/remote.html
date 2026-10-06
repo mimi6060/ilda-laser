@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Télécommande Laser Studio</title>
+<style>
+  /* T-428: the tablet remote. One column, made for touch (targets ≥ 44 px).
+     It can play and stop; it can never turn the laser on. */
+  :root {
+    --bg: #101216; --panel: #1b1e24; --line: #2c313a; --text: #e8eaee; --muted: #9aa3b0;
+    --accent: #4aa3ff; --ok: #3ccf7a; --warn: #f0b429; --danger: #e5484d; --on: #1f6f43;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f5f7; --panel: #ffffff; --line: #d6d9df; --text: #15181d; --muted: #5b6370; --accent: #0b66d0; --on: #bfe8cf; color-scheme: light; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.35 -apple-system, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+  main { max-width: 720px; margin: 0 auto; padding: 12px 16px 40px; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 20px; margin: 4px 0; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  label { display: block; color: var(--muted); font-size: 14px; margin: 8px 0 4px; }
+  input[type=text], input[type=number] { width: 100%; min-height: 48px; font-size: 22px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  #code { letter-spacing: .3em; text-align: center; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; min-height: 44px; accent-color: var(--accent); }
+  button { min-height: 48px; min-width: 48px; font-size: 17px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); padding: 6px 12px; touch-action: manipulation; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .primary { background: var(--accent); color: #fff; border-color: var(--accent); width: 100%; margin-top: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row > * { flex: 1 1 auto; }
+  .tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+  .tabs button { flex: none; }
+  .tabs button[aria-pressed=true] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .grid { display: grid; gap: 6px; }
+  .grid button { min-height: 64px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; user-select: none; -webkit-user-select: none; touch-action: none; }
+  .grid button.on { background: var(--on); border-color: var(--ok); }
+  .grid .empty { min-height: 64px; border-radius: 10px; border: 1px dashed var(--line); }
+  #state { font-weight: 700; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); }
+  #state.lit { border-color: var(--warn); color: var(--warn); }
+  #stopped, #gate { padding: 10px 12px; border-radius: 10px; border: 2px solid var(--danger); color: var(--danger); font-weight: 600; }
+  #gate { border-color: var(--warn); color: var(--warn); }
+  #stopBtn { width: 100%; min-height: 96px; font-size: 26px; font-weight: 800; letter-spacing: .05em; background: var(--danger); color: #fff; border-color: var(--danger); }
+  #error { color: var(--danger); min-height: 1.3em; }
+  .hint { color: var(--muted); font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Télécommande Laser Studio</h1>
+
+  <!-- Pairing: the only thing an unpaired tablet gets. -->
+  <section id="pairing" aria-labelledby="pairTitle">
+    <h2 id="pairTitle">Appairage</h2>
+    <form id="pairForm" autocomplete="off">
+      <label for="code">Code d'appairage</label>
+      <input id="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code">
+      <label for="name">Nom de cette télécommande</label>
+      <input id="name" type="text" maxlength="32" placeholder="Tablette régie">
+      <button class="primary" type="submit" id="pairBtn">Appairer</button>
+    </form>
+    <p class="hint">Le code s'affiche sur l'écran principal, RÉGLAGES › Télécommande. La télécommande peut jouer et arrêter. Elle ne peut pas allumer le laser.</p>
+  </section>
+
+  <div id="remote" hidden>
+    <div class="row" style="margin-bottom:14px">
+      <div id="state" role="status" aria-live="polite">Laser éteint</div>
+    </div>
+    <div id="stopped" role="alert" hidden>Arrêt d'urgence : réinitialiser sur l'écran principal</div>
+    <div id="gate" role="status" hidden>Entrées externes fermées sur l'écran principal : seul l'arrêt est accepté.</div>
+
+    <section aria-labelledby="cuesTitle" style="margin-top:14px">
+      <h2 id="cuesTitle">Cues</h2>
+      <div class="tabs" id="tabs" role="group" aria-label="Pages de cues"></div>
+      <div class="grid" id="grid" style="margin-top:8px"></div>
+      <button id="stopAll" style="width:100%;margin-top:10px">Tout arrêter</button>
+    </section>
+
+    <section aria-labelledby="mastersTitle" style="margin-top:14px">
+      <h2 id="mastersTitle">Maîtres</h2>
+      <div id="masters"></div>
+    </section>
+
+    <section aria-labelledby="tempoTitle" style="margin-top:14px">
+      <h2 id="tempoTitle">Tempo</h2>
+      <div class="row">
+        <button id="tap">Tap</button>
+        <div>
+          <label for="bpm">BPM</label>
+          <input id="bpm" type="number" min="20" max="300" step="0.1" inputmode="decimal">
+        </div>
+        <button id="sync">Sync 1</button>
+      </div>
+    </section>
+
+    <section style="margin-top:14px">
+      <button id="stopBtn" aria-label="Noir et arrêt d'urgence">NOIR / ARRÊT</button>
+      <p class="hint">Plus de pilotage depuis cette tablette après un arrêt : il se réinitialise sur l'écran principal.</p>
+    </section>
+  </div>
+  <div id="error" role="alert"></div>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+let st = null, held = new Set(), polling = null, sliding = null;
+
+async function call(method, path, body) {
+  const opts = { method, credentials: 'same-origin', headers: {} };
+  if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  return fetch(path, opts);
+}
+
+async function send(id, extra) {
+  try {
+    const r = await call('POST', '/api/remote/control', Object.assign({ id }, extra || {}));
+    if (r.status === 401) return showPairing();
+    $('error').textContent = r.ok ? '' : await r.text();
+  } catch { $('error').textContent = 'Studio injoignable'; }
+}
+
+function showPairing() {
+  st = null;
+  $('pairing').hidden = false; $('remote').hidden = true;
+}
+
+$('pairForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  try {
+    const r = await call('POST', '/pair', { code: $('code').value.trim(), name: $('name').value.trim() });
+    if (!r.ok) { $('error').textContent = await r.text(); $('code').value = ''; return; }
+    $('error').textContent = '';
+    poll();
+  } catch { $('error').textContent = 'Studio injoignable'; }
+});
+
+function render(s) {
+  st = s;
+  $('pairing').hidden = true; $('remote').hidden = false;
+  $('state').textContent = s.armed ? 'Laser allumé' : 'Laser éteint';
+  $('state').classList.toggle('lit', s.armed);
+  $('stopped').hidden = !s.estop;
+  $('gate').hidden = s.gate_open || s.estop;
+  const tabs = $('tabs');
+  const tabKey = JSON.stringify([s.pages, s.page]);
+  if (tabs.dataset.key !== tabKey) {
+    tabs.dataset.key = tabKey;
+    tabs.innerHTML = '';
+    s.pages.forEach((name, i) => {
+      const b = document.createElement('button');
+      b.textContent = name; b.setAttribute('aria-pressed', String(i === s.page));
+      b.onclick = () => send('page.' + (i + 1));
+      tabs.appendChild(b);
+    });
+  }
+  const grid = $('grid');
+  const cols = Math.min(s.cols, window.innerWidth < 560 ? 4 : 8);
+  grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+  const gridKey = JSON.stringify([s.page, s.cols, s.cells.map(c => c && [c.id, c.name])]);
+  if (grid.dataset.key !== gridKey) {
+    grid.dataset.key = gridKey;
+    grid.innerHTML = '';
+    for (const c of s.cells) {
+      if (!c) { const d = document.createElement('div'); d.className = 'empty'; d.setAttribute('aria-hidden', 'true'); grid.appendChild(d); continue; }
+      const b = document.createElement('button');
+      b.textContent = c.name; b.dataset.id = c.id; b.setAttribute('aria-label', 'Cue ' + c.name);
+      b.addEventListener('pointerdown', ev => { ev.preventDefault(); b.setPointerCapture?.(ev.pointerId); held.add(c.id); send(c.id, { down: true }); });
+      const up = () => { if (held.delete(c.id)) send(c.id, { down: false }); };
+      b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('lostpointercapture', up);
+      b.addEventListener('keydown', ev => { if ((ev.key === 'Enter' || ev.key === ' ') && !ev.repeat) { ev.preventDefault(); held.add(c.id); send(c.id, { down: true }); } });
+      b.addEventListener('keyup', ev => { if (ev.key === 'Enter' || ev.key === ' ') up(); });
+      grid.appendChild(b);
+    }
+  }
+  s.cells.forEach(c => { if (c) grid.querySelector(`[data-id="${CSS.escape(c.id)}"]`)?.classList.toggle('on', c.active); });
+  const box = $('masters');
+  const mKey = JSON.stringify(s.masters.map(m => m.id));
+  if (box.dataset.key !== mKey) {
+    box.dataset.key = mKey;
+    box.innerHTML = '';
+    for (const m of s.masters) {
+      const id = 'm-' + m.id.replace(/\W/g, '_');
+      const l = document.createElement('label'); l.htmlFor = id; l.textContent = m.label;
+      const i = document.createElement('input');
+      Object.assign(i, { type: 'range', id, min: m.min, max: m.max, step: (m.max - m.min) / 200 });
+      i.dataset.control = m.id; i.dataset.default = m.default;
+      let last = 0, timer = null;
+      i.addEventListener('input', () => {
+        sliding = i;
+        const go = () => { last = Date.now(); send(m.id, { value: Number(i.value) }); };
+        clearTimeout(timer);
+        if (Date.now() - last > 80) go(); else timer = setTimeout(go, 80);
+      });
+      i.addEventListener('change', () => { sliding = null; send(m.id, { value: Number(i.value) }); });
+      box.append(l, i);
+    }
+  }
+  for (const m of s.masters) {
+    const i = box.querySelector(`[data-control="${CSS.escape(m.id)}"]`);
+    if (i && i !== sliding && typeof m.value === 'number') i.value = m.value;
+  }
+  if (document.activeElement !== $('bpm') && typeof s.bpm === 'number') $('bpm').value = Math.round(s.bpm * 10) / 10;
+}
+
+async function poll() {
+  clearTimeout(polling);
+  try {
+    const r = await call('GET', '/api/remote/state');
+    if (r.status === 401) showPairing();
+    else if (r.ok) render(await r.json());
+    else if (r.status === 503) { showPairing(); $('error').textContent = 'Télécommande désactivée sur l\'écran principal'; }
+  } catch { $('error').textContent = 'Studio injoignable'; }
+  polling = setTimeout(poll, 500);
+}
+
+// A pad never stays held when this page goes away.
+function releaseAll() { for (const id of held) send(id, { down: false }); held.clear(); }
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+window.addEventListener('pagehide', releaseAll);
+window.addEventListener('blur', releaseAll);
+
+$('stopAll').onclick = () => send('cue.stop_all');
+$('tap').onclick = () => send('tempo.tap');
+$('sync').onclick = () => send('tempo.resync');
+$('bpm').addEventListener('change', () => { const v = Number($('bpm').value); if (Number.isFinite(v) && v > 0) send('tempo.bpm', { value: v }); });
+$('stopBtn').onclick = () => send('safety.estop');
+
+poll();
+</script>
+</body>
+</html>

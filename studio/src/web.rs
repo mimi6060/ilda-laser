@@ -53,6 +53,250 @@ fn static_asset(path: &str) -> Option<(&'static str, &'static str)> {
 
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
+/// What a route of the main UI does (T-428), for the table below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteClass {
+    /// Reads state; changes nothing.
+    Read,
+    /// Plays, stops or adjusts live (allowed in show mode).
+    Play,
+    /// Edits content or settings.
+    Edit,
+    /// Safety, outputs, calibration, the external gate, the remote access.
+    Safety,
+    /// Arms, resets the e-stop, or counts as the operator's presence.
+    Arm,
+    /// `--test-hooks` only.
+    Test,
+}
+
+/// Every route `dispatch` (and the fast paths before it) serves: method
+/// (`*`: any), path (ending in `*`: a prefix), class. The tablet remote
+/// (remote.rs) answers 403 to all of them and serves only its own
+/// whitelist; `every_route_is_in_the_table` fails when a route is added
+/// to `dispatch` without a line here.
+pub const ROUTES: &[(&str, &str, RouteClass)] = &[
+    ("GET", "/", RouteClass::Read),
+    ("GET", "/beam3d.js", RouteClass::Read),
+    ("POST", "/api/estop", RouteClass::Safety),
+    ("GET", "/api/events", RouteClass::Read),
+    ("GET", "/api/frame.bin", RouteClass::Read),
+    ("GET", "/api/history", RouteClass::Read),
+    ("POST", "/api/undo", RouteClass::Edit),
+    ("POST", "/api/redo", RouteClass::Edit),
+    ("GET", "/api/state", RouteClass::Read),
+    ("GET", "/api/diagnostics/report", RouteClass::Read),
+    ("GET", "/api/logs/tail", RouteClass::Read),
+    ("GET", "/api/frame", RouteClass::Read),
+    ("GET", "/api/preview-frame", RouteClass::Read),
+    ("POST", "/api/prepared", RouteClass::Play),
+    ("POST", "/api/prepared/adjust", RouteClass::Play),
+    ("POST", "/api/prepared/send", RouteClass::Play),
+    ("POST", "/api/prepared/clear", RouteClass::Play),
+    ("GET", "/api/notices", RouteClass::Read),
+    ("GET", "/api/data/warnings", RouteClass::Read),
+    ("POST", "/api/data/warnings/ack", RouteClass::Safety),
+    ("POST", "/api/settings", RouteClass::Edit),
+    ("POST", "/api/audio", RouteClass::Play),
+    ("GET", "/api/audio/state", RouteClass::Read),
+    ("GET", "/api/audio/spectrum", RouteClass::Read),
+    ("GET", "/api/audio/devices", RouteClass::Read),
+    ("GET", "/api/devices", RouteClass::Read),
+    ("POST", "/api/devices/scan", RouteClass::Safety),
+    ("GET", "/api/outputs", RouteClass::Read),
+    ("POST", "/api/outputs/scan", RouteClass::Safety),
+    ("POST", "/api/outputs/select", RouteClass::Safety),
+    ("POST", "/api/outputs/config", RouteClass::Safety),
+    ("GET", "/api/outputs/artnet", RouteClass::Read),
+    ("POST", "/api/outputs/artnet", RouteClass::Safety),
+    ("POST", "/api/test/output", RouteClass::Test),
+    ("GET", "/api/audio/config", RouteClass::Read),
+    ("POST", "/api/audio/config", RouteClass::Edit),
+    ("POST", "/api/audio/tempo/new_track", RouteClass::Play),
+    ("POST", "/api/heartbeat", RouteClass::Arm),
+    ("GET", "/api/presence", RouteClass::Read),
+    ("POST", "/api/presence", RouteClass::Safety),
+    ("GET", "/api/lock", RouteClass::Read),
+    ("POST", "/api/lock", RouteClass::Safety),
+    ("GET", "/api/onboarding", RouteClass::Read),
+    ("POST", "/api/onboarding", RouteClass::Play),
+    ("GET", "/api/help", RouteClass::Read),
+    ("POST", "/api/keep_awake", RouteClass::Safety),
+    ("POST", "/api/test/wifi", RouteClass::Test),
+    ("GET", "/api/test/menu", RouteClass::Test),
+    ("POST", "/api/test/menu", RouteClass::Test),
+    ("POST", "/api/test/stall", RouteClass::Test),
+    ("POST", "/api/test/tempo_estimate", RouteClass::Test),
+    ("POST", "/api/test/timecode", RouteClass::Test),
+    ("POST", "/api/test/native_audio", RouteClass::Test),
+    ("GET", "/api/arm", RouteClass::Read),
+    ("POST", "/api/arm", RouteClass::Arm),
+    ("POST", "/api/estop/reset", RouteClass::Arm),
+    ("GET", "/api/safety", RouteClass::Read),
+    ("POST", "/api/safety", RouteClass::Safety),
+    ("GET", "/api/safety/profiles", RouteClass::Read),
+    ("POST", "/api/safety/profiles", RouteClass::Safety),
+    ("POST", "/api/safety/profiles/load", RouteClass::Safety),
+    ("GET", "/api/audience", RouteClass::Read),
+    ("POST", "/api/audience", RouteClass::Safety),
+    ("GET", "/api/outputs/limits", RouteClass::Read),
+    ("POST", "/api/outputs/limits", RouteClass::Safety),
+    ("GET", "/api/safety/exposure", RouteClass::Read),
+    ("POST", "/api/safety/exposure", RouteClass::Safety),
+    ("GET", "/api/outputs/color", RouteClass::Read),
+    ("POST", "/api/outputs/color", RouteClass::Safety),
+    ("GET", "/api/outputs/scan_limits", RouteClass::Read),
+    ("POST", "/api/outputs/scan_limits", RouteClass::Safety),
+    ("GET", "/api/testpattern", RouteClass::Read),
+    ("POST", "/api/testpattern", RouteClass::Safety),
+    ("GET", "/api/checklist", RouteClass::Read),
+    ("GET", "/api/safety/log", RouteClass::Read),
+    ("GET", "/api/safety/log.csv", RouteClass::Read),
+    ("POST", "/api/calibration", RouteClass::Safety),
+    ("GET", "/api/venue", RouteClass::Read),
+    ("POST", "/api/venue", RouteClass::Safety),
+    ("POST", "/api/venue/preset", RouteClass::Safety),
+    ("GET", "/api/frames", RouteClass::Read),
+    ("GET", "/api/projection", RouteClass::Read),
+    ("GET", "/api/groups", RouteClass::Read),
+    ("POST", "/api/projection", RouteClass::Safety),
+    ("POST", "/api/projection/align", RouteClass::Safety),
+    ("POST", "/api/scenes/save", RouteClass::Edit),
+    ("POST", "/api/scenes/delete", RouteClass::Edit),
+    ("POST", "/api/scenes/play", RouteClass::Play),
+    ("POST", "/api/playlist/start", RouteClass::Play),
+    ("GET", "/api/presets", RouteClass::Read),
+    ("GET", "/api/presets/thumbs", RouteClass::Read),
+    ("GET", "/api/presets/loops", RouteClass::Read),
+    ("GET", "/api/presets/preview", RouteClass::Read),
+    ("POST", "/api/presets/play", RouteClass::Play),
+    ("POST", "/api/cue", RouteClass::Play),
+    ("GET", "/api/cues", RouteClass::Read),
+    ("GET", "/api/cues/tags", RouteClass::Read),
+    ("POST", "/api/cues/slot", RouteClass::Edit),
+    ("POST", "/api/cues/program", RouteClass::Edit),
+    ("POST", "/api/cues/modifiers", RouteClass::Edit),
+    ("GET", "/api/cues/program", RouteClass::Read),
+    ("POST", "/api/cues/program/preview", RouteClass::Edit),
+    ("POST", "/api/cues/program/store", RouteClass::Edit),
+    ("GET", "/api/grid", RouteClass::Read),
+    ("POST", "/api/grid", RouteClass::Edit),
+    ("POST", "/api/grid/page", RouteClass::Edit),
+    ("POST", "/api/grid/pages", RouteClass::Edit),
+    ("POST", "/api/grid/edit", RouteClass::Edit),
+    ("POST", "/api/cues/store", RouteClass::Edit),
+    ("POST", "/api/cues/update", RouteClass::Edit),
+    ("POST", "/api/grid/move", RouteClass::Edit),
+    ("POST", "/api/grid/clear", RouteClass::Edit),
+    ("GET", "/api/layers", RouteClass::Read),
+    ("POST", "/api/layers", RouteClass::Edit),
+    ("GET", "/api/live", RouteClass::Read),
+    ("POST", "/api/live", RouteClass::Play),
+    ("GET", "/api/festival", RouteClass::Read),
+    ("GET", "/api/latency", RouteClass::Read),
+    ("POST", "/api/latency", RouteClass::Safety),
+    ("POST", "/api/festival/palette", RouteClass::Edit),
+    ("POST", "/api/festival", RouteClass::Edit),
+    ("GET", "/api/palettes", RouteClass::Read),
+    ("POST", "/api/palettes", RouteClass::Edit),
+    ("GET", "/api/scan-presets", RouteClass::Read),
+    ("POST", "/api/scan-presets", RouteClass::Edit),
+    ("GET", "/api/speed-groups", RouteClass::Read),
+    ("POST", "/api/speed-groups", RouteClass::Play),
+    ("GET", "/api/lfos", RouteClass::Read),
+    ("POST", "/api/lfos", RouteClass::Edit),
+    ("GET", "/api/executors", RouteClass::Read),
+    ("POST", "/api/executors", RouteClass::Edit),
+    ("GET", "/api/desks", RouteClass::Read),
+    ("POST", "/api/desks", RouteClass::Edit),
+    ("GET", "/api/macros", RouteClass::Read),
+    ("POST", "/api/macros", RouteClass::Edit),
+    ("POST", "/api/macros/run", RouteClass::Play),
+    ("POST", "/api/macros/stop", RouteClass::Play),
+    ("POST", "/api/macros/go", RouteClass::Play),
+    ("GET", "/api/fx", RouteClass::Read),
+    ("POST", "/api/fx", RouteClass::Edit),
+    ("GET", "/api/audio/routes", RouteClass::Read),
+    ("POST", "/api/audio/routes", RouteClass::Edit),
+    ("GET", "/api/audio/presets", RouteClass::Read),
+    ("POST", "/api/audio/preset", RouteClass::Edit),
+    ("GET", "/api/audio/triggers", RouteClass::Read),
+    ("POST", "/api/audio/triggers", RouteClass::Edit),
+    ("GET", "/api/controls", RouteClass::Read),
+    ("GET", "/api/control-values", RouteClass::Read),
+    ("POST", "/api/control", RouteClass::Play),
+    ("POST", "/api/command", RouteClass::Play),
+    ("GET", "/api/command/actions", RouteClass::Read),
+    ("GET", "/api/running", RouteClass::Read),
+    ("POST", "/api/running/stop", RouteClass::Play),
+    ("GET", "/api/cuelists", RouteClass::Read),
+    ("POST", "/api/cuelists", RouteClass::Edit),
+    ("POST", "/api/cuelists/delete", RouteClass::Edit),
+    ("POST", "/api/cuelist/load", RouteClass::Play),
+    ("POST", "/api/playlist/stop", RouteClass::Play),
+    ("GET", "/api/shows", RouteClass::Read),
+    ("POST", "/api/shows", RouteClass::Edit),
+    ("GET", "/api/figures", RouteClass::Read),
+    ("POST", "/api/figures", RouteClass::Edit),
+    ("POST", "/api/figures/load", RouteClass::Edit),
+    ("POST", "/api/figures/delete", RouteClass::Edit),
+    ("POST", "/api/figures/import", RouteClass::Edit),
+    ("POST", "/api/figures/text", RouteClass::Edit),
+    ("GET", "/api/fonts", RouteClass::Read),
+    ("GET", "/api/timeline", RouteClass::Read),
+    ("GET", "/api/timeline/markers.csv", RouteClass::Read),
+    ("POST", "/api/timeline/markers/parse", RouteClass::Edit),
+    ("GET", "/api/media/audio", RouteClass::Read),
+    ("POST", "/api/media/audio", RouteClass::Edit),
+    ("GET", "/api/media/ilda", RouteClass::Read),
+    ("POST", "/api/media/ilda", RouteClass::Edit),
+    ("POST", "/api/media/ilda/delete", RouteClass::Edit),
+    ("GET", "/api/media/ilda/export", RouteClass::Read),
+    ("GET", "/api/ilda/record", RouteClass::Read),
+    ("POST", "/api/ilda/record", RouteClass::Edit),
+    ("POST", "/api/ilda/record/cancel", RouteClass::Play),
+    ("GET", "/api/ilda/record/file", RouteClass::Read),
+    ("GET", "/api/sdbank", RouteClass::Read),
+    ("POST", "/api/sdbank", RouteClass::Edit),
+    ("POST", "/api/sdbank/add", RouteClass::Edit),
+    ("POST", "/api/sdbank/renumber", RouteClass::Edit),
+    ("POST", "/api/sdbank/export", RouteClass::Edit),
+    ("GET", "/api/timeline/waveform", RouteClass::Read),
+    ("GET", "/api/timeline/examples", RouteClass::Read),
+    ("POST", "/api/timeline/audio", RouteClass::Edit),
+    ("GET", "/api/timeline/autoshow", RouteClass::Read),
+    ("POST", "/api/timeline/autoshow", RouteClass::Edit),
+    ("POST", "/api/timeline/autoshow/cancel", RouteClass::Edit),
+    ("GET", "/api/timeline/templates", RouteClass::Read),
+    ("POST", "/api/timeline/templates", RouteClass::Edit),
+    ("POST", "/api/timeline/templates/delete", RouteClass::Edit),
+    ("POST", "/api/timeline/templates/render", RouteClass::Edit),
+    ("GET", "/api/netin", RouteClass::Read),
+    ("POST", "/api/netin", RouteClass::Safety),
+    ("GET", "/api/backup", RouteClass::Read),
+    ("POST", "/api/backup", RouteClass::Edit),
+    ("POST", "/api/backup/now", RouteClass::Play),
+    ("GET", "/api/help/*", RouteClass::Read),
+    ("POST", "/api/checklist/*", RouteClass::Safety),
+    ("POST", "/api/cuelist/*", RouteClass::Play),
+    ("POST", "/api/timeline/*", RouteClass::Edit),
+    ("*", "/api/midi*", RouteClass::Edit),
+    ("*", "/api/external*", RouteClass::Safety),
+    ("*", "/api/dmx/*", RouteClass::Safety),
+    ("*", "/api/timecode", RouteClass::Safety),
+    ("*", "/api/timecode/arm", RouteClass::Safety),
+    ("*", "/api/project", RouteClass::Edit),
+    ("*", "/api/project/*", RouteClass::Edit),
+    ("GET", "/api/remote", RouteClass::Read),
+    ("POST", "/api/remote", RouteClass::Safety),
+    ("POST", "/api/remote/kick", RouteClass::Safety),
+];
+
+/// Whether `method path` is a route of the main UI (`ROUTES`).
+pub fn is_known_route(method: &str, path: &str) -> bool {
+    ROUTES.iter().any(|&(m, p, _)| (m == "*" || m == method) && p.strip_suffix('*').map_or(path == p, |prefix| path.starts_with(prefix)))
+}
+
 pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) -> anyhow::Result<()> {
     let server = Server::http(addr).map_err(|e| anyhow::anyhow!("failed to start web server on {addr}: {e}"))?;
     serve(server, shared, estop, calibration_path, running);
@@ -2370,6 +2614,38 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (method, p) if p.starts_with("/api/external") || p.starts_with("/api/dmx/") => external_route(request, shared, method, p),
         (method, p) if p == "/api/timecode" || p == "/api/timecode/arm" => timecode_route(request, shared, method, p),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
+        // The tablet remote (T-428): turned on, watched and cut from here
+        // only (this server listens on 127.0.0.1); the remote's own
+        // server (remote.rs) never reaches these routes.
+        (Method::Get, "/api/remote") => json_response(crate::remote::view(&shared.lock().unwrap(), Instant::now())),
+        (Method::Post, "/api/remote") => {
+            let local = request.remote_addr().is_some_and(|a| a.ip().is_loopback());
+            let req = match body::<RemoteRequest>(request) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            if !local {
+                return text(403, "la télécommande ne s'autorise que depuis l'interface de ce Mac");
+            }
+            // Show mode: cutting the access is allowed, opening it is not.
+            if req.enabled && shared.lock().unwrap().show_mode.on {
+                return locked();
+            }
+            match crate::remote::set_enabled(shared, req.enabled, req.port) {
+                Ok(()) => json_response(crate::remote::view(&shared.lock().unwrap(), Instant::now())),
+                Err(e) => text(409, &e),
+            }
+        }
+        (Method::Post, "/api/remote/kick") => match body::<RemoteKick>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let n = crate::remote::kick(&mut s, req.name.as_deref());
+                let mut v = crate::remote::view(&s, Instant::now());
+                v["kicked"] = json!(n);
+                json_response(v)
+            }
+            Err(e) => e,
+        },
         // The copy to a second location (T-450): settings, and « Copier maintenant ».
         (Method::Get, "/api/backup") => json_response(shared.lock().unwrap().project.backup.view()),
         (Method::Post, "/api/backup") => match body::<crate::backup::SettingsRequest>(request) {
@@ -3534,6 +3810,21 @@ enum DesksRequest {
 
 fn desks_view(s: &Shared) -> serde_json::Value {
     json!({ "tabs": s.desks.tabs, "rev": s.desks.rev, "max_tabs": crate::desk::MAX_TABS, "max_items": crate::desk::MAX_ITEMS })
+}
+
+/// `POST /api/remote` (T-428).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteRequest {
+    enabled: bool,
+    port: Option<u16>,
+}
+
+/// `POST /api/remote/kick`: one remote by name, or all.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteKick {
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -5469,6 +5760,82 @@ mod tests {
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"keyboard"}"#).0, 200);
         let st = arm_status(&t);
         assert_eq!((st["armed"].clone(), st["source"].clone()), (json!(true), json!("keyboard")));
+    }
+
+    /// T-428: `ROUTES` lists every route `dispatch` serves (scanned from
+    /// this file), and nothing that isn't one; the remote refuses them all.
+    #[test]
+    fn every_route_is_in_the_table() {
+        let src = include_str!("web.rs");
+        let start = src.find("fn dispatch(").unwrap();
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        let quoted = |s: &str| s.strip_prefix('"').and_then(|r| r.split('"').next()).map(str::to_string);
+        let mut found: Vec<(String, String)> = Vec::new();
+        for (i, _) in body.match_indices("(Method::") {
+            let rest = &body[i + "(Method::".len()..];
+            let (method, rest) = rest.split_once(", ").unwrap();
+            if let Some(path) = quoted(rest) {
+                found.push((method.to_uppercase(), path));
+            }
+        }
+        for line in body.lines().filter(|l| l.trim_start().starts_with('(') && l.contains(" if ")) {
+            let method = if line.trim_start().starts_with("(method,") { "*".to_string() } else { line.trim_start()[9..].split(',').next().unwrap().to_uppercase() };
+            for (i, _) in line.match_indices("p.starts_with(") {
+                found.push((method.clone(), format!("{}*", quoted(&line[i + 14..]).unwrap())));
+            }
+            for (i, _) in line.match_indices("p == ") {
+                found.push((method.clone(), quoted(&line[i + 5..]).unwrap()));
+            }
+        }
+        assert!(found.len() > 150, "the scan found {}", found.len());
+        for (method, path) in &found {
+            assert!(ROUTES.iter().any(|&(m, p, _)| m == method && p == path), "{method} {path} missing from web::ROUTES");
+        }
+        for &(m, p, _) in ROUTES {
+            let fast = ["/", "/beam3d.js", "/api/estop", "/api/events", "/api/frame.bin"].contains(&p);
+            assert!(fast || found.iter().any(|(fm, fp)| fm == m && fp == p), "{m} {p} in ROUTES but not served");
+        }
+        for (m, p) in [("POST", "/api/arm"), ("POST", "/api/estop/reset"), ("POST", "/api/heartbeat")] {
+            assert!(ROUTES.contains(&(m, p, RouteClass::Arm)), "{p}");
+        }
+        assert!(is_known_route("POST", "/api/timeline/play") && is_known_route("GET", "/api/midi/devices") && !is_known_route("GET", "/nope"));
+    }
+
+    /// T-428: the remote access over the main API: off by default, on
+    /// and off from here, sessions listed and kicked, the main server
+    /// untouched (still 127.0.0.1), and nothing armed.
+    #[test]
+    fn the_remote_access_over_the_main_api() {
+        let t = TestServer::start(false);
+        assert!(t.addr.ip().is_loopback());
+        let v = js(&t.request("GET", "/api/remote", "").1);
+        assert_eq!((v["enabled"].clone(), v["port"].clone(), v["code"].clone()), (json!(false), json!(crate::remote::DEFAULT_PORT), json!("")));
+        assert_eq!(t.request("POST", "/api/remote", r#"{"enabled":true,"port":80}"#).0, 409);
+        assert_eq!(t.request("POST", "/api/remote", r#"{"enabled":"yes"}"#).0, 400);
+        let (st, body) = t.request("POST", "/api/remote", r#"{"enabled":true,"port":0}"#);
+        assert_eq!(st, 200, "{body}");
+        let v = js(&body);
+        assert_eq!(v["enabled"], true);
+        let code = v["code"].as_str().unwrap().to_string();
+        assert_eq!(code.len(), 6);
+        let port = v["bound_port"].as_u64().unwrap() as u16;
+        assert_eq!(v["urls"][0], format!("http://127.0.0.1:{port}"));
+        // Pair a remote on its own port, see it listed, kick it.
+        let raddr = SocketAddr::from(([127, 0, 0, 1], port));
+        assert_eq!(http(raddr, "POST", "/pair", &json!({ "code": code, "name": "iPad" }).to_string()).0, 200);
+        assert_eq!(http(raddr, "POST", "/api/heartbeat", "{}").0, 403, "no heartbeat from a remote");
+        assert_eq!(http(raddr, "POST", "/api/arm", r#"{"on":true}"#).0, 403);
+        let v = js(&t.request("GET", "/api/remote", "").1);
+        assert_eq!(v["sessions"][0]["name"], "iPad");
+        let v = js(&t.request("POST", "/api/remote/kick", r#"{"name":"iPad"}"#).1);
+        assert_eq!((v["kicked"].clone(), v["sessions"].as_array().unwrap().len()), (json!(1), 0));
+        // Show mode: cutting is allowed, opening is not.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/remote", r#"{"enabled":false}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/remote", r#"{"enabled":true}"#).0, 423);
+        assert!(TcpStream::connect_timeout(&raddr, Duration::from_millis(500)).is_err(), "port closed");
+        assert_eq!(js(&t.request("GET", "/api/remote", "").1)["enabled"], false);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     /// T-432/T-433: the notices since an id, their last id and the cached

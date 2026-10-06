@@ -1509,7 +1509,7 @@ fn keep_show_on(rig: &mut Rig, rng: &mut Rng, first: bool) {
 
 fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> {
     let mut rng = Rng::new(seed);
-    let (s, hold_to_run) = random_case(&mut rng);
+    let (s, _) = random_case(&mut rng);
     // One case in three on an output with a small frame size limit, taken
     // from the seed so the case's own random stream is unchanged.
     let max_points = seed.is_multiple_of(3).then(|| 16 + (seed as usize).wrapping_mul(7919) % 600);
@@ -1827,7 +1827,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 s.profiles.insert_for_tests(p);
             }
             let name = *hrng.pick(&["Fuzz A", "Fuzz B", crate::profiles::SAFE_PREVIEW, "Fuzz public", "Inconnu", "Fuzz abîmé"]);
-            let src = *hrng.pick(&[ArmSource::Ui, ArmSource::Keyboard, ArmSource::Api, ArmSource::Midi, ArmSource::Network, ArmSource::Osc, ArmSource::Dmx, ArmSource::System]);
+            let src = *hrng.pick(&[ArmSource::Ui, ArmSource::Keyboard, ArmSource::Api, ArmSource::Midi, ArmSource::Network, ArmSource::Osc, ArmSource::Dmx, ArmSource::Remote, ArmSource::System]);
             let confirm = hrng.chance(0.5);
             let was_armed = s.gate.is_armed();
             let before = (s.safety.get(), s.outputs.active_limits(), s.presence.settings.clone());
@@ -1889,10 +1889,11 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             }
         }
         // The fuzz's pages never hold the hold-to-run key; the controller
-        // pad (`safety.hold`) may be pressed by a random control.
-        let (may_emit, caps, held, scanning_before) = {
+        // pad (`safety.hold`) may be pressed by a random control. Hold-to-run
+        // is read as in force: a safety profile load (above) may change it.
+        let (may_emit, caps, held, scanning_before, hold_to_run) = {
             let s = rig.s();
-            (s.gate.is_armed() && !s.estop.is_latched(), s.outputs.active_limits(), s.presence.status().midi_hold, s.audience.is_scanning())
+            (s.gate.is_armed() && !s.estop.is_latched(), s.outputs.active_limits(), s.presence.status().midi_hold, s.audience.is_scanning(), s.presence.enforced && s.presence.settings.hold_to_run)
         };
         let armed_before = rig.s().gate.is_armed();
         let (black_held, with_effects) = {

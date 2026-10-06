@@ -60,6 +60,10 @@ pub fn allowed(path: &str) -> bool {
         "/api/arm",
         "/api/heartbeat",
         "/api/lock",
+        // The tablet remote (T-428): cutting it or a remote is always
+        // allowed; the handler refuses opening it in show mode.
+        "/api/remote",
+        "/api/remote/kick",
         // The external inputs gate (T-408) is a live switch, like arming,
         // and so is TC-IN (T-168); the timecode settings are an edit.
         "/api/external/gate",

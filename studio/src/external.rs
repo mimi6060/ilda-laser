@@ -48,16 +48,19 @@ pub enum SourceKind {
     Dmx,
     Osc,
     Timecode,
+    /// The tablet remote (T-428, remote.rs): pairing is its access.
+    Remote,
 }
 
 impl SourceKind {
-    pub const ALL: [SourceKind; 3] = [SourceKind::Dmx, SourceKind::Osc, SourceKind::Timecode];
+    pub const ALL: [SourceKind; 4] = [SourceKind::Dmx, SourceKind::Osc, SourceKind::Timecode, SourceKind::Remote];
 
     pub fn label_fr(self) -> &'static str {
         match self {
             SourceKind::Dmx => "DMX",
             SourceKind::Osc => "OSC",
             SourceKind::Timecode => "Timecode",
+            SourceKind::Remote => "Télécommande",
         }
     }
 
@@ -67,6 +70,7 @@ impl SourceKind {
             SourceKind::Dmx => ArmSource::Dmx,
             SourceKind::Osc => ArmSource::Osc,
             SourceKind::Timecode => ArmSource::Network,
+            SourceKind::Remote => ArmSource::Remote,
         }
     }
 }
@@ -125,9 +129,16 @@ pub struct SourceScope {
 
 impl SourceScope {
     pub fn default_for(source: SourceKind) -> Self {
-        // Timecode can only ever move the timeline (T-168).
-        let set = if source == SourceKind::Timecode { 3 } else { 0 };
-        SourceScope { source, groups: SCOPE_SETS[set].groups.iter().map(|g| g.to_string()).collect(), require_access: true }
+        // Timecode can only ever move the timeline (T-168); the remote
+        // (T-428) plays: masters, cues and tempo (remote::SCOPE narrows
+        // it further).
+        let sets: &[usize] = match source {
+            SourceKind::Timecode => &[3],
+            SourceKind::Remote => &[0, 1, 2],
+            _ => &[0],
+        };
+        let groups = sets.iter().flat_map(|&i| SCOPE_SETS[i].groups.iter().map(|g| g.to_string())).collect();
+        SourceScope { source, groups, require_access: true }
     }
 }
 
@@ -250,9 +261,18 @@ impl External {
     }
 }
 
-pub fn access_key(src: SourceKind, client: &str) -> String {
+/// Sources whose access is per client (the key's prefix).
+fn client_prefix(src: SourceKind) -> Option<&'static str> {
     match src {
-        SourceKind::Osc => format!("osc:{client}"),
+        SourceKind::Osc => Some("osc:"),
+        SourceKind::Remote => Some("remote:"),
+        _ => None,
+    }
+}
+
+pub fn access_key(src: SourceKind, client: &str) -> String {
+    match client_prefix(src) {
+        Some(prefix) => format!("{prefix}{client}"),
         _ => serde_json::to_value(src).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
     }
 }
@@ -469,14 +489,14 @@ pub fn view(s: &mut Shared, now: Instant) -> Value {
         .iter()
         .map(|&src| {
             let scope = cfg.scope(src);
-            let clients: Vec<String> = match src {
-                SourceKind::Osc => {
-                    gate.access.keys().filter(|k| has_access(gate, k, now)).filter_map(|k| k.strip_prefix("osc:").map(str::to_string)).collect()
+            let clients: Vec<String> = match client_prefix(src) {
+                Some(prefix) => {
+                    gate.access.keys().filter(|k| has_access(gate, k, now)).filter_map(|k| k.strip_prefix(prefix).map(str::to_string)).collect()
                 }
-                _ => Vec::new(),
+                None => Vec::new(),
             };
             let access = match src {
-                SourceKind::Osc => !clients.is_empty(),
+                SourceKind::Osc | SourceKind::Remote => !clients.is_empty(),
                 // TC-IN (T-168).
                 SourceKind::Timecode => s.timecode.armed,
                 _ => has_access(gate, &access_key(src, ""), now),
@@ -551,7 +571,11 @@ mod tests {
         assert!(!s.external.gate.open);
         for src in SourceKind::ALL {
             let sc = s.external.config().scope(src);
-            let want: &[&str] = if src == SourceKind::Timecode { &["timeline"] } else { &["layer", "look", "master"] };
+            let want: &[&str] = match src {
+                SourceKind::Timecode => &["timeline"],
+                SourceKind::Remote => &["cue", "grid", "layer", "look", "master", "page", "tempo"],
+                _ => &["layer", "look", "master"],
+            };
             assert_eq!(sc.groups, want);
             assert!(sc.require_access);
         }
