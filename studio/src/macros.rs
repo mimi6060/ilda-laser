@@ -681,9 +681,7 @@ fn wait_label(due: Due, now_s: f64, beat: f64) -> Value {
 pub fn running(s: &Shared) -> Vec<Value> {
     let now = s.now_s();
     let beat = s.tempo.beat_at(now);
-    s.macros
-        .player
-        .runs
+    shown_runs(s)
         .iter()
         .map(|r| {
             let m = s.macros.get(&r.macro_id);
@@ -701,6 +699,19 @@ pub fn running(s: &Shared) -> Vec<Value> {
         .collect()
 }
 
+/// The runs the views report (T-480). With the e-stop latched, none:
+/// no step runs while it is (`frame` ends every run first), but the
+/// HTTP fast path leaves the clearing to the engine's next frame when the
+/// lock is busy, and a view read in between must not show a macro still
+/// running next to `estop: true`.
+fn shown_runs(s: &Shared) -> &[MacroRun] {
+    if s.estop.is_latched() {
+        &[]
+    } else {
+        &s.macros.player.runs
+    }
+}
+
 /// `GET /api/macros`.
 pub fn view(s: &Shared) -> Value {
     json!({
@@ -714,10 +725,7 @@ pub fn view(s: &Shared) -> Value {
 
 /// `/api/frame` › `macros`: what the LIVE buttons need every frame.
 pub fn live_view(s: &Shared) -> Value {
-    let runs: Vec<Value> = s
-        .macros
-        .player
-        .runs
+    let runs: Vec<Value> = shown_runs(s)
         .iter()
         .map(|r| json!({ "id": r.macro_id, "step": r.step, "go": r.due == Due::OnGo, "error": r.last_error.is_some() }))
         .collect();
@@ -950,6 +958,25 @@ mod tests {
         assert_eq!(size(&s), 50.0, "nothing after « noir »");
         assert!(s.macros.player.runs.is_empty());
         assert!(!s.gate.is_armed());
+    }
+
+    #[test]
+    fn a_latch_not_yet_seen_by_the_engine_already_hides_the_runs() {
+        // T-480: the HTTP fast path trips the latch but, with the lock
+        // busy, leaves the runs to the engine's next frame.
+        let mut s = with(vec![mac("m1", "Un", vec![step("master.size 50", Wait::Seconds(1.0)), step("master.size 90", Wait::None)])]);
+        start(&mut s, "m1", ControlSource::Ui).unwrap();
+        frame(&mut s, 0.0, 0.0);
+        assert_eq!(running(&s).len(), 1);
+        s.estop.trip(ArmSource::Keyboard);
+        assert_eq!(s.macros.player.runs.len(), 1, "not cleared yet");
+        assert!(running(&s).is_empty());
+        assert_eq!(live_view(&s)["running"], json!([]));
+        assert_eq!(view(&s)["running"], json!([]));
+        // And the engine's next frame clears them before any step.
+        frame(&mut s, 5.0, 0.0);
+        assert!(s.macros.player.runs.is_empty());
+        assert_eq!(size(&s), 50.0);
     }
 
     #[test]

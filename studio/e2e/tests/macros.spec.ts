@@ -98,7 +98,9 @@ test('a step « armer » is refused under its line, nothing is saved, nothing ar
 });
 
 test('Échap during a macro: the stop latches and no step runs after it', async ({ page }) => {
-  await createMacro(page, 'Longue', [['master.size 30', 'seconds', 1], ['master.size 90', 'none']]);
+  // T-480: the stop must land inside the wait; 3 s leaves room for the
+  // poll and the key press on a loaded machine.
+  await createMacro(page, 'Longue', [['master.size 30', 'seconds', 3], ['master.size 90', 'none']]);
   await page.locator('#macSave').click();
   await expect(page.locator('#macState')).toHaveText('Macros enregistrées');
   await reveal(page, '#macButtons');
@@ -108,7 +110,8 @@ test('Échap during a macro: the stop latches and no step runs after it', async 
   await page.keyboard.press('Escape');
   await expect.poll(async () => (await frame()).estop).toBe(true);
   expect((await frame()).macros.running).toEqual([]);
-  await page.waitForTimeout(1500);
+  // Past the wait: the second step never runs.
+  await page.waitForTimeout(3500);
   expect((await studio.live()).size).toBeCloseTo(0.3, 5);
   expect((await frame()).armed).toBe(false);
   // Launching is refused while latched.

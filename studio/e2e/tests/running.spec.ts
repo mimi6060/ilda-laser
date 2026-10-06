@@ -108,27 +108,34 @@ test('the source column reads « MIDI » after a fader, « Interface » after th
 });
 
 test('a quantised launch shows « en attente » and can be cancelled before its bar', async ({ page }) => {
-  // A slow tempo and « Mesure »: the next bar is seconds away.
+  // A slow tempo and « Mesure »: a bar lasts 8 s.
   expect(await studio.post('/api/control', { id: 'tempo.bpm', value: 30 })).toBe(200);
   expect(await studio.post('/api/control', { id: 'cue.quantize', value: 2 })).toBe(200);
   try {
     await page.locator('#liveTabs [data-panel-tab="running"]').click();
+    // T-480: click at a known place in the bar, never a random one. Put the
+    // « 1 » now, then wait past the catch-up window (1/8 beat = 250 ms at
+    // 30 BPM, where a press still starts on the bar it just missed): the
+    // launch always waits, and its bar is at least 5 s away, enough to
+    // check the row and cancel it even on a loaded machine.
+    expect(await studio.post('/api/control', { id: 'tempo.resync' })).toBe(200);
+    await expect.poll(async () => {
+      const t = (await studio.frame()).tempo;
+      const inBar = t.beat_in_bar + t.phase;
+      return inBar >= 0.25 && inBar <= 1.5;
+    }, { intervals: [50] }).toBe(true);
     const cell = page.locator('#cues .cue').nth(3);
     const id = await cell.getAttribute('data-id');
     await cell.click();
-    // 1 chance in ~30 to land on the bar itself: then it simply plays.
-    await expect.poll(async () => (await running()).cues.length).toBe(1);
-    if ((await running()).cues[0]?.phase === 'pending') {
-      const row = page.locator('#runCues .run-row', { hasText: 'en attente' });
-      await expect(row).toHaveCount(1);
-      await expect(row.locator('.src')).toHaveText('Interface');
-      await row.getByRole('button', { name: 'Arrêter' }).click();
-      await expect(page.locator('#runCues')).toHaveText('Rien ne joue');
-      await page.waitForTimeout(300);
-      expect(await playing()).not.toContain(id);
-    } else {
-      await expect.poll(playing).toEqual([id]);
-    }
+    await expect.poll(async () => (await running()).cues.map(c => [c.cue, c.phase])).toEqual([[id, 'pending']]);
+    const row = page.locator('#runCues .run-row', { hasText: 'en attente' });
+    await expect(row).toHaveCount(1);
+    await expect(row.locator('.src')).toHaveText('Interface');
+    await row.getByRole('button', { name: 'Arrêter' }).click();
+    await expect(page.locator('#runCues')).toHaveText('Rien ne joue');
+    await expect(page.locator('#runMsg')).toHaveText('');
+    await page.waitForTimeout(300);
+    expect(await playing()).not.toContain(id);
   } finally {
     await studio.post('/api/control', { id: 'cue.quantize', value: 0 });
     await studio.post('/api/control', { id: 'tempo.bpm', value: 120 });
