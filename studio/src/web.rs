@@ -2530,7 +2530,11 @@ fn sdbank_view(s: &Shared) -> serde_json::Value {
         "default_seconds": sd::DEFAULT_SECONDS,
         "first": sd::FIRST,
         "last": sd::LAST,
-        "outputs": s.outputs.list().iter().map(|o| json!({ "id": o.id, "name": o.projector.name, "max_power": o.limits.max_power })).collect::<Vec<_>>(),
+        "outputs": s.outputs.list().iter().map(|o| {
+            // Points per frame baked into the files (T-476), shown in the export dialogs.
+            let fl = o.scan.frame_limits();
+            json!({ "id": o.id, "name": o.projector.name, "max_power": o.limits.max_power, "min_points": fl.min, "max_points": fl.max })
+        }).collect::<Vec<_>>(),
         "output": crate::power::MAIN_OUTPUT,
     })
 }
@@ -6349,6 +6353,10 @@ mod tests {
         let empty = json(&t.request("GET", "/api/sdbank", "").1);
         assert_eq!(empty["slots"], json!([]));
         assert_eq!(empty["outputs"][0]["id"], "main");
+        // The points per frame the files get (T-476): the output's own range.
+        let fl = crate::power::OutputScan::default().frame_limits();
+        assert_eq!(empty["outputs"][0]["min_points"], json!(fl.min));
+        assert_eq!(empty["outputs"][0]["max_points"], json!(fl.max));
         // Nothing playing: « the current cue » is refused.
         assert_eq!(t.request("POST", "/api/sdbank/add", "{}").0, 400);
         assert_eq!(t.request("POST", "/api/sdbank/add", r#"{"id":"nope"}"#).0, 404);

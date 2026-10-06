@@ -1729,7 +1729,7 @@
     <label for="recOut">Sécurité appliquée au fichier (sortie)</label>
     <select id="recOut" class="sd-output"><option value="main">main</option></select>
     <div class="ilda-rights" id="recSafety" role="note">Les images enregistrées sont celles qui sortent de la <b>chaîne de sécurité</b> de la sortie choisie,
-      jamais le look brut : calibration, couleurs de la sortie, zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de puissance.
+      jamais le look brut : calibration, points par image de la sortie (indiqués dans la liste), couleurs de la sortie, zones, horizon, limiteur de strobe, garde anti-point fixe, plafonds de puissance.
       Le projecteur qui les jouera le fera sans le studio et applique les siens : vérifiez zones, puissance et calibration sur place,
       essayez d'abord à faible puissance, et gardez l'arrêt d'urgence matériel (clé, interlock) à portée de main : c'est lui la vraie sécurité.
       Enregistrer n'arme jamais le laser.</div>
@@ -2741,7 +2741,7 @@
       <select id="ildaExpOut" class="sd-output"><option value="main">main</option></select>
       <div class="row"><button id="ildaExport" class="primary">Exporter 001.ild</button></div>
       <div id="ildaExpMsg" class="hint" role="status"></div>
-      <div class="ilda-rights">La chaîne de sécurité de la sortie choisie est inscrite dans le fichier : calibration, zones, horizon,
+      <div class="ilda-rights">La chaîne de sécurité de la sortie choisie est inscrite dans le fichier : calibration, points par image de la sortie (indiqués dans la liste), zones, horizon,
         limiteur de strobe (prévu pour une lecture à ce nombre d'images/s), garde anti-point fixe, plafonds de puissance. Mais le ShowNET
         le joue seul, sans le studio : il peut ajouter ses propres effets en mode DMX. Essayez-le d'abord à faible puissance, et gardez
         l'arrêt d'urgence matériel (clé, interlock) à portée de main : c'est lui la vraie sécurité.</div>
@@ -3598,7 +3598,7 @@
       <ul id="sdWarn"></ul>
       <div class="hint">Copiez les fichiers à la racine de la carte microSD (lecteur de carte du Mac). <code>banque.json</code> liste
         quel numéro joue quel cue. Les fichiers de plus de 6 Mo passent par un lecteur de carte, pas par l'Admin Tool ; 8 Mo au plus.</div>
-      <div class="ilda-rights">Chaque fichier contient déjà la chaîne de sécurité de la sortie choisie (calibration, zones, horizon,
+      <div class="ilda-rights">Chaque fichier contient déjà la chaîne de sécurité de la sortie choisie (calibration, points par image indiqués dans la liste, zones, horizon,
         limiteur de strobe, garde anti-point fixe, plafonds) ; un cue qu'elle coupe entièrement est refusé. Mais le ShowNET joue la carte
         seul, sans le studio, et peut ajouter ses propres effets en mode DMX : l'arrêt d'urgence matériel (clé, interlock) reste votre
         vraie sécurité. N'exportez que vos propres looks.</div>
@@ -14343,13 +14343,20 @@ async function sdRequest(path, body) {
   }
   return r.json();
 }
+// Points per frame baked into the files (T-476): the output's own range
+// (RÉGLAGES › Sorties › balayage), applied before the safety chain.
+function sdPointsText(o) {
+  const min = o.min_points || 0, max = o.max_points;
+  if (max) return min ? `${min} à ${max} points par image` : `${max} points par image au plus`;
+  return min ? `${min} points par image au moins` : 'points par image sans limite';
+}
 function fillOutputs(sel, outputs) {
   const keep = sel.value;
   sel.innerHTML = '';
   for (const o of outputs) {
     const opt = document.createElement('option');
     opt.value = o.id;
-    opt.textContent = `${o.name ? o.name + ' (' + o.id + ')' : o.id} · puissance max ${Math.round(o.max_power * 100)} %`;
+    opt.textContent = `${o.name ? o.name + ' (' + o.id + ')' : o.id} · puissance max ${Math.round(o.max_power * 100)} % · ${sdPointsText(o)}`;
     sel.appendChild(opt);
   }
   if (outputs.some(o => o.id === keep)) sel.value = keep;

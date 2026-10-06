@@ -57,6 +57,8 @@ test('two cues are numbered, exported to a folder and read back, laser disarmed'
 
     // Export to the temporary folder, the main output's safety chain inside.
     await expect(page.locator('#sdOutput')).toHaveValue('main');
+    // The points per frame baked into the files are shown with the output (T-476).
+    await expect(page.locator('#sdOutput option[value="main"]')).toContainText('points par image');
     await page.locator('#sdDir').fill(out);
     await page.locator('#sdExport').click();
     await expect(page.locator('#sdMsg')).toContainText('2 fichiers exportés', { timeout: 30_000 });
