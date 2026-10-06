@@ -88,6 +88,7 @@ mod record;
 mod sdbank;
 mod sheets;
 mod tempo;
+mod templates;
 mod testpattern;
 mod textures;
 mod timecode;
@@ -455,6 +456,9 @@ pub struct Shared {
     pub timeline: timeline::Player,
     /// Saved shows, `studio-data/shows/`.
     pub shows: timeline::ShowStore,
+    /// Timeline templates (templates.rs, T-165), `studio-data/templates/`:
+    /// the user's library, not part of a project.
+    pub templates: templates::TemplateStore,
     /// Incoming timecode (timecode/, T-168): settings in `timecode.json`,
     /// TC-IN in memory only (off at start). Drives the timeline only.
     pub timecode: timecode::TimecodeState,
@@ -1378,6 +1382,7 @@ fn startup_state(cli: &Cli) -> Shared {
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
+        templates: templates::TemplateStore::new(cli.data_dir.join("templates")),
         timecode: timecode::TimecodeState::load(cli.data_dir.join("timecode.json")),
         figures: figures::FigureStore::load(cli.data_dir.join("figures")),
         user_cues: usercues::UserCueStore::load_or_create(cli.data_dir.join("user_cues.json")),

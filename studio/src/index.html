@@ -194,6 +194,23 @@
   /* Enregistrer une animation ILDA (T-442). */
   #recDialog .box { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
   #recDialog input[type=text], #recDialog select { width: 100%; }
+  /* Modèles de phrases (T-165). */
+  #tlTplDialog .box { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+  #tlTplList { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 10px; }
+  #tlTplList .tl-ex[aria-pressed="true"] { border-color: var(--ws-timeline); }
+  .tl-tpl-badge { font-size: 10px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--ws-timeline); color: var(--ws-timeline); }
+  #tlTplApply { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  #tlTplApply[hidden] { display: none; }
+  #tlTplPreview { width: 100%; height: 72px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
+  #tlTplSlots { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px; }
+  #tlTplSlots label, .tl-tpl-row label { display: flex; align-items: center; gap: 6px; margin: 0; }
+  #tlTplSlots select { flex: 1 1 auto; min-width: 0; }
+  .tl-tpl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .tl-tpl-row input[type=number] { width: 72px; }
+  .tl-tpl-row input[type=text] { flex: 1 1 160px; min-width: 0; }
+  #tlTplDialog button, #tlTplDialog select, #tlTplDialog input[type=text], #tlTplDialog input[type=number] { min-height: 44px; }
+  #tlTplDialog h4 { margin: 14px 0 4px; }
+  #tlTplMsg.err { color: var(--danger, var(--warn)); }
   #tlExList { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; margin-top: 10px; }
   .tl-ex { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 12px; text-align: left; border-radius: 10px; white-space: normal; height: auto; }
   .tl-ex b { font-size: 14px; color: var(--text); }
@@ -1758,6 +1775,44 @@
     <div id="tlExList"></div>
   </div>
 </div>
+<!-- TIMELINE › Modèles (T-165) : phrases prêtes à poser. -->
+<div id="tlTplDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="tlTplTitle" hidden>
+  <div class="box">
+    <div class="keys-head"><h3 id="tlTplTitle">Modèles de phrases</h3><button id="tlTplClose">Fermer</button></div>
+    <div class="hint">Un modèle est une phrase de quelques mesures avec des emplacements (A, B…) à la place des cues. Posé sur une région, il devient des événements normaux, modifiables ensuite ; Annuler le retire. Un modèle ne touche jamais au laser.</div>
+    <div id="tlTplList" role="group" aria-label="Modèles"></div>
+    <div id="tlTplApply" hidden>
+      <canvas id="tlTplPreview" role="img" aria-label="Aperçu schématique du modèle"></canvas>
+      <div class="hint" id="tlTplInfo"></div>
+      <div id="tlTplSlots"></div>
+      <div class="tl-tpl-row">
+        <label>Région <select id="tlTplRegion"></select></label>
+        <label>De la mesure <input type="number" id="tlTplFrom" min="1" step="1" value="1"></label>
+        <label>Mesures <input type="number" id="tlTplBars" min="1" max="1024" step="1" value="8"></label>
+      </div>
+      <div class="tl-tpl-row">
+        <span>Ajuster :</span>
+        <div class="seg" id="tlTplFit" role="group" aria-label="Ajuster le modèle à la région">
+          <button data-fit="stretch" title="Positions et durées mises à l'échelle de la région">Étirer</button><button data-fit="repeat" title="Copies bout à bout, alignées aux mesures ; la dernière est coupée à la fin de la région">Répéter</button><button data-fit="crop" title="Une copie, coupée à la fin de la région">Couper</button>
+        </div>
+        <label>Première piste <select id="tlTplTrack"></select></label>
+        <label class="check"><input type="checkbox" id="tlTplReplace"> Remplacer les événements de la région</label>
+      </div>
+      <div class="tl-tpl-row">
+        <button id="tlTplGo" class="primary">Appliquer à la région</button>
+        <button id="tlTplDel" title="Supprimer ce modèle de studio-data/templates">Supprimer le modèle</button>
+      </div>
+    </div>
+    <h4>Enregistrer la sélection comme modèle</h4>
+    <div class="hint">Les événements sélectionnés dans la timeline : chaque cue devient un emplacement, les enveloppes de bus suivent.</div>
+    <div class="tl-tpl-row">
+      <input type="text" id="tlTplName" aria-label="Nom du modèle" placeholder="Nom du modèle" maxlength="64" title="Lettres, chiffres, espaces, - et _">
+      <input type="text" id="tlTplDesc" aria-label="Description du modèle" placeholder="Description (facultatif)" maxlength="300">
+      <button id="tlTplSave">Enregistrer la sélection comme modèle</button>
+    </div>
+    <div class="hint" id="tlTplMsg" role="status"></div>
+  </div>
+</div>
 <!-- CRÉATION › Médiathèque et TIMELINE : enregistrer une animation ILDA (T-442). -->
 <div id="recDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="recTitle" hidden>
   <div class="box">
@@ -2525,6 +2580,7 @@
       <button id="tlCopy" title="Cmd+C : la sélection (sinon la région de boucle)">Copier la phrase</button>
       <button id="tlPaste" title="Cmd+V : au prochain début de mesure après la tête de lecture">Coller</button>
       <button id="tlDup" title="Cmd+D : juste après la sélection, en mesures entières (ou Alt+glisser)">Dupliquer</button>
+      <button id="tlTpl" title="Phrases prêtes à poser sur une région (Montée, Drop…) ; enregistrer la sélection comme modèle" aria-haspopup="dialog">Modèles…</button>
       <button id="tlDel" title="Suppr">Supprimer</button>
       <button id="tlUndo" title="Cmd+Z">Annuler</button>
       <button id="tlRedo" title="Cmd+Maj+Z">Rétablir</button>
@@ -10170,6 +10226,165 @@ $('tlDup').onclick = tlDuplicate;
 $('tlDel').onclick = tlDelete;
 $('tlUndo').onclick = tlUndo;
 $('tlRedo').onclick = tlRedo;
+
+// --- Modèles de phrases (T-165) ---
+// The server lays the template on the region (POST
+// /api/timeline/templates/render, which changes nothing); the result goes
+// out through tlChange like any edit: one undo step, locked tracks and
+// show mode refused by /api/timeline/edit. Never touches the arm state.
+const TPL = { list: [], categories: [], cur: null, fit: 'repeat', region: null };
+function tplMsg(text, err = false) { $('tlTplMsg').textContent = text; $('tlTplMsg').classList.toggle('err', err); }
+async function openTlTemplates() {
+  if (!TL.show) { tlMsg('Ouvrez ou créez un show d\'abord.', true); return; }
+  $('tlTplDialog').hidden = false;
+  tplMsg('');
+  await tplLoad();
+  tplRegions();
+  const first = $('tlTplList').querySelector('button') || $('tlTplName');
+  if (first) first.focus();
+}
+function closeTlTemplates() { $('tlTplDialog').hidden = true; }
+async function tplLoad() {
+  try {
+    const j = await apiJson('GET', '/api/timeline/templates');
+    TPL.list = j.templates || []; TPL.categories = j.categories || [];
+  } catch { TPL.list = []; tplMsg('Modèles indisponibles.', true); }
+  if (TPL.cur && !TPL.list.some(t => t.name === TPL.cur)) TPL.cur = null;
+  $('tlTplList').innerHTML = TPL.list.map(t => `<button class="tl-ex" data-tpl="${esc(t.name)}" aria-pressed="${t.name === TPL.cur}">
+      <b>${esc(t.name)}</b><span class="meta">${+t.length_bars} mesure(s) · ${t.slots.length} emplacement(s) · ${t.events.length} événement(s)${t.builtin ? ' <span class="tl-tpl-badge">Intégré</span>' : ''}</span>${t.description ? `<span class="desc">${esc(t.description)}</span>` : ''}</button>`).join('')
+    || '<div class="hint">Aucun modèle pour l\'instant : sélectionnez des événements dans la timeline et enregistrez-les ci-dessous.</div>';
+  tplShow();
+}
+const tplCurrent = () => TPL.list.find(t => t.name === TPL.cur) || null;
+function tplShow() {
+  const t = tplCurrent();
+  $('tlTplApply').hidden = !t;
+  if (!t) return;
+  $('tlTplDel').hidden = !!t.builtin;
+  $('tlTplInfo').textContent = `${t.length_bars} mesure(s) en ${t.beats_per_bar}/4 · emplacements ${t.slots.join(', ') || '—'}${t.bus_envelopes.length ? ' · enveloppes de bus' : ''}`;
+  const autoOpts = TPL.categories.map(c => `<option value="auto:${esc(c)}">Auto : ${esc(c)}</option>`).join('');
+  const cueOpts = TPL.categories.map(c => `<optgroup label="${esc(c)}">` + presets.filter(p => p.category === c).map(p => `<option value="cue:${esc(p.id)}">${esc(p.name)}</option>`).join('') + '</optgroup>').join('');
+  const keep = {};
+  $('tlTplSlots').querySelectorAll('select').forEach(s => { keep[s.dataset.slot] = s.value; });
+  $('tlTplSlots').innerHTML = t.slots.map(s => `<label>${esc(s)} : <select data-slot="${esc(s)}" aria-label="Cue de l'emplacement ${esc(s)}"><option value="">— choisir un cue —</option><optgroup label="Auto (un cue de la page)">${autoOpts}</optgroup>${cueOpts}</select></label>`).join('');
+  $('tlTplSlots').querySelectorAll('select').forEach(s => { if (keep[s.dataset.slot]) s.value = keep[s.dataset.slot]; });
+  $('tlTplTrack').innerHTML = TL.show.tracks.map((tr, i) => tr.kind === 'bus' ? '' : `<option value="${i}">${esc(tr.name)}${tr.locked ? ' (verrouillée)' : ''}</option>`).join('') + `<option value="${TL.show.tracks.length}">Nouvelle piste</option>`;
+  $('tlTplFit').querySelectorAll('[data-fit]').forEach(b => { b.classList.toggle('active', b.dataset.fit === TPL.fit); b.setAttribute('aria-pressed', String(b.dataset.fit === TPL.fit)); });
+  tplPreview(t);
+}
+// A schematic: one lane per template track, events by slot, bar lines.
+function tplPreview(t) {
+  const c = $('tlTplPreview'), dpr = window.devicePixelRatio || 1, W = c.clientWidth || 560, H = c.clientHeight || 72;
+  c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const cs = getComputedStyle(document.documentElement), col = v => cs.getPropertyValue(v).trim();
+  g.clearRect(0, 0, W, H);
+  const beats = t.length_bars * t.beats_per_bar, lanes = Math.max(1, ...t.events.map(e => e.track + 1)) + (t.bus_envelopes.length ? 1 : 0);
+  const x = b => 4 + b / beats * (W - 8), lh = (H - 8) / lanes;
+  g.strokeStyle = col('--line');
+  for (let bar = 0; bar <= t.length_bars; bar++) { g.beginPath(); g.moveTo(x(bar * t.beats_per_bar) + .5, 2); g.lineTo(x(bar * t.beats_per_bar) + .5, H - 2); g.stroke(); }
+  g.font = '11px system-ui, sans-serif'; g.textBaseline = 'middle';
+  for (const e of t.events) {
+    const y = 4 + e.track * lh, si = Math.max(0, t.slots.indexOf(e.slot));
+    g.fillStyle = TL_LAYER_COLORS[si % TL_LAYER_COLORS.length];
+    g.globalAlpha = .75; g.fillRect(x(e.start_beat), y + 2, Math.max(2, x(e.start_beat + e.len_beats) - x(e.start_beat)), lh - 4); g.globalAlpha = 1;
+    g.fillStyle = col('--bg'); g.fillText(e.slot, x(e.start_beat) + 4, y + lh / 2);
+  }
+  if (t.bus_envelopes.length) { g.fillStyle = col('--muted'); g.fillText('∿ bus', 6, 4 + (lanes - 1) * lh + lh / 2); }
+}
+// Regions: the loop, the selection, each pair of markers; else by hand.
+function tplRegions() {
+  const out = [];
+  const r = TL.show.loop_region;
+  if (r) out.push({ label: 'Région de boucle', from: r[0], to: r[1] });
+  const sel = tlSelected();
+  if (sel.length) out.push({ label: 'Sélection (mesures entières)', from: tlUAtBar(Math.floor(Math.min(...sel.map(s => tlBarAt(s.e.start))) + 1e-6)), to: tlUAtBar(Math.ceil(Math.max(...sel.map(s => tlBarAt(s.e.start + s.e.len))) - 1e-6)) });
+  const m = TL.show.markers;
+  for (let i = 0; i + 1 < m.length; i++) if (m[i + 1].at > m[i].at) out.push({ label: `${m[i].name || 'Marqueur ' + (i + 1)} → ${m[i + 1].name || 'Marqueur ' + (i + 2)}`, from: m[i].at, to: m[i + 1].at });
+  TPL.regions = out;
+  $('tlTplRegion').innerHTML = '<option value="">Mesures ci-contre</option>' + out.map((g, i) => `<option value="${i}">${esc(g.label)}</option>`).join('');
+  $('tlTplRegion').value = out.length ? '0' : '';
+  tplRegionPick();
+}
+function tplRegionPick() {
+  const g = TPL.regions && TPL.regions[+$('tlTplRegion').value];
+  TPL.region = $('tlTplRegion').value === '' ? null : g;
+  if (!TPL.region) return;
+  const from = tlBarAt(g.from), to = tlBarAt(g.to);
+  $('tlTplFrom').value = +(from + 1).toFixed(2);
+  $('tlTplBars').value = +(to - from).toFixed(2);
+}
+function tplRegion() {
+  if (TPL.region) return [TPL.region.from, TPL.region.to];
+  const from = Math.max(1, +$('tlTplFrom').value || 1) - 1, bars = Math.max(1, +$('tlTplBars').value || 1);
+  return [tlUAtBar(from), tlUAtBar(from + bars)];
+}
+async function tplApply() {
+  const t = tplCurrent();
+  if (!t || !TL.show) return;
+  if (TL.inflight) { tplMsg('Modification en cours, réessayez.', true); return; }
+  const slots = {};
+  for (const s of $('tlTplSlots').querySelectorAll('select')) {
+    if (!s.value) { tplMsg(`Emplacement ${s.dataset.slot} : choisissez un cue.`, true); s.focus(); return; }
+    const [kind, ...rest] = s.value.split(':');
+    slots[s.dataset.slot] = { [kind]: rest.join(':') };
+  }
+  const [from, to] = tplRegion();
+  const body = { name: t.name, from, to, fit: TPL.fit, track: +$('tlTplTrack').value || 0, replace: $('tlTplReplace').checked, slots, show: TL.show };
+  const r = await api('POST', '/api/timeline/templates/render', body, { quiet: true });
+  if (!r.ok) { tplMsg(await r.text(), true); return; }
+  const j = await r.json();
+  const known = new Set(tlEvents().map(x => x.e.id));
+  if (!tlChange(() => { TL.show = j.show; })) { tplMsg('Rien n\'a été posé (piste verrouillée ?).', true); return; }
+  TL.sel = new Set(tlEvents().filter(x => !known.has(x.e.id)).map(x => x.e.id));
+  TL.headsKey = ''; tlHeads();
+  const msg = `« ${t.name} » posé : ${j.added} événement(s)${j.removed ? `, ${j.removed} remplacé(s)` : ''}. Annuler le retire.`;
+  tplMsg(msg); tlMsg(msg);
+}
+async function tplSave() {
+  const name = $('tlTplName').value.trim();
+  if (!name) { tplMsg('Donnez un nom au modèle.', true); $('tlTplName').focus(); return; }
+  if (!TL.sel.size) { tplMsg('Sélectionnez d\'abord des événements dans la timeline (Maj+clic).', true); return; }
+  const body = { name, description: $('tlTplDesc').value.trim(), events: [...TL.sel], show: TL.show };
+  let r = await api('POST', '/api/timeline/templates', body, { quiet: true });
+  if (r.status === 409 && confirm(`Un modèle s'appelle déjà « ${name} » : le remplacer ?`)) r = await api('POST', '/api/timeline/templates', { ...body, overwrite: true }, { quiet: true });
+  if (!r.ok) { tplMsg(await r.text(), true); return; }
+  const j = await r.json();
+  TPL.cur = j.template.name;
+  await tplLoad();
+  tplMsg(`Modèle « ${j.template.name} » enregistré : ${j.template.length_bars} mesure(s), emplacements ${j.template.slots.join(', ') || '—'}.` + (j.warnings && j.warnings.length ? ' ' + j.warnings.join(' · ') : ''));
+}
+async function tplDelete() {
+  const t = tplCurrent();
+  if (!t || t.builtin || !confirm(`Supprimer le modèle « ${t.name} » ?`)) return;
+  const r = await api('POST', '/api/timeline/templates/delete', { name: t.name }, { quiet: true });
+  if (!r.ok) { tplMsg(await r.text(), true); return; }
+  TPL.cur = null;
+  await tplLoad();
+  tplMsg(`Modèle « ${t.name} » supprimé.`);
+}
+$('tlTpl').onclick = openTlTemplates;
+$('tlTplClose').onclick = closeTlTemplates;
+$('tlTplDialog').addEventListener('click', e => { if (e.target === $('tlTplDialog')) closeTlTemplates(); });
+$('tlTplList').addEventListener('click', e => {
+  const b = e.target.closest('[data-tpl]');
+  if (!b) return;
+  TPL.cur = b.dataset.tpl;
+  $('tlTplList').querySelectorAll('[data-tpl]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  tplShow();
+});
+$('tlTplFit').addEventListener('click', e => {
+  const b = e.target.closest('[data-fit]');
+  if (!b) return;
+  TPL.fit = b.dataset.fit;
+  $('tlTplFit').querySelectorAll('[data-fit]').forEach(x => { x.classList.toggle('active', x === b); x.setAttribute('aria-pressed', String(x === b)); });
+});
+$('tlTplRegion').addEventListener('change', tplRegionPick);
+['tlTplFrom', 'tlTplBars'].forEach(id => $(id).addEventListener('input', () => { $('tlTplRegion').value = ''; TPL.region = null; }));
+$('tlTplGo').onclick = tplApply;
+$('tlTplSave').onclick = tplSave;
+$('tlTplDel').onclick = tplDelete;
 
 // --- drawing ---
 let tlColors = null;

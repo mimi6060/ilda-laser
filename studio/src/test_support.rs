@@ -93,6 +93,7 @@ pub fn shared() -> Shared {
         figures: crate::figures::FigureStore::in_memory(),
         user_cues: crate::usercues::UserCueStore::in_memory(),
         shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id())).join("shows")),
+        templates: crate::templates::TemplateStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id())).join("templates")),
         media: std::sync::Arc::new(crate::audio::media::MediaStore::new(&std::env::temp_dir().join(format!("laser-studio-test-media-{}", std::process::id())))),
         autoshow: Default::default(),
         // Its own folder per call: tests import in parallel.
