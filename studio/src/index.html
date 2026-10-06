@@ -925,6 +925,9 @@
   #diagContents { margin: 4px 0 6px 18px; padding: 0; }
   #diagDir { word-break: break-all; }
   #diagTail { max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+  /* Fiche sécurité (T-263): the event form; the sheet itself has its own print stylesheet. */
+  .ss-date { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 6px; margin: 4px 0; }
+  .ss-date input { min-width: 0; }
   .sl-wrap { max-height: 360px; overflow: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; }
   #slTable { width: 100%; border-collapse: collapse; font-size: 12px; }
   #slTable th { position: sticky; top: 0; background: var(--panel-2); text-align: left; font-weight: 600; color: var(--muted); }
@@ -3756,6 +3759,32 @@
           <tbody id="slRows"></tbody>
         </table></div>
         <div class="hint" id="slInfo">Les plus récents en haut. Un fichier par jour dans le dossier de données (logs/), gardé un an.</div>
+      </details>
+    </section>
+
+    <section data-help="reglages-securite">
+      <details id="safetySheetPanel" data-search="Fiche sécurité du show annexe DGTA imprimer PDF">
+        <summary>Fiche sécurité</summary>
+        <div class="ex-banner" id="ssBanner">La fiche résume les réglages du logiciel au moment de l'export. Elle n'atteste ni la sécurité ni la conformité du show et ne remplace ni l'évaluation d'une personne compétente, ni l'autorisation (DGTA en extérieur, autorités locales), ni les mesures, ni l'arrêt matériel.</div>
+        <div class="hint">Annexe technique imprimable (Imprimer › Enregistrer en PDF dans le navigateur) : projecteurs, plafonds, zones, extérieur, mesures actives, liste de contrôle et estimation d'exposition. La générer ne change rien et n'arme jamais.</div>
+        <div class="sf-sub">Événement</div>
+        <label for="ssName">Nom de l'événement</label>
+        <input type="text" id="ssName" maxlength="200" autocomplete="off">
+        <label for="ssVenue">Lieu (adresse)</label>
+        <input type="text" id="ssVenue" maxlength="200" autocomplete="off">
+        <label for="ssOperator">Opérateur laser</label>
+        <input type="text" id="ssOperator" maxlength="200" autocomplete="off">
+        <label for="ssPhone">Portable de la personne présente pendant la projection</label>
+        <input type="tel" id="ssPhone" maxlength="200" autocomplete="off">
+        <div class="hint">Le numéro n'est enregistré nulle part : ni fichier, ni journal, ni navigateur. Il n'apparaît que sur la fiche générée.</div>
+        <div class="sf-sub" id="ssDatesLabel">Dates et heures</div>
+        <div id="ssDates" role="group" aria-labelledby="ssDatesLabel"></div>
+        <div class="row"><button id="ssAddDate">Ajouter une date</button></div>
+        <label class="check"><input type="checkbox" id="ssNotes"> Inclure les notes des fiches projecteurs (modèle, numéro de série…)</label>
+        <label class="check"><input type="checkbox" id="ssLog"> Inclure le journal de sécurité du jour</label>
+        <div class="row"><button id="ssGenerate" class="primary">Générer la fiche</button></div>
+        <div class="hint sf-error" id="ssError" role="alert"></div>
+        <div class="hint">La fiche s'ouvre dans un nouvel onglet, sans script ni ressource externe. Les champs vides restent à compléter à la main sur la version imprimée.</div>
       </details>
     </section>
 
@@ -7781,6 +7810,64 @@ $('slCsv').onclick = () => {
   document.body.append(a); a.click(); a.remove();
 };
 setInterval(() => { if (activeWs === 'settings' && $('safetyLogPanel').open && !document.hidden) loadSafetyLog(); }, 2000);
+
+// RÉGLAGES › Fiche sécurité (T-263): the event form and the printable
+// sheet. The event fields (never the mobile number) are remembered in this
+// browser only; the studio saves none of them.
+const SS_KEY = 'laserStudio.safetySheet';
+const SS_MAX_DATES = 10;
+function ssAddDate(d = {}) {
+  const box = $('ssDates');
+  if (box.children.length >= SS_MAX_DATES) return;
+  const n = box.children.length + 1;
+  const row = document.createElement('div');
+  row.className = 'ss-date';
+  for (const [key, label, ph] of [['day', 'Date', 'jj/mm/aaaa'], ['start', 'Début', 'hh:mm'], ['end', 'Fin', 'hh:mm']]) {
+    const input = document.createElement('input');
+    input.type = 'text'; input.maxLength = 200; input.dataset.k = key; input.placeholder = ph;
+    input.setAttribute('aria-label', `${label} (${n})`);
+    input.value = d[key] || '';
+    input.oninput = ssRemember;
+    row.append(input);
+  }
+  box.append(row);
+  $('ssAddDate').disabled = box.children.length >= SS_MAX_DATES;
+}
+function ssEvent() {
+  const dates = [...$('ssDates').children].map(r => Object.fromEntries([...r.querySelectorAll('input')].map(i => [i.dataset.k, i.value.trim()])))
+    .filter(d => d.day || d.start || d.end);
+  return { name: $('ssName').value.trim(), venue: $('ssVenue').value.trim(), operator: $('ssOperator').value.trim(), phone: $('ssPhone').value.trim(), dates };
+}
+function ssRemember() {
+  const { phone, ...kept } = ssEvent();
+  try { localStorage.setItem(SS_KEY, JSON.stringify(kept)); } catch { /* storage unavailable: nothing kept */ }
+}
+(function ssInit() {
+  let kept = {};
+  try { kept = JSON.parse(localStorage.getItem(SS_KEY) || '{}') || {}; } catch { kept = {}; }
+  $('ssName').value = kept.name || ''; $('ssVenue').value = kept.venue || ''; $('ssOperator').value = kept.operator || '';
+  const dates = Array.isArray(kept.dates) && kept.dates.length ? kept.dates.slice(0, SS_MAX_DATES) : [{}];
+  dates.forEach(d => ssAddDate(d));
+  for (const id of ['ssName', 'ssVenue', 'ssOperator']) $(id).oninput = ssRemember;
+})();
+$('ssAddDate').onclick = () => { ssAddDate(); ssRemember(); };
+$('ssGenerate').onclick = async () => {
+  $('ssError').textContent = '';
+  // Opened inside the click so the browser does not block it.
+  const w = window.open('', '_blank');
+  let r;
+  try {
+    r = await api('POST', '/api/safety/sheet', { event: ssEvent(), include_log: $('ssLog').checked, include_notes: $('ssNotes').checked }, { quiet: true });
+  } catch { if (w) w.close(); $('ssError').textContent = 'Studio injoignable : fiche non générée.'; return; }
+  if (!r.ok) {
+    if (w) w.close();
+    $('ssError').textContent = (await r.text().catch(() => '')) || `Fiche non générée (${r.status}).`;
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([await r.text()], { type: 'text/html' }));
+  if (w) { w.opener = null; w.location.href = url; } else { $('ssError').textContent = 'Le navigateur a bloqué le nouvel onglet : autorisez les fenêtres de Laser Studio.'; }
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+};
 
 // RÉGLAGES › Diagnostic (T-403): the application log's tail and state,
 // and the diagnostic report download.

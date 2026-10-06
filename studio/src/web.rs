@@ -163,6 +163,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/checklist", RouteClass::Read),
     ("GET", "/api/safety/log", RouteClass::Read),
     ("GET", "/api/safety/log.csv", RouteClass::Read),
+    ("GET", "/api/safety/sheet", RouteClass::Read),
+    ("POST", "/api/safety/sheet", RouteClass::Read),
     ("POST", "/api/calibration", RouteClass::Safety),
     ("GET", "/api/venue", RouteClass::Read),
     ("POST", "/api/venue", RouteClass::Safety),
@@ -1673,6 +1675,19 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (Method::Get, "/api/checklist") => json_response(shared.lock().unwrap().checklist.view()),
         (Method::Post, p) if p.starts_with("/api/checklist/") => checklist_route(request, shared, &p["/api/checklist/".len()..]),
         (Method::Get, "/api/safety/log") | (Method::Get, "/api/safety/log.csv") => safety_log_view(request.url(), shared, path.ends_with(".csv")),
+        // The safety sheet (T-263): a printable HTML summary of the
+        // settings in force. GET: the settings only (event fields left
+        // blank to fill by hand); POST `{event, include_log,
+        // include_notes}`: with what the operator typed. Reads only: the
+        // body (with its mobile number) is written nowhere.
+        (Method::Get, "/api/safety/sheet") => safety_sheet(&crate::safetysheet::SheetRequest::default(), shared),
+        (Method::Post, "/api/safety/sheet") => match body::<crate::safetysheet::SheetRequest>(request) {
+            Ok(req) => match req.event.validate() {
+                Ok(()) => safety_sheet(&req, shared),
+                Err(e) => text(400, &e.to_string()),
+            },
+            Err(_) => text(400, "fiche sécurité : requête illisible"),
+        },
         (Method::Post, "/api/calibration") => match body::<Calibration>(request) {
             Ok(cal) => {
                 let cal = cal.sanitized();
@@ -5324,6 +5339,29 @@ fn safety_log_view(url: &str, shared: &Arc<Mutex<Shared>>, csv: bool) -> HttpRes
     }))
 }
 
+/// `GET|POST /api/safety/sheet` (T-263): the sheet, with a policy that
+/// forbids any script, external resource or form in it. The safety log is
+/// read without the studio lock.
+fn safety_sheet(req: &crate::safetysheet::SheetRequest, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let (mut data, log) = {
+        let s = shared.lock().unwrap();
+        (crate::safetysheet::gather(&s, std::time::SystemTime::now()), s.gate.log().clone())
+    };
+    if req.include_log {
+        data.log = Some(match log.dir().map(Path::to_path_buf) {
+            Some(dir) => {
+                log.flush(Duration::from_millis(200));
+                crate::safety_log::read_day(&dir, &crate::safety_log::today().to_string())
+            }
+            None => Vec::new(),
+        });
+    }
+    let html = crate::safetysheet::render(&data, req);
+    let csp = Header::from_bytes(&b"Content-Security-Policy"[..], crate::safetysheet::CSP.as_bytes()).expect("ASCII header");
+    let cache = Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).expect("ASCII header");
+    with_type(Response::from_string(html), "text/html; charset=utf-8").with_header(csp).with_header(cache)
+}
+
 /// The pre-show checklist (T-258). `operator {name}`, `check {id, on,
 /// value?}`, `complete`, `restart`, `config {items, outdoor,
 /// audience_scan}` or `config {defaults: true}`. Each answers the
@@ -8246,6 +8284,33 @@ mod tests {
         t.shared.lock().unwrap().show_mode.on = true;
         assert_eq!(t.request("POST", "/api/safety/exposure", r#"{"exposure":{"distance_m":5}}"#).0, 423);
         assert_eq!(t.request("GET", "/api/safety/exposure", "").0, 200);
+    }
+
+    #[test]
+    fn safety_sheet_reads_only_and_works_in_show_mode() {
+        let t = TestServer::start(false);
+        let snapshot = |t: &TestServer| {
+            let s = t.shared.lock().unwrap();
+            (s.safety.get(), s.outputs.list().to_vec(), s.checklist.view(), s.gate.is_armed())
+        };
+        let before = snapshot(&t);
+        let (head, body) = get_bytes(t.addr, "/api/safety/sheet");
+        let html = String::from_utf8(body).unwrap();
+        assert!(head.contains("200"), "{head}");
+        assert!(head.contains("text/html") && head.contains("Content-Security-Policy: default-src 'none'"), "{head}");
+        assert!(html.contains("Fiche sécurité du show") && html.contains(&crate::safetysheet::esc(crate::safetysheet::FOOTER_FR)));
+        let phone = "+32 499 12 34 56";
+        let req = format!(r#"{{"event":{{"name":"Test","phone":"{phone}","dates":[{{"day":"10/10","start":"21h","end":"23h"}}]}},"include_log":true}}"#);
+        let (code, html) = t.request("POST", "/api/safety/sheet", &req);
+        assert_eq!(code, 200, "{html}");
+        assert!(html.contains(phone) && html.contains("Journal de sécurité du jour"));
+        assert_eq!(t.request("POST", "/api/safety/sheet", r#"{"event":{"name":"a\nb"}}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/safety/sheet", "pas du json").0, 400);
+        // Reading only: allowed in show mode, changes nothing, never arms.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/safety/sheet", &req).0, 200);
+        t.shared.lock().unwrap().show_mode.on = false;
+        assert_eq!(snapshot(&t), before);
     }
 
     #[test]
