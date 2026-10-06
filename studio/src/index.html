@@ -1127,6 +1127,18 @@
   .ni-state.bad { color: var(--danger); font-weight: 700; }
   #oscMonitor { font: 11px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); max-height: 140px; overflow-y: auto; margin-top: 4px; }
   #oscMonitor .err { color: var(--warn); }
+  /* Retour OSC, moniteur et adresses (T-416): Theme (T-299) tokens. */
+  .osc-scroll { max-height: 220px; overflow: auto; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; }
+  .osc-scroll table { width: 100%; border-collapse: collapse; font: 11px/1.4 ui-monospace, Menlo, monospace; }
+  .osc-scroll th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; text-align: left; padding: 3px 6px; }
+  .osc-scroll td { padding: 2px 6px; border-top: 1px solid var(--line); color: var(--text); word-break: break-all; }
+  .osc-scroll td.r-refused { color: var(--warn); }
+  .osc-scroll td.r-unknown { color: var(--muted); }
+  .osc-scroll td.r-ok { color: var(--ok); }
+  .osc-subs { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; color: var(--muted); }
+  .osc-subs li { padding: 2px 0; }
+  #oscFbPanel .row { display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+  #oscFbPanel .row label { margin: 0; }
   #dmxChart { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
   #dmxChart td { padding: 2px 4px; border-top: 1px solid var(--line); }
   #dmxChart td:first-child, #dmxChart td:last-child { width: 44px; color: var(--muted); }
@@ -1928,6 +1940,7 @@
   <button id="midiMenuShift">Apprendre avec Shift</button>
   <button id="midiMenuForget">Oublier MIDI</button>
   <button id="midiMenuDmx" title="Bougez ensuite un canal de la console : le premier qui bouge est affecté à ce contrôle">Apprendre DMX</button>
+  <button id="midiMenuOsc" title="Copie l'adresse OSC de ce contrôle (/ls/…) dans le presse-papiers">Copier l'adresse OSC</button>
 </div>
 <!-- APC40 à l'écran (T-210): info-bulle et menu du clic droit. -->
 <div id="vapcTip" role="tooltip" hidden></div>
@@ -3912,7 +3925,7 @@
     <section data-help="reglages-entrees">
       <details id="netinPanel" data-search="Entrées réseau OSC Art-Net sACN DMX">
         <summary>Entrées réseau (OSC, Art-Net, sACN, DMX)</summary>
-        <div class="hint">Pilotage depuis une console lumière ou une autre application. Rien de ce qui arrive par le réseau ne peut armer le laser ; le blackout et l'arrêt d'urgence sont toujours acceptés. Écoute seule : le studio n'envoie rien. Réglage de cette machine (pas du projet).</div>
+        <div class="hint">Pilotage depuis une console lumière ou une autre application. Rien de ce qui arrive par le réseau ne peut armer le laser ; le blackout et l'arrêt d'urgence sont toujours acceptés. Art-Net et sACN : écoute seule. L'OSC n'envoie que le <b>Retour OSC</b> (ci-dessous), coupé par défaut. Réglage de cette machine (pas du projet).</div>
         <div class="mdev">
           <div class="n">OSC</div>
           <label class="check"><input type="checkbox" id="oscEnabled"> Recevoir l'OSC (UDP)</label>
@@ -3921,7 +3934,7 @@
             <input type="text" id="oscBind" autocomplete="off" spellcheck="false"><input type="number" id="oscPort" min="0" max="65535">
           </div>
           <div class="ni-state" id="oscState" role="status"></div>
-          <div class="hint">Adresses : <code>/ls/control/&lt;id&gt; valeur</code>, <code>/ls/norm/&lt;id&gt; 0..1</code>, <code>/ls/cue/play "id du cue"</code>, <code>/ls/cue/stop</code>, <code>/ls/blackout</code>. Les id sont ceux de <code>--list-controls</code>.</div>
+          <div class="hint">Adresses : <code>/ls/master/size valeur</code> (voir <b>Liste des adresses</b> ci-dessous), <code>/ls/control/&lt;id&gt; valeur</code>, <code>/ls/norm/&lt;id&gt; 0..1</code>, <code>/ls/cue/play "id du cue"</code>, <code>/ls/cue/stop</code>, <code>/ls/blackout</code>. Les id sont ceux de <code>--list-controls</code>.</div>
           <div id="oscMonitor"><div class="hint">Aucun message reçu.</div></div>
         </div>
         <div class="mdev">
@@ -3992,6 +4005,44 @@
           <div class="hint">Le fondu et le noir baissent la sortie (avant les étages de sécurité) sans désarmer, et seulement si les entrées externes sont ouvertes. Le retour du signal reprend la main, sans jamais armer. Un arrêt logiciel ne remplace pas l'arrêt matériel du projecteur.</div>
         </div>
         <div class="hint sf-error" id="netinError" role="alert"></div>
+      </details>
+      <details id="oscFbPanel" data-search="Retour OSC feedback abonnés abonnements destinations moniteur OSC liste des adresses /ls">
+        <summary>Retour OSC, adresses et moniteur</summary>
+        <div class="hint">Renvoie la valeur de chaque contrôle externe aux surfaces tactiles et consoles qui la demandent (une fois par changement, sans la renvoyer à qui l'a envoyée). Coupé par défaut. Part de l'interface d'écoute OSC ci-dessus, uniquement vers les destinations saisies ici et les clients qui envoient <code>/ls/subscribe port</code> (oubliés après 60 s sans message) ; jamais de diffusion. Seules des valeurs de contrôles sortent. Rien de ce qui arrive par OSC n'arme le laser.</div>
+        <div class="mdev">
+          <label class="check"><input type="checkbox" id="oscFbEnabled"> Retour OSC</label>
+          <label class="check"><input type="checkbox" id="oscFbSubscribe"> Accepter les abonnements</label>
+          <label class="check"><input type="checkbox" id="oscFbBeat"> Un message à chaque temps (<code>/ls/tempo/beat</code>)</label>
+          <label for="oscFbTargets">Destinations (adresse IP:port, séparées par des virgules)</label>
+          <input type="text" id="oscFbTargets" autocomplete="off" spellcheck="false" placeholder="192.168.1.20:9000">
+          <label for="oscFbRate">Messages par seconde et par contrôle (au plus)</label>
+          <input type="number" id="oscFbRate" min="1" max="60" step="1">
+          <div class="ni-state" id="oscFbState" role="status"></div>
+          <div class="n">Abonnés</div>
+          <ul id="oscFbSubs" class="osc-subs" aria-label="Abonnés au retour OSC"></ul>
+        </div>
+        <div class="mdev">
+          <div class="n">Moniteur OSC</div>
+          <div class="row">
+            <label for="oscMonDir">Afficher</label>
+            <select id="oscMonDir"><option value="">Tous les messages</option><option value="in">Entrants</option><option value="out">Sortants</option></select>
+            <button id="oscMonClear">Effacer</button>
+          </div>
+          <div class="osc-scroll" tabindex="0" role="region" aria-label="Derniers messages OSC">
+            <table id="oscMonTable"><thead><tr><th>Heure</th><th>Sens</th><th>Client</th><th>Adresse</th><th>Arguments</th><th>Résultat</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        <div class="mdev">
+          <button id="oscAddrBtn" aria-expanded="false" aria-controls="oscAddrBox">Liste des adresses</button>
+          <div id="oscAddrBox" hidden>
+            <label for="oscAddrSearch">Chercher une adresse ou un contrôle</label>
+            <input type="search" id="oscAddrSearch" autocomplete="off" spellcheck="false">
+            <div class="osc-scroll" tabindex="0" role="region" aria-label="Adresses OSC">
+              <table id="oscAddrTable"><thead><tr><th>Adresse</th><th>Contrôle</th><th>Type</th><th>Plage</th><th></th></tr></thead><tbody></tbody></table>
+            </div>
+          </div>
+        </div>
+        <div class="hint sf-error" id="oscFbError" role="alert"></div>
       </details>
     </section>
 
@@ -15928,6 +15979,105 @@ $('midiMenuDmx').onclick = async () => {
 };
 $('netinPanel').addEventListener('toggle', () => { if ($('netinPanel').open) loadNetin(); });
 setInterval(() => { if (activeWs === 'settings' && $('netinPanel').open && !document.hidden) loadNetin(); }, 500);
+
+// RÉGLAGES › Retour OSC (T-416): the feedback settings, the subscribers,
+// the monitor (last 200 messages in and out) and the address list, all
+// generated by the server from the control registry. Polled while open.
+const OSC_KIND_FR = { continuous: 'continu', toggle: 'bascule', momentary: 'momentané', trigger: 'déclencheur', choice: 'choix' };
+const OSC_RESULT_CLS = { 'appliqué': 'r-ok', 'envoyé': 'r-ok', 'refusé': 'r-refused', 'abandonné': 'r-refused', 'inconnu': 'r-unknown' };
+let oscAddrList = [];
+function oscCell(text, cls) { const td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; return td; }
+function showOscFb(v) {
+  const c = v.config;
+  $('oscFbEnabled').checked = c.enabled;
+  $('oscFbSubscribe').checked = c.allow_subscribe;
+  $('oscFbBeat').checked = c.beat_messages;
+  setField('oscFbTargets', c.targets.join(', '));
+  setField('oscFbRate', c.max_rate_hz);
+  let st = 'Coupé', cls = '';
+  if (c.enabled) {
+    const from = v.status.local ? `depuis ${v.status.local}` : `depuis l'interface ${v.osc.bind}`;
+    st = `Actif ${from} — ${v.status.sent} message(s) envoyé(s)` + (v.dropped ? `, ${v.dropped} abandonné(s) (file pleine)` : '');
+    cls = 'ok';
+    if (v.status.error) { st += ` — ${v.status.error}`; cls = 'warn'; }
+    if (!v.osc.enabled) { st += ' — l\'entrée OSC est coupée : pas d\'abonnements'; cls = 'warn'; }
+  }
+  $('oscFbState').textContent = st; $('oscFbState').className = 'ni-state ' + cls;
+  const subs = v.subscribers;
+  if (!subs.length) $('oscFbSubs').replaceChildren(Object.assign(document.createElement('li'), { textContent: 'Aucun abonné.' }));
+  else $('oscFbSubs').replaceChildren(...subs.map(sb => Object.assign(document.createElement('li'), {
+    textContent: sb.addr + (sb.fixed ? ' (destination fixe)' : ` (dernier message il y a ${Math.round(sb.age_ms / 1000)} s)`),
+  })));
+}
+async function loadOscFb() {
+  try { const r = await api('GET', '/api/osc/config', undefined, { quiet: true }); if (r.ok) showOscFb(await r.json()); } catch {}
+}
+async function saveOscFb(patch) {
+  const r = await api('POST', '/api/osc/config', patch, { quiet: true });
+  $('oscFbError').textContent = r.ok ? '' : await r.text();
+  if (r.ok) showOscFb(await r.json()); else loadOscFb();
+}
+async function loadOscMonitor() {
+  const dir = $('oscMonDir').value;
+  let j;
+  try { const r = await api('GET', '/api/osc/monitor' + (dir ? '?dir=' + dir : ''), undefined, { quiet: true }); if (!r.ok) return; j = await r.json(); } catch { return; }
+  const body = $('oscMonTable').tBodies[0];
+  if (!j.entries.length) { const tr = document.createElement('tr'); const td = oscCell('Aucun message.'); td.colSpan = 6; tr.append(td); body.replaceChildren(tr); return; }
+  body.replaceChildren(...j.entries.map(e => {
+    const tr = document.createElement('tr');
+    tr.className = e.incoming ? 'osc-in' : 'osc-out';
+    tr.append(oscCell(new Date(e.at_ms).toLocaleTimeString('fr-FR')), oscCell(e.incoming ? 'entrant' : 'sortant'), oscCell(e.peer),
+      oscCell(e.address), oscCell(e.args), oscCell(e.result + (e.detail ? ' : ' + e.detail : ''), OSC_RESULT_CLS[e.result]));
+    return tr;
+  }));
+}
+async function loadOscAddresses() {
+  try { const r = await api('GET', '/api/osc/addresses', undefined, { quiet: true }); if (r.ok) oscAddrList = await r.json(); } catch {}
+  return oscAddrList;
+}
+function renderOscAddresses() {
+  const q = $('oscAddrSearch').value.trim().toLowerCase();
+  const list = oscAddrList.filter(a => !q || a.address.toLowerCase().includes(q) || a.control.includes(q) || a.label_fr.toLowerCase().includes(q));
+  $('oscAddrTable').tBodies[0].replaceChildren(...list.map(a => {
+    const tr = document.createElement('tr');
+    const range = a.min == null ? '—' : `${a.min} … ${a.max}` + (a.unit && a.unit !== 'none' ? ` (${a.unit})` : '');
+    const td = document.createElement('td');
+    const b = Object.assign(document.createElement('button'), { textContent: 'Copier', title: 'Copier ' + a.address });
+    b.setAttribute('aria-label', 'Copier ' + a.address);
+    b.onclick = () => copyOscAddress(a.address);
+    td.append(b);
+    tr.append(oscCell(a.address), oscCell(`${a.label_fr} · ${a.control}`), oscCell(OSC_KIND_FR[a.kind] || a.kind), oscCell(range), td);
+    return tr;
+  }));
+}
+async function copyOscAddress(address) {
+  try { await navigator.clipboard.writeText(address); flash('Adresse copiée : ' + address); }
+  catch { flash('Adresse OSC : ' + address + ' (copie impossible, sélectionnez-la)'); }
+}
+$('oscFbEnabled').onchange = e => saveOscFb({ enabled: e.target.checked });
+$('oscFbSubscribe').onchange = e => saveOscFb({ allow_subscribe: e.target.checked });
+$('oscFbBeat').onchange = e => saveOscFb({ beat_messages: e.target.checked });
+$('oscFbTargets').onchange = e => saveOscFb({ targets: e.target.value.split(/[\s,;]+/).filter(Boolean) });
+$('oscFbRate').onchange = e => saveOscFb({ max_rate_hz: +e.target.value });
+$('oscMonDir').onchange = loadOscMonitor;
+$('oscMonClear').onclick = async () => { await api('POST', '/api/osc/monitor/clear', {}); loadOscMonitor(); };
+$('oscAddrBtn').onclick = async () => {
+  const open = $('oscAddrBox').hidden;
+  $('oscAddrBox').hidden = !open;
+  $('oscAddrBtn').setAttribute('aria-expanded', String(open));
+  if (open) { await loadOscAddresses(); renderOscAddresses(); }
+};
+$('oscAddrSearch').oninput = renderOscAddresses;
+$('oscFbPanel').addEventListener('toggle', () => { if ($('oscFbPanel').open) { loadOscFb(); loadOscMonitor(); } });
+setInterval(() => { if (activeWs === 'settings' && $('oscFbPanel').open && !document.hidden) { loadOscFb(); loadOscMonitor(); } }, 500);
+// « Copier l'adresse OSC » (menu of a control): exactly the listed address.
+$('midiMenuOsc').onclick = async () => {
+  const id = menuControl.replace(/^live\./, 'master.');
+  closeMidiMenu();
+  const a = (await loadOscAddresses()).find(x => x.control === id);
+  if (!a) return flash('Pas d\'adresse OSC : ce contrôle ne se pilote pas depuis le réseau');
+  copyOscAddress(a.address);
+};
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
 // ---------- project (T-286) ----------
 // One .lsproj file per show, in the studio's projects folder only (no

@@ -482,6 +482,84 @@ mod tests {
         thread.join().unwrap();
     }
 
+    /// T-416 on loopback (127.0.0.1, ports picked by the system): a client
+    /// subscribes, a change made like the UI's comes back to it once, its
+    /// own changes don't, and `/ls/tempo/bpm 128` sets the tempo.
+    #[test]
+    fn osc_feedback_round_trip_on_loopback() {
+        use super::super::feedback;
+        let mut s = open_studio();
+        let mut cfg = NetInConfig::default();
+        (cfg.osc.enabled, cfg.osc.port, cfg.feedback.enabled, cfg.feedback.beat_messages) = (true, 0, true, false);
+        s.netin.hub.set_file(cfg).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let hub = Arc::clone(&s.netin.hub);
+        let mut threads = spawn(Arc::clone(&hub), s.netin.sender(), Arc::clone(&running));
+        threads.extend(feedback::spawn(s.netin.feedback.take_receiver().unwrap(), Arc::clone(&hub), Arc::clone(&running)));
+        let local = || hub.status(Proto::Osc).local.and_then(|a| a.parse::<SocketAddr>().ok());
+        wait_for("the OSC socket", || local().is_some());
+        let osc_addr = local().unwrap();
+
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        let port = client.local_addr().unwrap().port();
+        client.send_to(&encode("/ls/subscribe", &[OscArg::Int(port as i32)]), osc_addr).unwrap();
+        wait_for("the subscription", || {
+            frame(&mut s, Instant::now());
+            !s.netin.feedback.subscribers.is_empty()
+        });
+        // Reads what arrives for a while, running frames meanwhile.
+        let collect = |s: &mut crate::Shared, ms: u64| {
+            let mut buf = [0u8; 2048];
+            let mut got = Vec::new();
+            let end = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < end {
+                frame(s, Instant::now());
+                while let Ok(n) = client.recv(&mut buf) {
+                    got.push(osc::decode(&buf[..n]).unwrap().remove(0));
+                }
+            }
+            got
+        };
+        let full = collect(&mut s, 600);
+        assert!(full.iter().any(|m| m.address == "/ls/master/size"), "the full state on subscribing");
+
+        // A change from the UI comes back once.
+        crate::controls::apply(&mut s, "master.size", crate::controls::ControlInput::Value(1.5), false).unwrap();
+        let got = collect(&mut s, 400);
+        let size: Vec<_> = got.iter().filter(|m| m.address == "/ls/master/size").collect();
+        assert_eq!(size.len(), 1, "{got:?}");
+        assert_eq!(size[0].args, vec![OscArg::Float(1.5)]);
+
+        // The client's own change and its echo: nothing comes back.
+        client.send_to(&encode("/ls/master/size", &[OscArg::Float(0.5)]), osc_addr).unwrap();
+        wait_for("the client's value", || {
+            frame(&mut s, Instant::now());
+            s.live.size == 0.5
+        });
+        client.send_to(&encode("/ls/master/size", &[OscArg::Float(0.5)]), osc_addr).unwrap();
+        let got = collect(&mut s, 400);
+        assert!(got.iter().all(|m| m.address != "/ls/master/size"), "{got:?}");
+
+        // The tempo.
+        client.send_to(&encode("/ls/tempo/bpm", &[OscArg::Float(128.0)]), osc_addr).unwrap();
+        wait_for("the tempo", || {
+            frame(&mut s, Instant::now());
+            s.tempo.bpm == 128.0
+        });
+        client.send_to(&encode("/ls/tempo/resync", &[]), osc_addr).unwrap();
+        wait_for("the resync", || {
+            frame(&mut s, Instant::now());
+            s.netin.monitor.list(Some(true)).first().is_some_and(|e| e.address == "/ls/tempo/resync" && e.result == "appliqué")
+        });
+        assert!(s.netin.monitor.list(Some(false)).iter().any(|e| e.address == "/ls/master/size" && e.result == "envoyé"));
+        assert!(!s.gate.is_armed());
+        running.store(false, Ordering::SeqCst);
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+
     #[test]
     fn a_busy_port_is_reported_not_retried_in_a_loop() {
         let taken = UdpSocket::bind("127.0.0.1:0").unwrap();
