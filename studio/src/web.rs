@@ -162,6 +162,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/venue", RouteClass::Read),
     ("POST", "/api/venue", RouteClass::Safety),
     ("POST", "/api/venue/preset", RouteClass::Safety),
+    ("POST", "/api/venue/camera", RouteClass::Play),
     ("GET", "/api/frames", RouteClass::Read),
     ("GET", "/api/projection", RouteClass::Read),
     ("GET", "/api/groups", RouteClass::Read),
@@ -1651,6 +1652,13 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 }
                 set_venue(venue, shared)
             }
+            Err(e) => e,
+        },
+        // The 3D view's viewpoint (T-278): a view, like a camera move. Not
+        // an edit (never in the undo history, allowed in show mode), never
+        // touches the projectors, the outputs or the arm state.
+        (Method::Post, "/api/venue/camera") => match body::<crate::venue::CameraState>(request) {
+            Ok(camera) => json_response(json!({ "camera": shared.lock().unwrap().venue.set_camera(camera) })),
             Err(e) => e,
         },
         (Method::Get, "/api/frames") => frames(shared),
@@ -4332,7 +4340,10 @@ impl VenueRefusal {
 /// an undo (history.rs, T-285).
 pub(crate) fn apply_venue(s: &mut Shared, venue: crate::venue::Venue) -> Result<(), VenueRefusal> {
     venue.validate().map_err(|e| VenueRefusal::Other(400, e.to_string()))?;
-    let next = venue.sanitized();
+    let mut next = venue.sanitized();
+    // The viewpoint (T-278) only changes through `/api/venue/camera`: a
+    // venue edit or an undo never moves the camera back.
+    next.camera = s.venue.get().camera.clone();
     s.gate.sync_estop(&s.estop);
     if let Some(main) = s.output_mgr.selected() {
         if let Some(p) = next.extras().find(|p| p.output.as_deref() == Some(main.as_str())) {
@@ -5504,6 +5515,31 @@ mod tests {
     /// blocks arming until the engine has installed it; while armed, its
     /// output can't change but its placement can; `/api/frames` has one
     /// entry per projector; a preset keeps the projectors.
+    #[test]
+    fn the_camera_viewpoint_is_saved_alone_and_never_an_edit() {
+        let t = TestServer::start(false);
+        let undo = |t: &TestServer| js(&t.request("GET", "/api/state", "").1)["history"]["undo"].as_u64().unwrap();
+        let n = undo(&t);
+        t.shared.lock().unwrap().show_mode.on = true;
+        let (code, body) = t.request("POST", "/api/venue/camera", r#"{"preset":"front","pos_m":[0,1.7,9],"target_m":[0,2,15],"fov_deg":50}"#);
+        assert_eq!(code, 200, "a viewpoint is a view: allowed in show mode");
+        assert_eq!(js(&body)["camera"]["preset"], "front");
+        t.shared.lock().unwrap().show_mode.on = false;
+        assert_eq!(undo(&t), n, "never in the undo history");
+        let v = js(&t.request("GET", "/api/venue", "").1);
+        assert_eq!(v["venue"]["camera"]["preset"], "front");
+        // A venue edit carrying an older camera keeps the saved one.
+        let mut venue = v["venue"].clone();
+        venue["camera"] = json!({ "preset": "top" });
+        venue["room"]["width_m"] = json!(12.0);
+        assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 200);
+        let v = js(&t.request("GET", "/api/venue", "").1);
+        assert_eq!((v["venue"]["camera"]["preset"].as_str(), v["venue"]["room"]["width_m"].as_f64()), (Some("front"), Some(12.0)));
+        assert_eq!(t.request("POST", "/api/venue/camera", r#"{"preset":"nulle-part"}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/venue", "").1)["venue"]["camera"]["preset"], "", "unknown preset: the default view");
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+    }
+
     #[test]
     fn the_venue_route_routes_outputs_only_while_disarmed() {
         let t = TestServer::start(false);
