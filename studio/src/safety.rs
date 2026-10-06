@@ -59,6 +59,7 @@
 //! explicit confirmation (`SafetyStore::set(.., confirm_loosen)`).
 
 use crate::dwell::DwellGuard;
+use crate::outdoor::OutdoorSettings;
 use crate::patterns::Point;
 use crate::zones::{Horizon, Mask, Zone, ZoneGradient, ZoneKind, MAX_FEATHER, MAX_VERTICES, MAX_ZONES};
 use anyhow::{bail, Result};
@@ -93,6 +94,9 @@ pub struct SafetySettings {
     pub min_diode_level: f32,
     /// Static beam guard (T-256, `dwell.rs`).
     pub dwell: DwellGuard,
+    /// Outdoor mode (T-262, `outdoor.rs`): declared sectors, the vertical
+    /// limit, and « Ciel coupé » (runtime, never saved).
+    pub outdoor: OutdoorSettings,
 }
 
 impl Default for SafetySettings {
@@ -106,6 +110,7 @@ impl Default for SafetySettings {
             color_gain: [1.0; 3],
             min_diode_level: 0.0,
             dwell: DwellGuard::default(),
+            outdoor: OutdoorSettings::default(),
         }
     }
 }
@@ -133,6 +138,7 @@ struct SafetyWire {
     color_gain: [f32; 3],
     min_diode_level: f32,
     dwell: DwellGuard,
+    outdoor: OutdoorSettings,
 }
 
 impl Default for SafetyWire {
@@ -148,6 +154,7 @@ impl Default for SafetyWire {
             color_gain: d.color_gain,
             min_diode_level: d.min_diode_level,
             dwell: d.dwell,
+            outdoor: d.outdoor,
         }
     }
 }
@@ -164,6 +171,7 @@ impl From<SafetyWire> for SafetySettings {
             color_gain: w.color_gain,
             min_diode_level: w.min_diode_level,
             dwell: w.dwell,
+            outdoor: w.outdoor,
         }
     }
 }
@@ -208,6 +216,7 @@ impl SafetySettings {
         }
         check(self.min_diode_level, MIN_DIODE_RANGE, "Niveau minimum des diodes")?;
         self.dwell.validate()?;
+        self.outdoor.validate()?;
         if self.zones.len() > MAX_ZONES {
             bail!("{} zones : {MAX_ZONES} au maximum", self.zones.len());
         }
@@ -312,12 +321,20 @@ impl SafetySettings {
             color_gain: self.color_gain.map(|c| fix(c, UNIT_RANGE, 0.0)),
             min_diode_level: fix(self.min_diode_level, MIN_DIODE_RANGE, 0.0),
             dwell: self.dwell.sanitized(),
+            outdoor: self.outdoor.sanitized(),
         }
     }
 
-    /// The compiled zones, horizon and colour calibration.
+    /// The compiled zones, horizon and colour calibration, plus the
+    /// outdoor cut (T-262) as extra Blank zones.
     pub fn mask(&self) -> Mask {
-        Mask::new(&self.zones, self.horizon, self.color_gain, self.min_diode_level)
+        let outdoor = self.outdoor.blank_zones();
+        if outdoor.is_empty() {
+            Mask::new(&self.zones, self.horizon, self.color_gain, self.min_diode_level)
+        } else {
+            let all: Vec<Zone> = self.zones.iter().cloned().chain(outdoor).collect();
+            Mask::new(&all, self.horizon, self.color_gain, self.min_diode_level)
+        }
     }
 
     /// What going from `self` to `new` would loosen, in French, for the
@@ -373,6 +390,7 @@ impl SafetySettings {
             }
         }
         out.extend(self.dwell.loosenings(&new.dwell));
+        out.extend(self.outdoor.loosenings(&new.outdoor));
         out
     }
 
@@ -457,6 +475,9 @@ impl SafetyStore {
     pub fn set(&mut self, settings: SafetySettings, confirm_loosen: bool) -> std::result::Result<SafetySettings, SetError> {
         settings.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
         let mut settings = settings;
+        // « Ciel coupé » and the projector are the engine's, never stored.
+        settings.outdoor.sky_off = false;
+        settings.outdoor.projector.clear();
         let mut next = self.settings.zones.iter().chain(&settings.zones).map(|z| z.id).max().unwrap_or(0);
         for z in &mut settings.zones {
             if z.id == 0 {

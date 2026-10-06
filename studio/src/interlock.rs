@@ -182,6 +182,11 @@ pub const OUTPUT_LABEL: &str = "Aucune sortie connectée";
 /// drives an output (T-277, venue.rs) has none connected: every output of
 /// the venue must be there to arm.
 pub const PROJECTORS: &str = "projectors";
+/// Id of the interlock held open while the outdoor mode is on without
+/// the DGTA authorisation reference (T-262, outdoor.rs).
+pub const OUTDOOR_AUTH: &str = "outdoor_auth";
+/// Its label, also the refusal message.
+pub const OUTDOOR_AUTH_LABEL: &str = "Mode extérieur : référence d'autorisation DGTA manquante";
 
 pub struct ArmGate {
     armed: bool,

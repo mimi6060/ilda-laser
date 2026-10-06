@@ -57,6 +57,8 @@ pub fn allowed(path: &str) -> bool {
         // Safety: never locked.
         "/api/estop",
         "/api/estop/reset",
+        // « Ciel coupé » (T-262): a live safety switch, like arming.
+        "/api/safety/sky",
         "/api/arm",
         "/api/heartbeat",
         "/api/lock",

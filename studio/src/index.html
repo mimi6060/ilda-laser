@@ -8,6 +8,7 @@
   :root {
     --bg: #07080e; --panel: #11131d; --panel-2: #191c29; --line: #262a3b;
     --text: #eef0f8; --muted: #8a90a8; --accent: #22e3ff; --accent-ink: #00222b;
+    --sky: #2f7bff;
     --accent-2: #ff3dc8; --violet: #8b5cf6; --ok: #3ddc84;
     --laser: linear-gradient(90deg, #22e3ff, #8b5cf6 55%, #ff3dc8);
     --danger: #ff4d5e; --warn: #ffb020;
@@ -1422,6 +1423,8 @@
   #linkLost { padding: 6px 12px; border-radius: 8px; background: var(--warn); color: #241600; font-weight: 800; font-size: 12px; white-space: nowrap; box-shadow: 0 0 16px #ffb02088; }
   #linkLost[hidden] { display: none; }
   .tb-safety { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+  #skyBtn { height: 44px; width: 60px; flex: none; padding: 0 4px; border-radius: 12px; border: 2px solid var(--sky); background: transparent; color: var(--sky); font-weight: 800; font-size: 10px; line-height: 1.1; letter-spacing: .03em; }
+  #skyBtn[aria-pressed="true"] { background: var(--sky); color: #fff; box-shadow: 0 0 12px var(--sky); }
   #blackoutBtn { height: 44px; padding: 0 16px; border-radius: 12px; border: 2px solid #fff3; background: #000; color: #fff; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
   #blackoutBtn:hover { border-color: #fff8; background: #111; }
   #estopBtn { width: 48px; height: 48px; font-size: 10px; }
@@ -1531,6 +1534,7 @@
     --text: color-mix(in srgb, #d6d9e6 var(--dim), #000); --muted: color-mix(in srgb, #7b8198 var(--dim), #000);
     --accent: color-mix(in srgb, #22e3ff var(--dim), #000); --accent-2: color-mix(in srgb, #ff3dc8 var(--dim), #000);
     --violet: color-mix(in srgb, #8b5cf6 var(--dim), #000);
+    --sky: color-mix(in srgb, #2f7bff var(--dim), #000);
     --laser: linear-gradient(90deg, var(--accent), var(--violet) 55%, var(--accent-2));
     --ws-live: color-mix(in srgb, #ff3d7f var(--dim), #000); --ws-timeline: color-mix(in srgb, #3d9bff var(--dim), #000);
     --ws-creation: color-mix(in srgb, #b45cff var(--dim), #000); --ws-settings: color-mix(in srgb, #ffb020 var(--dim), #000);
@@ -1706,6 +1710,7 @@
   <div class="tb-safety">
     <button id="blackoutBtn" title="Noir : coupe le laser tout de suite (comme Maj+Échap), toujours actif · Échap = ARRÊT (verrouillé)">Noir</button>
     <button id="estopBtn" data-control="safety.estop" title="Arrêt d'urgence (Échap) · safety.estop">ARRÊT</button>
+    <button id="skyBtn" hidden aria-pressed="false" title="Ciel coupé (Alt+C) : éteint tout au-dessus de l'horizon sans désarmer · safety.sky_off">CIEL COUPÉ</button>
   </div>
   <div class="arm">
     <button id="armBtn" data-control="transport.arm" aria-pressed="false" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
@@ -3332,6 +3337,45 @@
           <button id="holdKeyPick" style="flex:0;white-space:nowrap">Changer…</button></div>
         <div class="hint">Mode maintien : le laser n'émet que tant que la touche est maintenue (une pédale USB qui envoie une touche fonctionne aussi ; pad MIDI : contrôle safety.hold). Relâcher = sortie noire ; relâché plus de 10 s = désarmé.</div>
       </details>
+      <details id="outdoorPanel" data-search="Mode extérieur ciel coupé DGTA secteurs verticale">
+        <summary>Mode extérieur</summary>
+        <div class="shownet-help" id="odBanner"><b>Aide logicielle seulement.</b> Projeter un laser dans l'espace aérien demande toujours une autorisation (en Belgique : la DGTA). Le logiciel coupe ce qui sort des angles déclarés, mais l'autorisation, les observateurs du ciel et l'arrêt matériel (interlock, arrêt d'urgence, clé) restent votre responsabilité. Il ne garantit aucune conformité aéronautique.</div>
+        <label class="check"><input type="checkbox" id="odEnabled"> Show en extérieur</label>
+        <label for="odRef">Référence d'autorisation DGTA</label>
+        <input type="text" id="odRef" maxlength="120" autocomplete="off" placeholder="Obligatoire pour armer en mode extérieur">
+        <div class="hint sf-warn" id="odRefWarn" role="status" hidden>Mode extérieur sans référence d'autorisation : armement refusé.</div>
+        <div class="row">
+          <div><label for="odLat">Latitude (WGS84)</label><input type="number" id="odLat" min="-90" max="90" step="0.000001"></div>
+          <div><label for="odLon">Longitude (WGS84)</label><input type="number" id="odLon" min="-180" max="180" step="0.000001"></div>
+        </div>
+        <div class="sf-sub">Montage du projecteur principal</div>
+        <div class="row">
+          <div><label for="odScan">Angle de balayage (°)</label><input type="number" id="odScan" min="1" max="120" step="1"></div>
+          <div><label for="odTilt">Inclinaison (°)</label><input type="number" id="odTilt" min="-90" max="90" step="1"></div>
+        </div>
+        <div class="row">
+          <div><label for="odAz">Azimut de l'axe (°, 0 = nord)</label><input type="number" id="odAz" min="0" max="360" step="1"></div>
+          <div><label for="odHeight">Hauteur au-dessus du sol (m)</label><input type="number" id="odHeight" min="0" max="10000" step="0.1"></div>
+        </div>
+        <div class="hint">Un point de sortie (x, y) vise l'azimut + x × angle/2 et l'élévation inclinaison + y × angle/2 (approximation : prévoyez une marge dans les coins). Les autres projecteurs du lieu sans montage déclaré sont entièrement éteints en mode extérieur et quand le ciel est coupé.</div>
+        <div class="sf-sub">Secteurs déclarés</div>
+        <div id="odSectors"></div>
+        <div class="row"><button id="odSectorAdd">Ajouter un secteur</button><button id="odExport">Exporter les secteurs (CSV)</button></div>
+        <div class="hint">Comme sur le formulaire : angle horizontal de… à… (sens horaire, 350 → 10 passe par le nord), angle vertical de… à… En mode extérieur, tout point hors des secteurs est éteint ; sans secteur, tout est éteint.</div>
+        <div class="sf-sub">Limite de verticale</div>
+        <label for="odVert">Écart max à la verticale (°)</label>
+        <input type="number" id="odVert" min="0" max="90" step="1">
+        <label class="check"><input type="checkbox" id="odWaive"> L'autorisation lève cette limite</label>
+        <label for="odWaiveRef">Référence de la dérogation</label>
+        <input type="text" id="odWaiveRef" maxlength="120" autocomplete="off">
+        <div class="hint">Au-dessus de l'horizon, un faisceau plus loin de la verticale que la limite (45° par défaut, GDF-12) est éteint. Les zones sans laser autour des aéroports (OACI) ne sont pas calculées : vérifiez-les avec l'autorité.</div>
+        <div id="odLoosen" hidden>
+          <div id="odLoosenText"></div>
+          <div class="row"><button id="odLoosenOk">Confirmer l'assouplissement</button><button id="odLoosenCancel">Annuler</button></div>
+        </div>
+        <div class="hint sf-error" id="odError" role="alert"></div>
+        <div class="hint">« Ciel coupé » (bouton bleu à côté d'ARRÊT, Alt+C, pad MIDI safety.sky_off) éteint tout au-dessus de l'horizon au cycle suivant, sans désarmer : le show au sol continue. Seul l'écran ou le clavier rétablit le ciel. Activer ou resserrer s'applique tout de suite ; désactiver, élargir ou déplacer demande une confirmation.</div>
+      </details>
     </section>
 
     <section data-help="reglages-securite">
@@ -4739,6 +4783,10 @@ function buildShortcuts() {
       when: () => presence.hold_to_run,
       down: e => { setHold(true); if (isTyping()) return false; },
       up: () => setHold(false) },
+    // « Ciel coupé » (T-262): Alt+C everywhere (C alone is a cue key in LIVE).
+    { id: 'sky', group: 'Sécurité', codes: ['KeyC'], alt: true, zones: '*', show: true,
+      label: 'Ciel coupé : éteindre / rétablir tout au-dessus de l\'horizon (sans désarmer)',
+      down: e => { if (!e.repeat) toggleSky('keyboard'); } },
     { id: 'workspace', group: 'Espaces de travail', codes: ['F1', 'F2', 'F3', 'F4'], zones: '*', typing: true, show: false,
       cap: () => 'F1 … F4', label: 'LIVE, TIMELINE, CRÉATION, RÉGLAGES (en mode spectacle : LIVE et TIMELINE)',
       down: (e, i) => setWorkspace(WORKSPACES[i]) },
@@ -5495,6 +5543,7 @@ function applyState(f, at, pushed) {
   noticeConditions(f);
   showShownet(f.shownet);
   showAudienceMode(f.audience);
+  if (f.outdoor) showOutdoor(f.outdoor);
   showProfilePill(f.safety_profile);
   // Ticked or restarted from another page, or the output became (or
   // stopped being) a ShowNET: refresh the list.
@@ -6995,6 +7044,7 @@ function showSafety(force = false) {
   $('sfError').textContent = sfLoadError || '';
   $('sfZoneAdd').disabled = safety.zones.length >= 8;
   if (force || !$('sfZones').contains(document.activeElement)) renderZones();
+  showOutdoorSettings(force);
 }
 function renderZones() {
   $('sfZones').innerHTML = safety.zones.map((z, i) => `
@@ -7298,6 +7348,120 @@ $('sfZoneAdd').addEventListener('click', () => {
   saveSafety(next);
 });
 $('sfLoosenOk').addEventListener('click', () => { if (sfPending) saveSafety(sfPending, true); });
+// RÉGLAGES › Mode extérieur (T-262): part of the safety settings, saved
+// through POST /api/safety like the zones (tighter at once, looser after
+// « Confirmer l'assouplissement »). « Ciel coupé » is session state:
+// POST /api/safety/sky, the blue button next to ARRÊT and Alt+C.
+let outdoorState = null, odPending = null;
+const odNum = (id, def) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : def; };
+function showOutdoorSettings(force = false) {
+  if (!safety || !safety.outdoor) return;
+  const o = safety.outdoor, panel = $('outdoorPanel');
+  if (!force && panel.contains(document.activeElement)) return;
+  $('odEnabled').checked = o.enabled;
+  $('odRef').value = o.authorization_ref;
+  $('odLat').value = o.wgs84 ? o.wgs84[0] : '';
+  $('odLon').value = o.wgs84 ? o.wgs84[1] : '';
+  $('odScan').value = o.mounting.scan_angle_deg;
+  $('odTilt').value = o.mounting.tilt_deg;
+  $('odAz').value = o.mounting.azimuth_deg;
+  $('odHeight').value = o.mounting.height_m;
+  $('odVert').value = o.max_from_vertical_deg;
+  $('odWaive').checked = o.vertical_limit_waived;
+  $('odWaiveRef').value = o.waiver_ref;
+  $('odRefWarn').hidden = !(o.enabled && !o.authorization_ref.trim());
+  $('odSectorAdd').disabled = o.sectors.length >= 16;
+  $('odSectors').innerHTML = o.sectors.map((s, i) => `
+    <div class="odsector row" data-si="${i}">
+      <span class="odnum">${i + 1}</span>
+      <label for="odAzMin${i}">Horiz. de</label><input type="number" class="odazmin" id="odAzMin${i}" min="0" max="360" step="1" value="${s.az_min}">
+      <label for="odAzMax${i}">à</label><input type="number" class="odazmax" id="odAzMax${i}" min="0" max="360" step="1" value="${s.az_max}">
+      <label for="odElMin${i}">Vert. de</label><input type="number" class="odelmin" id="odElMin${i}" min="-90" max="90" step="1" value="${s.el_min}">
+      <label for="odElMax${i}">à</label><input type="number" class="odelmax" id="odElMax${i}" min="-90" max="90" step="1" value="${s.el_max}">
+      <button class="oddel" aria-label="Supprimer le secteur ${i + 1}">Supprimer</button>
+    </div>`).join('');
+}
+function odFromControls() {
+  const next = structuredClone(safety), o = next.outdoor;
+  o.enabled = $('odEnabled').checked;
+  o.authorization_ref = $('odRef').value.trim();
+  const lat = parseFloat($('odLat').value), lon = parseFloat($('odLon').value);
+  o.wgs84 = Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
+  o.mounting = {
+    scan_angle_deg: odNum('odScan', o.mounting.scan_angle_deg), tilt_deg: odNum('odTilt', o.mounting.tilt_deg),
+    azimuth_deg: odNum('odAz', o.mounting.azimuth_deg), height_m: odNum('odHeight', o.mounting.height_m),
+  };
+  o.max_from_vertical_deg = odNum('odVert', o.max_from_vertical_deg);
+  o.vertical_limit_waived = $('odWaive').checked;
+  o.waiver_ref = $('odWaiveRef').value.trim();
+  o.sectors = [...$('odSectors').querySelectorAll('.odsector')].map((row, i) => {
+    const old = safety.outdoor.sectors[i] || {};
+    const n = (cls, def) => { const v = parseFloat(row.querySelector(cls).value); return Number.isFinite(v) ? v : def; };
+    return { az_min: n('.odazmin', old.az_min), az_max: n('.odazmax', old.az_max), el_min: n('.odelmin', old.el_min), el_max: n('.odelmax', old.el_max) };
+  });
+  return next;
+}
+async function odSave(next, confirm = false) {
+  const r = await api('POST', '/api/safety', confirm ? { ...next, confirm_loosen: true } : next, { quiet: true });
+  if (r.ok) {
+    safety = (await r.json()).settings; odPending = null;
+    $('odLoosen').hidden = true; $('odError').textContent = '';
+    showSafety(); showOutdoorSettings(true);
+  } else if (r.status === 409) {
+    const j = await r.json();
+    odPending = next;
+    $('odLoosenText').textContent = 'Assouplir la sécurité ? ' + j.loosen.join(' · ');
+    $('odLoosen').hidden = false;
+  } else {
+    const msg = await r.text();
+    await reloadSafety();
+    showOutdoorSettings(true);
+    $('odError').textContent = msg;
+  }
+}
+$('outdoorPanel').addEventListener('change', e => {
+  if (e.target.matches('input')) odSave(odFromControls());
+});
+$('outdoorPanel').addEventListener('toggle', () => { if ($('outdoorPanel').open) showOutdoorSettings(true); });
+$('odSectors').addEventListener('click', e => {
+  const row = e.target.closest('.odsector');
+  if (!row || !e.target.matches('.oddel')) return;
+  const next = odFromControls();
+  next.outdoor.sectors.splice(+row.dataset.si, 1);
+  odSave(next);
+});
+$('odSectorAdd').addEventListener('click', () => {
+  const next = odFromControls(), m = next.outdoor.mounting, half = m.scan_angle_deg / 2;
+  // Default: the field as mounted, the projector's own angles.
+  const az = a => Math.round(((a % 360) + 360) % 360);
+  next.outdoor.sectors.push({ az_min: az(m.azimuth_deg - half), az_max: az(m.azimuth_deg + half),
+    el_min: Math.max(-90, Math.round(m.tilt_deg - half)), el_max: Math.min(90, Math.round(m.tilt_deg + half)) });
+  odSave(next);
+});
+$('odExport').addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = '/api/safety/outdoor/export';
+  a.download = 'secteurs-dgta.csv';
+  document.body.append(a); a.click(); a.remove();
+});
+$('odLoosenOk').addEventListener('click', () => { if (odPending) odSave(odPending, true); });
+$('odLoosenCancel').addEventListener('click', () => { odPending = null; $('odLoosen').hidden = true; showOutdoorSettings(true); });
+/** The outdoor summary from /api/state or a frame: the blue button. */
+function showOutdoor(o) {
+  const was = outdoorState;
+  outdoorState = o || null;
+  const btn = $('skyBtn'), on = !!(o && o.sky_off);
+  btn.hidden = !(o && (o.enabled || o.sky_off));
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'Ciel coupé : rien au-dessus de l\'horizon. Cliquer (ou Alt+C) pour rétablir le ciel.' : 'Ciel coupé (Alt+C) : éteint tout au-dessus de l\'horizon sans désarmer · safety.sky_off';
+  if (o && was && JSON.stringify(o.cut) !== JSON.stringify(was.cut) && lastPoints && show2d) draw(lastPoints);
+}
+async function toggleSky(source) {
+  const r = await api('POST', '/api/safety/sky', { toggle: true, source }, { quiet: true });
+  if (r.ok) showOutdoor({ ...(outdoorState || {}), ...(await r.json()) });
+}
+$('skyBtn').addEventListener('click', () => toggleSky('ui'));
+
 $('sfLoosenCancel').addEventListener('click', () => { sfPending = null; $('sfLoosen').hidden = true; reloadSafety(); });
 $('sfOverlay').addEventListener('change', () => { if (lastPoints && show2d) draw(lastPoints); });
 // Drawing a zone: each click on the 2D preview adds a vertex.
@@ -7347,6 +7511,20 @@ function drawSafetyOverlay(W, H, px) {
     const dim = z.kind === 'dim' && (!z.audience || scanning);
     poly(z.points, dim ? 'rgba(255,120,60,0.16)' : 'rgba(255,40,40,0.28)', z.audience ? 'rgba(255,176,32,0.95)' : 'rgba(255,77,79,0.9)');
     if (dim) drawSoftZone(z, px);
+  }
+  // Outdoor mode (T-262): what the declared angles and « Ciel coupé »
+  // cut, hatched in blue; the rest of the field tinted green.
+  const cut = outdoorState && outdoorState.cut;
+  if (cut && (outdoorState.enabled || outdoorState.sky_off)) {
+    if (outdoorState.enabled) { g.fillStyle = 'rgba(60,220,120,0.08)'; g.fillRect(0, 0, W, H); }
+    for (const r of cut) {
+      const [x0, y0] = px(r[3]), [x1, y1] = px(r[1]);
+      g.save(); g.beginPath(); g.rect(x0, y0, x1 - x0, y1 - y0); g.clip();
+      g.fillStyle = 'rgba(47,123,255,0.14)'; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+      g.strokeStyle = 'rgba(47,123,255,0.5)'; g.lineWidth = 1; g.beginPath();
+      for (let d = -(y1 - y0); d < x1 - x0; d += 10) { g.moveTo(x0 + d, y1); g.lineTo(x0 + d + (y1 - y0), y0); }
+      g.stroke(); g.restore();
+    }
   }
   // Cells the static beam guard is dimming (orange, stronger = darker).
   if (dwellStatus && dwellStatus.cells.length) {

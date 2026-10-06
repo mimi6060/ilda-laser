@@ -122,6 +122,7 @@ pub fn shared() -> Shared {
         checklist: crate::checklist::Checklist::in_memory(false),
         profiles: crate::profiles::ProfileStore::in_memory(),
         audience: Default::default(),
+        sky_off: false,
         test_hooks: false,
         menu: None,
         test_stall_ms: 0,

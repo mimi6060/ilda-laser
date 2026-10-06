@@ -15,8 +15,12 @@
 //! 2. no colour above the output's caps (global × per colour);
 //! 3. nothing lit in a Blank zone, nor on a segment crossing one; with
 //!    the full horizon at level 0, nothing lit below it;
-//! 4. (outdoor sectors / « Ciel coupé », T-262: not implemented yet, so
-//!    not checked);
+//! 4. outdoor mode (T-262): with random mountings, sectors, vertical
+//!    limits and « Ciel coupé », nothing lit (sample or segment) where the
+//!    declared angles forbid, on every projector (one without a mounting
+//!    is fully cut); « Ciel coupé » toggled from a controller never
+//!    restores the sky, never arms; the mode without its DGTA reference
+//!    keeps arming refused;
 //! 5. coordinates always finite and within -1..1;
 //! 6. no sequence of controls, MIDI, external inputs (DMX / OSC /
 //!    timecode through the gate, T-408) or API calls arms, except the
@@ -387,7 +391,80 @@ pub(crate) fn random_safety(rng: &mut Rng) -> SafetySettings {
         color_gain: [unit_or_one(rng), unit_or_one(rng), unit_or_one(rng)],
         min_diode_level: if rng.chance(0.6) { 0.0 } else { rng.range(0.0, 0.5) },
         dwell: dwell::DwellGuard { profile: *rng.pick(&[dwell::DwellProfile::Strict, dwell::DwellProfile::Beams, dwell::DwellProfile::Off]), ..Default::default() },
+        outdoor: Default::default(),
     }
+}
+
+/// Random outdoor settings (T-262): any mounting, 0 to 4 sectors (some
+/// through north), a vertical limit (sometimes waived with its
+/// reference), sometimes no DGTA reference. `on`: the mode always on;
+/// otherwise on in about half the cases. The runtime fields (« Ciel
+/// coupé », the projector) are set at random too, for the safety stage
+/// tests; the store drops them.
+pub(crate) fn random_outdoor(rng: &mut Rng, on: bool) -> crate::outdoor::OutdoorSettings {
+    use crate::outdoor::{Mounting, OutdoorSettings, Sector};
+    let mounting = |rng: &mut Rng| Mounting {
+        scan_angle_deg: rng.range(5.0, 120.0),
+        tilt_deg: rng.range(-60.0, 90.0),
+        azimuth_deg: rng.range(0.0, 360.0),
+        height_m: rng.range(0.0, 30.0),
+    };
+    let sectors = (0..rng.below(5))
+        .map(|_| {
+            let (a, b) = (rng.range(-90.0, 90.0), rng.range(-90.0, 90.0));
+            Sector { az_min: rng.range(0.0, 360.0), az_max: rng.range(0.0, 360.0), el_min: a.min(b), el_max: a.max(b) }
+        })
+        .collect();
+    let waived = rng.chance(0.2);
+    let main = mounting(rng);
+    let others = (0..rng.below(3)).map(|i| (format!("p{}", i + 2), mounting(rng))).collect();
+    OutdoorSettings {
+        enabled: on || rng.chance(0.5),
+        authorization_ref: if rng.chance(0.85) { "DGTA-fuzz".into() } else { String::new() },
+        wgs84: rng.chance(0.5).then_some((50.8, 4.35)),
+        mounting: main,
+        mountings: others,
+        sectors,
+        max_from_vertical_deg: if rng.chance(0.5) { 45.0 } else { rng.range(0.0, 90.0) },
+        vertical_limit_waived: waived,
+        waiver_ref: if waived { "GDF-12".into() } else { String::new() },
+        sky_off: rng.chance(0.3),
+        projector: if rng.chance(0.7) { String::new() } else { format!("p{}", 2 + rng.below(3)) },
+    }
+}
+
+/// « Ciel coupé » (T-262) from a random source: a controller pad cuts,
+/// a controller or the network never restores, the operator does. Never
+/// arms.
+fn sky_action(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
+    let was_armed = s.gate.is_armed();
+    match rng.below(4) {
+        0 => {
+            let _ = controls::apply_as(s, "safety.sky_off", ControlInput::Value(1.0), ArmSource::Midi);
+            if !s.sky_off {
+                return Err("the « Ciel coupé » pad did not cut the sky".into());
+            }
+        }
+        1 => {
+            let before = s.sky_off;
+            let src = *rng.pick(&[ArmSource::Midi, ArmSource::Osc, ArmSource::Dmx, ArmSource::Network, ArmSource::System]);
+            if s.set_sky_off(false, src) || s.sky_off != before {
+                return Err(format!("« Ciel coupé » restored from {src:?}"));
+            }
+        }
+        2 => {
+            if !s.set_sky_off(false, ArmSource::Ui) || s.sky_off {
+                return Err("the operator could not restore the sky".into());
+            }
+        }
+        _ => {
+            s.set_sky_off(true, ArmSource::Keyboard);
+        }
+    }
+    if s.gate.is_armed() && !was_armed {
+        return Err("« Ciel coupé » armed the laser".into());
+    }
+    Ok(())
 }
 
 /// A venue's safety profile (T-260): random zones, limiter, caps,
@@ -430,7 +507,7 @@ fn random_color(rng: &mut Rng) -> ColorCalibration {
     }
 }
 
-fn random_calibration(rng: &mut Rng) -> Calibration {
+pub(crate) fn random_calibration(rng: &mut Rng) -> Calibration {
     // The ranges `POST /api/calibration` clamps to.
     Calibration {
         offset_x: rng.range(-1.0, 1.0),
@@ -1023,6 +1100,12 @@ fn check_points(frame: &[Point], caps: &OutputLimits, cfg: &SafetySettings, what
     if blank > 0 {
         return Err(format!("{what}: {blank} lit samples/segments in a Blank zone"));
     }
+    // Invariant 4 (T-262): straight from the declared angles, not from
+    // the compiled zones. The caller sets « Ciel coupé » and the projector.
+    let outdoor = crate::outdoor::violations(frame, &cfg.outdoor, 1e-3);
+    if outdoor > 0 {
+        return Err(format!("{what}: {outdoor} lit samples/segments outside the declared outdoor angles ({:?})", cfg.outdoor));
+    }
     if cfg.horizon.lines && cfg.horizon.level == 0.0 {
         let below = zones::blank_violations(frame, &[below_horizon(&cfg.horizon)]);
         if below > 0 {
@@ -1467,6 +1550,18 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     if fixtures {
         setup_fixtures(&mut rig.s(), &mut drng);
     }
+    // Outdoor mode and « Ciel coupé » (T-262), from their own stream.
+    let mut orng = Rng::new(seed ^ 0x0262_0262);
+    if orng.chance(0.3) {
+        let mut s = rig.s();
+        let o = random_outdoor(&mut orng, false);
+        let cfg = SafetySettings { outdoor: o, ..s.safety.get() };
+        s.safety.set(cfg, true).map_err(|e| format!("setup: outdoor refused: {e:?}"))?;
+        s.sync_audience();
+        if !s.safety.get().outdoor.authorized() && s.request_arm(ArmSource::Ui).is_ok() {
+            return Err("armed in outdoor mode without the DGTA reference".into());
+        }
+    }
     // Transitions and quantised launches (T-158 / T-159), from their own stream.
     let mut trng = Rng::new(seed ^ 0x0158_0158);
     if trng.chance(0.6) {
@@ -1757,6 +1852,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 return Err(format!("frame {frame}: « Préparer » changed the arming"));
             }
         }
+        if orng.chance(0.02) {
+            sky_action(&mut rig.s(), &mut orng).map_err(|e| format!("frame {frame}: {e}"))?;
+        }
         for _ in 0..rng.below(3) {
             let (was, was_scanning) = {
                 let s = rig.s();
@@ -1816,7 +1914,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 return Err(format!("frame {frame}: audience scanning with the e-stop latched"));
             }
             // The saved settings: the checks don't trust `audience::effective`.
-            (s.audience.is_scanning(), s.safety.get())
+            let mut cfg = s.safety.get();
+            cfg.outdoor.sky_off = s.sky_off;
+            (s.audience.is_scanning(), cfg)
         };
         let limiter_holding = rig.s().strobe.active;
         let w = rig.wire.lock().unwrap();
@@ -3481,6 +3581,15 @@ fn run_multi_case(seed: u64, cov: &mut [usize; 3]) -> Result<(), String> {
     let n = 1 + rng.below(3);
     let wires = add_projectors(&mut rig, n, max_points);
     let ids: Vec<String> = wires.iter().map(|(id, _)| id.clone()).collect();
+    // Outdoor mode (T-262), from its own stream: the extra projectors
+    // with or without a mounting of their own.
+    let mut orng = Rng::new(seed ^ 0x0262_0262);
+    if orng.chance(0.4) {
+        let mut s = rig.s();
+        let cfg = SafetySettings { outdoor: random_outdoor(&mut orng, false), ..s.safety.get() };
+        s.safety.set(cfg, true).map_err(|e| format!("setup: outdoor refused: {e:?}"))?;
+        s.sync_audience();
+    }
     {
         let mut s = rig.s();
         if s.request_arm(ArmSource::Ui).is_ok() {
@@ -3551,10 +3660,15 @@ fn run_multi_case(seed: u64, cov: &mut [usize; 3]) -> Result<(), String> {
         if trip {
             rig.s().emergency_stop(ArmSource::Keyboard);
         }
-        let (may_emit, held, caps, cfg, scanning) = {
+        if orng.chance(0.03) {
+            sky_action(&mut rig.s(), &mut orng).map_err(|e| format!("frame {frame}: {e}"))?;
+        }
+        let (may_emit, held, caps, mut cfg, scanning) = {
             let s = rig.s();
             let caps: Vec<OutputLimits> = std::iter::once(s.outputs.active_limits()).chain(ids.iter().map(|id| s.outputs.config_for(id).limits)).collect();
-            (s.gate.is_armed() && !s.estop.is_latched(), s.presence.status().midi_hold, caps, s.safety.get(), s.audience.is_scanning())
+            let mut cfg = s.safety.get();
+            cfg.outdoor.sky_off = s.sky_off;
+            (s.gate.is_armed() && !s.estop.is_latched(), s.presence.status().midi_hold, caps, cfg, s.audience.is_scanning())
         };
         let armed_before = rig.s().gate.is_armed();
         rig.tick();
@@ -3584,6 +3698,7 @@ fn run_multi_case(seed: u64, cov: &mut [usize; 3]) -> Result<(), String> {
             if lit > 0 && hold_to_run && !held {
                 return Err(format!("{what}: {lit} lit points with hold-to-run not held"));
             }
+            cfg.outdoor.projector = if k == 0 { String::new() } else { ids[k - 1].clone() };
             check_points(&w.last, &caps[k], &cfg, &format!("{what}, sent"))?;
             check_public(&w.last, &caps[k], &cfg, scanning, &format!("{what}, sent"))?;
             if let Some(max) = max_points.filter(|&m| w.last.len() > m) {
@@ -3593,6 +3708,7 @@ fn run_multi_case(seed: u64, cov: &mut [usize; 3]) -> Result<(), String> {
         }
         let s = rig.s();
         for (k, f) in s.projector_frames.iter().enumerate() {
+            cfg.outdoor.projector = f.id.clone();
             check_points(&f.points, &caps[k + 1], &cfg, &format!("frame {frame}, projector {}, preview", k + 1))?;
         }
         if s.projector_frames.len() != n {
