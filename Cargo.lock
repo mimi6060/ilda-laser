@@ -876,7 +876,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
- "tiny_http",
+ "tiny_http 0.12.0",
  "zip",
 ]
 
@@ -1243,7 +1243,7 @@ dependencies = [
  "rppal",
  "serde",
  "serde_json",
- "tiny_http",
+ "tiny_http 0.12.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1671,6 +1671,16 @@ dependencies = [
  "log",
  "rustversion",
  "windows",
+]
+
+[[package]]
+name = "tiny_http"
+version = "0.12.0"
+dependencies = [
+ "ascii",
+ "chunked_transfer",
+ "httpdate",
+ "log",
 ]
 
 [[package]]

@@ -7,7 +7,11 @@ description = "Live laser show studio for the Mac: shapes, text, animation and m
 [dependencies]
 laser-dac = { version = "0.13.1", default-features = false, features = ["ether-dream", "idn", "helios"] }
 libusb1-sys = { version = "0.7", features = ["vendored"] }  # Helios USB (T-303): libusb built from source and linked in, never a Homebrew dylib
-tiny_http = { version = "0.12", default-features = false }
+# tiny_http 0.12.0 with our robustness patches (T-449, MIT OR Apache-2.0):
+# bounded drain of an unread body, bounded header lines and count,
+# per-connection timeouts, no stop on an accept error. Each change is
+# marked "Laser Studio patch" in `vendor/tiny_http`.
+tiny_http = { path = "vendor/tiny_http", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }

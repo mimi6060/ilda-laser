@@ -129,6 +129,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/test/menu", RouteClass::Test),
     ("POST", "/api/test/menu", RouteClass::Test),
     ("POST", "/api/test/stall", RouteClass::Test),
+    ("POST", "/api/test/panic", RouteClass::Test),
     ("POST", "/api/test/tempo_estimate", RouteClass::Test),
     ("POST", "/api/test/timecode", RouteClass::Test),
     ("POST", "/api/test/native_audio", RouteClass::Test),
@@ -324,8 +325,24 @@ pub fn is_known_route(method: &str, path: &str) -> bool {
     ROUTES.iter().any(|&(m, p, _)| (m == "*" || m == method) && p.strip_suffix('*').map_or(path == p, |prefix| path.starts_with(prefix)))
 }
 
+/// How long a client may stop sending (a body cut short) or stop reading
+/// (an answer it never reads) before its connection is dropped (T-449).
+/// Without it, one such request held the single worker, and so every
+/// route but the stop, for good. Longer than the 4 s a browser or Node
+/// keeps an idle connection, so an idle keep-alive is closed by the
+/// client first.
+pub(crate) const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A server on `addr` whose connections time out reads and writes after
+/// `CLIENT_IO_TIMEOUT` (set on each accepted socket by our tiny_http
+/// patch, `vendor/tiny_http`: macOS sockets don't inherit the listener's).
+pub(crate) fn bind(addr: impl std::net::ToSocketAddrs) -> anyhow::Result<Server> {
+    let listener = std::net::TcpListener::bind(addr)?;
+    Server::from_listener_with_timeout(listener, None, Some(CLIENT_IO_TIMEOUT)).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) -> anyhow::Result<()> {
-    let server = Server::http(addr).map_err(|e| anyhow::anyhow!("failed to start web server on {addr}: {e}"))?;
+    let server = bind(addr).map_err(|e| anyhow::anyhow!("failed to start web server on {addr}: {e}"))?;
     serve(server, shared, estop, calibration_path, running);
     Ok(())
 }
@@ -748,9 +765,15 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // Undo / redo (T-285): `{}` one step, `{"to": id}` down to that
         // entry (the history panel). Refused in show mode (an edit).
         (Method::Post, "/api/undo") | (Method::Post, "/api/redo") => {
-            let to = match body::<serde_json::Value>(request) {
-                Ok(v) => v.get("to").and_then(serde_json::Value::as_u64),
-                Err(_) => None,
+            // No body: one step. A body that can't be read or parsed is
+            // refused (T-449: never an undo the request didn't ask for).
+            let to = match read_body(request) {
+                Ok(raw) if raw.trim().is_empty() => None,
+                Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(v) => v.get("to").and_then(serde_json::Value::as_u64),
+                    Err(e) => return text(400, &format!("invalid JSON: {e}")),
+                },
+                Err(e) => return e,
             };
             match crate::history::step(shared, path == "/api/redo", to) {
                 Ok(v) => json_response(v),
@@ -1109,6 +1132,15 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             s.test_stall_ms = ms;
             ok()
+        }
+        (Method::Post, "/api/test/panic") => {
+            // `--test-hooks` only (T-449): proves the API robustness harness
+            // sees a handler panic. The lock is released first; the panic
+            // hook then cuts the output and stops the studio, as for any panic.
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            panic!("POST /api/test/panic (--test-hooks)");
         }
         (Method::Post, "/api/test/tempo_estimate") => {
             // `--test-hooks` only (e2e of Tempo auto, T-234): publishes a
@@ -3633,8 +3665,9 @@ fn some_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<(f
 fn midi_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, path: &str) -> HttpResponse {
     let mut raw = String::new();
     if post {
-        if let Err(e) = request.as_reader().read_to_string(&mut raw) {
-            return text(400, &format!("unreadable body: {e}"));
+        match read_body(request) {
+            Ok(r) => raw = r,
+            Err(e) => return e,
         }
     }
     match crate::midi::api::route(&mut shared.lock().unwrap(), post, path, &raw) {
@@ -3785,8 +3818,9 @@ fn personality(url: &str) -> HttpResponse {
 fn project_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool, path: &str) -> HttpResponse {
     let mut raw = String::new();
     if post {
-        if let Err(e) = request.as_reader().read_to_string(&mut raw) {
-            return text(400, &format!("unreadable body: {e}"));
+        match read_body(request) {
+            Ok(r) => raw = r,
+            Err(e) => return e,
         }
     }
     let action = path.strip_prefix("/api/project").unwrap_or("").trim_start_matches('/');
@@ -5081,10 +5115,10 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
 /// for `goto`. Playback only: allowed in show mode, never arms; Go waits
 /// for an e-stop reset.
 fn cuelist_transport(request: &mut Request, shared: &Mutex<Shared>, action: &str) -> HttpResponse {
-    let mut raw = String::new();
-    if let Err(e) = request.as_reader().read_to_string(&mut raw) {
-        return text(400, &format!("unreadable body: {e}"));
-    }
+    let raw = match read_body(request) {
+        Ok(raw) => raw,
+        Err(e) => return e,
+    };
     let req: serde_json::Value = if raw.trim().is_empty() {
         json!({})
     } else {
@@ -5168,9 +5202,30 @@ struct FxCellsBody {
 }
 
 fn body<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T, HttpResponse> {
-    let mut raw = String::new();
-    request.as_reader().read_to_string(&mut raw).map_err(|e| text(400, &format!("unreadable body: {e}")))?;
+    let raw = read_body(request)?;
     serde_json::from_str(&raw).map_err(|e| text(400, &format!("invalid JSON: {e}")))
+}
+
+/// The largest JSON body a route reads (T-449). Well above the biggest
+/// legitimate one (a timeline at its event, track and envelope limits);
+/// the file imports keep their own limits. Beyond it: 413, and a body
+/// announced bigger is refused before a byte of it is read.
+pub(crate) const MAX_JSON_BODY: usize = 16 * 1024 * 1024;
+
+/// A request's text body, at most `MAX_JSON_BODY` bytes (T-449: a huge
+/// or endless body is never read whole into memory).
+fn read_body(request: &mut Request) -> Result<String, HttpResponse> {
+    use std::io::Read;
+    let too_big = || text(413, &format!("requête trop grosse ({} Mo au plus)", MAX_JSON_BODY >> 20));
+    if request.body_length().is_some_and(|n| n > MAX_JSON_BODY) {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::new();
+    request.as_reader().take(MAX_JSON_BODY as u64 + 1).read_to_end(&mut bytes).map_err(|e| text(400, &format!("unreadable body: {e}")))?;
+    if bytes.len() > MAX_JSON_BODY {
+        return Err(too_big());
+    }
+    String::from_utf8(bytes).map_err(|e| text(400, &format!("unreadable body: {e}")))
 }
 
 /// `calibration.json`, or the identity. A damaged file is a safety file
@@ -5321,10 +5376,10 @@ fn safety_log_view(url: &str, shared: &Arc<Mutex<Shared>>, csv: bool) -> HttpRes
 /// arm: nothing here ever arms. Restarting or editing the list closes
 /// the `checklist` interlock again, which disarms if armed.
 fn checklist_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &str) -> HttpResponse {
-    let mut raw = String::new();
-    if let Err(e) = request.as_reader().read_to_string(&mut raw) {
-        return text(400, &format!("unreadable body: {e}"));
-    }
+    let raw = match read_body(request) {
+        Ok(raw) => raw,
+        Err(e) => return e,
+    };
     // `complete` and `restart` need no body.
     let v: serde_json::Value = match raw.trim() {
         "" => json!({}),
@@ -5972,6 +6027,31 @@ mod tests {
     /// T-285: edits are recorded, cue presses are not; undo restores a
     /// deleted scene; show mode refuses undo; a venue undo that would
     /// change the projectors' outputs is refused while armed, never disarms.
+    /// T-449: an undo whose body can't be read or parsed is refused and
+    /// undoes nothing (it used to undo a step); a JSON body announced over
+    /// `MAX_JSON_BODY` is refused (413) before a byte of it is read, on
+    /// every route that reads one.
+    #[test]
+    fn a_garbled_undo_undoes_nothing_and_oversized_bodies_are_refused() {
+        let t = TestServer::start(false);
+        let has_scene = |t: &TestServer| t.shared.lock().unwrap().scenes.get("Garder").is_some();
+        assert_eq!(t.request("POST", "/api/scenes/save", r#"{"name":"Garder","duration_secs":4}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/undo", r#"{"to":"#).0, 400);
+        assert_eq!(t.request("POST", "/api/redo", "pas du JSON").0, 400);
+        assert!(has_scene(&t), "a refused undo undoes nothing");
+        for path in ["/api/undo", "/api/settings", "/api/project/save-as", "/api/midi/profile", "/api/cuelist/go", "/api/checklist/operator"] {
+            let mut stream = TcpStream::connect(t.addr).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            write!(stream, "POST {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{{}}", MAX_JSON_BODY + 1).unwrap();
+            let mut head = [0u8; 12];
+            stream.read_exact(&mut head).unwrap();
+            assert_eq!(&head, b"HTTP/1.1 413", "{path}");
+        }
+        assert!(has_scene(&t));
+        assert_eq!(t.request("POST", "/api/undo", "").0, 200, "an empty body is still one step");
+        assert!(!has_scene(&t));
+    }
+
     #[test]
     fn undo_redo_and_the_history_over_the_api() {
         let t = TestServer::start(false);

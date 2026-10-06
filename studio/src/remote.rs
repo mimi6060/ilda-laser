@@ -265,7 +265,8 @@ pub fn set_enabled(shared: &Arc<Mutex<Shared>>, on: bool, port: Option<u16>) -> 
 fn start(s: &mut Shared, shared: Arc<Mutex<Shared>>) -> Result<(), String> {
     let code = new_code()?;
     let addr = SocketAddr::new(s.remote.bind, s.remote.settings.port);
-    let server = Server::http(addr).map_err(|e| format!("port {} indisponible : {e}", s.remote.settings.port))?;
+    // Timeouts (T-449): a stalled tablet frees its request thread.
+    let server = crate::web::bind(addr).map_err(|e| format!("port {} indisponible : {e}", s.remote.settings.port))?;
     let port = server.server_addr().to_ip().map_or(s.remote.settings.port, |a| a.port());
     let running = Arc::new(AtomicBool::new(true));
     let thread = std::thread::Builder::new()
