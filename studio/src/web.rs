@@ -8503,8 +8503,14 @@ mod tests {
         }
         assert_eq!(hub.streams(), 1, "the stuck stream keeps its slot until its page goes");
         // The studio lock is free: the routes and the state builder carry on.
+        // Other threads (the server's workers) take the lock for a moment
+        // now and then: it must come free soon, not be held by the write.
         let started = Instant::now();
-        assert!(t.shared.try_lock().is_ok(), "no lock held by the blocked write");
+        let free = (0..100).any(|_| t.shared.try_lock().is_ok() || {
+            std::thread::sleep(Duration::from_millis(5));
+            false
+        });
+        assert!(free, "no lock held by the blocked write");
         assert_eq!(t.request("POST", "/api/heartbeat", r#"{"client_id":"p"}"#).0, 200);
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"source":"ui"}"#).0, 200);
         assert_eq!(t.request("POST", "/api/estop?source=ui", "").0, 200);
