@@ -8,6 +8,7 @@
 //! laser output. The HTTP handlers in `web.rs` only ever edit that shared
 //! state.
 
+mod about;
 mod applog;
 mod artnet;
 mod audience;

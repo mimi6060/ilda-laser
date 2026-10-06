@@ -80,6 +80,8 @@ pub fn allowed(path: &str) -> bool {
         "/api/keep_awake",
         // The guided tour seen or not (T-437): a view, not an edit.
         "/api/onboarding",
+        // « Nouveautés » closed (T-452): the notes seen, not an edit.
+        "/api/about/seen",
         "/api/devices/scan",
         // Playing.
         "/api/cue",

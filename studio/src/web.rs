@@ -86,6 +86,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/redo", RouteClass::Edit),
     ("GET", "/api/state", RouteClass::Read),
     ("GET", "/api/diagnostics/report", RouteClass::Read),
+    ("GET", "/api/about", RouteClass::Read),
+    ("POST", "/api/about/seen", RouteClass::Play),
     ("GET", "/api/logs/tail", RouteClass::Read),
     ("GET", "/api/frame", RouteClass::Read),
     ("GET", "/api/preview-frame", RouteClass::Read),
@@ -742,6 +744,24 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         }
         (Method::Get, "/api/state") => state(shared),
         (Method::Get, "/api/diagnostics/report") => diagnostic_report(request.url(), shared),
+        // À propos (T-452): version, folders, third-party files, release
+        // notes. Local only, no update check. The first read on a new data
+        // folder records the version (no « Nouveautés » on a first launch).
+        (Method::Get, "/api/about") => {
+            let (data_dir, projects_dir) = {
+                let s = shared.lock().unwrap();
+                (s.project.data_dir.clone(), s.project.dir.clone())
+            };
+            json_response(json!(crate::about::info(&data_dir, &projects_dir)))
+        }
+        // « Fermer » on the « Nouveautés » window: the notes are not shown again.
+        (Method::Post, "/api/about/seen") => {
+            let data_dir = shared.lock().unwrap().project.data_dir.clone();
+            match crate::about::mark_seen(&data_dir) {
+                Ok(()) => json_response(json!({ "last_seen_version": crate::about::VERSION })),
+                Err(e) => text(500, &format!("impossible d'enregistrer les préférences : {e:#}")),
+            }
+        }
         (Method::Get, "/api/logs/tail") => {
             let n = query_u64(request.url(), "n").unwrap_or(200).clamp(1, 1000) as usize;
             let app = Arc::clone(&shared.lock().unwrap().applog);
@@ -6828,6 +6848,34 @@ mod tests {
         assert_eq!(t.request("POST", "/api/onboarding", r#"{"tour_done":false}"#).0, 200, "not an edit: allowed in show mode");
         assert_eq!(js(&t.request("GET", "/api/state", "").1)["first_run"], true);
         assert_eq!(arm_status(&t)["armed"], false, "never arms");
+    }
+
+    /// T-452: « À propos » reports the version and folders; the release
+    /// notes show once after an update, never on a first launch, and
+    /// closing them is allowed in show mode. Never arms.
+    #[test]
+    fn about_reports_version_and_notes_once() {
+        let t = TestServer::start(false);
+        let js = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let dir = std::env::temp_dir().join(format!("laser-studio-web-about-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        t.shared.lock().unwrap().project.data_dir = dir.clone();
+        let (code, body) = t.request("GET", "/api/about", "");
+        let v = js(&body);
+        assert_eq!(code, 200);
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(v["data_dir"], json!(dir));
+        assert_eq!(v["project_format"], crate::project::PROJECT_FORMAT);
+        assert!(v["unseen"].is_null(), "first launch: nothing shown");
+        assert!(v["changelog"].as_array().is_some_and(|c| !c.is_empty()));
+        std::fs::write(dir.join("prefs.json"), r#"{"about":{"last_seen_version":"0.0.1"}}"#).unwrap();
+        assert_eq!(js(&t.request("GET", "/api/about", "").1)["unseen"]["version"], env!("CARGO_PKG_VERSION"));
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/about/seen", "{}").0, 200, "not an edit: allowed in show mode");
+        assert!(js(&t.request("GET", "/api/about", "").1)["unseen"].is_null());
+        assert_eq!(arm_status(&t)["armed"], false, "never arms");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// T-438: the help pages come from the binary; unknown or malformed

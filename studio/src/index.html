@@ -1424,6 +1424,21 @@
   #wsTabs #keysBtn { align-self: center; margin-left: 8px; padding: 4px 10px; border-radius: 8px; border: 1px solid #2a2f44; font-weight: 600; letter-spacing: 0; font-size: 12px; }
   #wsTabs #keysBtn::before { display: none; }
   #keysHelp .box { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+  #aboutDialog .box, #whatsNew .box { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+  .about-tabs { display: flex; gap: 6px; margin: 4px 0 10px; border-bottom: 1px solid var(--line); }
+  .about-tabs button { min-height: 44px; border-radius: 8px 8px 0 0; }
+  .about-tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+  .about-dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 0 0 8px; align-items: center; }
+  .about-dl dt { color: var(--muted); }
+  .about-dl dd { margin: 0; overflow-wrap: anywhere; }
+  .about-dl dd button, #aboutDialog .keys-head button, #whatsNew .keys-head button { min-height: 44px; }
+  .about-safety { color: var(--warn); }
+  #aboutDialog h4, .about-md h4 { margin: 12px 0 6px; font-size: 13px; }
+  .about-third { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .about-third th, .about-third td { text-align: left; vertical-align: top; padding: 4px 6px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .about-md ul { margin: 4px 0 8px; padding-left: 20px; }
+  .about-md p { margin: 4px 0; }
+  .about-release + .about-release { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
   .keys-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   #keysList { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 6px 18px; margin-top: 10px; }
   .keys-group h4 { margin: 10px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
@@ -1695,6 +1710,7 @@
       <button data-proj="save-as">Enregistrer sous…</button>
       <button data-proj="version-save">Enregistrer une version…</button>
       <button data-proj="versions">Versions…</button>
+      <button data-proj="about">À propos de Laser Studio…</button>
     </div>
   </div>
   <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
@@ -1991,6 +2007,40 @@
       <button id="recCancel" hidden>Annuler</button>
       <button id="recDownload" hidden>Télécharger</button>
     </div>
+  </div>
+</div>
+<!-- À propos (T-452): version, folders, licences, release notes. Local only. -->
+<div id="aboutDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="aboutTitle" hidden>
+  <div class="box">
+    <div class="keys-head"><h3 id="aboutTitle">À propos de Laser Studio</h3><button id="aboutClose">Fermer</button></div>
+    <div class="about-tabs" role="tablist" aria-label="À propos">
+      <button role="tab" id="aboutTabInfo" aria-controls="aboutInfo" aria-selected="true">À propos</button>
+      <button role="tab" id="aboutTabNotes" aria-controls="aboutNotes" aria-selected="false" tabindex="-1">Notes de version</button>
+    </div>
+    <div id="aboutInfo" role="tabpanel" aria-labelledby="aboutTabInfo">
+      <dl class="about-dl">
+        <dt>Version</dt><dd id="aboutVersion">…</dd>
+        <dt>Compilé le</dt><dd id="aboutBuild">…</dd>
+        <dt>Dossier de données</dt><dd><code id="aboutDataDir"></code> <button id="aboutCopyData">Copier le chemin</button></dd>
+        <dt>Dossier des projets</dt><dd><code id="aboutProjDir"></code> <button id="aboutCopyProj">Copier le chemin</button></dd>
+        <dt>Format de projet</dt><dd id="aboutFormat"></dd>
+      </dl>
+      <div class="hint" id="aboutCopied" role="status"></div>
+      <p class="about-safety" id="aboutSafety"></p>
+      <p class="hint" id="aboutNetwork"></p>
+      <h4>Fichiers tiers et licences</h4>
+      <div id="aboutThird"></div>
+      <p class="hint" id="aboutLibs"></p>
+      <div id="aboutError" class="merr" role="alert"></div>
+    </div>
+    <div id="aboutNotes" role="tabpanel" aria-labelledby="aboutTabNotes" hidden></div>
+  </div>
+</div>
+<!-- Nouveautés (T-452): once after an update; « Fermer » records it seen. -->
+<div id="whatsNew" class="modal" role="dialog" aria-modal="true" aria-labelledby="whatsNewTitle" hidden>
+  <div class="box">
+    <div class="keys-head"><h3 id="whatsNewTitle">Nouveautés</h3><button id="whatsNewClose">Fermer</button></div>
+    <div id="whatsNewBody" class="about-md"></div>
   </div>
 </div>
 <div id="projDialog" class="modal" hidden>
@@ -4483,7 +4533,7 @@ async function apiRefused(method, path, r, opts) {
 // raised by every editing request so a reload within that time is caught),
 // the timeline editor's show, the figure being drawn and the cue program
 // being edited in CRÉATION. An autosave is not a save: the guard stays.
-const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame|onboarding|help|prepared)/;
+const NOT_EDITS = /^\/api\/(arm|estop|heartbeat|lock|notices|project|audio(\?|$)|external\/gate|timecode\/arm|data\/warnings|checklist|audience|keep_awake|testpattern|outputs|safety|presence|calibration|frame|onboarding|about|help|prepared)/;
 const DIRTY = { editAt: -1, savedAt: 0, server: false, serverAt: 0 };
 function noteEdit(path) { if (!NOT_EDITS.test(path)) DIRTY.editAt = performance.now(); }
 function takeProjectModified(modified, at) {
@@ -15724,6 +15774,8 @@ async function projOpen(name) {
 }
 async function projAction(kind) {
   $('projMenu').hidden = true;
+  // À propos (T-452): reads only, so allowed in show mode too.
+  if (kind === 'about') return openAbout();
   // T-283: in show mode, only « Enregistrer » (the open project, in place).
   if (showMode && kind !== 'save') return flash(LOCKED_FR);
   await loadProject();
@@ -15745,6 +15797,106 @@ async function projAction(kind) {
 $('projBtn').onclick = e => { e.stopPropagation(); $('projMenu').hidden = !$('projMenu').hidden; if (!$('projMenu').hidden) loadProject(); };
 $('projMenu').querySelectorAll('[data-proj]').forEach(b => b.onclick = () => projAction(b.dataset.proj));
 document.addEventListener('click', e => { if (!e.target.closest('.proj')) $('projMenu').hidden = true; });
+// À propos de Laser Studio (T-452): everything comes from the studio
+// itself (version, folders, licences, release notes); no update check.
+// Notes are simple Markdown (### titles, - lists, paragraphs), turned into
+// elements with textContent: never interpreted as HTML.
+function renderNotesMd(md) {
+  const root = document.createElement('div');
+  root.className = 'about-md';
+  let list = null, para = null;
+  for (const raw of md.split('\n')) {
+    const line = raw.trim();
+    if (!line) { list = null; para = null; continue; }
+    if (line.startsWith('### ')) {
+      list = null; para = null;
+      const h = document.createElement('h4'); h.textContent = line.slice(4); root.append(h);
+    } else if (line.startsWith('- ')) {
+      para = null;
+      if (!list) { list = document.createElement('ul'); root.append(list); }
+      const li = document.createElement('li'); li.textContent = line.slice(2); list.append(li);
+    } else if (para) {
+      para.textContent += ' ' + line;
+    } else {
+      list = null;
+      para = document.createElement('p'); para.textContent = line; root.append(para);
+    }
+  }
+  return root;
+}
+function releaseBlock(r, withTitle) {
+  const div = document.createElement('div');
+  div.className = 'about-release';
+  if (withTitle) { const h = document.createElement('h4'); h.textContent = `Version ${r.version} — ${r.date}`; div.append(h); }
+  div.append(renderNotesMd(r.notes_md));
+  return div;
+}
+function aboutTab(which) {
+  const notes = which === 'notes';
+  $('aboutTabInfo').setAttribute('aria-selected', String(!notes)); $('aboutTabInfo').tabIndex = notes ? -1 : 0;
+  $('aboutTabNotes').setAttribute('aria-selected', String(notes)); $('aboutTabNotes').tabIndex = notes ? 0 : -1;
+  $('aboutInfo').hidden = notes; $('aboutNotes').hidden = !notes;
+}
+async function openAbout() {
+  aboutTab('info');
+  $('aboutError').textContent = ''; $('aboutCopied').textContent = '';
+  $('aboutDialog').hidden = false;
+  let a;
+  try { a = await apiJson('GET', '/api/about', undefined, { quiet: true }); }
+  catch (e) { $('aboutError').textContent = 'Informations indisponibles : ' + e.message; return; }
+  $('aboutVersion').textContent = a.name + ' ' + a.version + (a.commit ? ` (${a.commit})` : '');
+  $('aboutBuild').textContent = a.build_date;
+  $('aboutDataDir').textContent = a.data_dir;
+  $('aboutProjDir').textContent = a.projects_dir;
+  $('aboutFormat').textContent = String(a.project_format);
+  $('aboutSafety').textContent = a.safety;
+  $('aboutNetwork').textContent = a.network;
+  $('aboutLibs').textContent = a.libraries;
+  const third = $('aboutThird');
+  third.replaceChildren();
+  if (!a.third_party.length) {
+    const p = document.createElement('p'); p.className = 'hint'; p.textContent = a.third_party_note; third.append(p);
+  } else {
+    const t = document.createElement('table'); t.className = 'about-third';
+    const head = t.createTHead().insertRow();
+    for (const h of ['Fichiers', 'Source', 'Licence', 'Vérifié le']) { const th = document.createElement('th'); th.textContent = h; head.append(th); }
+    const body = t.createTBody();
+    for (const f of a.third_party) { const row = body.insertRow(); for (const v of [f.files, f.url, f.licence, f.checked_on]) row.insertCell().textContent = v; }
+    third.append(t);
+  }
+  $('aboutNotes').replaceChildren(...a.changelog.map(r => releaseBlock(r, true)));
+}
+async function copyAboutPath(id) {
+  const path = $(id).textContent;
+  try { await navigator.clipboard.writeText(path); $('aboutCopied').textContent = 'Chemin copié.'; }
+  catch { $('aboutCopied').textContent = 'Copie impossible : sélectionnez le chemin à la main.'; }
+}
+$('aboutClose').onclick = () => { $('aboutDialog').hidden = true; };
+$('aboutTabInfo').onclick = () => aboutTab('info');
+$('aboutTabNotes').onclick = () => aboutTab('notes');
+for (const id of ['aboutTabInfo', 'aboutTabNotes']) $(id).addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault(); e.stopPropagation();
+  const toNotes = id === 'aboutTabInfo';
+  aboutTab(toNotes ? 'notes' : 'info'); $(toNotes ? 'aboutTabNotes' : 'aboutTabInfo').focus();
+});
+$('aboutCopyData').onclick = () => copyAboutPath('aboutDataDir');
+$('aboutCopyProj').onclick = () => copyAboutPath('aboutProjDir');
+// After an update: the new version's notes, once. On a new data folder the
+// studio records the version itself and sends nothing to show.
+async function checkWhatsNew() {
+  let a;
+  try { a = await apiJson('GET', '/api/about', undefined, { quiet: true }); } catch { return; }
+  if (!a.unseen) return;
+  $('whatsNewTitle').textContent = `Nouveautés de la version ${a.unseen.version}`;
+  $('whatsNewBody').replaceChildren(releaseBlock(a.unseen, false));
+  $('whatsNew').hidden = false;
+}
+$('whatsNewClose').onclick = async () => {
+  $('whatsNew').hidden = true;
+  try { await api('POST', '/api/about/seen', {}); } catch { /* shown again on the next load */ }
+};
+checkWhatsNew();
 $('projOk').onclick = projDialogOk;
 $('projCancel').onclick = () => { $('projDialog').hidden = true; };
 $('projPath').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); projDialogOk(); } });

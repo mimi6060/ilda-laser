@@ -434,7 +434,7 @@ pub struct ReportParts {
 /// What the report contains, for about.json and the UI's list.
 pub const REPORT_CONTENTS_FR: &[&str] = &[
     "logs/ : journal de l'application et journal de sécurité des 14 derniers jours",
-    "about.json : version, système, architecture, durée de fonctionnement",
+    "about.json : version, date de compilation, commit, format de projet, système, architecture, durée de fonctionnement",
     "devices.json : entrées audio, ports MIDI, état de la sortie laser",
     "settings.json : réglages de sécurité, présence, calibration, plafonds de puissance, préférences",
     "state.json : l'état courant du studio (/api/state)",
@@ -472,6 +472,9 @@ pub fn report(app: &AppLog, parts: ReportParts) -> Vec<u8> {
     let about = json!({
         "application": "Laser Studio",
         "version": env!("CARGO_PKG_VERSION"),
+        "build_date": crate::about::BUILD_DATE,
+        "commit": crate::about::commit(),
+        "project_format": crate::project::PROJECT_FORMAT,
         "os": std::env::consts::OS,
         "os_version": os_version(),
         "arch": std::env::consts::ARCH,
@@ -867,6 +870,7 @@ mod tests {
         assert!(names.iter().all(|n| !is_media(n)), "{names:?}");
         let about: Value = serde_json::from_slice(&entries.iter().find(|(n, _)| n == "about.json").unwrap().1).unwrap();
         assert_eq!(about["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(about["build_date"], crate::about::BUILD_DATE);
         assert_eq!(about["project_included"], false);
         assert!(about["log"].get("dir").is_none(), "no absolute path");
         let state = String::from_utf8(entries.iter().find(|(n, _)| n == "state.json").unwrap().1.clone()).unwrap();
