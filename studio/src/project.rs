@@ -207,6 +207,60 @@ impl Project {
     }
 }
 
+/// What *Nouveau projet* takes from the open project (T-451). All false
+/// when absent: an empty `POST /api/project/new` keeps nothing, as before.
+/// The machine's settings (calibration, safety, venue, outputs, the
+/// safety lock) are never part of a project: a new one always keeps them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct KeepOnNew {
+    /// The MIDI mappings (`midi`).
+    pub midi: bool,
+    /// The colour palettes (`palettes`).
+    pub palettes: bool,
+    /// The operator's grid pages (T-405) with the user cues they point at,
+    /// and the grid properties (`grid`).
+    pub pages: bool,
+    /// The site profile the project carries (key `site`, T-289): only
+    /// carried, never applied.
+    pub venue: bool,
+}
+
+/// Body of `POST /api/project/new`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct NewRequest {
+    pub keep: KeepOnNew,
+    /// A template of `templates/`: the new project is an untitled copy of
+    /// it, and `keep` does not apply.
+    pub template: Option<String>,
+}
+
+/// Templates folder in the data directory (`<data-dir>/templates/`).
+pub const TEMPLATES_DIR: &str = "templates";
+
+/// An empty project that takes the ticked sections from `from`.
+pub fn new_from(from: &Project, keep: KeepOnNew) -> Project {
+    let mut p = Project::default();
+    if keep.midi {
+        p.midi = from.midi.clone();
+    }
+    if keep.palettes {
+        p.palettes = from.palettes.clone();
+    }
+    if keep.pages {
+        p.grid = from.grid.clone();
+        p.pages = from.pages.clone();
+        p.user_cues = from.user_cues.clone();
+    }
+    if keep.venue {
+        if let Some(site) = from.extra.get(crate::sites::PROJECT_KEY) {
+            p.extra.insert(crate::sites::PROJECT_KEY.into(), site.clone());
+        }
+    }
+    p
+}
+
 /// `<data-dir>/recent.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -960,6 +1014,7 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
         (false, "") => return Some(Reply::Json(info(shared))),
         (false, "quit-check") => return Some(Reply::Json(json!(quit_check(shared)))),
         (false, "versions") => return Some(Reply::Json(versions_info(shared))),
+        (false, "templates") => return Some(Reply::Json(templates_info(shared))),
         (true, "autosave") => match serde_json::from_str::<crate::autosave::SettingsRequest>(body) {
             Ok(req) => crate::autosave::set_settings(shared, req)
                 .map(|()| Done::default())
@@ -971,12 +1026,14 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
             crate::autosave::ignore(shared);
             Ok(Done::default())
         }
-        (true, "new") => open_project(shared, None),
+        (true, "new") => new_project(shared, body),
+        (true, "save-template") => template_req(body).and_then(|req| save_template(shared, &req.name, req.replace)),
+        (true, "delete-template") => template_req(body).and_then(|req| delete_template(shared, &req.name)),
         (true, "open") => match path_req() {
             Ok(req) => {
                 let dir = shared.lock().unwrap().project.dir.clone();
                 match resolve(&dir, &req.path) {
-                    Ok(path) => open_project(shared, Some(&path)),
+                    Ok(path) => open_project(shared, Some(&path), Project::default()),
                     Err(e) => Err(Reply::Text(400, format!("{e:#}"))),
                 }
             }
@@ -1065,10 +1122,11 @@ fn swap_in(shared: &Mutex<Shared>, p: &Project) -> Result<Vec<String>, Reply> {
     Ok(w.macro_warnings.iter().cloned().chain(warnings.into_iter().map(|e| format!("impossible d'écrire {e}"))).collect())
 }
 
-/// Opens `path`, or a new empty project with `None`. Atomic: nothing
+/// Opens `path`, or with `None` the untitled project `fresh` (*Nouveau
+/// projet*, T-451: empty, or with sections kept, or a template copy). Atomic: nothing
 /// changes unless the whole file is valid. An older file is migrated (its
 /// original kept, T-288); a newer one opens read only.
-fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Done, Reply> {
+fn open_project(shared: &Mutex<Shared>, path: Option<&Path>, fresh: Project) -> Result<Done, Reply> {
     let loaded = match path {
         Some(path) => Some(load_file(path).map_err(|e| {
             let code = if path.exists() { 400 } else { 404 };
@@ -1078,7 +1136,7 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>) -> Result<Done, Rep
     };
     let (mut p, migrated, newer) = match &loaded {
         Some((l, _)) => (l.project.clone(), l.migrated(), l.newer()),
-        None => (Project::default(), None, None),
+        None => (fresh, None, None),
     };
     let name = path.map(name_of);
     p.name = name.clone().unwrap_or_else(|| UNTITLED.into());
@@ -1186,6 +1244,89 @@ pub fn current_project(shared: &Mutex<Shared>) -> Project {
     p.name = name;
     stamp(&mut p);
     p
+}
+
+// ---------- new project and templates (T-451) ----------
+
+#[derive(Deserialize)]
+struct TemplateRequest {
+    name: String,
+    /// *Un modèle porte déjà ce nom : le remplacer ?* answered yes.
+    #[serde(default)]
+    replace: bool,
+}
+
+fn template_req(body: &str) -> Result<TemplateRequest, Reply> {
+    serde_json::from_str(body).map_err(|e| Reply::Text(400, format!("JSON invalide : {e}")))
+}
+
+fn templates_dir(shared: &Mutex<Shared>) -> PathBuf {
+    shared.lock().unwrap().project.data_dir.join(TEMPLATES_DIR)
+}
+
+/// A template's file in `dir`: the same name rules as a project.
+fn template_path(dir: &Path, name: &str) -> Result<PathBuf, Reply> {
+    resolve(dir, name).map_err(|_| Reply::Text(400, format!("nom de modèle refusé ({NAME_RULE})")))
+}
+
+/// *Nouveau projet*: an empty body (or `{}`) keeps nothing, as before
+/// T-451; `keep` takes the ticked sections of the open project; a
+/// `template` opens an untitled copy of it (never the template's file:
+/// *Enregistrer* asks for a name), `keep` not applying. Machine settings
+/// are not in a project, so nothing here reads or writes them, and the
+/// arming state does not change.
+fn new_project(shared: &Mutex<Shared>, body: &str) -> Result<Done, Reply> {
+    let req: NewRequest = if body.trim().is_empty() { NewRequest::default() } else { serde_json::from_str(body).map_err(|e| Reply::Text(400, format!("JSON invalide : {e}")))? };
+    let fresh = match req.template.as_deref() {
+        Some(name) => {
+            let path = template_path(&templates_dir(shared), name)?;
+            let (loaded, _) = load_file(&path).map_err(|e| Reply::Text(if path.exists() { 400 } else { 404 }, format!("modèle « {} » : {e:#}", name_of(&path))))?;
+            if let Some(v) = loaded.newer() {
+                return Err(Reply::Text(400, format!("modèle créé par une version plus récente de Laser Studio (format {v}) : impossible de s'en servir")));
+            }
+            loaded.project
+        }
+        None if req.keep == KeepOnNew::default() => Project::default(),
+        None => new_from(&current_project(shared), req.keep),
+    };
+    let mut done = open_project(shared, None, fresh)?;
+    if let Some(name) = &req.template {
+        done.notice = Some(format!("Nouveau projet depuis le modèle « {} »", name.trim()));
+    }
+    Ok(done)
+}
+
+/// `GET /api/project/templates`.
+fn templates_info(shared: &Mutex<Shared>) -> Value {
+    let dir = templates_dir(shared);
+    json!({ "dir": dir, "templates": list(&dir) })
+}
+
+/// *Enregistrer comme modèle…*: the current project (what *Enregistrer*
+/// would write) as `templates/<name>.lsproj`. An existing template is only
+/// replaced when asked (409 otherwise). The open project is unchanged.
+fn save_template(shared: &Mutex<Shared>, name: &str, replace: bool) -> Result<Done, Reply> {
+    let dir = templates_dir(shared);
+    let path = template_path(&dir, name)?;
+    if path.exists() && !replace {
+        return Err(Reply::Text(409, "Un modèle porte déjà ce nom : le remplacer ?".into()));
+    }
+    let mut p = current_project(shared);
+    p.name = name_of(&path);
+    std::fs::create_dir_all(&dir).map_err(anyhow::Error::from).and_then(|()| write_project(&path, &p)).map_err(|e| Reply::Text(500, format!("échec de l'enregistrement du modèle : {e:#}")))?;
+    log::info!("Modèle enregistré : « {} »", name_of(&path));
+    Ok(Done { notice: Some(format!("Modèle « {} » enregistré", name_of(&path))), ..Done::default() })
+}
+
+/// Deletes a template (the page asks first).
+fn delete_template(shared: &Mutex<Shared>, name: &str) -> Result<Done, Reply> {
+    let path = template_path(&templates_dir(shared), name)?;
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        return Err(Reply::Text(404, format!("modèle introuvable : {}", name_of(&path))));
+    }
+    std::fs::remove_file(&path).map_err(|e| Reply::Text(500, format!("impossible de supprimer le modèle : {e}")))?;
+    log::info!("Modèle supprimé : « {} »", name_of(&path));
+    Ok(Done { notice: Some(format!("Modèle « {} » supprimé", name_of(&path))), ..Done::default() })
 }
 
 // ---------- named versions (T-288) ----------
@@ -2871,6 +3012,153 @@ mod tests {
         // « Utiliser celui du projet ».
         crate::sites::use_project(&mut shared.lock().unwrap(), false, crate::interlock::ArmSource::Ui).unwrap();
         assert_eq!(shared.lock().unwrap().calibration.offset_x, 0.4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---------- T-451: new project, templates ----------
+
+    /// A project with something in every section `new_from` may keep, and
+    /// in some it never keeps.
+    fn rich() -> Project {
+        let (mut p, _) = pair();
+        p.timelines = vec![Show { name: "Final".into(), ..Default::default() }];
+        p.palettes = vec![Palette { name: "Maison".into(), colors: vec![[255, 0, 0], [0, 0, 255]] }];
+        p.grid.multi = !CueDeck::default().multi;
+        p.tempo.bpm = 140.0;
+        p.extra.insert(crate::sites::PROJECT_KEY.into(), json!({ "name": "Salle" }));
+        p.extra.insert("calibration".into(), json!({ "offset_x": 5.0 }));
+        p
+    }
+
+    #[test]
+    fn new_from_keeps_exactly_the_ticked_sections() {
+        let from = rich();
+        let empty = Project::default();
+        for bits in 0..16u8 {
+            let keep = KeepOnNew { midi: bits & 1 != 0, palettes: bits & 2 != 0, pages: bits & 4 != 0, venue: bits & 8 != 0 };
+            let p = new_from(&from, keep);
+            assert_eq!(p.midi, if keep.midi { from.midi.clone() } else { empty.midi.clone() }, "{keep:?}");
+            assert_eq!(p.palettes, if keep.palettes { from.palettes.clone() } else { Vec::new() }, "{keep:?}");
+            assert_eq!(p.pages, if keep.pages { from.pages.clone() } else { empty.pages.clone() }, "{keep:?}");
+            assert_eq!(p.grid.multi, if keep.pages { from.grid.multi } else { empty.grid.multi }, "{keep:?}");
+            assert_eq!(p.user_cues.len(), if keep.pages { from.user_cues.len() } else { 0 }, "{keep:?}");
+            assert_eq!(p.extra.get(crate::sites::PROJECT_KEY), if keep.venue { from.extra.get(crate::sites::PROJECT_KEY) } else { None }, "{keep:?}");
+            // Never kept: the show itself, and what isn't the project's business.
+            assert!(p.scenes.is_empty() && p.timelines.is_empty() && p.figures.is_empty() && p.lfos.is_empty(), "{keep:?}");
+            assert_eq!(p.tempo, TempoDefaults::default());
+            assert!(!p.extra.contains_key("calibration"));
+        }
+    }
+
+    fn shared_with_content(dir: &Path) -> Mutex<Shared> {
+        let shared = studio(dir);
+        {
+            let mut s = shared.lock().unwrap();
+            s.scenes.replace_in_memory(vec![scene("Ouverture", 0.5)]);
+            s.palettes.replace_in_memory(vec![Palette { name: "Maison".into(), colors: vec![[255, 0, 0], [0, 255, 0]] }]);
+            let mut profiles = BTreeMap::new();
+            profiles.insert("pad".to_string(), midi("Pad"));
+            s.midi.store.replace_user_in_memory(profiles);
+            s.shows.save(&Show { name: "Intro".into(), ..Default::default() }).unwrap();
+        }
+        shared
+    }
+
+    #[test]
+    fn a_new_project_with_midi_ticked_keeps_the_mappings_and_nothing_else() {
+        let dir = temp_dir("new-keep-midi");
+        let shared = shared_with_content(&dir);
+        let armed_before = shared.lock().unwrap().gate.is_armed();
+        let v = post(&shared, &dir, "new", json!({ "keep": { "midi": true } })).unwrap();
+        assert_eq!(v["name"], UNTITLED);
+        let p = current_project(&shared);
+        assert_eq!(p.midi.profiles.keys().collect::<Vec<_>>(), ["pad"]);
+        assert!(p.scenes.is_empty() && p.timelines.is_empty() && p.figures.is_empty() && p.palettes.is_empty());
+        assert_eq!(shared.lock().unwrap().gate.is_armed(), armed_before, "arming unchanged");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_project_without_a_body_keeps_nothing() {
+        let dir = temp_dir("new-empty");
+        for body in ["", "{}"] {
+            let shared = shared_with_content(&dir);
+            let Some(Reply::Json(v)) = route(&shared, true, "new", body) else { panic!("new failed for {body:?}") };
+            assert_eq!(v["name"], UNTITLED);
+            let p = current_project(&shared);
+            assert!(p.midi.profiles.is_empty() && p.palettes.is_empty() && p.scenes.is_empty() && p.timelines.is_empty(), "{body:?}");
+        }
+        let shared = studio(&dir);
+        assert!(matches!(route(&shared, true, "new", "{nope"), Some(Reply::Text(400, _))));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_project_never_touches_the_machine_settings_nor_arms() {
+        let dir = temp_dir("new-machine");
+        let shared = shared_with_content(&dir);
+        let before = {
+            let mut s = shared.lock().unwrap();
+            s.calibration.offset_x = 0.25;
+            (s.calibration, serde_json::to_value(s.safety.get()).unwrap(), s.gate.is_armed(), serde_json::to_value(s.venue.get()).unwrap())
+        };
+        post(&shared, &dir, "new", json!({ "keep": { "midi": true, "palettes": true, "pages": true, "venue": true } })).unwrap();
+        post(&shared, &dir, "save-template", json!({ "name": "Base" })).unwrap();
+        post(&shared, &dir, "new", json!({ "template": "Base" })).unwrap();
+        let s = shared.lock().unwrap();
+        assert_eq!((s.calibration, serde_json::to_value(s.safety.get()).unwrap(), s.gate.is_armed(), serde_json::to_value(s.venue.get()).unwrap()), before);
+        assert!(!s.gate.is_armed());
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_template_round_trips_into_an_untitled_copy() {
+        let dir = temp_dir("template");
+        let shared = shared_with_content(&dir);
+        post(&shared, &dir, "save-as", json!({ "path": "Concert" })).unwrap();
+        let saved = current_project(&shared);
+        post(&shared, &dir, "save-template", json!({ "name": "Soirée type" })).unwrap();
+        assert!(dir.join("templates/Soirée type.lsproj").is_file());
+        assert_eq!(templates_info(&shared)["templates"], json!(["Soirée type"]));
+        // Same name again: asked first, then replaced.
+        assert_eq!(post(&shared, &dir, "save-template", json!({ "name": "Soirée type" })).unwrap_err().0, 409);
+        post(&shared, &dir, "save-template", json!({ "name": "Soirée type", "replace": true })).unwrap();
+        // Something else, then a new project from the template.
+        post(&shared, &dir, "new", json!({})).unwrap();
+        let v = post(&shared, &dir, "new", json!({ "template": "Soirée type", "keep": { "midi": false } })).unwrap();
+        assert_eq!(v["name"], UNTITLED, "a copy, never the template itself");
+        assert!(v["file"].is_null());
+        let p = current_project(&shared);
+        assert_eq!(p.fingerprint(), saved.fingerprint(), "same content");
+        assert_eq!(post(&shared, &dir, "save", json!({})).unwrap_err().0, 409, "« Enregistrer » asks for a name");
+        // Deleting.
+        post(&shared, &dir, "delete-template", json!({ "name": "Soirée type" })).unwrap();
+        assert_eq!(templates_info(&shared)["templates"], json!([]));
+        assert_eq!(post(&shared, &dir, "delete-template", json!({ "name": "Soirée type" })).unwrap_err().0, 404);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_template_names_unknown_and_damaged_templates_change_nothing() {
+        let dir = temp_dir("template-bad");
+        let shared = shared_with_content(&dir);
+        for name in ["../x", "../projects/Concert", "a/b", "", "x\u{0}"] {
+            assert_eq!(post(&shared, &dir, "save-template", json!({ "name": name })).unwrap_err().0, 400, "{name:?}");
+            assert_eq!(post(&shared, &dir, "new", json!({ "template": name })).unwrap_err().0, 400, "{name:?}");
+            assert_eq!(post(&shared, &dir, "delete-template", json!({ "name": name })).unwrap_err().0, 400, "{name:?}");
+        }
+        assert!(!dir.join("x.lsproj").exists());
+        let (code, _) = post(&shared, &dir, "new", json!({ "template": "Inconnu" })).unwrap_err();
+        assert_eq!(code, 404);
+        std::fs::create_dir_all(dir.join(TEMPLATES_DIR)).unwrap();
+        std::fs::write(dir.join("templates/Abîmé.lsproj"), "{ pas du json").unwrap();
+        let (code, text) = post(&shared, &dir, "new", json!({ "template": "Abîmé" })).unwrap_err();
+        assert_eq!(code, 400);
+        assert!(text.contains("modèle « Abîmé »"), "{text}");
+        let p = current_project(&shared);
+        assert_eq!(p.scenes.len(), 1, "the open project is intact");
+        assert_eq!(p.palettes.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
