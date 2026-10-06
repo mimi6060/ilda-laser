@@ -397,6 +397,12 @@ pub fn catalog() -> Vec<Preset> {
         }
     }
 
+    // Abstracts made of stacked oscillators (T-440), appended to
+    // « Abstraits » (they land on « Abstraits 2 », so no page moves).
+    for (name, settings) in crate::abstracts::catalog() {
+        b.add(crate::abstracts::CATEGORY, name, settings);
+    }
+
     b.presets
 }
 
@@ -1094,7 +1100,7 @@ fn pack(points: &[crate::patterns::Point]) -> String {
 }
 
 /// `pack` thinned to at most `max` points.
-fn pack_max(points: &[crate::patterns::Point], max: usize) -> String {
+pub(crate) fn pack_max(points: &[crate::patterns::Point], max: usize) -> String {
     let step = points.len().div_ceil(max.max(1)).max(1);
     let pos = |v: f32| ((v.clamp(-1.0, 1.0) + 1.0) * 127.5).round() as u8;
     let col = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -1371,6 +1377,8 @@ mod tests {
     const GRAPHIC_CUES: usize = 12;
     /// The T-112 to T-123 « Festival évolutifs » page, after those.
     const EVOLVING_CUES: usize = 12;
+    /// The T-440 abstracts (stacked oscillators), after those.
+    const ABSTRACT_CUES: usize = 11;
 
     fn festival() -> Vec<Preset> {
         catalog().into_iter().skip(LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES).take(FESTIVAL_CUES).collect()
@@ -1474,7 +1482,7 @@ mod tests {
     fn graphic_cues_are_appended_with_room_on_their_pages() {
         let all = catalog();
         let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES + FESTIVAL_CUES;
-        assert_eq!(all.len(), start + GRAPHIC_CUES + EVOLVING_CUES, "appended before the evolving cues");
+        assert_eq!(all.len(), start + GRAPHIC_CUES + EVOLVING_CUES + ABSTRACT_CUES, "appended before the evolving cues");
         let new = &all[start..start + GRAPHIC_CUES];
         assert_eq!((new[0].id.as_str(), new[6].id.as_str()), ("texte-horloge-022", "geometrie-013"));
         for p in new {
@@ -1656,10 +1664,25 @@ mod tests {
         xs
     }
 
+    /// T-440: the shipped abstracts come last, on « Abstraits » after its
+    /// older cues (so every older id keeps its number, and they land on
+    /// « Abstraits 2 », which has room: no page moves).
+    #[test]
+    fn abstract_cues_are_appended_to_the_abstracts_page() {
+        let all = catalog();
+        let new = &all[all.len() - ABSTRACT_CUES..];
+        assert!(new.iter().all(|p| p.category == "Abstraits" && matches!(p.settings.content, Content::Abstract(_))));
+        let older = all.iter().filter(|p| p.category == "Abstraits").count() - ABSTRACT_CUES;
+        assert_eq!(new[0].id, format!("abstraits-{:03}", older + 1));
+        let grid = crate::controls::GRID_ROWS * crate::controls::GRID_COLS;
+        assert!(older > grid && older + ABSTRACT_CUES <= 2 * grid, "on « Abstraits 2 », within one page");
+        assert_eq!(new[0].name, "Lissajous 3:2");
+    }
+
     #[test]
     fn evolving_cues_are_appended_on_their_own_page() {
         let all = catalog();
-        let new = &all[all.len() - EVOLVING_CUES..];
+        let new = &all[all.len() - ABSTRACT_CUES - EVOLVING_CUES..all.len() - ABSTRACT_CUES];
         assert!(new.iter().all(|p| p.category == EVOLVING && p.tag.is_some()));
         assert_eq!((new[0].id.as_str(), new[11].id.as_str()), ("festival-evolutifs-001", "festival-evolutifs-012"));
         assert!(new.len() <= crate::controls::GRID_ROWS * crate::controls::GRID_COLS, "one grid page");

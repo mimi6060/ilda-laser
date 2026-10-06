@@ -8,6 +8,7 @@
 //! laser output. The HTTP handlers in `web.rs` only ever edit that shared
 //! state.
 
+mod abstracts;
 mod about;
 mod applog;
 mod artnet;
@@ -2310,6 +2311,7 @@ impl Engine {
                         };
                         animator.set_optimizer(scan);
                         animator.set_palette(festival_palette);
+                        animator.set_point_budget(mixer.point_budget);
                         let mut points = animator.render(settings, audio, event_dt, &content_clock);
                         if cue.modifiers != live::LiveModifiers::default() {
                             let fresh = !event_live.contains_key(&cue.instance);
@@ -2346,6 +2348,7 @@ impl Engine {
                     });
                     animator.set_optimizer(scan);
                     animator.set_palette(festival_palette);
+                    animator.set_point_budget(mixer.point_budget);
                     let mut points = animator.render(settings, audio, anim_dt * levels.speed(Some(*id), *layer), &render_clock);
                     // A user cue's own master modifiers (T-405), before the
                     // master stage, like a timeline event's.

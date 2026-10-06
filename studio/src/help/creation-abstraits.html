@@ -1,0 +1,11 @@
+<p>Construisez vos propres abstraits : une courbe faite de la somme de six oscillateurs au plus, chacun sur X, Y ou la couleur. Deux oscillateurs X et Y donnent une figure de Lissajous ; en en empilant, on obtient rosaces, étoiles, nœuds et rubans.</p>
+<ul>
+<li>« + Oscillateur » en ajoute un ; « Cible » choisit X, Y ou Couleur (la teinte le long du tracé), « Actif » le garde sans le jouer, « Supprimer » l'enlève.</li>
+<li>« Rapport » : combien de fois il oscille pendant une période (0,25 à 16, entier ou fractionnaire). X à 3 et Y à 2 dessinent une figure de Lissajous 3:2.</li>
+<li>« Phase » le décale (0 à 360°), « Amplitude » règle sa part (0 à 1), « Forme » choisit l'onde : « Sinus », « Triangle », « Carré », « Dent de scie ↑ » ou « Dent de scie ↓ ».</li>
+<li>« Dérive (tours par temps) » fait tourner sa phase au tempo : la figure évolue en suivant l'horloge. À 0 partout, la figure est fixe.</li>
+<li>Quand la somme des amplitudes d'une cible dépasse 1, elle est ramenée à 1 : la figure reste toujours dans le cadre.</li>
+<li>« Points » règle la finesse du tracé ; il est borné par le budget du calque, et l'éditeur l'indique (« Limité par le budget du calque »). « Tours » fixe le nombre de périodes parcourues ; « Tours automatiques » prend le plus petit nombre qui referme la courbe.</li>
+</ul>
+<p>L'aperçu est dessiné par le moteur lui-même, mais il ne part jamais vers le laser : ce qui joue en LIVE ne change pas. « Enregistrer comme cue… » crée un cue utilisateur dans la première case libre d'une page utilisateur ; lancé, il passe comme tout contenu par le budget du calque, les maîtres, le limiteur de strobe et toute la chaîne de sécurité. Taille, rotation et luminosité restent pilotables par les modulateurs et les liens audio.</p>
+<p>« Reprendre le look » charge l'abstrait du look en cours, « Réinitialiser » revient au cercle de départ. Annuler (<kbd>Cmd</kbd>+<kbd>Z</kbd>) reprend un enregistrement ; le mode spectacle bloque l'édition. Une dizaine d'abstraits tout faits sont sur la deuxième page Abstraits de la grille.</p>

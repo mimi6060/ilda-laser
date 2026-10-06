@@ -106,7 +106,7 @@ impl Modulator {
 
 /// Periodic shapes at position `p` (0..1), -1..1. Sine and triangle start
 /// at 0 going up, so every shape is in step at the same phase.
-fn shape(wave: Wave, p: f64) -> f64 {
+pub(crate) fn shape(wave: Wave, p: f64) -> f64 {
     match wave {
         Wave::Sine => (std::f64::consts::TAU * p).sin(),
         Wave::Triangle if p < 0.25 => 4.0 * p,

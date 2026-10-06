@@ -483,6 +483,23 @@ pub fn store_program(s: &mut Shared, source: &str, program: CueProgram) -> Resul
     Ok((id, page, slot))
 }
 
+/// CRÉATION › Abstraits (T-440) « Enregistrer comme cue… » : a new user
+/// cue of `look` (the editor's own, never what plays), named `name`, into
+/// the first free cell of a user page (made if none), which is then shown.
+/// Returns the new cue's id and its cell (page, slot).
+pub fn store_look(s: &mut Shared, look: Settings, name: Option<&str>) -> Result<(String, usize, usize), Refusal> {
+    let mut grid = s.grid.clone();
+    grid.materialize(&s.presets);
+    let to = first_user_page(&mut grid, &s.presets)?;
+    let (page, slot) = target(&grid, to)?;
+    let mut cues = s.user_cues.clone();
+    let id = cues.create(name, None, look, None).map_err(bad)?;
+    grid.put(page, slot, Some(CueRef::User(id.clone()))).map_err(bad)?;
+    commit(s, cues, grid)?;
+    s.cue_page = page.min(s.grid.page_count() - 1);
+    Ok((id, page, slot))
+}
+
 /// The cell a copy goes to: `to`'s slot, else the page's first empty one.
 fn target(grid: &crate::grid::CueGrid, (page, slot): (usize, Option<usize>)) -> Result<(usize, usize), Refusal> {
     let pg = grid.pages.get(page).ok_or_else(|| bad("page inconnue"))?;

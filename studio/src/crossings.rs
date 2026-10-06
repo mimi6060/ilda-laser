@@ -183,7 +183,8 @@ fn hot_beam(p: &GenParams, ctx: &GenCtx) -> Geometry {
 /// opening in `open` beats, for a full half-width `w`.
 pub fn burst_width(x: f32, period: f32, open: f32, w: f32) -> f32 {
     let wide = w.max(W_MIN);
-    let open = open.clamp(1.0 / 32.0, period / 2.0);
+    // A period under 1/16 beat (a mangled one) must not panic the clamp.
+    let open = open.clamp(1.0 / 32.0, (period / 2.0).max(1.0 / 32.0));
     let collapse = (period / 4.0).min(0.5);
     let hold = (period / 8.0).min(0.25);
     let shut = period - hold - collapse;
@@ -233,6 +234,16 @@ mod tests {
     use super::*;
     use crate::engine::densify;
     use crate::generators::{colorize, GENERATOR_NAMES};
+
+    /// A period shorter than 1/16 beat (found by the safety fuzz) used to
+    /// panic `clamp` (min > max); it now just opens at once.
+    #[test]
+    fn a_tiny_burst_period_does_not_panic() {
+        for period in [0.04, 0.001, 0.0] {
+            let w = burst_width(0.01, period, 0.25, 0.5);
+            assert!(w.is_finite() && w >= 0.0, "{period}: {w}");
+        }
+    }
 
     const NAMES: [&str; 4] = ["scissor", "hot_beam", "bundle_burst", "beam_v"];
 

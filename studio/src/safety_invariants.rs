@@ -116,6 +116,12 @@
 //!     deleted while the cues play, run in the sessions (1-21 hold with
 //!     them); they never arm, and every stored preset stays within the
 //!     master controls' ranges.
+//! 23. abstracts (T-440): random oscillator stacks (mangled numbers,
+//!     non-finite ones, too many oscillators, fast drifts, square and saw
+//!     waves) sent as the look the way « Enregistrer comme cue… » stores
+//!     them, run in the sessions (1-22 hold with them: the curve goes
+//!     through densify, the mixer's budget and the whole safety stage);
+//!     they never arm.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -1526,6 +1532,41 @@ fn random_level(s: &mut Shared, rng: &mut Rng) {
 /// in past validation (the engine clamps them on apply), references on
 /// cells and timeline events (unknown ones and ones of another family
 /// included), « Enregistrer depuis le direct », deletes.
+/// A random abstract look (T-440): up to 8 oscillators (6 are kept), any
+/// wave, numbers in and out of range (non-finite ones included), any
+/// sample count, bright enough to be seen in the show phase.
+fn random_abstract(rng: &mut Rng) -> Settings {
+    use crate::abstracts::{AbstractShape, Osc, OscTarget};
+    let wild = |rng: &mut Rng, lo: f32, hi: f32| match rng.below(16) {
+        0 => f32::NAN,
+        1 => f32::INFINITY,
+        2 => rng.range(-1e5, 1e5),
+        _ => rng.range(lo, hi),
+    };
+    let waves = [lfo::Wave::Sine, lfo::Wave::Triangle, lfo::Wave::Square, lfo::Wave::SawUp, lfo::Wave::SawDown, lfo::Wave::Random];
+    let n = 1 + rng.below(8);
+    let oscs = (0..n)
+        .map(|_| Osc {
+            target: *rng.pick(&[OscTarget::X, OscTarget::Y, OscTarget::Color]),
+            ratio: wild(rng, 0.0, 17.0),
+            phase_deg: wild(rng, -30.0, 400.0),
+            amp: wild(rng, 0.0, 1.3),
+            wave: *rng.pick(&waves),
+            drift: wild(rng, -5.0, 5.0),
+            enabled: rng.chance(0.9),
+        })
+        .collect();
+    let shape = AbstractShape { oscs, points: rng.below(2600) as u16, turns: wild(rng, 0.0, 70.0), auto_turns: rng.chance(0.6), closed: rng.chance(0.7) };
+    Settings {
+        content: Content::Abstract(shape),
+        color: [rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8],
+        scale: rng.range(0.2, 1.2),
+        rotation_speed: if rng.chance(0.3) { rng.range(-720.0, 720.0) } else { 0.0 },
+        brightness: rng.range(0.4, 1.0),
+        ..Settings::default()
+    }
+}
+
 fn random_pools(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
     use crate::pools::{self, PoolPreset, PoolValues, PresetRefs, FAMILIES};
     let family = *rng.pick(&FAMILIES);
@@ -1901,6 +1942,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // Referenced presets (T-422), from their own stream.
     let mut grng = Rng::new(seed ^ 0x0422_0422);
     let pools_on = grng.chance(0.35);
+    // Abstracts (T-440), from their own stream.
+    let mut nrng = Rng::new(seed ^ 0x0440_0440);
+    let abstracts_on = nrng.chance(0.35);
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
@@ -1934,6 +1978,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             if pools_on && grng.chance(0.3) {
                 random_pools(&mut s, &mut grng).map_err(|e| format!("frame {frame}: {e}"))?;
             }
+            if abstracts_on && nrng.chance(0.1) {
+                controls::set_look(&mut s, random_abstract(&mut nrng));
+            }
             // Held buttons are let go of: « Noir » and « Figer » don't
             // stay down for the whole session.
             if (s.live.black || s.live.freeze || s.live.strobe.hold) && erng.chance(0.7) {
@@ -1941,7 +1988,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 let _ = controls::apply(&mut s, id, ControlInput::Value(0.0), erng.chance(0.5));
             }
             if s.gate.is_armed() != armed {
-                return Err(format!("frame {frame}: a live effect, a level or a preset changed the arming"));
+                return Err(format!("frame {frame}: a live effect, a level, a preset or an abstract changed the arming"));
             }
         }
         if exec_on && brng.chance(0.35) {
