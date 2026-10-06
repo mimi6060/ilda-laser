@@ -485,6 +485,17 @@ pub fn describe(e: &SafetyEvent) -> String {
         "scene" => format!("Scène lancée (armé) : {}", str_of(d, "name")),
         "safety_settings" => format!("Réglages de sécurité modifiés{}", changed()),
         "presence_settings" => format!("Réglages de présence modifiés{}", changed()),
+        // Safety profiles per venue (T-260).
+        "safety_profile" => match str_of(d, "action") {
+            "load" if d.get("confirmed_loosen").and_then(Value::as_bool).unwrap_or(false) => {
+                format!("Profil de sécurité chargé (assouplissement confirmé) : {} (laser désarmé)", str_of(d, "name"))
+            }
+            "load" => format!("Profil de sécurité chargé : {} (laser désarmé)", str_of(d, "name")),
+            "save" => format!("Profil de sécurité enregistré : {}", str_of(d, "name")),
+            "verify" => format!("Profil de sécurité vérifié sur place : {} ({})", str_of(d, "name"), str_of(d, "verified_on")),
+            "delete" => format!("Profil de sécurité supprimé : {}", str_of(d, "name")),
+            _ => format!("Profil de sécurité refusé : {} (laser désarmé)", str_of(d, "name")),
+        },
         "midi_safety" => {
             let allow = d.pointer("/after/allow_arm").and_then(Value::as_bool);
             let before = d.pointer("/before/allow_arm").and_then(Value::as_bool);

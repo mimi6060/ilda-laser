@@ -61,16 +61,16 @@ test('the wizard shows every condition, unlocks with the phrase, and the e-stop 
   await expect(wizard).toContainText('Le logiciel ne détecte pas une panne des galvos');
   await expect(wizard).toContainText('personne qualifiée');
   const steps = page.locator('#audSteps li');
-  await expect(steps).toHaveCount(5);
+  await expect(steps).toHaveCount(6);
   await expect(page.locator('#audSteps li[data-cond="dim_zone"]')).toHaveClass('ok');
-  for (const id of ['projector', 'checklist', 'hold_to_run', 'dwell_strict']) {
+  for (const id of ['venue_profile', 'projector', 'checklist', 'hold_to_run', 'dwell_strict']) {
     await expect(page.locator(`#audSteps li[data-cond="${id}"]`)).toHaveClass('bad');
   }
   await expect(page.locator('#audUnlock')).toBeDisabled();
   // The API refuses too, with the missing labels.
   let r = await fetch(studio.url + '/api/audience', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'scanning', phrase: PHRASE }) });
   expect(r.status).toBe(409);
-  expect((await r.json()).missing).toHaveLength(4);
+  expect((await r.json()).missing).toHaveLength(5);
 
   // « Régler » opens the setting: the static beam guard, set to strict.
   await page.locator('#audSteps li[data-cond="dwell_strict"] button').click();
@@ -89,7 +89,10 @@ test('the wizard shows every condition, unlocks with the phrase, and the e-stop 
   await studio.completeChecklist();
   const presence = (await studio.get('/api/presence')).settings;
   expect(await studio.post('/api/presence', { ...presence, hold_to_run: true })).toBe(200);
-  for (const id of ['projector', 'checklist', 'hold_to_run']) {
+  // The venue's safety profile allows it (T-260): a loosening, confirmed.
+  expect(await studio.post('/api/safety/profiles', { action: 'save', name: 'Salle test', audience_scan_allowed: true })).toBe(409);
+  expect(await studio.post('/api/safety/profiles', { action: 'save', name: 'Salle test', audience_scan_allowed: true, confirm_loosen: true })).toBe(200);
+  for (const id of ['venue_profile', 'projector', 'checklist', 'hold_to_run']) {
     await expect(page.locator(`#audSteps li[data-cond="${id}"]`)).toHaveClass('ok');
   }
   await expect(page.locator('#audUnlock')).toBeEnabled();
@@ -116,7 +119,7 @@ test('the wizard shows every condition, unlocks with the phrase, and the e-stop 
   // The safety log has the unlock with its conditions.
   const log = await studio.get('/api/safety/log');
   const unlock = log.events.find((e: { kind: string; detail: { mode: string } }) => e.kind === 'audience_mode' && e.detail.mode === 'scanning');
-  expect(unlock.detail.conditions).toHaveLength(5);
+  expect(unlock.detail.conditions).toHaveLength(6);
   expect(unlock.detail.operator).toBe('Test e2e');
 
   // Emergency stop: back above the audience, and still so after the reset.

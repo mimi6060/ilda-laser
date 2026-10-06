@@ -837,6 +837,17 @@
   #pjNotes { width: 100%; padding: 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; resize: vertical; box-sizing: border-box; }
   #sfLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; background: #3a1214; font-size: 12px; }
   #sfLoosenOk { border-color: var(--danger); color: var(--danger); }
+  /* Safety profiles (T-260). */
+  #sfpLoosen { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px; font-size: 12px; }
+  #sfpLoosenOk { border-color: var(--danger); color: var(--danger); }
+  #sfpSaveBox { margin-top: 6px; }
+  #sfpSaveBox[hidden], #sfpLoosen[hidden], #sfpStale[hidden] { display: none; }
+  .arm-line { display: flex; gap: 8px; min-width: 0; }
+  .arm-line > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .arm-line #armInfo { flex: 0 1 auto; min-width: 0; }
+  #profilePill { font-size: 11px; color: var(--muted); flex: 0 100 auto; min-width: 0; }
+  #profilePill.warn { color: var(--warn); }
+  #profilePill[hidden] { display: none; }
   .sf-error { color: var(--danger); }
   /* Exposure estimator (T-257): red over the MPE, green under; never « safe ». */
   .ex-banner { margin: 6px 0 8px; padding: 8px 10px; border-left: 3px solid var(--danger); border-radius: 6px; background: var(--panel-2); font-size: 12px; font-weight: 600; }
@@ -1675,7 +1686,7 @@
     <span id="wifiPill" role="alert" hidden>Wi-Fi</span>
     <span id="sdPill" role="alert" hidden>SD : NOIR</span>
     <span id="audPill" role="status" hidden title="Balayage public déverrouillé : les zones Public reçoivent de la lumière atténuée. Le logiciel ne rend pas cela sûr ; il ne détecte pas une panne des galvos.">BALAYAGE PUBLIC</span>
-    <span id="armInfo">Désarmé</span>
+    <div class="arm-line"><span id="armInfo">Désarmé</span><span id="profilePill" role="status" title="Profil de sécurité actif (RÉGLAGES › Sécurité)" hidden></span></div>
     <div class="leds">
       <!-- Entrées externes (T-408): closed at start and after an e-stop. -->
       <button id="extGate" aria-pressed="false" title="Entrées externes fermées : DMX, OSC et timecode ne changent rien (sauf le noir et l'arrêt d'urgence) · Alt+X"><span class="long">Entrées externes</span><span class="short">Ext.</span></button>
@@ -3233,6 +3244,30 @@
     <section data-help="reglages-securite">
       <details id="safetyPanel" data-search="Sécurité">
         <summary>Sécurité <span id="strobeLed" title="Limiteur de stroboscope">Limiteur actif</span><span id="dwellLed" title="Garde anti-point fixe">Garde active</span></summary>
+        <div class="sf-sub">Profil de sécurité du lieu</div>
+        <label for="sfpSelect">Profil de sécurité</label>
+        <select id="sfpSelect"></select>
+        <div class="row"><button id="sfpLoad">Charger ce profil</button><button id="sfpSaveAs">Enregistrer sous…</button></div>
+        <div class="row"><button id="sfpVerify">Marquer comme vérifié aujourd'hui</button><button id="sfpDelete">Supprimer ce profil</button></div>
+        <div class="hint" id="sfpInfo" role="status"></div>
+        <div class="hint sf-warn" id="sfpStale" role="status" hidden></div>
+        <div id="sfpSaveBox" hidden>
+          <label for="sfpName">Nom du profil</label>
+          <input type="text" id="sfpName" maxlength="60" autocomplete="off" placeholder="Ex. : Club Le Hangar">
+          <label for="sfpVenue">Lieu</label>
+          <input type="text" id="sfpVenue" maxlength="120" autocomplete="off">
+          <label for="sfpNotes">Notes</label>
+          <input type="text" id="sfpNotes" maxlength="2000" autocomplete="off">
+          <label class="check"><input type="checkbox" id="sfpAudience"> Balayage public autorisé dans ce lieu</label>
+          <div class="row"><button id="sfpSaveOk" class="primary">Enregistrer</button><button id="sfpSaveCancel">Annuler</button></div>
+          <div class="hint">Enregistre les réglages de sécurité en vigueur (zones, horizon, limiteur, plafonds de puissance, présence, liste « Avant le show »).</div>
+        </div>
+        <div id="sfpLoosen" hidden>
+          <div id="sfpLoosenText"></div>
+          <div class="row"><button id="sfpLoosenOk">Confirmer l'assouplissement</button><button id="sfpLoosenCancel">Annuler</button></div>
+        </div>
+        <div class="hint sf-error" id="sfpError" role="alert"></div>
+        <div class="hint">Charger un profil désarme le laser et remet la liste « Avant le show » à zéro ; ce qui assouplit la sécurité demande une confirmation. Un profil ne rend pas un show sûr : vérifiez le lieu sur place, et l'arrêt réel reste matériel (interlock, arrêt d'urgence, clé).</div>
         <div class="sf-sub">Mode de sortie</div>
         <div class="seg" id="audSeg" role="group" aria-label="Mode de sortie">
           <button data-aud="above" class="active">Au-dessus du public</button>
@@ -5460,6 +5495,7 @@ function applyState(f, at, pushed) {
   noticeConditions(f);
   showShownet(f.shownet);
   showAudienceMode(f.audience);
+  showProfilePill(f.safety_profile);
   // Ticked or restarted from another page, or the output became (or
   // stopped being) a ShowNET: refresh the list.
   if (checklist && f.checklist && f.checklist.complete !== checklist.complete) reloadChecklist();
@@ -7049,7 +7085,7 @@ const SL_GROUPS = {
   locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_reset', 'checklist_edit', 'show_mode', 'input_lost', 'input_back'],
   limiter: ['limiter'],
   play: ['cue', 'scene', 'show'],
-  settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings', 'audience_mode'],
+  settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings', 'audience_mode', 'safety_profile'],
   studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow', 'output_select', 'output'],
 };
 let slLog = null;
@@ -13532,6 +13568,119 @@ $('venuePanel').addEventListener('toggle', async () => {
   reloadVenue();
 });
 
+// ---------- safety profiles per venue (T-260) ----------
+// The active profile is a label over the settings in force. Loading one
+// disarms; what it would loosen asks for a confirmation (409 → sfpLoosen).
+let spView = null, spPending = null;
+function showProfilePill(p) {
+  const el = $('profilePill');
+  if (p === undefined) return;
+  if (!p || !p.name) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = 'Profil : ' + p.name + (p.modified ? ' (modifié)' : '');
+  el.classList.toggle('warn', !!(p.modified || p.stale));
+  el.title = 'Profil de sécurité actif' + (p.stale ? ' — vérification sur place à refaire' : '') + ' (RÉGLAGES › Sécurité)';
+}
+async function reloadProfiles() {
+  try {
+    const r = await api('GET', '/api/safety/profiles', undefined, { quiet: true });
+    if (r.ok) showProfiles(await r.json());
+  } catch { /* server gone */ }
+}
+function showProfiles(v) {
+  spView = v;
+  const sel = $('sfpSelect'), keep = sel.value;
+  sel.replaceChildren(...v.profiles.map(p => {
+    const o = document.createElement('option');
+    o.value = p.name;
+    o.textContent = p.name + (p.builtin ? ' (intégré)' : '') + (p.damaged ? ' — abîmé' : '') + (p.name === v.active ? ' ✓' : '');
+    o.disabled = !!p.damaged;
+    return o;
+  }));
+  sel.value = v.profiles.some(p => p.name === keep) ? keep : (v.active || v.builtin);
+  showProfileInfo();
+}
+function showProfileInfo() {
+  const v = spView;
+  if (!v) return;
+  const p = v.profiles.find(x => x.name === $('sfpSelect').value);
+  const a = v.active_profile;
+  let info = a ? `Actif : ${a.name}${a.venue ? ' — ' + a.venue : ''}${v.modified ? ' (réglages modifiés depuis, à enregistrer)' : ''}.` : 'Aucun profil actif.';
+  if (a) info += a.audience_scan_allowed ? ' Balayage public autorisé dans ce lieu.' : ' Balayage public interdit dans ce lieu.';
+  if (v.load_error) info += ' ' + v.load_error;
+  $('sfpInfo').textContent = info;
+  const stale = a && a.stale;
+  $('sfpStale').hidden = !stale;
+  $('sfpStale').textContent = !stale ? '' : a.verified_on
+    ? `⚠ Dernière vérification sur place le ${a.verified_on} (plus de ${v.verify_max_days} jours) : revérifiez le lieu.`
+    : '⚠ Ce profil n\'a jamais été vérifié sur place.';
+  const builtin = !p || p.builtin;
+  $('sfpVerify').disabled = builtin;
+  $('sfpDelete').disabled = builtin;
+  $('sfpLoad').disabled = !p || !!p.damaged;
+}
+$('sfpSelect').addEventListener('change', () => { spPending = null; $('sfpLoosen').hidden = true; showProfileInfo(); });
+$('safetyPanel').addEventListener('toggle', () => { if ($('safetyPanel').open) reloadProfiles(); });
+/** Answers of the profile routes: 409 → the loosening confirmation. */
+async function profileReply(r, retry) {
+  $('sfpError').textContent = '';
+  if (r.ok) {
+    spPending = null; $('sfpLoosen').hidden = true;
+    const v = await r.json();
+    showProfiles(v);
+    showProfilePill({ name: v.active, modified: v.modified, stale: !!(v.active_profile && v.active_profile.stale) });
+    reloadSafety(); reloadOutputs(); reloadChecklist(); reloadAudience();
+    return true;
+  }
+  if (r.status === 409) {
+    const j = await r.json();
+    spPending = retry;
+    $('sfpLoosenText').textContent = 'Ce profil assouplit la sécurité : ' + j.loosen.join(' · ');
+    $('sfpLoosen').hidden = false;
+  } else if (r.status === 423) {
+    $('sfpError').textContent = 'Verrouillé en mode spectacle';
+  } else {
+    $('sfpError').textContent = await r.text();
+    reloadProfiles();
+  }
+  return false;
+}
+async function loadProfile(name, confirm = false) {
+  const r = await api('POST', '/api/safety/profiles/load', { name, confirm_loosen: confirm, source: 'ui' }, { quiet: true });
+  await profileReply(r, () => loadProfile(name, true));
+}
+async function saveProfile(body, confirm = false) {
+  const r = await api('POST', '/api/safety/profiles', { ...body, action: 'save', confirm_loosen: confirm, source: 'ui' }, { quiet: true });
+  if (await profileReply(r, () => saveProfile(body, true))) $('sfpSaveBox').hidden = true;
+}
+$('sfpLoad').addEventListener('click', () => loadProfile($('sfpSelect').value));
+$('sfpLoosenOk').addEventListener('click', () => { const f = spPending; spPending = null; if (f) f(); });
+$('sfpLoosenCancel').addEventListener('click', () => { spPending = null; $('sfpLoosen').hidden = true; });
+$('sfpSaveAs').addEventListener('click', () => {
+  const a = spView && spView.active_profile;
+  const mine = a && !a.builtin;
+  $('sfpName').value = mine ? a.name : '';
+  $('sfpVenue').value = mine ? a.venue : '';
+  $('sfpNotes').value = mine ? a.notes : '';
+  $('sfpAudience').checked = !!(mine && a.audience_scan_allowed);
+  $('sfpSaveBox').hidden = false;
+  $('sfpName').focus();
+});
+$('sfpSaveCancel').addEventListener('click', () => { $('sfpSaveBox').hidden = true; });
+$('sfpSaveOk').addEventListener('click', () => saveProfile({
+  name: $('sfpName').value.trim(), venue: $('sfpVenue').value, notes: $('sfpNotes').value, audience_scan_allowed: $('sfpAudience').checked,
+}));
+$('sfpVerify').addEventListener('click', async () => {
+  const r = await api('POST', '/api/safety/profiles', { action: 'verify', name: $('sfpSelect').value, source: 'ui' }, { quiet: true });
+  await profileReply(r, null);
+});
+$('sfpDelete').addEventListener('click', async () => {
+  const name = $('sfpSelect').value;
+  if (!confirm(`Supprimer le profil « ${name} » ? Les réglages en vigueur ne changent pas.`)) return;
+  const r = await api('POST', '/api/safety/profiles', { action: 'delete', name, source: 'ui' }, { quiet: true });
+  await profileReply(r, null);
+});
+
 // ---------- boot ----------
 async function loadState() {
   const st = await apiJson('GET', '/api/state');
@@ -13547,6 +13696,7 @@ async function loadState() {
   showShowMode(st.lock);
   checklistState = st.checklist; showShownet(st.shownet); reloadChecklist();
   showAudienceMode(st.audience); reloadAudience();
+  showProfilePill(st.safety_profile); reloadProfiles();
   if (!$('gen').children.length) {
     $('gen').innerHTML = st.generators.map(g => `<option value="${g}">${GEN_NAMES[g] || g}</option>`).join('');
   }

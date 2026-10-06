@@ -81,6 +81,12 @@
 //!     with them); a ×4 group never gets flashing past the strobe limiter
 //!     (`speed_groups_never_get_past_the_strobe_limiter`).
 //!
+//! 18. safety profiles (T-260): random venue profiles (one damaged) are
+//!     loaded during the sessions from every source, confirmed or not;
+//!     only the operator's sources load one, a load never arms and always
+//!     leaves the laser disarmed, and a refused one changes no setting
+//!     (1-17 hold with whatever is in force).
+//!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
 //! catalogue cue forced onto the default seeds (flashed over itself, and
@@ -346,7 +352,7 @@ fn random_polygon(rng: &mut Rng) -> Vec<[f32; 2]> {
         .collect()
 }
 
-fn random_safety(rng: &mut Rng) -> SafetySettings {
+pub(crate) fn random_safety(rng: &mut Rng) -> SafetySettings {
     let zones = (0..rng.below(4))
         .map(|i| Zone {
             id: i as u32 + 1,
@@ -384,7 +390,20 @@ fn random_safety(rng: &mut Rng) -> SafetySettings {
     }
 }
 
-fn random_limits(rng: &mut Rng) -> OutputLimits {
+/// A venue's safety profile (T-260): random zones, limiter, caps,
+/// presence and audience permission.
+fn random_profile(rng: &mut Rng, name: &str) -> crate::profiles::SafetyProfile {
+    crate::profiles::SafetyProfile {
+        name: name.into(),
+        audience_scan_allowed: rng.chance(0.3),
+        safety: random_safety(rng),
+        limits: [(MAIN_OUTPUT.to_string(), random_limits(rng))].into_iter().collect(),
+        presence: rng.chance(0.5).then(|| PresenceSettings { hold_to_run: rng.chance(0.5), ..Default::default() }),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn random_limits(rng: &mut Rng) -> OutputLimits {
     let c = |rng: &mut Rng| if rng.chance(0.4) { 1.0 } else { rng.f() };
     OutputLimits { max_power: c(rng), max_color: [c(rng), c(rng), c(rng)] }
 }
@@ -1096,6 +1115,10 @@ fn prepare_scanning(s: &mut Shared, rng: &mut Rng) {
         let _ = s.checklist.complete();
     }
     s.presence.settings.hold_to_run = true;
+    // The venue's safety profile allows it (T-260), confirmed as the
+    // operator would.
+    let allow = crate::profiles::SaveRequest { name: "Fuzz public".into(), venue: None, notes: None, audience_scan_allowed: Some(true) };
+    crate::profiles::save(s, allow, true, ArmSource::Ui).expect("profile saved");
 }
 
 /// How much light the fuzz really exercised, so a generator that stops
@@ -1506,6 +1529,19 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
         start..start + show_len
     };
     let mut session_lit = false;
+    // Safety profiles (T-260), from their own stream: two venues, one
+    // of them damaged on disk (out of range values).
+    let mut hrng = Rng::new(seed ^ 0x0260_0260);
+    {
+        let mut s = rig.s();
+        let a = random_profile(&mut hrng, "Fuzz A");
+        let b = random_profile(&mut hrng, "Fuzz B");
+        let mut bad = random_profile(&mut hrng, "Fuzz abîmé");
+        bad.safety.horizon.y = f32::NAN;
+        for p in [a, b, bad] {
+            s.profiles.insert_for_tests(p);
+        }
+    }
     // The executor bank (T-418), from its own stream.
     let mut brng = Rng::new(seed ^ 0x0418_0418);
     let exec_on = brng.chance(0.6);
@@ -1658,6 +1694,56 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                         return Err(format!("frame {frame}: audience scanning unlocked while armed"));
                     }
                 }
+            }
+        }
+        // Safety profiles (T-260), from their own stream: random profiles
+        // loaded from any source, confirmed or not. Only the operator may
+        // load one; it never arms, always leaves the laser disarmed, and a
+        // refused one (looser and not confirmed, unknown, damaged, from a
+        // controller or the network) changes no setting. The frames that
+        // follow are checked against whatever is in force (1-17).
+        if hrng.chance(0.03) {
+            let mut s = rig.s();
+            if hrng.chance(0.3) {
+                let name = if hrng.chance(0.5) { "Fuzz A" } else { "Fuzz B" };
+                let p = random_profile(&mut hrng, name);
+                s.profiles.insert_for_tests(p);
+            }
+            let name = *hrng.pick(&["Fuzz A", "Fuzz B", crate::profiles::SAFE_PREVIEW, "Fuzz public", "Inconnu", "Fuzz abîmé"]);
+            let src = *hrng.pick(&[ArmSource::Ui, ArmSource::Keyboard, ArmSource::Api, ArmSource::Midi, ArmSource::Network, ArmSource::Osc, ArmSource::Dmx, ArmSource::System]);
+            let confirm = hrng.chance(0.5);
+            let was_armed = s.gate.is_armed();
+            let before = (s.safety.get(), s.outputs.active_limits(), s.presence.settings.clone());
+            let r = crate::profiles::load(&mut s, name, confirm, src);
+            let after = (s.safety.get(), s.outputs.active_limits(), s.presence.settings.clone());
+            use crate::profiles::LoadError;
+            match &r {
+                Ok(_) | Err(LoadError::Failed(_)) => {
+                    if s.gate.is_armed() {
+                        return Err(format!("frame {frame}: profile « {name} » loaded and the laser stayed armed"));
+                    }
+                    if !crate::profiles::operator_source(src) {
+                        return Err(format!("frame {frame}: profile loaded from {src:?}"));
+                    }
+                }
+                Err(LoadError::Source) => {
+                    if crate::profiles::operator_source(src) || after != before || s.gate.is_armed() != was_armed {
+                        return Err(format!("frame {frame}: a profile load from {src:?} changed something"));
+                    }
+                }
+                Err(LoadError::Loosens(_)) => {
+                    if confirm || after != before || s.gate.is_armed() != was_armed {
+                        return Err(format!("frame {frame}: a refused loosening (confirmed: {confirm}) changed something"));
+                    }
+                }
+                Err(LoadError::Unknown(_)) | Err(LoadError::Damaged(_)) => {
+                    if after != before || s.gate.is_armed() {
+                        return Err(format!("frame {frame}: an unknown or damaged profile changed the settings or left the laser armed"));
+                    }
+                }
+            }
+            if s.gate.is_armed() && !was_armed {
+                return Err(format!("frame {frame}: a profile load armed the laser"));
             }
         }
         // « Préparer » (T-274), from its own stream: prepare, adjust, the

@@ -953,6 +953,56 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // Safety profiles per venue (T-260). Locked in show mode (423,
+        // not in `showmode::allowed`); never recorded by undo.
+        (Method::Get, "/api/safety/profiles") => json_response(crate::profiles::view(&shared.lock().unwrap())),
+        // `{action: "save", name, venue?, notes?, audience_scan_allowed?,
+        // confirm_loosen?}` (« Enregistrer sous… »: the settings in force,
+        // which becomes the active profile), `{action: "verify", name}`,
+        // `{action: "delete", name}`. « Aperçu sûr » is refused (403).
+        (Method::Post, "/api/safety/profiles") => match body::<ProfileRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let src = ArmSource::parse(req.source.as_deref().unwrap_or("ui"));
+                if !crate::profiles::operator_source(src) {
+                    return text(403, &crate::profiles::LoadError::Source.message_fr());
+                }
+                if crate::profiles::is_builtin(&req.name) {
+                    return text(403, &format!("« {} » est intégré : il ne peut être ni modifié ni supprimé", crate::profiles::SAFE_PREVIEW));
+                }
+                let done = match req.action.as_str() {
+                    "save" => {
+                        let save = crate::profiles::SaveRequest { name: req.name.clone(), venue: req.venue, notes: req.notes, audience_scan_allowed: req.audience_scan_allowed };
+                        crate::profiles::save(&mut s, save, req.confirm_loosen, src).map(|_| ())
+                    }
+                    "verify" => crate::profiles::verify(&mut s, &req.name, crate::safety_log::today()).map(|_| ()).map_err(|e| crate::profiles::LoadError::Damaged(e.to_string())),
+                    "delete" => crate::profiles::delete(&mut s, &req.name).map_err(|e| crate::profiles::LoadError::Damaged(e.to_string())),
+                    _ => return text(400, "expected \"action\": \"save\", \"verify\" or \"delete\""),
+                };
+                match done {
+                    Ok(()) => json_response(crate::profiles::view(&s)),
+                    Err(e) => profile_error(e),
+                }
+            }
+            Err(e) => e,
+        },
+        // `{name, confirm_loosen?, source?}`: disarms (« Changement de
+        // profil »), restarts the checklist. Looser than what is in force:
+        // 409 `{error, loosen}` without `confirm_loosen` (sent only by the
+        // operator's confirmation), nothing changed. Unknown (404) or
+        // damaged (400): disarmed, settings in force kept. Not from the
+        // operator (MIDI, OSC, DMX...): 403.
+        (Method::Post, "/api/safety/profiles/load") => match body::<ProfileLoadRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let src = ArmSource::parse(req.source.as_deref().unwrap_or("ui"));
+                match crate::profiles::load(&mut s, &req.name, req.confirm_loosen, src) {
+                    Ok(_) => json_response(crate::profiles::view(&s)),
+                    Err(e) => profile_error(e),
+                }
+            }
+            Err(e) => e,
+        },
         (Method::Get, "/api/audience") => {
             let mut s = shared.lock().unwrap();
             s.sync_audience();
@@ -3813,6 +3863,39 @@ fn audience_view(s: &Shared) -> serde_json::Value {
 }
 
 /// 423 Locked: an edit refused in show mode (T-283).
+#[derive(Deserialize)]
+struct ProfileRequest {
+    action: String,
+    name: String,
+    venue: Option<String>,
+    notes: Option<String>,
+    audience_scan_allowed: Option<bool>,
+    #[serde(default)]
+    confirm_loosen: bool,
+    source: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProfileLoadRequest {
+    name: String,
+    #[serde(default)]
+    confirm_loosen: bool,
+    source: Option<String>,
+}
+
+/// The reply to a refused profile action (T-260).
+fn profile_error(e: crate::profiles::LoadError) -> HttpResponse {
+    use crate::profiles::LoadError;
+    let msg = e.message_fr();
+    match e {
+        LoadError::Source => text(403, &msg),
+        LoadError::Unknown(_) => text(404, &msg),
+        LoadError::Damaged(m) => text(400, &m),
+        LoadError::Loosens(list) => with_status(json_response(json!({ "error": msg, "loosen": list })), 409),
+        LoadError::Failed(_) => text(500, &msg),
+    }
+}
+
 fn locked() -> HttpResponse {
     text(423, crate::showmode::LOCKED_FR)
 }
@@ -4012,6 +4095,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     });
     // T-450: free space and the copy to a second location.
     v["storage"] = json!(s.project.backup.status());
+    // T-260: the active safety profile, for the status bar.
+    v["safety_profile"] = crate::profiles::summary(s);
     v
 }
 
@@ -4194,6 +4279,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     });
     // T-285: undo / redo counts and labels; `rev` moves on every change.
     v["history"] = s.history.summary();
+    // T-260: the active safety profile, for the status bar.
+    v["safety_profile"] = crate::profiles::summary(s);
     // T-418: the executor page shown, its faders, and the pages with
     // something active.
     v["executors"] = crate::executors::view(s);
@@ -5140,12 +5227,12 @@ mod tests {
         let unlock = |phrase: &str| t.request("POST", "/api/audience", &json!({ "mode": "scanning", "phrase": phrase }).to_string());
         let view: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/audience", "").1).unwrap();
         assert_eq!(view["mode"], "above");
-        assert_eq!(view["conditions"].as_array().unwrap().len(), 5);
+        assert_eq!(view["conditions"].as_array().unwrap().len(), 6);
         assert_eq!(view["phrase"], crate::audience::PHRASE);
         let (status, body) = unlock(crate::audience::PHRASE);
         assert_eq!(status, 409);
         let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(reply["missing"].as_array().unwrap().len(), 5, "{body}");
+        assert_eq!(reply["missing"].as_array().unwrap().len(), 6, "{body}");
         // Every condition met (fictitious declarations).
         {
             let mut s = t.shared.lock().unwrap();
@@ -5166,6 +5253,12 @@ mod tests {
             s.checklist.complete().unwrap();
             s.presence.settings.hold_to_run = true;
         }
+        // The venue's profile allows it (T-260): a loosening, confirmed.
+        let allow = json!({ "action": "save", "name": "Club", "audience_scan_allowed": true });
+        assert_eq!(t.request("POST", "/api/safety/profiles", &allow.to_string()).0, 409);
+        let mut confirmed = allow.clone();
+        confirmed["confirm_loosen"] = json!(true);
+        assert_eq!(t.request("POST", "/api/safety/profiles", &confirmed.to_string()).0, 200);
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
         let (status, body) = unlock(crate::audience::PHRASE);
         assert_eq!((status, serde_json::from_str::<serde_json::Value>(&body).unwrap()["armed"].clone()), (409, json!(true)));

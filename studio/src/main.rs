@@ -71,6 +71,7 @@ mod power;
 mod presence;
 mod prepared;
 mod presets;
+mod profiles;
 mod running;
 mod program;
 mod project;
@@ -510,6 +511,9 @@ pub struct Shared {
     /// The pre-show checklist (checklist.rs, T-258): the list is saved,
     /// what was ticked lives for this run only.
     pub checklist: checklist::Checklist,
+    /// Safety profiles per venue (profiles.rs, T-260): the active one is a
+    /// label over the settings in force; loading one disarms.
+    pub profiles: profiles::ProfileStore,
     /// Audience scanning mode (audience.rs, T-255). In memory only: every
     /// start is « Au-dessus du public ».
     pub audience: audience::AudienceState,
@@ -723,7 +727,7 @@ impl Shared {
     pub fn audience_conditions(&self) -> Vec<audience::Condition> {
         let safety = self.safety.get();
         let of = |projector: &power::ProjectorInfo| {
-            audience::conditions(&audience::Inputs { safety: &safety, projector, checklist: &self.checklist, hold_to_run: self.presence.settings.hold_to_run })
+            audience::conditions(&audience::Inputs { safety: &safety, projector, checklist: &self.checklist, hold_to_run: self.presence.settings.hold_to_run, venue_allows: self.profiles.audience_allowed() })
         };
         let mut conds = of(&self.outputs.active().projector);
         // Every other projector that drives an output must meet them too
@@ -1301,6 +1305,11 @@ const AUTOSAVE_SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 /// files in the data directory say, it is disarmed (reason « Démarrage »):
 /// arming is not part of any saved state, and there is no option for it.
 fn startup_state(cli: &Cli) -> Shared {
+    // First start ever (T-260): an empty data directory (the instance lock
+    // and the logs aside). Read before anything is written.
+    let fresh_install = std::fs::read_dir(&cli.data_dir)
+        .map(|entries| entries.flatten().all(|e| matches!(e.file_name().to_str(), Some(instance::LOCK_FILE) | Some("logs"))))
+        .unwrap_or(true);
     let mut gate = ArmGate::default();
     // Arming needs a connected output (T-401). The one the command line
     // names is opened by `main` right after (or the studio stops), so it
@@ -1442,6 +1451,7 @@ fn startup_state(cli: &Cli) -> Shared {
         show_mode: showmode::ShowMode::load(&cli.data_dir),
         data_warnings: Vec::new(),
         checklist: checklist::Checklist::load(cli.data_dir.join("checklist.json"), checklist_enforced(cli)),
+        profiles: profiles::ProfileStore::load(&cli.data_dir),
         audience: Default::default(),
         test_hooks: cli.test_hooks,
         menu: None,
@@ -1468,6 +1478,9 @@ fn startup_state(cli: &Cli) -> Shared {
     }
     // First start: the existing data becomes a « Sans titre » project.
     project::startup(&mut state);
+    // Safety profiles (T-260): existing settings kept as « Réglages
+    // actuels », a fresh install on « Aperçu sûr ». Never arms.
+    profiles::startup(&mut state, &cli.data_dir, fresh_install);
     // Every show is read once, so a damaged one is set aside now (T-402).
     state.shows.list();
     // Damaged files found while loading: the banner, and `data_ack` closed
@@ -2731,6 +2744,9 @@ mod tests {
         }
         s.checklist.complete().unwrap();
         s.presence.settings.hold_to_run = true;
+        // The venue's safety profile allows it (T-260), confirmed.
+        let allow = profiles::SaveRequest { name: "Club".into(), venue: None, notes: None, audience_scan_allowed: Some(true) };
+        profiles::save(&mut s, allow, true, interlock::ArmSource::Ui).unwrap();
         s
     }
 
@@ -2787,7 +2803,7 @@ mod tests {
         s.checklist.restart();
         s.sync_audience();
         assert!(!s.audience.is_scanning());
-        assert_eq!(s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui).unwrap_err(), UnlockError::Missing(vec![s.audience_conditions()[2].label_fr.to_string()]));
+        assert_eq!(s.unlock_audience_scanning(PHRASE, interlock::ArmSource::Ui).unwrap_err(), UnlockError::Missing(vec![s.audience_conditions().iter().find(|c| c.id == "checklist").unwrap().label_fr.to_string()]));
 
         // Every change is in the safety log, the unlock with its conditions.
         log.flush(Duration::from_secs(2));
@@ -3609,7 +3625,12 @@ mod tests {
         assert_eq!(s.output_mgr.state(), output_manager::LinkState::Available);
         assert_eq!(s.request_arm(ArmSource::Ui).unwrap_err(), [interlock::OUTPUT_LABEL]);
         assert_eq!(s.pps, 30_000);
-        assert!(!dir.join("outputs.json").exists(), "nothing written at start");
+        // Nothing of the connection is written at start; a fresh install
+        // only gets the « Aperçu sûr » caps (T-260).
+        let written: power::OutputsFile = load_json(&dir.join("outputs.json"));
+        assert_eq!(written.connection, output_manager::OutputPrefs::default(), "no connection written at start");
+        assert_eq!(s.outputs.active_limits().max_power, profiles::SAFE_PREVIEW_POWER);
+        assert_eq!(s.profiles.active().unwrap().name, profiles::SAFE_PREVIEW);
         let cli = Cli::try_parse_from(["laser-studio", "--no-midi", "--pps", "45000", "--data-dir", dir.to_str().unwrap()]).unwrap();
         assert_eq!(startup_state(&cli).pps, 45_000);
         assert_eq!(startup_output_id(&cli), None);
