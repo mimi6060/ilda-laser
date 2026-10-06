@@ -20,6 +20,10 @@
 // projector. Beams that enter the audience volume are drawn red and
 // counted. A design aid only: the real safety stays on the server
 // (safety.rs, zones.rs), and nothing here changes what a laser draws.
+//
+// Viewpoints (T-278): ready-made cameras computed from the venue (control
+// desk, front row, stage, plan, elevation) plus *Libre*, the last manual
+// position, reached in 400 ms. The page saves the choice in venue.json.
 
 export const DEFAULT_ROOM = { w: 10, d: 15, h: 5 };
 export const DEFAULT_PROJECTOR = { pos: [0, 3, 11], yaw: 0, pitch: 0, roll: 0, scanDeg: 40 };
@@ -259,6 +263,62 @@ export function buildSafetyOverlay({ room, projectors = [], audience = null, saf
   return { tris: new Float32Array(tris), lines: new Float32Array(lines) };
 }
 
+// ---------- camera viewpoints (T-278) ----------
+
+/** The viewpoints, in button order (Alt+Maj+1 … 6). `free`: the last manual position. */
+export const CAMERA_PRESETS = ['public', 'front', 'stage', 'top', 'side', 'free'];
+export const ORBIT_MODES = ['room', 'projector', 'camera'];
+export const DEFAULT_FOV = 50;
+/** Eye height of a standing spectator (m). */
+const EYE_M = 1.7;
+
+/**
+ * The computed viewpoints of a venue ({room {w, d, h}, projectors [{pos}],
+ * audience {rect_m}}), each {pos, target, fov} in metres:
+ * - public: the back of the room (control desk), 1.7 m, looking at the stage;
+ * - front: the stage edge of the audience area, 1.7 m, looking at the stage;
+ * - stage: behind the projectors, looking at the audience;
+ * - top: a plan, straight down, stage at the top of the image;
+ * - side: an elevation from the left wall, stage on the right.
+ */
+export function cameraPresets({ room = DEFAULT_ROOM, projectors = [], audience = null } = {}) {
+  const { w, d, h } = room;
+  const ps = projectors.length ? projectors : [DEFAULT_PROJECTOR];
+  const mean = i => ps.reduce((s, p) => s + p.pos[i], 0) / ps.length;
+  const px = mean(0), py = mean(1), pz = Math.max(...ps.map(p => p.pos[2]));
+  const aud = audienceBox(audience);
+  const fx = aud ? (aud.lo[0] + aud.hi[0]) / 2 : 0;
+  const fz = clamp(aud ? aud.hi[2] : d * 0.6, 0.2, d - 0.2);
+  const az = aud ? clamp((aud.lo[2] + aud.hi[2]) / 2, 0, d) : d * 0.3;
+  const reach = Math.tan(DEFAULT_FOV / 2 * DEG);
+  const top = Math.max(w, d) / 2 / reach * 1.1;
+  const side = Math.max(d, h) / 2 / reach * 1.1 + w / 2;
+  const f = DEFAULT_FOV;
+  return {
+    public: { pos: [0, EYE_M, Math.min(0.5, d / 4)], target: [0, py, d], fov: f },
+    front: { pos: [fx, EYE_M, fz], target: [fx, py, d], fov: f },
+    stage: { pos: [px, Math.min(py + 0.5, h - 0.1), clamp(pz + 1.5, 0.1, d - 0.1)], target: [px, EYE_M, az], fov: f },
+    // A hair off the vertical so "up" on the image stays the stage.
+    top: { pos: [0, top, d / 2 - top * 0.01], target: [0, 0, d / 2], fov: f },
+    side: { pos: [-side, h / 2, d / 2], target: [0, h / 2, d / 2], fov: f },
+  };
+}
+
+/** Orbit parameters {target, az, el, dist} of an eye looking at `target`. */
+export function orbitFromPose(pos, target) {
+  const v = [pos[0] - target[0], pos[1] - target[1], pos[2] - target[2]];
+  const dist = Math.max(1e-3, Math.hypot(v[0], v[1], v[2]));
+  return { target: [...target], az: Math.atan2(v[0], v[2]), el: Math.asin(clamp(v[1] / dist, -1, 1)), dist };
+}
+
+/** The eye of orbit parameters. */
+export function eyeOf({ target: t, az, el, dist }) {
+  return [t[0] + dist * Math.cos(el) * Math.sin(az), t[1] + dist * Math.sin(el), t[2] + dist * Math.cos(el) * Math.cos(az)];
+}
+
+/** Smoothstep easing for the 400 ms transitions. */
+export const ease = t => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
+
 /**
  * Automatic quality: drops one level when frames take longer than 20 ms
  * for 2 s in a row. Never climbs back up by itself (no oscillation).
@@ -446,6 +506,8 @@ export class BeamView {
     };
     this.buildBuffers();
     this.targets = null;
+    // Viewpoints (T-278): see presets() below.
+    this.camPreset = ''; this.freePose = null; this.orbitMode = 'room'; this.anim = null; this.onCameraChange = null;
     this.recenter();
     this.bindControls();
   }
@@ -567,6 +629,7 @@ export class BeamView {
     }
     this.selected = selected;
     this.buildRoom(); this.dirty = true;
+    this.followVenue();
   }
 
   /**
@@ -626,44 +689,188 @@ export class BeamView {
 
   // ----- camera -----
 
+  /** The default view (no viewpoint): a manual move, saved as such. */
   recenter() {
     const { w, d, h } = this.room;
     // From the audience side, a little to the right and above head height.
-    this.cam = { target: [0, h * 0.4, d * 0.55], az: Math.PI - 0.4, el: 0.3, dist: Math.max(w, d) * 1.75 };
+    this.anim = null;
+    this.cam = { target: [0, h * 0.4, d * 0.55], az: Math.PI - 0.4, el: 0.3, dist: Math.max(w, d) * 1.75, fov: this.cam?.fov ?? DEFAULT_FOV };
+    this.camPreset = ''; this.cameraChanged();
   }
   setCamera(c) { Object.assign(this.cam, c); }
 
+  // Viewpoints (T-278). `camPreset`: the viewpoint shown ('' = the default
+  // view); `freePose`: the last manual position (*Libre*); `orbitMode`:
+  // what a drag turns around. `onCameraChange` (set by the page) hears a
+  // viewpoint chosen or a manual move ended; the page saves it. Display
+  // only: the camera never changes what a laser draws.
+
+  /** The computed viewpoints of the current venue. */
+  presets() { return cameraPresets({ room: this.room, projectors: this.projectors, audience: this.audience }); }
+
+  /** Where the camera is now: preset, eye, target (m), vertical fov (°), orbit mode. */
+  cameraState() {
+    return { preset: this.camPreset, pos: eyeOf(this.cam), target: [...this.cam.target], fov: this.cam.fov, orbit: this.orbitMode, moving: !!this.anim };
+  }
+
+  /** Moves to {pos, target, fov} in `ms` (0: at once). */
+  setPose({ pos, target, fov = DEFAULT_FOV }, ms = 400) {
+    const to = { ...orbitFromPose(pos, target), fov };
+    if (ms > 0 && this.running) {
+      this.anim = { t0: performance.now(), ms, fromPos: eyeOf(this.cam), fromTarget: [...this.cam.target], fromFov: this.cam.fov, toPos: [...pos], toTarget: [...target], toFov: fov, to };
+    } else {
+      this.anim = null; this.cam = to;
+    }
+  }
+
+  /** Advances a transition (from draw). Positions are interpolated, so it never swings round. */
+  stepCamera(now = performance.now()) {
+    const a = this.anim;
+    if (!a) return;
+    const k = ease((now - a.t0) / a.ms);
+    if (k >= 1) { this.cam = a.to; this.anim = null; return; }
+    const lerp = (p, q) => p.map((v, i) => v + (q[i] - v) * k);
+    this.cam = { ...orbitFromPose(lerp(a.fromPos, a.toPos), lerp(a.fromTarget, a.toTarget)), fov: a.fromFov + (a.toFov - a.fromFov) * k };
+  }
+
+  /**
+   * Shows a viewpoint (CAMERA_PRESETS), smoothly unless `ms` is 0. *Libre*
+   * goes back to the last manual position (or stays put without one).
+   * Returns false for an unknown id.
+   */
+  applyPreset(id, { ms = 400, notify = true } = {}) {
+    if (!CAMERA_PRESETS.includes(id)) return false;
+    const pose = id === 'free' ? this.freePose : this.presets()[id];
+    if (pose) this.setPose(pose, ms);
+    this.camPreset = id;
+    if (notify) this.cameraChanged();
+    return true;
+  }
+
+  /**
+   * The saved viewpoint ({preset, pos_m, target_m, fov_deg}, as in
+   * venue.json): `pos_m` / `target_m` are the *Libre* position. At once.
+   */
+  restoreCamera(c) {
+    if (!c) return;
+    if (Array.isArray(c.pos_m) && Array.isArray(c.target_m) && c.preset) this.freePose = { pos: [...c.pos_m], target: [...c.target_m], fov: c.fov_deg || DEFAULT_FOV };
+    if (CAMERA_PRESETS.includes(c.preset)) this.applyPreset(c.preset, { ms: 0, notify: false });
+  }
+
+  /** The venue changed: a computed viewpoint follows it (not *Libre*, not mid-transition). */
+  followVenue() {
+    if (this.anim || !CAMERA_PRESETS.includes(this.camPreset) || this.camPreset === 'free') return;
+    this.setPose(this.presets()[this.camPreset], 0);
+  }
+
+  /**
+   * What a drag turns around: the room (its centre), the selected
+   * projector (the main one when none is), or the camera itself
+   * (subjective view: the eye stays, the look turns). The first two look
+   * at their centre, smoothly.
+   */
+  setOrbitMode(mode, { retarget = true } = {}) {
+    if (!ORBIT_MODES.includes(mode)) return false;
+    this.orbitMode = mode;
+    if (mode === 'camera' || !retarget) return true;
+    const { d, h } = this.room;
+    const p = this.projectors[this.selected >= 0 ? this.selected : 0];
+    const target = mode === 'room' ? [0, h / 2, d / 2] : [...p.pos];
+    const eye = eyeOf(this.cam);
+    // An eye on its pivot (standing at the projector): step back first.
+    if (Math.hypot(eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]) < 0.5) eye[2] -= 3;
+    this.setPose({ pos: eye, target, fov: this.cam.fov });
+    this.manualEnd();
+    return true;
+  }
+
+  /** A manual move starts: no viewpoint any more, any transition stops where it is. */
+  manualStart() {
+    this.anim = null;
+    if (this.camPreset !== 'free') this.camPreset = 'free';
+  }
+
+  /** A manual move ended: *Libre* remembers it, the page hears it. */
+  manualEnd() {
+    const a = this.anim;
+    this.freePose = a ? { pos: [...a.toPos], target: [...a.toTarget], fov: a.toFov } : { pos: eyeOf(this.cam), target: [...this.cam.target], fov: this.cam.fov };
+    this.camPreset = 'free';
+    this.cameraChanged();
+  }
+
+  cameraChanged() {
+    if (typeof this.onCameraChange === 'function') {
+      try { this.onCameraChange(this.savedCamera()); } catch (e) { console.warn('onCameraChange', e); }
+    }
+  }
+
+  /** What venue.json keeps: the viewpoint, and the *Libre* position. */
+  savedCamera() {
+    const a = this.anim;
+    const free = this.freePose || (a ? { pos: a.toPos, target: a.toTarget, fov: a.toFov } : { pos: eyeOf(this.cam), target: this.cam.target, fov: this.cam.fov });
+    return { preset: this.camPreset, pos_m: [...free.pos], target_m: [...free.target], fov_deg: free.fov || DEFAULT_FOV };
+  }
+
   viewProj(aspect) {
-    const { target: t, az, el, dist } = this.cam;
-    const eye = [t[0] + dist * Math.cos(el) * Math.sin(az), t[1] + dist * Math.sin(el), t[2] + dist * Math.cos(el) * Math.cos(az)];
-    return mul(perspective(50 * DEG, aspect, 0.1, 500), lookAt(eye, t, [0, 1, 0]));
+    const t = this.cam.target;
+    return mul(perspective((this.cam.fov || DEFAULT_FOV) * DEG, aspect, 0.1, 500), lookAt(eyeOf(this.cam), t, [0, 1, 0]));
+  }
+
+  /** Subjective view: the eye stays, the look turns by (daz, del). */
+  turnHead(daz, del) {
+    const eye = eyeOf(this.cam), c = this.cam;
+    c.az += daz; c.el = clamp(c.el + del, -1.4, 1.4);
+    const o = eyeOf({ ...c, target: [0, 0, 0] });
+    c.target = [eye[0] - o[0], eye[1] - o[1], eye[2] - o[2]];
+  }
+
+  /** Subjective view: walk forward (positive) or back along the look, in metres. */
+  walk(m) {
+    const o = eyeOf({ ...this.cam, target: [0, 0, 0] }), k = -m / this.cam.dist;
+    for (let i = 0; i < 3; i++) this.cam.target[i] += o[i] * k;
   }
 
   bindControls() {
     const cv = this.canvas, ptrs = new Map();
-    let pinch = 0;
+    let pinch = 0, moved = false, wheelEnd = 0;
     cv.style.touchAction = 'none';
     cv.addEventListener('pointerdown', e => { cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); pinch = 0; });
-    const up = e => { ptrs.delete(e.pointerId); pinch = 0; };
+    // A manual move (T-278): the viewpoint becomes *Libre* once it ends.
+    const up = e => {
+      ptrs.delete(e.pointerId); pinch = 0;
+      if (moved && !ptrs.size) { moved = false; this.manualEnd(); }
+    };
     cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
     cv.addEventListener('pointermove', e => {
       const last = ptrs.get(e.pointerId);
       if (!last) return;
       const dx = e.clientX - last[0], dy = e.clientY - last[1];
+      if (!dx && !dy) return;
       ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+      if (!moved) { moved = true; this.manualStart(); }
       if (ptrs.size >= 2) {
         const [a, b] = [...ptrs.values()], dd = Math.hypot(a[0] - b[0], a[1] - b[1]);
-        if (pinch) this.cam.dist = clamp(this.cam.dist * pinch / dd, 2, 120);
+        if (pinch && this.orbitMode === 'camera') this.walk((dd - pinch) * 0.02);
+        else if (pinch) this.cam.dist = clamp(this.cam.dist * pinch / dd, 2, 120);
         pinch = dd;
         this.pan(dx / 2, dy / 2);
       } else if (e.shiftKey || e.buttons === 4 || e.buttons === 2) {
         this.pan(dx, dy);
+      } else if (this.orbitMode === 'camera') {
+        // Subjective view: drag the world, the head turns.
+        this.turnHead(dx * 0.004, -dy * 0.004);
       } else {
         this.cam.az -= dx * 0.006;
-        this.cam.el = clamp(this.cam.el + dy * 0.006, -0.2, 1.5);
+        this.cam.el = clamp(this.cam.el + dy * 0.006, Math.min(-0.2, this.cam.el), Math.max(1.5, this.cam.el));
       }
     });
-    cv.addEventListener('wheel', e => { e.preventDefault(); this.cam.dist = clamp(this.cam.dist * Math.exp(e.deltaY * 0.001), 2, 120); }, { passive: false });
+    cv.addEventListener('wheel', e => {
+      e.preventDefault();
+      this.manualStart();
+      if (this.orbitMode === 'camera') this.walk(-e.deltaY * 0.01);
+      else this.cam.dist = clamp(this.cam.dist * Math.exp(e.deltaY * 0.001), 2, 120);
+      clearTimeout(wheelEnd); wheelEnd = setTimeout(() => this.manualEnd(), 300);
+    }, { passive: false });
     cv.addEventListener('dblclick', () => this.recenter());
     cv.addEventListener('contextmenu', e => e.preventDefault());
   }
@@ -693,7 +900,10 @@ export class BeamView {
     this.raf = requestAnimationFrame(tick);
   }
 
-  stop() { this.running = false; cancelAnimationFrame(this.raf); }
+  stop() {
+    this.running = false; cancelAnimationFrame(this.raf);
+    if (this.anim) { this.cam = this.anim.to; this.anim = null; }
+  }
 
   target(w, h) {
     const gl = this.gl, tex = gl.createTexture(), fb = gl.createFramebuffer();
@@ -725,6 +935,7 @@ export class BeamView {
   /** Draws one image. Also usable on its own (tests, stills). */
   draw(timeS = performance.now() / 1000) {
     const t0 = performance.now(), gl = this.gl, f = this.features(), r = this.render;
+    this.stepCamera(t0);
     if (this.dirty) this.upload();
     const T = this.ensureTargets(f.scale), S = T.scene;
     const vp = this.viewProj(S.w / S.h);

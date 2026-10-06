@@ -82,6 +82,8 @@ pub fn allowed(path: &str) -> bool {
         "/api/onboarding",
         // « Nouveautés » closed (T-452): the notes seen, not an edit.
         "/api/about/seen",
+        // The 3D view's viewpoint (T-278): where the camera stands.
+        "/api/venue/camera",
         "/api/devices/scan",
         // Playing.
         "/api/cue",

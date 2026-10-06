@@ -168,6 +168,44 @@ impl Default for RenderSettings {
     }
 }
 
+/// The 3D view's camera viewpoints (T-278), in this order: the
+/// *Libre* one is the last manual position.
+pub const CAMERA_PRESETS: [&str; 6] = ["public", "front", "stage", "top", "side", "free"];
+
+/// The 3D view's saved viewpoint (T-278): which preset, and the *Libre*
+/// one (the last manual position: eye and target in metres, vertical
+/// field of view). The page computes the other presets from the venue,
+/// so they follow the room. An empty preset is the view's own default.
+/// Display only: it never changes what a laser draws.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CameraState {
+    pub preset: String,
+    pub pos_m: [f32; 3],
+    pub target_m: [f32; 3],
+    pub fov_deg: f32,
+}
+
+impl Default for CameraState {
+    fn default() -> Self {
+        Self { preset: String::new(), pos_m: [0.0, 1.7, 0.0], target_m: [0.0, 2.0, 15.0], fov_deg: 50.0 }
+    }
+}
+
+impl CameraState {
+    /// An unknown preset becomes the default view, numbers are clamped,
+    /// and an eye on its target is moved back a little.
+    pub fn sanitized(&self) -> Self {
+        let preset = if CAMERA_PRESETS.contains(&self.preset.as_str()) { self.preset.clone() } else { String::new() };
+        let pos_m = self.pos_m.map(|v| fix(v, -1000.0, 1000.0, 0.0));
+        let mut target_m = self.target_m.map(|v| fix(v, -1000.0, 1000.0, 0.0));
+        if pos_m.iter().zip(&target_m).all(|(a, b)| (a - b).abs() < 1e-3) {
+            target_m[2] += 1.0;
+        }
+        Self { preset, pos_m, target_m, fov_deg: fix(self.fov_deg, 10.0, 120.0, 50.0) }
+    }
+}
+
 /// `venue.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -179,6 +217,9 @@ pub struct Venue {
     pub screens: Vec<Screen>,
     pub projectors: Vec<Projector>,
     pub render: RenderSettings,
+    /// The 3D view's viewpoint (T-278). Set by `POST /api/venue/camera`
+    /// only: a whole-venue post or an undo keeps the current one.
+    pub camera: CameraState,
 }
 
 impl Default for Venue {
@@ -191,6 +232,7 @@ impl Default for Venue {
             screens: Vec::new(),
             projectors: vec![Projector::default()],
             render: RenderSettings::default(),
+            camera: CameraState::default(),
         }
     }
 }
@@ -306,6 +348,7 @@ impl Venue {
             screens,
             projectors,
             render: RenderSettings { haze: fix(self.render.haze, 0.0, 1.0, 0.5), room_light: fix(self.render.room_light, 0.0, 1.0, 0.1) },
+            camera: self.camera.sanitized(),
         }
     }
 
@@ -414,6 +457,16 @@ impl VenueStore {
         }
         Ok(&self.venue)
     }
+
+    /// Saves the 3D view's viewpoint (T-278), sanitized; the rest of the
+    /// venue is untouched.
+    pub fn set_camera(&mut self, camera: CameraState) -> &CameraState {
+        self.venue.camera = camera.sanitized();
+        if let Some(path) = &self.path {
+            crate::datafile::save_json(Path::new(path), &self.venue);
+        }
+        &self.venue.camera
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +485,27 @@ mod tests {
         let back: Venue = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
         assert_eq!(back, v);
         assert_eq!(back.sanitized(), v, "sanitizing twice changes nothing");
+    }
+
+    /// T-278: a venue saved before the camera loads with the view's own
+    /// default; a hand-edited camera is repaired; the store saves it alone.
+    #[test]
+    fn the_camera_loads_by_default_and_is_repaired() {
+        let v: Venue = serde_json::from_str(r#"{"preset":"club"}"#).unwrap();
+        assert_eq!(v.camera, CameraState::default());
+        assert_eq!(v.camera.preset, "", "no preset: the 3D view keeps its own default view");
+        let c = CameraState { preset: "plafond".into(), pos_m: [f32::NAN, 2.0, 5000.0], target_m: [0.0, 2.0, 1000.0], fov_deg: 400.0 }.sanitized();
+        assert_eq!(c.preset, "");
+        assert_eq!(c.pos_m, [0.0, 2.0, 1000.0]);
+        assert_eq!(c.target_m, [0.0, 2.0, 1001.0], "an eye on its target is moved apart");
+        assert_eq!(c.fov_deg, 120.0);
+        let mut store = VenueStore::in_memory();
+        let before = store.get().projectors.clone();
+        let c = store.set_camera(CameraState { preset: "top".into(), pos_m: [0.0, 20.0, 7.5], target_m: [0.0, 0.0, 7.5], fov_deg: 50.0 });
+        assert_eq!(c.preset, "top");
+        assert_eq!(store.get().projectors, before);
+        let back: Venue = serde_json::from_str(&serde_json::to_string(store.get()).unwrap()).unwrap();
+        assert_eq!(back.camera.preset, "top");
     }
 
     #[test]

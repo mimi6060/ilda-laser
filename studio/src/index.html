@@ -886,6 +886,11 @@
   .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
   .render3d .check { margin-top: 6px; }
   /* Safety overlays in the 3D view (T-279), Theme (T-299) tokens. */
+  .cam3d { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-bottom: 4px; }
+  .cam3d .seg { flex-wrap: wrap; }
+  .cam3d .seg button { flex: none; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+  .cam3d .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .cam3d-lbl { font-size: 12px; color: var(--muted); }
   .r3safety { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0 14px; align-items: center; border-top: 1px solid var(--line); margin-top: 6px; }
   #aud3d { position: absolute; top: 12px; right: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
   #aud3d.hot, #stAudWrap.hot b { color: var(--danger); }
@@ -2220,6 +2225,21 @@
       <div id="aud3d" hidden role="status" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="aud3dN">0</b></div>
     </div>
     <div class="render3d" id="render3d" hidden>
+      <div class="cam3d" role="group" aria-labelledby="cam3dLbl">
+        <span id="cam3dLbl" class="cam3d-lbl">Point de vue</span>
+        <div class="seg" id="cam3dSeg">
+          <button data-cam="public" aria-pressed="false" title="Fond de salle, à hauteur d'yeux (1,7 m), vers la scène (Alt+Maj+1)">Public (régie)</button>
+          <button data-cam="front" aria-pressed="false" title="Bord de la zone public côté scène, à hauteur d'yeux (1,7 m) (Alt+Maj+2)">Premier rang</button>
+          <button data-cam="stage" aria-pressed="false" title="Derrière les projecteurs, vers le public : ce qui part vers la salle (Alt+Maj+3)">Scène</button>
+          <button data-cam="top" aria-pressed="false" title="Vue de dessus (plan), la scène en haut (Alt+Maj+4)">Dessus</button>
+          <button data-cam="side" aria-pressed="false" title="Vue de côté (élévation), la scène à droite (Alt+Maj+5)">Côté</button>
+          <button data-cam="free" aria-pressed="false" title="Dernière position réglée à la souris (Alt+Maj+6)">Libre</button>
+        </div>
+        <label for="cam3dOrbit">Tourner autour</label>
+        <select id="cam3dOrbit" title="Ce que la souris fait tourner : le centre de la salle, le projecteur sélectionné (le principal sinon), ou la caméra elle-même (vue subjective : la molette avance et recule)">
+          <option value="room">salle</option><option value="projector">projecteur</option><option value="camera">caméra</option>
+        </select>
+      </div>
       <div><label title="Aide à la conception, pas une mesure photométrique">Exposition <span class="v" id="r3exposureV"></span></label>
         <input type="range" id="r3exposure" data-default="100" min="10" max="400" step="5" title="Aide à la conception, pas une mesure photométrique"></div>
       <div><label>Brume : densité <span class="v" id="r3hazeV"></span></label><input type="range" id="r3haze" data-default="50" min="0" max="100"></div>
@@ -5207,6 +5227,12 @@ function buildShortcuts() {
     { id: 'sky', group: 'Sécurité', codes: ['KeyC'], alt: true, zones: '*', show: true,
       label: 'Ciel coupé : éteindre / rétablir tout au-dessus de l\'horizon (sans désarmer)',
       down: e => { if (!e.repeat) toggleSky('keyboard'); } },
+    // Points de vue de la vue 3D (T-278): Alt+Maj+chiffre, while it is shown
+    // (Alt+chiffre is the cue page, the digit alone an executor).
+    { id: 'view3d.camera', group: 'Vue 3D', codes: ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'], alt: true, shift: true, zones: '*', show: true,
+      cap: () => '1 … 6', label: 'Point de vue : Public (régie), Premier rang, Scène, Dessus, Côté, Libre (vue 3D affichée)',
+      when: () => show3d && !!view3d,
+      down: (e, i) => { if (!e.repeat) setCam3d(beam3d.CAMERA_PRESETS[i]); } },
     { id: 'workspace', group: 'Espaces de travail', codes: ['F1', 'F2', 'F3', 'F4'], zones: '*', typing: true, show: false,
       cap: () => 'F1 … F4', label: 'LIVE, TIMELINE, CRÉATION, RÉGLAGES (en mode spectacle : LIVE et TIMELINE)',
       down: (e, i) => setWorkspace(WORKSPACES[i]) },
@@ -6124,6 +6150,41 @@ function bindRender3d() {
   }, 500);
   setInterval(() => { if (show3d && view3d) showAud3d(); }, 200);
 }
+// Viewpoints (T-278): computed from the venue by beam3d.js; the choice
+// (and the *Libre* position) is saved in venue.json through
+// /api/venue/camera, a view like a camera move: allowed in show mode,
+// never undone, never touching the output. The orbit mode is this
+// browser's. Display only: the 3D view is a design aid, not a safety check.
+const ORBIT_KEY = 'laserStudio.beam3d.orbit';
+let cam3dRestored = false, cam3dTimer = 0;
+function bindCam3d() {
+  view3d.setOrbitMode(remembered(ORBIT_KEY) || 'room', { retarget: false });
+  view3d.onCameraChange = c => {
+    showCam3d();
+    if (venue) venue.camera = c;
+    clearTimeout(cam3dTimer);
+    cam3dTimer = setTimeout(() => api('POST', '/api/venue/camera', c, { quiet: true }).catch(() => { /* next move saves it */ }), 300);
+  };
+  document.querySelectorAll('#cam3dSeg button').forEach(b => b.onclick = () => setCam3d(b.dataset.cam));
+  $('cam3dOrbit').onchange = e => { view3d.setOrbitMode(e.target.value); remember(ORBIT_KEY, e.target.value); showCam3d(); };
+  showCam3d();
+}
+function setCam3d(id) {
+  if (!view3d || !show3d) return false;
+  view3d.applyPreset(id);
+  showCam3d();
+}
+function showCam3d() {
+  if (!view3d) return;
+  const st = view3d.cameraState();
+  document.querySelectorAll('#cam3dSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.cam === st.preset)));
+  $('cam3dOrbit').value = st.orbit;
+}
+// The camera for the e2e tests and the console: read only.
+window.__viz = {
+  camera: () => view3d ? view3d.cameraState() : null,
+  presets: () => view3d ? view3d.presets() : null,
+};
 // Stage tabs (T-270): 2D, 3D, or both side by side. The choice is
 // remembered in this browser.
 const STAGE_KEY = 'laserStudio.stageTab';
@@ -6136,7 +6197,7 @@ async function setView(mode) {
       beam3d ??= await import('/beam3d.js');
       if (!beam3d.BeamView.supported()) throw new Error('no WebGL2');
       view3d = new beam3d.BeamView($('beams'), { render: { ...beam3d.DEFAULT_RENDER, ...loadRender3d() } });
-      bindRender3d(); showRender3d();
+      bindRender3d(); bindCam3d(); showRender3d();
     } catch (e) {
       console.warn('3D view unavailable:', e);
       $('beamsMsg').hidden = false;
@@ -14779,6 +14840,8 @@ function venueTo3d() {
     selected: venue.projectors.length > 1 && $('venuePanel').open ? vnSel : -1,
     audience: venue.audience,
   });
+  // The saved viewpoint, once: later reloads of the venue keep the camera.
+  if (!cam3dRestored) { cam3dRestored = true; view3d.restoreCamera(venue.camera); showCam3d(); }
   outdoorTo3d();
 }
 async function pollFrames3d() {
