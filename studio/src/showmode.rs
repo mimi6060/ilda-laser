@@ -155,7 +155,9 @@ pub fn allowed(path: &str) -> bool {
         "/api/checklist/complete",
         "/api/checklist/restart",
     ];
-    PLAY.contains(&path) || path.starts_with("/api/test/")
+    // Vues et préférences d'opérateur (T-426): the operator's own screen
+    // layout, kept outside the project; never the output.
+    PLAY.contains(&path) || path.starts_with("/api/test/") || path.starts_with("/api/operators/")
 }
 
 /// Turns show mode on or off. Entering cancels a MIDI or DMX learn. Logged in

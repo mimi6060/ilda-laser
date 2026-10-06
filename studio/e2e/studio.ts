@@ -188,6 +188,14 @@ export class Studio {
     await this.post('/api/control', { id: 'master.reset' });
   }
 
+  /** T-426: back to the empty « Défaut » operator (views and interface preferences). */
+  async resetOperator() {
+    try {
+      await this.post('/api/operators/current', { name: 'Défaut' });
+      await this.post('/api/operators/' + encodeURIComponent('Défaut'), { views: [], prefs: {} });
+    } catch { /* studio not running (a spec that restarts it) */ }
+  }
+
   /** Ctrl+C (the studio's clean shutdown), then SIGKILL if it hangs. */
   async stop() {
     const p = this.proc;
@@ -273,6 +281,9 @@ export class Studio {
 export function useStudio(opts: StudioOptions = {}): Studio {
   const studio = new Studio(opts);
   base.beforeAll(async () => { await studio.start(); });
+  // T-426: each test opens a fresh browser, which takes the operator's
+  // preferences from the studio; start every test from an empty profile.
+  base.beforeEach(async () => { await studio.resetOperator(); });
   base.afterAll(async () => {
     try { await studio.post('/api/arm', { on: false }); } catch { /* already stopped */ }
     await studio.stop();
