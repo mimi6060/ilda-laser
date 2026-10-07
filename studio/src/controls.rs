@@ -398,6 +398,14 @@ impl ControlRegistry {
             add(format!("group.{n}.master"), format!("Maître groupe {n}"), "group", cont(0.0, 1.0, 1.0, Unit::Percent), true);
         }
         add("group.all_full".into(), "Maîtres de groupe : tout à 100 %".into(), "group", ControlKind::Trigger, true);
+        // Zone chasers (T-170): free-running on/off and the speed of them
+        // all. Routing only, steps bounded by the strobe limit: they never
+        // add light and never arm. With the masters (« Maîtres » scope).
+        for n in 1..=crate::zonechase::MAX_CHASERS {
+            add(format!("chaser.{n}.enabled"), format!("Chenillard de zones {n}"), "group", ControlKind::Toggle { default: false }, true);
+        }
+        let rates = ControlKind::Choice { options: crate::zonechase::RATE_LABELS.to_vec(), default: crate::zonechase::DEFAULT_RATE };
+        add("chaser.rate".into(), "Vitesse des chenillards de zones".into(), "group", rates, true);
 
         // The executor bank (T-418): every page's handles, the page shown
         // and its `exec.cur.*` aliases. Playback only: none of them arms,
@@ -670,6 +678,10 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             s.projection.set_masters(&vec![1.0; n]);
             s.groups_dirty = true;
         }
+        "chaser.rate" => {
+            s.projection.set_chase_rate(crate::zonechase::RATES[choice_index(&desc.kind, input)]);
+            s.groups_dirty = true;
+        }
         "fx.stop" => s.fx.stop_all(),
         "fx.dest" => s.fx.set_dest(crate::fx::DESTS[choice_index(&desc.kind, input)]),
         "fx.mode" => s.fx.set_click(crate::fx::CLICKS[choice_index(&desc.kind, input)]),
@@ -712,6 +724,13 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             if let Some(n) = group_master_control(other) {
                 if !s.projection.set_master(n, value(input)) {
                     return Err(ControlError::Refused("ce groupe de zones n'existe pas"));
+                }
+                s.groups_dirty = true;
+                return Ok(());
+            }
+            if let Some(n) = chaser_control(other) {
+                if !s.projection.set_chaser_enabled(n, truthy(input)) {
+                    return Err(ControlError::Refused("ce chenillard de zones n'existe pas"));
                 }
                 s.groups_dirty = true;
                 return Ok(());
@@ -781,6 +800,11 @@ fn finite(input: ControlInput) -> Result<ControlInput, ControlError> {
 /// "group.<n>.master" → n (1-based), for registered ids only.
 fn group_master_control(id: &str) -> Option<usize> {
     id.strip_prefix("group.")?.strip_suffix(".master")?.parse().ok()
+}
+
+/// "chaser.<n>.enabled" → n (1-based), for registered ids only (T-170).
+fn chaser_control(id: &str) -> Option<usize> {
+    id.strip_prefix("chaser.")?.strip_suffix(".enabled")?.parse().ok()
 }
 
 /// "layer.<n>.<param>" → (n, param), for registered ids only.
@@ -1056,6 +1080,8 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         },
         id if id.starts_with("exec.") => crate::executors::current(s, id)?,
         id if id.starts_with("group.") => json!(s.projection.master(group_master_control(id)?)?),
+        "chaser.rate" => json!(crate::zonechase::RATES.iter().position(|r| *r == s.projection.get().chase_rate).unwrap_or(crate::zonechase::DEFAULT_RATE)),
+        id if id.starts_with("chaser.") => json!(s.projection.chaser_enabled(chaser_control(id)?)?),
         id if id.starts_with("layer.") => {
             let (n, param) = layer_control(id)?;
             let l = s.mixer.layer(n);
@@ -2053,6 +2079,7 @@ mod tests {
             zones: vec![ProjectionZone { id: 1, ..Default::default() }, ProjectionZone { id: 2, ..Default::default() }],
             default_zones: vec![1],
             groups: vec![ZoneGroup { name: "Centre".into(), zones: vec![1], master: 1.0 }, ZoneGroup { name: "Côtés".into(), zones: vec![2], master: 1.0 }],
+            ..Default::default()
         };
         s.projection.set(cfg).unwrap();
         apply(&mut s, "group.2.master", ControlInput::Value(0.5), true).unwrap();
@@ -2069,6 +2096,46 @@ mod tests {
         apply(&mut s, "group.all_full", ControlInput::Value(1.0), true).unwrap();
         assert_eq!(s.projection.masters(), [1.0, 1.0]);
         assert_eq!(current(&s, s.controls.get("group.3.master").unwrap()), None);
+        assert!(!s.gate.is_armed());
+    }
+
+    /// T-170: `chaser.<n>.enabled` (toggle) and `chaser.rate` (choice),
+    /// external, with the masters; a missing chaser refuses; the values
+    /// read back; nothing arms.
+    #[test]
+    fn zone_chaser_controls_start_stop_and_set_the_rate() {
+        use crate::projection::{ProjectionConfig, ProjectionZone, ZoneGroup};
+        use crate::zonechase::{ZoneChaser, MAX_CHASERS};
+        let mut s = shared();
+        for n in 1..=MAX_CHASERS {
+            let d = s.controls.get(&format!("chaser.{n}.enabled")).unwrap_or_else(|| panic!("chaser.{n}.enabled"));
+            assert!(d.external);
+            assert_eq!(d.group, "group");
+            assert_eq!(d.kind, ControlKind::Toggle { default: false });
+        }
+        let rate = s.controls.get("chaser.rate").unwrap().clone();
+        assert!(rate.external && matches!(rate.kind, ControlKind::Choice { default: 2, .. }));
+        assert!(matches!(apply(&mut s, "chaser.1.enabled", ControlInput::Value(1.0), true), Err(ControlError::Refused(_))), "no chaser yet");
+        let cfg = ProjectionConfig {
+            zones: vec![ProjectionZone { id: 1, ..Default::default() }, ProjectionZone { id: 2, ..Default::default() }],
+            groups: vec![ZoneGroup { name: "G".into(), zones: vec![1], master: 1.0 }, ZoneGroup { name: "D".into(), zones: vec![2], master: 1.0 }],
+            chasers: vec![ZoneChaser { name: "G-D".into(), steps: vec![0, 1], ..Default::default() }],
+            ..Default::default()
+        };
+        s.projection.set(cfg).unwrap();
+        apply(&mut s, "chaser.1.enabled", ControlInput::Value(1.0), true).unwrap();
+        assert!(s.groups_dirty);
+        assert_eq!(current(&s, s.controls.get("chaser.1.enabled").unwrap()), Some(json!(true)));
+        assert_eq!(current(&s, s.controls.get("chaser.2.enabled").unwrap()), None);
+        apply(&mut s, "chaser.rate", ControlInput::Value(4.0), true).unwrap();
+        assert_eq!(s.projection.get().chase_rate, 4.0);
+        assert_eq!(current(&s, &rate), Some(json!(4)));
+        apply(&mut s, "chaser.rate", ControlInput::Norm(0.0), true).unwrap();
+        assert_eq!(s.projection.get().chase_rate, 0.25);
+        apply(&mut s, "master.reset", ControlInput::Value(1.0), true).unwrap();
+        assert_eq!(s.projection.chaser_enabled(1), Some(true), "Réinitialiser le direct leaves the chasers");
+        apply(&mut s, "chaser.1.enabled", ControlInput::Value(0.0), true).unwrap();
+        assert_eq!(s.projection.chaser_enabled(1), Some(false));
         assert!(!s.gate.is_armed());
     }
 }

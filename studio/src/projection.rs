@@ -27,12 +27,18 @@
 use crate::engine::Calibration;
 use crate::layers::{self, MixReport, Mixer, LAYER_COUNT};
 use crate::patterns::Point;
+use crate::zonechase::{self, ZoneChaser};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Zone ids are 1..=MAX_ZONES.
 pub const MAX_ZONES: u8 = 8;
+
+/// A routing that reaches no zone (zone ids start at 1): a look a zone
+/// chase (T-170) leaves without any of its zones this step is drawn
+/// nowhere, as a cue routed to a zone that doesn't exist.
+pub const NO_ZONE: u8 = 0;
 
 /// The scan field's corners, in warp order: bottom left, bottom right,
 /// top right, top left (y up).
@@ -291,9 +297,12 @@ impl Default for ProjectionZone {
     }
 }
 
-/// Groups with a master (`group.<n>.master`, T-420); more groups can
-/// exist in no version, so a file never holds more.
+/// Groups with a master control (`group.<n>.master`, T-420): the first
+/// ones. Groups past them keep the level they have (100 % when created).
 pub const GROUP_MASTER_CONTROLS: usize = 16;
+
+/// Zone groups in a configuration (T-170).
+pub const MAX_GROUPS: usize = 32;
 
 /// A named group of projection zones (« Centre », « Côtés ») and its
 /// master: an inhibitive dimmer, 0..1, that multiplies the colours of
@@ -362,11 +371,17 @@ pub struct ProjectionConfig {
     /// Zone groups and their masters (T-420). Missing in files saved
     /// before: none.
     pub groups: Vec<ZoneGroup>,
+    /// Zone chasers (T-170, zonechase.rs) over these groups. Missing in
+    /// files saved before: none.
+    pub chasers: Vec<ZoneChaser>,
+    /// `chaser.rate`: every chaser's speed multiplier, one of
+    /// `zonechase::RATES`. A playing value.
+    pub chase_rate: f32,
 }
 
 impl Default for ProjectionConfig {
     fn default() -> Self {
-        Self { zones: vec![ProjectionZone::default()], default_zones: vec![1], groups: Vec::new() }
+        Self { zones: vec![ProjectionZone::default()], default_zones: vec![1], groups: Vec::new(), chasers: Vec::new(), chase_rate: 1.0 }
     }
 }
 
@@ -390,12 +405,23 @@ impl ProjectionConfig {
                 check_quad(&z.geometry.warp.corners).map_err(|e| anyhow::anyhow!("zone {} : {e}", z.id))?;
             }
         }
-        if self.groups.len() > GROUP_MASTER_CONTROLS {
-            bail!("au plus {GROUP_MASTER_CONTROLS} groupes");
+        if self.groups.len() > MAX_GROUPS {
+            bail!("au plus {MAX_GROUPS} groupes");
         }
         for g in &self.groups {
             if let Some(id) = g.zones.iter().find(|id| self.zone(**id).is_none()) {
                 bail!("le groupe « {} » contient la zone {id}, qui n'existe pas", g.name.trim());
+            }
+        }
+        if self.chasers.len() > zonechase::MAX_CHASERS {
+            bail!("au plus {} chenillards", zonechase::MAX_CHASERS);
+        }
+        for c in &self.chasers {
+            if c.steps.len() > zonechase::MAX_STEPS {
+                bail!("le chenillard « {} » a plus de {} pas", c.name.trim(), zonechase::MAX_STEPS);
+            }
+            if let Some(g) = c.steps.iter().find(|g| **g >= self.groups.len()) {
+                bail!("le chenillard « {} » passe par le groupe {}, qui n'existe pas", c.name.trim(), g + 1);
             }
         }
         Ok(())
@@ -432,7 +458,7 @@ impl ProjectionConfig {
         let groups = self
             .groups
             .iter()
-            .take(GROUP_MASTER_CONTROLS)
+            .take(MAX_GROUPS)
             .enumerate()
             .map(|(i, g)| {
                 let mut ids: Vec<u8> = g.zones.iter().copied().filter(|id| zones.iter().any(|z| z.id == *id)).collect();
@@ -444,8 +470,22 @@ impl ProjectionConfig {
                 }
                 ZoneGroup { name, zones: ids, master: master_level(g.master) }
             })
-            .collect();
-        Self { zones, default_zones, groups }
+            .collect::<Vec<_>>();
+        let chasers = zonechase::sanitize(&self.chasers, groups.len());
+        Self { zones, default_zones, groups, chasers, chase_rate: zonechase::snap_rate(self.chase_rate) }
+    }
+
+    /// The configuration without its playing values (group masters at
+    /// 100 %, chasers stopped, rate ×1): what an edit changes. The undo
+    /// history compares and restores this (`history.rs`): a master or a
+    /// chaser played since an edit doesn't make its undo stale, and an
+    /// undo never moves them (`ProjectionStore::set` keeps them).
+    pub fn without_playing(&self) -> Self {
+        let mut cfg = self.clone();
+        cfg.groups.iter_mut().for_each(|g| g.master = 1.0);
+        cfg.chasers.iter_mut().for_each(|c| c.enabled = false);
+        cfg.chase_rate = 1.0;
+        cfg
     }
 
     pub fn zone(&self, id: u8) -> Option<&ProjectionZone> {
@@ -544,7 +584,9 @@ impl ProjectionStore {
     /// controls: a group that already exists (same name) keeps its level
     /// whatever the page sent (it may hold a stale copy), even when the
     /// groups before it were removed; a new group takes the level it
-    /// comes with.
+    /// comes with. The same for the chasers (T-170): one that exists
+    /// (same name) keeps whether it runs, a new one takes what it comes
+    /// with; the rate (`chaser.rate`) is kept.
     pub fn set(&mut self, cfg: ProjectionConfig) -> Result<()> {
         cfg.validate()?;
         let mut cfg = cfg.sanitized();
@@ -553,6 +595,12 @@ impl ProjectionStore {
                 g.master = old.master;
             }
         }
+        for c in &mut cfg.chasers {
+            if let Some(old) = self.cfg.chasers.iter().find(|o| o.name == c.name) {
+                c.enabled = old.enabled;
+            }
+        }
+        cfg.chase_rate = self.cfg.chase_rate;
         self.cfg = cfg;
         if self.align.is_some_and(|id| self.cfg.zone(id).is_none()) {
             self.align = None;
@@ -596,6 +644,29 @@ impl ProjectionStore {
         for (i, g) in self.cfg.groups.iter_mut().enumerate() {
             g.master = master_level(levels.get(i).copied().unwrap_or(1.0));
         }
+    }
+
+    /// Starts or stops chaser `n` (1-based) free-running. Memory only: the
+    /// caller marks `groups_dirty`. False if no such chaser.
+    pub fn set_chaser_enabled(&mut self, n: usize, on: bool) -> bool {
+        match n.checked_sub(1).and_then(|i| self.cfg.chasers.get_mut(i)) {
+            Some(c) => {
+                c.enabled = on;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Chaser `n` (1-based) runs free, if it exists.
+    pub fn chaser_enabled(&self, n: usize) -> Option<bool> {
+        self.cfg.chasers.get(n.checked_sub(1)?).map(|c| c.enabled)
+    }
+
+    /// Sets every chaser's speed multiplier (snapped to `zonechase::RATES`).
+    /// Memory only: the caller marks `groups_dirty`.
+    pub fn set_chase_rate(&mut self, rate: f32) {
+        self.cfg.chase_rate = zonechase::snap_rate(rate);
     }
 
     /// The geometry a test pattern goes through (T-404 + alignment).
@@ -863,7 +934,7 @@ mod tests {
         assert_eq!(s.zones[1].name, "Zone 3");
         assert_eq!(s.zones[0].output, None);
         assert_eq!(s.default_zones, [3]);
-        let empty = ProjectionConfig { zones: vec![], default_zones: vec![], groups: vec![] }.sanitized();
+        let empty = ProjectionConfig { zones: vec![], default_zones: vec![], ..Default::default() }.sanitized();
         assert_eq!(empty, ProjectionConfig::default());
         // An old or empty file: one neutral zone, the default.
         let old: ProjectionConfig = serde_json::from_str("{}").unwrap();
@@ -1041,13 +1112,86 @@ mod tests {
         assert_eq!(s.groups[1].master, 0.0);
         cfg.groups = vec![group("X", &[5], 1.0)];
         assert!(cfg.validate().is_err(), "a group on a zone that doesn't exist");
+        // Up to 32 groups (T-170), the first 16 with a master control.
         cfg.groups = vec![group("X", &[1], 1.0); GROUP_MASTER_CONTROLS + 1];
+        cfg.validate().unwrap();
+        cfg.groups = vec![group("X", &[1], 1.0); MAX_GROUPS + 1];
         assert!(cfg.validate().is_err());
+        assert_eq!(cfg.sanitized().groups.len(), MAX_GROUPS);
         // A zone that goes leaves its groups.
         let mut one = two_zones();
         one.groups = vec![group("G", &[1, 2], 1.0)];
         one.zones.pop();
         assert_eq!(one.sanitized().groups[0].zones, [1]);
+    }
+
+    fn chaser(name: &str, steps: &[usize], enabled: bool) -> ZoneChaser {
+        ZoneChaser { name: name.into(), steps: steps.to_vec(), enabled, ..Default::default() }
+    }
+
+    /// T-170: chasers load from files without them, are checked against
+    /// the groups, and their playing values (running, rate) survive a
+    /// stale POST like the masters do.
+    #[test]
+    fn chasers_are_validated_and_keep_their_playing_values() {
+        let old: ProjectionConfig = serde_json::from_str(r#"{"zones":[{"id":1}],"default_zones":[1],"groups":[{"name":"A","zones":[1]}]}"#).unwrap();
+        assert!(old.chasers.is_empty());
+        assert_eq!(old.chase_rate, 1.0);
+        let mut cfg = two_zones();
+        cfg.groups = vec![group("Gauche", &[1], 1.0), group("Droite", &[2], 1.0)];
+        cfg.chasers = vec![chaser("G-D", &[0, 1], false)];
+        cfg.validate().unwrap();
+        cfg.chasers[0].steps.push(2);
+        assert!(cfg.validate().is_err(), "a step on a group that doesn't exist");
+        cfg.chasers[0].steps.pop();
+        let mut many = cfg.clone();
+        many.chasers = vec![chaser("C", &[0], false); zonechase::MAX_CHASERS + 1];
+        assert!(many.validate().is_err());
+        many.chasers = vec![chaser("C", &[0; zonechase::MAX_STEPS + 1], false)];
+        assert!(many.validate().is_err());
+        let mut store = ProjectionStore::in_memory();
+        store.set(cfg.clone()).unwrap();
+        assert!(store.set_chaser_enabled(1, true));
+        assert!(!store.set_chaser_enabled(2, true), "no chaser 2");
+        store.set_chase_rate(3.5);
+        assert_eq!(store.get().chase_rate, 4.0, "snapped to x4");
+        // The page posts a stale copy (stopped, x1) with a new chaser.
+        let mut stale = cfg.clone();
+        stale.chasers.push(chaser("Nouveau", &[1, 0], true));
+        store.set(stale).unwrap();
+        assert_eq!(store.chaser_enabled(1), Some(true), "still running");
+        assert_eq!(store.chaser_enabled(2), Some(true), "a new chaser comes as posted");
+        assert_eq!(store.get().chase_rate, 4.0);
+        // What an edit is, for the undo history: no playing value.
+        let edit = store.get().without_playing();
+        assert!(edit.chasers.iter().all(|c| !c.enabled) && edit.chase_rate == 1.0 && edit.groups.iter().all(|g| g.master == 1.0));
+    }
+
+    /// T-170 acceptance: a zone outside the active group gets no point;
+    /// with the chase off the routing is as before.
+    #[test]
+    fn a_zone_outside_the_active_group_gets_no_point() {
+        let mut cfg = two_zones();
+        cfg.default_zones = vec![1, 2];
+        cfg.groups = vec![group("Gauche", &[1], 1.0), group("Droite", &[2], 1.0)];
+        cfg.chasers = vec![chaser("G-D", &[0, 1], true)];
+        let draw = |cfg: &ProjectionConfig, beat: f64| {
+            let now = zonechase::ChaseNow::at(cfg, beat, 120.0, 4.0);
+            let zones = now.route(cfg, &[], None);
+            render(vec![(1, line(0.0), zones)], cfg, None, &Mixer::default(), |_, p| p.to_vec(), &Calibration::default()).0
+        };
+        let side = |f: &[Point], x: f32| f.iter().filter(|p| (p.x - x).abs() < 1e-6).count();
+        let left = draw(&cfg, 0.5);
+        assert!(side(&left, -0.5) > 0 && side(&left, 0.5) == 0, "beat 0: Gauche only");
+        let right = draw(&cfg, 1.5);
+        assert!(side(&right, 0.5) > 0 && side(&right, -0.5) == 0, "beat 1: Droite only");
+        cfg.chasers[0].enabled = false;
+        let both = draw(&cfg, 1.5);
+        assert!(side(&both, -0.5) > 0 && side(&both, 0.5) > 0, "chase off: normal routing");
+        // A step on a group of no routed zone: nothing drawn at all.
+        cfg.groups.push(group("Vide", &[], 1.0));
+        cfg.chasers = vec![chaser("Rien", &[2], true)];
+        assert!(draw(&cfg, 0.0).iter().all(|p| !p.is_lit()));
     }
 
     #[test]

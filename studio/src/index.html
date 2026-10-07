@@ -905,6 +905,18 @@
   .layer button.solo.active { background: var(--warn); border-color: var(--warn); color: #2b1d00; }
   /* Maîtres de groupe (T-420) */
   #groupMasters[hidden] { display: none; }
+  #zoneChase[hidden] { display: none; }
+  #zoneChase .layers-head select { min-height: 44px; }
+  .zc-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
+  .zc-btn { min-height: 44px; min-width: 88px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 4px 10px; }
+  .zc-btn .zc-on { font-size: 11px; color: var(--muted); }
+  .zc-btn[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .zc-btn[aria-pressed="true"] .zc-on { color: var(--text); }
+  .zc-stepline { display: flex; align-items: center; gap: 6px; }
+  .zc-stepline select { flex: 1; min-height: 44px; }
+  .zc-stepline .zc-del, .pz-chaser .row button { min-height: 44px; min-width: 44px; }
+  .pz-chaser select { min-height: 44px; }
+  .zc-now { font-size: 12px; color: var(--muted); }
   #groupMasters .layers-head button { padding: 2px 8px; font-size: 11px; }
   .gm-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .gm-row .layer { width: 72px; }
@@ -2988,6 +3000,14 @@
       </div>
       <div class="gm-row" id="gmRow"></div>
     </div>
+    <!-- Zone chasers (T-170): start / stop each one, the group it is on. -->
+    <div id="zoneChase" hidden>
+      <div class="layers-head">
+        <span title="Le contenu passe d'un groupe de zones au suivant au rythme du tempo ; il n'ajoute jamais de lumière (RÉGLAGES › Zones de projection › Chenillards)">Chenillards de zones</span>
+        <select id="zcRate" data-control="chaser.rate" aria-label="Vitesse des chenillards" title="chaser.rate : vitesse de tous les chenillards de zones"></select>
+      </div>
+      <div class="zc-row" id="zcRow"></div>
+    </div>
     <!-- Exécuteurs (T-418): pages of 8 faders + 2 buttons, assigned by the operator. -->
     <div id="execBank" role="region" aria-label="Exécuteurs">
       <div class="layers-head">
@@ -4136,6 +4156,14 @@
         <div id="pzGroups"></div>
         <div class="row"><button id="pzGroupAdd">Ajouter un groupe</button></div>
         </div>
+        <div id="pzChaseBlock" data-search="Chenillards de zones (groupes de projecteurs)">
+        <div class="tp-sub">Chenillards de zones</div>
+        <div class="hint">Un chenillard fait passer le contenu d'un groupe de zones au suivant au rythme du tempo (gauche, centre, droite…). Libre : il s'applique à tous les cues sans chenillard lié ; lié à un cue (« Propriétés du cue ») : à ce cue seulement. Il ne fait que choisir les zones qui reçoivent le contenu : il n'ajoute jamais de lumière, et un pas ne dure jamais moins que ce que permet le limiteur de strobe. Toute la sécurité reste appliquée après. Les exports de fichiers dessinent toutes les zones du cue, sans chenillard.</div>
+        <div id="pzChasers"></div>
+        <div class="row"><button id="pzChaserAdd">Ajouter un chenillard</button></div>
+        <label for="pzChaseRate">Vitesse de tous les chenillards</label>
+        <select id="pzChaseRate" data-control="chaser.rate" title="chaser.rate : multiplie la vitesse de tous les chenillards de zones"></select>
+        </div>
         <div class="hint sf-error" id="pzError" role="alert"></div>
       </details>
     </section>
@@ -4695,6 +4723,8 @@
   <select id="cueMenuShow"><option value="">Aucun</option></select>
   <label>Zones de projection (aucune = zones par défaut)</label>
   <div id="cueMenuZones" class="pz-checks"></div>
+  <label for="cueMenuChaser">Chenillard de zones</label>
+  <select id="cueMenuChaser" title="Chenillard lié à ce cue (RÉGLAGES › Zones de projection › Chenillards) : tant qu'il joue, ses zones suivent ce chenillard au lieu des chenillards libres"><option value="">Aucun (chenillards libres)</option></select>
   <label class="check" title="« Arrêter les cues » et « Tout arrêter » le laissent jouer ; l'arrêt d'urgence coupe tout"><input type="checkbox" id="cueMenuProtStop"> Protégé de Tout arrêter</label>
   <label class="check" title="Reste affiché quand un autre cue est tenu en mode Solo"><input type="checkbox" id="cueMenuProtSolo"> Protégé du solo</label>
   <label for="cueMenuCellColor">Couleur de la case</label>
@@ -8300,12 +8330,15 @@ $('pzWarp').addEventListener('change', () => {
 $('pzResetCorners').addEventListener('click', () => { pzZone().geometry.warp.corners = PZ_SQUARE.map(c => c.slice()); saveProjection(true); });
 $('pzResetGeo').addEventListener('click', () => { pzZone().geometry = pzNeutral(); saveProjection(true); });
 // Zone groups (T-420): name and zones here; the master's level is only a
-// reminder (it moves in LIVE, through `group.<n>.master`).
+// reminder (it moves in LIVE, through `group.<n>.master`). Up to 32 groups
+// (T-170), the first 16 with a master.
+const PZ_MAX_GROUPS = 32, PZ_MASTER_CONTROLS = 16;
 let pzGroupsKey = '';
 function pzShowGroups() {
   const groups = proj.groups || (proj.groups = []);
   const key = JSON.stringify([groups, proj.zones.map(z => [z.id, z.name])]);
-  $('pzGroupAdd').disabled = groups.length >= 16;
+  $('pzGroupAdd').disabled = groups.length >= PZ_MAX_GROUPS;
+  pzShowChasers();
   const typing = document.activeElement?.type === 'text' && $('pzGroups').contains(document.activeElement);
   if (key === pzGroupsKey || typing) return;
   pzGroupsKey = key;
@@ -8337,17 +8370,100 @@ function pzShowGroups() {
       l.append(c, ` ${z.id} · ${z.name}`);
       return l;
     }));
-    d.querySelector('.gm-level').textContent = `Maître : ${Math.round((g.master ?? 1) * 100)} % (LIVE)`;
-    d.querySelector('.del').addEventListener('click', () => { proj.groups.splice(i, 1); saveProjection(true); });
+    d.querySelector('.gm-level').textContent = i < PZ_MASTER_CONTROLS ? `Maître : ${Math.round((g.master ?? 1) * 100)} % (LIVE)` : 'Sans maître (16 premiers groupes seulement)';
+    d.querySelector('.del').addEventListener('click', () => {
+      proj.groups.splice(i, 1);
+      // The chasers' steps on it go, the later groups move up (T-170).
+      for (const c of proj.chasers || []) c.steps = c.steps.filter(g => g !== i).map(g => g > i ? g - 1 : g);
+      saveProjection(true);
+    });
     return d;
   }));
 }
 $('pzGroupAdd').addEventListener('click', () => {
   const groups = proj.groups || (proj.groups = []);
-  if (groups.length >= 16) return;
+  if (groups.length >= PZ_MAX_GROUPS) return;
   groups.push({ name: `Groupe ${groups.length + 1}`, zones: [], master: 1 });
   saveProjection(true);
 });
+// Zone chasers (T-170): name, steps (groups in order), step length and
+// mode are edits of the zones (`POST /api/projection`: history, locked in
+// show mode); running and the speed are playing values (`chaser.<n>.enabled`,
+// `chaser.rate` through `/api/control`), allowed in show mode.
+const ZC_STEPS = [0.25, 0.5, 1, 2, 4], ZC_STEP_FR = ['1/4 temps', '1/2 temps', '1 temps', '2 temps', '4 temps'];
+const ZC_MODES = [['forward', 'Avant'], ['bounce', 'Aller-retour'], ['random', 'Aléatoire']];
+const ZC_RATES_FR = ['×1/4', '×1/2', '×1', '×2', '×4'];
+const ZC_MAX = 16, ZC_MAX_STEPS = 32;
+let pzChasersKey = '';
+function zcOptions(sel, pairs, value) {
+  sel.replaceChildren(...pairs.map(([v, t]) => new Option(t, String(v))));
+  sel.value = String(value);
+}
+function pzShowChasers() {
+  const chasers = proj.chasers || (proj.chasers = []), groups = proj.groups || [];
+  $('pzChaserAdd').disabled = chasers.length >= ZC_MAX || !groups.length;
+  const rate = $('pzChaseRate');
+  if (!rate.options.length) zcOptions(rate, ZC_RATES_FR.map((t, i) => [i, t]), 2);
+  if (document.activeElement !== rate) rate.value = String(Math.max(0, [0.25, 0.5, 1, 2, 4].indexOf(proj.chase_rate ?? 1)));
+  const key = JSON.stringify([chasers, groups.map(g => g.name)]);
+  const typing = document.activeElement?.type === 'text' && $('pzChasers').contains(document.activeElement);
+  if (key === pzChasersKey || typing) return;
+  pzChasersKey = key;
+  const groupOpts = groups.map((g, gi) => [gi, `${gi + 1} · ${g.name}`]);
+  $('pzChasers').replaceChildren(...chasers.map((c, i) => {
+    const d = document.createElement('div');
+    d.className = 'pz-group pz-chaser';
+    d.dataset.chaser = i + 1;
+    d.innerHTML = `<label for="pzChName${i}">Nom du chenillard ${i + 1}</label>
+      <input type="text" id="pzChName${i}" maxlength="40" autocomplete="off">
+      <label class="check zc-run"><input type="checkbox" data-control="chaser.${i + 1}.enabled"> En marche (libre)</label>
+      <div class="pz-grid">
+        <div><label for="pzChStep${i}">Pas</label><select id="pzChStep${i}" class="zc-step"></select></div>
+        <div><label for="pzChMode${i}">Mode</label><select id="pzChMode${i}" class="zc-mode"></select></div>
+      </div>
+      <div class="zc-steps" role="list" aria-label="Étapes du chenillard ${i + 1}"></div>
+      <div class="row"><button class="zc-add">Ajouter une étape</button><span class="zc-now" aria-live="off"></span><button class="del">Supprimer le chenillard</button></div>`;
+    const name = d.querySelector('input[type=text]');
+    name.value = c.name;
+    name.addEventListener('change', () => { proj.chasers[i].name = name.value; saveProjection(true); });
+    const run = d.querySelector('.zc-run input');
+    run.checked = !!c.enabled;
+    run.addEventListener('change', () => post('/api/control', { id: `chaser.${i + 1}.enabled`, value: run.checked ? 1 : 0 }));
+    const step = d.querySelector('.zc-step');
+    zcOptions(step, ZC_STEPS.map((b, k) => [b, ZC_STEP_FR[k]]), c.step_beats ?? 1);
+    step.addEventListener('change', () => { proj.chasers[i].step_beats = +step.value; saveProjection(true); });
+    const mode = d.querySelector('.zc-mode');
+    zcOptions(mode, ZC_MODES, c.mode || 'forward');
+    mode.addEventListener('change', () => { proj.chasers[i].mode = mode.value; saveProjection(true); });
+    d.querySelector('.zc-steps').replaceChildren(...c.steps.map((g, k) => {
+      const row = document.createElement('div');
+      row.className = 'zc-stepline';
+      row.setAttribute('role', 'listitem');
+      row.innerHTML = `<label for="pzChS${i}_${k}">Étape ${k + 1}</label><select id="pzChS${i}_${k}"></select><button class="zc-del" aria-label="Retirer l'étape ${k + 1}" title="Retirer l'étape">×</button>`;
+      const sel = row.querySelector('select');
+      zcOptions(sel, groupOpts, g);
+      sel.addEventListener('change', () => { proj.chasers[i].steps[k] = +sel.value; saveProjection(true); });
+      row.querySelector('.zc-del').addEventListener('click', () => { proj.chasers[i].steps.splice(k, 1); saveProjection(true); });
+      return row;
+    }));
+    const add = d.querySelector('.zc-add');
+    add.disabled = c.steps.length >= ZC_MAX_STEPS || !groups.length;
+    add.addEventListener('click', () => {
+      const st = proj.chasers[i].steps;
+      st.push(st.length ? (st[st.length - 1] + 1) % groups.length : 0);
+      saveProjection(true);
+    });
+    d.querySelector('.del').addEventListener('click', () => { proj.chasers.splice(i, 1); saveProjection(true); });
+    return d;
+  }));
+}
+$('pzChaserAdd').addEventListener('click', () => {
+  const chasers = proj.chasers || (proj.chasers = []), groups = proj.groups || [];
+  if (chasers.length >= ZC_MAX || !groups.length) return;
+  chasers.push({ name: `Chenillard ${chasers.length + 1}`, steps: groups.map((_, gi) => gi).slice(0, ZC_MAX_STEPS), step_beats: 1, mode: 'forward', enabled: false });
+  saveProjection(true);
+});
+$('pzChaseRate').addEventListener('change', () => post('/api/control', { id: 'chaser.rate', value: +$('pzChaseRate').value }));
 $('pzAdd').addEventListener('click', () => {
   const id = [1, 2, 3, 4, 5, 6, 7, 8].find(n => !proj.zones.some(z => z.id === n));
   if (!id) return;
@@ -10889,6 +11005,11 @@ function openCueMenu(p, x, y, at) {
     l.append(c, `${z.id} · ${z.name}`);
     return l;
   }));
+  // Zone chaser tied to the cue (T-170); one that no longer exists shows as such.
+  const chSel = $('cueMenuChaser'), chasers = (proj && proj.chasers) || [];
+  chSel.replaceChildren(new Option('Aucun (chenillards libres)', ''), ...chasers.map((c, i) => new Option(`${i + 1} · ${c.name}`, String(i))));
+  if (slot.zone_chaser != null && slot.zone_chaser >= chasers.length) chSel.add(new Option(`${slot.zone_chaser + 1} · (supprimé)`, String(slot.zone_chaser)));
+  chSel.value = slot.zone_chaser != null ? String(slot.zone_chaser) : '';
   const cell = document.querySelector(`#cues .cue[data-id="${CSS.escape(p.id)}"]`);
   menuControl = cell?.dataset.control || null;
   $('cueMenuMidi').hidden = !menuControl;
@@ -10911,9 +11032,10 @@ async function saveCueMenu() {
   const scan = $('cueMenuScan').value || null;
   const notes = $('cueMenuNotes').value, tags = menuTags, color = menuColor;
   const speed_group = $('cueMenuSpeed').value ? +$('cueMenuSpeed').value : null;
+  const zone_chaser = $('cueMenuChaser').value !== '' ? +$('cueMenuChaser').value : null;
   const refs = {};
   $('cueMenuRefs').querySelectorAll('select').forEach(sel => { if (sel.value) refs[sel.dataset.family] = sel.value; });
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group, refs });
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group, zone_chaser, refs });
   if (Object.keys(refs).length || Object.keys(slots[menuCue]?.refs || {}).length) loadPools(false);
   await loadSlots();
 }
@@ -11060,7 +11182,7 @@ $('cueMenuCellColorNone').addEventListener('click', () => {
   saveCueMenu();
 });
 ['cueMenuRefPosition', 'cueMenuRefSize', 'cueMenuRefColor', 'cueMenuRefMotion'].forEach(id => $(id).addEventListener('change', saveCueMenu));
-['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuSpeed', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuSpeed', 'cueMenuChaser', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 
 // ---------- « En cours » (T-423) ----------
 // The tab's count comes with every frame (cues playing + 1 for a running
@@ -13542,7 +13664,7 @@ function buildLayers() {
 // dragged is left alone.
 let gmKey = '';
 function showGroupMasters(groups) {
-  groups = groups || [];
+  groups = (groups || []).filter(g => g.control);
   EXEC.groups = groups.map(g => ({ n: g.n, name: g.name }));
   $('groupMasters').hidden = !groups.length;
   const key = groups.map(g => g.n + ':' + g.name).join('|');
@@ -13581,6 +13703,48 @@ function showGroupMasters(groups) {
   });
 }
 $('gmAllFull').addEventListener('click', () => post('/api/control', { id: 'group.all_full' }));
+// Zone chasers (T-170) in LIVE: one toggle per chaser (its name and the
+// group it is on now), the speed of them all. Hidden while there is none.
+let zcKey = '';
+function showZoneChase(v) {
+  const chasers = (v && v.chasers) || [];
+  $('zoneChase').hidden = !chasers.length;
+  const rate = $('zcRate');
+  if (!rate.options.length) zcOptions(rate, ZC_RATES_FR.map((t, i) => [i, t]), 2);
+  if (v && document.activeElement !== rate) rate.value = String(v.rate);
+  if ($('pzChaseRate').options.length && document.activeElement !== $('pzChaseRate') && v) $('pzChaseRate').value = String(v.rate);
+  const key = chasers.map(c => c.n + ':' + c.name).join('|');
+  if (key !== zcKey) {
+    zcKey = key;
+    $('zcRow').replaceChildren(...chasers.map(c => {
+      const b = document.createElement('button');
+      b.className = 'zc-btn';
+      b.dataset.control = c.control;
+      b.dataset.chaser = c.n;
+      b.title = c.control;
+      b.innerHTML = '<span class="zc-name"></span><span class="zc-on"></span>';
+      b.querySelector('.zc-name').textContent = c.name;
+      b.addEventListener('click', () => post('/api/control', { id: c.control, value: b.getAttribute('aria-pressed') === 'true' ? 0 : 1 }));
+      return b;
+    }));
+  }
+  const groups = (proj && proj.groups) || [];
+  chasers.forEach((c, i) => {
+    const b = $('zcRow').children[i];
+    const on = c.group ? (groups[c.group - 1]?.name || 'Groupe ' + c.group) : '—';
+    b.setAttribute('aria-pressed', String(!!c.enabled));
+    b.setAttribute('aria-label', `Chenillard ${c.name} : ${c.enabled ? 'en marche' : 'arrêté'}, groupe ${on}`);
+    b.querySelector('.zc-on').textContent = on;
+    // RÉGLAGES: running and where each one stands.
+    const box = document.querySelector(`#pzChasers .pz-chaser[data-chaser="${c.n}"]`);
+    if (box) {
+      const run = box.querySelector('.zc-run input');
+      if (document.activeElement !== run) run.checked = !!c.enabled;
+      box.querySelector('.zc-now').textContent = c.step ? `Étape ${c.step} · ${on}` : '';
+    }
+  });
+}
+$('zcRate').addEventListener('change', () => post('/api/control', { id: 'chaser.rate', value: +$('zcRate').value }));
 
 // ---------- executors (T-418) ----------
 // Pages of 8 executors: a fader and two buttons each, assigned with a
@@ -13865,6 +14029,7 @@ function showLayers(l) {
   if (key === layerKey) return;
   layerKey = key;
   showGroupMasters(l.groups);
+  showZoneChase(l.chase);
   const { mixer, mix } = l;
   const anySolo = mixer.layers.some(x => x.solo);
   document.querySelectorAll('#layers .layer').forEach((d, i) => {

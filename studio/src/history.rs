@@ -156,7 +156,9 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         CueLists => json!(s.cue_lists.list()),
         Figures => json!(s.figures.list()),
         Venue => json!(s.venue.get()),
-        Projection => json!(s.projection.get()),
+        // Without the group masters and the running chasers (T-170):
+        // playing values, never undone, never a reason for a stale undo.
+        Projection => json!(s.projection.get().without_playing()),
         Fx => json!(s.fx.grid().cells()),
         Executors => json!(s.executors.bank),
         Desks => json!(s.desks.tabs),
@@ -542,6 +544,8 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, AudioRoutes) if path == "/api/audio/preset" => "Préréglage audio appliqué".into(),
         (_, AudioRoutes) => "Liens audio modifiés".into(),
         (_, Venue) => "Lieu et projecteurs modifiés".into(),
+        // Only the chasers changed (T-170): say so.
+        (_, Projection) if only_chasers_changed(old, new) => "Chenillards de zones modifiés".into(),
         (_, Projection) => "Zones de projection modifiées".into(),
         (_, Fx) => fx_label(old, new),
         (_, Executors) => exec_label(old, new),
@@ -549,6 +553,18 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Macros) => named(list_change(old, new, "id", "name"), "Macro", "Macros", true, "créé"),
         (_, ShowList) => "Liste de shows modifiée".into(),
     }
+}
+
+/// The projection section changed in its chasers only (T-170).
+fn only_chasers_changed(old: &Value, new: &Value) -> bool {
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("chasers");
+        }
+        v
+    };
+    old.get("chasers") != new.get("chasers") && strip(old) == strip(new)
 }
 
 /// « Effet « Respiration » modifié », « Effet 2.3 supprimé »…: the
