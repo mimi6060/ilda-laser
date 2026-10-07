@@ -540,6 +540,10 @@ export class BeamView {
     this.targets = null;
     // Viewpoints (T-278): see presets() below.
     this.camPreset = ''; this.freePose = null; this.orbitMode = 'room'; this.anim = null; this.onCameraChange = null;
+    // Video recording (T-459), set by the page: a fixed drawing size
+    // ([w, h] or null for the element's) and a callback run right after
+    // each image, while the WebGL buffer can still be copied. Display only.
+    this.fixedSize = null; this.onDrawn = null;
     this.recenter();
     this.bindControls();
   }
@@ -961,8 +965,8 @@ export class BeamView {
   }
 
   ensureTargets(scale) {
-    const cv = this.canvas, dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const W = Math.max(16, Math.round((cv.clientWidth || cv.width) * dpr)), H = Math.max(16, Math.round((cv.clientHeight || cv.height) * dpr));
+    const cv = this.canvas, dpr = Math.min(window.devicePixelRatio || 1, 2), fx = this.fixedSize;
+    const W = fx ? fx[0] : Math.max(16, Math.round((cv.clientWidth || cv.width) * dpr)), H = fx ? fx[1] : Math.max(16, Math.round((cv.clientHeight || cv.height) * dpr));
     if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
     const sw = Math.max(8, Math.round(W * scale)), sh = Math.max(8, Math.round(H * scale));
     const t = this.targets;
@@ -1069,6 +1073,12 @@ export class BeamView {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
     this.stats.drawMs = performance.now() - t0;
+    if (this.onDrawn) this.onDrawn(this.canvas);
+  }
+
+  /** T-459: draw at [w, h] (a video size) instead of the element's size; null goes back. */
+  setRenderSize(size) {
+    this.fixedSize = size ? [Math.max(16, Math.round(size[0])), Math.max(16, Math.round(size[1]))] : null;
   }
 
   /** Canvas pixel (origin bottom-left) where a world point lands, or null if behind the camera. */
