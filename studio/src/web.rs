@@ -8537,6 +8537,43 @@ mod tests {
         assert!(static_asset("/vendor/nothing.js").is_none());
     }
 
+    /// T-434: the page is styled by classes (common components and
+    /// utilities), never by inline style attributes. The markup outside
+    /// the scripts has none; a script template may set one only for a
+    /// computed value, each declaration starting with a whitelisted
+    /// property fed by `${…}`.
+    #[test]
+    fn page_has_no_inline_styles_except_computed_ones() {
+        const COMPUTED: [&str; 5] = ["height:${", "background:${", "left:${", "width:${", "border-left-color:${"];
+        // Split the page into markup (outside <script>…</script>) and scripts.
+        let (mut markup, mut scripts) = (String::new(), String::new());
+        let mut rest = INDEX_HTML;
+        while let Some(open) = rest.find("<script") {
+            markup.push_str(&rest[..open]);
+            let close = rest[open..].find("</script>").map(|i| open + i).expect("a closed script");
+            scripts.push_str(&rest[open..close]);
+            scripts.push('\n');
+            rest = &rest[close..];
+        }
+        markup.push_str(rest);
+        assert!(!scripts.is_empty() && markup.contains("<header"));
+
+        let static_styles: Vec<&str> = markup.match_indices("style=").map(|(i, _)| &markup[i..(i + 60).min(markup.len())]).collect();
+        assert!(static_styles.is_empty(), "inline styles in the markup: {static_styles:#?}");
+
+        let mut computed = 0;
+        for (i, _) in scripts.match_indices("style=") {
+            let after = &scripts[i + "style=".len()..];
+            assert!(after.starts_with('"'), "a template style must be a quoted attribute: {}", &scripts[i..(i + 60).min(scripts.len())]);
+            let value = &after[1..after[1..].find('"').map(|e| e + 1).expect("closed attribute")];
+            for decl in value.split(';').map(str::trim).filter(|d| !d.is_empty()) {
+                assert!(COMPUTED.iter().any(|ok| decl.starts_with(ok)), "not a computed value: style=\"{value}\"");
+            }
+            computed += 1;
+        }
+        assert!(computed > 0, "the timeline heads and swatches keep their computed styles");
+    }
+
     #[test]
     fn timecode_routes_set_tc_in_and_never_arm() {
         let t = TestServer::start(false);
