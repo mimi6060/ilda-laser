@@ -89,6 +89,8 @@ pub fn allowed(path: &str) -> bool {
         "/api/about/seen",
         // The 3D view's viewpoint (T-278): where the camera stands.
         "/api/venue/camera",
+        // The previews' galvo simulation (T-280): display only, a view.
+        "/api/venue/sim",
         "/api/devices/scan",
         // Playing.
         "/api/cue",

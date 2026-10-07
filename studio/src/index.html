@@ -523,6 +523,9 @@
   }
   #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
   #offBadge.hidden { display: none; }
+  /* T-280: the previews show simulated galvos, not the frame as sent. */
+  #galvoBadge { position: absolute; bottom: 12px; left: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
+  #galvoBadge[hidden] { display: none; }
   .stats { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .stats b { color: var(--text); font-weight: 600; }
   .stats .bad { color: var(--warn); }
@@ -2408,6 +2411,7 @@
         </div>
       </div>
       <div id="offBadge">Laser éteint : aperçu seulement</div>
+      <div id="galvoBadge" hidden title="Aperçu seulement : les galvos sont simulés (approximation). Le laser reçoit l'image telle quelle ; le vrai projecteur peut arrondir ou scintiller davantage. RÉGLAGES › Simulation de l'aperçu">Galvos simulés : approximation</div>
       <div id="outTag" hidden>Sortie</div>
       <div id="aud3d" hidden role="status" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="aud3dN">0</b></div>
     </div>
@@ -2450,6 +2454,7 @@
     <div class="stats">
       <span>Points <b id="stPoints">0</b></span>
       <span>Images/s <b id="stFps">–</b></span>
+      <span id="galvoLong" class="bad" role="status" hidden title="Tracer une image prend plus de 1/25 s à la vitesse de balayage de la sortie : le projecteur la montrera en scintillant. Moins de points ou une vitesse plus élevée (dans les limites des galvos) la stabilisent.">Image trop longue : scintillement probable</span>
       <span id="stAudWrap" hidden title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="stAud">0</b></span>
       <span><kbd>Espace</kbd> laser on/off · <kbd>Échap</kbd> arrêt d'urgence · <kbd>Maj</kbd>+<kbd>Échap</kbd> désarmer</span>
     </div>
@@ -4231,6 +4236,18 @@
         </div>
         <div class="hint">Écrans : <span id="vnScreens">0</span> (gardés dans le lieu ; leur édition viendra avec la vue 3D).</div>
         <div class="hint sf-error" id="vnError" role="alert"></div>
+      </details>
+      <!-- T-280: display only, nothing here changes what the laser receives. -->
+      <details id="galvoPanel" data-search="Simulation de l'aperçu : simuler les galvos, réponse, divergence, scintillement, image trop longue">
+        <summary>Simulation de l'aperçu</summary>
+        <div class="hint">Approximation : les aperçus 2D et 3D montrent l'image comme des galvos la traceraient à la vitesse de balayage de la sortie (coins arrondis, léger dépassement, scintillement d'une image trop longue). Affichage seulement : le laser reçoit toujours l'image telle quelle. Le vrai projecteur peut faire pire ; un faisceau fixe reste toujours affiché, et les faisceaux dans le public de la vue 3D comptent aussi l'image envoyée.</div>
+        <label class="check"><input type="checkbox" id="galvoOn"> Simuler les galvos</label>
+        <label for="galvoResp">Réponse (ms) <span class="v" id="galvoRespV"></span></label>
+        <input type="range" id="galvoResp" min="0.05" max="5" step="0.05" value="0.3" data-default="0.3" title="Temps de montée des galvos (10 à 90 %) pour un saut : plus il est long, plus les coins s'arrondissent">
+        <label for="galvoDiv">Divergence (mrad) <span class="v" id="galvoDivV"></span></label>
+        <input type="range" id="galvoDiv" min="0" max="20" step="0.1" value="1" data-default="1" title="Vue 3D : le faisceau s'élargit avec la distance (4 mm à la sortie + distance × divergence), la même lumière étalée. 0 : trait fin">
+        <button id="galvoSheet" hidden>Reprendre la fiche projecteur</button>
+        <div class="hint sf-error" id="galvoError" role="alert"></div>
       </details>
     </section>
 
@@ -6150,6 +6167,102 @@ $('holdKeyPick').addEventListener('click', e => {
   $('holdKeyLabel').textContent = '…';
 });
 
+// ---------- galvo simulation (T-280) ----------
+// RÉGLAGES › Simulation de l'aperçu. DISPLAY ONLY: the previews (2D, 3D)
+// draw the frame as scanners would trace it, the server keeps nothing but
+// the settings (venue.json › render). The frame sent to the output,
+// /api/frame and every export are the same with the simulation on or off
+// (safety_invariants.rs checks it). An approximation: a real projector
+// can round corners more, or flicker sooner, than shown here.
+//
+// The scanner is a second-order low-pass filter (damping 0.7, so about
+// 4.6 % overshoot) whose 10–90 % rise time is *Réponse (ms)*, fed one
+// point per 1/pps second, held between points as a DAC does. Exact
+// discretisation: any point rate, any response, no sub-steps.
+const GALVO_ZETA = 0.7, GALVO_RISE = 2.1376; // ωn · (10–90 % rise time) at ζ = 0.7
+const GALVO_FLICKER_S = 1 / 25;              // a frame longer than this flickers
+const GALVO = { enabled: false, response_ms: 0.3, divergence_mrad: 1.0, gain: 1, long: false };
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+/**
+ * The positions a scanner reaches, one per point: [x, y, r, g, b] with the
+ * colours of the point sent. `cyclic`: the frame repeats (the filter's
+ * steady state, from two passes); otherwise it starts at rest on `from`.
+ */
+function galvoFilter(points, pps, responseMs, { cyclic = true, from = null } = {}) {
+  const n = points.length;
+  if (!n || !(pps > 0) || !(responseMs > 0)) return points;
+  const dt = 1 / pps, wn = GALVO_RISE / (responseMs / 1000);
+  const s = GALVO_ZETA * wn, wd = wn * Math.sqrt(1 - GALVO_ZETA * GALVO_ZETA);
+  const ex = Math.exp(-s * dt), c = Math.cos(wd * dt), sn = Math.sin(wd * dt) / wd;
+  // (error, speed) after dt, the input held: error = position - point.
+  const a11 = ex * (c + s * sn), a12 = ex * sn, a21 = -ex * wn * wn * sn, a22 = ex * (c - s * sn);
+  const start = from || points[n - 1];
+  let x = start[0], y = start[1], vx = 0, vy = 0;
+  const out = new Array(n);
+  for (let pass = cyclic ? 0 : 1; pass < 2; pass++) {
+    for (let i = 0; i < n; i++) {
+      const p = points[i], ex0 = x - p[0], ey0 = y - p[1];
+      x = p[0] + a11 * ex0 + a12 * vx; vx = a21 * ex0 + a22 * vx;
+      y = p[1] + a11 * ey0 + a12 * vy; vy = a21 * ey0 + a22 * vy;
+      if (pass) out[i] = [Math.max(-1.5, Math.min(1.5, x)), Math.max(-1.5, Math.min(1.5, y)), p[2], p[3], p[4]];
+    }
+  }
+  return out;
+}
+/** The time to trace a frame of `n` points, seconds. */
+const galvoFrameS = (n, pps) => (pps > 0 ? n / pps : 0);
+/** The point rate the previews simulate: the output's, 30 kpps if unknown. */
+const galvoPps = () => (pps > 0 ? pps : 30000);
+/**
+ * What the previews draw for a frame: its galvo simulation when on, else
+ * the frame itself. Also sets the flicker gain (between 0.7 and 1, slow:
+ * 2 Hz, so the preview never strobes; none with reduced motion) and the
+ * « Image trop longue » flag.
+ */
+function galvoShown(points) {
+  const on = GALVO.enabled;
+  GALVO.long = on && galvoFrameS(points.length, galvoPps()) > GALVO_FLICKER_S;
+  GALVO.gain = GALVO.long && !reducedMotion.matches ? 1 - 0.3 * (0.5 + 0.5 * Math.sin(performance.now() / 1000 * 2 * Math.PI * 2)) : 1;
+  return on ? galvoFilter(points, galvoPps(), GALVO.response_ms) : points;
+}
+function showGalvo() {
+  $('galvoOn').checked = GALVO.enabled;
+  if (document.activeElement !== $('galvoResp')) $('galvoResp').value = GALVO.response_ms;
+  $('galvoRespV').textContent = GALVO.response_ms.toFixed(2).replace('.', ',') + ' ms';
+  if (document.activeElement !== $('galvoDiv')) $('galvoDiv').value = GALVO.divergence_mrad;
+  $('galvoDivV').textContent = GALVO.divergence_mrad.toFixed(1).replace('.', ',') + ' mrad';
+  $('galvoBadge').hidden = !GALVO.enabled;
+  $('galvoLong').hidden = !GALVO.long;
+  const sheet = outputCfg && outputCfg.projector && outputCfg.projector.divergence_mrad;
+  $('galvoSheet').hidden = !(sheet > 0);
+  $('galvoSheet').textContent = sheet > 0 ? `Reprendre la fiche projecteur (${String(sheet).replace('.', ',')} mrad)` : '';
+}
+/** venue.json › render, from GET /api/venue or a post. */
+function takeGalvo(r) {
+  if (!r) return;
+  if (r.galvo) { GALVO.enabled = !!r.galvo.enabled; GALVO.response_ms = +r.galvo.response_ms || 0.3; }
+  if (Number.isFinite(+r.divergence_mrad)) GALVO.divergence_mrad = +r.divergence_mrad;
+  showGalvo();
+  if (lastPoints) showPoints(lastPoints);
+}
+// A slider being dragged: latest wins (T-484); the answer is the clamped value.
+async function sendGalvo(patch) {
+  Object.assign(GALVO, 'enabled' in patch ? { enabled: patch.enabled } : {},
+    'response_ms' in patch ? { response_ms: patch.response_ms } : {}, 'divergence_mrad' in patch ? { divergence_mrad: patch.divergence_mrad } : {});
+  showGalvo();
+  if (lastPoints) showPoints(lastPoints);
+  const r = await sendLatest('galvo:' + Object.keys(patch).join(), 'POST', '/api/venue/sim', patch, { quiet: true });
+  if (!r) return; // replaced by a newer value
+  if (r.ok) takeGalvo((await r.json()).render);
+  else { $('galvoError').textContent = await r.text(); reloadVenue(); }
+}
+$('galvoOn').onchange = e => sendGalvo({ enabled: e.target.checked });
+$('galvoResp').oninput = e => { const v = +e.target.value; if (Number.isFinite(v)) sendGalvo({ response_ms: v }); };
+$('galvoDiv').oninput = e => { const v = +e.target.value; if (Number.isFinite(v)) sendGalvo({ divergence_mrad: v }); };
+$('galvoSheet').onclick = () => { const d = outputCfg && outputCfg.projector && outputCfg.projector.divergence_mrad; if (d > 0) sendGalvo({ divergence_mrad: d }); };
+// For the e2e tests and the console: the pure filter, read only.
+window.__galvo = { filter: galvoFilter, frameS: galvoFrameS, settings: () => ({ ...GALVO }) };
+
 // ---------- preview ----------
 const cv = $('preview'), g = cv.getContext('2d');
 function draw(points, c = cv) {
@@ -6162,7 +6275,9 @@ function draw(points, c = cv) {
   const px = p => [(p[0] + 1) / 2 * W, (1 - (p[1] + 1) / 2) * H];
   if (out) drawSafetyOverlay(W, H, px);
   // Boost dim colors so a low-brightness look is still visible on screen.
-  const col = (p, a) => `rgba(${[2, 3, 4].map(i => Math.round(255 * Math.sqrt(p[i]))).join(',')},${a})`;
+  // T-280: an overlong frame flickers a little when the galvos are simulated.
+  const gain = out ? GALVO.gain : 1;
+  const col = (p, a) => `rgba(${[2, 3, 4].map(i => Math.round(255 * Math.sqrt(p[i]))).join(',')},${a * gain})`;
   for (const [width, alpha] of [[9, 0.18], [2.5, 1]]) {
     g.lineWidth = width; g.lineCap = 'round';
     for (let i = 1; i < points.length; i++) {
@@ -6294,8 +6409,15 @@ function decodeFrame(buf) {
 function showPoints(points) {
   lastPoints = points;
   // One frame feeds whichever view is shown; the 3D view only reads it.
-  if (view3d && show3d) view3d.setFrame(points);
-  if (show2d) draw(points);
+  // With the galvo simulation (T-280) both draw the simulated trace; the
+  // 3D view also gets the frame as sent, for its audience check.
+  const shown = lastShown = galvoShown(points);
+  if (view3d && show3d) {
+    view3d.setSim({ gain: GALVO.gain, divergenceMrad: GALVO.divergence_mrad });
+    view3d.setFrame(shown, shown === points ? null : points);
+  }
+  if (show2d) draw(shown);
+  $('galvoLong').hidden = !GALVO.long;
   const n = points.length, fps = n ? pps / n : 0;
   $('stPoints').textContent = n;
   $('stFps').textContent = n ? fps.toFixed(1) : '–';
@@ -6503,7 +6625,7 @@ function noticeConditions(f) {
 // way to reach the server. It is loaded on the first click on "3D", runs
 // its render loop only while shown, and remembers its render settings in
 // this browser.
-let view3d = null, show3d = false, lastPoints = [], beam3d = null;
+let view3d = null, show3d = false, lastPoints = [], lastShown = [], beam3d = null;
 const R3_KEY = 'laserStudio.beam3d.render';
 function loadRender3d() {
   try { return JSON.parse(localStorage.getItem(R3_KEY) || '{}') || {}; } catch { return {}; }
@@ -6622,10 +6744,10 @@ async function setView(mode) {
   $('beams').hidden = !show3d;
   $('beamsMsg').hidden = !want3d || !!view3d;
   for (const id of ['recenter3d', 'hint3d', 'render3d']) $(id).hidden = !show3d;
-  if (show3d) { venueTo3d(); safetyTo3d(); view3d.setFrame(lastPoints); view3d.start(); pollFrames3d(); }
+  if (show3d) { venueTo3d(); safetyTo3d(); view3d.setFrame(lastShown, lastShown === lastPoints ? null : lastPoints); view3d.start(); pollFrames3d(); }
   else view3d?.stop();
   showAud3d();
-  if (show2d) draw(lastPoints);
+  if (show2d) draw(lastShown);
   remember(STAGE_KEY, mode);
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
@@ -9175,7 +9297,7 @@ function showOutdoor(o) {
   btn.hidden = !(o && (o.enabled || o.sky_off));
   btn.setAttribute('aria-pressed', String(on));
   btn.title = on ? 'Ciel coupé : rien au-dessus de l\'horizon. Cliquer (ou Alt+C) pour rétablir le ciel.' : 'Ciel coupé (Alt+C) : éteint tout au-dessus de l\'horizon sans désarmer · safety.sky_off';
-  if (o && was && JSON.stringify(o.cut) !== JSON.stringify(was.cut) && lastPoints && show2d) draw(lastPoints);
+  if (o && was && JSON.stringify(o.cut) !== JSON.stringify(was.cut) && lastPoints && show2d) draw(lastShown);
   const key = o => o ? JSON.stringify([o.enabled, o.sky_off, o.cut, o.cuts]) : '';
   if (key(o) !== key(was)) outdoorTo3d();
 }
@@ -9186,7 +9308,7 @@ async function toggleSky(source) {
 $('skyBtn').addEventListener('click', () => toggleSky('ui'));
 
 $('sfLoosenCancel').addEventListener('click', () => { sfPending = null; $('sfLoosen').hidden = true; reloadSafety(); });
-$('sfOverlay').addEventListener('change', () => { if (lastPoints && show2d) draw(lastPoints); });
+$('sfOverlay').addEventListener('change', () => { if (lastPoints && show2d) draw(lastShown); });
 // Drawing a zone: each click on the 2D preview adds a vertex.
 $('preview').addEventListener('click', e => {
   if (!sfDrawing && !sfGradPick) return;
@@ -15399,6 +15521,7 @@ function showCapHint() {
 }
 function showOutputs(force = false) {
   if (!outputCfg) return;
+  showGalvo(); // its « fiche projecteur » divergence
   for (const [id, get] of Object.entries(pwFields)) {
     if (force || document.activeElement !== $(id)) $(id).value = Math.round(get(outputCfg.limits) * 100);
     $(id + 'V').textContent = Math.round(get(outputCfg.limits) * 100) + ' %';
@@ -15835,7 +15958,7 @@ function showAudienceMode(a) {
   $('audPill').hidden = !on;
   $('stage').classList.toggle('aud-scan', on);
   $('audSeg').querySelectorAll('button').forEach(b => b.classList.toggle('active', (b.dataset.aud === 'scanning') === on));
-  if (!!was !== on) { reloadAudience(); safetyTo3d(); if (lastPoints && show2d) draw(lastPoints); }
+  if (!!was !== on) { reloadAudience(); safetyTo3d(); if (lastPoints && show2d) draw(lastShown); }
 }
 async function reloadAudience() {
   try {
@@ -16053,6 +16176,7 @@ async function reloadVenue() {
 }
 function applyVenue(j) {
   venue = j.venue; venueLinks = j.links || []; vnMax = j.max_projectors || 8;
+  takeGalvo(venue.render);
   const pre = $('vnPreset');
   if (pre.options.length <= 1) for (const p of j.presets || []) pre.add(new Option(`${p.label_fr} (${p.depth_m} × ${p.width_m}${p.ceiling ? ' × ' + p.height_m : ''} m)`, p.id));
   if (vnSel >= venue.projectors.length) vnSel = 0;
@@ -16143,7 +16267,12 @@ async function pollFrames3d() {
   if (!show3d || !view3d || !venue || venue.projectors.length <= 1) return;
   try {
     const j = await apiJson('GET', '/api/frames', undefined, { cache: 'no-store' });
-    j.frames.forEach((f, i) => { if (i > 0) view3d.setProjectorFrame(i, f.points); });
+    // T-280: the galvo simulation at the main output's point rate (display only).
+    j.frames.forEach((f, i) => {
+      if (i === 0) return;
+      const shown = GALVO.enabled ? galvoFilter(f.points, galvoPps(), GALVO.response_ms) : f.points;
+      view3d.setProjectorFrame(i, shown, shown === f.points ? null : f.points);
+    });
   } catch { /* next time */ }
   vnFramesTimer = setTimeout(pollFrames3d, 100);
 }

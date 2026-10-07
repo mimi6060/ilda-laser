@@ -5560,3 +5560,37 @@ fn every_export_is_never_brighter_than_its_projectors_live_output() {
         assert!(dimmed_cases * 5 > seeds.len(), "only {dimmed_cases} cases with a group master below 100 %");
     }
 }
+
+// ---------- previews ----------
+
+/// T-280: the previews' galvo simulation and divergence are display only.
+/// The same session, with the simulation off and on (slowest response,
+/// widest divergence), sends exactly the same points to the output and
+/// publishes exactly the same frame for the page (`/api/frame`).
+#[test]
+fn the_galvo_simulation_never_changes_what_is_sent() {
+    let run = |sim: bool| -> Vec<(Vec<Point>, Vec<Point>)> {
+        let mut s = test_support::shared();
+        if sim {
+            let patch = crate::venue::SimPatch { enabled: Some(true), response_ms: Some(5.0), divergence_mrad: Some(20.0) };
+            assert!(s.venue.set_sim(&patch).unwrap().galvo.enabled);
+        }
+        s.request_arm(ArmSource::Ui).unwrap();
+        let mut rig = Rig::new(s, if sim { "galvo-on" } else { "galvo-off" }, 280);
+        let epoch = rig.s().epoch;
+        rig.now = epoch;
+        (0..90)
+            .map(|_| {
+                rig.tick();
+                let sent = rig.wire.lock().unwrap().last.clone();
+                (sent, rig.s().frame.clone())
+            })
+            .collect()
+    };
+    let (off, on) = (run(false), run(true));
+    assert!(off.iter().any(|(sent, _)| sent.iter().any(|p| p.is_lit())), "the look went out lit");
+    assert_eq!(off.len(), on.len());
+    for (i, (a, b)) in off.iter().zip(&on).enumerate() {
+        assert!(a == b, "frame {i} differs with the galvo simulation on");
+    }
+}
