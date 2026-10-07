@@ -205,6 +205,11 @@ pub struct CueSlot {
     /// ones. None in older files; a chaser that no longer exists is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zone_chaser: Option<usize>,
+    /// *Étalement* (T-421, spread.rs): the look drawn once per zone of a
+    /// group, shifted in phase, delay or speed from zone to zone. None in
+    /// older files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread: Option<crate::spread::Spread>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -424,6 +429,7 @@ impl CueDeck {
             sanitize_notes(&mut slot.notes);
             sanitize_tags(&mut slot.tags);
             slot.speed_group = slot.speed_group.filter(|g| crate::speed::check_group(*g).is_ok());
+            slot.spread = slot.spread.take().map(crate::spread::Spread::sanitized).filter(crate::spread::Spread::is_set);
         }
         self.slots.retain(|_, slot| *slot != CueSlot::default());
     }

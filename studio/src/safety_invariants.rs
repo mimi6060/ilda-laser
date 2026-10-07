@@ -129,6 +129,14 @@
 //!     exist or not, every parameter, deep and fast) run in the sessions
 //!     (1-23 hold with them: the per-part stage runs before the cue's
 //!     modifiers, the mixer and the whole safety stage); they never arm.
+//! 25. spreads across zone groups (T-421): cells and modulators spread
+//!     in phase, delay or speed over groups that exist or not (edited
+//!     while the cues play), with wild values, run in the sessions (1-24
+//!     hold with them: every zone's copy goes through the cue level, the
+//!     masters, its geometry and the whole safety stage); they never arm,
+//!     and no delayed frame is kept through an e-stop or a « Noir »
+//!     (`a_spread_never_delays_a_stop` adds the disarm and every
+//!     projector of a venue).
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -703,6 +711,120 @@ fn random_zone_chase(s: &mut Shared, rng: &mut Rng, setup: bool) {
     }
 }
 
+/// Half of what the fuzz measures (T-473 rule) at 1000 cases.
+const SPREAD_GATE: f64 = 0.011;
+
+/// A spread (T-421) as the cell menu, the timeline or `/api/lfos` could
+/// send it: on a group that exists or not, any parameter, values out of
+/// range and not finite, any shape. Mostly delays and phases a session
+/// can see within its frames.
+fn random_spread_value(s: &Shared, rng: &mut Rng) -> crate::spread::Spread {
+    use crate::spread::{Spread, SpreadParam};
+    let groups: Vec<String> = s.projection.get().groups.iter().map(|g| g.name.clone()).collect();
+    let group = match rng.below(10) {
+        0 => String::new(),
+        1 => "Inconnu".into(),
+        2..=6 => "Étalement".into(),
+        _ if groups.is_empty() => "G0".into(),
+        _ => rng.pick(&groups).clone(),
+    };
+    let wild = |rng: &mut Rng, v: f32| match rng.below(12) {
+        0 => f32::NAN,
+        1 => f32::INFINITY,
+        2 => rng.range(-1e6, 1e6),
+        _ => v,
+    };
+    let param = *rng.pick(&[SpreadParam::Phase, SpreadParam::Delay, SpreadParam::Delay, SpreadParam::Speed]);
+    let (from, to) = match param {
+        SpreadParam::Phase => (rng.range(-90.0, 90.0), rng.range(0.0, 720.0)),
+        SpreadParam::Delay => (rng.range(0.0, 0.1), rng.range(0.0, 0.6)),
+        SpreadParam::Speed => (rng.range(0.0, 150.0), rng.range(50.0, 400.0)),
+    };
+    Spread {
+        group,
+        param,
+        from: wild(rng, from),
+        to: wild(rng, to),
+        delay_in_beats: rng.chance(0.3),
+        wings: rng.below(20) as u8,
+        blocks: rng.below(20) as u8,
+        shuffle: rng.chance(0.3).then(|| rng.next()),
+    }
+}
+
+/// A spread move (T-421): a cell spread (or not) and routed to the group's
+/// zones, a modulator spread, a group of the zones (so there is one to
+/// spread over). `setup`: a cue on show with a spread.
+fn random_spread(s: &mut Shared, rng: &mut Rng, setup: bool) {
+    // Something to spread over: at least two zones (added, neutral, when
+    // the session has fewer) in a group « Étalement », put back when the
+    // other streams replaced the groups.
+    let missing = s.projection.get().groups.iter().find(|g| g.name == "Étalement").is_none_or(|g| g.zones.len() < 2);
+    if setup || missing || rng.chance(0.05) {
+        let mut cfg = s.projection.get().clone();
+        let mut next = 1;
+        while cfg.zones.len() < 2 + rng.below(3) && cfg.zones.len() < MAX_ZONES as usize {
+            while cfg.zone(next).is_some() {
+                next += 1;
+            }
+            cfg.zones.push(ProjectionZone { id: next, name: format!("Z{next}"), ..Default::default() });
+        }
+        let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
+        cfg.groups.retain(|g| g.name != "Étalement");
+        cfg.groups.insert(0, ZoneGroup { name: "Étalement".into(), zones: ids.clone(), master: 1.0 });
+        cfg.groups.truncate(crate::projection::MAX_GROUPS);
+        cfg.chasers.iter_mut().for_each(|c| c.steps.retain(|g| *g < cfg.groups.len()));
+        if rng.chance(0.5) {
+            cfg.default_zones = ids;
+        }
+        let _ = s.projection.set(cfg);
+    }
+    match if setup || !spreading(s) { 0 } else { rng.below(4) } {
+        0 | 1 => {
+            let cue = s.presets[rng.below(s.presets.len())].id.clone();
+            let slot = s.deck.slot(&cue);
+            let spread = (setup || rng.chance(0.85)).then(|| random_spread_value(s, rng));
+            // Often on the group's zones, so the spread has something to do.
+            let zones = match spread.as_ref().and_then(|sp| s.projection.get().groups.iter().find(|g| g.name == sp.group)) {
+                Some(g) if rng.chance(0.6) => g.zones.clone(),
+                _ => slot.zones.clone(),
+            };
+            s.deck.set_slot(&cue, CueSlot { spread, zones, ..slot });
+            if setup || rng.chance(0.7) {
+                // Played (not toggled off when already on show).
+                if !s.deck.active.iter().any(|a| a.cue == cue) {
+                    controls::press_cue(s, &cue, Some(ClickMode::Toggle), true);
+                }
+            }
+        }
+        2 => {
+            let mut list = s.lfos.list().to_vec();
+            if list.is_empty() {
+                list.push(lfo::Modulator::default());
+            }
+            let i = rng.below(list.len());
+            list[i].spread = rng.chance(0.85).then(|| random_spread_value(s, rng));
+            s.lfos.replace_in_memory(list);
+        }
+        _ => {
+            // The group edited while spread cues play: a zone added or
+            // removed changes every spread at the next frame.
+            let mut cfg = s.projection.get().clone();
+            let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
+            if let Some(g) = cfg.groups.first_mut() {
+                g.zones = ids.iter().copied().filter(|_| rng.chance(0.7)).collect();
+            }
+            let _ = s.projection.set(cfg);
+        }
+    }
+}
+
+/// A cue on show is spread over a group of two zones or more (T-421).
+fn spreading(s: &Shared) -> bool {
+    let cfg = s.projection.get();
+    s.deck.active.iter().any(|a| s.deck.slot(&a.cue).spread.as_ref().is_some_and(|sp| !sp.zones(cfg).is_empty()))
+}
+
 /// Group masters moved the way a fader, MIDI, OSC or DMX would (through
 /// the controls, values out of range included), or « Tout à 100 % ».
 fn random_group_masters(s: &mut Shared, rng: &mut Rng) {
@@ -876,6 +998,11 @@ fn random_lfos(s: &Shared, rng: &mut Rng) -> Vec<lfo::Modulator> {
             // A..D, and now and then a group that doesn't exist (T-419).
             speed_group: rng.below(6) as u8,
             part: None,
+            // Width and ramps (T-421), now and then out of range.
+            width: rng.range(-0.2, 1.2),
+            attack: rng.range(-0.1, 1.0),
+            decay: rng.range(-0.1, 1.0),
+            spread: None,
         })
         .collect()
 }
@@ -1364,6 +1491,9 @@ struct Coverage {
     sent_lit_with_trace: usize,
     /// Frames that sent light while a zone chaser had an active step (T-170).
     sent_lit_with_zone_chase: usize,
+    /// Frames that sent light while a cue on show was spread over a zone
+    /// group of two zones or more (T-421).
+    sent_lit_with_spread: usize,
 }
 
 impl Coverage {
@@ -1394,6 +1524,7 @@ impl Coverage {
             lit_with_exec,
             sent_lit_with_trace,
             sent_lit_with_zone_chase,
+            sent_lit_with_spread,
         } = o;
         self.frames += frames;
         self.sent_lit += sent_lit;
@@ -1417,6 +1548,7 @@ impl Coverage {
         self.lit_with_exec += lit_with_exec;
         self.sent_lit_with_trace += sent_lit_with_trace;
         self.sent_lit_with_zone_chase += sent_lit_with_zone_chase;
+        self.sent_lit_with_spread += sent_lit_with_spread;
     }
 }
 
@@ -2160,6 +2292,15 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
     if chase_on {
         random_zone_chase(&mut rig.s(), &mut hrng, true);
     }
+    // Spreads across zone groups (T-421), from their own stream: cells
+    // and modulators spread in phase, delay or speed over groups that may
+    // not exist, with wild values; the delayed zones go through the same
+    // chain, and a stop empties every delay memory.
+    let mut spread_rng = Rng::new(seed ^ 0x0421_0421);
+    let spread_on = spread_rng.chance(0.4);
+    if spread_on {
+        random_spread(&mut rig.s(), &mut spread_rng, true);
+    }
     let mut beats = 0;
     for frame in 0..frames {
         // The hang guard sees the session move on (T-486).
@@ -2344,6 +2485,14 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
             random_zone_chase(&mut s, &mut hrng, false);
             if s.gate.is_armed() != was {
                 return Err(format!("frame {frame}: a zone chase move changed the arming"));
+            }
+        }
+        if spread_on && spread_rng.chance(0.3) {
+            let mut s = rig.s();
+            let was = s.gate.is_armed();
+            random_spread(&mut s, &mut spread_rng, false);
+            if s.gate.is_armed() != was {
+                return Err(format!("frame {frame}: a spread changed the arming"));
             }
         }
         if fixtures && drng.chance(0.5) {
@@ -2598,6 +2747,12 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
         }
         cov.sent_lit_with_trace += (lit > 0 && s.zone_trace.is_on()) as usize;
         cov.sent_lit_with_zone_chase += (lit > 0 && s.zone_chase.steps.iter().any(Option::is_some)) as usize;
+        // A stop never leaves a delayed frame behind (T-421).
+        let held = rig.engine.as_ref().map_or(0, |e| e.spread.held_frames());
+        if (s.estop.is_latched() || black_held) && held > 0 {
+            return Err(format!("frame {frame}: {held} delayed frames kept through a stop"));
+        }
+        cov.sent_lit_with_spread += (lit > 0 && spreading(&s)) as usize;
     }
     cov.sessions += 1;
     cov.sessions_lit += session_lit as usize;
@@ -2742,6 +2897,8 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.sent_lit_with_trace) > 0.015, "only {} of {} frames sent the zone trace", cov.sent_lit_with_trace, cov.frames);
         eprintln!("coverage: sent lit with a zone chase {:.4}", share(cov.sent_lit_with_zone_chase));
         assert!(share(cov.sent_lit_with_zone_chase) > ZONE_CHASE_GATE, "only {} of {} frames sent light while a zone chase ran", cov.sent_lit_with_zone_chase, cov.frames);
+        eprintln!("coverage: sent lit with a spread {:.4}", share(cov.sent_lit_with_spread));
+        assert!(share(cov.sent_lit_with_spread) > SPREAD_GATE, "only {} of {} frames sent light while a cue was spread", cov.sent_lit_with_spread, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
@@ -5864,5 +6021,128 @@ fn the_galvo_simulation_never_changes_what_is_sent() {
     assert_eq!(off.len(), on.len());
     for (i, (a, b)) in off.iter().zip(&on).enumerate() {
         assert!(a == b, "frame {i} differs with the galvo simulation on");
+    }
+}
+
+// ---------- spread across zones (T-421) ----------
+
+/// The other projectors' wires (`add_projectors`).
+type Wires = Vec<(String, Arc<Mutex<Wire>>)>;
+
+/// Three zones side by side (left, centre, right) in the group « Trio »,
+/// the default zones, a static square played as a cue spread over it.
+fn spread_rig(tag: &str, spread: crate::spread::Spread) -> (Rig, Wires) {
+    let mut s = test_support::shared();
+    s.tempo.set_bpm_manual(120.0, 0.0);
+    let zone = |id: u8, x: f32| ProjectionZone { id, name: format!("Z{id}"), geometry: Geometry { size_x: 0.25, size_y: 0.25, pos_x: x, ..Default::default() }, ..Default::default() };
+    let cfg = ProjectionConfig {
+        zones: vec![zone(1, -0.6), zone(2, 0.0), zone(3, 0.6)],
+        default_zones: vec![1, 2, 3],
+        groups: vec![ZoneGroup { name: "Trio".into(), zones: vec![1, 2, 3], master: 1.0 }],
+        ..Default::default()
+    };
+    s.projection.set(cfg).unwrap();
+    let cue = s.presets[0].id.clone();
+    s.deck.set_slot(&cue, CueSlot { spread: Some(spread), ..Default::default() });
+    let look = Settings { content: Content::Shape { shape: "square".into() }, scale: 0.8, rotation_speed: 0.0, brightness: 1.0, ..Settings::default() };
+    assert!(controls::send_prepared(&mut s, &cue, Some(ClickMode::Toggle), look, None));
+    let mut rig = Rig::new(s, tag, 0);
+    let wires = add_projectors(&mut rig, 1, None);
+    (rig, wires)
+}
+
+/// Lit points of `frame` in the left, centre and right thirds.
+fn thirds(frame: &[Point]) -> [usize; 3] {
+    let mut n = [0; 3];
+    for p in frame.iter().filter(|p| p.is_lit()) {
+        n[if p.x < -0.3 { 0 } else if p.x < 0.3 { 1 } else { 2 }] += 1;
+    }
+    n
+}
+
+/// A delay spread through the real engine: the late zones are dark until
+/// their delay has passed, then every zone is lit; each zone went through
+/// its own geometry (and the rest of the chain). Every projector of the
+/// venue draws them.
+#[test]
+fn a_delay_spread_lights_the_late_zones_later() {
+    let spread = crate::spread::Spread { group: "Trio".into(), param: crate::spread::SpreadParam::Delay, from: 0.0, to: 1.0, ..Default::default() };
+    let (mut rig, wires) = spread_rig("spread-delay", spread);
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    rig.tick();
+    let early = thirds(&rig.wire.lock().unwrap().last);
+    assert!(early[0] > 0 && early[1] == 0 && early[2] == 0, "only zone 1 at first: {early:?}");
+    for _ in 0..35 {
+        rig.tick();
+    }
+    let half = thirds(&rig.wire.lock().unwrap().last);
+    assert!(half[0] > 0 && half[1] > 0 && half[2] == 0, "zone 2 after 0.5 s, zone 3 not yet: {half:?}");
+    for _ in 0..40 {
+        rig.tick();
+    }
+    let all = thirds(&rig.wire.lock().unwrap().last);
+    assert!(all.iter().all(|n| *n > 0), "every zone after 1 s: {all:?}");
+    assert!(thirds(&wires[0].1.lock().unwrap().last).iter().all(|n| *n > 0), "the other projector too");
+    // Adding nothing to the cue, a zone taken out of the group plays on
+    // time: the spread follows the group.
+    {
+        let mut s = rig.s();
+        let mut cfg = s.projection.get().clone();
+        cfg.groups[0].zones = vec![1, 2];
+        s.projection.set(cfg).unwrap();
+    }
+    rig.tick();
+    let n = thirds(&rig.wire.lock().unwrap().last);
+    assert!(n[2] > 0, "zone 3 on time once out of the group: {n:?}");
+}
+
+/// Safety: a spread never delays a stop. E-stop, « Noir » and a disarm
+/// darken every zone of every projector in the very next frame, however
+/// late a zone plays, and no frame lit before the stop comes back after
+/// it: the late zones start over from dark.
+#[test]
+fn a_spread_never_delays_a_stop() {
+    use crate::spread::{Spread, SpreadParam};
+    for (param, to) in [(SpreadParam::Delay, 4.0), (SpreadParam::Phase, 300.0), (SpreadParam::Speed, 300.0)] {
+        for stop in ["estop", "noir", "disarm"] {
+            let spread = Spread { group: "Trio".into(), param, from: 0.0, to, ..Default::default() };
+            let (mut rig, wires) = spread_rig(&format!("spread-stop-{stop}"), spread);
+            rig.tick();
+            rig.s().request_arm(ArmSource::Ui).unwrap();
+            for _ in 0..5 * 60 {
+                rig.tick();
+            }
+            assert!(lit(&rig.wire) > 0 && lit(&wires[0].1) > 0, "{param:?}: lit before the stop");
+            match stop {
+                "estop" => rig.s().emergency_stop(ArmSource::Keyboard),
+                "noir" => rig.s().live.black = true,
+                _ => rig.s().gate.disarm(interlock::DisarmReason::User, ArmSource::Ui),
+            }
+            rig.tick();
+            assert_eq!(lit(&rig.wire), 0, "{param:?} {stop}: main projector dark in the next frame");
+            assert_eq!(lit(&wires[0].1), 0, "{param:?} {stop}: every projector dark in the next frame");
+            assert_eq!(rig.engine.as_ref().unwrap().spread.held_frames(), 0, "{param:?} {stop}: no delayed frame kept");
+            // Released and re-armed by the operator: only what is on time
+            // shows at first.
+            {
+                let mut s = rig.s();
+                s.live.black = false;
+                let estop = Arc::clone(&s.estop);
+                s.gate.reset_estop(&estop);
+            }
+            rig.s().request_arm(ArmSource::Ui).unwrap();
+            rig.tick();
+            let n = thirds(&rig.wire.lock().unwrap().last);
+            if rig.s().deck.active.is_empty() {
+                // The stop ended the cue: nothing comes back by itself.
+                assert_eq!(n, [0, 0, 0], "{param:?} {stop}: the cue stays stopped");
+                continue;
+            }
+            assert!(n[0] > 0, "{param:?} {stop}: zone 1 back at once: {n:?}");
+            if param == SpreadParam::Delay {
+                assert_eq!(n[2], 0, "{stop}: the 4 s late zone starts over from dark: {n:?}");
+            }
+        }
     }
 }

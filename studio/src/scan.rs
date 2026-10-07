@@ -497,6 +497,7 @@ mod tests {
             elapsed_s: 0.0,
             scan: None,
             refs: Default::default(),
+            spread: None,
         };
         assert_eq!(for_event(&s, &ev, &fig), params(BEAMS));
         ev.scan = Some(GRAPHICS.into());

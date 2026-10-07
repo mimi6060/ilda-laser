@@ -1094,6 +1094,7 @@ mod tests {
                     enabled: true,
                     speed_group: 0,
                     part: None,
+                    ..Default::default()
                 })
                 .collect();
             let mut animator = Animator::default();

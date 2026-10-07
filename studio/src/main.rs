@@ -99,6 +99,7 @@ mod lspack;
 #[cfg(feature = "shownet")]
 mod shownet;
 mod speed;
+mod spread;
 mod scan;
 mod scenes;
 mod record;
@@ -1957,6 +1958,8 @@ struct Engine {
     frozen_events: HashMap<u64, f64>,
     /// The speed group each look was last drawn in (T-419).
     look_groups: HashMap<u64, u8>,
+    /// Spread looks (T-421): delay memories and per-zone animators.
+    spread: spread::SpreadState,
     frames_since_save: u32,
     last: Instant,
     /// If this thread panics, unwinding drops the stage: dark frame + disarm.
@@ -1999,6 +2002,7 @@ impl Engine {
             frozen: None,
             frozen_events: HashMap::new(),
             look_groups: HashMap::new(),
+            spread: Default::default(),
             frames_since_save: 0,
             last: Instant::now(),
             stage: OutputStage::new(output),
@@ -2039,7 +2043,7 @@ impl Engine {
         self.last = now;
 
         let record_due;
-        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan), trace) = {
+        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods, zone_live), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan), trace) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -2142,7 +2146,10 @@ impl Engine {
             live = self.smoothers.master.step(&live, &s.mixer.smoothing, dt);
             let time_share = s.routes.routing().time_share();
             // Each modulator counts the beats of its speed group (T-419).
-            lfo::modulate_grouped(s.lfos.list(), &s.controls, &mut settings, &mut live, mod_t, &|g| speed.beat(g, mod_beat, mod_t + speed_off), time_share);
+            // One spread over a zone group (T-421) moves each zone's copy
+            // of the master modifiers instead, below.
+            let (zoned_mods, global_mods) = lfo::split_zoned(s.lfos.list(), s.projection.get());
+            lfo::modulate_grouped(&global_mods, &s.controls, &mut settings, &mut live, mod_t, &|g| speed.beat(g, mod_beat, mod_t + speed_off), time_share);
             // The FX grid (T-146), on top of the LFOs, on the same copies.
             // An e-stop ends every effect (they don't come back after the
             // reset). *Cue sélectionné*: the master-level changes go to the
@@ -2177,6 +2184,22 @@ impl Engine {
             // DMX signal lost with *Fondu au noir* / *Noir immédiat* (T-406):
             // the same copy goes dark, before the safety stage. No disarm.
             live.brightness *= s.netin.gain.clamp(0.0, 1.0);
+            // Spread modulators (T-421): each zone's copy of the master
+            // modifiers, from this one, the modulator at the zone's phase.
+            // Like every modulation: clamped, a brightness only dims.
+            let zone_live: Vec<(u8, live::LiveModifiers)> = if zoned_mods.is_empty() {
+                Vec::new()
+            } else {
+                let cfg = s.projection.get();
+                cfg.zones
+                    .iter()
+                    .map(|z| {
+                        let mut copy = live.clone();
+                        lfo::modulate_zone(&zoned_mods, z.id, cfg, &s.controls, &mut copy, mod_t, &|g| speed.beat(g, mod_beat, mod_t + speed_off), time_share);
+                        (z.id, copy)
+                    })
+                    .collect()
+            };
             self.audio_guard.set_flash_limited(s.routes.flash_limited());
             s.audio_guard = self.audio_guard.status();
             // The looks' own reaction sees the beat counter capped too.
@@ -2295,7 +2318,7 @@ impl Engine {
             // before the safety chain; nothing else changes.
             // The projector it records (T-478): its frame, not the main one's.
             record_due = s.recorder.due(t).then(|| s.recorder.output().to_string());
-            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
+            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods, zone_live), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -2315,6 +2338,12 @@ impl Engine {
         // The live clock of a group: frozen looks keep their beat, the
         // rotations and colours of a level read the group's real beat.
         let live_clocks = speed.clocks(&clock, t + speed_off);
+        // Spread looks (T-421): an e-stop (the blackout is one), a « Noir »
+        // or a disarm empties every delay memory, whatever stands in for the
+        // looks this frame; looks no longer playing lose theirs.
+        self.spread.frame(estop.is_latched() || live.black, armed, |id| {
+            looks.iter().zip(&routing.look_spreads).any(|((_, i, _), sp)| *i == id && sp.is_some()) || show_cues.iter().zip(&routing.show_spreads).any(|((c, _), sp)| c.instance == id && sp.is_some())
+        });
         let (mut frame, mut extra_frames, mix, evolving) = match (trace, pattern) {
             // The zone trace (T-447): the outlines, already in output
             // coordinates (no look, no live stage, no calibration), at
@@ -2354,13 +2383,16 @@ impl Engine {
                 animators.retain(|id, _| looks.iter().any(|(_, i, _)| i == id) || show_cues.iter().any(|(c, _)| c.instance == *id) || (*id == 0 && look_hidden));
                 event_live.retain(|id, _| show_cues.iter().any(|(c, _)| c.instance == *id));
                 cue_live.retain(|id, _| cue_masters.contains_key(id));
+                let spread_state = &mut self.spread;
+                let spread_clock = (t, clock.beat, clock.bpm, clock.beats_per_bar);
                 // Timeline events first (under the cues played by hand on the same
                 // layer), each on its own content clock; paused or held ones freeze.
                 let mut rendered: Vec<projection::Routed> = show_cues
                     .iter()
                     .zip(&routing.show_zones)
                     .zip(&show_scan)
-                    .map(|(((cue, settings), zones), scan)| {
+                    .zip(&routing.show_spreads)
+                    .flat_map(|((((cue, settings), zones), scan), spread)| {
                         // An event met mid-way (a seek, a timecode jump, T-409)
                         // starts with the motion it would have had playing from
                         // its start: its first step is all the time elapsed.
@@ -2377,8 +2409,22 @@ impl Engine {
                         animator.set_optimizer(scan);
                         animator.set_palette(festival_palette);
                         animator.set_point_budget(mixer.point_budget);
-                        let mut points = animator.render(settings, audio, event_dt, &content_clock);
-                        if cue.modifiers != live::LiveModifiers::default() {
+                        let points = animator.render(settings, audio, event_dt, &content_clock);
+                        // A spread (T-421): the zones of its group drawn on
+                        // their own, late or at their own speed, from the raw
+                        // content; every stage below runs on each of them.
+                        let plan = spread::plan(spread.as_ref(), &routing.config, zones);
+                        let variants = match spread {
+                            Some(sp) if !plan.is_empty() => spread_state.variants(cue.instance, sp, &plan, &points, spread_clock, |a, _, k| {
+                                a.set_optimizer(scan);
+                                a.set_palette(festival_palette);
+                                a.set_point_budget(mixer.point_budget);
+                                a.render(settings, audio, event_dt * k, &engine::BeatClock { beat: content_beat * k as f64, ..clock })
+                            }),
+                            _ => Vec::new(),
+                        };
+                        let own = cue.modifiers != live::LiveModifiers::default();
+                        if own {
                             let fresh = !event_live.contains_key(&cue.instance);
                             let st = event_live.entry(cue.instance).or_default();
                             st.set_clock(t, clock.beat);
@@ -2389,18 +2435,25 @@ impl Engine {
                                 (false, false) => dt,
                             };
                             st.advance(&cue.modifiers, live_dt, clock.bpm, clock.beats_per_bar);
-                            points = live::apply(&points, &cue.modifiers, st, &user_palettes);
                         }
                         // Its layer's modifiers (T-144), the event's own colour first.
                         let coloured = cue.modifiers.color != live::ColorOverride::Normal;
-                        let points = levels.layer_stage(cue.layer, points, coloured, layer_live, &user_palettes);
-                        (cue.layer, points, zones.clone())
+                        let stage = |mut points: Vec<Point>| {
+                            if let Some(st) = event_live.get(&cue.instance).filter(|_| own) {
+                                points = live::apply(&points, &cue.modifiers, st, &user_palettes);
+                            }
+                            levels.layer_stage(cue.layer, points, coloured, layer_live, &user_palettes)
+                        };
+                        let rest = spread::rest(&routing.config, zones, &plan);
+                        let mut out = vec![(cue.layer, stage(points), rest)];
+                        out.extend(variants.into_iter().map(|(zone, raw)| (cue.layer, stage(raw), vec![zone])));
+                        out
                     })
                     .collect();
                 // Muted layers keep animating, so they come back in motion.
                 let look_groups_seen = &mut self.look_groups;
                 look_groups_seen.retain(|id, _| looks.iter().any(|(_, i, _)| i == id));
-                let mut cue_looks: Vec<transition::Rendered<(u8, Vec<u8>)>> = looks.iter().zip(&routing.look_zones).zip(&look_scan).zip(&look_groups).map(|((((layer, id, settings), zones), scan), &group)| {
+                let mut cue_looks: Vec<transition::Rendered<(u8, Vec<u8>)>> = looks.iter().zip(&routing.look_zones).zip(&look_scan).zip(&look_groups).zip(&routing.look_spreads).flat_map(|(((((layer, id, settings), zones), scan), &group), spread)| {
                     // A look moved to another speed group starts over on
                     // that group's beat line (a phase jump, never a freeze).
                     if look_groups_seen.insert(*id, group).is_some_and(|before| before != group) {
@@ -2416,7 +2469,24 @@ impl Engine {
                     animator.set_point_budget(mixer.point_budget);
                     // A figure cue's parts (T-441), before everything else.
                     animator.set_parts(part_mods.get(id), &user_palettes);
-                    let mut points = animator.render(settings, audio, anim_dt * levels.speed(Some(*id), *layer), &render_clock);
+                    let look_dt = anim_dt * levels.speed(Some(*id), *layer);
+                    let points = animator.render(settings, audio, look_dt, &render_clock);
+                    // A spread (T-421): the zones of its group drawn on their
+                    // own, late or at their own speed, from the raw content;
+                    // every stage below (and the transitions, the executors,
+                    // the masters, the safety stage) runs on each of them.
+                    let plan = spread::plan(spread.as_ref(), &routing.config, zones);
+                    let variants = match spread {
+                        Some(sp) if !plan.is_empty() => spread_state.variants(*id, sp, &plan, &points, (t, render_clock.beat, render_clock.bpm, render_clock.beats_per_bar), |a, start, k| {
+                            a.set_optimizer(scan);
+                            a.set_palette(festival_palette);
+                            a.set_point_budget(mixer.point_budget);
+                            a.set_parts(part_mods.get(id), &user_palettes);
+                            let beat = start + (render_clock.beat - start) * k as f64;
+                            a.render(settings, audio, look_dt * k, &engine::BeatClock { beat, ..render_clock })
+                        }),
+                        _ => Vec::new(),
+                    };
                     // A user cue's own master modifiers (T-405), before the
                     // master stage, like a timeline event's.
                     let mut coloured = false;
@@ -2425,7 +2495,6 @@ impl Engine {
                         st.set_clock(t, clock.beat);
                         st.freeze_colours(frozen_at);
                         st.advance(m, live_dt, clock.bpm, clock.beats_per_bar);
-                        points = live::apply(&points, m, st, &user_palettes);
                         coloured = m.color != live::ColorOverride::Normal;
                     }
                     // Then the cue level and the layer level (T-144), still
@@ -2436,11 +2505,21 @@ impl Engine {
                         st.set_clock(t, clock.beat);
                         st.freeze_colours(frozen_at);
                         st.advance(m, live_dt, clock.bpm, clock.beats_per_bar);
-                        points = live::apply(&points, m, st, &user_palettes);
                         coloured |= m.color != live::ColorOverride::Normal;
                     }
-                    let points = levels.layer_stage(*layer, points, coloured, layer_live, &user_palettes);
-                    (*id, points, (*layer, zones.clone()))
+                    let stage = |mut points: Vec<Point>| {
+                        if let (Some(m), Some(st)) = (cue_masters.get(id), cue_live.get(id)) {
+                            points = live::apply(&points, m, st, &user_palettes);
+                        }
+                        if let (Some(m), Some(st)) = (levels.cues.get(id), cue_level_live.get(id)) {
+                            points = live::apply(&points, m, st, &user_palettes);
+                        }
+                        levels.layer_stage(*layer, points, coloured, layer_live, &user_palettes)
+                    };
+                    let rest = spread::rest(&routing.config, zones, &plan);
+                    let mut out = vec![(*id, stage(points), (*layer, rest))];
+                    out.extend(variants.into_iter().map(|(zone, raw)| (*id, stage(raw), (*layer, vec![zone]))));
+                    out
                 }).collect();
                 // Transitions between cues (T-158): fades scale colours by
                 // at most 1, a morph never lights travel (transition.rs);
@@ -2469,10 +2548,13 @@ impl Engine {
                 // Perceived balance (T-130) on the content, with the master
                 // stage: gains of at most 1, before the calibration, the
                 // output's colour calibration and the safety stage.
+                // A zone moved by a spread modulator (T-421) uses its own
+                // copy of the master modifiers.
                 let finish = |zone: u8, look: &[Point]| {
+                    let live = zone_live.iter().find(|(z, _)| *z == zone).map_or(&live, |(_, l)| l);
                     let mut out = match routing.remotes.iter().find(|(z, _)| *z == zone) {
-                        Some((_, remote)) => dmx::fixture::apply(look, remote, &live, &self.live_state, &user_palettes, t),
-                        None => live::apply(look, &live, &self.live_state, &user_palettes),
+                        Some((_, remote)) => dmx::fixture::apply(look, remote, live, &self.live_state, &user_palettes, t),
+                        None => live::apply(look, live, &self.live_state, &user_palettes),
                     };
                     balance.apply(&mut out);
                     out
@@ -2696,6 +2778,10 @@ struct Routing {
     /// The zone chaser tied to each look's cue (T-170), same order.
     look_chasers: Vec<Option<usize>>,
     show_chasers: Vec<Option<usize>>,
+    /// Each look's spread over a zone group (T-421), same order: the
+    /// cell's; an event's own, else its cue's cell's.
+    look_spreads: Vec<Option<spread::Spread>>,
+    show_spreads: Vec<Option<spread::Spread>>,
     config: projection::ProjectionConfig,
     output: Option<String>,
     align: Option<projection::Geometry>,
@@ -2720,11 +2806,22 @@ impl Routing {
                 timeline::EventSource::Look { .. } => (Vec::new(), None),
             })
             .unzip();
+        let look_spreads = looks.iter().map(|(_, id, _)| s.deck.find(*id).and_then(|a| s.deck.slot(&a.cue).spread)).collect();
+        let show_spreads = show_cues
+            .iter()
+            .map(|(cue, _)| match &cue.source {
+                _ if cue.spread.is_some() => cue.spread.clone(),
+                timeline::EventSource::Cue { id } => s.deck.slot(id).spread,
+                timeline::EventSource::Look { .. } => None,
+            })
+            .collect();
         Self {
             look_zones,
             show_zones,
             look_chasers,
             show_chasers,
+            look_spreads,
+            show_spreads,
             config: s.projection.get().clone(),
             output: s.output_mgr.prefs().selected,
             align: s.projection.align_geometry(),
