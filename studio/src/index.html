@@ -4989,6 +4989,43 @@ async function post(path, body) {
   return (await api('POST', path, body ?? {})).ok;
 }
 
+// « La plus récente gagne » (T-484). A control moved continuously (fader,
+// knob, pad, slider) posts many values; sent as they come, an older one
+// can reach the studio after the newest and stay. Here one key (one
+// control) has at most one request in flight: values posted meanwhile
+// replace each other and only the newest leaves next, so the last value
+// posted is always the last one the studio gets. Resolves like api() for
+// the request that left, `null` for a value replaced before leaving.
+// Never for a stop: blackout, e-stop, disarm and hold buttons call api()
+// directly and are not delayed by this.
+const LATEST = new Map();
+function sendLatest(key, method, path, body, opts = {}) {
+  let s = LATEST.get(key);
+  if (!s) LATEST.set(key, s = { busy: false, next: null });
+  return new Promise((resolve, reject) => {
+    if (s.next) s.next.resolve(null);
+    s.next = { method, path, body, opts, resolve, reject };
+    if (!s.busy) latestPump(key, s);
+  });
+}
+async function latestPump(key, s) {
+  s.busy = true;
+  while (s.next) {
+    const { method, path, body, opts, resolve, reject } = s.next;
+    s.next = null;
+    try { resolve(await api(method, path, body, opts)); } catch (e) { reject(e); }
+  }
+  s.busy = false;
+  if (LATEST.get(key) === s) LATEST.delete(key);
+}
+// post() through sendLatest: false only when the studio refused this value.
+async function postLatest(key, path, body) {
+  const r = await sendLatest(key, 'POST', path, body ?? {});
+  return !r || r.ok;
+}
+// A control value (`/api/control`), latest wins per control id.
+const controlLatest = body => postLatest('control:' + body.id, '/api/control', body);
+
 // ---------- settings <-> controls ----------
 const hex = c => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
 const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
@@ -6172,8 +6209,8 @@ async function sendFestival(patch) {
   if (!festival) return;
   festSentAt = performance.now();
   const body = { quantize: festival.quantize, balance: { ...festival.balance }, ...patch };
-  const r = await api('POST', '/api/festival', body);
-  if (r.ok) { festSentAt = 0; showFestival(await r.json()); }
+  const r = await sendLatest('festival', 'POST', '/api/festival', body);
+  if (r && r.ok) { festSentAt = 0; showFestival(await r.json()); }
 }
 $('festOwn').onclick = () => pickPalette(null);
 document.querySelectorAll('#festQuant button').forEach(b => b.onclick = () => sendFestival({ quantize: b.dataset.fq }));
@@ -6456,8 +6493,10 @@ async function pollPrepared() {
     }
   } catch { /* the link notice says it */ } finally { prepBusy = false; }
 }
-async function prepPost(path, body) {
-  const r = await api('POST', path, body ?? {});
+// `latest`: a slider being dragged, latest wins per field (T-484).
+async function prepPost(path, body, latest = false) {
+  const r = latest ? await sendLatest('prep:' + Object.keys(body).join(), 'POST', path, body) : await api('POST', path, body ?? {});
+  if (!r) return true; // replaced by a newer value
   if (!r.ok) return false;
   showPrepared(await r.json());
   return true;
@@ -6470,10 +6509,10 @@ async function sendPrepared() {
 $('prepBtn').onclick = () => setPrepMode(!prepMode);
 $('prepSend').onclick = sendPrepared;
 $('prepClear').onclick = () => prepPost('/api/prepared/clear');
-$('prepScale').oninput = e => prepPost('/api/prepared/adjust', { scale: e.target.value / 100 });
-$('prepBright').oninput = e => prepPost('/api/prepared/adjust', { brightness: e.target.value / 100 });
-$('prepRot').oninput = e => prepPost('/api/prepared/adjust', { rotation_speed: +e.target.value });
-$('prepColor').oninput = e => prepPost('/api/prepared/adjust', { color: rgb(e.target.value) });
+$('prepScale').oninput = e => prepPost('/api/prepared/adjust', { scale: e.target.value / 100 }, true);
+$('prepBright').oninput = e => prepPost('/api/prepared/adjust', { brightness: e.target.value / 100 }, true);
+$('prepRot').oninput = e => prepPost('/api/prepared/adjust', { rotation_speed: +e.target.value }, true);
+$('prepColor').oninput = e => prepPost('/api/prepared/adjust', { color: rgb(e.target.value) }, true);
 
 // ---------- show mode (T-283) ----------
 // The server owns the lock (GET/POST /api/lock, `lock` in every frame) and
@@ -7739,7 +7778,7 @@ let calTimer = null;
 Object.keys(calMap).forEach(id => $(id).addEventListener('input', () => {
   for (const [cid, [key, k]] of Object.entries(calMap)) calibration[key] = $(cid).value / k;
   showCalibration();
-  clearTimeout(calTimer); calTimer = setTimeout(() => post('/api/calibration', calibration), 60);
+  clearTimeout(calTimer); calTimer = setTimeout(() => postLatest('calibration', '/api/calibration', calibration), 60);
 }));
 
 // ---------- test patterns (T-404) ----------
@@ -7763,14 +7802,17 @@ function showTestPattern(tp) {
   if (document.activeElement !== $('tpBright')) $('tpBright').value = Math.round(tp.brightness * 100);
   $('tpBrightV').textContent = $('tpBright').value + ' %';
 }
-async function postTestPattern(body) {
-  const r = await api('POST', '/api/testpattern', body);
+// `latest`: the brightness slider, latest wins (T-484). Leaving the
+// pattern posts directly.
+async function postTestPattern(body, latest = false) {
+  const r = latest ? await sendLatest('testpattern', 'POST', '/api/testpattern', body) : await api('POST', '/api/testpattern', body);
+  if (!r) return;
   if (r.ok) showTestPattern((await r.json()).state); else console.warn('/api/testpattern', await r.text());
 }
 $('tpSelect').addEventListener('change', () => postTestPattern({ pattern: $('tpSelect').value || null }));
 $('tpBright').addEventListener('input', () => {
   $('tpBrightV').textContent = $('tpBright').value + ' %';
-  clearTimeout(tpTimer); tpTimer = setTimeout(() => postTestPattern({ brightness: $('tpBright').value / 100 }), 60);
+  clearTimeout(tpTimer); tpTimer = setTimeout(() => postTestPattern({ brightness: $('tpBright').value / 100 }, true), 60);
 });
 $('tpExit').addEventListener('click', () => postTestPattern({ pattern: null }));
 $('tpBannerExit').addEventListener('click', () => postTestPattern({ pattern: null }));
@@ -7965,7 +8007,8 @@ async function loadProjection() {
   try { takeProjection(await apiJson('GET', '/api/projection')); } catch (e) { console.warn('/api/projection', e); }
 }
 async function pzSend(path, body) {
-  const r = await api('POST', path, body, { quiet: true });
+  const r = await sendLatest('pz:' + path, 'POST', path, body, { quiet: true });
+  if (!r) return true; // replaced by a newer edit (T-484)
   if (r.ok) { $('pzError').textContent = ''; takeProjection(await r.json()); return true; }
   const t = await r.text();
   if (r.status === 423) flash(t); else $('pzError').textContent = t;
@@ -8460,7 +8503,8 @@ async function reloadSafety() {
 // what would be loosened, and only « Confirmer l'assouplissement » sends it.
 let sfPending = null;
 async function saveSafety(next, confirm = false) {
-  const r = await api('POST', '/api/safety', confirm ? { ...next, confirm_loosen: true } : next, { quiet: true });
+  const r = await sendLatest('safety', 'POST', '/api/safety', confirm ? { ...next, confirm_loosen: true } : next, { quiet: true });
+  if (!r) return; // replaced by a newer edit (T-484)
   if (r.ok) {
     safety = (await r.json()).settings; sfLoadError = null; sfPending = null;
     $('sfLoosen').hidden = true;
@@ -8872,12 +8916,14 @@ function showStrobe(st) {
 // answered carries the old values and must not be drawn over the controls
 // (it would e.g. untick « Synchro tempo » right after it was ticked).
 let liveSentAt = 0, liveAnsweredAt = 0;
-async function postLive(body) {
+// `latest`: a slider or pad value, latest wins per control (T-484); the
+// hold buttons (Flash, Figer, Noir) post directly.
+async function postLive(body, latest = false) {
   if (directScope === 'cue' && directPart) return postPart(body);
   const id = scopedId(body.id);
   if (!id) return;
   liveSentAt = performance.now();
-  await post('/api/control', { ...body, id });
+  if (latest) await controlLatest({ ...body, id }); else await post('/api/control', { ...body, id });
   liveAnsweredAt = performance.now();
 }
 
@@ -9052,7 +9098,7 @@ $('directStore').addEventListener('click', async () => {
 $('smoothOn').addEventListener('change', () => post('/api/control', { id: 'smoothing.on', value: $('smoothOn').checked ? 1 : 0 }));
 $('smoothInertia').addEventListener('input', () => {
   $('smoothInertiaV').textContent = `× ${($('smoothInertia').value / 100).toFixed(2)}`;
-  post('/api/control', { id: 'smoothing.inertia', value: $('smoothInertia').value / 100 });
+  controlLatest({ id: 'smoothing.inertia', value: $('smoothInertia').value / 100 });
 });
 let live = null;
 const liveGet = (path) => path.split('.').reduce((o, k) => o[k], live);
@@ -9091,14 +9137,14 @@ function showLive(l) {
 document.querySelectorAll('[data-live]').forEach(el => el.addEventListener('input', () => {
   const v = el.value / +el.dataset.k;
   if (live) { liveSet(el.dataset.live, v); showLive(live); }
-  postLive({ id: el.title, value: v });
+  postLive({ id: el.title, value: v }, true);
 }));
 document.querySelectorAll('#rotPresets button').forEach(b => b.addEventListener('click', () =>
   postLive({ id: 'master.rot.preset', value: +b.dataset.preset })));
 // One live value, shown at once and sent to its control.
 function setLive(path, id, v) {
   if (live) { liveSet(path, v); showLive(live); }
-  return postLive({ id, value: v });
+  return postLive({ id, value: v }, true);
 }
 document.querySelectorAll('#speedPresets button').forEach(b => b.addEventListener('click', () => setLive('speed', 'master.speed', +b.dataset.speed)));
 // Zoom −/+ : 10 % steps of the master size, within its 0..200 %.
@@ -9408,11 +9454,11 @@ FX_HOLDS.forEach(id => {
   ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => $(id).addEventListener(ev, () => fxHold(id, false)));
 });
 $('fxStrobe').addEventListener('click', () => postLive({ id: 'master.strobe.on', value: !(live && live.strobe.on) }));
-$('fxRate').addEventListener('input', () => { $('fxRateV').textContent = `${+$('fxRate').value} Hz`; postLive({ id: 'master.strobe.rate', value: +$('fxRate').value }); });
+$('fxRate').addEventListener('input', () => { $('fxRateV').textContent = `${+$('fxRate').value} Hz`; postLive({ id: 'master.strobe.rate', value: +$('fxRate').value }, true); });
 $('fxSync').querySelectorAll('button').forEach(b => b.addEventListener('click', () => postLive({ id: 'master.strobe.sync', value: +b.dataset.sync })));
-$('fxDuty').addEventListener('input', () => { $('fxDutyV').textContent = `${$('fxDuty').value} %`; postLive({ id: 'master.strobe.duty', value: $('fxDuty').value / 100 }); });
+$('fxDuty').addEventListener('input', () => { $('fxDutyV').textContent = `${$('fxDuty').value} %`; postLive({ id: 'master.strobe.duty', value: $('fxDuty').value / 100 }, true); });
 $('fxMirror').querySelectorAll('button').forEach(b => b.addEventListener('click', () => postLive({ id: 'master.mirror', value: +b.dataset.mirror })));
-$('fxPrism').addEventListener('input', () => { $('fxPrismV').textContent = $('fxPrism').value; postLive({ id: 'master.prism', value: +$('fxPrism').value }); });
+$('fxPrism').addEventListener('input', () => { $('fxPrismV').textContent = $('fxPrism').value; postLive({ id: 'master.prism', value: +$('fxPrism').value }, true); });
 const FX_SYNC_BEATS = [1, 0.5, 0.25, 0.125, 0.0625];
 function showFx(l) {
   const st = l.strobe, hz = st.rate.hz, beats = st.rate.beats;
@@ -9439,6 +9485,8 @@ const COLOR_STEPS = [0.125, 0.25, 0.5, 1, 2, 4];
 let palettes = { builtin: [], user: [] };
 const colorMode = () => live ? COLOR_MODES.indexOf(live.color.kind) : 0;
 const control = (id, value) => { const sid = scopedId(id); return sid ? post('/api/control', { id: sid, value }) : Promise.resolve(false); };
+// The same for a slider or a strip being dragged: latest wins (T-484).
+const controlDrag = (id, value) => { const sid = scopedId(id); return sid ? controlLatest({ id: sid, value }) : Promise.resolve(false); };
 const setColorMode = m => control('master.color.mode', m);
 function showColor(l) {
   const p = l.color_params, mode = COLOR_MODES.indexOf(l.color.kind);
@@ -9484,7 +9532,7 @@ $('colorFixed').addEventListener('input', () => {
   clearTimeout(fixedTimer);
   fixedTimer = setTimeout(async () => {
     const [r, g, b] = rgb($('colorFixed').value);
-    await Promise.all([control('master.color.red', r / 255), control('master.color.green', g / 255), control('master.color.blue', b / 255)]);
+    await Promise.all([controlDrag('master.color.red', r / 255), controlDrag('master.color.green', g / 255), controlDrag('master.color.blue', b / 255)]);
     if (colorMode() !== 1) setColorMode(1);
   }, 40);
 });
@@ -9492,14 +9540,14 @@ function pickHue(e) {
   const box = $('hueStrip').getBoundingClientRect();
   const hue = Math.min(360, Math.max(0, (e.clientX - box.left) / box.width * 360));
   $('hueMark').style.left = (hue / 360 * 100) + '%';
-  control('master.color.hue', hue).then(() => { if (colorMode() !== 2) setColorMode(2); });
+  controlDrag('master.color.hue', hue).then(() => { if (colorMode() !== 2) setColorMode(2); });
 }
 $('hueStrip').addEventListener('pointerdown', e => { $('hueStrip').setPointerCapture(e.pointerId); pickHue(e); });
 $('hueStrip').addEventListener('pointermove', e => { if (e.buttons & 1) pickHue(e); });
 $('paletteModes').querySelectorAll('button').forEach(b => b.addEventListener('click', () => control('master.color.palette_mode', +b.dataset.pm)));
-$('colorOffset').addEventListener('input', () => { $('colorOffsetV').textContent = $('colorOffset').value; control('master.color.offset', +$('colorOffset').value); });
+$('colorOffset').addEventListener('input', () => { $('colorOffsetV').textContent = $('colorOffset').value; controlDrag('master.color.offset', +$('colorOffset').value); });
 $('colorSteps').querySelectorAll('button').forEach(b => b.addEventListener('click', () => control('master.color.rate', +b.dataset.step)));
-$('colorSpread').addEventListener('input', () => control('master.color.spread', $('colorSpread').value / 100));
+$('colorSpread').addEventListener('input', () => controlDrag('master.color.spread', $('colorSpread').value / 100));
 $('chaseSpreads').querySelectorAll('button').forEach(b => b.addEventListener('click', () => control('master.color.chase_spread', +b.dataset.cs)));
 $('paletteNew').addEventListener('click', async () => {
   const name = prompt('Nom de la nouvelle palette :');
@@ -9554,7 +9602,7 @@ buildSpeedGroups();
 $('speedOnBar').addEventListener('change', e => post('/api/speed-groups', { change_on_bar: e.target.checked }));
 $('speedRate').addEventListener('input', () => {
   $('speedRateV').textContent = $('speedRate').value + ' %';
-  post('/api/control', { id: 'master.rate', value: $('speedRate').value / 100 });
+  controlLatest({ id: 'master.rate', value: $('speedRate').value / 100 });
 });
 let speedKey = '';
 function showSpeedGroups(t) {
@@ -9648,7 +9696,10 @@ async function loadLatency() {
 }
 async function sendLatency() {
   LAT.send = null;
-  try { LAT.data = await apiJson('POST', '/api/latency', { output_offset_ms: +$('latOffset').value }); showLatency(); } catch { /* refused: said by api() */ }
+  try {
+    const r = await sendLatest('latency', 'POST', '/api/latency', { output_offset_ms: +$('latOffset').value });
+    if (r && r.ok) { LAT.data = await r.json(); showLatency(); }
+  } catch { /* unreachable: said by api() */ }
 }
 function latOffsetMoved() {
   $('latOffsetV').textContent = fmtMs(+$('latOffset').value);
@@ -13168,7 +13219,7 @@ function buildLayers() {
     const range = d.querySelector('input');
     range.addEventListener('input', () => {
       d.querySelector('.dv').textContent = range.value + ' %';
-      post('/api/control', { id: `layer.${n}.dimmer`, value: range.value / 100 });
+      controlLatest({ id: `layer.${n}.dimmer`, value: range.value / 100 });
     });
     for (const p of ['mute', 'solo']) {
       const b = d.querySelector('.' + p);
@@ -13207,7 +13258,7 @@ function showGroupMasters(groups) {
       range.setAttribute('aria-label', 'Maître du groupe ' + g.name);
       range.addEventListener('input', () => {
         d.querySelector('.dv').textContent = range.value + ' %';
-        post('/api/control', { id, value: range.value / 100 });
+        controlLatest({ id, value: range.value / 100 });
       });
       return d;
     }));
@@ -13289,7 +13340,7 @@ function buildExecRow() {
     range.title = `exec.cur.${i}.fader${fn ? ' · ' + fn : ''}`;
     range.addEventListener('input', () => {
       d.querySelector('.dv').textContent = range.value + ' %';
-      post('/api/control', { id: `exec.cur.${i}.fader`, value: range.value / 100 });
+      controlLatest({ id: `exec.cur.${i}.fader`, value: range.value / 100 });
     });
     ['b1', 'b2'].forEach((c, b) => {
       const btn = d.querySelector('.' + c), f = h.buttons?.[b] || 'none';
@@ -13674,7 +13725,7 @@ const DESK_KIND_FR = { button: 'Bouton', fader: 'Curseur', xy_pad: 'Pavé XY', l
 const DESK_SIZE = { button: [2, 1], fader: [1, 4], xy_pad: [3, 3], label: [3, 1], preview: [3, 3] };
 const DESK_MAX_TABS = 8, DESK_MAX_ITEMS = 96, DESK_TAB_KEY = 'laserStudio.deskTab';
 const DESK = { tabs: null, rev: -1, loading: null, tab: 0, edit: false, sel: null, values: {}, missing: new Set(), active: new Set(),
-  regs: null, key: '', ptr: new Map(), local: new Map(), send: new Map(), full: false, ownExit: false, raf: 0 };
+  regs: null, key: '', ptr: new Map(), local: new Map(), full: false, ownExit: false, raf: 0 };
 // Never on a desk (desk.rs `forbidden` checks the same): arming, and
 // safety controls other than the emergency stop.
 const deskForbidden = id => id === 'transport.arm' || (id.startsWith('safety.') && id !== 'safety.estop');
@@ -13894,18 +13945,13 @@ function deskLeave() {
 }
 
 // ----- play -----
-// A control write, coalesced to one per animation frame per component.
+// A fader or pad write, latest wins per control (T-484); the spring back
+// to the centre goes the same way, after the drag's last value. Buttons
+// (taps, holds, « Noir ») post directly: never coalesced.
 function deskSend(id, norm) {
-  const first = !DESK.send.has(id);
-  DESK.send.set(id, norm);
-  if (first) requestAnimationFrame(() => {
-    const n = DESK.send.get(id);
-    DESK.send.delete(id);
-    if (n != null) post('/api/control', { id, norm: n });
-  });
+  if (norm != null) controlLatest({ id, norm });
 }
 function deskSendNow(id, value) {
-  DESK.send.delete(id);
   return post('/api/control', { id, value });
 }
 function deskPointerNorm(el, it, e) {
@@ -13959,7 +14005,7 @@ function deskPlayUp(e) {
   } else if (it.kind === 'xy_pad' && it.spring) {
     // « Retour au centre »: both controls back to their registry default.
     for (const bb of [it.binding, it.binding_y]) {
-      if (bb?.type === 'control' && typeof controlDefaults[bb.id] === 'number') deskSendNow(bb.id, controlDefaults[bb.id]);
+      if (bb?.type === 'control' && typeof controlDefaults[bb.id] === 'number') controlLatest({ id: bb.id, value: controlDefaults[bb.id] });
     }
   }
   // The server's value takes over once it has the last write.
@@ -14298,7 +14344,7 @@ async function loadLfos() {
   renderLfos();
 }
 async function saveLfos() {
-  if (!await post('/api/lfos', lfos)) await loadLfos();
+  if (!await postLatest('lfos', '/api/lfos', lfos)) await loadLfos();
 }
 function renderLfos() {
   const opts = (list, sel) => list.map(([v, t]) => `<option value="${v}"${String(v) === String(sel) ? ' selected' : ''}>${lfoEsc(t)}</option>`).join('');
@@ -14582,7 +14628,7 @@ async function loadRoutes() {
 async function saveRoutes() {
   // An edit by hand: the routes are no preset's any more (T-239).
   $('musPreset').value = ''; arFlicker = [];
-  if (!await post('/api/audio/routes', { mix: arMix, routes: aroutes })) await loadRoutes();
+  if (!await postLatest('routes', '/api/audio/routes', { mix: arMix, routes: aroutes })) await loadRoutes();
 }
 function arSpan(r, f, label, title) {
   const sp = r.shape[f], beats = sp.beats !== undefined, v = beats ? sp.beats : sp.ms;
@@ -14866,7 +14912,8 @@ function pjFromControls() {
 }
 async function saveOutputs(body, confirm = false) {
   body = { ...body, id: pwTargetId() };
-  const r = await api('POST', '/api/outputs/limits', confirm ? { ...body, confirm_loosen: true } : body, { quiet: true });
+  const r = await sendLatest('outputs:' + Object.keys(body).sort().join(), 'POST', '/api/outputs/limits', confirm ? { ...body, confirm_loosen: true } : body, { quiet: true });
+  if (!r) return; // replaced by a newer edit (T-484)
   if (r.ok) {
     outputCfg = (await r.json()).output; pwLoadError = null; pwPending = null;
     $('pwLoosen').hidden = true;
@@ -14978,7 +15025,9 @@ async function reloadOutColor() {
   } catch (e) { console.warn('/api/outputs/color', e); }
 }
 async function saveOutColor(color, confirm = false) {
-  const r = await api('POST', '/api/outputs/color?output=' + encodeURIComponent(pwTargetId()), confirm ? { color, confirm_loosen: true } : { color }, { quiet: true });
+  const path = '/api/outputs/color?output=' + encodeURIComponent(pwTargetId());
+  const r = await sendLatest(path, 'POST', path, confirm ? { color, confirm_loosen: true } : { color }, { quiet: true });
+  if (!r) return; // replaced by a newer edit (T-484)
   $('ocError').textContent = '';
   if (r.ok) {
     outColor = await r.json(); ocPending = null; $('ocLoosen').hidden = true;
@@ -16145,7 +16194,22 @@ async function vapcLoadLayout() {
   const key = JSON.stringify(l);
   if (key === vapcKey) return;
   vapcKey = key;
+  // Same drawing, other mappings (a page, a learn): updated in place, so
+  // an element under the pointer stays. A new drawing is not built under
+  // the pointer (T-484): mid-drag or while a button is held, it would drop
+  // the element and its listeners, and the moves (and the release) with it.
+  if (vapc && vapcShape(l) === vapcShape(vapc) && $('vapc').firstChild) { vapc = l; vapcPending = null; vapcRefresh(); vapcPaint(); return; }
+  if (vapcHolds) { vapcPending = l; return; }
   vapc = l;
+  vapcBuild();
+}
+const vapcShape = l => JSON.stringify([l.model, l.width, l.height, l.elements.map(e => [e.id, e.widget, e.x, e.y, e.w, e.h])]);
+// A drag or a held button on the drawing; the layout waits for its end.
+let vapcHolds = 0, vapcPending = null;
+function vapcRelease() {
+  vapcHolds = Math.max(0, vapcHolds - 1);
+  if (vapcHolds || !vapcPending) return;
+  vapc = vapcPending; vapcPending = null;
   vapcBuild();
 }
 async function vapcLoop() {
@@ -16154,7 +16218,10 @@ async function vapcLoop() {
   if (visible) {
     try {
       if (!vapc || Date.now() - vapcLayoutAt > 2000) await vapcLoadLayout();
+      const asked = performance.now();
       const L = await apiJson('GET', '/api/midi/leds');
+      // Asked before our Shift was answered: it would undo the box just ticked.
+      if (vapcLeds && (vapcShiftBusy || asked < vapcShiftAt)) L.shift = vapcLeds.shift;
       if (L.model !== vapc.model || L.port !== vapc.port) await vapcLoadLayout();
       vapcLeds = L;
       vapcPaint();
@@ -16212,6 +16279,11 @@ function vapcBuild() {
     vapcBind(g, e);
   }
   vapcPaint();
+  vapcRefresh();
+}
+// What follows the mappings and the port: « affecté » and the line above.
+function vapcRefresh() {
+  document.querySelectorAll('#vapc [data-vapc]').forEach(g => g.classList.toggle('mapped', !!vapcEl(g.dataset.vapc)?.map));
   $('vapcModel').value = vapc.model === 'Apc40' ? 'Apc40' : 'Apc40Mk2';
   $('vapcModel').disabled = !!vapc.port;
   $('vapcInfo').textContent = (vapc.port ? `· ${vapc.model_label} branché (${vapc.port})` : '· aucun APC branché : schéma seul')
@@ -16281,8 +16353,11 @@ function vapcPaint() {
   });
 }
 
-async function vapcSend(body) {
-  const r = await api('POST', '/api/midi/virtual', body, { quiet: !!body.learn });
+// `latest`: a fader or knob value, latest wins per element (T-484).
+async function vapcSend(body, latest = false) {
+  const r = latest ? await sendLatest('vapc:' + body.id, 'POST', '/api/midi/virtual', body)
+    : await api('POST', '/api/midi/virtual', body, { quiet: !!body.learn });
+  if (!r) return true; // replaced by a newer value
   if (!r.ok) {
     const t = await r.text();
     if (r.status === 423) flash(t);
@@ -16295,10 +16370,12 @@ async function vapcSend(body) {
 const vapcLearning = () => learnBusy && !$('learnYes').offsetParent;
 function vapcBind(g, e) {
   const button = ['pad', 'round', 'button', 'key'].includes(e.widget);
-  g.addEventListener('pointerenter', ev => vapcTip(e, ev));
+  // The mappings may change under a drawing kept in place: read them now.
+  const cur = () => vapcEl(e.id) || e;
+  g.addEventListener('pointerenter', ev => vapcTip(cur(), ev));
   g.addEventListener('pointermove', ev => vapcTipMove(ev));
   g.addEventListener('pointerleave', () => { $('vapcTip').hidden = true; });
-  g.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); vapcOpenMenu(e, ev.clientX, ev.clientY); });
+  g.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); vapcOpenMenu(cur(), ev.clientX, ev.clientY); });
   g.addEventListener('pointerdown', ev => {
     if (ev.button !== 0) return;
     ev.preventDefault();
@@ -16306,13 +16383,17 @@ function vapcBind(g, e) {
     if (vapcLearning()) { vapcSend({ id: e.id, learn: true }).then(() => { midiNow(); vapcNow(); }); return; }
     if (e.id === 'shift') { vapcSetShift(!vapcLeds?.shift); return; }
     try { g.setPointerCapture(ev.pointerId); } catch (err) { /* synthetic pointer */ }
+    vapcHolds++;
     if (button) {
       g.classList.add('down');
-      vapcSend({ id: e.id, down: true });
+      // The press leaves at once; the release after the press's answer, so
+      // a quick click can't reach the studio as release-then-press.
+      const pressed = vapcSend({ id: e.id, down: true }).catch(() => {});
       const up = () => {
         g.classList.remove('down');
         g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
-        vapcSend({ id: e.id, down: false });
+        pressed.then(() => vapcSend({ id: e.id, down: false }));
+        vapcRelease();
       };
       g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
       return;
@@ -16324,18 +16405,18 @@ function vapcBind(g, e) {
       ev.preventDefault();
       const step = ev.deltaY < 0 ? 1 : -1;
       if (e.widget === 'encoder') vapcSend({ id: e.id, delta: step });
-      else vapcSend({ id: e.id, value: Math.round(Math.max(0, Math.min(1, vapcPos(e) + step * 2 / 127)) * 127) });
+      else vapcSend({ id: e.id, value: Math.round(Math.max(0, Math.min(1, vapcPos(e) + step * 2 / 127)) * 127) }, true);
     }, { passive: false });
   }
 }
 // Faders follow the pointer; knobs turn with a vertical drag; encoders
-// send a step every 6 px. Moves are sent at most once per frame.
+// send a step every 6 px (steps add up, in any order). A value goes out
+// latest wins: one request in flight, the last position always last.
 function vapcDragStart(g, e, ev) {
   const svg = g.ownerSVGElement;
   const toUnits = (x, y) => { const p = svg.createSVGPoint(); p.x = x; p.y = y; return p.matrixTransform(svg.getScreenCTM().inverse()); };
   const start = { y: ev.clientY, pos: vapcPos(e), steps: 0 };
-  let pending = null, raf = 0;
-  const flush = () => { raf = 0; if (pending) { vapcSend(pending); pending = null; } };
+  let sent = null;
   const move = mv => {
     if (e.widget === 'encoder') {
       const steps = Math.trunc((start.y - mv.clientY) / 6);
@@ -16351,20 +16432,23 @@ function vapcDragStart(g, e, ev) {
     f = Math.max(0, Math.min(1, f));
     vapcDrag[e.id] = f;
     vapcPaint();
-    pending = { id: e.id, value: Math.round(f * 127) };
-    if (!raf) raf = requestAnimationFrame(flush);
+    const value = Math.round(f * 127);
+    if (value !== sent) { sent = value; vapcSend({ id: e.id, value }, true); }
   };
   const end = () => {
     g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', end); g.removeEventListener('pointercancel', end);
-    flush();
+    vapcRelease();
     // Keep showing the dragged position until the studio reports its value.
     setTimeout(() => { delete vapcDrag[e.id]; }, 300);
   };
   g.addEventListener('pointermove', move); g.addEventListener('pointerup', end); g.addEventListener('pointercancel', end);
   if (e.widget !== 'knob' && e.widget !== 'encoder') move(ev);
 }
+let vapcShiftBusy = 0, vapcShiftAt = 0;
 async function vapcSetShift(on) {
-  await vapcSend({ id: 'shift', down: on });
+  vapcShiftBusy++;
+  if (vapcLeds) vapcLeds.shift = on;
+  try { await vapcSend({ id: 'shift', down: on }); } finally { vapcShiftBusy--; vapcShiftAt = performance.now(); }
   vapcLoop();
 }
 function vapcTipHtml(e) {
