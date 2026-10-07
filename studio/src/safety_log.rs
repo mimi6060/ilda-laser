@@ -484,6 +484,11 @@ pub fn describe(e: &SafetyEvent) -> String {
         }
         "scene" => format!("Scène lancée (armé) : {}", str_of(d, "name")),
         "safety_settings" => format!("Réglages de sécurité modifiés{}", changed()),
+        // Mirror targets (T-109).
+        "mirror_targets" if d.get("confirmed_loosen").and_then(Value::as_bool).unwrap_or(false) => {
+            format!("Cibles miroir modifiées (assouplissement confirmé){}", changed())
+        }
+        "mirror_targets" => format!("Cibles miroir modifiées{}", changed()),
         "presence_settings" => format!("Réglages de présence modifiés{}", changed()),
         // Safety profiles per venue (T-260).
         "safety_profile" => match str_of(d, "action") {

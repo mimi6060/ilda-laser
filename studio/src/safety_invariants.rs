@@ -137,6 +137,17 @@
 //!     and no delayed frame is kept through an e-stop or a « Noir »
 //!     (`a_spread_never_delays_a_stop` adds the disarm and every
 //!     projector of a venue).
+//! 26. mirror targets (T-109): random target lists (too many, not
+//!     numbers, out of the field, below the horizon: refused; confirmed
+//!     or not, armed or not) set from the UI, and the « Cibles miroir »
+//!     look on random masks, chases and tempos run in the sessions (1-25
+//!     hold with them: their static beams go through the whole safety
+//!     stage, no exemption); they never arm, and no stored target was
+//!     added or moved below the horizon. Plus a dedicated property
+//!     (`mirror_targets_never_light_a_cut_target_nor_pass_the_guard_dose`):
+//!     nothing lit in a Blank or Public zone, below the horizon or outside
+//!     the outdoor angles, and the output dose of every cell of the guard's
+//!     grid never above what the guard allows.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -735,6 +746,103 @@ const SPREAD_GATE: f64 = 0.011;
 
 /// Half of what the fuzz measures (T-473 rule) at 1000 cases (T-463).
 const FIXED_RATE_GATE: f64 = 0.016;
+
+/// Half of what the fuzz measures (T-473 rule) at 1000 cases (T-109).
+const TARGETS_GATE: f64 = 0.005;
+
+/// A random target list (T-109) as `POST /api/targets` could send it:
+/// mostly valid points (above the horizon, through the calibration, so
+/// most are kept), now and then a target below the horizon, a position
+/// that is not a number or out of the field, an empty name, one too many.
+fn random_target_list(s: &Shared, rng: &mut Rng) -> crate::targets::Targets {
+    use crate::targets::{Target, Targets, MAX_TARGETS};
+    let floor = s.effective_safety().horizon.y;
+    let n = if rng.chance(0.05) { MAX_TARGETS + 1 } else { rng.below(MAX_TARGETS + 1) };
+    let items = (0..n)
+        .map(|i| {
+            let x = match rng.below(40) {
+                0 => f32::NAN,
+                1 => rng.range(1.01, 3.0),
+                _ => rng.range(-0.9, 0.9),
+            };
+            let y = if rng.chance(0.1) { rng.range(-1.0, 1.0) } else { rng.range((floor + 0.05).min(0.95), 1.0) };
+            let name = if rng.chance(0.03) { String::new() } else { format!("Cible {}", i + 1) };
+            Target { name, x, y }
+        })
+        .collect();
+    Targets { items }
+}
+
+/// One target edit from the UI (T-109), confirmed or not: refused when the
+/// list is not valid or loosens without the confirmation or while armed;
+/// a stored target that is new or moved lands above the horizon. Never
+/// arms.
+fn random_targets(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
+    use crate::targets::SetError;
+    let new = random_target_list(s, rng);
+    let (cfg, cal) = (s.effective_safety(), s.calibration);
+    let (before, armed) = (s.targets.get().clone(), s.gate.is_armed());
+    let confirm = rng.chance(0.8);
+    let valid = new.validate().is_ok();
+    match s.targets.set(new.clone(), &cfg, &cal, armed, confirm) {
+        Ok(stored) => {
+            if !valid {
+                return Err(format!("targets: an invalid list was stored: {new:?}"));
+            }
+            let loosened = before.loosenings(&stored);
+            if !loosened.is_empty() && (armed || !confirm) {
+                return Err(format!("targets: loosened without the confirmation or armed: {loosened:?}"));
+            }
+            for (i, t) in stored.items.iter().enumerate() {
+                let moved = before.items.get(i).is_none_or(|o| (o.x, o.y) != (t.x, t.y));
+                if moved && crate::targets::output_of(t, &cal).1 <= cfg.horizon.y {
+                    return Err(format!("targets: target {} stored below the horizon: {t:?}", i + 1));
+                }
+            }
+        }
+        Err(SetError::Invalid(_)) => {}
+        Err(SetError::Loosens(_) | SetError::Armed(_)) if !valid => return Err("targets: an invalid list got past the validation".into()),
+        Err(SetError::Loosens(_)) if confirm && !armed => return Err("targets: confirmed but refused".into()),
+        Err(SetError::Armed(_)) if !armed => return Err("targets: refused as armed while disarmed".into()),
+        Err(_) => {}
+    }
+    if s.targets.get() != &before && !valid {
+        return Err("targets: a refused list changed the store".into());
+    }
+    if s.gate.is_armed() != armed {
+        return Err("targets: an edit changed the arming".into());
+    }
+    Ok(())
+}
+
+/// The « Cibles miroir » look (T-109): a random mask (all, none, any),
+/// together or chased, any step rate and tempo, sometimes backwards.
+fn random_mirror_look(rng: &mut Rng) -> Settings {
+    let a = match rng.below(5) {
+        0 => 65535.0,
+        1 => 0.0,
+        2 => rng.range(-5.0, 1e6),
+        _ => rng.below(65536) as f32,
+    };
+    let params = crate::generators::GenParams {
+        a,
+        b: if rng.chance(0.5) { 1.0 } else { 0.0 },
+        steps_per_beat: *rng.pick(&[0.25, 1.0, 4.0, 16.0, 0.0]),
+        beat_sync: rng.chance(0.6),
+        direction: *rng.pick(&[1, -1, 0]),
+        ..Default::default()
+    };
+    Settings {
+        content: Content::Generator { generator: crate::targets::GENERATOR.into(), params },
+        color: [rng.below(256) as u8, rng.below(256) as u8, 255],
+        brightness: rng.range(0.3, 1.0),
+        ..Settings::default()
+    }
+}
+
+fn is_mirror_look(s: &Settings) -> bool {
+    matches!(&s.content, Content::Generator { generator, .. } if generator == crate::targets::GENERATOR)
+}
 
 /// A spread (T-421) as the cell menu, the timeline or `/api/lfos` could
 /// send it: on a group that exists or not, any parameter, values out of
@@ -1522,6 +1630,8 @@ struct Coverage {
     autopilot_changes: u64,
     /// Frames that sent light at a fixed frame rate (T-463).
     sent_lit_with_fixed_rate: usize,
+    /// Frames that sent light while the look was « Cibles miroir » (T-109).
+    sent_lit_with_targets: usize,
 }
 
 impl Coverage {
@@ -1556,6 +1666,7 @@ impl Coverage {
             agenda_starts,
             autopilot_changes,
             sent_lit_with_fixed_rate,
+            sent_lit_with_targets,
         } = o;
         self.frames += frames;
         self.sent_lit += sent_lit;
@@ -1583,6 +1694,7 @@ impl Coverage {
         self.agenda_starts += agenda_starts;
         self.autopilot_changes += autopilot_changes;
         self.sent_lit_with_fixed_rate += sent_lit_with_fixed_rate;
+        self.sent_lit_with_targets += sent_lit_with_targets;
     }
 }
 
@@ -2472,6 +2584,17 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
     if autopilot_on {
         random_autopilot(&mut rig.s(), &mut vlj_rng, seed)?;
     }
+    // Mirror targets (T-109), from their own stream: a list set from the
+    // UI (confirmed), the « Cibles miroir » look now and then.
+    let mut mtrng = Rng::new(seed ^ 0x0109_0109);
+    let targets_on = mtrng.chance(0.35);
+    if targets_on {
+        let mut s = rig.s();
+        random_targets(&mut s, &mut mtrng).map_err(|e| format!("setup: {e}"))?;
+        if mtrng.chance(0.7) {
+            controls::set_look(&mut s, random_mirror_look(&mut mtrng));
+        }
+    }
     let mut beats = 0;
     for frame in 0..frames {
         // The hang guard sees the session move on (T-486).
@@ -2655,6 +2778,18 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
         }
         if trng.chance(0.05) {
             random_transitions(&mut rig.s(), &mut trng);
+        }
+        if targets_on && mtrng.chance(0.05) {
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            if mtrng.chance(0.3) {
+                random_targets(&mut s, &mut mtrng).map_err(|e| format!("frame {frame}: {e}"))?;
+            } else {
+                controls::set_look(&mut s, random_mirror_look(&mut mtrng));
+            }
+            if s.gate.is_armed() != armed {
+                return Err(format!("frame {frame}: a mirror target move changed the arming"));
+            }
         }
         if autopilot_on && vlj_rng.chance(0.08) {
             let mut s = rig.s();
@@ -2993,6 +3128,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
             return Err(format!("frame {frame}: {held} delayed frames kept through a stop"));
         }
         cov.sent_lit_with_spread += (lit > 0 && spreading(&s)) as usize;
+        cov.sent_lit_with_targets += (lit > 0 && is_mirror_look(&s.settings)) as usize;
         // A fixed rate (T-463): the frame sent is its size (dark points
         // added after the safety stage), unless the zone mask overflowed it.
         if let Some(fr) = s.fixed_rate {
@@ -3152,6 +3288,8 @@ fn random_sessions_keep_every_output_invariant() {
         eprintln!("coverage: playbacks started by the agenda {}", cov.agenda_starts);
         eprintln!("coverage: sent lit at a fixed frame rate {:.4}", share(cov.sent_lit_with_fixed_rate));
         assert!(share(cov.sent_lit_with_fixed_rate) > FIXED_RATE_GATE, "only {} of {} frames sent light at a fixed frame rate", cov.sent_lit_with_fixed_rate, cov.frames);
+        eprintln!("coverage: sent lit with mirror targets {:.4}", share(cov.sent_lit_with_targets));
+        assert!(share(cov.sent_lit_with_targets) > TARGETS_GATE, "only {} of {} frames sent light with the mirror targets look", cov.sent_lit_with_targets, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
         eprintln!("coverage: autopilot changes {}", cov.autopilot_changes);
         // ~22 at 1000 cases: the fuzz's own presses win over it most of
@@ -6559,4 +6697,246 @@ fn a_spread_never_delays_a_stop() {
             }
         }
     }
+}
+
+// ---------- mirror targets (T-109) ----------
+
+/// An independent meter of the light that really goes out, on the static
+/// beam guard's grid and window (T-256): per cell, the share of the scan
+/// time spent lit there over the last `window_ms`, like the guard measures
+/// its input (1.0 = a full-brightness beam held on the cell all window).
+struct DoseMeter {
+    grid: usize,
+    window: f64,
+    frames: std::collections::VecDeque<(f64, Vec<(usize, f64)>)>,
+    sum: Vec<f64>,
+    last_t: Option<f64>,
+}
+
+impl DoseMeter {
+    fn new(cfg: &dwell::DwellGuard) -> Self {
+        let cfg = cfg.sanitized();
+        let grid = cfg.grid as usize;
+        Self { grid, window: cfg.window_ms as f64 / 1000.0, frames: Default::default(), sum: vec![0.0; grid * grid], last_t: None }
+    }
+
+    /// Adds the frame sent at `t`; returns the highest cell dose now.
+    fn feed(&mut self, frame: &[Point], t: f64) -> f64 {
+        let g = self.grid;
+        let dt = self.last_t.map_or(1.0 / 60.0, |last| (t - last).clamp(0.0, 0.1));
+        self.last_t = Some(t);
+        let n = frame.len().max(1) as f64;
+        let idx = |v: f32| (((v.clamp(-1.0, 1.0) + 1.0) * 0.5 * g as f32) as usize).min(g - 1);
+        let mut cells: Vec<(usize, f64)> = Vec::new();
+        for p in frame.iter().filter(|p| p.is_lit()) {
+            let c = idx(p.y) * g + idx(p.x);
+            let e = p.r.max(p.g).max(p.b).clamp(0.0, 1.0) as f64 / n * dt;
+            match cells.iter_mut().find(|(k, _)| *k == c) {
+                Some((_, v)) => *v += e,
+                None => cells.push((c, e)),
+            }
+        }
+        for &(c, e) in &cells {
+            self.sum[c] += e;
+        }
+        self.frames.push_back((t, cells));
+        while self.frames.front().is_some_and(|(ft, _)| *ft <= t - self.window) {
+            let (_, cells) = self.frames.pop_front().unwrap();
+            for (c, e) in cells {
+                self.sum[c] = (self.sum[c] - e).max(0.0);
+            }
+        }
+        self.sum.iter().fold(0.0f64, |m, &s| m.max(s / self.window))
+    }
+}
+
+/// The highest output dose of a cell the guard lets through (T-256), for
+/// a beam of any shape. Each frame the guard scales a cell to at most
+/// `cap / d` of its input, where `d` (its input dose over the window) is
+/// below 2 × cap for any frame that keeps light. Summed over a window the
+/// output is at most ∫ min(1, cap·W / A) dA from 0 to 2·cap·W, i.e.
+/// `cap · (1 + ln 2)`; a beam held still settles at `cap`. Off armed acts
+/// as Beams; Beams allows its higher cap only above the horizon and
+/// outside the Public zones, so the higher cap bounds every cell.
+fn guard_bound(cfg: &dwell::DwellGuard) -> f64 {
+    let cfg = cfg.sanitized();
+    let cap = match cfg.profile {
+        dwell::DwellProfile::Strict => cfg.max_cell_dose,
+        _ => cfg.max_cell_dose.max(cfg.max_cell_dose_beams),
+    };
+    cap as f64 * (1.0 + std::f64::consts::LN_2) * 1.001 + 1e-6
+}
+
+/// One mirror target case (T-109): random zones (Blank, Dim, Public), a
+/// random horizon, calibration, caps, guard profile, sometimes the outdoor
+/// mode and « Ciel coupé »; random targets stored the way the UI would
+/// (the ones below the horizon refused), sometimes the horizon raised
+/// afterwards (a tightening: some targets end below it); the « Cibles
+/// miroir » look on a random mask and chase, armed from the UI. On every
+/// frame sent: nothing lit in a Blank or Public zone (scanning off), below
+/// the horizon (every lit sample of this look is a beam) or outside the
+/// outdoor angles, the caps hold, and no cell of the guard's grid gets
+/// more than the guard allows. Returns the frames that sent light.
+fn run_mirror_case(seed: u64) -> Result<usize, String> {
+    use crate::targets::{output_of, Target, Targets, MAX_TARGETS};
+    let mut rng = Rng::new(seed);
+    let mut s = test_support::shared();
+    let mut cfg = random_safety(&mut rng);
+    if rng.chance(0.3) {
+        cfg.outdoor = random_outdoor(&mut rng, false);
+        cfg.outdoor.authorization_ref = "DGTA-fuzz".into();
+    }
+    s.safety.set(cfg, true).map_err(|e| format!("setup: safety refused: {e:?}"))?;
+    if rng.chance(0.5) {
+        mark_public(&mut s, &mut rng);
+    }
+    s.sync_audience();
+    if rng.chance(0.4) {
+        s.calibration = random_calibration(&mut rng);
+    }
+    if rng.chance(0.2) {
+        s.set_sky_off(true, ArmSource::Ui);
+    }
+    let caps = random_limits(&mut rng);
+    s.outputs.set(MAIN_OUTPUT, Some(caps), None, false, true).map_err(|e| format!("setup: caps refused: {e:?}"))?;
+    // Targets anywhere; the store keeps those above the horizon.
+    let (eff, cal) = (s.effective_safety(), s.calibration);
+    let n = 1 + rng.below(MAX_TARGETS);
+    let all: Vec<Target> = (0..n).map(|i| Target { name: format!("T{i}"), x: rng.range(-1.0, 1.0), y: rng.range(-1.0, 1.0) }).collect();
+    if s.targets.set(Targets { items: all.clone() }, &eff, &cal, false, true).is_ok() != all.iter().all(|t| output_of(t, &cal).1 > eff.horizon.y) {
+        return Err("setup: a list with a target below the horizon was not refused (or a clean one was)".into());
+    }
+    let kept: Vec<Target> = all.into_iter().filter(|t| output_of(t, &cal).1 > eff.horizon.y).collect();
+    s.targets.set(Targets { items: kept }, &eff, &cal, false, true).map_err(|_| "setup: targets above the horizon refused".to_string())?;
+    if rng.chance(0.3) {
+        // Tighter: no confirmation needed.
+        let mut c = s.safety.get();
+        c.horizon.y = rng.range(c.horizon.y, 0.9);
+        s.safety.set(c, false).map_err(|e| format!("setup: a higher horizon refused: {e:?}"))?;
+    }
+    s.settings = random_mirror_look(&mut rng);
+    if rng.chance(0.5) {
+        let bpm = rng.range(60.0, 250.0) as f64;
+        let _ = controls::apply(&mut s, "tempo.bpm", ControlInput::Value(bpm as f32), false);
+    }
+    let mut rig = Rig::new(s, "mirror", seed);
+    let _ = rig.s().request_arm(ArmSource::Ui);
+    let (cfg, guard) = {
+        let s = rig.s();
+        (s.effective_safety(), s.safety.get().dwell)
+    };
+    let mut meter = DoseMeter::new(&guard);
+    let bound = guard_bound(&guard);
+    let mut lit_frames = 0;
+    for frame in 0..120 {
+        rig.tick();
+        let t = rig.t();
+        let w = rig.wire.lock().unwrap();
+        let what = format!("frame {frame}, sent");
+        check_points(&w.last, &caps, &cfg, &what)?;
+        check_public(&w.last, &caps, &cfg, false, &what)?;
+        if let Some(p) = w.last.iter().find(|p| p.is_lit() && p.y <= cfg.horizon.y) {
+            return Err(format!("{what}: a mirror beam lit at ({}, {}), below the horizon at {}", p.x, p.y, cfg.horizon.y));
+        }
+        let dose = meter.feed(&w.last, t);
+        if dose > bound {
+            return Err(format!("{what}: a cell received {dose:.4} of the window, the guard allows {bound:.4} ({:?})", guard.profile));
+        }
+        lit_frames += w.last.iter().any(|p| p.is_lit()) as usize;
+        drop(w);
+        if rig.s().gate.is_armed() && rng.chance(0.02) {
+            // A target edit while armed: never a loosening, never arms.
+            let mut s = rig.s();
+            let list = random_target_list(&s, &mut rng);
+            let (eff, cal) = (s.effective_safety(), s.calibration);
+            let before = s.targets.get().clone();
+            if s.targets.set(list, &eff, &cal, true, true).is_ok_and(|stored| !before.loosenings(&stored).is_empty()) {
+                return Err(format!("frame {frame}: a target added or moved while armed"));
+            }
+        }
+    }
+    Ok(lit_frames)
+}
+
+/// T-109: the mirror targets' static beams never get past the safety
+/// stage: random targets and zones over many cases (see `run_mirror_case`),
+/// and enough of them lit that the checks are not vacuous.
+#[test]
+fn mirror_targets_never_light_a_cut_target_nor_pass_the_guard_dose() {
+    let name = "mirror_targets_never_light_a_cut_target_nor_pass_the_guard_dose";
+    let seeds = seeds(109, 200);
+    let threads = sweep_threads(seeds.len());
+    let guard = test_support::progress_guard(name, threads, CASE_STALL);
+    let (lit, result) = sweep_seeds(
+        &seeds,
+        threads,
+        &guard,
+        |seed, lit: &mut usize, _| run_mirror_case(seed).map(|n| *lit += n),
+        |total: &mut usize, part| *total += part,
+    );
+    drop(guard);
+    if let Err((seed, e)) = result {
+        panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+    }
+    if seeds.len() > 50 {
+        let share = lit as f64 / (seeds.len() * 120) as f64;
+        eprintln!("coverage: mirror target frames sent lit {share:.3}");
+        // ~0.36 at 1000 cases (T-473 rule: gate at about half).
+        assert!(share > 0.18, "only {lit} lit frames over {} cases", seeds.len());
+    }
+}
+
+/// T-109 through the real engine: a lone target is a static beam. In the
+/// Beams profile it stays lit, under the guard's cap and the power caps; in Strict it
+/// is dark within the window; in a Blank zone or under « Ciel coupé » it is
+/// dark from the first frame; a chase of two targets lights them in turn.
+#[test]
+fn a_lone_mirror_target_is_capped_in_beams_and_cut_in_strict() {
+    use crate::targets::{Target, Targets};
+    let run = |profile: dwell::DwellProfile, zone: bool, sky: bool, items: Vec<(f32, f32)>, chase: bool| -> Vec<Vec<Point>> {
+        let mut s = test_support::shared();
+        let mut cfg = SafetySettings::default();
+        cfg.dwell.profile = profile;
+        if zone {
+            cfg.zones.push(Zone { id: 1, name: "Régie".into(), kind: ZoneKind::Blank, points: vec![[0.1, 0.3], [0.5, 0.3], [0.5, 0.7], [0.1, 0.7]], ..Default::default() });
+        }
+        s.safety.set(cfg, true).unwrap();
+        let items: Vec<Target> = items.iter().map(|&(x, y)| Target { name: "T".into(), x, y }).collect();
+        let (eff, cal) = (s.effective_safety(), s.calibration);
+        s.targets.set(Targets { items }, &eff, &cal, false, true).ok().unwrap();
+        if sky {
+            assert!(s.set_sky_off(true, ArmSource::Ui));
+        }
+        let params = crate::generators::GenParams { a: 65535.0, b: chase as u8 as f32, beat_sync: true, ..Default::default() };
+        s.settings = Settings { content: Content::Generator { generator: crate::targets::GENERATOR.into(), params }, color: [255, 255, 255], ..Settings::default() };
+        let mut rig = Rig::new(s, &format!("mirror-{profile:?}-{zone}-{sky}-{chase}"), 109);
+        rig.s().request_arm(ArmSource::Ui).unwrap();
+        (0..90)
+            .map(|_| {
+                rig.tick();
+                rig.wire.lock().unwrap().last.clone()
+            })
+            .collect()
+    };
+    let peak = |f: &[Point]| f.iter().map(|p| p.r.max(p.g).max(p.b)).fold(0.0f32, f32::max);
+    let beams = run(dwell::DwellProfile::Beams, false, false, vec![(0.3, 0.5)], false);
+    let last = peak(beams.last().unwrap());
+    assert!(last > 0.0 && last < 1.0, "Beams: still lit, under the power caps ({last})");
+    // The meter sees the beam (the frame is completed with dark points), under the bound.
+    let mut meter = DoseMeter::new(&dwell::DwellGuard::default());
+    let top = beams.iter().enumerate().map(|(i, f)| meter.feed(f, i as f64 / 60.0)).fold(0.0f64, f64::max);
+    let cap = dwell::DwellGuard::default().max_cell_dose_beams as f64;
+    assert!(top > 0.1 && top <= guard_bound(&dwell::DwellGuard::default()), "dose {top}, cap {cap}");
+    let strict = run(dwell::DwellProfile::Strict, false, false, vec![(0.3, 0.5)], false);
+    assert!(strict.iter().skip(15).all(|f| peak(f) == 0.0), "Strict: a lone beam goes dark");
+    let zoned = run(dwell::DwellProfile::Beams, true, false, vec![(0.3, 0.5)], false);
+    assert!(zoned.iter().all(|f| peak(f) == 0.0), "in a Blank zone: never lit");
+    let sky = run(dwell::DwellProfile::Beams, false, true, vec![(0.3, 0.5)], false);
+    assert!(sky.iter().all(|f| peak(f) == 0.0), "« Ciel coupé »: never lit");
+    // Two targets chased one per beat (120 BPM: 30 frames a beat).
+    let chase = run(dwell::DwellProfile::Beams, false, false, vec![(-0.6, 0.4), (0.6, 0.8)], true);
+    let side = |f: &[Point]| f.iter().filter(|p| p.is_lit()).map(|p| p.x.signum() as i8).collect::<std::collections::BTreeSet<i8>>();
+    let lit_sides: Vec<_> = chase.iter().map(|f| side(f)).filter(|s| !s.is_empty()).collect();
+    assert!(lit_sides.iter().all(|s| s.len() == 1), "one target at a time");
+    assert!(lit_sides.iter().any(|s| s.contains(&-1)) && lit_sides.iter().any(|s| s.contains(&1)), "both in turn");
 }

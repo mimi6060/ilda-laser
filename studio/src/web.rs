@@ -151,6 +151,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/estop/reset", RouteClass::Arm),
     ("GET", "/api/safety", RouteClass::Read),
     ("POST", "/api/safety", RouteClass::Safety),
+    ("GET", "/api/targets", RouteClass::Read),
+    ("POST", "/api/targets", RouteClass::Safety),
     ("GET", "/api/safety/lock", RouteClass::Read),
     ("POST", "/api/safety/lock", RouteClass::Safety),
     ("POST", "/api/safety/unlock", RouteClass::Safety),
@@ -1442,6 +1444,45 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                             ),
                         }
                     }
+                }
+            }
+            Err(e) => e,
+        },
+        // Mirror targets (T-109, targets.rs): the list, where each one's
+        // beam goes and what the safety stage does to it there.
+        (Method::Get, "/api/targets") => json_response(targets_view(&shared.lock().unwrap())),
+        // `{items, confirm_loosen?}`: the whole list. A new or moved target
+        // is a loosening: 409 `{error, loosen}` without `"confirm_loosen":
+        // true` (sent only by the operator's confirmation in the UI), 409
+        // `{error, loosen, armed: true}` while armed, 423 under the safety
+        // lock; one below the horizon is 400. Removing or renaming always
+        // runs. Never arms.
+        (Method::Post, "/api/targets") => match body::<TargetsRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let lock_on = safety_lock_on(&mut s);
+                let armed = s.gate.is_armed();
+                let (cfg, cal) = (s.effective_safety(), s.calibration);
+                let before = s.targets.get().clone();
+                let new = crate::targets::Targets { items: req.items };
+                match s.targets.set(new, &cfg, &cal, armed || lock_on, req.confirm_loosen && !lock_on) {
+                    Ok(stored) => {
+                        if let Some(mut change) = crate::safety_log::settings_change(&before, &stored) {
+                            change["confirmed_loosen"] = json!(req.confirm_loosen && !before.loosenings(&stored).is_empty());
+                            s.gate.log().record("mirror_targets", Some("ui"), change);
+                        }
+                        json_response(targets_view(&s))
+                    }
+                    Err(crate::targets::SetError::Invalid(msg)) => text(400, &msg),
+                    Err(crate::targets::SetError::Armed(list)) if lock_on => safety_locked_list(&list),
+                    Err(crate::targets::SetError::Armed(list)) => with_status(
+                        json_response(json!({ "error": "Désarmez le laser pour ajouter ou déplacer une cible", "loosen": list, "armed": true })),
+                        409,
+                    ),
+                    Err(crate::targets::SetError::Loosens(list)) => with_status(
+                        json_response(json!({ "error": "Ajouter ou déplacer une cible assouplit la sécurité : confirmation requise", "loosen": list })),
+                        409,
+                    ),
                 }
             }
             Err(e) => e,
@@ -5397,6 +5438,41 @@ fn safety_locked_list(list: &[String]) -> HttpResponse {
 /// tightening through.
 fn safety_lock_on(s: &mut Shared) -> bool {
     crate::safetylock::check(s, Instant::now())
+}
+
+#[derive(Deserialize)]
+struct TargetsRequest {
+    items: Vec<crate::targets::Target>,
+    #[serde(default)]
+    confirm_loosen: bool,
+}
+
+/// `GET /api/targets` and the answer to a change (T-109): the list, each
+/// target's output point and status, and the static-beam guard's cells
+/// that dim one of them on the last frame.
+fn targets_view(s: &Shared) -> serde_json::Value {
+    let cfg = s.effective_safety();
+    let g = s.dwell.grid.max(1) as f32;
+    let status: Vec<serde_json::Value> = s
+        .targets
+        .get()
+        .items
+        .iter()
+        .map(|t| {
+            let st = crate::targets::status(t, &cfg, &s.calibration);
+            let cell = |v: f32| (((v.clamp(-1.0, 1.0) + 1.0) * 0.5 * g) as usize).min(g as usize - 1) as f32;
+            let (cx, cy) = (cell(st.out[0]), cell(st.out[1]));
+            let guard = s.dwell.cells.iter().find(|c| c[0] == cx && c[1] == cy).map(|c| c[2]);
+            json!({ "out": st.out, "level": st.level, "reasons": st.reasons, "guard": guard })
+        })
+        .collect();
+    json!({
+        "items": s.targets.get().items,
+        "status": status,
+        "max": crate::targets::MAX_TARGETS,
+        "horizon_y": cfg.horizon.y,
+        "dwell_profile": cfg.dwell.profile,
+    })
 }
 
 #[derive(Deserialize)]
@@ -10872,6 +10948,68 @@ mod tests {
         // Noir latches the stop at once.
         assert_eq!(cmd("noir").0, 200);
         assert!(t.shared.lock().unwrap().estop.is_latched());
+    }
+
+    /// T-109: mirror targets through the API. A new or moved target needs
+    /// the confirmation, is refused armed, under the safety lock and in
+    /// show mode; one below the horizon is refused with a message; removing
+    /// runs locked; nothing arms; the status says why a target is cut.
+    #[test]
+    fn mirror_targets_need_a_confirmation_and_never_loosen_locked() {
+        let t = TestServer::start(false);
+        let post = |b: &serde_json::Value| t.request("POST", "/api/targets", &b.to_string());
+        let one = json!({ "items": [{ "name": "Boule", "x": 0.2, "y": 0.5 }] });
+        let (code, body) = post(&one);
+        assert_eq!(code, 409, "{body}");
+        assert!(js(&body)["loosen"][0].as_str().unwrap().contains("ajoutée"));
+        assert!(t.shared.lock().unwrap().targets.get().items.is_empty());
+        let mut confirmed = one.clone();
+        confirmed["confirm_loosen"] = json!(true);
+        let (code, body) = post(&confirmed);
+        assert_eq!(code, 200, "{body}");
+        let v = js(&body);
+        assert_eq!(v["items"][0]["name"], "Boule");
+        assert_eq!(v["status"][0]["level"], 1.0);
+        assert_eq!(v["max"], crate::targets::MAX_TARGETS);
+        // Below the horizon: refused with a message, confirmed or not.
+        let low = json!({ "items": [{ "name": "Boule", "x": 0.2, "y": 0.5 }, { "name": "Sol", "x": 0.0, "y": -0.4 }], "confirm_loosen": true });
+        let (code, body) = post(&low);
+        assert_eq!(code, 400);
+        assert!(body.contains("sous l'horizon") && body.contains("Sol"), "{body}");
+        // Bad values: 400.
+        assert_eq!(post(&json!({ "items": [{ "name": "", "x": 0.0, "y": 0.5 }], "confirm_loosen": true })).0, 400);
+        assert_eq!(post(&json!({ "items": [{ "name": "A", "x": 2.0, "y": 0.5 }], "confirm_loosen": true })).0, 400);
+        // A Blank zone over it: kept, dark, and the status says so.
+        let mut cfg = js(&t.request("GET", "/api/safety", "").1)["settings"].clone();
+        cfg["zones"] = json!([{ "id": 1, "name": "Régie", "kind": "blank", "points": [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]] }]);
+        assert_eq!(t.request("POST", "/api/safety", &cfg.to_string()).0, 200);
+        let v = js(&t.request("GET", "/api/targets", "").1);
+        assert_eq!(v["status"][0]["level"], 0.0);
+        assert!(v["status"][0]["reasons"][0].as_str().unwrap().contains("Régie"), "{v}");
+        // Armed: moving refused (409 armed), renaming runs; never disarms nor arms.
+        t.shared.lock().unwrap().request_arm(crate::interlock::ArmSource::Ui).unwrap();
+        let moved = json!({ "items": [{ "name": "Boule", "x": -0.3, "y": 0.5 }], "confirm_loosen": true });
+        let (code, body) = post(&moved);
+        assert_eq!(code, 409, "{body}");
+        assert_eq!(js(&body)["armed"], true);
+        assert_eq!(post(&json!({ "items": [{ "name": "Miroir", "x": 0.2, "y": 0.5 }] })).0, 200);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+        t.shared.lock().unwrap().gate.disarm(crate::interlock::DisarmReason::User, crate::interlock::ArmSource::Ui);
+        assert_eq!(post(&moved).0, 200);
+        // Show mode: every change refused.
+        assert_eq!(t.request("POST", "/api/lock", &json!({ "show_mode": true }).to_string()).0, 200);
+        assert_eq!(post(&json!({ "items": [] })).0, 423);
+        assert_eq!(t.shared.lock().unwrap().targets.get().items.len(), 1);
+        assert_eq!(t.request("POST", "/api/lock", &json!({ "show_mode": false }).to_string()).0, 200);
+        // Under the safety lock: adding refused (423), removing runs.
+        assert_eq!(t.request("POST", "/api/safety/lock", &json!({ "action": "set", "code": "2468" }).to_string()).0, 200);
+        let two = json!({ "items": [{ "name": "Miroir", "x": -0.3, "y": 0.5 }, { "name": "Mur", "x": 0.6, "y": 0.7 }], "confirm_loosen": true });
+        let (code, body) = post(&two);
+        assert_eq!(code, 423, "{body}");
+        assert!(js(&body)["loosen"].as_array().is_some_and(|l| l.len() == 1));
+        assert_eq!(post(&json!({ "items": [] })).0, 200);
+        assert!(t.shared.lock().unwrap().targets.get().items.is_empty());
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     /// T-261: with the safety lock on, every Safety-class route refuses
