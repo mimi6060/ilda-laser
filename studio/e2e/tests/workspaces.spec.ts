@@ -5,7 +5,10 @@
 import { test, expect, useStudio, openUi, openWorkspace, reveal, focusPage, type Workspace } from '../studio';
 import type { Page } from '@playwright/test';
 
-const studio = useStudio();
+// --midi-test: the MIDI-lost banner comes from a really unplugged
+// simulated controller, so the page's own MIDI check agrees with the test (T-487).
+const studio = useStudio({ midiTest: true });
+const LOST_PORT = 'Test contrôleur débranché';
 const WORKSPACES: Workspace[] = ['live', 'timeline', 'creation', 'settings', 'desk'];
 const activeCue = async () => (await studio.controlValues()).active_cue;
 
@@ -80,8 +83,14 @@ test('five workspace tabs, LIVE first, each section in its workspace', async ({ 
 });
 
 test('top bar, laser button, ARRÊT and the banners are visible in every workspace', async ({ page }) => {
-  // Force the MIDI-lost banner on (no controller in tests) to check where it sits.
-  await page.locator('#midiLost').evaluate(el => el.classList.add('on'));
+  // Unplug a simulated controller so the MIDI-lost banner is really on, to check where it sits.
+  const lostDevice = async () => ((await studio.get('/api/midi')).devices as { name: string; connected: boolean; lost: boolean }[])
+    .find(d => d.name === LOST_PORT);
+  expect(await studio.post('/api/midi/plug', { port: LOST_PORT })).toBe(200);
+  await expect.poll(async () => (await lostDevice())?.connected, { timeout: 8000 }).toBe(true);
+  expect(await studio.post('/api/midi/unplug', { port: LOST_PORT })).toBe(200);
+  await expect.poll(async () => (await lostDevice())?.lost, { timeout: 8000 }).toBe(true);
+  await expect(page.locator('#midiLost')).toContainText(LOST_PORT, { timeout: 8000 });
   for (const ws of WORKSPACES) {
     await openWorkspace(page, ws);
     for (const sel of TOP_BAR) await expect(page.locator(sel), `${sel} in ${ws}`).toBeVisible();
@@ -90,7 +99,10 @@ test('top bar, laser button, ARRÊT and the banners are visible in every workspa
       expect(await page.locator(sel).evaluate(el => !el.closest('[data-ws]') && !!el.closest('#top')), sel).toBe(true);
     }
   }
-  await page.locator('#midiLost').evaluate(el => el.classList.remove('on'));
+  // Plugged back: the banner goes away by itself.
+  expect(await studio.post('/api/midi/plug', { port: LOST_PORT })).toBe(200);
+  await expect.poll(async () => (await lostDevice())?.lost, { timeout: 8000 }).toBe(false);
+  await expect(page.locator('#midiLost')).toBeHidden({ timeout: 8000 });
 
   // ARRÊT (the button) latches the stop from any workspace, and its banner shows there.
   for (const ws of WORKSPACES) {
