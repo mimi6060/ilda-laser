@@ -48,6 +48,8 @@ pub enum ControlSource {
     System,
     /// The command line and its palette (T-424).
     Command,
+    /// The autopilot (T-148).
+    Autopilot,
 }
 
 impl ControlSource {
@@ -66,6 +68,7 @@ impl ControlSource {
             ControlSource::Network => "Réseau",
             ControlSource::System => "Système",
             ControlSource::Command => "Ligne de commande",
+            ControlSource::Autopilot => "Pilote auto",
         }
     }
 
@@ -80,6 +83,7 @@ impl ControlSource {
             Some("network") => ControlSource::Network,
             Some("system") => ControlSource::System,
             Some("audio") => ControlSource::Audio,
+            Some("autopilot") => ControlSource::Autopilot,
             _ => ControlSource::Ui,
         }
     }
@@ -278,6 +282,11 @@ impl ControlRegistry {
         // The audio triggers' switch (T-240): memory only, off at start,
         // switched off by an e-stop. Turning it on never arms anything.
         add("audio.triggers.enabled".into(), "Automatisme audio (déclencheurs)".into(), "audio", ControlKind::Toggle { default: false }, true);
+        // Pilote automatique (T-148): the switch is memory only, off at
+        // start, switched off by an e-stop or a disarm; never arms.
+        add("vlj.enabled".into(), "Pilote automatique".into(), "autopilot", ControlKind::Toggle { default: false }, true);
+        add("vlj.every".into(), "Pilote auto : rythme".into(), "autopilot", choice(&crate::autopilot::EVERY_LABELS, 2), true);
+        add("vlj.order".into(), "Pilote auto : ordre".into(), "autopilot", choice(&crate::autopilot::ORDER_LABELS, 0), true);
 
         // Both latch the emergency stop (T-251): a controller's blackout pad
         // is the stop button. Only the UI resets it, and nothing external arms.
@@ -545,6 +554,9 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "audio.flash" => s.settings.audio.flash = value(input),
         "audio.color_on_beat" => s.settings.audio.color_on_beat = truthy(input),
         "audio.triggers.enabled" => crate::audio::triggers::set_enabled(s, truthy(input), src).map_err(ControlError::Refused)?,
+        "vlj.enabled" => crate::autopilot::set_enabled(s, truthy(input), src).map_err(ControlError::Refused)?,
+        "vlj.every" => crate::autopilot::set_every(s, choice_index(&desc.kind, input)),
+        "vlj.order" => crate::autopilot::set_random(s, choice_index(&desc.kind, input) == 1),
         "transport.blackout" | "safety.estop" => s.emergency_stop(src),
         "safety.hold" => s.presence.set_midi_hold(truthy(input)),
         "safety.sky_off" => {
@@ -1042,6 +1054,9 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "audio.flash" => json!(s.settings.audio.flash),
         "audio.color_on_beat" => json!(s.settings.audio.color_on_beat),
         "audio.triggers.enabled" => json!(s.triggers.enabled()),
+        "vlj.enabled" => json!(s.autopilot.enabled()),
+        "vlj.every" => json!(crate::autopilot::EVERY_BARS.iter().position(|&n| n == s.autopilot.config().every_bars)),
+        "vlj.order" => json!(s.autopilot.config().random as u8),
         "transport.arm" => json!(s.gate.is_armed() && !s.estop.is_latched()),
         "safety.hold" => json!(s.presence.status().midi_hold),
         "tempo.bpm" => json!(s.tempo.bpm),
@@ -1231,6 +1246,12 @@ pub fn send_prepared(s: &mut Shared, id: &str, mode: Option<ClickMode>, look: Se
     }
     let now = s.now_s();
     press_cue_with(s, id, mode, true, src, ControlSource::from_id(src), now, Some(look))
+}
+
+/// `press_cue_as` at `t` on the studio clock (the engine's frame time):
+/// the autopilot (T-148) presses on the bar boundary itself.
+pub fn press_cue_as_at(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, source: ControlSource, t: f64) -> bool {
+    press_cue_full(s, id, mode, down, src, source, t)
 }
 
 fn press_cue_full(s: &mut Shared, id: &str, mode: Option<ClickMode>, down: bool, src: Option<&'static str>, source: ControlSource, t: f64) -> bool {

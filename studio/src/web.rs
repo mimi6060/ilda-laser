@@ -273,6 +273,10 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/audio/preset", RouteClass::Edit),
     ("GET", "/api/audio/triggers", RouteClass::Read),
     ("POST", "/api/audio/triggers", RouteClass::Edit),
+    // Pilote automatique (T-148): its pages and public content are an
+    // edit; the switch, rhythm and order are the `vlj.*` controls.
+    ("GET", "/api/autopilot", RouteClass::Read),
+    ("POST", "/api/autopilot", RouteClass::Edit),
     ("GET", "/api/controls", RouteClass::Read),
     ("GET", "/api/control-values", RouteClass::Read),
     ("POST", "/api/control", RouteClass::Play),
@@ -2828,6 +2832,19 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 match crate::audio::triggers::set_config(s, cfg) {
                     Ok(_) => json_response(crate::audio::triggers::view(s)),
                     Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        // Pilote automatique (T-148): the pages and the public content
+        // (an edit: history, locked in show mode); playing it is `vlj.*`.
+        (Method::Get, "/api/autopilot") => json_response(crate::autopilot::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/autopilot") => match body::<crate::autopilot::AutopilotEdit>(request) {
+            Ok(edit) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::autopilot::set_config(s, edit) {
+                    Ok(()) => json_response(crate::autopilot::view(s)),
+                    Err(e) => text(400, &e),
                 }
             }
             Err(e) => e,
@@ -5547,6 +5564,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     v["showlist"] = json!(crate::showlist::summary(s));
     // The agenda (T-455): the next slot and the last runs.
     v["agenda"] = crate::agenda::state(s);
+    // Pilote automatique (T-148): the switch, its pick, why it waits.
+    v["autopilot"] = crate::autopilot::status(s);
     // The live take (T-169).
     v["take"] = s.take.view();
     // T-450: free space and the copy to a second location.
@@ -5774,6 +5793,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["showlist"] = json!(crate::showlist::summary(s));
     // The agenda (T-455): the top bar's « Agenda actif — prochain 20:30 ».
     v["agenda"] = crate::agenda::summary(s);
+    // Pilote automatique (T-148): the switch, its pick, why it waits.
+    v["autopilot"] = crate::autopilot::status(s);
     // T-448: 0 normal, 1 loaded, 2 late frames (the points indicator).
     v["perf_level"] = json!(s.perf.level());
     // T-285: undo / redo counts and labels; `rev` moves on every change.
@@ -7804,6 +7825,50 @@ mod tests {
         assert_eq!(t.request("POST", "/api/audio/preset", r#"{"id":"calm"}"#).0, 423);
         assert_eq!(t.request("POST", "/api/control", r#"{"id":"audio.triggers.enabled","value":0}"#).0, 200, "the switch is playback");
         assert!(!t.shared.lock().unwrap().triggers.enabled());
+    }
+
+    /// T-148: the autopilot's pages are an edit (checked, undone, 423 in
+    /// show mode); its switch, rhythm and order are controls that keep
+    /// working in show mode and never arm; the skip flag is a cue property.
+    #[test]
+    fn autopilot_over_the_api() {
+        let t = TestServer::start(false);
+        let json = |(code, body): (u16, String)| -> (u16, serde_json::Value) { (code, serde_json::from_str(&body).unwrap_or(serde_json::Value::Null)) };
+        let (code, v) = json(t.request("GET", "/api/autopilot", ""));
+        assert_eq!((code, v["enabled"].as_bool(), v["every_bars"].as_u64()), (200, Some(false), Some(4)));
+        assert!(!v["candidates"].as_array().unwrap().is_empty());
+        assert_eq!(t.request("POST", "/api/autopilot", r#"{"pages":[999]}"#).0, 400);
+        let (code, v) = json(t.request("POST", "/api/autopilot", r#"{"pages":[2,1],"allow_audience":false}"#));
+        assert_eq!((code, v["pages"].clone()), (200, json!([1, 2])));
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert!(t.shared.lock().unwrap().autopilot.config().pages.is_empty(), "undone");
+        assert_eq!(t.request("POST", "/api/redo", "{}").0, 200);
+        assert_eq!(t.shared.lock().unwrap().autopilot.config().pages, vec![1, 2]);
+
+        let cue = t.shared.lock().unwrap().grid.view()[0].cells.iter().flatten().next().unwrap().clone();
+        assert_eq!(t.request("POST", "/api/cues/slot", &json!({ "id": cue, "vlj_skip": true }).to_string()).0, 200);
+        assert!(t.shared.lock().unwrap().deck.slot(&cue).vlj_skip);
+        let (_, v) = json(t.request("GET", "/api/autopilot", ""));
+        assert!(!v["candidates"].as_array().unwrap().iter().any(|c| c == &json!(cue)));
+
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/autopilot", r#"{"pages":[]}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"vlj.enabled","value":1}"#).0, 200, "the switch is playback");
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"vlj.every","value":3}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"vlj.order","value":1}"#).0, 200);
+        {
+            let s = t.shared.lock().unwrap();
+            assert!(s.autopilot.enabled() && s.autopilot.config().random);
+            assert_eq!(s.autopilot.config().every_bars, 8);
+            assert!(!s.gate.is_armed());
+        }
+        let (_, v) = json(t.request("GET", "/api/control-values", ""));
+        assert_eq!((v["values"]["vlj.enabled"].clone(), v["values"]["vlj.every"].clone()), (json!(true), json!(3)));
+        assert_eq!(t.request("POST", "/api/estop", "").0, 200);
+        // The fast path trips the latch; the next engine frame sees it.
+        crate::autopilot::sync_stops(&mut t.shared.lock().unwrap());
+        assert!(!t.shared.lock().unwrap().autopilot.enabled());
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"vlj.enabled","value":1}"#).0, 403, "refused while latched");
     }
 
     /// T-283: in show mode, edits get 423 and change nothing; playing,

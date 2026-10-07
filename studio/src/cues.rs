@@ -210,6 +210,9 @@ pub struct CueSlot {
     /// older files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spread: Option<crate::spread::Spread>,
+    /// « Ignorer par le pilote » (T-148): the autopilot never picks it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub vlj_skip: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
