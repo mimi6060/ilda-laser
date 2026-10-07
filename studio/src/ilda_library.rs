@@ -415,6 +415,9 @@ impl ExportSafety {
     /// geometry and the calibration; zones joined by blanked travel. Only
     /// content: the output safety chain comes after (`bake_chain`). A look
     /// routed to no zone of this projector gives an empty frame, as live.
+    /// Zone chasers (T-170) are left out by design: a chase is a playing
+    /// move, so a file draws every routed zone, as live with no chase (at
+    /// most the union of a chase cycle, never a zone it doesn't route to).
     pub fn place(&self, rendered: &[Routed], mixer: &Mixer) -> Vec<Point> {
         let zones = self.projection.zones.iter().collect();
         projection::render_zones(rendered, &self.projection, zones, mixer, |_, look| look.to_vec(), &self.calibration).0

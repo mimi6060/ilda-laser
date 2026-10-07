@@ -189,6 +189,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/frames", RouteClass::Read),
     ("GET", "/api/projection", RouteClass::Read),
     ("GET", "/api/groups", RouteClass::Read),
+    ("GET", "/api/zone-chase", RouteClass::Read),
     ("POST", "/api/projection", RouteClass::Safety),
     ("POST", "/api/projection/align", RouteClass::Safety),
     ("POST", "/api/scenes/save", RouteClass::Edit),
@@ -1911,6 +1912,10 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // Zone groups and their masters (T-420): levels move through
         // `/api/control` (`group.<n>.master`), never through here.
         (Method::Get, "/api/groups") => json_response(groups_view(&shared.lock().unwrap())),
+        // Zone chasers (T-170): where each stands now. They are edited with
+        // the zones (`POST /api/projection`), played through `/api/control`
+        // (`chaser.<n>.enabled`, `chaser.rate`).
+        (Method::Get, "/api/zone-chase") => json_response(chase_view(&shared.lock().unwrap())),
         (Method::Post, "/api/projection") => match body::<crate::projection::ProjectionConfig>(request) {
             Ok(cfg) => {
                 let mut s = shared.lock().unwrap();
@@ -2085,6 +2090,11 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 // and keeps them.
                 if req.slot.speed_group.is_some_and(|g| crate::speed::check_group(g).is_err()) {
                     return text(400, "groupe de vitesse inconnu (0 à 4)");
+                }
+                // A zone chaser (T-170) may be created later; one past the
+                // most there can be is a mistake.
+                if req.slot.zone_chaser.is_some_and(|c| c >= crate::zonechase::MAX_CHASERS) {
+                    return text(400, "chenillard de zones inconnu");
                 }
                 let CueSlot { program, modifiers, part_modifiers, refs: before, .. } = s.deck.slot(&req.id);
                 let mut slot = req.slot;
@@ -4138,9 +4148,48 @@ fn groups_view(s: &Shared) -> serde_json::Value {
         .groups
         .iter()
         .enumerate()
-        .map(|(i, g)| json!({ "n": i + 1, "name": g.name, "zones": g.zones, "master": g.master, "control": format!("group.{}.master", i + 1) }))
+        .map(|(i, g)| {
+            // Only the first groups have a master control (T-170: up to 32 groups).
+            let control = (i < crate::projection::GROUP_MASTER_CONTROLS).then(|| format!("group.{}.master", i + 1));
+            json!({ "n": i + 1, "name": g.name, "zones": g.zones, "master": g.master, "control": control })
+        })
         .collect();
-    json!({ "groups": groups, "max_groups": crate::projection::GROUP_MASTER_CONTROLS })
+    json!({ "groups": groups, "max_groups": crate::projection::MAX_GROUPS, "master_controls": crate::projection::GROUP_MASTER_CONTROLS })
+}
+
+/// `GET /api/zone-chase` (T-170): each zone chaser, whether it runs free,
+/// its step and active group now (1-based, null when it has no step), the
+/// rate, and the choices the page offers.
+fn chase_view(s: &Shared) -> serde_json::Value {
+    use crate::zonechase::{DEFAULT_RATE, MAX_CHASERS, MAX_STEPS, RATES, RATE_LABELS, STEP_BEATS, STEP_LABELS};
+    let cfg = s.projection.get();
+    let chasers: Vec<_> = cfg
+        .chasers
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let now = s.zone_chase.steps.get(i).copied().flatten();
+            json!({
+                "n": i + 1,
+                "name": c.name,
+                "enabled": c.enabled,
+                "control": format!("chaser.{}.enabled", i + 1),
+                "step": now.map(|(step, _)| step + 1),
+                "group": now.map(|(_, g)| g + 1),
+            })
+        })
+        .collect();
+    let rate = RATES.iter().position(|r| *r == cfg.chase_rate).unwrap_or(DEFAULT_RATE);
+    json!({
+        "chasers": chasers,
+        "rate": rate,
+        "zones": s.zone_chase.free,
+        "rates": RATE_LABELS,
+        "step_beats": STEP_BEATS,
+        "step_labels": STEP_LABELS,
+        "max_chasers": MAX_CHASERS,
+        "max_steps": MAX_STEPS,
+    })
 }
 
 /// `GET /api/projection`.
@@ -5536,7 +5585,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
             "beat_every": s.deck.beat_every,
         },
         // Group masters (T-420) ride with the layers: the LIVE row shows them.
-        "layers": { "mixer": s.mixer, "mix": s.mix, "groups": groups_view(s)["groups"] },
+        "layers": { "mixer": s.mixer, "mix": s.mix, "groups": groups_view(s)["groups"], "chase": chase_view(s) },
         "tempo": tempo_view(s),
         // T-409: the timecode state also under `timeline.timecode`.
         "timeline": timeline_with_timecode(s),
@@ -9417,6 +9466,59 @@ mod tests {
         assert_eq!(v["dangling"][0]["id"], "tunnels-001");
         assert!(!t.shared.lock().unwrap().gate.is_armed());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-170: zone chasers are edited with the zones (an edit: in the
+    /// history, 423 in show mode), played through the controls (allowed in
+    /// show mode), tied to a cue in « Propriétés du cue »; nothing arms.
+    #[test]
+    fn zone_chasers_over_the_api() {
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let t = TestServer::start(false);
+        let v = js(&t.request("GET", "/api/zone-chase", "").1);
+        assert_eq!(v["chasers"], json!([]));
+        assert_eq!((v["rate"].as_u64(), v["max_chasers"].as_u64()), (Some(2), Some(16)));
+        let cfg = json!({
+            "zones": [{ "id": 1 }, { "id": 2 }, { "id": 3 }],
+            "default_zones": [1, 2, 3],
+            "groups": [{ "name": "Gauche", "zones": [1] }, { "name": "Centre", "zones": [2] }, { "name": "Droite", "zones": [3] }],
+            "chasers": [{ "name": "Balayage", "steps": [0, 1, 2], "step_beats": 1, "mode": "bounce" }]
+        });
+        let (code, body) = t.request("POST", "/api/projection", &cfg.to_string());
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Zones de projection modifiées");
+        let v = js(&t.request("GET", "/api/zone-chase", "").1);
+        assert_eq!(v["chasers"][0]["name"], "Balayage");
+        assert_eq!(v["chasers"][0]["control"], "chaser.1.enabled");
+        assert_eq!(v["chasers"][0]["enabled"], false);
+        // A step on a group that doesn't exist: refused.
+        let mut bad = cfg.clone();
+        bad["chasers"][0]["steps"] = json!([0, 3]);
+        assert_eq!(t.request("POST", "/api/projection", &bad.to_string()).0, 400);
+        // Only the chasers changed: the history says so.
+        let mut faster = cfg.clone();
+        faster["chasers"][0]["step_beats"] = json!(0.5);
+        assert_eq!(t.request("POST", "/api/projection", &faster.to_string()).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Chenillards de zones modifiés");
+        // Played live, then the edit is undone: the chaser keeps running.
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"chaser.1.enabled","value":1}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"chaser.rate","value":3}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        let p = t.shared.lock().unwrap().projection.get().clone();
+        assert_eq!(p.chasers[0].step_beats, 1.0, "undone");
+        assert!(p.chasers[0].enabled, "a playing value: kept");
+        assert_eq!(p.chase_rate, 2.0);
+        assert_eq!(js(&t.request("GET", "/api/frame", "").1)["layers"]["chase"]["chasers"][0]["enabled"], true);
+        // A cue tied to chaser 1; one past the most there can be is refused.
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-001","zone_chaser":0}"#).0, 200);
+        assert_eq!(js(&t.request("GET", "/api/cues", "").1)["slots"]["tunnels-001"]["zone_chaser"], 0);
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"tunnels-001","zone_chaser":16}"#).0, 400);
+        // Show mode: editing is locked, playing is not.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/projection", &faster.to_string()).0, 423);
+        assert_eq!(t.request("POST", "/api/control", r#"{"id":"chaser.1.enabled","value":0}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().projection.chaser_enabled(1), Some(false));
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     #[test]

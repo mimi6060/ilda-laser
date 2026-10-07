@@ -101,6 +101,7 @@ pub fn shared() -> Shared {
         mixer: layers::Mixer::default(),
         mixer_dirty: false,
         groups_dirty: false,
+        zone_chase: Default::default(),
         mix: layers::MixReport::default(),
         safety: crate::safety::SafetyStore::in_memory(),
         strobe: Default::default(),

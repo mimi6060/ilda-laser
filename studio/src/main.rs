@@ -118,6 +118,7 @@ mod usercues;
 mod versions;
 mod venue;
 mod watchdog;
+mod zonechase;
 mod zones;
 mod zonetrace;
 mod web;
@@ -464,6 +465,9 @@ pub struct Shared {
     /// A group master (T-420, `group.<n>.master`) moved: the engine writes
     /// projection.json at most once a second, like `mixer_dirty`.
     pub groups_dirty: bool,
+    /// Where each zone chaser stands (T-170), written by the engine every
+    /// frame for the page.
+    pub zone_chase: zonechase::ChaseNow,
     /// What the point budget did to the last frame.
     pub mix: layers::MixReport,
     /// Strobe limiter and beam horizon settings (safety.rs, safety.json).
@@ -1509,6 +1513,7 @@ fn startup_state(cli: &Cli) -> Shared {
         },
         mixer_dirty: false,
         groups_dirty: false,
+        zone_chase: Default::default(),
         mix: layers::MixReport::default(),
         safety: safety::SafetyStore::load_or_create(cli.data_dir.join("safety.json")),
         strobe: safety::StrobeStatus::default(),
@@ -2238,6 +2243,14 @@ impl Engine {
             let mut routing = Routing::read(&s, &looks, &show_cues);
             // A zone group flashed or blacked by an executor (T-418), held.
             executors::group_overrides(&s, &mut routing.config);
+            // Zone chasers (T-170): each look's zones narrowed to the active
+            // group(s) on the tempo clock (frozen with « Figer »), steps
+            // bounded by the strobe limit. Routing only: the mixer, group
+            // masters, geometry, calibration and safety stage follow.
+            let chase_beat = self.frozen.map_or(clock.beat, |(_, beat)| beat);
+            let chase = zonechase::ChaseNow::at(&routing.config, chase_beat, clock.bpm, s.safety.get().strobe_max_hz);
+            routing.chase(&chase);
+            s.zone_chase = chase;
             let caps = s.outputs.active_limits();
             // The ShowNET SD card over Art-Net (T-301) plays the cue's bank
             // number itself: it needs the cue, not only the points.
@@ -2666,6 +2679,9 @@ pub use datafile::save_json;
 struct Routing {
     look_zones: Vec<Vec<u8>>,
     show_zones: Vec<Vec<u8>>,
+    /// The zone chaser tied to each look's cue (T-170), same order.
+    look_chasers: Vec<Option<usize>>,
+    show_chasers: Vec<Option<usize>>,
     config: projection::ProjectionConfig,
     output: Option<String>,
     align: Option<projection::Geometry>,
@@ -2675,25 +2691,39 @@ struct Routing {
 
 impl Routing {
     fn read(s: &Shared, looks: &[(u8, u64, Settings)], show_cues: &[(timeline::TimelineCue, Settings)]) -> Self {
-        let of_cue = |cue: &str| s.deck.slot(cue).zones;
-        let look_zones = looks
+        let of_cue = |cue: &str| {
+            let slot = s.deck.slot(cue);
+            (slot.zones, slot.zone_chaser)
+        };
+        let (look_zones, look_chasers) = looks
             .iter()
             .map(|(_, id, _)| s.deck.find(*id).map(|a| of_cue(&a.cue)).unwrap_or_default())
-            .collect();
-        let show_zones = show_cues
+            .unzip();
+        let (show_zones, show_chasers) = show_cues
             .iter()
             .map(|(cue, _)| match &cue.source {
                 timeline::EventSource::Cue { id } => of_cue(id),
-                timeline::EventSource::Look { .. } => Vec::new(),
+                timeline::EventSource::Look { .. } => (Vec::new(), None),
             })
-            .collect();
+            .unzip();
         Self {
             look_zones,
             show_zones,
+            look_chasers,
+            show_chasers,
             config: s.projection.get().clone(),
             output: s.output_mgr.prefs().selected,
             align: s.projection.align_geometry(),
             remotes: s.netin.fixtures.remotes.clone(),
+        }
+    }
+}
+
+impl Routing {
+    /// Every look's zones through the zone chasers of this frame (T-170).
+    fn chase(&mut self, now: &zonechase::ChaseNow) {
+        for (zones, own) in self.look_zones.iter_mut().zip(&self.look_chasers).chain(self.show_zones.iter_mut().zip(&self.show_chasers)) {
+            *zones = now.route(&self.config, zones, *own);
         }
     }
 }

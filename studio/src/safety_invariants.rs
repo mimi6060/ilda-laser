@@ -170,6 +170,7 @@ use crate::power::{OutputLimits, MAIN_OUTPUT};
 use crate::presence::{Presence, PresenceSettings};
 use crate::projection::{Geometry, ProjectionConfig, ProjectionZone, Warp, ZoneGroup, MAX_ZONES, SQUARE};
 use crate::safety::{self, SafetySettings};
+use crate::zonechase::{self, ChaseMode, ZoneChaser};
 use crate::zones::{self, Horizon, Zone, ZoneKind};
 use crate::transition::{self, Transition, TransitionKind, TransitionLength, LENGTHS, TRANSITION_KINDS};
 use crate::{audience, dwell, interlock, lfo, live, program, test_support, testpattern, timeline, Engine, Shared, FRAME_INTERVAL};
@@ -597,7 +598,7 @@ fn random_projection(rng: &mut Rng) -> ProjectionConfig {
         })
         .collect::<Vec<_>>();
     let default_zones = (0..1 + rng.below(2)).map(|_| zones[rng.below(zones.len())].id).collect();
-    ProjectionConfig { zones, default_zones, groups: Vec::new() }
+    ProjectionConfig { zones, default_zones, ..Default::default() }
 }
 
 /// Zone groups with random masters (T-420): zones that may overlap
@@ -629,12 +630,65 @@ fn random_master(rng: &mut Rng) -> f32 {
 }
 
 /// Zone groups on the current zones (T-420), as `POST /api/projection`
-/// would set them (a new group takes the level it comes with).
+/// would set them (a new group takes the level it comes with). The
+/// chasers (T-170) lose their steps on groups that went, as the page
+/// does.
 fn random_zone_groups(s: &mut Shared, rng: &mut Rng) {
     let mut cfg = s.projection.get().clone();
     let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
     cfg.groups = random_groups(rng, &ids);
+    let n = cfg.groups.len();
+    cfg.chasers.iter_mut().for_each(|c| c.steps.retain(|g| *g < n));
     let _ = s.projection.set(cfg);
+}
+
+/// Half of what the fuzz measures (T-473 rule) at 1000 cases.
+const ZONE_CHASE_GATE: f64 = 0.03;
+
+/// A zone chase move (T-170), the way the page, a controller or the API
+/// would make it: new chasers (edited with the zones, refusals
+/// included), one started or stopped through the controls or an
+/// external input, the rate, a cue tied to a chaser (one that may not
+/// exist). `setup`: the first chasers, created running.
+fn random_zone_chase(s: &mut Shared, rng: &mut Rng, setup: bool) {
+    let n = s.projection.get().chasers.len();
+    match if setup || n == 0 { 0 } else { rng.below(5) } {
+        0 => {
+            let mut cfg = s.projection.get().clone();
+            if cfg.groups.is_empty() {
+                let ids: Vec<u8> = cfg.zones.iter().map(|z| z.id).collect();
+                cfg.groups = random_groups(rng, &ids);
+            }
+            cfg.chasers = random_chasers(rng, cfg.groups.len());
+            if setup {
+                cfg.chasers.iter_mut().for_each(|c| c.enabled = true);
+            }
+            if rng.chance(0.05) {
+                cfg.chasers.push(ZoneChaser { name: "Hors".into(), steps: vec![cfg.groups.len() + 3], ..Default::default() }); // refused
+            }
+            let _ = s.projection.set(cfg);
+        }
+        1 | 2 => {
+            let id = format!("chaser.{}.enabled", 1 + rng.below(n + 1));
+            let input = ControlInput::Value(rng.chance(0.6) as u8 as f32);
+            if rng.chance(0.3) {
+                let src = *rng.pick(&crate::external::SourceKind::ALL);
+                let now = s.sim_now.unwrap_or_else(Instant::now);
+                let _ = crate::external::apply(s, src, "rig", &id, input, now);
+            } else {
+                let _ = controls::apply(s, &id, input, rng.chance(0.5));
+            }
+        }
+        3 => {
+            let input = if rng.chance(0.5) { ControlInput::Norm(rng.range(-1.0, 2.0)) } else { ControlInput::Value(rng.range(-2.0, 6.0)) };
+            let _ = controls::apply(s, "chaser.rate", input, rng.chance(0.5));
+        }
+        _ => {
+            let cue = s.presets[rng.below(s.presets.len())].id.clone();
+            let slot = s.deck.slot(&cue);
+            s.deck.set_slot(&cue, CueSlot { zone_chaser: rng.chance(0.8).then(|| rng.below(n + 1)), ..slot });
+        }
+    }
 }
 
 /// Group masters moved the way a fader, MIDI, OSC or DMX would (through
@@ -1012,8 +1066,9 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
             // The executors (T-418) have their own stream (`brng`): 226
             // ids would otherwise take a third of these picks.
             // The macros (T-425) too (`grng`-like stream `krng`), so this
-            // stream's picks stay what they were.
-            let ids: Vec<String> = s.controls.list().iter().filter(|d| d.group != "exec" && d.group != "macro").map(|d| d.id.clone()).collect();
+            // stream's picks stay what they were; and the zone chasers
+            // (T-170, stream `hrng`).
+            let ids: Vec<String> = s.controls.list().iter().filter(|d| d.group != "exec" && d.group != "macro" && !d.id.starts_with("chaser.")).map(|d| d.id.clone()).collect();
             let id = rng.pick(&ids).clone();
             let external = rng.chance(0.5);
             let input = if rng.chance(0.5) { ControlInput::Norm(rng.f()) } else { ControlInput::Value(rng.range(-3.0, 3.0)) };
@@ -1295,6 +1350,8 @@ struct Coverage {
     lit_with_exec: usize,
     /// Frames that sent light while the zone trace ran (T-447).
     sent_lit_with_trace: usize,
+    /// Frames that sent light while a zone chaser had an active step (T-170).
+    sent_lit_with_zone_chase: usize,
 }
 
 /// A random executor bank (T-418), as `POST /api/executors` could send it
@@ -2030,6 +2087,13 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // Figure parts (T-441), from their own stream.
     let mut qrng = Rng::new(seed ^ 0x0441_0441);
     let parts_on = qrng.chance(0.35);
+    // Zone chasers (T-170), from their own stream: chasers over the zone
+    // groups, started and stopped, the rate, a cue tied to one.
+    let mut hrng = Rng::new(seed ^ 0x0170_0170);
+    let chase_on = hrng.chance(0.5);
+    if chase_on {
+        random_zone_chase(&mut rig.s(), &mut hrng, true);
+    }
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
@@ -2204,6 +2268,14 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 random_zone_groups(&mut s, &mut mrng);
             } else {
                 random_group_masters(&mut s, &mut mrng);
+            }
+        }
+        if chase_on && hrng.chance(0.15) {
+            let mut s = rig.s();
+            let was = s.gate.is_armed();
+            random_zone_chase(&mut s, &mut hrng, false);
+            if s.gate.is_armed() != was {
+                return Err(format!("frame {frame}: a zone chase move changed the arming"));
             }
         }
         if fixtures && drng.chance(0.5) {
@@ -2457,6 +2529,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             return Err(format!("frame {frame}: the zone trace survived the e-stop"));
         }
         cov.sent_lit_with_trace += (lit > 0 && s.zone_trace.is_on()) as usize;
+        cov.sent_lit_with_zone_chase += (lit > 0 && s.zone_chase.steps.iter().any(Option::is_some)) as usize;
     }
     cov.sessions += 1;
     cov.sessions_lit += session_lit as usize;
@@ -2521,6 +2594,8 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.lit_with_exec) > 0.035, "only {} of {} lit frames had a cue below full executor level", cov.lit_with_exec, cov.frames);
         eprintln!("coverage: sent lit with the zone trace {:.4}", share(cov.sent_lit_with_trace));
         assert!(share(cov.sent_lit_with_trace) > 0.015, "only {} of {} frames sent the zone trace", cov.sent_lit_with_trace, cov.frames);
+        eprintln!("coverage: sent lit with a zone chase {:.4}", share(cov.sent_lit_with_zone_chase));
+        assert!(share(cov.sent_lit_with_zone_chase) > ZONE_CHASE_GATE, "only {} of {} frames sent light while a zone chase ran", cov.sent_lit_with_zone_chase, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
@@ -3849,7 +3924,7 @@ fn group_masters_run_before_zones_and_caps() {
         let mut s = rig.s();
         let zone = |id: u8, x: f32| ProjectionZone { id, name: format!("Z{id}"), geometry: Geometry { size_x: 0.4, size_y: 0.4, pos_x: x, ..Default::default() }, ..Default::default() };
         let groups = vec![ZoneGroup { name: "Gauche".into(), zones: vec![1], master: 1.0 }, ZoneGroup { name: "Droite".into(), zones: vec![2], master: 1.0 }];
-        s.projection.set(ProjectionConfig { zones: vec![zone(1, -0.5), zone(2, 0.5)], default_zones: vec![1, 2], groups }).unwrap();
+        s.projection.set(ProjectionConfig { zones: vec![zone(1, -0.5), zone(2, 0.5)], default_zones: vec![1, 2], groups, ..Default::default() }).unwrap();
         // A Blank zone over the right half and a cap of 0.3.
         let blank = Zone { id: 1, name: "B".into(), kind: ZoneKind::Blank, level: 0.0, points: vec![[0.0, -1.0], [1.0, -1.0], [1.0, 1.0], [0.0, 1.0]], audience: false, ..Default::default() };
         s.safety.set(SafetySettings { zones: vec![blank], ..Default::default() }, true).unwrap();
@@ -3872,6 +3947,226 @@ fn group_masters_run_before_zones_and_caps() {
     assert!(!after.is_empty(), "points kept: the galvos keep scanning");
     assert!(after.iter().all(|p| !p.is_lit()), "zone 1 dark, zone 2 still behind the Blank zone");
     assert!(rig.s().gate.is_armed(), "a master never disarms either");
+}
+
+// ---------- zone chasers (T-170) ----------
+
+/// Random zone chasers over `groups` groups, as `POST /api/projection`
+/// could send them: steps on any group (repeats included), every step
+/// length and mode, running or not.
+fn random_chasers(rng: &mut Rng, groups: usize) -> Vec<ZoneChaser> {
+    if groups == 0 {
+        return Vec::new();
+    }
+    (0..1 + rng.below(3))
+        .map(|i| ZoneChaser {
+            name: format!("C{i}"),
+            steps: (0..1 + rng.below(5)).map(|_| rng.below(groups)).collect(),
+            step_beats: *rng.pick(&zonechase::STEP_BEATS),
+            mode: *rng.pick(&[ChaseMode::Forward, ChaseMode::Bounce, ChaseMode::Random]),
+            enabled: rng.chance(0.7),
+        })
+        .collect()
+}
+
+/// Three zones side by side (left, centre, right), one group each, every
+/// look on all three by default, and `chasers` over the groups.
+fn three_zone_chase_rig(tag: &str, chasers: Vec<ZoneChaser>, default_zones: Vec<u8>, bpm: f64) -> Rig {
+    let mut rig = armed_square_rig(tag);
+    {
+        let mut s = rig.s();
+        s.settings.scale = 0.5;
+        s.tempo.set_bpm_manual(bpm, 0.0);
+        let zone = |id: u8, x: f32| ProjectionZone { id, name: format!("Z{id}"), geometry: Geometry { size_x: 0.25, size_y: 0.25, pos_x: x, ..Default::default() }, ..Default::default() };
+        let group = |name: &str, id: u8| ZoneGroup { name: name.into(), zones: vec![id], master: 1.0 };
+        let cfg = ProjectionConfig {
+            zones: vec![zone(1, -0.6), zone(2, 0.0), zone(3, 0.6)],
+            default_zones,
+            groups: vec![group("Gauche", 1), group("Centre", 2), group("Droite", 3)],
+            chasers,
+            ..Default::default()
+        };
+        s.projection.set(cfg).unwrap();
+    }
+    rig.tick();
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    rig
+}
+
+/// The zone (1..=3) a lit point of `three_zone_chase_rig` is drawn in.
+fn zone_of(p: &Point) -> u8 {
+    if p.x < -0.3 {
+        1
+    } else if p.x > 0.3 {
+        3
+    } else {
+        2
+    }
+}
+
+/// T-170 acceptance through the real engine: a free chaser over three
+/// groups, one beat a step at 120 BPM (30 frames), changes group every
+/// 30 frames exactly; the output lights only the active group's zone;
+/// stopped, the routing is as before; nothing disarms or arms.
+#[test]
+fn a_zone_chase_moves_on_each_beat_and_lights_only_the_active_group() {
+    let chaser = ZoneChaser { name: "G-C-D".into(), steps: vec![0, 1, 2], step_beats: 1.0, mode: ChaseMode::Forward, enabled: true };
+    let mut rig = three_zone_chase_rig("zone-chase-beat", vec![chaser], vec![1, 2, 3], 120.0);
+    let (mut changes, mut last, mut lit_frames) = (Vec::new(), None, 0);
+    for frame in 0..240 {
+        rig.tick();
+        let s = rig.s();
+        let (step, group) = s.zone_chase.steps[0].expect("the chaser runs");
+        assert_eq!(step, group, "steps 0, 1, 2 are groups 0, 1, 2");
+        if last.is_some_and(|l| l != group) {
+            changes.push(frame);
+        }
+        last = Some(group);
+        let out = rig.wire.lock().unwrap().last.clone();
+        let zones: std::collections::BTreeSet<u8> = out.iter().filter(|p| p.is_lit()).map(zone_of).collect();
+        // The frame that went out was drawn with this frame's step.
+        assert!(zones.iter().all(|z| *z == group as u8 + 1), "frame {frame}: group {group} active, lit zones {zones:?}");
+        lit_frames += !zones.is_empty() as usize;
+        assert!(s.gate.is_armed(), "frame {frame}: a chase never disarms");
+    }
+    assert!(lit_frames > 200, "the output was lit ({lit_frames} frames)");
+    assert!(changes.len() >= 7, "{changes:?}");
+    assert!(changes.windows(2).all(|w| w[1] - w[0] == 30), "one change per beat exactly: {changes:?}");
+    // Stopped: every zone again.
+    controls::apply(&mut rig.s(), "chaser.1.enabled", ControlInput::Value(0.0), true).unwrap();
+    rig.tick();
+    let out = rig.wire.lock().unwrap().last.clone();
+    let zones: std::collections::BTreeSet<u8> = out.iter().filter(|p| p.is_lit()).map(zone_of).collect();
+    assert_eq!(zones.into_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(rig.s().zone_chase.free, None);
+}
+
+/// The fastest chase the controls allow (¼ beat at ×4, 250 BPM: 15 ms
+/// steps asked) on a look routed to one zone of the chase only, so the
+/// output flashes on every other step: through the real engine, the
+/// flashes never come faster than the strobe limit, at 4 Hz and at a
+/// tighter 2 Hz, so the limiter never has to hold. The chase still runs.
+#[test]
+fn a_zone_chase_never_flashes_faster_than_the_strobe_limit() {
+    for max_hz in [4.0, 2.0] {
+        let chaser = ZoneChaser { name: "Flash".into(), steps: vec![0, 1], step_beats: 0.25, mode: ChaseMode::Forward, enabled: true };
+        let mut rig = three_zone_chase_rig("zone-chase-strobe", vec![chaser], vec![1], 250.0);
+        {
+            let mut s = rig.s();
+            let cfg = SafetySettings { strobe_max_hz: max_hz, ..s.safety.get() };
+            s.safety.set(cfg, true).unwrap();
+        }
+        controls::apply(&mut rig.s(), "chaser.rate", ControlInput::Value(4.0), true).unwrap();
+        let (mut on, mut onsets) = (false, Vec::new());
+        for frame in 0..900 {
+            rig.tick();
+            let lit = lit(&rig.wire) > 0;
+            if lit && !on {
+                onsets.push(frame);
+            }
+            on = lit;
+            let st = rig.s().strobe;
+            assert!(!st.active && !st.output_cut, "{max_hz} Hz, frame {frame}: the limiter had to act: {st:?}");
+        }
+        let period = (60.0 / max_hz) as usize;
+        assert!(onsets.len() > 900 / period / 2, "{max_hz} Hz: the chase flashed {} times", onsets.len());
+        // One frame of quantisation at most below the limit's period.
+        assert!(onsets.windows(2).all(|w| w[1] - w[0] + 1 >= period), "{max_hz} Hz: flashes {onsets:?}");
+        assert!(rig.s().gate.is_armed());
+    }
+}
+
+/// The frames sent by one random session with zone chasers (`chase`) or
+/// the same session without them (same random stream).
+fn zone_chase_session(seed: u64, chase: bool) -> (Vec<Vec<Point>>, bool) {
+    let mut rng = Rng::new(seed);
+    let mut s = test_support::shared();
+    s.tempo.set_bpm_manual(rng.range(60.0, 250.0) as f64, 0.0);
+    s.mixer.point_budget = crate::layers::MAX_POINT_BUDGET;
+    let mut projection = random_projection(&mut rng);
+    let ids: Vec<u8> = projection.zones.iter().map(|z| z.id).collect();
+    projection.groups = random_groups(&mut rng, &ids);
+    // The masters are T-420's property: here at 100 %.
+    projection.groups.iter_mut().for_each(|g| g.master = 1.0);
+    let chasers = random_chasers(&mut rng, projection.groups.len());
+    let tied = (!chasers.is_empty() && rng.chance(0.5)).then(|| rng.below(chasers.len()));
+    if chase {
+        projection.chasers = chasers;
+    }
+    let _ = s.projection.set(projection);
+    // A static look, on the manual look and, tied to a chaser, a cue.
+    let shape = rng.pick(&["square", "circle", "triangle", "star"]).to_string();
+    let look = Settings { content: Content::Shape { shape }, scale: rng.range(0.2, 0.9), rotation_speed: 0.0, ..Settings::default() };
+    s.settings = look.clone();
+    if let Some(c) = tied {
+        let k = s.presets.iter().position(|p| !matches!(p.settings.content, Content::Ilda { .. })).unwrap();
+        s.presets[k].settings = look;
+        let cue = s.presets[k].id.clone();
+        let mut zones: Vec<u8> = (0..rng.below(3)).map(|_| *rng.pick(&ids)).collect();
+        zones.dedup();
+        let slot = s.deck.slot(&cue);
+        s.deck.set_slot(&cue, CueSlot { zones, zone_chaser: Some(c), ..slot });
+        controls::press_cue(&mut s, &cue, None, true);
+    }
+    let mut rig = Rig::new(s, "zone-chase-light", seed);
+    rig.tick();
+    let _ = rig.s().request_arm(ArmSource::Ui);
+    let mut frames = Vec::new();
+    for _ in 0..150 {
+        rig.tick();
+        frames.push(rig.wire.lock().unwrap().last.clone());
+    }
+    let ran = rig.s().zone_chase.steps.iter().any(Option::is_some);
+    (frames, ran)
+}
+
+/// A zone chase only routes: the same random session (zones with any
+/// geometry, groups, free and cue-tied chasers, any tempo) with its
+/// chasers and without them, frame by frame: every lit point sent with
+/// the chase is also sent without it, at the same place, at least as
+/// bright. It removes light, never adds or moves any.
+#[test]
+fn a_zone_chase_never_adds_light() {
+    let name = "a_zone_chase_never_adds_light";
+    let seeds = seeds(170, 40);
+    let _guard = property_guard(name, seeds.len(), 40);
+    let (mut ran, mut removed) = (0, 0);
+    for &seed in &seeds {
+        let (chased, chase_ran) = zone_chase_session(seed, true);
+        let (plain, _) = zone_chase_session(seed, false);
+        for (i, (c, p)) in chased.iter().zip(&plain).enumerate() {
+            let bad = brighter_than_live(c, p);
+            assert!(bad.is_empty(), "{name}: frame {i}: {} lit points the session without chase doesn't send, first: {} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})", bad.len(), bad[0]);
+        }
+        ran += chase_ran as usize;
+        let lit = |f: &[Vec<Point>]| f.iter().flatten().filter(|p| p.is_lit()).count();
+        removed += (lit(&chased) < lit(&plain)) as usize;
+    }
+    if seeds.len() >= 20 {
+        assert!(ran * 2 > seeds.len(), "{name}: the chase ran in {ran} of {} sessions", seeds.len());
+        // About a quarter: many sessions have one zone, or groups that hold them all.
+        assert!(removed * 8 > seeds.len(), "{name}: the chase took light away in only {removed} of {} sessions", seeds.len());
+    }
+}
+
+/// By design the exports leave the zone chase out (zonechase.rs): a file
+/// carries the look on every routed zone, whatever the chasers do now.
+#[test]
+fn exports_leave_the_zone_chase_out() {
+    use crate::ilda_library::{export_cue, ExportSafety};
+    let chaser = ZoneChaser { name: "G-D".into(), steps: vec![0, 2], step_beats: 1.0, mode: ChaseMode::Forward, enabled: true };
+    let mut rig = three_zone_chase_rig("zone-chase-export", vec![chaser], vec![1, 2, 3], 120.0);
+    for _ in 0..20 {
+        rig.tick();
+    }
+    let look = rig.s().settings.clone();
+    let export = |rig: &Rig| export_cue(&look, &[], 4, 25.0, 120.0, &ExportSafety::of(&rig.s(), MAIN_OUTPUT).unwrap()).unwrap().bytes;
+    let with_chase = export(&rig);
+    controls::apply(&mut rig.s(), "chaser.1.enabled", ControlInput::Value(0.0), true).unwrap();
+    assert_eq!(with_chase, export(&rig), "the chase changes nothing in a file");
+    let back = crate::ilda::read(&with_chase).unwrap();
+    let zones: std::collections::BTreeSet<u8> = back.iter().flat_map(|f| &f.points).filter(|p| p.is_lit()).map(zone_of).collect();
+    assert_eq!(zones.into_iter().collect::<Vec<_>>(), vec![1, 2, 3], "every routed zone");
 }
 
 // ---------- transitions between cues (T-158) ----------

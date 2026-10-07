@@ -1963,6 +1963,7 @@ mod tests {
                 zones: vec![ProjectionZone { id: 1, ..Default::default() }, ProjectionZone { id: 2, ..Default::default() }],
                 default_zones: vec![1],
                 groups: vec![ZoneGroup { name: "Centre".into(), zones: vec![1], master: 1.0 }, ZoneGroup { name: "Côtés".into(), zones: vec![2], master: 1.0 }],
+                ..Default::default()
             };
             s.projection.set(cfg).unwrap();
             s.projection.set_master(2, 0.4);

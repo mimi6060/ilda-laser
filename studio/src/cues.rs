@@ -199,6 +199,12 @@ pub struct CueSlot {
     /// files.
     #[serde(skip_serializing_if = "crate::pools::PresetRefs::is_empty")]
     pub refs: crate::pools::PresetRefs,
+    /// The zone chaser tied to this cue (T-170, zonechase.rs): index into
+    /// `ProjectionConfig.chasers`. While the cue plays (in the grid or as
+    /// a timeline event) its look follows that chaser instead of the free
+    /// ones. None in older files; a chaser that no longer exists is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone_chaser: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
