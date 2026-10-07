@@ -216,6 +216,10 @@
   .tl-tpl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .tl-tpl-row input[type=number] { width: 72px; }
   .tl-tpl-row input[type=text] { flex: 1 1 160px; min-width: 0; }
+  #tlTakeRec.rec { color: var(--danger); border-color: var(--danger); }
+  #tlTakeRec.wait { border-color: var(--danger); }
+  .tl-take { flex-wrap: wrap; gap: 6px; }
+  .tl-take[hidden] { display: none; }
   #tlTplDialog button, #tlTplDialog select, #tlTplDialog input[type=text], #tlTplDialog input[type=number] { min-height: 44px; }
   #tlTplDialog h4 { margin: 14px 0 4px; }
   #tlTplMsg.err { color: var(--danger, var(--warn)); }
@@ -3030,8 +3034,20 @@
         <button data-ctl="timeline.pause" id="tlPause" title="timeline.pause">❚❚ Pause</button>
         <button data-ctl="timeline.stop" id="tlStop" title="timeline.stop">■ Arrêt</button>
         <button id="tlLoop" title="timeline.loop : rejoue la région de boucle (ou tout le show)">⟲ Boucle</button>
+        <button id="tlTakeRec" aria-pressed="false" title="Enregistrer le jeu en direct : pendant la lecture, les cues joués et les maîtres bougés deviennent des pistes « Prise n ». N'arme jamais le laser et ne change rien à ce qui joue ; l'arrêt d'urgence arrête l'enregistrement.">● Enregistrer</button>
         <button id="tlRecord" title="Exporter le show en animation ILDA, dans la médiathèque (rendu hors temps réel, sécurité de la sortie incluse ; n'arme jamais le laser)">Exporter en ILDA…</button>
         <span id="tlPos">–</span>
+      </div>
+      <div class="cue-bar tl-take" id="tlTakeRow" role="group" aria-label="Prise enregistrée" hidden>
+        <span id="tlTakeInfo" aria-live="polite"></span>
+        <label for="tlTakeQ">Quantifier les débuts</label>
+        <select id="tlTakeQ" title="Aligner le début de chaque cue enregistré sur le temps ou la mesure la plus proche (la durée est gardée)">
+          <option value="off">Non (comme joué)</option>
+          <option value="beat">Au temps</option>
+          <option value="bar">À la mesure</option>
+        </select>
+        <button id="tlTakeKeep" class="lock-edit" title="Ajouter la prise au show en nouvelles pistes « Prise n » (Annuler la retire)">Garder dans le show</button>
+        <button id="tlTakeDrop" title="Oublier cette prise">Jeter la prise</button>
       </div>
       <div class="tl-audio" id="tlAudio">
         <div class="cue-bar">
@@ -11533,6 +11549,7 @@ function showTimeline(t) {
   $('tlPlay').classList.toggle('active', t.playing);
   $('tlPause').classList.toggle('active', t.paused);
   $('tlLoop').classList.toggle('active', t.loop);
+  showTake(t.take);
   const bar = `mesure ${Math.floor(t.bar) + 1}.${Math.floor((t.bar % 1) * t.beats_per_bar + 1e-6) + 1}`;
   const pos = !t.name ? '–' : t.time_base === 'beats'
     ? `temps ${t.position.toFixed(1)} / ${t.length.toFixed(0)} · ${bar}`
@@ -11862,6 +11879,55 @@ $('tlPlay').onclick = async () => {
   $('tlMsg').textContent = r.ok ? '' : await r.text();
 };
 $('tlLoop').onclick = () => post('/api/timeline/loop', { on: !(timeline && timeline.loop) });
+
+// --- Enregistrer le jeu en direct (T-169) ---
+// The studio observes the cues and the master moves while the timeline
+// plays (take.rs); it never arms, never changes what plays. The take is
+// laid out by POST /api/timeline/record/take (changes nothing) and goes
+// out through tlChange like any edit: one undo step, locked tracks and
+// show mode refused by /api/timeline/edit.
+let takeView = null;
+function showTake(k) {
+  if (!k) return;
+  takeView = k;
+  const b = $('tlTakeRec');
+  const rec = k.state === 'recording', wait = k.state === 'waiting';
+  b.classList.toggle('rec', rec); b.classList.toggle('wait', wait);
+  b.setAttribute('aria-pressed', String(rec || wait));
+  const label = rec ? `■ Arrêter l'enregistrement (${k.events} cue${k.events > 1 ? 's' : ''})` : wait ? '● En attente de la lecture…' : '● Enregistrer';
+  if (b.textContent !== label) b.textContent = label;
+  const t = k.take;
+  $('tlTakeRow').hidden = !t;
+  if (t) {
+    const env = t.envelopes.length ? ` · ${t.envelopes.length} réglage(s) : ${t.envelopes.map(x => x.replace('master.', '')).join(', ')}` : '';
+    const text = `Prise sur « ${t.show} » (${t.reason_fr}) : ${t.events} cue(s)${env}`;
+    if ($('tlTakeInfo').textContent !== text) $('tlTakeInfo').textContent = text;
+  }
+}
+$('tlTakeRec').onclick = async () => {
+  const k = takeView;
+  const busy = k && (k.state === 'recording' || k.state === 'waiting');
+  const r = await api('POST', busy ? '/api/timeline/record/stop' : '/api/timeline/record/start', {}, { quiet: true });
+  if (!r.ok) { tlMsg(await r.text(), true); return; }
+  showTake(await r.json());
+  if (!busy) tlMsg(timeline && timeline.playing ? 'Enregistrement en cours.' : 'Enregistrement prêt : il démarre avec la lecture.');
+};
+$('tlTakeKeep').onclick = async () => {
+  if (!TL.show) { tlMsg('Ouvrez le show de la prise d\'abord.', true); return; }
+  const r = await api('POST', '/api/timeline/record/take', { show: TL.show, quantize: $('tlTakeQ').value }, { quiet: true });
+  if (!r.ok) { tlMsg(await r.text(), true); return; }
+  const j = await r.json();
+  if (!tlChange(() => { TL.show = j.show; })) { tlMsg('Rien n\'a été ajouté.', true); return; }
+  TL.headsKey = ''; tlHeads();
+  const d = await api('POST', '/api/timeline/record/discard', {}, { quiet: true });
+  if (d.ok) showTake(await d.json());
+  tlMsg(`Prise ${j.number} gardée : ${j.added} cue(s) sur ${j.tracks.join(', ')}${j.skipped ? ` (${j.skipped} cue(s) supprimé(s) depuis, ignoré(s))` : ''}. Annuler la retire.`);
+};
+$('tlTakeDrop').onclick = async () => {
+  if (!confirm('Jeter cette prise ? Elle ne pourra pas être récupérée.')) return;
+  const r = await api('POST', '/api/timeline/record/discard', {}, { quiet: true });
+  if (r.ok) { showTake(await r.json()); tlMsg('Prise jetée.'); }
+};
 function seekFromClick(el, e) {
   if (!timeline || !timeline.length) return;
   const b = el.getBoundingClientRect();

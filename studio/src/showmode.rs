@@ -136,6 +136,11 @@ pub fn allowed(path: &str) -> bool {
         "/api/timeline/stop",
         "/api/timeline/seek",
         "/api/timeline/loop",
+        // Enregistrer le jeu en direct (T-169): recording only observes;
+        // keeping the take is an edit (/api/timeline/edit, locked).
+        "/api/timeline/record/start",
+        "/api/timeline/record/stop",
+        "/api/timeline/record/discard",
         "/api/midi/learn/cancel",
         // The on-screen APC40 (T-210) plays like the real one; which model
         // it draws is a view. Removing a mapping is an edit.
@@ -231,6 +236,7 @@ mod tests {
             "/api/timeline/templates",
             "/api/timeline/templates/render",
             "/api/timeline/templates/delete",
+            "/api/timeline/record/take",
             "/api/figures/delete",
             "/api/cuelists",
             "/api/cuelists/delete",

@@ -264,6 +264,14 @@ fn slot<'a>(id: &str, settings: &'a mut Settings, live: &'a mut LiveModifiers) -
     })
 }
 
+/// The current values of the master controls `ids` (`master.*` ids of the
+/// allow-list), read from the live modifiers; `None` for any other id.
+/// For the live take (take.rs, T-169), which reads, never writes.
+pub fn master_values(ids: &[&str], live: &LiveModifiers) -> Vec<Option<f32>> {
+    let (mut settings, mut live) = (Settings::default(), live.clone());
+    ids.iter().map(|id| if id.starts_with("master.") { slot(id, &mut settings, &mut live).map(|s| s.get()) } else { None }).collect()
+}
+
 /// Brightness controls: the fader is a ceiling, a modulator can only dim.
 fn is_brightness(id: &str) -> bool {
     matches!(id, "look.brightness" | "master.brightness")
