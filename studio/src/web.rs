@@ -110,6 +110,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/audio/state", RouteClass::Read),
     ("GET", "/api/audio/spectrum", RouteClass::Read),
     ("GET", "/api/audio/devices", RouteClass::Read),
+    ("GET", "/api/audio/diagnostics", RouteClass::Read),
     ("GET", "/api/devices", RouteClass::Read),
     ("POST", "/api/devices/scan", RouteClass::Safety),
     ("GET", "/api/outputs", RouteClass::Read),
@@ -970,6 +971,12 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             let hub = Arc::clone(&shared.lock().unwrap().audio_in);
             // The capture thread's last scan: this handler never calls CoreAudio.
             json_response(json!({ "capture": hub.capture_enabled(), "devices": hub.devices() }))
+        }
+        (Method::Get, "/api/audio/diagnostics") => {
+            // T-242: read-only, from what the audio threads published (no
+            // CoreAudio call here, nothing recorded).
+            let hub = Arc::clone(&shared.lock().unwrap().audio_in);
+            json_response(hub.diagnostics(Instant::now()))
         }
         (Method::Get, "/api/devices") => {
             // The last scan (devices.rs): this handler never scans or opens a DAC.
@@ -5984,6 +5991,7 @@ impl SimEstimate {
             spectrum: [crate::audio::analysis::FLOOR_DB; crate::audio::spectrum::SPECTRUM_BANDS],
             sections: Default::default(),
             downbeat,
+            health: Default::default(),
             t: now,
             at: Instant::now(),
         }
@@ -6023,6 +6031,10 @@ struct SimSnapshot {
     /// Seconds since the section started.
     #[serde(default)]
     section_since_s: f32,
+    /// The signal's verdict (T-242), as the analysis thread's `HealthMeter`
+    /// would give it.
+    #[serde(default)]
+    health: crate::audio::health::InputHealth,
 }
 
 impl SimNative {
@@ -6055,6 +6067,7 @@ impl SimNative {
                     spectrum,
                     sections,
                     downbeat: Default::default(),
+                    health: sim.health,
                     t: now,
                     at: Instant::now(),
                 })
@@ -7942,6 +7955,38 @@ mod tests {
         assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"state":"loud"}"#).0, 400);
         assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"snapshot":{"features":{"section":"chorus"}}}"#).0, 400);
         // Never arms anything.
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    /// T-242: the input diagnostics are read-only, show the health the
+    /// analysis gave, and an input problem never arms the laser.
+    #[test]
+    fn audio_diagnostics_show_the_health_and_never_arm() {
+        let t = TestServer::start(false);
+        t.shared.lock().unwrap().test_hooks = true;
+        let read = |path: &str| -> serde_json::Value { serde_json::from_str(&t.request("GET", path, "").1).unwrap() };
+        // The browser source: nothing to judge.
+        let d = read("/api/audio/diagnostics");
+        assert!(d["health"].is_null() && d["last_error"].is_null(), "{d}");
+        assert_eq!(t.request("POST", "/api/audio/config", r#"{"source":"native"}"#).0, 200);
+        let sim = r#"{"state":"running","device":"Micro test","devices":[{"name":"Micro test","is_default":true}],
+            "snapshot":{"level_db":-120,"peak_db":-120,"health":"permission_suspected"}}"#;
+        assert_eq!(t.request("POST", "/api/test/native_audio", sim).0, 200);
+        let d = read("/api/audio/diagnostics");
+        assert_eq!((d["health"]["state"].as_str(), d["health"]["label"].as_str(), d["health"]["tone"].as_str()), (Some("permission_suspected"), Some("Autorisation refusée ?"), Some("bad")));
+        assert_eq!((d["signal_present"].as_bool(), d["sample_rate"].as_u64(), d["level_db"].as_f64()), (Some(false), Some(48_000), Some(-120.0)));
+        assert_eq!(d["devices"][0]["name"], "Micro test");
+        assert_eq!(read("/api/audio/state")["health"]["state"], "permission_suspected");
+        let sim = r#"{"state":"running","snapshot":{"level_db":-3,"peak_db":0,"health":"clipping"}}"#;
+        assert_eq!(t.request("POST", "/api/test/native_audio", sim).0, 200);
+        let d = read("/api/audio/diagnostics");
+        assert_eq!((d["health"]["label"].as_str(), d["signal_present"].as_bool()), (Some("Entrée trop forte"), Some(true)));
+        assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"state":"device_lost","message":"Entrée « Micro test » perdue"}"#).0, 200);
+        let d = read("/api/audio/diagnostics");
+        assert_eq!((d["health"]["state"].as_str(), d["last_error"]["message"].as_str()), (Some("device_lost"), Some("Entrée « Micro test » perdue")));
+        assert!(d["sample_rate"].is_null());
+        // Read-only: no POST.
+        assert_eq!(t.request("POST", "/api/audio/diagnostics", "{}").0, 404);
         assert_eq!(arm_status(&t)["armed"], false);
     }
 

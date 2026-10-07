@@ -659,6 +659,18 @@
   #musCalm { width: 100%; margin-top: 6px; }
   .mus-info { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--panel-2); font-size: 12px; color: var(--muted); }
   .mus-info b { color: var(--text); font-weight: 600; }
+  /* Input health badge (T-242): green / orange / red, from the theme's tokens. */
+  .in-health { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; color: var(--muted); white-space: nowrap; }
+  .in-health::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+  .in-health[data-tone="ok"] { color: var(--ok); }
+  .in-health[data-tone="warn"] { color: var(--warn); }
+  .in-health[data-tone="bad"] { color: var(--danger); }
+  .in-health[hidden] { display: none; }
+  #musLevelRow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #micDiagGrid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 13px; margin: 8px 0; }
+  #micDiagGrid dt { color: var(--muted); }
+  #micDiagGrid dd { margin: 0; font-variant-numeric: tabular-nums; }
+  #micDiagDevices { margin: 4px 0 8px; padding-left: 18px; font-size: 13px; }
   .mus-warn { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: #3a2a00; color: var(--warn); font-size: 12px; border: 1px solid var(--warn); }
   .mus-warn[hidden], .mus-info[hidden], #musDevRow [hidden], #musNativeSettings[hidden], #musBrowserSettings[hidden] { display: none; }
   #musStatus.err { color: var(--danger); }
@@ -2625,7 +2637,7 @@
 
       <details id="musAnalysis" open>
         <summary>Analyse</summary>
-        <label>Niveau <span class="v" id="musDb">– dBFS</span></label>
+        <div id="musLevelRow"><label>Niveau <span class="v" id="musDb">– dBFS</span></label><span class="in-health" id="musHealth" role="status" hidden></span></div>
         <div class="mus-db" id="musDbMeter" title="Zone conseillée : −25 à 0 dBFS"><i class="zone"></i><div id="musDbFill"></div><i class="peak" id="musDbPeak"></i></div>
         <div class="mus-bands" id="musBands">
           <div data-band="sub"><div class="bar"><div></div></div><span>Sub</span></div>
@@ -3948,6 +3960,35 @@
         <div class="hint">Dossier des journaux : <code id="diagDir">…</code></div>
         <div class="hint">Journal de l'application (200 dernières lignes) :</div>
         <pre id="diagTail"></pre>
+      </details>
+    </section>
+
+    <section data-help="depannage">
+      <details id="micDiagPanel" data-search="Entrée audio : diagnostic du micro, autorisation macOS, niveau, signal">
+        <summary>Entrée audio (diagnostic)</summary>
+        <div class="hint">Lecture seule : ce que la capture native du studio voit de l'entrée audio. Le son n'est ni enregistré ni envoyé ailleurs.</div>
+        <div><span class="in-health" id="micDiagHealth" role="status">Capture native arrêtée</span></div>
+        <div class="hint" id="micDiagHelp"></div>
+        <dl id="micDiagGrid">
+          <dt>Source</dt><dd id="micDiagSource">–</dd>
+          <dt>État</dt><dd id="micDiagState">–</dd>
+          <dt>Entrée</dt><dd id="micDiagDevice">–</dd>
+          <dt>Fréquence</dt><dd id="micDiagRate">–</dd>
+          <dt>Tampon</dt><dd id="micDiagBuffer">–</dd>
+          <dt>Niveau / crête</dt><dd id="micDiagLevel">–</dd>
+          <dt>Signal présent ?</dt><dd id="micDiagSignal">–</dd>
+          <dt>Pertes (débordements)</dt><dd id="micDiagOverruns">–</dd>
+          <dt>Dernière erreur</dt><dd id="micDiagError">aucune</dd>
+        </dl>
+        <div class="hint">Entrées vues par le studio :</div>
+        <ul id="micDiagDevices"></ul>
+        <div class="hint"><b>Autoriser le micro sur macOS</b> (le studio ne modifie jamais ce réglage lui-même) :</div>
+        <ol class="hint" id="micDiagSteps">
+          <li>Ouvrez Réglages Système › Confidentialité et sécurité › Microphone.</li>
+          <li>Activez Laser Studio, ou l'application qui a lancé le studio (Terminal, iTerm…).</li>
+          <li>Quittez puis relancez le studio : macOS n'applique l'autorisation qu'au lancement.</li>
+        </ol>
+        <button id="micDiagRefresh">Actualiser</button>
       </details>
     </section>
 
@@ -7191,7 +7232,7 @@ const BANDS = ['sub', 'bass', 'low_mid', 'mid', 'high'];
 // last seen (a change made elsewhere is followed), the last counters (a
 // light flashes when its counter moves) and since when a running native
 // capture has been exactly silent.
-let mus = null, musPick = null, musServerSrc = null, musCounters = null, musSilentSince = 0, musError = '', musConfig = null, musSentAt = 0;
+let mus = null, musPick = null, musServerSrc = null, musCounters = null, musError = '', musConfig = null, musSentAt = 0;
 const musSens = delta => Math.round(100 * Math.log10(0.3 / delta));      // delta 0.3 … 0.03 ↔ 0 … 100 %
 const musDelta = sens => +(0.3 * 10 ** (-sens / 100)).toFixed(4);
 const fmtDb = v => (v <= -119.5 ? '−∞' : (v < 0 ? '−' : '') + Math.abs(v).toFixed(1)) + ' dBFS';
@@ -7329,16 +7370,18 @@ function showMusic() {
   $('musStatus').textContent = text;
   $('musStatus').className = 'hint ' + cls;
 
-  // Native capture running but exactly silent for > 2 s: probably a
-  // refused permission (macOS then delivers zeros, no error).
+  // Input health (T-242), judged by the studio on the samples: the badge
+  // next to the meter, and the help for a refusal or a missing input.
   const nativeOn = a && musServerSrc === 'native' && a.source === 'native';
+  const h = nativeOn ? a.health : null;
+  showHealth($('musHealth'), h);
   const denied = nativeOn && a.state === 'permission_denied';
-  const mute = nativeOn && a.state === 'running' && musSilentSince && performance.now() - musSilentSince > 2000;
-  $('musSilentHint').hidden = !(denied || mute);
-  $('musSilentHint').textContent = (denied ? 'Accès au micro refusé par macOS. ' : 'La capture native tourne mais l\'entrée est totalement muette depuis plus de 2 s : macOS a peut-être refusé l\'accès au micro. ')
-    + 'Réglages Système › Confidentialité et sécurité › Microphone : autorisez l\'application qui a lancé le studio (Terminal, iTerm…), puis relancez le studio. '
-    + '« tccutil reset Microphone » dans un terminal fait redemander macOS.';
-  if (mute || denied) $('musSilentHint').dataset.reason = denied ? 'denied' : 'silent';
+  const bad = !!h && h.tone === 'bad';
+  $('musSilentHint').hidden = !bad;
+  if (bad) {
+    $('musSilentHint').textContent = (denied ? 'Accès au micro refusé par macOS. ' : '') + h.help;
+    $('musSilentHint').dataset.reason = h.state;
+  }
 
   // Settings.
   $('musGain').disabled = $('musAutoGain').checked;
@@ -7346,6 +7389,16 @@ function showMusic() {
   $('musSilenceV').textContent = $('musSilence').value + ' dBFS';
   $('musSensV').textContent = $('musSens').value + ' %';
   $('gainV').textContent = '×' + (+$('gain').value).toFixed(1);
+}
+
+// The input health badge (T-242): `h` from /api/state.audio.health or
+// /api/audio/diagnostics (null: nothing to judge).
+function showHealth(el, h, empty) {
+  el.hidden = !h && !empty;
+  el.dataset.tone = h ? h.tone : '';
+  el.dataset.state = h ? h.state : '';
+  el.textContent = h ? h.label : (empty || '');
+  el.title = h ? h.help : '';
 }
 
 function flashLight(el) {
@@ -7372,9 +7425,6 @@ function showAudioState(a, asked) {
   $('musDbFill').style.width = pos(db) + '%';
   $('musDbFill').classList.toggle('hot', peak >= -0.5);
   $('musDbPeak').style.left = `calc(${pos(peak)}% - 2px)`;
-  const running = a.source === 'native' && a.state === 'running';
-  if (running && a.level_db != null && a.level_db <= -119.5) musSilentSince ||= performance.now();
-  else musSilentSince = 0;
   for (const k of BANDS) document.querySelector(`#musBands [data-band="${k}"] .bar > div`).style.height = Math.round(100 * (a.bands?.[k] ?? 0)) + '%';
   // Lights: a counter that moved since the last poll.
   const c = a.counters || {};
@@ -8455,6 +8505,36 @@ async function loadDiag() {
   if (atEnd) tail.scrollTop = tail.scrollHeight;
 }
 $('diagPanel').addEventListener('toggle', () => { if ($('diagPanel').open) loadDiag(); });
+
+// RÉGLAGES › Entrée audio (T-242): read-only diagnostics of the native input.
+const MIC_STATE_FR = { off: 'arrêtée', disabled: 'désactivée (--no-audio)', running: 'en cours', no_device: 'aucune entrée', device_lost: 'entrée perdue', permission_denied: 'accès refusé par macOS', error: 'erreur' };
+const MIC_SOURCE_FR = { native: 'Native (le studio écoute)', browser: 'Navigateur', none: 'Aucune' };
+async function loadMicDiag() {
+  let d;
+  try { d = await apiJson('GET', '/api/audio/diagnostics', undefined, { quiet: true }); } catch { return; }
+  const native = d.source === 'native';
+  showHealth($('micDiagHealth'), d.health, native ? 'En attente du signal' : 'Capture native arrêtée');
+  $('micDiagHelp').textContent = d.health ? d.health.help : native ? '' : 'Choisissez la source « Native » dans LIVE › Musique pour que le studio écoute une entrée du Mac.';
+  $('micDiagSource').textContent = MIC_SOURCE_FR[d.source] ?? d.source;
+  $('micDiagState').textContent = (MIC_STATE_FR[d.state] ?? d.state) + (d.message ? ` · ${d.message}` : '');
+  $('micDiagDevice').textContent = d.device || (d.wanted ? `${d.wanted} (choisie)` : 'entrée par défaut du Mac');
+  $('micDiagRate').textContent = d.sample_rate ? `${(d.sample_rate / 1000).toFixed(1).replace('.', ',')} kHz · ${d.channels} canal${d.channels > 1 ? 'aux' : ''}` : '–';
+  $('micDiagBuffer').textContent = `${d.buffer_frames} échantillons`;
+  $('micDiagLevel').textContent = d.level_db != null ? `${fmtDb(d.level_db)} / ${fmtDb(d.peak_db)}` : '–';
+  $('micDiagSignal').textContent = d.signal_present ? 'oui' : 'non';
+  $('micDiagSignal').dataset.present = String(!!d.signal_present);
+  $('micDiagOverruns').textContent = String(d.overruns ?? 0);
+  $('micDiagError').textContent = d.last_error ? `${d.last_error.message} (il y a ${Math.round(d.last_error.ago_s)} s)` : 'aucune';
+  const list = $('micDiagDevices');
+  list.replaceChildren(...(d.devices.length ? d.devices : [null]).map(dev => {
+    const li = document.createElement('li');
+    li.textContent = dev ? dev.name + (dev.is_default ? ' (par défaut)' : '') : (d.capture ? 'Aucune entrée trouvée (ou capture native pas encore lancée).' : 'Capture désactivée (--no-audio).');
+    return li;
+  }));
+}
+$('micDiagPanel').addEventListener('toggle', () => { if ($('micDiagPanel').open) loadMicDiag(); });
+$('micDiagRefresh').onclick = loadMicDiag;
+setInterval(() => { if (activeWs === 'settings' && $('micDiagPanel').open && !document.hidden) loadMicDiag(); }, 1000);
 
 // RÉGLAGES › Performance (T-448): the engine's stage timings over 10 s,
 // read once a second while the section is open and shown.

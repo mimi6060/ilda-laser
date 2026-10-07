@@ -142,19 +142,22 @@ test('native snapshot: dBFS meter, bands, 64-band spectrum, lights, detected BPM
 test('a running but exactly silent native capture hints at a refused permission', async ({ page }) => {
   await studio.post('/api/audio/config', { source: 'native' });
   await openMusic(page);
-  const silent = { ...SNAPSHOT, level_db: -120, peak_db: -120 };
-  const end = Date.now() + 3500;
+  // The studio's analysis judged the samples (T-242): exact zeros for more than 2 s.
+  const silent = { ...SNAPSHOT, level_db: -120, peak_db: -120, health: 'permission_suspected' };
+  const end = Date.now() + 1500;
   const feeding = (async () => { while (Date.now() < end) { await studio.post('/api/test/native_audio', { state: 'running', snapshot: silent }); await new Promise(r => setTimeout(r, 100)); } })();
   await expect(page.locator('#musDb')).toHaveText('−∞ dBFS');
-  // Not before 2 s of it.
-  await expect(page.locator('#musSilentHint')).toBeHidden();
-  await expect(page.locator('#musSilentHint')).toBeVisible({ timeout: 3000 });
+  await expect(page.locator('#musHealth')).toHaveText('Autorisation refusée ?');
+  await expect(page.locator('#musHealth')).toHaveAttribute('data-tone', 'bad');
+  await expect(page.locator('#musSilentHint')).toBeVisible();
   await expect(page.locator('#musSilentHint')).toContainText('Confidentialité et sécurité › Microphone');
-  await expect(page.locator('#musSilentHint')).toContainText('tccutil reset Microphone');
+  // Explains only: no command that changes the privacy settings.
+  await expect(page.locator('#musSilentHint')).not.toContainText('tccutil');
   await feeding;
   // Sound again: gone.
   await feedNative(600);
   await expect(page.locator('#musSilentHint')).toBeHidden();
+  await expect(page.locator('#musHealth')).toHaveText('Signal correct');
   // An explicit refusal says so at once.
   await studio.post('/api/test/native_audio', { state: 'permission_denied', message: 'accès au micro refusé' });
   await expect(page.locator('#musSilentHint')).toBeVisible();

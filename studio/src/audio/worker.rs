@@ -21,6 +21,7 @@ use super::bpm::TempoEstimate;
 use super::downbeat::DownbeatDetection;
 use super::onsets::Onsets;
 use super::sections::SectionState;
+use super::health::{HealthMeter, InputHealth};
 use super::capture::{self, CaptureCounters, CpalSource, OpenError, OpenRequest, SampleSource};
 use super::{AudioHub, AudioInputSource, CaptureState, CaptureStatus, NativeSnapshot};
 use crate::timecode::ltc::LtcDecoder;
@@ -217,6 +218,9 @@ struct Current {
     analyzer: Analyzer,
     consumed: u64,
     ltc: LtcDecoder,
+    /// The signal's health (T-242), per stream: a new stream starts afresh.
+    health: HealthMeter,
+    verdict: InputHealth,
 }
 
 /// LTC samples read from the ring at once.
@@ -261,7 +265,7 @@ impl Analysis {
             analyzer.carry_sections(&self.sections);
             analyzer.carry_downbeat(&self.downbeat);
             let ltc = LtcDecoder::new(feed.sample_rate);
-            self.current = Some(Current { analyzer, feed, consumed: 0, ltc });
+            self.current = Some(Current { analyzer, feed, consumed: 0, ltc, health: HealthMeter::default(), verdict: InputHealth::Ok });
         }
         let Some(cur) = self.current.as_mut() else { return 0 };
         Self::decode_ltc(&self.hub, cur, &mut self.ltc_buf);
@@ -275,10 +279,14 @@ impl Analysis {
             self.guides = guides;
             cur.analyzer.set_guide(guide);
         }
+        let mut silence_db = None;
         if cur.feed.consumer.slots() >= HOP {
             // A copy under a leaf lock, at most once per poll.
-            cur.analyzer.set_config(self.hub.analysis_config());
+            let config = self.hub.analysis_config();
+            silence_db = Some(config.silence_db);
+            cur.analyzer.set_config(config);
         }
+        let hop_s = HOP as f64 / cur.feed.sample_rate.max(1) as f64;
         let mut hops = 0;
         let mut last = None;
         while cur.feed.consumer.slots() >= HOP && cur.feed.consumer.pop_entire_slice(&mut self.buf).is_ok() {
@@ -288,8 +296,14 @@ impl Analysis {
             let dropped = cur.feed.counters.dropped.load(Ordering::Relaxed);
             let t = first + (cur.consumed + dropped) as f64 / cur.feed.sample_rate.max(1) as f64;
             last = Some((cur.analyzer.process(&self.buf, t), t));
+            let health = cur.health.hop(&self.buf, hop_s, silence_db.unwrap_or(super::spectrum::AnalysisConfig::default().silence_db));
+            if health != cur.verdict {
+                cur.verdict = health;
+                Self::note_health(&self.hub, health);
+            }
             hops += 1;
         }
+        let health = cur.verdict;
         self.onsets = cur.analyzer.onsets();
         self.tempo = cur.analyzer.tempo();
         self.sections = cur.analyzer.sections();
@@ -299,13 +313,28 @@ impl Analysis {
             // bins, once per poll).
             let mut spectrum = [FLOOR_DB; SPECTRUM_BANDS];
             cur.analyzer.log_spectrum(&mut spectrum);
-            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, tempo: m.tempo, spectrum, sections: m.sections, downbeat: m.downbeat, t, at: Instant::now() });
+            self.hub.publish(NativeSnapshot { features: m.features, rms_db: m.rms_db, peak_db: m.peak_db, spectral: m.spectral, onsets: m.onsets, tempo: m.tempo, spectrum, sections: m.sections, downbeat: m.downbeat, health, t, at: Instant::now() });
         }
         if cur.feed.consumer.is_abandoned() && cur.feed.consumer.slots() < HOP {
             // The stream was closed and its ring is drained.
             self.current = None;
         }
         hops
+    }
+
+    /// A new verdict on the signal: logged (application log) when it is a
+    /// problem, kept as the last error when it is a likely refusal.
+    fn note_health(hub: &AudioHub, health: InputHealth) {
+        match health {
+            InputHealth::PermissionSuspected => {
+                let message = "Entrée exactement muette depuis plus de 2 s : autorisation micro refusée par macOS ?";
+                log::warn!("audio : {message}");
+                hub.note_error(message);
+            }
+            // Loud music can go in and out of the clip every second: not
+            // worth the application log.
+            _ => log::debug!("audio : {}", health.label()),
+        }
     }
 
     /// Everything waiting in the LTC ring, through the decoder; the newest
@@ -362,7 +391,7 @@ pub fn spawn_with<S: SampleSource + 'static>(make: impl FnOnce() -> S + Send + '
 mod tests {
     use super::super::analysis::testsig::sine;
     use super::super::bpm::DetectState;
-    use super::super::{Active, AudioConfig};
+    use super::super::{Active, AudioConfig, AudioInputSource};
     use super::capture::testing::FakeSource;
     use super::*;
     use crate::engine::AudioFeatures;
@@ -402,6 +431,93 @@ mod tests {
         fn state(&self) -> CaptureState {
             self.hub.status().state
         }
+
+        /// Like `run`, with `signal(n)` (n: sample index since the start
+        /// of this call) on both channels.
+        fn run_with(&mut self, ms: u64, mut signal: impl FnMut(usize) -> f32) {
+            let mut n = 0;
+            for _ in 0..ms / 10 {
+                self.now += Duration::from_millis(10);
+                self.capture.step(self.now);
+                let stereo: Vec<f32> = (0..480).flat_map(|i| [signal(n + i); 2]).collect();
+                n += 480;
+                self.fake.feed(&stereo);
+                self.analysis.poll();
+            }
+        }
+
+        fn diagnostics(&self) -> serde_json::Value {
+            self.hub.diagnostics(Instant::now())
+        }
+
+        fn health(&self) -> String {
+            self.diagnostics()["health"]["state"].as_str().unwrap_or("none").to_string()
+        }
+    }
+
+    /// T-242 on the whole chain (fake input → ring → analysis → hub): what
+    /// macOS delivers when it refuses the microphone (exact zeros), a
+    /// real silence (background noise), a full-scale sine. No microphone.
+    #[test]
+    fn the_input_health_reads_zeros_noise_and_clipping_from_the_samples() {
+        let mut r = rig(&["Mic"], AudioConfig::native());
+        let mut waited = 0;
+        while r.health() != "permission_suspected" {
+            r.run(100, 0.0);
+            waited += 100;
+            assert!(waited <= 3_000, "not suspected after {waited} ms: {}", r.health());
+        }
+        assert!(waited >= 2_000, "not before 2 s of zeros: {waited} ms");
+        let d = r.diagnostics();
+        assert_eq!((d["state"].as_str(), d["signal_present"].as_bool()), (Some("running"), Some(false)));
+        assert_eq!((d["sample_rate"].as_u64(), d["channels"].as_u64()), (Some(48_000), Some(2)));
+        assert_eq!(d["devices"][0]["name"], "Mic");
+        assert!(d["last_error"]["message"].as_str().unwrap().contains("autorisation micro"), "{d}");
+        assert!(d["health"]["help"].as_str().unwrap().contains("Confidentialité et sécurité › Microphone"));
+        assert_eq!(d["health"]["tone"], "bad");
+        // The capture keeps running: zeros are not a lost device.
+        assert_eq!(r.fake.opens(), 1);
+
+        // Background noise at −70 dBFS: *Silence*, never the refusal.
+        let mut seed = 1u32;
+        let mut noise = move |_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            // Uniform ±a, RMS a / √3 = −70 dBFS.
+            10f32.powf(-70.0 / 20.0) * 3f32.sqrt() * ((seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0)
+        };
+        for _ in 0..40 {
+            r.run_with(100, &mut noise);
+            assert_ne!(r.health(), "permission_suspected");
+        }
+        assert_eq!(r.health(), "silent");
+        assert_eq!(r.diagnostics()["signal_present"], false);
+
+        // A 0 dBFS sine: *Entrée trop forte*, and music is there.
+        r.run(300, 1.0);
+        assert_eq!(r.health(), "clipping");
+        assert_eq!(r.diagnostics()["signal_present"], true);
+        assert_eq!(r.hub.view(AudioFeatures::default(), Instant::now() - Duration::from_secs(60), Instant::now())["health"]["label"], "Entrée trop forte");
+        // A normal level: Ok once the clip has been shown for 1 s.
+        r.run(1_200, 0.3);
+        assert_eq!(r.health(), "ok");
+    }
+
+    #[test]
+    fn no_device_and_refusal_have_their_own_health_and_last_error() {
+        let mut r = rig(&[], AudioConfig::native());
+        r.run(100, 0.5);
+        assert_eq!(r.health(), "no_device");
+        assert_eq!(r.diagnostics()["last_error"]["message"], "Pas d'entrée audio");
+        r.fake.plug("Mic");
+        r.fake.0.lock().unwrap().refuse = Some(OpenError::PermissionDenied("TCC".into()));
+        r.run(2_100, 0.5);
+        assert_eq!(r.health(), "permission_suspected");
+        // Another source: nothing to judge.
+        r.hub.set_config(AudioConfig { source: AudioInputSource::Browser, ..AudioConfig::native() }).unwrap();
+        r.run(20, 0.5);
+        assert!(r.diagnostics()["health"].is_null());
+        // The last error stays readable after it is over.
+        assert!(r.diagnostics()["last_error"]["message"].as_str().unwrap().contains("Microphone"));
     }
 
     /// LTC on channel 2 (T-168), music on channel 1: the analysis thread
