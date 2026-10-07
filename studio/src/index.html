@@ -576,6 +576,21 @@
   .lfo canvas { width: 72px; height: 30px; aspect-ratio: auto; border-radius: 4px; flex: 0 0 72px; }
   .lfo .del { flex: 0 0 auto; padding: 4px 8px; }
   .lfo input[type=number] { max-width: 70px; }
+  /* Étalement entre zones (T-421). */
+  .spread-set { border: 1px solid var(--line); border-radius: 6px; margin: 8px 0 0; padding: 4px 8px 8px; min-width: 0; }
+  .spread-set legend { font-size: 11px; color: var(--muted); padding: 0 4px; }
+  .spread-set[disabled] { opacity: 0.6; }
+  .spread-set .hint { margin: 2px 0 6px; font-size: 11px; color: var(--muted); }
+  .spread-grid { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+  .spread-grid label { margin: 0; font-size: 12px; }
+  .spread-grid input, .spread-grid select { min-width: 0; width: 100%; }
+  .spread-opts { margin-top: 6px; gap: 8px; flex-wrap: wrap; }
+  .spread-chart { display: flex; gap: 3px; align-items: flex-end; height: 28px; margin-top: 6px; }
+  .spread-chart span { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; }
+  .tl-spread { position: relative; display: inline-block; }
+  .tl-spread > summary { cursor: pointer; padding: 4px 8px; }
+  .tl-spread[open] > .spread { position: absolute; z-index: 30; top: 100%; left: 0; width: 280px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px 8px; }
+  @media (pointer: coarse) { .spread-grid input, .spread-grid select, .spread-opts button, .tl-spread > summary { min-height: 44px; } }
   /* Liste de cues (T-410), Theme (T-299) tokens. */
   #cqPanel .cq-status { margin-top: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-height: 17px; }
   #cqPanel .cq-status b { color: var(--text); }
@@ -3191,6 +3206,10 @@
         <label class="tl-knob" title="Préréglage de couleur de l'événement sélectionné">Couleur <select id="tlRefColor" data-family="color"></select></label>
         <label class="tl-knob" title="Préréglage de mouvement de l'événement sélectionné">Mouvement <select id="tlRefMotion" data-family="motion"></select></label>
       </span>
+      <span id="tlSpreadRow" hidden>
+        <details id="tlSpreadDet" class="tl-spread"><summary title="Étalement de l'événement sélectionné sur un groupe de zones">Étalement</summary>
+          <div id="tlEvSpread" class="spread" data-prefix="tlSp"></div></details>
+      </span>
       <span id="tlNoteRow" hidden>
         <label class="tl-knob" title="Notes de l'événement sélectionné (info-bulle sur la timeline)">Notes <input type="text" id="tlEvNotes" maxlength="500" placeholder="ex. avec brouillard"></label>
         <label class="tl-knob" title="Étiquettes, séparées par des virgules (8 au plus)">Étiquettes <input type="text" id="tlEvTags" maxlength="200" placeholder="intro, drop"></label>
@@ -4758,6 +4777,7 @@
   <div id="cueMenuZones" class="pz-checks"></div>
   <label for="cueMenuChaser">Chenillard de zones</label>
   <select id="cueMenuChaser" title="Chenillard lié à ce cue (RÉGLAGES › Zones de projection › Chenillards) : tant qu'il joue, ses zones suivent ce chenillard au lieu des chenillards libres"><option value="">Aucun (chenillards libres)</option></select>
+  <div id="cueMenuSpread" class="spread" data-prefix="cmSp" title="Le look joué une fois par zone du groupe, décalé d'une zone à l'autre (zones du cue qui sont dans le groupe)"></div>
   <label class="check" title="« Arrêter les cues » et « Tout arrêter » le laissent jouer ; l'arrêt d'urgence coupe tout"><input type="checkbox" id="cueMenuProtStop"> Protégé de Tout arrêter</label>
   <label class="check" title="Reste affiché quand un autre cue est tenu en mode Solo"><input type="checkbox" id="cueMenuProtSolo"> Protégé du solo</label>
   <label for="cueMenuCellColor">Couleur de la case</label>
@@ -11148,6 +11168,9 @@ function openCueMenu(p, x, y, at) {
   chSel.replaceChildren(new Option('Aucun (chenillards libres)', ''), ...chasers.map((c, i) => new Option(`${i + 1} · ${c.name}`, String(i))));
   if (slot.zone_chaser != null && slot.zone_chaser >= chasers.length) chSel.add(new Option(`${slot.zone_chaser + 1} · (supprimé)`, String(slot.zone_chaser)));
   chSel.value = slot.zone_chaser != null ? String(slot.zone_chaser) : '';
+  // Spread across a zone group (T-421).
+  delete $('cueMenuSpread').dataset.seed;
+  spreadRender($('cueMenuSpread'), slot.spread);
   const cell = document.querySelector(`#cues .cue[data-id="${CSS.escape(p.id)}"]`);
   menuControl = cell?.dataset.control || null;
   $('cueMenuMidi').hidden = !menuControl;
@@ -11173,7 +11196,8 @@ async function saveCueMenu() {
   const zone_chaser = $('cueMenuChaser').value !== '' ? +$('cueMenuChaser').value : null;
   const refs = {};
   $('cueMenuRefs').querySelectorAll('select').forEach(sel => { if (sel.value) refs[sel.dataset.family] = sel.value; });
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group, zone_chaser, refs });
+  const spread = spreadRead($('cueMenuSpread'));
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group, zone_chaser, refs, spread });
   if (Object.keys(refs).length || Object.keys(slots[menuCue]?.refs || {}).length) loadPools(false);
   await loadSlots();
 }
@@ -11321,6 +11345,7 @@ $('cueMenuCellColorNone').addEventListener('click', () => {
 });
 ['cueMenuRefPosition', 'cueMenuRefSize', 'cueMenuRefColor', 'cueMenuRefMotion'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 ['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuSpeed', 'cueMenuChaser', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+spreadWire($('cueMenuSpread'), () => saveCueMenu());
 
 // ---------- « En cours » (T-423) ----------
 // The tab's count comes with every frame (cues playing + 1 for a running
@@ -13066,6 +13091,28 @@ TL_REFS.forEach(id => $(id).addEventListener('change', () => {
   if (free.length < items.length) tlMsg(tlIgnoredMsg(items.length - free.length));
 }));
 
+// Spread of the selected event across a zone group (T-421): one event at
+// a time; its own wins over its cue's cell.
+let tlSpreadKey = '';
+function tlSpreadRow() {
+  const items = TL.show ? tlSelected() : [];
+  const e = items.length === 1 ? items[0].e : null;
+  const key = e ? e.id + ':' + JSON.stringify(e.spread || null) + ':' + spreadGroups().map(g => g.name + g.zones.length).join(',') : '';
+  if (key === tlSpreadKey || $('tlEvSpread').contains(document.activeElement)) return;
+  tlSpreadKey = key;
+  $('tlSpreadRow').hidden = !e;
+  if (!e) return;
+  delete $('tlEvSpread').dataset.seed;
+  spreadRender($('tlEvSpread'), e.spread);
+}
+spreadWire($('tlEvSpread'), sp => {
+  const items = tlSelected(), free = items.filter(x => !x.t.locked);
+  if (items.length !== 1) return;
+  if (!free.length) { tlMsg('Piste verrouillée', true); tlSpreadKey = ''; return; }
+  tlChange(() => { if (sp) free[0].e.spread = sp; else delete free[0].e.spread; });
+});
+$('tlSpreadDet').addEventListener('toggle', () => { if ($('tlSpreadDet').open && !proj) loadProjection().then(() => { tlSpreadKey = ''; }); });
+
 // Notes and tags of the selected event (T-430): one event at a time.
 let tlNoteKey = '';
 function tlNoteRow() {
@@ -13524,6 +13571,7 @@ function tlLoop() {
     tlHeads();
     tlScanRow();
     tlNoteRow();
+    tlSpreadRow();
     tlRefRow();
     if (TL.fitPending && tlCanvas().clientWidth) { TL.fitPending = false; tlFit(); }
     tlWaveWanted();
@@ -14985,6 +15033,136 @@ $('deskOrient').addEventListener('change', e => deskChange((x, tab) => {
 }));
 $('deskDel').addEventListener('click', deskDelete);
 
+// ---------- Étalement entre zones (T-421) ----------
+// A spread names a zone group (RÉGLAGES › Zones de projection › Groupes):
+// each zone of the group gets a phase, a delay or a speed from its rank.
+// The same editor serves a modulator (phase only), a cell of the grid and
+// a timeline event. It only shifts when a zone shows the look: the safety
+// stage, the e-stop and Noir act on every zone at once.
+const SPREAD_PARAMS = [['phase', 'Phase'], ['delay', 'Délai'], ['speed', 'Vitesse']];
+const SPREAD_DEFAULT = { group: '', param: 'phase', from: 0, to: 360, delay_in_beats: false, wings: 1, blocks: 1 };
+const spreadGroups = () => ((proj && proj.groups) || []).filter(g => g.name.trim());
+const M64 = (1n << 64n) - 1n;
+function spreadMix(z) {
+  z = (z + 0x9e3779b97f4a7c15n) & M64;
+  z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & M64;
+  z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & M64;
+  return z ^ (z >> 31n);
+}
+// The server's `spread::permutation` and `spread::value`, for the chart.
+function spreadPerm(seed, n) {
+  const o = [...Array(n).keys()];
+  let st = BigInt(seed) & M64;
+  for (let i = n - 1; i >= 1; i--) {
+    st = spreadMix(st);
+    const j = Number(st % BigInt(i + 1));
+    [o[i], o[j]] = [o[j], o[i]];
+  }
+  return o;
+}
+function spreadValue(s, index, count) {
+  const from = +s.from || 0, to = +s.to || 0;
+  if (count < 2) return from;
+  index = Math.min(index, count - 1);
+  const pos = s.shuffle != null ? spreadPerm(s.shuffle, count)[index] : index;
+  const wings = Math.min(Math.max(s.wings || 1, 1), 16, count);
+  const wl = Math.ceil(count / wings), wing = Math.floor(pos / wl), start = wing * wl, end = Math.min(start + wl, count);
+  const local = wing % 2 ? end - 1 - pos : pos - start;
+  const blocks = Math.min(Math.max(s.blocks || 1, 1), 16);
+  const slot = Math.floor(local / blocks), slots = Math.ceil(wl / blocks);
+  const frac = (s.param || 'phase') === 'phase' ? slot / slots : slots < 2 ? 0 : slot / (slots - 1);
+  return from + (to - from) * frac;
+}
+const spreadUnit = s => s.param === 'delay' ? (s.delay_in_beats ? ' temps' : ' s') : s.param === 'speed' ? ' %' : '°';
+// The editor's fields into `box` (`data-prefix` for the ids, `data-fixed`
+// = phase for a modulator). Disabled, with its help, without any group.
+function spreadRender(box, spread) {
+  const s = { ...SPREAD_DEFAULT, ...(spread || {}) };
+  if (box.dataset.fixed) s.param = box.dataset.fixed;
+  const p = box.dataset.prefix, groups = spreadGroups();
+  box.dataset.seed = s.shuffle != null ? String(s.shuffle) : (box.dataset.seed || String(Math.floor(Math.random() * 2 ** 32)));
+  const gOpts = [['', 'Aucun'], ...groups.map(g => [g.name, `${g.name} (${g.zones.length} zone${g.zones.length > 1 ? 's' : ''})`])];
+  if (s.group && !groups.some(g => g.name === s.group)) gOpts.push([s.group, `${s.group} (absent)`]);
+  const opt = (list, sel) => list.map(([v, t]) => `<option value="${lfoEsc(v)}"${String(v) === String(sel) ? ' selected' : ''}>${lfoEsc(t)}</option>`).join('');
+  const step = s.param === 'delay' ? 0.05 : s.param === 'speed' ? 5 : 15;
+  box.innerHTML = `<fieldset class="spread-set"${groups.length || s.group ? '' : ' disabled'}><legend>Étalement</legend>
+    ${groups.length ? '' : '<p class="hint">Nécessite au moins un groupe de zones (RÉGLAGES › Zones de projection).</p>'}
+    <div class="spread-grid">
+      ${box.dataset.fixed ? '' : `<label for="${p}Param">Paramètre</label><select id="${p}Param" data-sf="param">${opt(SPREAD_PARAMS, s.param)}</select>`}
+      <label for="${p}Group">Groupe</label><select id="${p}Group" data-sf="group" title="Le groupe est une référence : ajouter une zone au groupe change l'étalement sans toucher au réglage">${opt(gOpts, s.group)}</select>
+      <label for="${p}From">De (${spreadUnit(s).trim()})</label><input type="number" id="${p}From" data-sf="from" step="${step}" value="${+s.from || 0}">
+      <label for="${p}To">À (${spreadUnit(s).trim()})</label><input type="number" id="${p}To" data-sf="to" step="${step}" value="${+s.to || 0}">
+      <label for="${p}Wings">Ailes</label><input type="number" id="${p}Wings" data-sf="wings" min="1" max="16" step="1" value="${s.wings || 1}" title="1 = aucune ; 2 = miroir autour du centre ; plus = motif répété">
+      <label for="${p}Blocks">Blocs</label><input type="number" id="${p}Blocks" data-sf="blocks" min="1" max="16" step="1" value="${s.blocks || 1}" title="Les zones voisines partagent la même valeur, par paquets">
+    </div>
+    <div class="row spread-opts">
+      ${s.param === 'delay' ? `<label class="check" title="De et À comptés en temps du tempo au lieu de secondes"><input type="checkbox" data-sf="beats"${s.delay_in_beats ? ' checked' : ''}> En temps</label>` : ''}
+      <label class="check" title="Ordre des zones permuté, le même à chaque lecture"><input type="checkbox" data-sf="shuffle"${s.shuffle != null ? ' checked' : ''}> Mélange</label>
+      <button type="button" data-sf-redraw${s.shuffle != null ? '' : ' disabled'}>Autre tirage</button>
+    </div>
+    <div class="spread-chart" role="img"></div></fieldset>`;
+  spreadChart(box);
+}
+// The spread the fields describe; null without a group (`draft`: what the
+// fields hold all the same, to redraw them).
+function spreadRead(box, draft = false) {
+  const v = sf => box.querySelector(`[data-sf="${sf}"]`);
+  const group = v('group') ? v('group').value : '';
+  if (!group && !draft) return null;
+  const num = (sf, lo, hi, d) => { const x = parseFloat(v(sf)?.value); return Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; };
+  const s = {
+    group,
+    param: box.dataset.fixed || (v('param') ? v('param').value : 'phase'),
+    from: num('from', -3600, 3600, 0), to: num('to', -3600, 3600, 0),
+    delay_in_beats: !!v('beats')?.checked,
+    wings: Math.round(num('wings', 1, 16, 1)), blocks: Math.round(num('blocks', 1, 16, 1)),
+  };
+  if (v('shuffle')?.checked) s.shuffle = +box.dataset.seed;
+  return s;
+}
+// One bar per zone of the group, its value as the height.
+function spreadChart(box) {
+  const chart = box.querySelector('.spread-chart');
+  if (!chart) return;
+  const s = spreadRead(box), g = s && spreadGroups().find(x => x.name === s.group);
+  const n = g ? g.zones.length : 0;
+  if (!s || n < 2) {
+    chart.innerHTML = '';
+    chart.setAttribute('aria-label', s ? 'Sans effet : le groupe a moins de deux zones' : 'Aucun étalement');
+    chart.title = chart.getAttribute('aria-label');
+    return;
+  }
+  const vals = g.zones.map((_, i) => spreadValue(s, i, n));
+  const lo = Math.min(0, ...vals), hi = Math.max(...vals, s.param === 'phase' ? 360 : lo + 1e-6);
+  const label = g.zones.map((z, i) => `zone ${z} : ${Math.round(vals[i] * 100) / 100}${spreadUnit(s)}`).join(', ');
+  chart.setAttribute('aria-label', label);
+  chart.title = label;
+  chart.innerHTML = vals.map(v => `<span style="height:${Math.max(6, Math.round((v - lo) / (hi - lo) * 100))}%"></span>`).join('');
+}
+// Edits: the chart follows while typing; `onChange(spread)` on a change.
+function spreadWire(box, onChange) {
+  box.addEventListener('input', e => { if (e.target.dataset.sf) spreadChart(box); });
+  box.addEventListener('change', e => {
+    const f = e.target.dataset.sf;
+    if (!f) return;
+    e.stopPropagation();
+    const s = spreadRead(box, true);
+    if (f === 'param' || f === 'group' || f === 'beats' || f === 'shuffle') {
+      // New units, steps and options; a new parameter starts from its
+      // usual range.
+      if (f === 'param') { s.from = s.param === 'speed' ? 100 : 0; s.to = s.param === 'phase' ? 360 : s.param === 'delay' ? 1 : 200; }
+      spreadRender(box, s);
+    } else spreadChart(box);
+    onChange(spreadRead(box));
+  });
+  box.addEventListener('click', e => {
+    if (!e.target.matches('[data-sf-redraw]')) return;
+    box.dataset.seed = String(Math.floor(Math.random() * 2 ** 32));
+    spreadChart(box);
+    onChange(spreadRead(box));
+  });
+}
+
 // ---------- LFO modulators ----------
 const LFO_WAVES = [['sine', 'Sinus'], ['triangle', 'Triangle'], ['square', 'Carré'], ['saw_up', 'Dent de scie ↗'],
   ['saw_down', 'Dent de scie ↘'], ['random', 'Aléatoire']];
@@ -14995,6 +15173,19 @@ const LFO_PART_PARAMS = [['brightness', 'Luminosité'], ['size', 'Taille'], ['po
 const lfoEsc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const lfoShape = (wave, p) => ({ sine: Math.sin(2 * Math.PI * p), triangle: p < 0.25 ? 4 * p : p < 0.75 ? 2 - 4 * p : 4 * p - 4,
   square: p < 0.5 ? 1 : -1, saw_up: 2 * p - 1, saw_down: 1 - 2 * p, random: 0 })[wave];
+// The wave as the server shapes it (`Modulator::wave_shifted`): the whole
+// wave within the first `width` of the cycle, attack and decay ramps from
+// and back to rest (-1).
+function lfoWave(m, p) {
+  const base = q => m.wave === 'random' ? (Math.floor(q * 4) % 2 ? 0.6 : -0.4) : lfoShape(m.wave, q);
+  const width = Math.min(1, Math.max(0, m.width ?? 1));
+  let a = Math.min(1, Math.max(0, m.attack || 0)), d = Math.min(1, Math.max(0, m.decay || 0));
+  if (a + d > 1) { const sum = a + d; a /= sum; d /= sum; }
+  if (width >= 1 && !a && !d) return base(p);
+  if (p >= width) return -1;
+  const q = p / width, env = a && q < a ? q / a : d && q > 1 - d ? (1 - q) / d : 1;
+  return -1 + (base(q) + 1) * Math.min(1, Math.max(0, env));
+}
 async function loadLfos() {
   const r = await apiJson('GET', '/api/lfos');
   lfos = r.lfos; lfoTargets = r.targets; lfoMax = r.max; lfoParts = r.parts || [];
@@ -15025,9 +15216,21 @@ function renderLfos() {
       <input type="range" data-f="depth" min="0" max="100" data-default="50" value="${Math.round(m.depth * 100)}">
       <label>Phase <span class="v">${Math.round(m.phase * 360)}°</span></label>
       <input type="range" data-f="phase" min="0" max="99" data-default="0" data-display-k="3.6" value="${Math.round(m.phase * 100)}">
+      <label>Largeur <span class="v">${Math.round((m.width ?? 1) * 100)} %</span></label>
+      <input type="range" data-f="width" min="0" max="100" data-default="100" value="${Math.round((m.width ?? 1) * 100)}" title="Part du cycle pendant laquelle le modulateur est actif ; au repos le reste du temps">
+      <label>Attaque <span class="v">${Math.round((m.attack || 0) * 100)} %</span></label>
+      <input type="range" data-f="attack" min="0" max="100" data-default="0" value="${Math.round((m.attack || 0) * 100)}" title="Part de la partie active consacrée à la montée">
+      <label>Déclin <span class="v">${Math.round((m.decay || 0) * 100)} %</span></label>
+      <input type="range" data-f="decay" min="0" max="100" data-default="0" value="${Math.round((m.decay || 0) * 100)}" title="Part de la partie active consacrée à la descente">
       <label class="check" style="justify-content:flex-start"><input type="checkbox" data-f="enabled"${m.enabled ? ' checked' : ''}> Actif</label>
+      ${m.part ? '' : `<div class="spread" data-prefix="lfoSp${i}" data-fixed="phase" data-i="${i}" title="Décale la phase de ce modulateur d'une zone à l'autre (contrôles du maître)"></div>`}
     </div>`;
   }).join('');
+  document.querySelectorAll('#lfoList .spread').forEach(box => {
+    spreadRender(box, lfos[+box.dataset.i].spread);
+    spreadWire(box, sp => { const m = lfos[+box.dataset.i]; if (sp) m.spread = sp; else delete m.spread; saveLfos(); });
+  });
+  if (!proj && lfos.length) loadProjection().then(() => { if (proj && spreadGroups().length) renderLfos(); });
   $('lfoAdd').disabled = lfos.length >= lfoMax;
   $('lfoHint').style.display = lfos.length ? 'none' : '';
 }
@@ -15058,6 +15261,16 @@ function lfoEdit(e, final) {
     m[f] = +v / 100;
     e.target.previousElementSibling.querySelector('.v').textContent = f === 'depth' ? Math.round(m.depth * 100) + ' %' : Math.round(m.phase * 360) + '°';
   }
+  else if (f === 'width' || f === 'attack' || f === 'decay') {
+    m[f] = +v / 100;
+    // Attack and decay share the active part (at most 100 % together).
+    if (f !== 'width' && (m.attack || 0) + (m.decay || 0) > 1) m[f === 'attack' ? 'decay' : 'attack'] = Math.max(0, 1 - m[f]);
+    box.querySelectorAll('[data-f="width"], [data-f="attack"], [data-f="decay"]').forEach(r => {
+      const k = r.dataset.f, x = Math.round((m[k] ?? (k === 'width' ? 1 : 0)) * 100);
+      if (r !== e.target) r.value = x;
+      r.previousElementSibling.querySelector('.v').textContent = x + ' %';
+    });
+  }
   else if (f === 'enabled') m.enabled = e.target.checked;
   else if (f === 'speed_group') m.speed_group = +v;
   if (final && (f === 'period' || f === 'target' || f === 'part')) renderLfos();
@@ -15076,7 +15289,7 @@ function showLfos(pos) {
     g.clearRect(0, 0, w, h);
     g.strokeStyle = m.enabled ? '#3ddc84' : '#8b929c'; g.lineWidth = 2; g.beginPath();
     for (let x = 0; x <= w; x++) {
-      const p = x / w, v = m.wave === 'random' ? (Math.floor(p * 4) % 2 ? 0.6 : -0.4) : lfoShape(m.wave, p);
+      const p = x / w, v = lfoWave(m, p);
       x ? g.lineTo(x, y(v)) : g.moveTo(x, y(v));
     }
     g.stroke();
