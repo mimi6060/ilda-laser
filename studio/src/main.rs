@@ -29,6 +29,7 @@ mod cues;
 mod cuelist;
 mod devices;
 mod dmx;
+mod dmx_out;
 mod datafile;
 mod formats;
 mod dwell;
@@ -637,6 +638,9 @@ pub struct Shared {
     /// The agenda (agenda.rs, T-455, `agenda.json`): the machine's, not
     /// the project's; its own thread starts the playbacks. Never arms.
     pub agenda: agenda::AgendaRunner,
+    /// The DMX output (T-453, dmx_out.rs): haze and simple lights, settings
+    /// in `dmx_out.json`, never in a project; off by default.
+    pub dmx_out: dmx_out::DmxOutState,
 }
 
 impl Shared {
@@ -954,6 +958,8 @@ impl Shared {
         audio::triggers::sync_estop(self);
         // Timecode restarts nothing until TC-IN is armed again (T-168).
         timecode::sync(self);
+        // The haze button lets go; the DMX output sends zeros (T-453).
+        dmx_out::estop(self);
         self.sync_audience();
     }
 
@@ -1135,6 +1141,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let osc_out_rx = state.netin.feedback.take_receiver();
     // Timecode output (T-417): the snapshots the engine queues for "tc-out".
     let (tc_out_rx, tc_out_status) = (state.timecode.out.take_receiver(), Arc::clone(&state.timecode.out.status));
+    // DMX output (T-453): the universes the engine queues for "dmx-out".
+    let (dmx_out_rx, dmx_out_status) = (state.dmx_out.take_receiver(), Arc::clone(&state.dmx_out.status));
     let audio_hub = Arc::clone(&state.audio_in);
     let (song_hub, media) = (Arc::clone(&state.song), Arc::clone(&state.media));
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
@@ -1212,6 +1220,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     // operator picks; none with --no-midi.
     let midi_opener = midi::clock::opener(sim.clone(), cli.no_midi);
     let tc_out_thread = tc_out_rx.and_then(|rx| timecode::out::spawn(rx, tc_out_status, midi_opener.clone(), Arc::clone(&running)));
+    // Idle (no socket) until switched on; reads the e-stop latch itself.
+    let dmx_out_thread = dmx_out_rx.and_then(|rx| dmx_out::spawn(rx, dmx_out_status, Arc::clone(&estop), Arc::clone(&running)));
     let clock_thread = clock_rx.and_then(|rx| midi::clock::spawn(rx, clock_status, midi_opener, Arc::clone(&running)));
     let midi_thread = if let Some(sim) = sim {
         println!("--midi-test: simulated APC40 mkII only, MIDI injection enabled (tests only).");
@@ -1318,6 +1328,9 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     }
     if let Some(t) = tc_out_thread {
         t.join().ok(); // within one poll (20 ms); the stream simply stops
+    }
+    if let Some(t) = dmx_out_thread {
+        t.join().ok(); // within one poll (10 ms), after its frames of zeros
     }
     // The audio threads close the input within ~50 ms; a device stuck in
     // CoreAudio must not hold the exit.
@@ -1605,6 +1618,7 @@ fn startup_state(cli: &Cli) -> Shared {
         showlist: showlist::ShowListRunner::load(cli.data_dir.join("showlist.json")),
         agenda: agenda::AgendaRunner::load(cli.data_dir.join("agenda.json")),
         remote: remote::Remote::load(cli.data_dir.join("remote.json"), cli.remote_bind),
+        dmx_out: dmx_out::DmxOutState::load(cli.data_dir.join("dmx_out.json")),
     };
     usercues::sync_presets(&mut state);
     figures::refresh(&mut state);
@@ -2298,7 +2312,7 @@ impl Engine {
             let cue_signal = (s.output_kind == Some(artnet::KIND)).then(|| {
                 let timeline_cue = show_cues.iter().rev().find_map(|(c, _)| match &c.source {
                     timeline::EventSource::Cue { id } => Some(id.as_str()),
-                    timeline::EventSource::Look { .. } => None,
+                    timeline::EventSource::Look { .. } | timeline::EventSource::Dmx { .. } => None,
                 });
                 // The cue on show after transitions (T-158) and the beat
                 // mode; a launch still waiting (T-159) is not on show.
@@ -2317,7 +2331,7 @@ impl Engine {
                     let cue_signal = s.projector_outputs.get(&p.id).filter(|o| o.kind == artnet::KIND).map(|_| {
                         let timeline_cue = show_cues.iter().rev().find_map(|(c, _)| match &c.source {
                             timeline::EventSource::Cue { id } => Some(id.as_str()),
-                            timeline::EventSource::Look { .. } => None,
+                            timeline::EventSource::Look { .. } | timeline::EventSource::Dmx { .. } => None,
                         });
                         artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some() || trace.is_some(), &cfg.limits)
                     });
@@ -2814,7 +2828,7 @@ impl Routing {
             .iter()
             .map(|(cue, _)| match &cue.source {
                 timeline::EventSource::Cue { id } => of_cue(id),
-                timeline::EventSource::Look { .. } => (Vec::new(), None),
+                timeline::EventSource::Look { .. } | timeline::EventSource::Dmx { .. } => (Vec::new(), None),
             })
             .unzip();
         let look_spreads = looks.iter().map(|(_, id, _)| s.deck.find(*id).and_then(|a| s.deck.slot(&a.cue).spread)).collect();
@@ -2823,7 +2837,7 @@ impl Routing {
             .map(|(cue, _)| match &cue.source {
                 _ if cue.spread.is_some() => cue.spread.clone(),
                 timeline::EventSource::Cue { id } => s.deck.slot(id).spread,
-                timeline::EventSource::Look { .. } => None,
+                timeline::EventSource::Look { .. } | timeline::EventSource::Dmx { .. } => None,
             })
             .collect();
         Self {
@@ -2868,10 +2882,12 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
     take::frame(s, &c);
     // The timecode output (T-417) reads the playhead it ended on.
     timecode::out::frame(s, &c);
+    // The DMX output (T-453): its DMX tracks and the haze panel.
+    dmx_out::frame(s, &c);
     // A cue event plays the cue's grid program too (T-157).
     let with_program = |cue: &timeline::TimelineCue, look: Settings| match &cue.source {
         timeline::EventSource::Cue { id } => s.deck.with_program(id, look),
-        timeline::EventSource::Look { .. } => look,
+        timeline::EventSource::Look { .. } | timeline::EventSource::Dmx { .. } => look,
     };
     cues
         .into_iter()

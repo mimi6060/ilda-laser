@@ -1075,6 +1075,10 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<Vec<String>, String> {
         cfg.validate()?;
         return Ok(changed);
     }
+    // Never listen to the DMX output's own universe (T-453).
+    if let Some(why) = crate::dmx_out::refuses_input(s, &cfg) {
+        return Err(why.to_string());
+    }
     s.netin.hub.store(cfg.clone())?;
     s.gate.log().record("netin_settings", Some(ArmSource::Ui.id()), json!({ "changed": changed, "before": before, "after": cfg }));
     Ok(changed)

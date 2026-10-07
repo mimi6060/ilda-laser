@@ -182,6 +182,12 @@
     border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
   #tlCsvMenu[hidden] { display: none; }
   #tlCsvMenu button { text-align: left; }
+  #tlTrackMenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 160px; display: flex; flex-direction: column; gap: 2px; padding: 6px;
+    border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+  #tlTrackMenu[hidden] { display: none; }
+  #tlTrackMenu button { text-align: left; }
+  #tlDmxRow[hidden] { display: none; }
+  #tlDmxRow input[type=number] { width: 64px; }
   #tlCsvDlg { width: min(460px, calc(100vw - 32px)); padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); color: inherit; }
   #tlCsvDlg::backdrop { background: #000a; }
   #tlCsvDlg h2 { margin: 0 0 8px; font-size: 16px; }
@@ -1095,6 +1101,23 @@
   #anLive[data-lit=true] { border-color: var(--ok); color: var(--ok); }
   #anLive[data-warn=true] { border-color: var(--warn); color: var(--warn); }
   #anLive[hidden] { display: none; }
+  /* Sortie DMX et brouillard (T-453), Theme (T-299) tokens. */
+  .do-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 4px 8px; align-items: center; margin-top: 6px; }
+  .do-grid label { margin: 0; }
+  .do-grid input, .do-grid select { width: 100%; box-sizing: border-box; }
+  #doChannels { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 12px; }
+  #doChannels th { font-weight: 600; color: var(--muted); text-align: left; padding: 2px 4px; }
+  #doChannels td { padding: 3px 4px; border-top: 1px solid var(--line); vertical-align: middle; }
+  #doChannels input[type=text] { width: 100%; box-sizing: border-box; }
+  #doChannels input[type=number] { width: 64px; }
+  #doLive { margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); font-size: 12px; color: var(--muted); }
+  #doLive[data-on=true] { border-color: var(--ok); color: var(--ok); }
+  #doLive[data-warn=true] { border-color: var(--warn); color: var(--warn); }
+  #hazeBox { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
+  #hazeBox[hidden], #hazeFanRow[hidden] { display: none; }
+  .haze-hold { touch-action: none; user-select: none; min-height: 44px; min-width: 120px; }
+  .haze-hold.active { border-color: var(--accent); color: var(--accent); }
+  @media (pointer: coarse) { #dmxOutPanel button, #dmxOutPanel select, #dmxOutPanel input { min-height: 44px; } }
   #clItems li .only { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--warn); margin-left: 4px; }
   /* Mode de sortie (T-255), Theme (T-299) tokens: orange = --warn. */
   #audPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .06em; color: #231800; background: var(--warn); box-shadow: 0 0 10px #ffb02088; cursor: help; }
@@ -2740,6 +2763,18 @@
           <button id="fxBlack" class="fx-hold" data-control="transport.black_hold" title="transport.black_hold : sortie noire tant que le bouton est tenu, sans désarmer (Échap reste l'arrêt d'urgence)">Noir momentané</button>
         </div>
       </div>
+      <!-- Brouillard (T-453): the DMX output's haze machine; hidden until a pump channel is chosen (RÉGLAGES › Sortie DMX). -->
+      <div id="hazeBox" hidden>
+        <div class="sf-sub">Brouillard</div>
+        <div class="row">
+          <button id="hazeBtn" class="haze-hold" data-control="haze.burst" aria-pressed="false" title="haze.burst : la pompe tourne tant que le bouton est tenu (Alt+B en LIVE), au plus la durée max d'un jet">Brouillard</button>
+          <span class="hint" id="hazeState" role="status"></span>
+        </div>
+        <div id="hazeFanRow">
+          <label for="hazeFan">Ventilateur <span class="v" id="hazeFanV"></span></label>
+          <input type="range" id="hazeFan" min="0" max="100" step="1" value="0" data-default="0" data-control="haze.fan" title="haze.fan">
+        </div>
+      </div>
     </section>
 
     <section data-panel="lfo" data-help="live-modulateurs">
@@ -3325,7 +3360,13 @@
       <button id="tlDel" title="Suppr">Supprimer</button>
       <button id="tlUndo" title="Cmd+Z">Annuler</button>
       <button id="tlRedo" title="Cmd+Maj+Z">Rétablir</button>
-      <button id="tlAddTrack" title="Nouvelle piste de cues">+ Piste</button>
+      <span class="tl-csv">
+        <button id="tlAddTrack" title="Nouvelle piste : de cues, ou d'événements DMX (brouillard, projecteurs simples)" aria-haspopup="menu" aria-expanded="false">+ Piste ▾</button>
+        <span id="tlTrackMenu" role="menu" hidden>
+          <button id="tlAddCues" role="menuitem" title="Ses événements jouent des cues sur un calque">Piste de cues</button>
+          <button id="tlAddDmx" role="menuitem" title="Ses événements règlent un canal de la sortie DMX (RÉGLAGES › Sorties et projecteurs › Sortie DMX)">Piste DMX</button>
+        </span>
+      </span>
       <button id="tlLockAll" title="Verrouiller toutes les pistes : plus aucun événement ne bouge (Maj+Alt+L, timeline active)">Tout verrouiller</button>
       <span id="tlMarkRow" hidden>
         <input type="text" id="tlMarkName" aria-label="Nom du marqueur" maxlength="64" title="Nom du marqueur">
@@ -3345,6 +3386,12 @@
       <span id="tlSpreadRow" hidden>
         <details id="tlSpreadDet" class="tl-spread"><summary title="Étalement de l'événement sélectionné sur un groupe de zones">Étalement</summary>
           <div id="tlEvSpread" class="spread" data-prefix="tlSp"></div></details>
+      </span>
+      <span id="tlDmxRow" hidden>
+        <label class="tl-knob" title="Canal nommé de la sortie DMX">Canal <select id="tlDmxCh"></select></label>
+        <label class="tl-knob" title="Valeur du canal pendant l'événement ; hors événement, il revient à sa valeur de repos">Valeur (0–255) <input type="number" id="tlDmxVal" min="0" max="255" step="1"></label>
+        <label class="tl-knob" title="Fondu d'entrée depuis la valeur de repos (secondes)">Fondu d'entrée <input type="number" id="tlDmxIn" min="0" max="600" step="0.1"></label>
+        <label class="tl-knob" title="Fondu de sortie vers la valeur de repos (secondes)">Fondu de sortie <input type="number" id="tlDmxOut" min="0" max="600" step="0.1"></label>
       </span>
       <span id="tlNoteRow" hidden>
         <label class="tl-knob" title="Notes de l'événement sélectionné (info-bulle sur la timeline)">Notes <input type="text" id="tlEvNotes" maxlength="500" placeholder="ex. avec brouillard"></label>
@@ -4719,6 +4766,40 @@
         <div class="hint">Une fois enregistrée, la sortie apparaît dans la liste ci-dessus : « Connecter ». Les réglages se changent sortie déconnectée.</div>
       </details>
       <div class="hint">Connecter, changer, déconnecter ou perdre la sortie désarme le laser ; une sortie retrouvée reste désarmée : seul l'opérateur réarme. Ce désarmement est logiciel : l'arrêt d'urgence matériel du projecteur reste votre vraie sécurité. Préférez un réseau filaire. La sortie choisie est retenue pour le prochain lancement ; <code>--device &lt;id&gt;</code> en impose une pour un seul lancement.</div>
+      <!-- Sortie DMX (T-453): haze machine and simple lights, never the laser. -->
+      <details id="dmxOutPanel" data-search="Sortie DMX brouillard machine à brouillard fumée ventilateur pompe projecteurs simples Art-Net sACN canaux">
+        <summary>Sortie DMX (brouillard, projecteurs simples)</summary>
+        <div class="hint">Quelques canaux DMX envoyés par le réseau (Art-Net ou sACN, un seul univers) vers un nœud DMX : machine à brouillard, un ou deux projecteurs. Pas un pupitre lumière, et <b>jamais le laser</b> : l'adresse de la sortie laser et les univers que le studio reçoit sont refusés. Envoi direct vers l'adresse saisie : aucune recherche, aucune diffusion. Réglage de cette machine (pas du projet).</div>
+        <label class="check"><input type="checkbox" id="doEnabled"> Activer la sortie DMX</label>
+        <div class="do-grid">
+          <label for="doProtocol">Protocole</label>
+          <select id="doProtocol"><option value="art_net">Art-Net</option><option value="sacn">sACN (E1.31)</option></select>
+          <label for="doUniverse">Univers</label>
+          <input type="number" id="doUniverse" min="0" max="63999" step="1">
+          <label for="doInterface">Interface réseau</label>
+          <select id="doInterface" title="L'adresse de ce Mac d'où partent les trames"></select>
+          <label for="doTarget">Adresse du nœud DMX</label>
+          <input type="text" id="doTarget" placeholder="192.168.1.30" autocomplete="off" spellcheck="false" title="IP ou IP:port d'une seule machine (port 6454 en Art-Net, 5568 en sACN). Ni diffusion, ni multidiffusion.">
+        </div>
+        <div class="sf-sub">Canaux</div>
+        <table id="doChannels" aria-label="Canaux DMX nommés"></table>
+        <div class="row"><button id="doAddCh" title="Jusqu'à 16 canaux nommés ; les autres canaux de l'univers sont envoyés à 0">+ Canal</button></div>
+        <div class="sf-sub">Brouillard</div>
+        <div class="do-grid">
+          <label for="doPump">Canal de la pompe</label>
+          <select id="doPump"></select>
+          <label for="doFan">Canal du ventilateur</label>
+          <select id="doFan"></select>
+          <label for="doPumpLevel">Niveau de la pompe (0–255)</label>
+          <input type="number" id="doPumpLevel" min="0" max="255" step="1">
+          <label for="doMaxBurst">Durée max d'un jet (s)</label>
+          <input type="number" id="doMaxBurst" min="0.5" max="60" step="0.5">
+        </div>
+        <div class="row"><button id="doSave">Enregistrer</button></div>
+        <div class="hint" id="doMsg" role="status"></div>
+        <div id="doLive" role="status" data-on="false">Arrêté</div>
+        <div class="hint">Arrêt d'urgence (Échap) : tous les canaux à 0 tant qu'il est verrouillé. Désactiver la sortie ou fermer le studio envoie trois trames à 0 avant de couper. Désarmer ou « Noir » (toute cause) remet chaque canal à sa valeur de repos, pompe et ventilateur à 0 : les événements DMX ne reviennent qu'à une nouvelle « Lecture », laser réarmé, et le brouillard qu'à un nouvel appui. <b>Une machine à brouillard chauffe et peut déclencher une alarme incendie</b> : la durée max d'un jet est un garde-fou, pas une garantie ; ce que fait le nœud quand le réseau s'arrête dépend de lui. Gardez l'interrupteur de la machine à portée de main.</div>
+      </details>
       <div class="sf-sub">Limites de sécurité</div>
       <div id="pwTargetRow" hidden>
         <label for="pwTarget">Projecteur</label>
@@ -5770,9 +5851,10 @@ const SHORTCUT_ZONES = ['live', 'grid', 'timeline', 'tl-canvas', 'creation', 'fi
 const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas' && z !== 'ask');
 const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live' && z !== 'grid');
 const LIVE_ZONES = ['live', 'grid'];
-// Macros (T-425): Alt + letter, read by position (e.code). Alt+C (« Ciel
-// coupé », T-262), P, S, T and X already have a role.
-const MACRO_TAKEN = ['C', 'P', 'S', 'T', 'X'];
+// Macros (T-425): Alt + letter, read by position (e.code). Alt+B (the
+// haze, T-453), Alt+C (« Ciel coupé », T-262), P, S, T and X already
+// have a role.
+const MACRO_TAKEN = ['B', 'C', 'P', 'S', 'T', 'X'];
 const MACRO_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter(l => !MACRO_TAKEN.includes(l));
 const SAFETY_SHORTCUTS = [
   { id: 'estop', group: 'Sécurité', keys: ['Escape'], meta: '*', alt: '*', zones: '*', typing: true, show: true,
@@ -5884,6 +5966,12 @@ function buildShortcuts() {
     { id: 'strobe', group: 'Direct', codes: ['KeyS'], alt: '*', zones: NOT_LIVE, show: true,
       label: 'Tenir : stroboscope 1/4 (hors LIVE)',
       down: () => holdStrobe(true), up: () => holdStrobe(false) },
+    // Brouillard (T-453): Alt+B held in LIVE (B alone is a cue key, Maj+B
+    // its flash), once a pump channel is chosen; the max burst still applies.
+    { id: 'haze', group: 'Direct', codes: ['KeyB'], alt: true, zones: LIVE_ZONES, show: true,
+      label: "Tenir : brouillard (sortie DMX, au plus la durée max d'un jet)",
+      when: () => !$('hazeBox').hidden,
+      down: e => { if (!e.repeat) setHazeHeld(true); }, up: () => setHazeHeld(false) },
     // Grand afficheur du timecode (T-409), in every workspace.
     { id: 'tc.big', group: 'Timeline', codes: ['KeyT'], alt: true, zones: '*', show: true,
       label: 'Grand afficheur du timecode (ouvrir / fermer)',
@@ -5980,7 +6068,7 @@ function buildShortcuts() {
     // Macros (T-425): Alt + the macro's letter, LIVE only (letters alone
     // are the cues, Alt + digit the pages).
     { id: 'macro', group: 'Macros', codes: MACRO_LETTERS.map(l => 'Key' + l), alt: true, zones: LIVE_ZONES, show: true,
-      cap: () => 'A … Z', label: 'Lancer la macro liée à cette lettre (CRÉATION › Macros ; sauf C, P, S, T, X)',
+      cap: () => 'A … Z', label: 'Lancer la macro liée à cette lettre (CRÉATION › Macros ; sauf B, C, P, S, T, X)',
       down: (e, i) => { const m = macroForKey(MACRO_LETTERS[i]); if (!m) return false; if (!e.repeat) macRun(m.id, 'keyboard'); } },
     // Cue letters, LIVE only (T-272); Maj = flash.
     { id: 'cue', group: 'Cues et pages', codes: CUE_CODES, shift: '*', zones: LIVE_ZONES, show: true,
@@ -6715,6 +6803,7 @@ function applyState(f, at, pushed) {
     : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement';
   showOutputKind(f);
   showArtnetStatus(f.output_status);
+  showDmxOutLive(f.dmx_out);
   highlightPlaylist(f.playlist);
   showTempo(pushed ? tempoNow() : f.tempo);
   // A live change of ours in flight, or just answered: an older state must
@@ -12690,6 +12779,8 @@ const TL_UNDO = 50, TL_MIN_LEN = 0.01, TL_SNAP_PX = 8, TL_ENV = 48, TL_ENV_PAD =
 // whatever the zoom) before an event, a marker or a loop edge moves.
 const TL_DRAG_PX = 4;
 const TL_LAYER_COLORS = ['#3ddc84', '#4da3ff', '#ffb020', '#e062ff'];
+// DMX tracks (T-453): one colour of their own, not a layer's.
+const TL_DMX_COLOR = '#c8ccd8';
 const TL_MARK_COLORS = [[255, 176, 32], [77, 163, 255], [224, 98, 255], [61, 220, 132], [255, 77, 79]];
 const tlSeconds = () => !TL.show || TL.show.time_base !== 'beats';
 // Empty state: the ruler and this many empty tracks (no show loaded).
@@ -12993,6 +13084,7 @@ const tlPresetName = id => (presets.find(p => p.id === id) || {}).name || id;
 // A look stored in the show (the examples' tweaked cues, countdown digits).
 function tlEventName(e) {
   if (e.source.kind === 'cue') return tlPresetName(e.source.id);
+  if (e.source.kind === 'dmx') return `DMX · ${e.source.channel} = ${e.source.value}`;
   const c = e.source.settings && e.source.settings.content || {};
   if (c.kind === 'text') return `Texte « ${c.text} »`;
   if (c.kind === 'generator') return 'Look · ' + (GEN_NAMES[c.generator] || c.generator);
@@ -13143,6 +13235,19 @@ function tlEnvShift(removed) {
   TL.env = shift(TL.env); TL.envMode = shift(TL.envMode);
 }
 // Double-click on a bus track: a bus event of 4 bars (it plays nothing; its envelopes act on the whole layer).
+// A DMX event (T-453): the first named channel of the DMX output at 255,
+// 4 bars long; its properties row sets the rest.
+function tlDmxAdd(ti, x) {
+  if (TL.show.tracks[ti].locked) { tlMsg('Piste verrouillée', true); return; }
+  const start = tlSnapU(tlXToU(x)), names = dmxOutNames();
+  tlChange(() => {
+    const ev = { id: tlNextId(), start, len: Math.max(TL_MIN_LEN, tlUAtBar(tlBarAt(start) + 4) - start), source: { kind: 'dmx', channel: names[0] || 'Brouillard', value: 255 },
+      fade_in: { seconds: 0 }, fade_out: { seconds: 0 } };
+    TL.show.tracks[ti].events.push(ev);
+    TL.sel = new Set([ev.id]);
+  });
+  if (!names.length) tlMsg('Aucun canal nommé : déclarez-les dans RÉGLAGES › Sorties et projecteurs › Sortie DMX.', true);
+}
 function tlBusAdd(ti, x) {
   const start = tlSnapU(tlXToU(x));
   tlChange(() => {
@@ -13185,12 +13290,12 @@ function tlHeads() {
     <div class="tl-head${t.locked ? ' locked' : ''}" data-ti="${i}" style="height:${TL_LANE}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
       <input type="text" value="${esc(t.name)}" maxlength="64" data-f="name" title="Nom de la piste"${t.locked ? ' disabled' : ''}>
       <select data-f="layer" title="Calque"${t.locked ? ' disabled' : ''}>${[1, 2, 3, 4].map(n => `<option value="${n}"${n === t.layer ? ' selected' : ''}>C${n}</option>`).join('')}</select>
-      <select data-f="kind" title="Cues : la piste joue des cues · Bus : ses enveloppes agissent sur toutes les pistes de son calque"${t.locked ? ' disabled' : ''}>
-        <option value="cues"${t.kind !== 'bus' ? ' selected' : ''}>Cues</option><option value="bus"${t.kind === 'bus' ? ' selected' : ''}>Bus</option></select>
+      <select data-f="kind" title="Cues : la piste joue des cues · Bus : ses enveloppes agissent sur toutes les pistes de son calque · DMX : ses événements règlent la sortie DMX"${t.locked ? ' disabled' : ''}>
+        <option value="cues"${t.kind === 'cues' ? ' selected' : ''}>Cues</option><option value="bus"${t.kind === 'bus' ? ' selected' : ''}>Bus</option><option value="dmx"${t.kind === 'dmx' ? ' selected' : ''}>DMX</option></select>
       <button data-f="mute" class="${t.mute ? 'active' : ''}" title="Muet">M</button>
       <button data-f="solo" class="${t.solo ? 'active' : ''}" title="Solo">S</button>
       <button data-f="lock" class="${t.locked ? 'active' : ''}" title="${t.locked ? 'Déverrouiller la piste' : 'Verrouiller la piste'} (Alt+L)" aria-pressed="${!!t.locked}">V</button>
-      <button data-f="env" class="${TL.env[i] ? 'active' : ''}" title="+ Enveloppe : une ligne sous la piste pour dessiner un paramètre (taille, rotation, luminosité…)">∿</button>
+      ${t.kind === 'dmx' ? '' : `<button data-f="env" class="${TL.env[i] ? 'active' : ''}" title="+ Enveloppe : une ligne sous la piste pour dessiner un paramètre (taille, rotation, luminosité…)">∿</button>`}
       <button data-f="del" title="Supprimer la piste (Annuler la rétablit)">✕</button>
     </div>${TL.env[i] ? `
     <div class="tl-head tl-envhead" data-ti="${i}" style="height:${TL_ENV}px;border-left-color:${TL_LAYER_COLORS[(t.layer - 1) % 4]}">
@@ -13208,7 +13313,13 @@ $('tlHeads').addEventListener('change', e => {
   if (f === 'name') tlChange(() => { t.name = v.slice(0, 64); });
   if (f === 'layer') tlChange(() => { t.layer = +v; });
   if (f === 'kind') {
+    // Cue events and DMX events don't mix: only an empty track changes to or from DMX.
+    if ((v === 'dmx' || t.kind === 'dmx') && t.events.length) {
+      tlMsg('Videz la piste avant de la changer en piste DMX (ou l\'inverse)', true);
+      e.target.value = t.kind; e.target.blur(); return;
+    }
     tlChange(() => { t.kind = v; });
+    if (v === 'dmx') { tlEnvOpen(ti, null); tlMsg('Piste DMX : double-cliquez sur la piste pour poser un événement, puis choisissez son canal et sa valeur.'); dmxOutChannels(); }
     if (v === 'bus' && !TL.env[ti]) tlEnvOpen(ti, tlEnvDefault(ti));
     if (v === 'bus') tlMsg('Piste bus : double-cliquez sur la piste pour y poser un événement, puis dessinez ses enveloppes : elles agissent sur toutes les pistes du calque.');
   }
@@ -13237,10 +13348,21 @@ $('tlHeads').addEventListener('click', e => {
   if (b.dataset.f === 'envx') { b.blur(); tlEnvOpen(i, null); }
 });
 $('tlLockAll').onclick = tlLockAll;
-$('tlAddTrack').onclick = () => tlChange(() => {
-  const n = TL.show.tracks.length;
-  TL.show.tracks.push({ name: `Piste ${n + 1}`, kind: 'cues', layer: (n % 4) + 1, mute: false, solo: false, events: [] });
-});
+function tlTrackMenu(open) { $('tlTrackMenu').hidden = !open; $('tlAddTrack').setAttribute('aria-expanded', open); }
+$('tlAddTrack').onclick = e => { e.stopPropagation(); tlTrackMenu($('tlTrackMenu').hidden); };
+document.addEventListener('click', e => { if (!e.target.closest('#tlTrackMenu') && e.target !== $('tlAddTrack')) tlTrackMenu(false); });
+function tlAddTrackOf(kind) {
+  tlTrackMenu(false);
+  if (!TL.show) return;
+  tlChange(() => {
+    const n = TL.show.tracks.length;
+    const name = kind === 'dmx' ? `DMX ${TL.show.tracks.filter(t => t.kind === 'dmx').length + 1}` : `Piste ${n + 1}`;
+    TL.show.tracks.push({ name, kind, layer: (n % 4) + 1, mute: false, solo: false, events: [] });
+  });
+  if (kind === 'dmx') { tlMsg('Piste DMX : double-cliquez sur la piste pour poser un événement, puis choisissez son canal et sa valeur.'); dmxOutChannels(); }
+}
+$('tlAddCues').onclick = () => tlAddTrackOf('cues');
+$('tlAddDmx').onclick = () => tlAddTrackOf('dmx');
 
 // --- toolbar ---
 function tlSetSnap(v) {
@@ -13458,7 +13580,7 @@ $('tlMarkDel').onclick = () => { const i = TL.marker; if (i < 0) return; tlChang
 // « Balayage » of the selected events (T-415): « Comme le cue » = none.
 let tlScanKey = '';
 function tlScanRow() {
-  const items = TL.show ? tlSelected() : [];
+  const items = TL.show ? tlSelected().filter(x => x.e.source.kind !== 'dmx') : [];
   const key = items.map(x => x.e.id + ':' + (x.e.scan || '')).join(',') + '|' + scanRev;
   if (key === tlScanKey) return;
   tlScanKey = key;
@@ -13480,7 +13602,7 @@ $('tlScan').addEventListener('change', () => {
 let tlRefKey = '';
 const TL_REFS = ['tlRefPosition', 'tlRefSize', 'tlRefColor', 'tlRefMotion'];
 function tlRefRow() {
-  const items = TL.show ? tlSelected() : [];
+  const items = TL.show ? tlSelected().filter(x => x.e.source.kind !== 'dmx') : [];
   const key = items.map(x => x.e.id + ':' + JSON.stringify(x.e.refs || {})).join(',') + '|' + poolRev;
   if (key === tlRefKey) return;
   tlRefKey = key;
@@ -13511,7 +13633,7 @@ TL_REFS.forEach(id => $(id).addEventListener('change', () => {
 // a time; its own wins over its cue's cell.
 let tlSpreadKey = '';
 function tlSpreadRow() {
-  const items = TL.show ? tlSelected() : [];
+  const items = TL.show ? tlSelected().filter(x => x.e.source.kind !== 'dmx') : [];
   const e = items.length === 1 ? items[0].e : null;
   const key = e ? e.id + ':' + JSON.stringify(e.spread || null) + ':' + spreadGroups().map(g => g.name + g.zones.length).join(',') : '';
   if (key === tlSpreadKey || $('tlEvSpread').contains(document.activeElement)) return;
@@ -13559,6 +13681,39 @@ $('tlEvTags').addEventListener('change', () => {
   tlChange(() => { if (tags.length) items[0].e.tags = tags; else delete items[0].e.tags; });
 });
 ['tlEvNotes', 'tlEvTags'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); }));
+
+// A DMX event's channel, value and fades (T-453): one event at a time.
+let tlDmxKey = '';
+// A fade in beats (an older edit) shown in seconds at the show's first tempo.
+const tlDurS = d => d && typeof d.seconds === 'number' ? d.seconds : d && typeof d.beats === 'number' ? d.beats * 60 / (TL.show?.tempo_map?.[0]?.bpm || 120) : 0;
+function tlDmxRow() {
+  const items = TL.show ? tlSelected() : [];
+  const e = items.length === 1 && items[0].e.source.kind === 'dmx' ? items[0].e : null;
+  const names = dmxOutNames();
+  const key = e ? JSON.stringify([e.id, e.source, e.fade_in, e.fade_out, names]) : '';
+  if (key === tlDmxKey || $('tlDmxRow').contains(document.activeElement)) return;
+  tlDmxKey = key;
+  $('tlDmxRow').hidden = !e;
+  if (!e) return;
+  const list = names.includes(e.source.channel) ? names : [...names, e.source.channel];
+  $('tlDmxCh').replaceChildren(...list.map(n => { const o = document.createElement('option'); o.value = n; o.textContent = names.includes(n) ? n : n + ' (inconnu)'; return o; }));
+  $('tlDmxCh').value = e.source.channel;
+  $('tlDmxVal').value = e.source.value;
+  $('tlDmxIn').value = +tlDurS(e.fade_in).toFixed(2);
+  $('tlDmxOut').value = +tlDurS(e.fade_out).toFixed(2);
+}
+function tlDmxEdit(f) {
+  const items = tlSelected();
+  if (items.length !== 1 || items[0].e.source.kind !== 'dmx') return;
+  if (items[0].t.locked) { tlMsg('Piste verrouillée', true); tlDmxKey = ''; return; }
+  tlChange(() => f(items[0].e));
+}
+const tlSecs = v => ({ seconds: Math.max(0, Math.min(600, Number.isFinite(+v) ? +v : 0)) });
+$('tlDmxCh').addEventListener('change', () => tlDmxEdit(e => { e.source.channel = $('tlDmxCh').value; }));
+$('tlDmxVal').addEventListener('change', () => tlDmxEdit(e => { const v = Math.round(+$('tlDmxVal').value); e.source.value = Number.isFinite(v) ? Math.max(0, Math.min(255, v)) : 0; }));
+$('tlDmxIn').addEventListener('change', () => tlDmxEdit(e => { e.fade_in = tlSecs($('tlDmxIn').value); }));
+$('tlDmxOut').addEventListener('change', () => tlDmxEdit(e => { e.fade_out = tlSecs($('tlDmxOut').value); }));
+['tlDmxVal', 'tlDmxIn', 'tlDmxOut'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); }));
 
 // --- selection, copy / paste / duplicate / delete ---
 function tlSelected() { return tlEvents().filter(x => TL.sel.has(x.e.id)); }
@@ -13677,7 +13832,7 @@ function tplShow() {
     const suggested = page && TPL.categories.includes(page) ? 'auto:' + page : '';
     s.value = (same && kept) || suggested || kept || '';
   });
-  $('tlTplTrack').innerHTML = TL.show.tracks.map((tr, i) => tr.kind === 'bus' ? '' : `<option value="${i}">${esc(tr.name)}${tr.locked ? ' (verrouillée)' : ''}</option>`).join('') + `<option value="${TL.show.tracks.length}">Nouvelle piste</option>`;
+  $('tlTplTrack').innerHTML = TL.show.tracks.map((tr, i) => tr.kind !== 'cues' ? '' : `<option value="${i}">${esc(tr.name)}${tr.locked ? ' (verrouillée)' : ''}</option>`).join('') + `<option value="${TL.show.tracks.length}">Nouvelle piste</option>`;
   $('tlTplFit').querySelectorAll('[data-fit]').forEach(b => { b.classList.toggle('active', b.dataset.fit === TPL.fit); b.setAttribute('aria-pressed', String(b.dataset.fit === TPL.fit)); });
   tplPreview(t);
 }
@@ -13870,7 +14025,7 @@ function tlDraw() {
   // Events.
   const active = new Set(TL.state ? TL.state.active : []);
   TL.show.tracks.forEach((t, ti) => {
-    const y = tlLaneY(ti) + 3, h = TL_LANE - 6, col = TL_LAYER_COLORS[(t.layer - 1) % 4], bus = t.kind === 'bus';
+    const y = tlLaneY(ti) + 3, h = TL_LANE - 6, col = t.kind === 'dmx' ? TL_DMX_COLOR : TL_LAYER_COLORS[(t.layer - 1) % 4], bus = t.kind === 'bus';
     for (const e of t.events) {
       const x0 = tlUToX(e.start), x1 = tlUToX(e.start + e.len);
       if (x1 < 0 || x0 > W) continue;
@@ -13987,6 +14142,7 @@ function tlLoop() {
     tlHeads();
     tlScanRow();
     tlNoteRow();
+    tlDmxRow();
     tlSpreadRow();
     tlRefRow();
     if (TL.fitPending && tlCanvas().clientWidth) { TL.fitPending = false; tlFit(); }
@@ -14215,6 +14371,7 @@ tlCv.addEventListener('dblclick', e => {
       const hit = tlEnvKeyAt(ti, x, y);
       if (hit) tlEnvCycleEase(hit); else tlEnvAddKey(ti, x, y);
     } else if (t.kind === 'bus' && !tlEventAt(ti, x)) tlBusAdd(ti, x);
+    else if (t.kind === 'dmx' && !tlEventAt(ti, x)) tlDmxAdd(ti, x);
   }
 });
 // Molette: zoom around the cursor; Maj+molette or horizontal swipe: scroll.
@@ -14232,7 +14389,7 @@ tlCv.addEventListener('wheel', e => {
 // Drag from the library.
 function tlDropAt(e) {
   const { x, y } = tlLocal(e), ti = tlTrackAt(y);
-  if (!TL.show || !TL.dragCue || y < TL_TOP || ti < 0 || ti >= TL.show.tracks.length || TL.show.tracks[ti].kind === 'bus') return null;
+  if (!TL.show || !TL.dragCue || y < TL_TOP || ti < 0 || ti >= TL.show.tracks.length || TL.show.tracks[ti].kind !== 'cues') return null;
   if (TL.show.tracks[ti].locked) { tlMsg('Piste verrouillée', true); return null; }
   const start = tlSnapU(tlXToU(x));
   return { ti, start, len: tlDefaultLen(TL.dragCue, start), id: TL.dragCue };
@@ -16520,6 +16677,152 @@ function showArtnetStatus(st) {
     : 'Envoyé : intensité 0, figure 0 (noir)') + ` · univers ${st.universe}, adresse ${st.dmx_address}`
     + (warning ? ' — ' + warning : '') + (st.error ? ' — ' + st.error : '');
 }
+// ---------- Sortie DMX (T-453): haze machine and simple lights ----------
+// The settings in RÉGLAGES (the node's address is typed, never searched
+// for); the *Brouillard* box in LIVE › Direct; the values and the sending
+// state come with every frame (`f.dmx_out`). Never the laser.
+let dmxOut = null;
+let doChans = [];
+let dmxOutLoading = null;
+async function loadDmxOut() {
+  try { showDmxOut(await apiJson('GET', '/api/dmx-out', undefined, { cache: 'no-store' })); } catch { /* next time */ }
+}
+// The named channels, for the timeline's DMX events (loaded once if needed).
+function dmxOutNames() { return dmxOut ? dmxOut.config.channels.map(c => c.name) : []; }
+function dmxOutChannels() {
+  if (!dmxOut && !dmxOutLoading) dmxOutLoading = loadDmxOut().finally(() => { dmxOutLoading = null; tlDmxKey = ''; });
+  return dmxOutLoading;
+}
+function doOptions(sel, list, cur) {
+  sel.replaceChildren(...list.map(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; return o; }));
+  sel.value = list.some(([v]) => v === cur) ? cur : '';
+}
+function showDmxOut(j) {
+  dmxOut = j;
+  const c = j.config;
+  $('doEnabled').checked = c.enabled;
+  $('doProtocol').value = c.protocol;
+  $('doUniverse').value = c.universe;
+  const ifs = j.interfaces.map(i => [i.ip, `${i.ip} (${i.name})`]);
+  if (c.interface && !ifs.some(([ip]) => ip === c.interface)) ifs.push([c.interface, c.interface + ' (absente)']);
+  doOptions($('doInterface'), [['', 'Choisir…'], ...ifs], c.interface || '');
+  $('doTarget').value = c.target || '';
+  doChans = c.channels.map(ch => ({ ...ch }));
+  renderDoChannels();
+  $('doPumpLevel').value = c.haze.pump_level;
+  $('doMaxBurst').value = c.haze.max_burst_s;
+  doHazeSelects(c.haze.pump || '', c.haze.fan || '');
+  showDmxOutLive(j.summary);
+}
+function doHazeSelects(pump, fan) {
+  const names = doChans.map(ch => ch.name.trim()).filter(Boolean).map(n => [n, n]);
+  doOptions($('doPump'), [['', 'Aucun'], ...names], pump);
+  doOptions($('doFan'), [['', 'Aucun'], ...names], fan);
+}
+function renderDoChannels() {
+  const t = $('doChannels');
+  const head = document.createElement('tr');
+  for (const h of ['Nom', 'Adresse', 'Valeur de repos', '']) { const th = document.createElement('th'); th.textContent = h; head.append(th); }
+  const rows = doChans.map((ch, i) => {
+    const tr = document.createElement('tr'); tr.dataset.i = i;
+    const cell = (k, type, label, attrs) => {
+      const td = document.createElement('td'), inp = document.createElement('input');
+      inp.type = type; inp.dataset.k = k; inp.value = ch[k]; inp.setAttribute('aria-label', label);
+      for (const [a, v] of Object.entries(attrs)) inp.setAttribute(a, v);
+      td.append(inp); return td;
+    };
+    const del = document.createElement('button');
+    del.dataset.del = i; del.textContent = '✕'; del.title = 'Supprimer ce canal'; del.setAttribute('aria-label', `Supprimer le canal ${i + 1}`);
+    const tdDel = document.createElement('td'); tdDel.append(del);
+    tr.append(cell('name', 'text', `Nom du canal ${i + 1}`, { maxlength: 40, autocomplete: 'off' }), cell('address', 'number', `Adresse du canal ${i + 1}`, { min: 1, max: 512, step: 1 }),
+      cell('rest', 'number', `Valeur de repos du canal ${i + 1}`, { min: 0, max: 255, step: 1 }), tdDel);
+    return tr;
+  });
+  if (!rows.length) {
+    const tr = document.createElement('tr'), td = document.createElement('td');
+    td.colSpan = 4; td.className = 'hint'; td.textContent = 'Aucun canal : « + Canal » pour en nommer un (16 au plus).';
+    tr.append(td); rows.push(tr);
+  }
+  t.replaceChildren(head, ...rows);
+  $('doAddCh').disabled = doChans.length >= (dmxOut ? dmxOut.max_channels : 16);
+}
+$('doChannels').addEventListener('input', e => {
+  const tr = e.target.closest('tr[data-i]'); if (!tr) return;
+  const ch = doChans[+tr.dataset.i], k = e.target.dataset.k;
+  ch[k] = k === 'name' ? e.target.value : e.target.value === '' ? '' : Math.round(+e.target.value);
+  if (k === 'name') doHazeSelects($('doPump').value, $('doFan').value);
+});
+$('doChannels').addEventListener('click', e => {
+  const b = e.target.closest('button[data-del]'); if (!b) return;
+  doChans.splice(+b.dataset.del, 1);
+  renderDoChannels(); doHazeSelects($('doPump').value, $('doFan').value);
+});
+$('doAddCh').addEventListener('click', () => {
+  const used = new Set(doChans.map(c => +c.address));
+  let address = 1; while (used.has(address) && address < 512) address++;
+  doChans.push({ name: `Canal ${doChans.length + 1}`, address, rest: 0 });
+  renderDoChannels(); doHazeSelects($('doPump').value, $('doFan').value);
+});
+function doBody() {
+  const int = (v, d) => { const n = Math.round(+v); return v === '' || !Number.isFinite(n) ? d : n; };
+  return {
+    enabled: $('doEnabled').checked,
+    protocol: $('doProtocol').value,
+    universe: int($('doUniverse').value, 1),
+    interface: $('doInterface').value || null,
+    target: $('doTarget').value.trim() || null,
+    channels: doChans.map(ch => ({ name: String(ch.name).trim(), address: int(ch.address, 0), rest: int(ch.rest, 0) })),
+    haze: { pump: $('doPump').value || null, fan: $('doFan').value || null, pump_level: int($('doPumpLevel').value, 255), max_burst_s: +$('doMaxBurst').value || 10 },
+  };
+}
+async function saveDmxOut() {
+  const r = await api('POST', '/api/dmx-out', doBody(), { quiet: true });
+  if (r.ok) {
+    showDmxOut(await r.json());
+    $('doMsg').textContent = dmxOut.config.enabled ? 'Enregistré : sortie DMX activée.' : 'Enregistré (sortie DMX désactivée).';
+    $('doMsg').classList.remove('sf-error');
+  } else {
+    $('doMsg').textContent = await r.text();
+    $('doMsg').classList.add('sf-error');
+    if (dmxOut) $('doEnabled').checked = dmxOut.config.enabled;
+  }
+}
+$('doSave').addEventListener('click', saveDmxOut);
+$('doEnabled').addEventListener('change', saveDmxOut);
+$('dmxOutPanel').addEventListener('toggle', () => { if ($('dmxOutPanel').open) loadDmxOut(); });
+// Every frame: the witness in RÉGLAGES and the haze box in LIVE.
+function showDmxOutLive(d) {
+  if (!d) return;
+  const live = $('doLive');
+  live.dataset.on = !!d.sending;
+  live.dataset.warn = !!(d.blocked || d.error || d.warning || d.estop || (d.enabled && d.held));
+  live.textContent = (d.sending ? `Envoi : ${d.rate_hz} trames/s` : 'Arrêté')
+    + (d.estop ? " — arrêt d'urgence : tous les canaux à 0" : d.enabled && d.held ? ' — ' + d.held : '') + (d.blocked ? ' — ' + d.blocked : '')
+    + (d.error ? ' — ' + d.error : '') + (d.warning ? ' — ' + d.warning : '');
+  $('hazeBox').hidden = !d.haze.available;
+  $('hazeFanRow').hidden = !d.haze.has_fan;
+  if (!hazeHeld) { $('hazeBtn').classList.toggle('active', !!d.haze.held); $('hazeBtn').setAttribute('aria-pressed', !!d.haze.held); }
+  $('hazeState').textContent = d.estop ? "Arrêt d'urgence : brouillard coupé" : d.haze.pump_on ? 'Pompe en marche' : d.haze.held ? "Durée max d'un jet atteinte : relâchez" : !d.enabled ? 'Sortie DMX désactivée' : '';
+  if (document.activeElement !== $('hazeFan')) $('hazeFan').value = Math.round(d.haze.fan * 100);
+  $('hazeFanV').textContent = `${$('hazeFan').value} %`;
+}
+// The haze button (and Alt+B): held while the pointer or the key is down;
+// let go on up, cancel, lost capture and when the window loses focus.
+let hazeHeld = false;
+function setHazeHeld(on) {
+  if (on === hazeHeld) return;
+  hazeHeld = on;
+  $('hazeBtn').classList.toggle('active', on); $('hazeBtn').setAttribute('aria-pressed', on);
+  api('POST', '/api/dmx-out/haze', { on }, { quiet: true }).catch(() => {});
+}
+$('hazeBtn').addEventListener('pointerdown', e => { if (e.button === 0) { $('hazeBtn').setPointerCapture?.(e.pointerId); setHazeHeld(true); } });
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => $('hazeBtn').addEventListener(ev, () => setHazeHeld(false)));
+window.addEventListener('blur', () => setHazeHeld(false));
+$('hazeFan').addEventListener('input', () => {
+  $('hazeFanV').textContent = `${$('hazeFan').value} %`;
+  api('POST', '/api/dmx-out/haze', { fan: +$('hazeFan').value / 100 }, { quiet: true }).catch(() => {});
+});
+
 // While RÉGLAGES is shown, the state line follows connections, losses and
 // the retry countdown.
 setInterval(() => { if (activeWs === 'settings') reloadDevices(); }, 500);
@@ -17089,6 +17392,7 @@ async function loadState() {
   reloadDevices();
   reloadVenue();
   loadArtnet();
+  loadDmxOut();
   calibration = st.calibration; armed = st.armed; arm = st.arm; scenes = st.scenes;
   showShowMode(st.lock);
   checklistState = st.checklist; showShownet(st.shownet); reloadChecklist();

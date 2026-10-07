@@ -198,7 +198,7 @@ pub fn for_look(s: &Shared, id: u64, look: &Settings) -> OptimizeParams {
 pub fn for_event(s: &Shared, cue: &TimelineCue, look: &Settings) -> OptimizeParams {
     let slot = match &cue.source {
         EventSource::Cue { id } => s.deck.slot_scan(id),
-        EventSource::Look { .. } => None,
+        EventSource::Look { .. } | EventSource::Dmx { .. } => None,
     };
     s.scan_presets.resolve(chosen(cue.scan.as_deref(), slot, figure_scan(look)), &s.mixer, &output_limits(s), s.live.scan)
 }
