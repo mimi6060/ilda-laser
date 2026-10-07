@@ -3108,6 +3108,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (Method::Post, "/api/timeline/templates/delete") => match body::<TemplateSave>(request) {
             Ok(req) => match shared.lock().unwrap().templates.delete(&req.name) {
                 Ok(()) => ok(),
+                Err(e) if crate::templates::is_builtin(&req.name) => text(409, &format!("{e:#}")),
                 Err(e) => text(404, &format!("{e:#}")),
             },
             Err(e) => e,
@@ -3854,6 +3855,9 @@ fn save_template(req: TemplateSave, shared: &Arc<Mutex<Shared>>) -> HttpResponse
         Ok(r) => r,
         Err(e) => return text(400, &format!("{e:#}")),
     };
+    if crate::templates::is_builtin(&t.name) {
+        return text(409, &format!("« {} » est un modèle intégré : choisissez un autre nom", t.name));
+    }
     if !req.overwrite && s.templates.exists(&t.name) {
         return text(409, &format!("un modèle s'appelle déjà « {} »", t.name));
     }
@@ -8454,7 +8458,13 @@ mod tests {
         assert_eq!(t.request("POST", "/api/timeline/templates", r#"{"name":"Deux temps","events":[1]}"#).0, 409);
         assert_eq!(t.request("POST", "/api/timeline/templates", r#"{"name":"Vide","events":[]}"#).0, 400);
         let list = json(&t.request("GET", "/api/timeline/templates", "").1);
-        assert_eq!((list["templates"][0]["name"].as_str(), list["templates"][0]["builtin"].as_bool()), (Some("Deux temps"), Some(false)));
+        let listed = list["templates"].as_array().unwrap();
+        assert_eq!(listed.iter().filter(|t| t["builtin"] == true).count(), crate::templates::builtin().len(), "the built-in pack first");
+        let mine = listed.iter().find(|t| t["name"] == "Deux temps").unwrap();
+        assert_eq!(mine["builtin"], false);
+        assert!(listed[0]["auto_pages"].is_object() && listed[0]["description"].is_string());
+        assert_eq!(t.request("POST", "/api/timeline/templates", r#"{"name":"Drop 16","events":[1],"overwrite":true}"#).0, 409, "a built-in name");
+        assert_eq!(t.request("POST", "/api/timeline/templates/delete", r#"{"name":"Drop 16"}"#).0, 409, "a built-in stays");
         assert!(list["categories"].as_array().unwrap().len() > 3);
 
         let req = json!({ "name": "Deux temps", "from": 8.0, "to": 16.0, "fit": "crop", "slots": { "A": { "cue": cue } } });
@@ -8481,6 +8491,15 @@ mod tests {
         assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
         assert_eq!(t.request("POST", "/api/timeline/templates/delete", r#"{"name":"Deux temps"}"#).0, 200);
         assert_eq!(t.request("POST", "/api/timeline/templates/delete", r#"{"name":"Deux temps"}"#).0, 404);
+        // T-166: a built-in, slots on their suggested pages, goes through the edit route.
+        t.shared.lock().unwrap().timeline.show.as_mut().unwrap().tracks[1].locked = false;
+        let montee = listed.iter().find(|t| t["name"] == "Montée 8 mesures").unwrap();
+        let slots: serde_json::Map<String, serde_json::Value> = montee["auto_pages"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), json!({ "auto": v }))).collect();
+        let req = json!({ "name": "Montée 8 mesures", "from": 32.0, "to": 64.0, "fit": "stretch", "slots": slots });
+        let (status, body) = t.request("POST", "/api/timeline/templates/render", &req.to_string());
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = t.request("POST", "/api/timeline/edit", &json!({ "show": json(&body)["show"] }).to_string());
+        assert_eq!(status, 200, "{body}");
         assert_eq!(json(&t.request("GET", "/api/state", "").1)["armed"], false, "templates never arm");
         let _ = std::fs::remove_dir_all(&dir);
     }
