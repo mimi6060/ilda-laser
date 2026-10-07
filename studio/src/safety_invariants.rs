@@ -1494,6 +1494,8 @@ struct Coverage {
     /// Frames that sent light while a cue on show was spread over a zone
     /// group of two zones or more (T-421).
     sent_lit_with_spread: usize,
+    /// Playbacks the agenda started (T-455).
+    agenda_starts: usize,
 }
 
 impl Coverage {
@@ -1525,6 +1527,7 @@ impl Coverage {
             sent_lit_with_trace,
             sent_lit_with_zone_chase,
             sent_lit_with_spread,
+            agenda_starts,
         } = o;
         self.frames += frames;
         self.sent_lit += sent_lit;
@@ -1549,6 +1552,7 @@ impl Coverage {
         self.sent_lit_with_trace += sent_lit_with_trace;
         self.sent_lit_with_zone_chase += sent_lit_with_zone_chase;
         self.sent_lit_with_spread += sent_lit_with_spread;
+        self.agenda_starts += agenda_starts;
     }
 }
 
@@ -1659,6 +1663,70 @@ fn random_show_list(s: &mut Shared, rng: &mut Rng, dir: &std::path::Path) {
         .map(|show| crate::showlist::ShowListItem { show, follow_system_tempo: rng.chance(0.8), wait_timecode: rng.chance(0.1), ..Default::default() })
         .collect();
     crate::showlist::set(s, crate::showlist::ShowList { items, loop_list: rng.chance(0.5) }).expect("valid fuzz show list");
+}
+
+/// The agenda's wall clock at the start of a session (T-455): a day of
+/// the year, sometimes the nights of the change of time, in Brussels'
+/// rules (fixed, so a replay is the same anywhere).
+fn agenda_wall_start(rng: &mut Rng) -> jiff::Zoned {
+    let tz = jiff::tz::TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").expect("fixed zone");
+    let date = match rng.below(4) {
+        0 => jiff::civil::date(2026, 10, 25),
+        1 => jiff::civil::date(2027, 3, 28),
+        _ => jiff::civil::date(2026, 1, 1).checked_add(jiff::Span::new().days(rng.below(365) as i64)).expect("in range"),
+    };
+    let dt = date.at(rng.below(24) as i8, rng.below(60) as i8, 0, 0);
+    tz.to_ambiguous_zoned(dt).compatible().expect("a time of the day")
+}
+
+/// The wall clock moves on: a few seconds, or the Mac sleeps an hour, or
+/// someone sets it back.
+fn agenda_wall_step(rng: &mut Rng, wall: &jiff::Zoned) -> jiff::Zoned {
+    let secs = match rng.below(40) {
+        0 => 3600 + rng.below(3 * 3600) as i64,
+        1 => -(rng.below(600) as i64),
+        _ => rng.below(15) as i64,
+    };
+    wall.checked_add(jiff::SignedDuration::from_secs(secs)).unwrap_or_else(|_| wall.clone())
+}
+
+/// A random agenda (T-455), as `POST /api/agenda` could send it: short
+/// shows (one missing), the show list, *Arrêt et noir*, slots in the
+/// minutes after `wall` on random days or that date, on most of the time.
+fn random_agenda(s: &mut Shared, rng: &mut Rng, dir: &std::path::Path, wall: &jiff::Zoned) {
+    use crate::agenda::{Agenda, AgendaEntry, AgendaTarget};
+    s.shows = timeline::ShowStore::new(dir.join("shows"));
+    for i in 0..2 {
+        let (id, _) = random_preset(s, rng);
+        let mut show = one_event_show(s, rng, &id);
+        show.name = format!("Agenda {}", i + 1);
+        for t in &mut show.tracks {
+            for e in &mut t.events {
+                e.start = 0.0;
+                e.len = rng.range(0.2, 2.0) as f64;
+            }
+        }
+        s.shows.save(&show).expect("fuzz show saved");
+    }
+    let n = 1 + rng.below(5);
+    let entries = (0..n)
+        .map(|i| {
+            let at = wall.checked_add(jiff::SignedDuration::from_secs(60 * (1 + rng.below(3)) as i64)).unwrap_or_else(|_| wall.clone());
+            let target = match rng.below(10) {
+                0..=4 => AgendaTarget::Show { name: format!("Agenda {}", 1 + rng.below(2)) },
+                5 => AgendaTarget::Show { name: "Agenda absent".into() },
+                6..=8 => AgendaTarget::ShowList,
+                _ => AgendaTarget::Stop,
+            };
+            let mut days = [false; 7];
+            for d in &mut days {
+                *d = rng.chance(0.7);
+            }
+            let date = rng.chance(0.2).then(|| at.date().to_string());
+            AgendaEntry { id: 0, name: format!("Entrée {}", i + 1), enabled: rng.chance(0.9), target, time: at.strftime("%H:%M").to_string(), days, date }
+        })
+        .collect();
+    crate::agenda::set(s, Agenda { enabled: rng.chance(0.85), entries }).expect("valid fuzz agenda");
 }
 
 /// One show-player move from the UI, a controller or the external gate.
@@ -2271,6 +2339,16 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
         let dir = rig.dir.clone();
         random_show_list(&mut rig.s(), &mut jrng, &dir);
     }
+    // The agenda (T-455), from its own stream: entries on short shows, the
+    // list and *Arrêt et noir*, and a wall clock that runs, sleeps and is
+    // set back.
+    let mut agrng = Rng::new(seed ^ 0x0455_0455);
+    let agenda_on = agrng.chance(0.3);
+    let mut wall = agenda_wall_start(&mut agrng);
+    if agenda_on {
+        let dir = rig.dir.clone();
+        random_agenda(&mut rig.s(), &mut agrng, &dir, &wall);
+    }
     // The zone trace (T-447), from its own stream: started from the UI
     // at a random frame (all zones or one, its page named or not), left
     // or let run out. It replaces the looks, so only some sessions.
@@ -2417,6 +2495,31 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
                 }
                 if s.gate.is_armed() && !armed {
                     return Err(format!("frame {frame}: the show list armed"));
+                }
+            }
+        }
+        if agenda_on {
+            wall = agenda_wall_step(&mut agrng, &wall);
+            if agrng.chance(0.8) {
+                let mut s = rig.s();
+                let armed = s.gate.is_armed();
+                let suspended = s.agenda.is_suspended();
+                let latched = s.estop.is_latched();
+                let was_playing = s.timeline.is_playing() || s.showlist.is_active();
+                let was_running = s.agenda.is_playing();
+                crate::agenda::tick(&mut s, &wall);
+                if s.gate.is_armed() && !armed {
+                    return Err(format!("frame {frame}: the agenda armed"));
+                }
+                let started = !was_playing && (s.timeline.is_playing() || s.showlist.is_active());
+                if started && latched {
+                    return Err(format!("frame {frame}: the agenda started a playback with the e-stop latched"));
+                }
+                if started && suspended && !armed {
+                    return Err(format!("frame {frame}: the suspended agenda started a playback"));
+                }
+                if s.agenda.is_playing() && !was_running {
+                    cov.agenda_starts += 1;
                 }
             }
         }
@@ -2899,6 +3002,7 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.sent_lit_with_zone_chase) > ZONE_CHASE_GATE, "only {} of {} frames sent light while a zone chase ran", cov.sent_lit_with_zone_chase, cov.frames);
         eprintln!("coverage: sent lit with a spread {:.4}", share(cov.sent_lit_with_spread));
         assert!(share(cov.sent_lit_with_spread) > SPREAD_GATE, "only {} of {} frames sent light while a cue was spread", cov.sent_lit_with_spread, cov.frames);
+        eprintln!("coverage: playbacks started by the agenda {}", cov.agenda_starts);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }

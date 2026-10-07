@@ -1,0 +1,12 @@
+<p>L'agenda lance une lecture à heure fixe, pour une installation qui joue chaque soir sans qu'on clique sur « Lecture ». Il est réglé pour cette machine et ce lieu, pas pour le projet : ouvrir un projet ne programme rien.</p>
+<ul>
+<li>« Agenda actif » le met en marche (il est désactivé au départ). La ligne « Prochain » et la pastille de la barre du haut donnent la prochaine échéance.</li>
+<li>« + Entrée » ajoute une entrée : un nom, une cible, une heure locale, et soit des jours de la semaine (L M M J V S D), soit une date unique. « Active » décochée, l'entrée est gardée mais ne se déclenche pas.</li>
+<li>Cibles : un show enregistré, la liste du lecteur de shows (depuis son premier show), ou « Arrêt et noir », qui arrête la lecture et désarme le laser à l'heure dite (un couvre-feu).</li>
+<li>À l'heure dite, la cible démarre comme avec « Lecture » et s'arrête à sa fin : l'agenda coupe la boucle pour cette lecture, puis la remet comme elle était.</li>
+<li>Si une lecture est déjà en cours, l'entrée n'est pas lancée : l'agenda n'interrompt jamais l'opérateur. Une échéance manquée de plus d'une minute (studio fermé, Mac en veille) n'est pas rattrapée. Au changement d'heure, une heure qui n'existe pas ce jour-là est sautée, une heure qui existe deux fois ne joue qu'une fois.</li>
+<li>« Historique » garde les vingt derniers déclenchements et leur résultat ; chaque déclenchement est aussi une notification.</li>
+</ul>
+<p><strong>L'agenda n'arme jamais le laser.</strong> Laser désarmé à l'heure dite, la lecture se fait dans l'aperçu et une notification le dit. Arrêt d'urgence verrouillé, rien ne démarre. Un arrêt d'urgence, ou un désarmement pendant une lecture de l'agenda, termine cette lecture et suspend l'agenda : aucune lecture ne démarre avant que l'opérateur réarme le laser (ou éteigne et rallume « Agenda actif »). Le verrouillage, la présence de l'opérateur, le maintien et la liste de contrôle s'appliquent comme toujours.</p>
+<p>Une installation sans opérateur exige sa propre sécurité matérielle (verrouillage du projecteur, clé, arrêt d'urgence câblé) et l'autorisation locale. L'arrêt logiciel ne remplace jamais l'arrêt matériel. Pour que le Mac ne s'endorme pas avant l'échéance, réglez sa mise en veille (le maintien éveillé du studio ne joue que pendant un show).</p>
+<p>L'agenda n'a ni raccourci clavier, ni commande MIDI, DMX ou OSC : on ne le pilote que depuis cette page. En mode spectacle, il ne se modifie pas.</p>

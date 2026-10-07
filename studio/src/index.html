@@ -832,6 +832,32 @@
   #slList .sl-x { padding: 2px 8px; min-width: 28px; }
   #slLoop[aria-pressed="true"], #slPlay.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   #slAdd { max-width: 220px; padding: 5px; }
+  /* Agenda (T-455), Theme (T-299) tokens. */
+  #agPanel { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+  #agEnabled[aria-pressed="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  #agNext { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text); }
+  #agSuspended { color: var(--warn); }
+  #agSuspended:empty { display: none; }
+  #agWarn { color: var(--warn); }
+  #agList { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  #agList li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); font-size: 12px; }
+  #agList li.off { opacity: .6; }
+  #agList li.next { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  #agList label { color: var(--muted); font-size: 11px; margin: 0; }
+  #agList .ag-name { flex: 1 1 120px; min-width: 100px; padding: 4px; }
+  #agList .ag-target { max-width: 200px; padding: 4px; }
+  #agList .ag-time { width: 120px; padding: 4px; }
+  #agList select, #agList input[type="date"] { width: auto; flex: 0 1 auto; padding: 4px; }
+  #agList .ag-days { display: inline-flex; gap: 2px; }
+  #agList .ag-day { min-width: 26px; padding: 2px 4px; font-size: 11px; }
+  #agList .ag-day[aria-pressed="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  html.touch #agList .ag-day, html.touch #agList .ag-x { min-width: 44px; min-height: 44px; }
+  #agList .ag-x { padding: 2px 8px; min-width: 28px; }
+  #agRuns { margin: 4px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #agRuns li.warn { color: var(--warn); }
+  #agendaPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); font-variant-numeric: tabular-nums; cursor: help; }
+  #agendaPill.warn { color: var(--warn); border-color: var(--warn); }
+  #agendaPill[hidden] { display: none; }
   .tl-bar { position: relative; height: 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; overflow: hidden; }
   .tl-bar .region { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .18; }
   #tlHead { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--accent); }
@@ -1961,6 +1987,8 @@
     <div id="output">…</div>
     <span id="wifiPill" role="alert" hidden>Wi-Fi</span>
     <span id="sdPill" role="alert" hidden>SD : NOIR</span>
+    <!-- Agenda (T-455): while it is on; it never arms. -->
+    <span id="agendaPill" role="status" hidden title="Agenda actif : il lance des lectures à heure fixe (TIMELINE › Agenda). Il n'arme jamais le laser.">Agenda actif</span>
     <span id="audPill" role="status" hidden title="Balayage public déverrouillé : les zones Public reçoivent de la lumière atténuée. Le logiciel ne rend pas cela sûr ; il ne détecte pas une panne des galvos.">BALAYAGE PUBLIC</span>
     <div class="arm-line"><span id="armInfo">Désarmé</span><span id="profilePill" role="status" title="Profil de sécurité actif (RÉGLAGES › Sécurité)" hidden></span></div>
     <div class="leds">
@@ -3170,6 +3198,26 @@
         <button id="slLoop" aria-pressed="false" title="Après le dernier show, reprendre au premier">⟲ Boucler la liste</button>
       </div>
       <div class="hint" id="slMsg"></div>
+    </section>
+    <!-- Agenda (T-455) : lecture programmée pour les installations -->
+    <section id="agPanel" aria-labelledby="agTitle" data-help="timeline-agenda">
+      <div class="cue-bar">
+        <span class="tl-track" id="agTitle" data-help-title>Agenda</span>
+        <button id="agEnabled" class="lock-edit" aria-pressed="false" title="Agenda actif : à l'heure dite, la cible démarre comme avec « Lecture ». Il n'arme jamais le laser.">Agenda actif</button>
+        <span id="agNext" role="status" aria-live="polite">Agenda inactif</span>
+      </div>
+      <div class="hint" id="agSuspended" role="alert"></div>
+      <div class="hint">L'agenda lance une lecture ; il n'arme jamais le laser. Laser désarmé, la lecture se fait en aperçu. Un arrêt d'urgence ou un désarmement pendant une lecture de l'agenda la termine et suspend l'agenda jusqu'au prochain armement.</div>
+      <div class="hint" id="agWarn">Installation sans opérateur : elle exige sa propre sécurité matérielle (verrouillage, clé, arrêt d'urgence câblé) et l'autorisation locale. Le logiciel seul ne suffit jamais à arrêter un laser. Pour que le Mac ne s'endorme pas avant l'échéance : RÉGLAGES › Général et les réglages d'énergie du Mac.</div>
+      <ol id="agList" aria-label="Entrées de l'agenda"></ol>
+      <div class="hint" id="agEmpty">Aucune entrée : « + Entrée » programme un show, la liste du lecteur de shows ou un arrêt.</div>
+      <div class="cue-bar">
+        <button id="agAdd" class="lock-edit" title="Ajouter une entrée à l'agenda">+ Entrée</button>
+      </div>
+      <details id="agHistory">
+        <summary>Historique</summary>
+        <ol id="agRuns" aria-label="Derniers déclenchements de l'agenda"></ol>
+      </details>
     </section>
     <div id="tcBig" hidden role="dialog" aria-label="Grand afficheur du timecode" data-state="off">
       <div id="tcBigShow"></div>
@@ -6666,6 +6714,7 @@ function applyState(f, at, pushed) {
   showTimecode(f.timecode);
   showTcOut(f.timeline && f.timeline.timecode_out);
   showShowList(f.showlist);
+  showAgenda(f.agenda);
   showSong(f.timeline, f.timeline_audio);
   tlOnState(f.timeline, f.tempo, at);
 }
@@ -11961,6 +12010,127 @@ $('slList').addEventListener('keydown', e => {
   if (!g || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || e.metaKey || e.altKey || e.ctrlKey) return;
   e.preventDefault();
   slMove(+g.dataset.i, +g.dataset.i + (e.key === 'ArrowUp' ? -1 : 1));
+});
+
+// ---------- Agenda (T-455) ----------
+// The entries (GET /api/agenda, fetched again when `rev` moves) and the
+// summary with every frame (`f.agenda`). Every change posts the whole
+// agenda: an edit (history, locked in show mode). The agenda starts a
+// playback; it never arms. No shortcut, no control, no MIDI.
+const AG = { agenda: { enabled: false, entries: [] }, rev: -1, state: null, loading: false };
+const AG_DAYS = [['L', 'lundi'], ['M', 'mardi'], ['M', 'mercredi'], ['J', 'jeudi'], ['V', 'vendredi'], ['S', 'samedi'], ['D', 'dimanche']];
+async function loadAgenda() {
+  if (AG.loading) return;
+  AG.loading = true;
+  try {
+    if (!shows.length) { try { shows = await apiJson('GET', '/api/shows', undefined, { quiet: true }); } catch { /* names only */ } }
+    takeAgenda(await apiJson('GET', '/api/agenda', undefined, { quiet: true }));
+  } catch { /* the next state tries again */ }
+  finally { AG.loading = false; }
+}
+function takeAgenda(v) {
+  AG.agenda = v.agenda || { enabled: false, entries: [] };
+  AG.rev = v.state ? v.state.rev : -1;
+  renderAgenda();
+  showAgenda(v.state, true);
+}
+async function saveAgenda(agenda) {
+  try { takeAgenda(await apiJson('POST', '/api/agenda', agenda, { source: 'Agenda' })); } catch { loadAgenda(); }
+}
+function agTargetValue(t) { return t.kind === 'show' ? 'show:' + t.name : t.kind; }
+function agTarget(v) { return v.startsWith('show:') ? { kind: 'show', name: v.slice(5) } : { kind: v }; }
+function renderAgenda() {
+  const nextId = AG.state && AG.state.next ? AG.state.next.id : null;
+  $('agList').innerHTML = AG.agenda.entries.map((e, i) => {
+    const k = 'ag' + i;
+    const opts = [['show_list', 'Lecteur de shows (liste)'], ...shows.map(s => ['show:' + s.name, 'Show : ' + s.name]), ['stop', 'Arrêt et noir (désarme)']];
+    const cur = agTargetValue(e.target);
+    if (!opts.some(o => o[0] === cur)) opts.push([cur, 'Show : ' + (e.target.name || '?') + ' (introuvable)']);
+    const dated = e.date != null;
+    const days = AG_DAYS.map(([l, n], d) => `<button class="ag-day" data-i="${i}" data-day="${d}" aria-pressed="${!!e.days[d]}" aria-label="${n}" title="${n}">${l}</button>`).join('');
+    return `<li data-i="${i}" class="${e.enabled ? '' : 'off'}${e.id === nextId ? ' next' : ''}">
+      <label for="${k}n">Nom</label><input type="text" id="${k}n" class="ag-name" data-i="${i}" data-f="name" maxlength="64" value="${esc(e.name)}">
+      <label for="${k}t">Cible</label><select id="${k}t" class="ag-target" data-i="${i}" data-f="target">${opts.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <label for="${k}h">Heure</label><input type="time" id="${k}h" class="ag-time" data-i="${i}" data-f="time" value="${esc(e.time)}" required>
+      <label for="${k}m">Quand</label><select id="${k}m" data-i="${i}" data-f="mode"><option value="days"${dated ? '' : ' selected'}>Jours</option><option value="date"${dated ? ' selected' : ''}>Date</option></select>
+      ${dated ? `<label for="${k}d">Date</label><input type="date" id="${k}d" data-i="${i}" data-f="date" value="${esc(e.date)}">`
+        : `<span class="ag-days" role="group" aria-label="Jours de « ${esc(e.name)} »">${days}</span>`}
+      <label for="${k}a">Active</label><input type="checkbox" id="${k}a" data-i="${i}" data-f="enabled"${e.enabled ? ' checked' : ''}>
+      <button class="ag-x" data-del="${i}" aria-label="Supprimer « ${esc(e.name)} »" title="Supprimer l'entrée">✕</button>
+    </li>`;
+  }).join('');
+  $('agEmpty').hidden = AG.agenda.entries.length > 0;
+  $('agEnabled').setAttribute('aria-pressed', AG.agenda.enabled);
+}
+function showAgenda(st, full) {
+  if (!st) return;
+  AG.state = Object.assign({}, AG.state, st);
+  if (!full && st.rev !== AG.rev) loadAgenda();
+  const next = st.next;
+  let text = 'Agenda inactif';
+  if (st.enabled) text = next ? `Prochain : « ${next.name} » — ${next.when}` : 'Agenda actif — aucune échéance';
+  if (st.playing) text += ` · en cours : « ${st.playing} »`;
+  $('agNext').textContent = text;
+  $('agSuspended').textContent = st.suspended ? `Agenda suspendu (${st.suspended}) : aucune lecture ne démarre avant le prochain armement du laser.` : '';
+  $('agEnabled').setAttribute('aria-pressed', !!st.enabled);
+  const pill = $('agendaPill');
+  pill.hidden = !st.enabled;
+  pill.textContent = st.suspended ? 'Agenda suspendu' : next ? `Agenda actif — prochain ${next.time}` : 'Agenda actif';
+  pill.classList.toggle('warn', !!st.suspended);
+  pill.title = (next ? `Prochaine échéance : « ${next.name} » — ${next.when}. ` : '') + 'Agenda actif : il lance des lectures à heure fixe (TIMELINE › Agenda). Il n\'arme jamais le laser.';
+  if (full && st.last_runs) {
+    $('agRuns').innerHTML = st.last_runs.length
+      ? st.last_runs.map(r => `<li class="${/^(non lancé|manqué|interrompu)/.test(r.result) ? 'warn' : ''}">${esc(r.when)} — ${esc(r.entry)} — ${esc(r.result)}</li>`).join('')
+      : '<li>Aucun déclenchement pour le moment.</li>';
+  }
+  document.querySelectorAll('#agList li').forEach(li => {
+    const e = AG.agenda.entries[+li.dataset.i];
+    li.classList.toggle('next', !!(e && next && e.id === next.id));
+  });
+}
+function agEdit(i, patch) {
+  const entries = AG.agenda.entries.map((e, k) => k === i ? { ...e, ...patch } : e);
+  saveAgenda({ ...AG.agenda, entries });
+}
+$('agEnabled').addEventListener('click', () => saveAgenda({ ...AG.agenda, enabled: !AG.agenda.enabled }));
+$('agAdd').addEventListener('click', () => {
+  const n = AG.agenda.entries.length + 1;
+  saveAgenda({ ...AG.agenda, entries: [...AG.agenda.entries, { id: 0, name: 'Entrée ' + n, enabled: true, target: { kind: 'show_list' }, time: '20:30', days: [true, true, true, true, true, true, true], date: null }] });
+});
+$('agList').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.del != null) {
+    const i = +b.dataset.del;
+    saveAgenda({ ...AG.agenda, entries: AG.agenda.entries.filter((_, k) => k !== i) });
+  } else if (b.dataset.day != null) {
+    const i = +b.dataset.i, d = +b.dataset.day;
+    agEdit(i, { days: AG.agenda.entries[i].days.map((v, k) => k === d ? !v : v) });
+  }
+});
+$('agList').addEventListener('focusin', async e => {
+  const sel = e.target.closest('select.ag-target');
+  if (!sel || sel.dataset.fresh) return;
+  try { shows = await apiJson('GET', '/api/shows', undefined, { quiet: true }); } catch { return; }
+  const cur = sel.value;
+  const opts = [['show_list', 'Lecteur de shows (liste)'], ...shows.map(s => ['show:' + s.name, 'Show : ' + s.name]), ['stop', 'Arrêt et noir (désarme)']];
+  if (!opts.some(o => o[0] === cur)) opts.push([cur, sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : cur]);
+  sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`).join('');
+  sel.dataset.fresh = '1';
+});
+$('agList').addEventListener('change', e => {
+  const c = e.target.closest('[data-f]');
+  if (!c) return;
+  const i = +c.dataset.i, f = c.dataset.f;
+  if (f === 'enabled') agEdit(i, { enabled: c.checked });
+  else if (f === 'target') agEdit(i, { target: agTarget(c.value) });
+  else if (f === 'mode') {
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    agEdit(i, { date: c.value === 'date' ? iso : null });
+  } else if (f === 'time') { if (c.value) agEdit(i, { time: c.value.slice(0, 5) }); }
+  else if (f === 'date') { if (c.value) agEdit(i, { date: c.value }); }
+  else if (f === 'name') agEdit(i, { name: c.value });
 });
 $('slList').addEventListener('dragstart', e => {
   const g = e.target.closest('.sl-grip');

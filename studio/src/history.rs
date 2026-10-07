@@ -80,11 +80,13 @@ pub enum Section {
     ShowList,
     /// Referenced presets (T-422).
     Pools,
+    /// The agenda (T-455): its switch and entries. Not what it played.
+    Agenda,
 }
 
 use Section::*;
 
-const ALL: [Section; 18] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools];
+const ALL: [Section; 19] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -107,6 +109,7 @@ impl Section {
             Macros => "macros",
             ShowList => "showlist",
             Pools => "pools",
+            Agenda => "agenda",
         }
     }
 
@@ -137,6 +140,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/desks" => &[Desks],
         "/api/macros" => &[Macros],
         "/api/showlist" => &[ShowList],
+        "/api/agenda" => &[Agenda],
         "/api/pools" | "/api/pools/delete" | "/api/pools/capture" => &[Pools],
         _ => return None,
     })
@@ -167,6 +171,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         // in show mode, from MIDI), not an edit.
         ShowList => json!(s.showlist.list().items),
         Pools => json!(s.pools.list()),
+        Agenda => json!(s.agenda.agenda()),
     }
 }
 
@@ -262,6 +267,7 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         // Straight to the store: undoing a preset's creation removes it
         // even if a cue refers to it since (that cue plays its own values).
         Pools => s.pools.set(from(v)?).map_err(bad)?,
+        Agenda => crate::agenda::set(s, from(v)?).map_err(|e| (400, e))?,
     }
     Ok(())
 }
@@ -563,6 +569,8 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Desks) => desk_label(old, new),
         (_, Macros) => named(list_change(old, new, "id", "name"), "Macro", "Macros", true, "créé"),
         (_, ShowList) => "Liste de shows modifiée".into(),
+        (_, Agenda) if old.get("enabled") != new.get("enabled") => if new["enabled"] == json!(true) { "Agenda activé".into() } else { "Agenda désactivé".into() },
+        (_, Agenda) => "Agenda modifié".into(),
     }
 }
 

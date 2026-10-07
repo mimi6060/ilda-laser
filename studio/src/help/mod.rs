@@ -48,6 +48,7 @@ pub const PAGES: &[HelpPage] = &[
     HelpPage { slug: "timeline-editeur", title_fr: "Éditeur de timeline", group_fr: "TIMELINE", body_html: include_str!("timeline-editeur.html") },
     HelpPage { slug: "timeline-timecode", title_fr: "Timecode", group_fr: "TIMELINE", body_html: include_str!("timeline-timecode.html") },
     HelpPage { slug: "timeline-lecteur", title_fr: "Lecteur de shows", group_fr: "TIMELINE", body_html: include_str!("timeline-lecteur.html") },
+    HelpPage { slug: "timeline-agenda", title_fr: "Agenda", group_fr: "TIMELINE", body_html: include_str!("timeline-agenda.html") },
     HelpPage { slug: "creation-look", title_fr: "Look", group_fr: "CRÉATION", body_html: include_str!("creation-look.html") },
     HelpPage { slug: "creation-abstraits", title_fr: "Abstraits", group_fr: "CRÉATION", body_html: include_str!("creation-abstraits.html") },
     HelpPage { slug: "creation-figures", title_fr: "Figures", group_fr: "CRÉATION", body_html: include_str!("creation-figures.html") },

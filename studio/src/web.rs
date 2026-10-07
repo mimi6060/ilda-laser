@@ -145,6 +145,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/test/tempo_estimate", RouteClass::Test),
     ("POST", "/api/test/timecode", RouteClass::Test),
     ("POST", "/api/test/native_audio", RouteClass::Test),
+    ("POST", "/api/test/clock", RouteClass::Test),
     ("GET", "/api/arm", RouteClass::Read),
     ("POST", "/api/arm", RouteClass::Arm),
     ("POST", "/api/estop/reset", RouteClass::Arm),
@@ -260,6 +261,10 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/showlist/next", RouteClass::Play),
     ("POST", "/api/showlist/prev", RouteClass::Play),
     ("POST", "/api/showlist/loop", RouteClass::Play),
+    // L'agenda (T-455): an edit (history, locked in show mode). It never
+    // arms and has no control: nothing external reaches it.
+    ("GET", "/api/agenda", RouteClass::Read),
+    ("POST", "/api/agenda", RouteClass::Edit),
     ("GET", "/api/fx", RouteClass::Read),
     ("POST", "/api/fx", RouteClass::Edit),
     ("GET", "/api/audio/routes", RouteClass::Read),
@@ -1273,6 +1278,23 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     let s = shared.lock().unwrap();
                     s.audio_in.publish(sim.snapshot(s.now_s()));
                     ok()
+                }
+                Err(e) => e,
+            }
+        }
+        (Method::Post, "/api/test/clock") => {
+            // `--test-hooks` only (e2e of T-455): the agenda's clock reads
+            // `at` (local time) from now on, in zone `tz`.
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            match body::<SimClock>(request) {
+                Ok(sim) => {
+                    let s = &mut *shared.lock().unwrap();
+                    match crate::agenda::set_test_clock(s, &sim.at, sim.tz.as_deref()) {
+                        Ok(()) => json_response(crate::agenda::view(s)),
+                        Err(e) => text(400, &e),
+                    }
                 }
                 Err(e) => e,
             }
@@ -2648,6 +2670,19 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 let s = &mut *shared.lock().unwrap();
                 match crate::showlist::set(s, list) {
                     Ok(()) => json_response(crate::showlist::view(s)),
+                    Err(e) => text(400, &e),
+                }
+            }
+            Err(e) => e,
+        },
+        // The agenda (T-455): GET the entries, the state and the clock;
+        // POST replaces the agenda (an edit: history, locked in show mode).
+        (Method::Get, "/api/agenda") => json_response(crate::agenda::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/agenda") => match body::<crate::agenda::Agenda>(request) {
+            Ok(agenda) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::agenda::set(s, agenda) {
+                    Ok(()) => json_response(crate::agenda::view(s)),
                     Err(e) => text(400, &e),
                 }
             }
@@ -5510,6 +5545,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     });
     // The show player (T-444).
     v["showlist"] = json!(crate::showlist::summary(s));
+    // The agenda (T-455): the next slot and the last runs.
+    v["agenda"] = crate::agenda::state(s);
     // The live take (T-169).
     v["take"] = s.take.view();
     // T-450: free space and the copy to a second location.
@@ -5735,6 +5772,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     });
     // The show player (T-444): the header's times, every frame.
     v["showlist"] = json!(crate::showlist::summary(s));
+    // The agenda (T-455): the top bar's « Agenda actif — prochain 20:30 ».
+    v["agenda"] = crate::agenda::summary(s);
     // T-448: 0 normal, 1 loaded, 2 late frames (the points indicator).
     v["perf_level"] = json!(s.perf.level());
     // T-285: undo / redo counts and labels; `rev` moves on every change.
@@ -6140,6 +6179,14 @@ fn json_response(value: serde_json::Value) -> HttpResponse {
 fn with_type(response: HttpResponse, content_type: &str) -> HttpResponse {
     let header = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).expect("content type is valid ASCII");
     response.with_header(header)
+}
+
+/// `POST /api/test/clock` (`--test-hooks`): the agenda's simulated time.
+#[derive(Deserialize)]
+struct SimClock {
+    at: String,
+    #[serde(default)]
+    tz: Option<String>,
 }
 
 /// `POST /api/test/timecode` (`--test-hooks`): Art-Net timecode frames.
@@ -6729,6 +6776,43 @@ mod tests {
         let undone = js(&t.request("GET", "/api/showlist", "").1);
         assert!(undone["items"].as_array().unwrap().is_empty(), "{undone}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The agenda (T-455): off by default, edited (checked, in the
+    /// history, locked in show mode), its state in `/api/state`; the test
+    /// clock only with `--test-hooks`; nothing external reaches it.
+    #[test]
+    fn the_agenda_over_the_api() {
+        let t = TestServer::start(false);
+        let g = js(&t.request("GET", "/api/agenda", "").1);
+        assert_eq!(g["agenda"]["enabled"], false);
+        assert!(g["agenda"]["entries"].as_array().unwrap().is_empty());
+        let agenda = json!({ "enabled": true, "entries": [{ "name": "Show du soir", "target": { "kind": "show", "name": "Soir" }, "time": "20:30", "days": [false, false, false, false, true, false, false] }] });
+        let (code, body) = t.request("POST", "/api/agenda", &agenda.to_string());
+        assert_eq!(code, 200, "{body}");
+        let v = js(&body);
+        assert_eq!(v["agenda"]["entries"][0]["id"], 1);
+        assert_eq!(v["state"]["next"]["name"], "Show du soir");
+        assert_eq!(v["state"]["next"]["time"], "20:30");
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Agenda activé");
+        let st = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!((st["agenda"]["enabled"].as_bool(), st["agenda"]["next"]["name"].as_str()), (Some(true), Some("Show du soir")));
+        assert!(st["agenda"]["last_runs"].as_array().unwrap().is_empty());
+        assert_eq!(js(&t.request("GET", "/api/frame", "").1)["agenda"]["enabled"], true);
+        assert_eq!(t.request("POST", "/api/agenda", r#"{"entries":[{"name":"X","time":"25:00"}]}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/agenda", r#"{"entries":[{"name":"X","target":{"kind":"cue_list"}}]}"#).0, 400);
+        // Show mode: locked.
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/agenda", r#"{"enabled":false}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/lock", r#"{"show_mode":false}"#).0, 200);
+        // Without --test-hooks, no test clock.
+        assert_eq!(t.request("POST", "/api/test/clock", r#"{"at":"2026-10-09T20:29:00"}"#).0, 404);
+        // Undo: off and empty again.
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        let undone = js(&t.request("GET", "/api/agenda", "").1);
+        assert_eq!(undone["agenda"]["enabled"], false);
+        assert!(undone["agenda"]["entries"].as_array().unwrap().is_empty(), "{undone}");
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap());
     }
 
     #[test]
