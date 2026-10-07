@@ -297,6 +297,19 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             Err(e) => e,
         },
         (false, "/api/midi/sent") if s.midi.sim.is_some() => Reply::Json(sent(s)),
+        (true, "/api/midi/clock/simulate") if s.midi.sim.is_some() => match parse::<SimClockRequest>(body) {
+            Ok(req) => simulate_clock(s, req),
+            Err(e) => e,
+        },
+        // MIDI clock in / out (T-207). POST is a Safety route (web.rs).
+        (false, "/api/midi/clock") => Reply::Json(super::clock::view(s)),
+        (true, "/api/midi/clock") => match parse::<Value>(body) {
+            Ok(patch) => match super::clock::update(s, &patch) {
+                Ok(()) => Reply::Json(super::clock::view(s)),
+                Err((code, msg)) => Reply::Text(code, msg),
+            },
+            Err(e) => e,
+        },
         // The on-screen controller (T-210): works with or without MIDI.
         (false, "/api/midi/virtual") => Reply::Json(virt::layout(s)),
         (false, "/api/midi/leds") => Reply::Json(virt::leds(s)),
@@ -395,6 +408,51 @@ fn inject(s: &Shared, req: InjectRequest) -> Reply {
     }
 }
 
+/// `--midi-test` only: a simulated deck plays a MIDI clock (T-207).
+#[derive(Deserialize)]
+struct SimClockRequest {
+    port: String,
+    bpm: f64,
+    beats: u32,
+    /// `Start` before the first tick.
+    #[serde(default)]
+    start: bool,
+    /// `Stop` after the last one.
+    #[serde(default)]
+    stop: bool,
+}
+
+/// Plays `beats` x 24 ticks at `bpm` into the simulated port's input, on
+/// a thread of its own (the answer comes at once), each tick at its time:
+/// the same path as a real deck's clock.
+fn simulate_clock(s: &Shared, req: SimClockRequest) -> Reply {
+    let Some(sim) = s.midi.sim.clone() else { return Reply::Text(404, "not found".into()) };
+    if !(20.0..=300.0).contains(&req.bpm) || req.beats == 0 || req.beats > 64 {
+        return Reply::Text(400, "« bpm » 20 à 300, « beats » 1 à 64".into());
+    }
+    if !sim.ports().contains(&req.port) {
+        return Reply::Text(404, format!("appareil simulé inconnu : {}", req.port));
+    }
+    let spawned = std::thread::Builder::new().name("midi-sim-clock".into()).spawn(move || {
+        let dt = std::time::Duration::from_secs_f64(60.0 / req.bpm / super::clock::PPQ);
+        let t0 = Instant::now();
+        if req.start {
+            let _ = sim.inject(&req.port, &[0xFA]);
+        }
+        for i in 0..req.beats * super::clock::PPQ as u32 {
+            std::thread::sleep((t0 + dt * i).saturating_duration_since(Instant::now()));
+            let _ = sim.inject(&req.port, &[0xF8]);
+        }
+        if req.stop {
+            let _ = sim.inject(&req.port, &[0xFC]);
+        }
+    });
+    match spawned {
+        Ok(_) => ok(),
+        Err(e) => Reply::Text(500, e.to_string()),
+    }
+}
+
 /// What the studio sent to each simulated device, and its pads' LEDs.
 fn sent(s: &Shared) -> Value {
     let Some(sim) = &s.midi.sim else { return Value::Null };
@@ -403,7 +461,7 @@ fn sent(s: &Shared) -> Value {
         .iter()
         .filter_map(|port| {
             sim.with_device(port, |apc| {
-                json!({ "port": port, "model": apc.model, "mode": apc.mode(), "sent": apc.received, "pads": apc.pads() })
+                json!({ "port": port, "model": apc.model, "mode": apc.mode(), "sent": apc.received, "pads": apc.pads(), "clock_ticks": apc.clock_ticks })
             })
         })
         .collect();

@@ -13,6 +13,7 @@
 
 pub mod api;
 pub mod backend;
+pub mod clock;
 pub mod decode;
 pub mod detect;
 pub mod engine;
@@ -148,11 +149,13 @@ pub struct MidiState {
     pub learn: learn::LearnState,
     /// Model of the on-screen controller while no APC is connected (T-210).
     pub virt_model: Model,
+    /// MIDI clock in and out (T-207).
+    pub clock: clock::ClockState,
 }
 
 impl MidiState {
     pub fn new(enabled: bool, store: profile::ProfileStore) -> Self {
-        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default(), sim: None, learn: learn::LearnState::default(), virt_model: Model::Apc40Mk2 }
+        MidiState { enabled, devices: Vec::new(), last: None, recent: VecDeque::new(), store, error: None, sender: None, map: engine::MapState::default(), sim: None, learn: learn::LearnState::default(), virt_model: Model::Apc40Mk2, clock: clock::ClockState::default() }
     }
 
     pub fn device_mut(&mut self, name: &str) -> &mut MidiDevice {

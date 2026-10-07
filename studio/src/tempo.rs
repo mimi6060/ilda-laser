@@ -110,6 +110,9 @@ pub enum TempoSource {
     Tap,
     /// Follows the audio detection (*Tempo auto*).
     Audio,
+    /// Follows an incoming MIDI clock (T-207, midi/clock.rs): Tap and Nudge
+    /// are ignored meanwhile.
+    MidiClock,
 }
 
 /// How the clock follows the detection. Defaults from the task (T-234).
@@ -385,6 +388,17 @@ impl TempoClock {
             self.follow = Follow::new(FollowState::Off);
         }
         self.source = source;
+    }
+
+    /// MIDI clock (T-207): on, the clock is driven by the incoming ticks
+    /// (*Tempo auto* stops); off, back to manual at the current BPM and
+    /// phase, so nothing jumps. Off does nothing under another source.
+    pub fn set_midi_clock(&mut self, on: bool) {
+        if on {
+            self.set_source(TempoSource::MidiClock);
+        } else if self.source == TempoSource::MidiClock {
+            self.set_source(TempoSource::Manual);
+        }
     }
 
     pub fn set_bpm_manual(&mut self, bpm: f64, t: f64) {
