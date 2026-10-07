@@ -201,6 +201,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/cues/slot", RouteClass::Edit),
     ("POST", "/api/cues/program", RouteClass::Edit),
     ("POST", "/api/cues/modifiers", RouteClass::Edit),
+    ("POST", "/api/cues/parts", RouteClass::Edit),
     ("GET", "/api/cues/program", RouteClass::Read),
     ("POST", "/api/cues/program/preview", RouteClass::Edit),
     ("POST", "/api/cues/program/store", RouteClass::Edit),
@@ -1958,6 +1959,13 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 .iter()
                 .map(|p| {
                     let mut v = json!({ "id": p.id, "name": p.name, "category": p.category, "beats": beats(p), "program": p.settings.program.is_some() });
+                    // A figure cue's named parts (T-441): the targets of
+                    // the Direct panel's « Cible » and the part modulators.
+                    if let crate::engine::Content::Figure(f) = &p.settings.content {
+                        if !f.parts.is_empty() {
+                            v["parts"] = json!(f.parts);
+                        }
+                    }
                     // The « Festival » page's moment of the track (T-110).
                     if let Some(tag) = p.tag {
                         v["tag"] = json!(tag);
@@ -2039,12 +2047,12 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 if req.slot.speed_group.is_some_and(|g| crate::speed::check_group(g).is_err()) {
                     return text(400, "groupe de vitesse inconnu (0 à 4)");
                 }
-                let CueSlot { program, modifiers, refs: before, .. } = s.deck.slot(&req.id);
+                let CueSlot { program, modifiers, part_modifiers, refs: before, .. } = s.deck.slot(&req.id);
                 let mut slot = req.slot;
                 if let Err(e) = crate::pools::check_refs(&s.pools, &before, &mut slot.refs) {
                     return text(400, &e);
                 }
-                s.deck.set_slot(&req.id, CueSlot { program, modifiers, ..slot });
+                s.deck.set_slot(&req.id, CueSlot { program, modifiers, part_modifiers, ..slot });
                 s.deck.save();
                 ok()
             }
@@ -2088,6 +2096,31 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     Ok(()) => ok(),
                     Err((code, why)) => text(code, &why),
                 }
+            }
+            Err(e) => e,
+        },
+        // A figure cue's per-part modifiers (T-441): `modifiers` for part
+        // `part` of cue `id` (`null` or neutral removes them). Stored in
+        // the cell, applied to that part only, before the cue's own
+        // modifiers and the whole chain. An edit: in the history, refused
+        // in show mode.
+        (Method::Post, "/api/cues/parts") => match body::<PartModifiersRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                if !req.id.starts_with(crate::figures::ID_PREFIX) || !s.presets.iter().any(|p| p.id == req.id) {
+                    return text(404, "cue de figure inconnu");
+                }
+                if !(1..=crate::figures::MAX_PARTS).contains(&req.part) {
+                    return text(400, &format!("partie 1 à {} attendue", crate::figures::MAX_PARTS));
+                }
+                let mut slot = s.deck.slot(&req.id);
+                match req.modifiers {
+                    Some(m) => slot.part_modifiers.insert(req.part, m),
+                    None => slot.part_modifiers.remove(&req.part),
+                };
+                s.deck.set_slot(&req.id, slot);
+                s.deck.save();
+                json_response(json!(s.deck.slot(&req.id).part_modifiers))
             }
             Err(e) => e,
         },
@@ -2430,7 +2463,15 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     Some(json!({ "id": d.id, "label": d.label_fr, "group": d.group, "min": min, "max": max }))
                 })
                 .collect();
-            json_response(json!({ "lfos": s.lfos.list(), "targets": targets, "max": crate::lfo::MAX_MODULATORS }))
+            // Figure parts a modulator may move instead (T-441).
+            let parts: Vec<_> = s
+                .figures
+                .list()
+                .iter()
+                .filter(|f| !f.parts.is_empty())
+                .map(|f| json!({ "cue": crate::figures::cue_id(&f.name), "figure": f.name, "parts": f.parts }))
+                .collect();
+            json_response(json!({ "lfos": s.lfos.list(), "targets": targets, "parts": parts, "max": crate::lfo::MAX_MODULATORS }))
         }
         (Method::Post, "/api/lfos") => match body::<Vec<crate::lfo::Modulator>>(request) {
             Ok(list) => {
@@ -4276,6 +4317,14 @@ struct CueModifiersRequest {
     with_master: bool,
     #[serde(default)]
     clear: bool,
+}
+
+#[derive(Deserialize)]
+struct PartModifiersRequest {
+    id: String,
+    part: u8,
+    #[serde(default)]
+    modifiers: Option<crate::live::LiveModifiers>,
 }
 
 #[derive(Deserialize)]
@@ -6606,6 +6655,57 @@ mod tests {
         assert!(!arm_status(&t)["armed"].as_bool().unwrap(), "nothing here arms");
     }
 
+    /// T-441: a figure cue's per-part modifiers over the API: stored in
+    /// the cell (an edit: history, undo), kept by the properties dialog,
+    /// refused on other cues and out-of-range parts; the part modulators
+    /// round-trip through `/api/lfos`, an unknown figure accepted.
+    #[test]
+    fn figure_part_modifiers_over_the_api() {
+        let t = TestServer::start(false);
+        let mut fig = crate::figures::test_figure("Visage", 1);
+        fig.frames[0].strokes[2].part = 1;
+        fig.parts = vec![crate::figures::PartDef { id: 1, name: "Yeux".into() }];
+        assert_eq!(t.request("POST", "/api/figures", &serde_json::to_string(&fig).unwrap()).0, 200);
+        let cue = "figure:Visage";
+        let set = |body: &str| t.request("POST", "/api/cues/parts", body);
+        assert_eq!(set(r#"{"id":"tunnels-001","part":1,"modifiers":{"brightness":0.5}}"#).0, 404, "not a figure");
+        assert_eq!(set(r#"{"id":"figure:Visage","part":9,"modifiers":{"brightness":0.5}}"#).0, 400);
+        let (code, body) = set(r#"{"id":"figure:Visage","part":1,"modifiers":{"brightness":0.5,"rot_angle":[0,0,30]}}"#);
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(js(&body)["1"]["brightness"], 0.5);
+        assert_eq!(t.shared.lock().unwrap().deck.slot(cue).part_modifiers[&1].rot_angle[2], 30.0);
+        let history = js(&t.request("GET", "/api/history", "").1);
+        assert!(history["undo"].as_array().unwrap().iter().any(|e| e["label"] == "Parties du cue « Visage » modifiées"), "{history}");
+        // The properties dialog never sends them, and keeps them.
+        assert_eq!(t.request("POST", "/api/cues/slot", r#"{"id":"figure:Visage","layer":2}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().deck.slot(cue).part_modifiers.len(), 1);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert_eq!(t.request("POST", "/api/undo", "{}").0, 200);
+        assert!(t.shared.lock().unwrap().deck.slot(cue).part_modifiers.is_empty());
+        // Removed with null.
+        assert_eq!(t.request("POST", "/api/redo", "{}").0, 200);
+        assert_eq!(set(r#"{"id":"figure:Visage","part":1,"modifiers":null}"#).0, 200);
+        assert!(t.shared.lock().unwrap().deck.slot(cue).part_modifiers.is_empty());
+        // Part modulators: saved and read back; a figure that doesn't exist is fine.
+        // (Into a file of this test's own: the test servers share the default one.)
+        let dir = std::env::temp_dir().join(format!("laser-studio-part-lfos-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.lfos = crate::lfo::LfoStore::load_or_create(dir.join("lfos.json"), &s.controls);
+        }
+        let lfos = r#"[{"target":"master.size","part":{"cue":"figure:Visage","part":1,"param":"brightness"}},{"part":{"cue":"figure:Disparue","part":3,"param":"angle_z"}}]"#;
+        assert_eq!(t.request("POST", "/api/lfos", lfos).0, 200);
+        let back = js(&t.request("GET", "/api/lfos", "").1);
+        assert_eq!(back["lfos"][1]["part"]["param"], "angle_z", "{back}");
+        assert_eq!(back["parts"][0]["cue"], "figure:Visage");
+        assert_eq!(back["parts"][0]["parts"][0]["name"], "Yeux");
+        assert_eq!(t.request("POST", "/api/lfos", r#"[{"part":{"cue":"tunnels-001","part":1,"param":"size"}}]"#).0, 400, "not a figure cue");
+        assert_eq!(t.request("POST", "/api/lfos", r#"[{"part":{"cue":"figure:Visage","part":0,"param":"size"}}]"#).0, 400);
+        assert!(!arm_status(&t)["armed"].as_bool().unwrap(), "nothing here arms");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// T-258: with a (simulated) real output, arming waits for the
     /// checklist; completing it never arms; restarting it disarms.
     #[test]
@@ -7332,6 +7432,7 @@ mod tests {
             ("/api/midi/learn", r#"{"target":"master.size"}"#),
             ("/api/cues/slot", r#"{"id":"tunnels-001"}"#),
             ("/api/cues/modifiers", r#"{"id":"tunnels-001"}"#),
+            ("/api/cues/parts", r#"{"id":"figure:x","part":1}"#),
             ("/api/grid", r#"{"cols":6,"rows":4}"#),
             ("/api/grid/page", r#"{"action":"new"}"#),
             ("/api/grid/move", r#"{"from":[1,0],"to":[0,null]}"#),

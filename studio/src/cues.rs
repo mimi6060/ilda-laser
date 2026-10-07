@@ -185,6 +185,11 @@ pub struct CueSlot {
     /// in older files.
     #[serde(skip_serializing_if = "crate::levels::is_neutral")]
     pub modifiers: crate::live::LiveModifiers,
+    /// A figure cue's per-part modifiers (T-441): part 1..=8 → modifiers
+    /// applied to that part's points only, before `modifiers`. Empty in
+    /// older files (and on other cues: they have no parts).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub part_modifiers: BTreeMap<u8, crate::live::LiveModifiers>,
     /// Speed group (T-419, speed.rs): 1..=4 = A..D, 0 = the master clock;
     /// `None` = the layer's group.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -404,6 +409,11 @@ impl CueDeck {
             slot.zones.dedup();
             slot.program = slot.program.take().filter(|p| p.validate().is_ok());
             slot.modifiers = crate::levels::for_storage(&slot.modifiers);
+            slot.part_modifiers.retain(|part, _| (1..=crate::figures::MAX_PARTS).contains(part));
+            for m in slot.part_modifiers.values_mut() {
+                *m = crate::levels::for_storage(m);
+            }
+            slot.part_modifiers.retain(|_, m| !crate::levels::is_neutral(m));
             slot.transition = slot.transition.map(Transition::sanitized);
             sanitize_notes(&mut slot.notes);
             sanitize_tags(&mut slot.tags);
@@ -891,6 +901,22 @@ mod tests {
 
     fn shown(d: &CueDeck) -> Vec<&str> {
         d.visible().iter().map(|a| a.cue.as_str()).collect()
+    }
+
+    #[test]
+    fn part_modifiers_load_from_older_files_and_stay_in_range() {
+        let slot: CueSlot = serde_json::from_str(r#"{"layer":2}"#).unwrap();
+        assert!(slot.part_modifiers.is_empty());
+        assert!(!serde_json::to_string(&slot).unwrap().contains("part_modifiers"));
+        let mut d = CueDeck::default();
+        let dim = crate::live::LiveModifiers { brightness: 0.5, freeze: true, ..Default::default() };
+        let parts = BTreeMap::from([(0, dim.clone()), (2, dim.clone()), (9, dim.clone()), (3, crate::live::LiveModifiers::default())]);
+        d.set_slot("figure:a", CueSlot { part_modifiers: parts, ..Default::default() });
+        let kept = &d.slot("figure:a").part_modifiers;
+        assert_eq!(kept.keys().copied().collect::<Vec<_>>(), [2], "parts 1..=8, neutral ones dropped");
+        assert!(!kept[&2].freeze && kept[&2].brightness == 0.5, "stored without the momentary ones");
+        let back: CueSlot = serde_json::from_str(&serde_json::to_string(&d.slot("figure:a")).unwrap()).unwrap();
+        assert_eq!(back.part_modifiers, *kept);
     }
 
     #[test]

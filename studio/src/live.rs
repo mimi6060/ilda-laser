@@ -11,6 +11,7 @@
 use crate::patterns::Point;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -616,29 +617,124 @@ fn dots(points: &mut [Point], amount: f32) {
 }
 
 fn transform(points: &[Point], m: &LiveModifiers, st: &LiveState) -> Vec<Point> {
-    let [ax, ay, az] = st.angles(m).map(f32::to_radians);
-    let (sx, cx) = ax.sin_cos();
-    let (sy, cy) = ay.sin_cos();
-    let (sz, cz) = az.sin_cos();
-    let three_d = ax != 0.0 || ay != 0.0;
-
+    let f = Transform::new(m, st);
     points
         .iter()
         .map(|p| {
-            let mut x = p.x * m.size * m.size_x;
-            let mut y = p.y * m.size * m.size_y;
-            if three_d {
-                // Rotate around X then Y, then project with a simple perspective.
-                let (y1, z1) = (y * cx, y * sx);
-                let (x2, z2) = (x * cy + z1 * sy, -x * sy + z1 * cy);
-                let depth = (1.0 + m.perspective.clamp(0.0, 1.0) * z2).max(0.2);
-                x = x2 / depth;
-                y = y1 / depth;
-            }
-            let (xr, yr) = (x * cz - y * sz, x * sz + y * cz);
-            Point { x: xr + m.pos_x, y: yr + m.pos_y, ..*p }
+            let (x, y) = f.apply(p.x, p.y);
+            Point { x, y, ..*p }
         })
         .collect()
+}
+
+/// The geometry of a `LiveModifiers` (size, rotations, perspective, then
+/// position), around the origin.
+struct Transform {
+    sx: f32,
+    sy: f32,
+    rot_x: (f32, f32),
+    rot_y: (f32, f32),
+    rot_z: (f32, f32),
+    three_d: bool,
+    perspective: f32,
+    pos: (f32, f32),
+}
+
+impl Transform {
+    fn new(m: &LiveModifiers, st: &LiveState) -> Self {
+        let [ax, ay, az] = st.angles(m).map(f32::to_radians);
+        Self {
+            sx: m.size * m.size_x,
+            sy: m.size * m.size_y,
+            rot_x: ax.sin_cos(),
+            rot_y: ay.sin_cos(),
+            rot_z: az.sin_cos(),
+            three_d: ax != 0.0 || ay != 0.0,
+            perspective: m.perspective.clamp(0.0, 1.0),
+            pos: (m.pos_x, m.pos_y),
+        }
+    }
+
+    fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        let (mut x, mut y) = (x * self.sx, y * self.sy);
+        if self.three_d {
+            // Rotate around X then Y, then project with a simple perspective.
+            let ((sx, cx), (sy, cy)) = (self.rot_x, self.rot_y);
+            let (y1, z1) = (y * cx, y * sx);
+            let (x2, z2) = (x * cy + z1 * sy, -x * sy + z1 * cy);
+            let depth = (1.0 + self.perspective * z2).max(0.2);
+            x = x2 / depth;
+            y = y1 / depth;
+        }
+        let (sz, cz) = self.rot_z;
+        let (xr, yr) = (x * cz - y * sz, x * sz + y * cz);
+        (xr + self.pos.0, yr + self.pos.1)
+    }
+}
+
+/// Per-part modifiers (T-441), before the cue's own: `parts[i]` is the
+/// part of `points[i]` (`Figure::frame_points_tagged`), `per_part` the
+/// modifiers of each part (0, « no part », is never a target) and
+/// `states` each part's rotation and clock. Only the points of a part
+/// with modifiers change; every other sample is returned bit for bit.
+///
+/// A part keeps its points: no mirror, prism or copies (they would add
+/// points between the strokes). Its geometry turns and scales around the
+/// centre of the part's bounding box (a wheel turns on itself), then
+/// moves; the result is clamped to -1..1. Colour, visible points, dots,
+/// strobe and brightness (0..1) only change or remove the light of lit
+/// points: a blanked point (the travel to and from every stroke) stays
+/// blanked. Lengths that don't match: the points unchanged.
+pub fn apply_parts(points: &[Point], parts: &[u8], per_part: &BTreeMap<u8, LiveModifiers>, states: &BTreeMap<u8, LiveState>, user: &[Palette]) -> Vec<Point> {
+    let mut out = points.to_vec();
+    if parts.len() != points.len() {
+        return out;
+    }
+    let neutral = LiveState::default();
+    for (&part, m) in per_part.iter().filter(|(&id, _)| id != 0) {
+        let idx: Vec<usize> = (0..parts.len()).filter(|&i| parts[i] == part).collect();
+        if idx.is_empty() {
+            continue;
+        }
+        let st = states.get(&part).unwrap_or(&neutral);
+        let mut own: Vec<Point> = idx.iter().map(|&i| out[i]).collect();
+        if !(m.geometry_is_identity() && st.spin == [0.0; 3]) {
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for p in &own {
+                lo = [lo[0].min(p.x), lo[1].min(p.y)];
+                hi = [hi[0].max(p.x), hi[1].max(p.y)];
+            }
+            let (cx, cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
+            let f = Transform::new(m, st);
+            for p in &mut own {
+                let (x, y) = f.apply(p.x - cx, p.y - cy);
+                let (x, y) = (x + cx, y + cy);
+                // A non-finite value (a mangled modifier) leaves the point where it was.
+                if x.is_finite() && y.is_finite() {
+                    (p.x, p.y) = (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0));
+                }
+            }
+        }
+        recolor(&mut own, &m.color, st, user);
+        trace(&mut own, m.trace);
+        dots(&mut own, m.dots);
+        if m.black || !m.strobe.lit_at(st.time, st.beat) {
+            black_out(&mut own);
+        }
+        let gain = if m.brightness.is_finite() { m.brightness.clamp(0.0, 1.0) } else { 1.0 };
+        for p in &mut own {
+            if gain != 1.0 {
+                (p.r, p.g, p.b) = (p.r * gain, p.g * gain, p.b * gain);
+            }
+            if !(p.r.is_finite() && p.g.is_finite() && p.b.is_finite()) {
+                (p.r, p.g, p.b) = (0.0, 0.0, 0.0);
+            }
+        }
+        for (k, &i) in idx.iter().enumerate() {
+            out[i] = own[k];
+        }
+    }
+    out
 }
 
 /// Brightness of a point (HSV value). Blanked points are 0 and stay blanked.
@@ -786,6 +882,74 @@ mod tests {
     use super::*;
     use crate::engine::{Animator, AudioFeatures, BeatClock};
     use crate::presets::catalog;
+
+    /// Two strokes: a lit square around (0.5, 0.5) in part 2, a lit line
+    /// in part 1, each with its blanked arrival.
+    fn two_parts() -> (Vec<Point>, Vec<u8>) {
+        let mut pts = vec![Point::blanked(-0.8, -0.8), Point::lit(-0.8, -0.8, 1.0, 0.0, 0.0), Point::lit(-0.2, -0.8, 1.0, 0.0, 0.0)];
+        let mut parts = vec![1, 1, 1];
+        let square = [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6], [0.4, 0.4]];
+        pts.push(Point::blanked(0.4, 0.4));
+        pts.extend(square.iter().map(|q| Point::lit(q[0], q[1], 0.0, 1.0, 0.0)));
+        parts.extend([2; 6]);
+        (pts, parts)
+    }
+
+    fn bits(p: &Point) -> [u32; 5] {
+        [p.x, p.y, p.r, p.g, p.b].map(f32::to_bits)
+    }
+
+    #[test]
+    fn a_part_effect_leaves_every_other_sample_bit_for_bit() {
+        let (pts, parts) = two_parts();
+        let m = LiveModifiers { brightness: 0.3, size: 1.7, pos_x: 0.2, rot_angle: [10.0, 20.0, 33.0], color: ColorOverride::Fixed { rgb: [0, 0, 255] }, ..Default::default() };
+        let out = apply_parts(&pts, &parts, &BTreeMap::from([(2, m)]), &BTreeMap::new(), &[]);
+        for i in 0..3 {
+            assert_eq!(bits(&out[i]), bits(&pts[i]), "part 1, point {i}");
+        }
+        assert!(out[3..].iter().zip(&pts[3..]).any(|(a, b)| bits(a) != bits(b)), "part 2 moved");
+        assert!(!out[3].is_lit(), "its blanked arrival stays blanked");
+        assert!(out[4..].iter().all(|p| p.b > 0.0 && p.b <= 0.3 + 1e-6 && p.g == 0.0));
+        // Part 0 is never a target; lengths that don't match change nothing.
+        let none = apply_parts(&pts, &[0; 9], &BTreeMap::from([(0, LiveModifiers { brightness: 0.0, ..Default::default() })]), &BTreeMap::new(), &[]);
+        assert_eq!(none, pts);
+        assert_eq!(apply_parts(&pts, &parts[..3], &BTreeMap::from([(2, LiveModifiers { brightness: 0.0, ..Default::default() })]), &BTreeMap::new(), &[]), pts);
+    }
+
+    #[test]
+    fn a_part_turns_and_scales_around_its_own_centre() {
+        let (pts, parts) = two_parts();
+        let m = LiveModifiers { rot_angle: [0.0, 0.0, 90.0], ..Default::default() };
+        let out = apply_parts(&pts, &parts, &BTreeMap::from([(2, m)]), &BTreeMap::new(), &[]);
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // (0.4, 0.4) turns a quarter around (0.5, 0.5): to (0.6, 0.4).
+        assert!(near(out[4].x, 0.6) && near(out[4].y, 0.4), "{:?}", out[4]);
+        assert!(out[4..].iter().all(|p| (0.39..=0.61).contains(&p.x) && (0.39..=0.61).contains(&p.y)), "not around the figure's centre");
+        // Twice the size around the same centre, clamped to the frame.
+        let big = apply_parts(&pts, &parts, &BTreeMap::from([(2, LiveModifiers { size: 2.0, ..Default::default() })]), &BTreeMap::new(), &[]);
+        assert!(near(big[4].x, 0.3) && near(big[4].y, 0.3), "{:?}", big[4]);
+        let far = apply_parts(&pts, &parts, &BTreeMap::from([(2, LiveModifiers { pos_x: 1.0, ..Default::default() })]), &BTreeMap::new(), &[]);
+        assert!(far.iter().all(|p| p.x <= 1.0));
+        // A spinning part: its own state turns it.
+        let spin = LiveModifiers { rot_speed: [0.0, 0.0, 90.0], ..Default::default() };
+        let mut st = LiveState::default();
+        st.advance(&spin, 1.0, 120.0, 4);
+        let turned = apply_parts(&pts, &parts, &BTreeMap::from([(2, spin)]), &BTreeMap::from([(2, st)]), &[]);
+        assert!(near(turned[4].x, 0.6) && near(turned[4].y, 0.4), "{:?}", turned[4]);
+    }
+
+    #[test]
+    fn a_part_can_only_dim() {
+        let (pts, parts) = two_parts();
+        for brightness in [1.0, 2.0, f32::INFINITY, f32::NAN] {
+            let out = apply_parts(&pts, &parts, &BTreeMap::from([(2, LiveModifiers { brightness, ..Default::default() })]), &BTreeMap::new(), &[]);
+            assert!(out.iter().zip(&pts).all(|(a, b)| a.g <= b.g && a.r <= b.r), "{brightness}");
+        }
+        // Then the cue, layer and master stages still multiply down.
+        let part = apply_parts(&pts, &parts, &BTreeMap::from([(2, LiveModifiers { brightness: 0.8, ..Default::default() })]), &BTreeMap::new(), &[]);
+        let master = apply(&part, &LiveModifiers { brightness: 0.5, ..Default::default() }, &LiveState::default(), &[]);
+        assert!(master.iter().all(|p| p.g <= 0.4 + 1e-6 && p.r <= 0.5 + 1e-6));
+    }
 
     #[test]
     fn default_modifiers_change_nothing() {

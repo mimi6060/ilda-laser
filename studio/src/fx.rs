@@ -244,7 +244,7 @@ impl FxGrid {
                 .into_iter()
                 .map(|c| {
                     c.map(|mut c| {
-                        c.modulators.retain(|m| lfo::modulatable(reg, &m.target).is_some());
+                        c.modulators.retain(|m| m.part.is_none() && lfo::modulatable(reg, &m.target).is_some());
                         c.sanitized()
                     })
                 })
@@ -264,6 +264,9 @@ pub fn validate(cells: &Cells, reg: &ControlRegistry) -> Result<()> {
     for cell in cells.iter().flatten().flatten() {
         if cell.modulators.len() > MAX_CELL_MODULATORS {
             bail!("« {} » : {MAX_CELL_MODULATORS} modulateurs au maximum par effet", cell.name);
+        }
+        if cell.modulators.iter().any(|m| m.part.is_some()) {
+            bail!("« {} » : un effet ne module pas une partie de figure (panneau Modulateurs)", cell.name);
         }
         if let Some(m) = cell.modulators.iter().find(|m| lfo::modulatable(reg, &m.target).is_none()) {
             bail!("« {} » : « {} » ne peut pas être modulé", cell.name, m.target);

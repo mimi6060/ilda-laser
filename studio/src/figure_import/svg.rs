@@ -24,6 +24,9 @@ const MAX_SEGMENTS: usize = 200_000;
 /// Points after flattening.
 const MAX_FLAT_POINTS: usize = 500_000;
 const XLINK: &str = "http://www.w3.org/1999/xlink";
+const INKSCAPE: &str = "http://www.inkscape.org/namespaces/inkscape";
+/// Longest group name kept as a part name.
+const MAX_PART_NAME: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Paint {
@@ -118,7 +121,14 @@ struct Reader<'a, 'input> {
     opts: &'a Options,
     ids: HashMap<&'a str, Node<'a, 'input>>,
     rules: Vec<(Selector, Vec<(String, String)>)>,
-    out: Vec<(Sub, [u8; 3])>,
+    out: Vec<(Sub, [u8; 3], u8)>,
+    /// The named group being read (T-441), outermost: its name and, once
+    /// it drew something, its part (0 = past `MAX_PARTS`).
+    group: Option<(String, Option<u8>)>,
+    /// Part names, part n at index n - 1.
+    parts: Vec<String>,
+    /// Named groups that drew something past `MAX_PARTS`.
+    overflow: usize,
     segments: usize,
     uses: usize,
     text: usize,
@@ -128,7 +138,11 @@ struct Reader<'a, 'input> {
     bad_data: usize,
 }
 
-pub(super) fn parse(text: &str, opts: &Options, warnings: &mut Vec<String>) -> Result<Vec<Path>> {
+/// The polylines, and the names of the parts their `part` numbers refer
+/// to (T-441): the named groups (`inkscape:label`, else `id`) that draw
+/// something, outermost first, in order of appearance, up to `MAX_PARTS`
+/// (groups of the same name share a part). The rest is in part 0.
+pub(super) fn parse(text: &str, opts: &Options, warnings: &mut Vec<String>) -> Result<(Vec<Path>, Vec<String>)> {
     // Internal entities are refused outright: roxmltree already guards
     // against expansion bombs, this keeps even small ones out. External
     // ones are never resolved (no resolver: nothing is fetched).
@@ -153,6 +167,9 @@ pub(super) fn parse(text: &str, opts: &Options, warnings: &mut Vec<String>) -> R
         ids: doc.descendants().filter_map(|n| n.attribute("id").map(|id| (id, n))).collect(),
         rules: Vec::new(),
         out: Vec::new(),
+        group: None,
+        parts: Vec::new(),
+        overflow: 0,
         segments: 0,
         uses: 0,
         text: 0,
@@ -182,7 +199,11 @@ pub(super) fn parse(text: &str, opts: &Options, warnings: &mut Vec<String>) -> R
     if r.bad_data > 0 {
         warnings.push(format!("{} forme(s) aux données invalides ignorée(s) ou tronquée(s)", r.bad_data));
     }
-    flatten(r.out)
+    if r.overflow > 0 {
+        let max = crate::figures::MAX_PARTS;
+        warnings.push(format!("{} groupe(s) nommé(s) au-delà de {max} : leurs tracés sont sans partie (« Aucune »)", r.overflow));
+    }
+    Ok((flatten(r.out)?, r.parts))
 }
 
 impl<'a, 'input> Reader<'a, 'input> {
@@ -243,6 +264,17 @@ impl<'a, 'input> Reader<'a, 'input> {
                 m = mul(&m, &[1.0, 0.0, 0.0, 1.0, x, y]);
                 self.children(node, style, &m, depth, use_depth)
             }
+            // A named group, outside any other and not reached through a
+            // `<use>`, is a part (T-441).
+            "g" if self.group.is_none() && use_depth == 0 => match group_name(node) {
+                Some(name) => {
+                    self.group = Some((name, None));
+                    let r = self.children(node, style, &m, depth, use_depth);
+                    self.group = None;
+                    r
+                }
+                None => self.children(node, style, &m, depth, use_depth),
+            },
             "svg" | "g" | "a" | "switch" => self.children(node, style, &m, depth, use_depth),
             "use" => self.use_element(node, style, &m, depth, use_depth),
             _ => {
@@ -271,16 +303,34 @@ impl<'a, 'input> Reader<'a, 'input> {
                     return Ok(());
                 }
                 let Some(color) = self.color_of(&style) else { return Ok(()) };
+                let part = self.part();
                 for s in subs {
                     self.segments += s.segs.len() + 1;
                     if self.segments > MAX_SEGMENTS {
                         bail!("SVG trop complexe : plus de {MAX_SEGMENTS} segments");
                     }
-                    self.out.push((s.transformed(&m), color));
+                    self.out.push((s.transformed(&m), color, part));
                 }
                 Ok(())
             }
         }
+    }
+
+    /// The part of a shape drawn now: its named group's, given at the
+    /// group's first shape.
+    fn part(&mut self) -> u8 {
+        let Some((name, id)) = &mut self.group else { return 0 };
+        *id.get_or_insert_with(|| match self.parts.iter().position(|n| n == name) {
+            Some(i) => i as u8 + 1,
+            None if self.parts.len() < crate::figures::MAX_PARTS as usize => {
+                self.parts.push(name.clone());
+                self.parts.len() as u8
+            }
+            None => {
+                self.overflow += 1;
+                0
+            }
+        })
     }
 
     fn children(&mut self, node: Node<'a, 'input>, style: Style, m: &Matrix, depth: usize, use_depth: usize) -> Result<()> {
@@ -663,9 +713,9 @@ fn arc(from: Pt, rx: f64, ry: f64, rot_deg: f64, large: bool, sweep: bool, to: P
 
 /// Curves → polylines, with a tolerance relative to the drawing's size
 /// (0.05 % of its diagonal), so the result doesn't depend on its units.
-fn flatten(subs: Vec<(Sub, [u8; 3])>) -> Result<Vec<Path>> {
+fn flatten(subs: Vec<(Sub, [u8; 3], u8)>) -> Result<Vec<Path>> {
     let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for q in subs.iter().flat_map(|(s, _)| s.points()) {
+    for q in subs.iter().flat_map(|(s, _, _)| s.points()) {
         for k in 0..2 {
             lo[k] = lo[k].min(q[k]);
             hi[k] = hi[k].max(q[k]);
@@ -675,7 +725,7 @@ fn flatten(subs: Vec<(Sub, [u8; 3])>) -> Result<Vec<Path>> {
     let tol = if diag.is_finite() && diag > 0.0 { diag * 0.0005 } else { 1.0 };
     let mut total = 0;
     let mut out = Vec::with_capacity(subs.len());
-    for (sub, color) in subs {
+    for (sub, color, part) in subs {
         let mut pts = vec![sub.start];
         let mut cur = sub.start;
         for seg in &sub.segs {
@@ -709,9 +759,17 @@ fn flatten(subs: Vec<(Sub, [u8; 3])>) -> Result<Vec<Path>> {
         if total > MAX_FLAT_POINTS {
             bail!("SVG trop complexe : plus de {MAX_FLAT_POINTS} points une fois les courbes tracées");
         }
-        out.push(Path { pts, closed: sub.closed, color });
+        out.push(Path { pts, closed: sub.closed, color, part });
     }
     Ok(out)
+}
+
+/// A group's name as a part name: its layer label (Inkscape), else its
+/// `id` (generated ids count: the import preview lets the user drop them).
+fn group_name(node: Node) -> Option<String> {
+    let raw = node.attribute((INKSCAPE, "label")).or_else(|| node.attribute("id"))?;
+    let name: String = raw.trim().chars().filter(|c| !c.is_control()).take(MAX_PART_NAME).collect();
+    (!name.is_empty()).then_some(name)
 }
 
 fn norm(v: Pt) -> f64 {
@@ -981,7 +1039,48 @@ mod tests {
     use super::*;
 
     fn run(svg: &str) -> Result<Vec<Path>> {
-        parse(svg, &Options::default(), &mut Vec::new())
+        parse(svg, &Options::default(), &mut Vec::new()).map(|(paths, _)| paths)
+    }
+
+    /// (part of each path, part names, warnings).
+    fn parts_of(svg: &str) -> (Vec<u8>, Vec<String>, Vec<String>) {
+        let mut warnings = Vec::new();
+        let (paths, names) = parse(svg, &Options::default(), &mut warnings).unwrap();
+        (paths.iter().map(|p| p.part).collect(), names, warnings)
+    }
+
+    #[test]
+    fn named_groups_become_parts_in_order() {
+        let svg = r#"<svg xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape">
+            <line x2="1" stroke="red"/>
+            <g id="Contour"><rect width="5" height="5" stroke="red"/></g>
+            <g inkscape:label="Yeux" id="layer2"><circle r="1" stroke="lime"/><circle cx="3" r="1" stroke="lime"/></g>
+            <g><line x2="2" stroke="blue"/></g>
+            <g id="vide"><text>x</text></g>
+        </svg>"#;
+        let (parts, names, _) = parts_of(svg);
+        assert_eq!(names, ["Contour", "Yeux"], "the label wins over the id; an empty group is no part");
+        assert_eq!(parts, [0, 1, 2, 2, 0]);
+    }
+
+    #[test]
+    fn nested_groups_belong_to_the_outer_part() {
+        let svg = r#"<svg><g id="Voiture"><line x2="1" stroke="red"/><g id="Roue"><circle r="1" stroke="red"/></g></g><g id="Roue2"><circle r="1" stroke="red"/></g></svg>"#;
+        let (parts, names, _) = parts_of(svg);
+        assert_eq!(names, ["Voiture", "Roue2"]);
+        assert_eq!(parts, [1, 1, 2]);
+        // Reached through <use>: not a part of its own.
+        let used = r##"<svg><defs><g id="motif"><line x2="1" stroke="red"/></g></defs><use href="#motif"/></svg>"##;
+        assert_eq!(parts_of(used).0, [0]);
+    }
+
+    #[test]
+    fn past_eight_named_groups_the_rest_has_no_part_and_a_warning() {
+        let groups: String = (1..=9).map(|i| format!(r#"<g id="g{i}"><line x2="{i}" stroke="red"/></g>"#)).collect();
+        let (parts, names, warnings) = parts_of(&format!("<svg>{groups}</svg>"));
+        assert_eq!(names.len(), 8);
+        assert_eq!(parts, [1, 2, 3, 4, 5, 6, 7, 8, 0]);
+        assert!(warnings.iter().any(|w| w.contains("au-delà de 8")), "{warnings:?}");
     }
     fn bbox(p: &Path) -> ([f64; 2], [f64; 2]) {
         let mut lo = [f64::MAX; 2];
@@ -1099,7 +1198,8 @@ mod tests {
             &Options::default(),
             &mut w,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(paths.len(), 4, "{paths:?}");
         assert_eq!(paths[0].color, [0xe3, 0x06, 0x13]);
         assert_eq!(paths[1].color, [0, 0, 255]);
@@ -1112,7 +1212,7 @@ mod tests {
         let all = w.join(" | ");
         assert!(all.contains("texte") && all.contains("image") && all.contains("externe"), "{all}");
         // Fills off: only strokes are drawn.
-        let only = parse(r#"<svg><rect width="5" height="5" fill="red"/><circle r="3" stroke="red"/></svg>"#, &Options { fills: false, ..Options::default() }, &mut w).unwrap();
+        let only = parse(r#"<svg><rect width="5" height="5" fill="red"/><circle r="3" stroke="red"/></svg>"#, &Options { fills: false, ..Options::default() }, &mut w).unwrap().0;
         assert_eq!(only.len(), 1);
     }
 
@@ -1134,7 +1234,8 @@ mod tests {
             &Options::default(),
             &mut w,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(paths.iter().flat_map(|p| &p.pts).flatten().all(|v| v.is_finite()));
         assert_eq!(paths[0].pts, vec![[0.0, 0.0], [10.0, 10.0]]);
         assert!(w.iter().any(|m| m.contains("invalides")));
@@ -1144,9 +1245,9 @@ mod tests {
         assert!(run(&nest(100_000)).unwrap_err().to_string().contains("imbriqués"));
         assert!(run(&nest(MAX_XML_DEPTH)).unwrap_err().to_string().contains("imbriqués"));
         let mut w = Vec::new();
-        assert!(parse(&nest(MAX_XML_DEPTH - 2), &Options::default(), &mut w).unwrap().is_empty());
+        assert!(parse(&nest(MAX_XML_DEPTH - 2), &Options::default(), &mut w).unwrap().0.is_empty());
         assert!(w.iter().any(|m| m.contains("imbriqués")));
-        assert_eq!(parse(&nest(10), &Options::default(), &mut w).unwrap().len(), 1);
+        assert_eq!(parse(&nest(10), &Options::default(), &mut w).unwrap().0.len(), 1);
         assert_eq!(xml_depth("<?xml?><!DOCTYPE svg [<!ELEMENT x ANY>]><svg><![CDATA[<a><b>]]><g/><g><x/></g></svg>"), 2);
         // A `use` loop stays bounded.
         let looped = r##"<svg xmlns:xlink="http://www.w3.org/1999/xlink"><g id="a"><use xlink:href="#a"/><line x2="1" stroke="red"/></g></svg>"##;

@@ -30,6 +30,8 @@ pub const MAX_POINTS: usize = 20_000;
 /// Frames per beat or per second.
 pub const MIN_RATE: f32 = 0.05;
 pub const MAX_RATE: f32 = 60.0;
+/// Parts a figure may name (T-441): strokes carry 0 (no part) or 1..=8.
+pub const MAX_PARTS: u8 = 8;
 /// A one-point stroke (the point tool) is held this many samples, so the
 /// dot is visible.
 const DOT_DWELL: usize = 8;
@@ -43,13 +45,34 @@ pub struct Stroke {
     pub points: Vec<[f32; 2]>,
     pub color: [u8; 3],
     pub lit: bool,
+    /// Part (T-441): 0 = no part, 1..=`MAX_PARTS` = one of the figure's
+    /// `parts`, the target of per-part effects. 0 in older files.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub part: u8,
+}
+
+fn is_zero(v: &u8) -> bool {
+    *v == 0
 }
 
 impl Default for Stroke {
     fn default() -> Self {
-        Self { points: Vec::new(), color: [0, 255, 0], lit: true }
+        Self { points: Vec::new(), color: [0, 255, 0], lit: true, part: 0 }
     }
 }
+
+/// A named part of a figure (T-441): « Yeux », « Contour »… Its strokes,
+/// in every frame, carry its `id`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PartDef {
+    /// 1..=`MAX_PARTS`.
+    pub id: u8,
+    pub name: String,
+}
+
+/// Longest part name kept.
+const MAX_PART_NAME: usize = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -94,11 +117,14 @@ pub struct Figure {
     /// grid cell's or a timeline event's own preset comes first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan: Option<String>,
+    /// Named parts (T-441), common to every frame. Empty in older files.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartDef>,
 }
 
 impl Default for Figure {
     fn default() -> Self {
-        Self { name: String::new(), frames: vec![FigureFrame::default()], rate: 1.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, scan: None }
+        Self { name: String::new(), frames: vec![FigureFrame::default()], rate: 1.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, scan: None, parts: Vec::new() }
     }
 }
 
@@ -132,6 +158,20 @@ impl Figure {
         }
         if self.frames.is_empty() {
             self.frames.push(FigureFrame::default());
+        }
+        // Parts (T-441): ids in 1..=MAX_PARTS, each once, named; a stroke
+        // whose part is out of range is back in « no part ».
+        let mut seen = [false; MAX_PARTS as usize + 1];
+        self.parts.retain(|p| (1..=MAX_PARTS).contains(&p.id) && !std::mem::replace(&mut seen[p.id as usize], true));
+        self.parts.sort_by_key(|p| p.id);
+        for p in &mut self.parts {
+            let name: String = p.name.trim().chars().filter(|c| !c.is_control()).take(MAX_PART_NAME).collect();
+            p.name = if name.is_empty() { format!("Partie {}", p.id) } else { name };
+        }
+        for s in self.frames.iter_mut().flat_map(|f| f.strokes.iter_mut()) {
+            if s.part > MAX_PARTS {
+                s.part = 0;
+            }
         }
         self.rate = if self.rate.is_finite() { self.rate.clamp(MIN_RATE, MAX_RATE) } else { 1.0 };
         Ok(())
@@ -167,24 +207,45 @@ impl Figure {
     /// stroke starts with a blanked point, so the travel to it is dark; a
     /// blanked stroke is travel all along.
     pub fn frame_points(&self, index: usize, scale: f32, paint: impl Fn([u8; 3]) -> (f32, f32, f32)) -> Vec<Point> {
-        let Some(frame) = self.frames.get(index) else { return Vec::new() };
-        let mut out = Vec::new();
+        self.frame_points_tagged(index, scale, paint).0
+    }
+
+    /// `frame_points`, with the part of every point beside it (T-441):
+    /// both vectors have the same length. The blanked arrival of a stroke
+    /// belongs to that stroke's part, so the travel to it is never lit by
+    /// an effect on another part (nor by one on its own: effects only dim
+    /// and move points, a blanked point stays blanked).
+    pub fn frame_points_tagged(&self, index: usize, scale: f32, paint: impl Fn([u8; 3]) -> (f32, f32, f32)) -> (Vec<Point>, Vec<u8>) {
+        let Some(frame) = self.frames.get(index) else { return (Vec::new(), Vec::new()) };
+        let (mut out, mut parts) = (Vec::new(), Vec::new());
         for stroke in &frame.strokes {
+            let before = out.len();
             let pts = stroke.points.iter().map(|p| (p[0] * scale, p[1] * scale));
             let (r, g, b) = if stroke.lit { paint(stroke.color) } else { (0.0, 0.0, 0.0) };
             if r <= 0.0 && g <= 0.0 && b <= 0.0 {
                 out.extend(pts.map(|(x, y)| Point::blanked(x, y)));
-                continue;
+            } else if let Some(&[x0, y0]) = stroke.points.first() {
+                out.push(Point::blanked(x0 * scale, y0 * scale));
+                if stroke.points.len() == 1 {
+                    out.extend(std::iter::repeat_n(Point::lit(x0 * scale, y0 * scale, r, g, b), DOT_DWELL));
+                } else {
+                    out.extend(pts.map(|(x, y)| Point::lit(x, y, r, g, b)));
+                }
             }
-            let Some(&[x0, y0]) = stroke.points.first() else { continue };
-            out.push(Point::blanked(x0 * scale, y0 * scale));
-            if stroke.points.len() == 1 {
-                out.extend(std::iter::repeat_n(Point::lit(x0 * scale, y0 * scale, r, g, b), DOT_DWELL));
-            } else {
-                out.extend(pts.map(|(x, y)| Point::lit(x, y, r, g, b)));
-            }
+            let part = if stroke.part <= MAX_PARTS { stroke.part } else { 0 };
+            parts.resize(out.len().max(before), part);
         }
-        out
+        (out, parts)
+    }
+
+    /// Whether any stroke of any frame belongs to a part.
+    pub fn has_parts(&self) -> bool {
+        self.frames.iter().flat_map(|f| &f.strokes).any(|s| s.part != 0)
+    }
+
+    /// The name of part `id`, if the figure has it.
+    pub fn part_name(&self, id: u8) -> Option<&str> {
+        self.parts.iter().find(|p| p.id == id).map(|p| p.name.as_str())
     }
 }
 
@@ -323,9 +384,9 @@ pub fn test_figure(name: &str, frames: usize) -> Figure {
             let y = i as f32 / 10.0;
             FigureFrame {
                 strokes: vec![
-                    Stroke { points: vec![[-0.5, y], [0.5, y]], color: [255, 0, 0], lit: true },
+                    Stroke { points: vec![[-0.5, y], [0.5, y]], color: [255, 0, 0], lit: true, part: 0 },
                     Stroke { points: vec![[0.5, -0.5], [0.0, -0.8]], lit: false, ..Default::default() },
-                    Stroke { points: vec![[0.0, -0.8]], color: [0, 255, 0], lit: true },
+                    Stroke { points: vec![[0.0, -0.8]], color: [0, 255, 0], lit: true, part: 0 },
                 ],
             }
         })
@@ -501,6 +562,197 @@ mod tests {
         refresh(&mut s);
         assert_eq!(s.presets.len(), builtin);
         assert!(s.controls.get(&format!("grid.{page}.1.1")).is_none());
+    }
+
+    // ---------- parts (T-441) ----------
+
+    use crate::live::{self, LiveModifiers, LiveState};
+    use std::collections::BTreeMap;
+
+    /// `test_figure` with its dot (stroke 3) in part 2 « Yeux ».
+    fn with_eyes() -> Figure {
+        let mut fig = test_figure("Visage", 1);
+        fig.frames[0].strokes[2].part = 2;
+        fig.parts = vec![PartDef { id: 2, name: "Yeux".into() }];
+        fig
+    }
+
+    #[test]
+    fn older_strokes_load_without_a_part_and_none_is_written() {
+        let s: Stroke = serde_json::from_str(r#"{"points":[[0,0]],"color":[255,0,0],"lit":true}"#).unwrap();
+        assert_eq!(s.part, 0);
+        assert!(!serde_json::to_string(&s).unwrap().contains("part"), "no part, no field");
+        let fig: Figure = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert!(fig.parts.is_empty());
+        assert!(!serde_json::to_string(&fig).unwrap().contains("parts"));
+        let eyes = with_eyes();
+        let back: Figure = serde_json::from_str(&serde_json::to_string(&eyes).unwrap()).unwrap();
+        assert_eq!(back, eyes, "parts survive a save");
+    }
+
+    #[test]
+    fn tagged_points_match_the_plain_ones_and_travel_belongs_to_the_arrival() {
+        let fig = with_eyes();
+        let (pts, parts) = fig.frame_points_tagged(0, 1.0, white);
+        assert_eq!(pts, fig.frame_points(0, 1.0, white), "same points");
+        assert_eq!(pts.len(), parts.len());
+        // Line (blanked arrival + 2), move (2), dot (blanked arrival + dwell).
+        assert_eq!(parts, [[0; 5].as_slice(), &[2; 1 + DOT_DWELL]].concat(), "the dot's blanked arrival is part 2");
+        assert!(!pts[5].is_lit() && parts[5] == 2);
+        assert_eq!(fig.frame_points_tagged(9, 1.0, white), (Vec::new(), Vec::new()));
+        // A black stroke (all travel) keeps its part on every point.
+        let (pts, parts) = fig.frame_points_tagged(0, 1.0, |_| (0.0, 0.0, 0.0));
+        assert!(pts.iter().all(|p| !p.is_lit()) && pts.len() == parts.len());
+        assert!(fig.has_parts() && !test_figure("x", 2).has_parts());
+        assert_eq!((fig.part_name(2), fig.part_name(1)), (Some("Yeux"), None));
+    }
+
+    #[test]
+    fn validate_brings_parts_into_range() {
+        let mut fig = with_eyes();
+        fig.frames[0].strokes[0].part = 9;
+        fig.parts = vec![
+            PartDef { id: 3, name: "  ".into() },
+            PartDef { id: 2, name: "Yeux".into() },
+            PartDef { id: 2, name: "Encore".into() },
+            PartDef { id: 0, name: "Zéro".into() },
+            PartDef { id: 12, name: "Trop".into() },
+            PartDef { id: 1, name: "n".repeat(80) },
+        ];
+        fig.validate().unwrap();
+        assert_eq!(fig.frames[0].strokes[0].part, 0, "out of range: no part");
+        assert_eq!(fig.frames[0].strokes[2].part, 2);
+        let ids: Vec<u8> = fig.parts.iter().map(|p| p.id).collect();
+        assert_eq!(ids, [1, 2, 3], "sorted, once each, in range");
+        assert_eq!((fig.parts[1].name.as_str(), fig.parts[2].name.as_str()), ("Yeux", "Partie 3"));
+        assert_eq!(fig.parts[0].name.chars().count(), 32);
+    }
+
+    fn mods(part: u8, m: LiveModifiers) -> BTreeMap<u8, LiveModifiers> {
+        BTreeMap::from([(part, m)])
+    }
+
+    fn render_parts(fig: &Figure, parts: Option<&BTreeMap<u8, LiveModifiers>>) -> Vec<Point> {
+        let s = Settings { content: Content::Figure(fig.clone()), scale: 1.0, brightness: 1.0, ..Default::default() };
+        let mut a = Animator::starting_at(0.0);
+        a.set_parts(parts, &[]);
+        a.render(&s, AudioFeatures::default(), 1.0 / 60.0, &BeatClock { beat: 0.5, bpm: 120.0, beats_per_bar: 4 })
+    }
+
+    #[test]
+    fn a_figure_without_parts_or_effects_renders_exactly_as_before() {
+        let plain = test_figure("p", 1);
+        let dim = mods(1, LiveModifiers { brightness: 0.2, ..Default::default() });
+        assert_eq!(render_parts(&plain, Some(&dim)), render_parts(&plain, None), "no parts: the same path");
+        let eyes = with_eyes();
+        assert_eq!(render_parts(&eyes, None), render_parts(&plain, None), "parts alone change nothing");
+        assert_eq!(render_parts(&eyes, Some(&BTreeMap::new())), render_parts(&plain, None));
+        // Part 2 dimmed: the red line is untouched, the dot is dimmer.
+        let out = render_parts(&eyes, Some(&mods(2, LiveModifiers { brightness: 0.25, ..Default::default() })));
+        assert!(out.iter().filter(|p| p.r > 0.0).all(|p| p.r == 1.0));
+        assert!(out.iter().filter(|p| p.g > 0.0).all(|p| (p.g - 0.25).abs() < 1e-6));
+    }
+
+    /// A small deterministic generator (no extra crate).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 40) as f32 / (1u64 << 24) as f32
+        }
+        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (hi - lo) * self.next()
+        }
+        fn wild(&mut self) -> f32 {
+            match (self.next() * 10.0) as u32 {
+                0 => f32::NAN,
+                1 => f32::INFINITY,
+                2 => -1e30,
+                _ => self.range(-4.0, 4.0),
+            }
+        }
+    }
+
+    fn random_figure(rng: &mut Lcg) -> Figure {
+        let strokes = (0..1 + (rng.next() * 12.0) as usize)
+            .map(|_| Stroke {
+                points: (0..1 + (rng.next() * 6.0) as usize).map(|_| [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)]).collect(),
+                color: [(rng.next() * 255.0) as u8, (rng.next() * 255.0) as u8, (rng.next() * 255.0) as u8],
+                lit: rng.next() > 0.2,
+                part: (rng.next() * 10.0) as u8,
+            })
+            .collect();
+        let mut fig = Figure { name: "r".into(), frames: vec![FigureFrame { strokes }], ..Default::default() };
+        fig.validate().unwrap();
+        fig
+    }
+
+    fn random_mods(rng: &mut Lcg) -> BTreeMap<u8, LiveModifiers> {
+        (0..(rng.next() * 4.0) as usize)
+            .map(|_| {
+                let m = LiveModifiers {
+                    brightness: rng.wild(),
+                    size: rng.wild(),
+                    size_x: rng.wild(),
+                    pos_x: rng.wild(),
+                    pos_y: rng.wild(),
+                    rot_angle: [rng.wild(), rng.wild(), rng.wild()],
+                    rot_speed: [0.0, 0.0, rng.range(-720.0, 720.0)],
+                    perspective: rng.wild(),
+                    trace: rng.range(0.0, 1.0),
+                    dots: rng.range(0.0, 1.0),
+                    color: if rng.next() > 0.5 { live::ColorOverride::Fixed { rgb: [255, 255, 255] } } else { live::ColorOverride::Normal },
+                    ..Default::default()
+                };
+                ((rng.next() * 10.0) as u8, m)
+            })
+            .collect()
+    }
+
+    /// Property (T-441): random figures, parts and effects give finite
+    /// points in -1..1, never light a point that was blanked (the travel
+    /// to and from every stroke, so no travel segment is ever lit) nor
+    /// join two strokes by a lit segment, never make a point more intense
+    /// (a colour may change, its intensity only drops), and leave
+    /// the points of every part without effects bit for bit.
+    #[test]
+    fn random_parts_and_effects_stay_finite_in_bounds_and_never_light_travel() {
+        let mut rng = Lcg(0x5eed_0441);
+        for case in 0..400 {
+            let mut states = BTreeMap::new();
+            for id in 1..=MAX_PARTS {
+                let mut st = LiveState::default();
+                st.set_clock(case as f64 * 0.1, case as f64 * 0.2);
+                states.insert(id, st);
+            }
+            let fig = random_figure(&mut rng);
+            let per_part = random_mods(&mut rng);
+            let (pts, parts) = fig.frame_points_tagged(0, 1.0, white);
+            let out = live::apply_parts(&pts, &parts, &per_part, &states, &[]);
+            assert_eq!(out.len(), pts.len(), "case {case}: same samples");
+            for (i, (a, b)) in pts.iter().zip(&out).enumerate() {
+                assert!([b.x, b.y, b.r, b.g, b.b].iter().all(|v| v.is_finite()), "case {case}: {b:?}");
+                assert!((-1.0..=1.0).contains(&b.x) && (-1.0..=1.0).contains(&b.y), "case {case}: {b:?}");
+                assert!(a.is_lit() || !b.is_lit(), "case {case}: point {i} lit from blanked");
+                assert!(b.r.max(b.g).max(b.b) <= a.r.max(a.g).max(a.b) + 1e-6, "case {case}: brighter");
+                if parts[i] == 0 || !per_part.contains_key(&parts[i]) {
+                    assert_eq!([a.x, a.y, a.r, a.g, a.b].map(f32::to_bits), [b.x, b.y, b.r, b.g, b.b].map(f32::to_bits), "case {case}: point {i}");
+                }
+            }
+            for i in 1..out.len() {
+                if out[i - 1].is_lit() && out[i].is_lit() {
+                    assert!(pts[i - 1].is_lit() && pts[i].is_lit() && parts[i - 1] == parts[i], "case {case}: lit segment {i} across strokes");
+                }
+            }
+            // The whole look: finite, in bounds, through rotation and densify.
+            let s = Settings { content: Content::Figure(fig.clone()), scale: 1.0, brightness: 1.0, ..Default::default() };
+            let mut a = Animator::starting_at(0.0);
+            a.set_parts(Some(&per_part), &[]);
+            for k in 0..3 {
+                let frame = a.render(&s, AudioFeatures::default(), 0.1, &BeatClock { beat: k as f64, bpm: 128.0, beats_per_bar: 4 });
+                assert!(frame.iter().all(|p| [p.x, p.y, p.r, p.g, p.b].iter().all(|v| v.is_finite() && *v >= -1.0 - 1e-5 && *v <= 1.0 + 1e-5)), "case {case}");
+            }
+        }
     }
 
     #[test]

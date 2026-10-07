@@ -1093,6 +1093,7 @@ mod tests {
                     offset: 2.0 * r(370 + k) - 1.0,
                     enabled: true,
                     speed_group: 0,
+                    part: None,
                 })
                 .collect();
             let mut animator = Animator::default();

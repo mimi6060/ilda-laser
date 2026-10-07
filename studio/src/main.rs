@@ -133,7 +133,7 @@ use interlock::{ArmGate, EStop};
 use output::{Output, OutputStage};
 use patterns::Point;
 use scenes::SceneStore;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2011,7 +2011,7 @@ impl Engine {
         self.last = now;
 
         let record_due;
-        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan), trace) = {
+        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan), trace) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -2211,6 +2211,25 @@ impl Engine {
                 .filter_map(|a| Some((a.id, usercues::master_of(&s, &a.cue)?)))
                 .collect();
             cue_masters.extend(fx_cue);
+            // Per-part modifiers of the figure cues on show (T-441): each
+            // cell's stored ones, moved by the part modulators (copies, like
+            // every modulation), per cue instance. Empty without parts.
+            let part_mods = {
+                let on_show: Vec<&cues::ActiveCue> = s.deck.active.iter().chain(s.deck.ending.iter().map(|e| &e.cue)).collect();
+                let mut by_cue: lfo::PartMods = on_show
+                    .iter()
+                    .filter_map(|a| {
+                        let stored = &s.deck.slots.get(&a.cue).filter(|slot| !slot.part_modifiers.is_empty())?.part_modifiers;
+                        // In range whatever the cell holds, like the cue level's.
+                        Some((a.cue.clone(), stored.iter().map(|(id, m)| (*id, levels::for_stage(m))).collect()))
+                    })
+                    .collect();
+                if s.lfos.list().iter().any(|m| m.part.is_some()) {
+                    let is_figure = |cue: &str| cue.starts_with(figures::ID_PREFIX) && on_show.iter().any(|a| a.cue == cue);
+                    lfo::modulate_parts(s.lfos.list(), &mut by_cue, &is_figure, mod_t, &|g| speed.beat(g, mod_beat, mod_t + speed_off), time_share);
+                }
+                on_show.iter().filter_map(|a| Some((a.id, by_cue.get(&a.cue)?.clone()))).collect::<HashMap<u64, BTreeMap<u8, live::LiveModifiers>>>()
+            };
             // The cue and layer levels (T-144): working copies follow the
             // deck, then this frame's values, smoothed.
             levels::frame(&mut s);
@@ -2256,7 +2275,7 @@ impl Engine {
             // before the safety chain; nothing else changes.
             // The projector it records (T-478): its frame, not the main one's.
             record_due = s.recorder.due(t).then(|| s.recorder.output().to_string());
-            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
+            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -2375,6 +2394,8 @@ impl Engine {
                     animator.set_optimizer(scan);
                     animator.set_palette(festival_palette);
                     animator.set_point_budget(mixer.point_budget);
+                    // A figure cue's parts (T-441), before everything else.
+                    animator.set_parts(part_mods.get(id), &user_palettes);
                     let mut points = animator.render(settings, audio, anim_dt * levels.speed(Some(*id), *layer), &render_clock);
                     // A user cue's own master modifiers (T-405), before the
                     // master stage, like a timeline event's.

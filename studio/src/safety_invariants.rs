@@ -122,6 +122,13 @@
 //!     them, run in the sessions (1-22 hold with them: the curve goes
 //!     through densify, the mixer's budget and the whole safety stage);
 //!     they never arm.
+//! 24. figure parts (T-441): random figures whose strokes are in random
+//!     parts (out-of-range ones included), played as cues with random
+//!     per-part modifiers in their cells (mangled values, stored past
+//!     validation) and random part modulators (on parts and figures that
+//!     exist or not, every parameter, deep and fast) run in the sessions
+//!     (1-23 hold with them: the per-part stage runs before the cue's
+//!     modifiers, the mixer and the whole safety stage); they never arm.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -802,6 +809,7 @@ fn random_lfos(s: &Shared, rng: &mut Rng) -> Vec<lfo::Modulator> {
             enabled: rng.chance(0.9),
             // A..D, and now and then a group that doesn't exist (T-419).
             speed_group: rng.below(6) as u8,
+            part: None,
         })
         .collect()
 }
@@ -1567,6 +1575,80 @@ fn random_abstract(rng: &mut Rng) -> Settings {
     }
 }
 
+/// A random figure with parts (T-441) saved to the library (its cue on
+/// the « Figures » page), random per-part modifiers in its cell (mangled
+/// ones written past validation) and random part modulators added to the
+/// master's. Returns the cue id.
+fn random_figure_parts(s: &mut Shared, rng: &mut Rng) -> String {
+    use crate::figures::{Figure, FigureFrame, PartDef, Stroke};
+    let wild = |rng: &mut Rng, lo: f32, hi: f32| match rng.below(16) {
+        0 => f32::NAN,
+        1 => f32::INFINITY,
+        2 => rng.range(-1e5, 1e5),
+        _ => rng.range(lo, hi),
+    };
+    let frames = (0..1 + rng.below(3))
+        .map(|_| FigureFrame {
+            strokes: (0..1 + rng.below(10))
+                .map(|_| Stroke {
+                    points: (0..1 + rng.below(8)).map(|_| [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)]).collect(),
+                    color: [rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8],
+                    lit: rng.chance(0.85),
+                    part: rng.below(11) as u8,
+                })
+                .collect(),
+        })
+        .collect();
+    let name = format!("Parties {}", rng.below(4));
+    let parts = (1..=8).filter(|_| rng.chance(0.6)).map(|id| PartDef { id, name: format!("P{id}") }).collect();
+    let fig = Figure { name: name.clone(), frames, rate: rng.range(0.5, 8.0), parts, ..Figure::default() };
+    // Saved once per name (a library refresh rebuilds the grid: costly).
+    if s.figures.get(&name).is_none() && s.figures.save(fig).is_ok() {
+        crate::figures::refresh(s);
+    }
+    let cue = crate::figures::cue_id(&name);
+    let mut part_mods = std::collections::BTreeMap::new();
+    for _ in 0..rng.below(4) {
+        let m = live::LiveModifiers {
+            brightness: wild(rng, 0.0, 1.5),
+            size: wild(rng, 0.0, 2.5),
+            size_y: wild(rng, -2.0, 2.0),
+            pos_x: wild(rng, -1.5, 1.5),
+            pos_y: wild(rng, -1.5, 1.5),
+            rot_angle: [wild(rng, -360.0, 360.0), wild(rng, -360.0, 360.0), wild(rng, -360.0, 360.0)],
+            rot_speed: [0.0, wild(rng, -720.0, 720.0), wild(rng, -720.0, 720.0)],
+            perspective: wild(rng, 0.0, 1.0),
+            trace: wild(rng, 0.0, 1.0),
+            dots: wild(rng, 0.0, 1.0),
+            strobe: live::Strobe { on: rng.chance(0.3), ..Default::default() },
+            color: if rng.chance(0.4) { live::ColorOverride::Fixed { rgb: [255, 255, 255] } } else { live::ColorOverride::Normal },
+            ..Default::default()
+        };
+        part_mods.insert(rng.below(10) as u8, m);
+    }
+    let mut slot = s.deck.slot(&cue);
+    slot.part_modifiers = part_mods;
+    // Past validation: the engine must cope with whatever a file holds.
+    s.deck.slots.insert(cue.clone(), slot);
+    let params = [lfo::PartParam::Brightness, lfo::PartParam::Size, lfo::PartParam::PosX, lfo::PartParam::PosY, lfo::PartParam::AngleZ];
+    let waves = [lfo::Wave::Sine, lfo::Wave::Square, lfo::Wave::SawUp, lfo::Wave::Random];
+    let mut list: Vec<lfo::Modulator> = s.lfos.list().iter().filter(|m| m.part.is_none()).cloned().collect();
+    for _ in 0..rng.below(4) {
+        let target = if rng.chance(0.8) { cue.clone() } else { "figure:Absente".to_string() };
+        list.push(lfo::Modulator {
+            wave: *rng.pick(&waves),
+            rate: if rng.chance(0.5) { live::Rate::Hz(rng.range(0.1, 25.0)) } else { live::Rate::Beats(rng.range(0.125, 8.0)) },
+            depth: rng.range(0.0, 3.0),
+            offset: rng.range(-3.0, 3.0),
+            part: Some(lfo::PartTarget { cue: target, part: rng.below(11) as u8, param: *rng.pick(&params) }),
+            ..Default::default()
+        });
+    }
+    list.truncate(lfo::MAX_MODULATORS);
+    s.lfos.replace_in_memory(list);
+    cue
+}
+
 fn random_pools(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
     use crate::pools::{self, PoolPreset, PoolValues, PresetRefs, FAMILIES};
     let family = *rng.pick(&FAMILIES);
@@ -1945,6 +2027,9 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     // Abstracts (T-440), from their own stream.
     let mut nrng = Rng::new(seed ^ 0x0440_0440);
     let abstracts_on = nrng.chance(0.35);
+    // Figure parts (T-441), from their own stream.
+    let mut qrng = Rng::new(seed ^ 0x0441_0441);
+    let parts_on = qrng.chance(0.35);
     let mut beats = 0;
     for frame in 0..frames {
         let in_show = show.contains(&frame);
@@ -1981,6 +2066,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
             if abstracts_on && nrng.chance(0.1) {
                 controls::set_look(&mut s, random_abstract(&mut nrng));
             }
+            if parts_on && qrng.chance(0.08) {
+                let cue = random_figure_parts(&mut s, &mut qrng);
+                controls::press_cue(&mut s, &cue, None, true);
+            }
             // Held buttons are let go of: « Noir » and « Figer » don't
             // stay down for the whole session.
             if (s.live.black || s.live.freeze || s.live.strobe.hold) && erng.chance(0.7) {
@@ -1988,7 +2077,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
                 let _ = controls::apply(&mut s, id, ControlInput::Value(0.0), erng.chance(0.5));
             }
             if s.gate.is_armed() != armed {
-                return Err(format!("frame {frame}: a live effect, a level, a preset or an abstract changed the arming"));
+                return Err(format!("frame {frame}: a live effect, a level, a preset, an abstract or a figure part changed the arming"));
             }
         }
         if exec_on && brng.chance(0.35) {

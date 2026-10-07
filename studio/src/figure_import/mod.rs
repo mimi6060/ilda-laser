@@ -40,6 +40,8 @@ struct Path {
     /// The first point is not repeated at the end: `finish` does it.
     closed: bool,
     color: [u8; 3],
+    /// Figure part (T-441): 0 = none; SVG named groups give 1..=8.
+    part: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,13 +205,16 @@ pub fn import(bytes: &[u8], file_name: &str, opts: &Options) -> Result<Imported>
     let kind = sniff(bytes)?;
     let mut warnings = Vec::new();
     let mut threshold = None;
+    let mut parts = Vec::new();
     let paths = match kind {
         Kind::Svg => {
             if bytes.len() > MAX_SVG_BYTES {
                 bail!("SVG trop gros : {} Mo au plus", MAX_SVG_BYTES / (1024 * 1024));
             }
             let Ok(text) = std::str::from_utf8(bytes) else { bail!("SVG illisible : le texte n'est pas en UTF-8") };
-            svg::parse(text, &opts, &mut warnings)?
+            let (paths, names) = svg::parse(text, &opts, &mut warnings)?;
+            parts = names;
+            paths
         }
         Kind::Png | Kind::Jpeg => {
             let (paths, t) = raster::vectorize(bytes, &opts, &mut warnings)?;
@@ -223,7 +228,10 @@ pub fn import(bytes: &[u8], file_name: &str, opts: &Options) -> Result<Imported>
             _ => "aucun contour trouvé dans l'image : essayez un autre mode, un autre seuil ou « Inverser »",
         });
     }
-    let (figure, mut stats) = finish(paths, &opts, &default_name(file_name), &mut warnings)?;
+    let (mut figure, mut stats) = finish(paths, &opts, &default_name(file_name), &mut warnings)?;
+    // Named SVG groups (T-441): parts 1, 2… in order of appearance.
+    figure.parts = parts.into_iter().zip(1..=crate::figures::MAX_PARTS).map(|(name, id)| crate::figures::PartDef { id, name }).collect();
+    figure.validate()?;
     stats.kind = kind.label();
     stats.threshold = threshold;
     Ok(Imported { figure, warnings, stats })
@@ -434,7 +442,7 @@ fn simplified(p: &Path, eps: f64) -> Path {
     };
     // A closed path reduced to a sliver keeps at least a segment.
     let closed = closed && pts.len() > 2;
-    Path { pts, closed, color: p.color }
+    Path { pts, closed, color: p.color, part: p.part }
 }
 
 /// Drops the `n` shortest strokes, keeping the others in order.
@@ -515,7 +523,7 @@ fn to_stroke(p: &Path) -> Stroke {
         // Closed outlines repeat their first point.
         points.push(points[0]);
     }
-    Stroke { points, color: p.color, lit: true }
+    Stroke { points, color: p.color, lit: true, part: p.part }
 }
 
 /// Laser points per frame, exactly as the engine will draw it: the
@@ -547,7 +555,7 @@ mod tests {
     use super::*;
 
     fn square(x: f64, y: f64, s: f64) -> Path {
-        Path { pts: vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]], closed: true, color: [255, 0, 0] }
+        Path { pts: vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]], closed: true, color: [255, 0, 0], part: 0 }
     }
 
     #[test]
@@ -577,7 +585,7 @@ mod tests {
         corner.extend((1..=100).map(|i| [1.0, i as f64 / 100.0]));
         assert_eq!(rdp(&corner, 0.001), vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]);
         // A closed circle keeps its shape.
-        let circle = Path { pts: (0..400).map(|i| { let a = i as f64 / 400.0 * std::f64::consts::TAU; [a.cos(), a.sin()] }).collect(), closed: true, color: [0; 3] };
+        let circle = Path { pts: (0..400).map(|i| { let a = i as f64 / 400.0 * std::f64::consts::TAU; [a.cos(), a.sin()] }).collect(), closed: true, color: [0; 3], part: 0 };
         let s = simplified(&circle, 0.01);
         assert!(s.closed && s.pts.len() >= 8 && s.pts.len() < 40, "{}", s.pts.len());
     }
@@ -593,8 +601,8 @@ mod tests {
         let after = travel(&ordered);
         assert!(after < before * 0.5, "{before} -> {after}");
         // Open strokes are reversed when their end is closer.
-        let a = Path { pts: vec![[-1.0, 1.0], [0.0, 1.0]], closed: false, color: [0; 3] };
-        let b = Path { pts: vec![[1.0, 1.0], [0.1, 1.0]], closed: false, color: [0; 3] };
+        let a = Path { pts: vec![[-1.0, 1.0], [0.0, 1.0]], closed: false, color: [0; 3], part: 0 };
+        let b = Path { pts: vec![[1.0, 1.0], [0.1, 1.0]], closed: false, color: [0; 3], part: 0 };
         let o = order(vec![b, a]);
         assert_eq!(o[0].pts[0], [-1.0, 1.0]);
         assert_eq!(o[1].pts[0], [0.1, 1.0]);
@@ -617,17 +625,39 @@ mod tests {
         let pts = fig.frame_points(0, 1.0, |_| (1.0, 1.0, 1.0));
         assert!(crate::engine::densify(&pts).len() <= 400);
         // A figure too big even alone is kept but flagged.
-        let big = vec![Path { pts: vec![[0.0, 0.0], [1.0, 0.0]], closed: false, color: [0, 0, 255] }];
+        let big = vec![Path { pts: vec![[0.0, 0.0], [1.0, 0.0]], closed: false, color: [0, 0, 255], part: 0 }];
         let (_, stats) = finish(big, &Options { budget: 100, size: 1.0, ..Options::default() }, "x", &mut w).unwrap();
         assert!(stats.over_budget);
         assert!(w.last().unwrap().contains("trop lourde"));
     }
 
     #[test]
+    fn named_svg_groups_become_figure_parts_and_pictures_have_none() {
+        let svg = br#"<svg viewBox="0 0 100 100"><g id="Contour"><rect x="10" y="10" width="80" height="80" stroke="red"/></g>
+            <g id="Yeux"><circle cx="35" cy="40" r="5" stroke="lime"/><circle cx="65" cy="40" r="5" stroke="lime"/></g>
+            <line x1="30" y1="70" x2="70" y2="70" stroke="blue"/></svg>"#;
+        let out = import(svg, "visage.svg", &Options::default()).unwrap();
+        let names: Vec<(u8, &str)> = out.figure.parts.iter().map(|p| (p.id, p.name.as_str())).collect();
+        assert_eq!(names, [(1, "Contour"), (2, "Yeux")]);
+        let mut count = [0; 3];
+        for s in &out.figure.frames[0].strokes {
+            count[s.part as usize] += 1;
+        }
+        assert_eq!(count, [1, 1, 2], "mouth, outline, two eyes");
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        // A picture: no parts.
+        let mut png = Vec::new();
+        let img = image::RgbImage::from_fn(64, 64, |x, y| if (16..48).contains(&x) && (16..48).contains(&y) { image::Rgb([0, 0, 0]) } else { image::Rgb([255, 255, 255]) });
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let pic = import(&png, "carre.png", &Options::default()).unwrap();
+        assert!(pic.figure.parts.is_empty() && !pic.figure.has_parts());
+    }
+
+    #[test]
     fn hostile_numbers_never_reach_the_figure() {
         let paths = vec![
-            Path { pts: vec![[f64::NAN, 0.0], [1.0, 1.0]], closed: false, color: [255; 3] },
-            Path { pts: vec![[0.0, 0.0], [1e300, 1.0]], closed: false, color: [255; 3] },
+            Path { pts: vec![[f64::NAN, 0.0], [1.0, 1.0]], closed: false, color: [255; 3], part: 0 },
+            Path { pts: vec![[0.0, 0.0], [1e300, 1.0]], closed: false, color: [255; 3], part: 0 },
         ];
         let (fig, _) = finish(paths, &Options::default(), "x", &mut Vec::new()).unwrap();
         assert!(fig.frames[0].strokes.iter().flat_map(|s| &s.points).flatten().all(|v| v.is_finite() && v.abs() <= 1.0));

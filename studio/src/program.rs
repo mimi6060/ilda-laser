@@ -281,7 +281,7 @@ impl CueProgram {
         // target add up. Like the master LFOs: a brightness only dims.
         let t = raw * sec_per_beat;
         let mut deltas = [0.0f32; TARGETS.len()];
-        for m in self.lfos.iter().filter(|m| m.enabled && m.depth > 0.0) {
+        for m in self.lfos.iter().filter(|m| m.enabled && m.depth > 0.0 && m.part.is_none()) {
             let Some(i) = target_index(&m.target).filter(|i| !(ROT_SPEED..ROT_SPEED + 3).contains(i)) else { continue };
             let wave = m.wave_at(t, raw);
             let amount = m.depth.clamp(0.0, 1.0) * (wave + m.offset.clamp(-1.0, 1.0));
@@ -351,6 +351,9 @@ impl CueProgram {
             bail!("{MAX_LFOS} LFO par cue au maximum");
         }
         for m in &self.lfos {
+            if m.part.is_some() {
+                bail!("LFO : une partie de figure se module dans le panneau Modulateurs, pas dans un cue");
+            }
             match target_index(&m.target) {
                 Some(i) if !(ROT_SPEED..ROT_SPEED + 3).contains(&i) => {}
                 _ => bail!("LFO : « {} » ne peut pas être modulé dans un cue", m.target),

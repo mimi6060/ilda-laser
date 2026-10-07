@@ -9,11 +9,13 @@ use crate::beat;
 use crate::evolving::{self, EvolvingCue};
 use crate::figures::Figure;
 use crate::fonts::{self, TextStyle};
+use crate::live::{self, LiveModifiers, LiveState, Palette};
 use crate::generators::{self, GenCtx, GenParams};
 use crate::optimize::{OptimizeParams, Optimizer};
 use crate::patterns::{self, Point};
 use crate::program::{self, CueProgram, PlayMode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -474,9 +476,35 @@ pub struct Animator {
     /// The layer's point budget (`layers::Mixer::point_budget`) an
     /// abstract samples within; `None` = the default budget.
     point_budget: Option<usize>,
+    /// A figure cue's per-part modifiers this frame (T-441, `set_parts`),
+    /// with the user palettes their colours may use, and each part's
+    /// rotation and clock. Empty: the figure is drawn as it always was.
+    part_mods: BTreeMap<u8, LiveModifiers>,
+    part_palettes: Vec<Palette>,
+    part_states: BTreeMap<u8, LiveState>,
 }
 
 impl Animator {
+    /// A figure's per-part modifiers for the next `render` (T-441): applied
+    /// to each part's points, before the rotation, the optimiser and every
+    /// later stage. `None` (or empty) for anything else.
+    pub fn set_parts(&mut self, mods: Option<&BTreeMap<u8, LiveModifiers>>, user: &[Palette]) {
+        match mods.filter(|m| !m.is_empty()) {
+            Some(m) => {
+                if self.part_mods != *m {
+                    self.part_mods = m.clone();
+                }
+                if self.part_palettes != user {
+                    self.part_palettes = user.to_vec();
+                }
+            }
+            None => {
+                self.part_mods.clear();
+                self.part_states.clear();
+            }
+        }
+    }
+
     /// Sample abstracts within the mixer's point budget (call before
     /// `render`). The mixer still thins whatever goes past it.
     pub fn set_point_budget(&mut self, budget: usize) {
@@ -668,6 +696,14 @@ impl Animator {
         }
         if let Content::Figure(_) = &s.content {
             self.fig_time += dt as f64;
+            // Each part's own rotation and clock (T-441).
+            let mods = &self.part_mods;
+            self.part_states.retain(|id, _| mods.contains_key(id));
+            for (id, m) in mods {
+                let st = self.part_states.entry(*id).or_default();
+                st.set_clock(self.fig_time, clock.beat);
+                st.advance(m, dt, clock.bpm, clock.beats_per_bar);
+            }
         }
         if let Content::Ilda { .. } = &s.content {
             self.ilda_time += dt as f64;
@@ -708,10 +744,19 @@ impl Animator {
                     crate::figures::RateUnit::Beat => beat_pos,
                     crate::figures::RateUnit::Second => self.fig_time,
                 };
-                fig.frame_points(fig.frame_index(pos), scale, |c| {
+                let paint = |c| {
                     let (r, g, b) = shift_hue(c, hue_shift);
                     (r * gain, g * gain, b * gain)
-                })
+                };
+                let index = fig.frame_index(pos);
+                // Per-part modifiers (T-441), only when there are some and
+                // the figure has parts: otherwise the very same path.
+                if !self.part_mods.is_empty() && fig.has_parts() {
+                    let (points, parts) = fig.frame_points_tagged(index, scale, paint);
+                    live::apply_parts(&points, &parts, &self.part_mods, &self.part_states, &self.part_palettes)
+                } else {
+                    fig.frame_points(index, scale, paint)
+                }
             }
             // Its own hue offsets on top of the look's colour (T-440); the
             // drift follows the tempo clock (`beat_pos`).
