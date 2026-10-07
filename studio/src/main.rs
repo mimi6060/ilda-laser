@@ -965,13 +965,14 @@ impl Shared {
         speed::resolve(slot, self.mixer.layer(layer).speed_group)
     }
 
-    /// `speed.json`, when the speed groups changed (T-419).
+    /// `speed.json`, when the speed groups changed (T-419); queued for
+    /// the writer thread (T-482), the engine saves it.
     pub fn save_speed(&mut self) {
         if !std::mem::take(&mut self.speed_dirty) {
             return;
         }
         if let Some(path) = &self.speed_path {
-            save_json(path, &self.speed);
+            datafile::save_json_later(path, &self.speed);
         }
     }
 
@@ -2028,25 +2029,9 @@ impl Engine {
             }
             self.frames_since_save += 1;
             if (s.live_dirty || s.mixer_dirty || s.groups_dirty || s.fx.dirty || s.speed_dirty) && self.frames_since_save >= 60 {
-                // At most once a second, so MIDI faders don't hammer the disk.
-                if s.live_dirty {
-                    save_json(&self.live_path, &s.live);
-                }
-                s.save_speed();
-                if s.mixer_dirty {
-                    save_json(&self.layers_path, &s.mixer);
-                }
-                if s.groups_dirty {
-                    s.projection.save();
-                }
-                if s.fx.dirty {
-                    if let Err(e) = s.fx.save() {
-                        log::warn!("{e:#}");
-                    }
-                }
-                s.live_dirty = false;
-                s.mixer_dirty = false;
-                s.groups_dirty = false;
+                // At most once a second, so MIDI faders don't hammer the
+                // disk; written by the writer thread, never here (T-482).
+                save_dirty(&mut s, &self.live_path, &self.layers_path);
                 self.frames_since_save = 0;
             }
             advance_playlist(&mut s);
@@ -2629,22 +2614,29 @@ impl Engine {
         }
         // The last second of live and layer moves joins the working copy (else
         // the next start would see them only in the autosave, T-287).
-        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
-        if s.live_dirty {
-            save_json(&self.live_path, &s.live);
-        }
-        s.save_speed();
-        if s.mixer_dirty {
-            save_json(&self.layers_path, &s.mixer);
-        }
-        if s.groups_dirty {
-            s.projection.save();
-        }
-        if s.fx.dirty {
-            if let Err(e) = s.fx.save() {
-                log::warn!("{e:#}");
-            }
-        }
+        save_dirty(&mut shared.lock().unwrap_or_else(|e| e.into_inner()), &self.live_path, &self.layers_path);
+        // Everything queued, these included, is on disk before the studio exits.
+        datafile::flush();
+    }
+}
+
+/// Queues the stores the engine saves (live, speed groups, layers, group
+/// masters, FX grid) that changed, and marks them saved. Serialised here,
+/// under the lock; written by `datafile`'s writer thread (T-482), so a
+/// slow disk never holds a frame.
+fn save_dirty(s: &mut Shared, live_path: &std::path::Path, layers_path: &std::path::Path) {
+    if std::mem::take(&mut s.live_dirty) {
+        datafile::save_json_later(live_path, &s.live);
+    }
+    s.save_speed();
+    if std::mem::take(&mut s.mixer_dirty) {
+        datafile::save_json_later(layers_path, &s.mixer);
+    }
+    if std::mem::take(&mut s.groups_dirty) {
+        s.projection.save_later();
+    }
+    if s.fx.dirty {
+        s.fx.save_later();
     }
 }
 

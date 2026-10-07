@@ -856,8 +856,6 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     put(&w.routes, serde_json::to_vec_pretty(&p.audio_routes));
     put(&w.palettes, serde_json::to_vec_pretty(&p.palettes));
     put(&w.scan_presets, serde_json::to_vec_pretty(&p.scan_presets));
-    put(&w.live, serde_json::to_vec_pretty(&p.live));
-    put(&w.layers, serde_json::to_vec_pretty(&p.layers));
     for show in &p.timelines {
         put(&w.shows.join(format!("{}.json", show.name)), serde_json::to_vec_pretty(show));
     }
@@ -895,6 +893,13 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(dir) = &w.figures {
         prune(dir, &keep_figures, &valid_show_name);
+    }
+    // The engine's own files go through the writer thread, after any
+    // older copy it queued before the swap (T-482).
+    for (path, bytes) in [(&w.live, serde_json::to_vec_pretty(&p.live)), (&w.layers, serde_json::to_vec_pretty(&p.layers))] {
+        if let Err(e) = bytes.map_err(anyhow::Error::from).and_then(|b| crate::datafile::replace(path, &b)) {
+            errors.push(format!("{} : {e:#}", path.display()));
+        }
     }
     errors
 }

@@ -69,6 +69,63 @@ Failures keep a screenshot and a trace in `test-results/`
   `testProfileFiles()`, a test layout seeded into the data dir.
 - `tests/` — one file per area: `content`, `laser`, `cues`, `live`,
   `tempo`, `scenes`, `persistence`, `midi`, …
+- `soak/` — the endurance soak (`operator.ts`, the long `soak.spec.ts`),
+  a Playwright project of its own that `npm test` never runs.
+
+## Endurance soak (T-482)
+
+A scripted operator clicks through the real UI for a long time, driven by
+a seeded generator: every workspace, LIVE panel and CRÉATION tab, cue
+pages and cues, slider drags (latest wins, T-484), tap tempo and BPM, the
+timeline examples, dialogs and popovers (closed by their button or by
+Échap), project « Enregistrer sous » / « Ouvrir », a second tab coming
+and going, and explicit arm → Échap → reset cycles on the fake output.
+The warm-up starts with a tour of everything once (panels build their
+content on first use). It checks:
+
+- no page error and no crash;
+- `armed` only inside an arm window the test opened, and the fake
+  output's log: never more arms than asked, never lit while disarmed;
+- Échap always disarms (the worst delay is reported) and closes what it
+  closes; the reset clears the banner;
+- the studio stays responsive (`/api/state` polled every 250 ms) and so
+  does the page (long tasks, an animation-frame probe);
+- the engine's frame times (`/api/perf`, T-448): in a release build no
+  frame over 50 ms after the warm-up, each late frame logged with the
+  operator's step;
+- memory: the studio's `footprint`, the page's JS heap after a forced
+  garbage collection, its DOM nodes and listeners, the studio's open
+  files. Compared by floors (the lowest value of the first third of the
+  samples after the warm-up against the last third).
+
+```sh
+# the long run: release build, 120 min by default, report in docs/qa/
+npm --prefix studio/e2e run soak
+SOAK_MINUTES=20 SOAK_SEED=7 npm --prefix studio/e2e run soak
+```
+
+`npm run soak` keeps the Mac awake (`caffeinate -dims`): a Mac left
+alone goes to sleep, which freezes the studio and the browser alike. A
+run during which everything stood still for more than 30 s (a laptop
+can still doze off in « Deep Idle ») fails and says so in its report.
+
+Options: `SOAK_MINUTES` (120), `SOAK_SEED` (482; a failure replays with
+the seed printed in the report), `SOAK_WARMUP_MINUTES` (5),
+`SOAK_SAMPLE_SECONDS` (60), `SOAK_REPORT_DIR` (default `docs/qa/` when
+the checkout has a `docs/` folder, else the test's output folder). The
+report, `soak-<date>.md`, is in French: verdict, criteria, late frames,
+the memory curve.
+
+`tests/soak.spec.ts` runs the same operator for 2 minutes in the normal
+suite (debug build: frames only bounded against a stall, 250 ms; memory
+bounds looser), so the scenario itself keeps working.
+
+At night: `studio/e2e/soak.sh` (same thing, for a scheduler). With
+launchd, a `~/Library/LaunchAgents/<label>.plist` whose
+`ProgramArguments` is the script's absolute path and whose
+`StartCalendarInterval` is the hour; or a crontab line such as
+`0 3 * * * /path/to/ilda-laser/studio/e2e/soak.sh`. It never uses
+`--device`, port 8080 or `studio-data/`, like every spec here.
 
 ## Safety invariants (T-264)
 

@@ -93,6 +93,33 @@ test('Shift+Escape is logged as a plain disarm from the keyboard; a refused arm 
   expect(lines[2].text).toContain('Armement refusé');
 });
 
+// T-482 (found by the soak): with the panel open, the page fetched the
+// whole day every 2 s and rebuilt every row; a show day's thousands of
+// events grew the page and froze it. Now the newest 300 rows, rebuilt only
+// when the log changed, and a line pointing to the CSV for the rest.
+test('a long day shows its newest 300 rows, with a pointer to the CSV, and is not rebuilt at rest', async ({ page }) => {
+  for (let i = 0; i < 170; i++) {
+    expect(await studio.post('/api/arm', { on: true })).toBe(200);
+    expect(await studio.post('/api/arm', { on: false })).toBe(200);
+  }
+  const total = (await log()).events.length;
+  expect(total).toBeGreaterThan(340);
+  await openWorkspace(page, 'settings');
+  await page.locator('#safetyLogPanel > summary').click();
+  await expect(page.locator('#slRows tr[data-kind]')).toHaveCount(300);
+  await expect(page.locator('#slMore')).toContainText(`${total - 300} événement(s) plus ancien(s)`);
+  await expect(page.locator('#slMore')).toContainText('Exporter CSV');
+  await expect(page.locator('#slRows tr').first()).toHaveAttribute('data-kind', 'disarm');
+  // At rest, the 2 s refresh keeps the same rows (no rebuild).
+  await page.locator('#slRows tr').first().evaluate(tr => { tr.setAttribute('data-mark', '1'); });
+  await page.waitForTimeout(2_500);
+  await expect(page.locator('#slRows tr').first()).toHaveAttribute('data-mark', '1');
+  // A new event comes in at the top.
+  expect(await studio.post('/api/arm', { on: true })).toBe(200);
+  await expect(page.locator('#slRows tr').first()).toHaveAttribute('data-kind', 'arm', { timeout: 5_000 });
+  expect(await studio.post('/api/arm', { on: false })).toBe(200);
+});
+
 test('safety settings changes are logged with before and after', async () => {
   const start = (await log()).events.length;
   const { settings } = await studio.get('/api/safety');

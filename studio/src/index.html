@@ -5469,9 +5469,12 @@ const SAFETY_SHORTCUTS = [
     down: () => { setArmed(false, 'keyboard'); afterEscape(); } },
 ];
 // After the stop, never instead of it: end a hold-key pick, a MIDI learn, the help.
+// The bell and history panels and the top menus close too (T-482): they
+// sit under the top bar, where the stop's banner and its reset appear.
 function afterEscape() {
   pickingHoldKey = false;
   try { stopLearning(); closeKeysHelp(); closeTlExamples(); closeVapcMenu(); closeSearch(); closeViewsMenu(); } catch (err) { console.warn('Échap', err); }
+  try { if (NC.open) setNoticePanel(false); if (HIST.open) setHistoryPanel(false); closeHelpMenu(); $('projMenu').hidden = true; } catch (err) { console.warn('Échap', err); }
 }
 let restShortcuts = null;
 function buildShortcuts() {
@@ -8395,10 +8398,19 @@ async function loadSafetyLog() {
   $('slError').textContent = st.last_error ? `Écriture du journal impossible : ${st.last_error}` : (st.dropped ? `${st.dropped} événement(s) perdu(s) (journal saturé).` : '');
   showSafetyLog();
 }
+// T-482: the newest rows only, and rebuilt only when the log changed. A
+// show day logs thousands of events; with the panel open, rebuilding them
+// all every 2 s grew the page and froze it for seconds. The CSV has all.
+const SL_MAX_ROWS = 300;
 function showSafetyLog() {
   if (!slLog) return;
   const group = SL_GROUPS[$('slKind').value];
-  const rows = slLog.events.filter(e => !group || group.includes(e.kind)).reverse();
+  const last = slLog.events[slLog.events.length - 1];
+  const key = [slLog.date, slLog.events.length, last ? last.ts : '', $('slKind').value].join('|');
+  if ($('slRows').dataset.key === key) return;
+  $('slRows').dataset.key = key;
+  const all = slLog.events.filter(e => !group || group.includes(e.kind)).reverse();
+  const rows = all.slice(0, SL_MAX_ROWS);
   $('slRows').replaceChildren(...rows.map(e => {
     const tr = document.createElement('tr');
     tr.className = 'k-' + e.kind;
@@ -8411,6 +8423,13 @@ function showSafetyLog() {
     }
     return tr;
   }));
+  if (all.length > rows.length) {
+    const tr = document.createElement('tr'), td = document.createElement('td');
+    tr.id = 'slMore';
+    td.colSpan = 3; td.className = 't';
+    td.textContent = `… et ${all.length - rows.length} événement(s) plus ancien(s) ce jour-là : « Exporter CSV » les contient tous.`;
+    tr.append(td); $('slRows').append(tr);
+  }
   if (!rows.length) {
     const tr = document.createElement('tr'), td = document.createElement('td');
     td.colSpan = 3; td.className = 't'; td.textContent = 'Aucun événement.';

@@ -307,6 +307,15 @@ impl FxStore {
         &self.grid
     }
 
+    /// `save` without waiting for the disk: the engine's once-a-second
+    /// save, written by the writer thread after any earlier `save` (T-482).
+    pub fn save_later(&mut self) {
+        self.dirty = false;
+        if let Some(path) = &self.path {
+            crate::datafile::save_json_later(path, &self.grid);
+        }
+    }
+
     pub fn save(&mut self) -> Result<()> {
         self.dirty = false;
         let Some(path) = &self.path else { return Ok(()) };
