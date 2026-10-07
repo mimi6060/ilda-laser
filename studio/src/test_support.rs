@@ -5,14 +5,30 @@ use crate::scenes::SceneStore;
 use crate::{controls, cues, layers, lfo, live, midi, presets, tempo, timeline, Shared};
 use std::time::Instant;
 
-static ILDA_DIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SCRATCH_DIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// A fresh `Shared` like the one `main` builds, with scenes stored in a
-/// path that is never written unless a test saves a scene.
+/// T-483: a data folder of its own for one test: process id plus a
+/// counter, so neither the tests of this binary (they run in parallel)
+/// nor other `cargo test` runs on the same machine (other worktrees)
+/// ever share it. Not created: it only appears once a test writes there.
+///
+/// It replaces the fixed `$TMPDIR/laser-studio-test-unused/` that every
+/// `shared()` used to load its LFOs, audio routes, scenes, palettes and
+/// scan presets from. A test that saved one (an LFO on `master.size`)
+/// leaked it into every later `shared()`, in this run or in another
+/// one, and four tests then failed "under load" (more runs at once).
+pub fn scratch_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("laser-studio-test-{}-{}", std::process::id(), SCRATCH_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+}
+
+/// A fresh `Shared` like the one `main` builds. Its stores (scenes, LFOs,
+/// audio routes...) live in a `scratch_dir` of its own: they start empty,
+/// and what a test saves is seen by that test only.
 pub fn shared() -> Shared {
+    let data = scratch_dir();
     // One Art-Net box setting (T-301) for the backend and the handlers.
     let shownet_dmx = std::sync::Arc::new(crate::artnet::ShowNetDmxStore::in_memory());
-    let mut backend = crate::output_manager::FakeBackend::new(Vec::new(), None, None, std::env::temp_dir().join("laser-studio-test-unused"));
+    let mut backend = crate::output_manager::FakeBackend::new(Vec::new(), None, None, data.clone());
     backend.artnet = std::sync::Arc::clone(&shownet_dmx);
     let output_mgr = std::sync::Arc::new(crate::output_manager::OutputManager::new(
         std::sync::Arc::new(backend),
@@ -24,8 +40,8 @@ pub fn shared() -> Shared {
     let controls = controls::ControlRegistry::build(&presets);
     let mut grid = crate::grid::CueGrid::default();
     grid.resolve(&presets);
-    let lfos = lfo::LfoStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/lfos.json"), &controls);
-    let routes = crate::audio::routes::RouteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/audio_routes.json"), &controls);
+    let lfos = lfo::LfoStore::load_or_create(data.join("lfos.json"), &controls);
+    let routes = crate::audio::routes::RouteStore::load_or_create(data.join("audio_routes.json"), &controls);
     let fx = crate::fx::FxStore::in_memory(&controls);
     // One latch for the gate and the network listeners' blackout path.
     let estop: std::sync::Arc<crate::interlock::EStop> = Default::default();
@@ -44,7 +60,7 @@ pub fn shared() -> Shared {
         output_error: None,
         applog: Default::default(),
         pps: 30_000,
-        scenes: SceneStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scenes.json")),
+        scenes: SceneStore::load_or_create(data.join("scenes.json")),
         sdbank: crate::sdbank::SdBankStore::in_memory(),
         recorder: crate::record::Recorder::default(),
         shownet_dmx,
@@ -70,8 +86,8 @@ pub fn shared() -> Shared {
         live: live::LiveModifiers::default(),
         live_dirty: false,
         cue_mods: Default::default(),
-        palettes: live::PaletteStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/palettes.json")),
-        scan_presets: crate::scan::ScanPresetStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scan_presets.json")),
+        palettes: live::PaletteStore::load_or_create(data.join("palettes.json")),
+        scan_presets: crate::scan::ScanPresetStore::load_or_create(data.join("scan_presets.json")),
         pools: crate::pools::PoolStore::in_memory(),
         festival: Default::default(),
         midi: midi::MidiState::new(false, midi::profile::ProfileStore::in_memory()),
@@ -96,16 +112,12 @@ pub fn shared() -> Shared {
         timeline: timeline::Player::default(),
         figures: crate::figures::FigureStore::in_memory(),
         user_cues: crate::usercues::UserCueStore::in_memory(),
-        shows: timeline::ShowStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id())).join("shows")),
-        templates: crate::templates::TemplateStore::new(std::env::temp_dir().join(format!("laser-studio-test-shows-{}", std::process::id())).join("templates")),
-        media: std::sync::Arc::new(crate::audio::media::MediaStore::new(&std::env::temp_dir().join(format!("laser-studio-test-media-{}", std::process::id())))),
+        shows: timeline::ShowStore::new(data.join("shows")),
+        templates: crate::templates::TemplateStore::new(data.join("templates")),
+        media: std::sync::Arc::new(crate::audio::media::MediaStore::new(&data)),
         autoshow: Default::default(),
-        // Its own folder per call: tests import in parallel.
-        ilda: std::sync::Arc::new(crate::ilda_library::IldaLibrary::new(&std::env::temp_dir().join(format!(
-            "laser-studio-test-ilda-{}-{}",
-            std::process::id(),
-            ILDA_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        )))),
+        // In the call's own folder like every store: tests import in parallel.
+        ilda: std::sync::Arc::new(crate::ilda_library::IldaLibrary::new(&data)),
         // No song-playback thread in unit tests: the timeline runs on the system clock.
         song: std::sync::Arc::new(crate::audio::playback::SongHub::new(Instant::now(), false)),
         song_sync: Default::default(),
@@ -113,7 +125,7 @@ pub fn shared() -> Shared {
         // of presence build an enforced one themselves.
         presence: Default::default(),
         health: Default::default(),
-        project: crate::project::ProjectState::load(&std::env::temp_dir().join("laser-studio-test-unused")),
+        project: crate::project::ProjectState::load(&data),
         test_pattern: Default::default(),
         zone_trace: Default::default(),
         keep_awake: crate::keep_awake::KeepAwakeState::in_memory(),
@@ -219,6 +231,33 @@ mod tests {
     #[test]
     fn the_test_binary_has_a_time_limit() {
         std::mem::forget(time_guard("the whole unit-test binary", BINARY_LIMIT));
+    }
+
+    /// T-483: what one test saves (an LFO on the master size, an audio
+    /// route on the master brightness, a scene) never reaches another
+    /// test's `shared()`. A shared folder once leaked such an LFO into
+    /// four safety and state-stream tests, in this run and in other runs
+    /// on the same machine.
+    #[test]
+    fn what_a_test_saves_never_reaches_another_shared() {
+        let mut a = shared();
+        let (lfo_path, routes_path) = (a.lfos.path().to_path_buf(), a.routes.path().to_path_buf());
+        let lfo = lfo::Modulator { target: "master.size".into(), ..Default::default() };
+        a.lfos.set(vec![lfo], &a.controls).unwrap();
+        let mut routing = a.routes.routing().clone();
+        routing.routes.push(crate::audio::routes::AudioRoute { target: "master.brightness".into(), ..Default::default() });
+        a.routes.set(routing, &a.controls).unwrap();
+        a.scenes.upsert(crate::scenes::Scene { name: "leak".into(), settings: Settings::default(), duration_secs: 4.0 }).unwrap();
+        assert!(lfo_path.exists() && routes_path.exists(), "the stores were saved");
+
+        let b = shared();
+        assert_ne!(b.lfos.path().parent(), a.lfos.path().parent(), "a folder of its own");
+        assert!(b.lfos.list().is_empty(), "an LFO leaked: {:?}", b.lfos.list());
+        assert!(b.routes.routing().routes.is_empty(), "an audio route leaked");
+        assert!(b.scenes.list().is_empty(), "a scene leaked");
+        assert_ne!(scratch_dir(), scratch_dir());
+        assert!(scratch_dir().starts_with(std::env::temp_dir()));
+        let _ = std::fs::remove_dir_all(lfo_path.parent().unwrap());
     }
 
     #[test]

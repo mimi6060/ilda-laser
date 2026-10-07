@@ -3335,7 +3335,7 @@ fn run_scan_limits_case(seed: u64) -> Result<(), String> {
     let limits = scan.scan_limits(pps);
     let base = crate::optimize::OptimizeParams { enabled: true, ..Default::default() };
     let mixer = crate::layers::Mixer { optimizer: base.clone(), ..Default::default() };
-    let presets = crate::scan::ScanPresetStore::load_or_create(std::env::temp_dir().join("laser-studio-test-unused/scan_presets.json"));
+    let presets = crate::scan::ScanPresetStore::load_or_create(test_support::scratch_dir().join("scan_presets.json"));
     let master = if rng.chance(0.1) { f32::NAN } else { rng.range(-1.0, 3.0) };
     let chosen = *rng.pick(&[None, Some(crate::scan::GRAPHICS)]);
     let p = presets.resolve(chosen, &mixer, &limits, master);

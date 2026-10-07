@@ -900,7 +900,7 @@ mod tests {
 
     /// A manager on a fake backend with two devices, already scanned.
     fn manager(auto: bool) -> (OutputManager, Arc<AtomicBool>, Arc<AtomicUsize>) {
-        let backend = FakeBackend::new(vec![dev("a"), dev("b")], None, None, std::env::temp_dir());
+        let backend = FakeBackend::new(vec![dev("a"), dev("b")], None, None, crate::test_support::scratch_dir());
         let (dropped, opens) = (Arc::clone(&backend.dropped), Arc::clone(&backend.opens));
         let list = Arc::new(DeviceList::fixed(backend.devices.clone()));
         list.refresh();
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn the_fake_backend_never_opens_anything_unknown() {
-        let backend = FakeBackend::new(vec![dev("a")], None, Some("127.0.0.1:9".parse().unwrap()), std::env::temp_dir());
+        let backend = FakeBackend::new(vec![dev("a")], None, Some("127.0.0.1:9".parse().unwrap()), crate::test_support::scratch_dir());
         assert!(backend.open("helios:left", 30_000).is_err());
         assert!(backend.open("ponk:127.0.0.1:5583", 30_000).is_err(), "PONK only to --ponk's address");
         assert!(backend.open(TEST_ID, 30_000).is_err(), "no --test-output");
@@ -1105,7 +1105,7 @@ mod tests {
 
     #[test]
     fn unplugging_a_fake_output_reports_a_fault() {
-        let backend = FakeBackend::new(vec![dev("a")], None, None, std::env::temp_dir());
+        let backend = FakeBackend::new(vec![dev("a")], None, None, crate::test_support::scratch_dir());
         let out = backend.open("a", 30_000).unwrap();
         assert_eq!(out.fault(), None);
         backend.dropped.store(true, Ordering::SeqCst);
@@ -1115,7 +1115,7 @@ mod tests {
 
     #[test]
     fn the_real_backend_lists_the_ponk_target_without_scanning() {
-        let backend = RealBackend { ponk: crate::ponk::DEFAULT_TARGET.parse().unwrap(), data_dir: std::env::temp_dir(), artnet: Arc::new(crate::artnet::ShowNetDmxStore::in_memory()) };
+        let backend = RealBackend { ponk: crate::ponk::DEFAULT_TARGET.parse().unwrap(), data_dir: crate::test_support::scratch_dir(), artnet: Arc::new(crate::artnet::ShowNetDmxStore::in_memory()) };
         let fixed = backend.fixed();
         assert_eq!(fixed.len(), 1, "the Art-Net box is off by default");
         assert_eq!((fixed[0].kind.as_str(), fixed[0].id.as_str()), ("ponk", "ponk:127.0.0.1:5583"));
@@ -1130,7 +1130,7 @@ mod tests {
         use crate::interlock::EStop;
         use crate::output::OutputStage;
         let fake = crate::shownet::fake::FakeShowNet::new(&[("box-1", 100_000)]);
-        let mut backend = FakeBackend::new(Vec::new(), None, None, std::env::temp_dir());
+        let mut backend = FakeBackend::new(Vec::new(), None, None, crate::test_support::scratch_dir());
         backend.shownet = Some(Arc::new(fake.clone()));
         let list = Arc::new(DeviceList::fixed(Vec::new()));
         let mgr = OutputManager::new(Arc::new(backend), list, &OutputPrefs::default(), 150_000);
@@ -1158,7 +1158,7 @@ mod tests {
         drop(stage.replace(None));
         assert!(fake.events.lock().unwrap().iter().all(|e| !matches!(e, crate::shownet::fake::Event::Frame { pps, .. } if *pps != 100_000)), "rate capped");
         // An unknown box fails to open, without an SDK nothing does.
-        assert!(FakeBackend::new(Vec::new(), None, None, std::env::temp_dir()).open("shownet:box-1", 30_000).is_err());
+        assert!(FakeBackend::new(Vec::new(), None, None, crate::test_support::scratch_dir()).open("shownet:box-1", 30_000).is_err());
     }
 
     /// The ShowNET SD card output (T-301): listed once an address is set,
@@ -1169,7 +1169,7 @@ mod tests {
         use crate::artnet::{ShowNetDmxConfig, ShowNetDmxStore};
         let (rx, addr) = crate::artnet::tests::receiver();
         let store = Arc::new(ShowNetDmxStore::in_memory());
-        let mut backend = FakeBackend::new(Vec::new(), None, None, std::env::temp_dir());
+        let mut backend = FakeBackend::new(Vec::new(), None, None, crate::test_support::scratch_dir());
         backend.artnet = Arc::clone(&store);
         assert!(backend.fixed().is_empty(), "off by default");
         store.set(ShowNetDmxConfig { target: Some(addr.to_string()), ..Default::default() }).unwrap();

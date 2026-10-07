@@ -3687,7 +3687,7 @@ mod tests {
             let hub = Arc::clone(&shared.lock().unwrap().push);
             let web = std::thread::spawn({
                 let (shared, running) = (Arc::clone(shared), Arc::clone(running));
-                move || web::serve(server, shared, estop, std::env::temp_dir().join("laser-studio-test-unused/calibration.json"), running)
+                move || web::serve(server, shared, estop, crate::test_support::scratch_dir().join("calibration.json"), running)
             });
             // A reader with a tiny buffer that never reads: the stream and
             // twenty frame requests, all left unread.
