@@ -82,11 +82,14 @@ pub enum Section {
     Pools,
     /// The agenda (T-455): its switch and entries. Not what it played.
     Agenda,
+    /// The autopilot's pages and public content (T-148). Not its switch,
+    /// rhythm and order: those are live controls.
+    Autopilot,
 }
 
 use Section::*;
 
-const ALL: [Section; 19] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda];
+const ALL: [Section; 20] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda, Autopilot];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -110,6 +113,7 @@ impl Section {
             ShowList => "showlist",
             Pools => "pools",
             Agenda => "agenda",
+            Autopilot => "autopilot",
         }
     }
 
@@ -142,6 +146,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/showlist" => &[ShowList],
         "/api/agenda" => &[Agenda],
         "/api/pools" | "/api/pools/delete" | "/api/pools/capture" => &[Pools],
+        "/api/autopilot" => &[Autopilot],
         _ => return None,
     })
 }
@@ -172,6 +177,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         ShowList => json!(s.showlist.list().items),
         Pools => json!(s.pools.list()),
         Agenda => json!(s.agenda.agenda()),
+        Autopilot => crate::autopilot::capture(s),
     }
 }
 
@@ -268,6 +274,8 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         // even if a cue refers to it since (that cue plays its own values).
         Pools => s.pools.set(from(v)?).map_err(bad)?,
         Agenda => crate::agenda::set(s, from(v)?).map_err(|e| (400, e))?,
+        // Checked again (a page it names may be gone since).
+        Autopilot => crate::autopilot::set_config(s, from(v)?).map_err(|e| (400, e))?,
     }
     Ok(())
 }
@@ -520,6 +528,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, Scenes) => named(list_change(old, new, "name", "name"), "Scène", "Scènes", true, "enregistré"),
         (_, UserCues) => named(list_change(old, new, "id", "name"), "Cue", "Cues", true, "créé"),
         (_, Palettes) => named(list_change(old, new, "name", "name"), "Palette", "Palettes", true, "ajouté"),
+        (_, Autopilot) => "Pilote automatique modifié".into(),
         (_, Pools) => named(list_change(old, new, "id", "name"), "Préréglage", "Préréglages", false, "ajouté"),
         (_, ScanPresets) => named(list_change(old, new, "id", "name"), "Préréglage de balayage", "Préréglages de balayage", false, "ajouté"),
         (_, CueLists) => named(list_change(old, new, "name", "name"), "Liste de cues", "Listes de cues", true, "créé"),

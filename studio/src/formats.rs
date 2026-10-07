@@ -121,6 +121,7 @@ pub const DATA_FILES: &[DataFile] = &[
     file("festival.json", false),
     file("latency.json", false),
     file("audio_triggers.json", false),
+    file("autopilot.json", false),
     file("shownet_artnet.json", false),
     file("prefs.json", false),
     file("recent.json", false),

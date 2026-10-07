@@ -1496,6 +1496,8 @@ struct Coverage {
     sent_lit_with_spread: usize,
     /// Playbacks the agenda started (T-455).
     agenda_starts: usize,
+    /// Cues the autopilot started (T-148).
+    autopilot_changes: u64,
 }
 
 impl Coverage {
@@ -1528,6 +1530,7 @@ impl Coverage {
             sent_lit_with_zone_chase,
             sent_lit_with_spread,
             agenda_starts,
+            autopilot_changes,
         } = o;
         self.frames += frames;
         self.sent_lit += sent_lit;
@@ -1553,7 +1556,65 @@ impl Coverage {
         self.sent_lit_with_zone_chase += sent_lit_with_zone_chase;
         self.sent_lit_with_spread += sent_lit_with_spread;
         self.agenda_starts += agenda_starts;
+        self.autopilot_changes += autopilot_changes;
     }
+}
+
+/// The autopilot (T-148), as the UI and a controller could set it: pages
+/// (now and then one that doesn't exist, which must be refused), public
+/// content allowed or not, cells skipped or tagged « public », the rhythm
+/// and order, the switch; the next bar boundary moved inside the session
+/// so it has a change to make.
+fn random_autopilot(s: &mut Shared, rng: &mut Rng, seed: u64) -> Result<(), String> {
+    s.autopilot.seed(seed);
+    let n = s.grid.page_count();
+    let pages: Vec<u8> = (0..rng.below(3)).map(|_| 1 + rng.below(n + 1) as u8).collect();
+    let bad = pages.iter().any(|&p| p as usize > n);
+    let r = crate::autopilot::set_config(s, crate::autopilot::AutopilotEdit { pages, allow_audience: rng.chance(0.3) });
+    if bad != r.is_err() {
+        return Err(format!("autopilot pages: {r:?} with a missing page: {bad}"));
+    }
+    let cells: Vec<String> = s.grid.view().iter().flat_map(|p| p.cells.iter().flatten().cloned()).collect();
+    for _ in 0..rng.below(8) {
+        if cells.is_empty() {
+            break;
+        }
+        let id = rng.pick(&cells).clone();
+        let mut slot = s.deck.slot(&id);
+        if rng.chance(0.5) {
+            slot.vlj_skip = true;
+        } else {
+            slot.tags.push(rng.pick(&["public", "Public", "audience"]).to_string());
+        }
+        s.deck.set_slot(&id, slot);
+    }
+    random_autopilot_move(s, rng);
+    autopilot_on_soon(s, rng);
+    Ok(())
+}
+
+/// The operator switches the autopilot on (from the screen or a pad) and
+/// its next change comes 0.05 to 0.4 s later: the sessions are short, so
+/// the bar boundary is moved there (« Recaler sur le 1 » would do it).
+fn autopilot_on_soon(s: &mut Shared, rng: &mut Rng) {
+    let _ = controls::apply(s, "vlj.enabled", ControlInput::Value(1.0), rng.chance(0.5));
+    let t = s.now_s();
+    let period = (s.tempo.beats_per_bar.max(1) as u32 * s.autopilot.config().every_bars.max(1) as u32) as f64;
+    let ahead = rng.range(0.05, 0.4) as f64 * s.tempo.bpm / 60.0;
+    let shift = (period - ahead) - s.tempo.effect_beat_at(t).rem_euclid(period);
+    s.tempo.nudge(shift);
+}
+
+/// One autopilot move from the UI or a controller: the switch, the
+/// rhythm, the order.
+fn random_autopilot_move(s: &mut Shared, rng: &mut Rng) {
+    let external = rng.chance(0.5);
+    let _ = match rng.below(4) {
+        0 => controls::apply(s, "vlj.enabled", ControlInput::Value(rng.chance(0.6) as u8 as f32), external),
+        1 => crate::autopilot::set_enabled(s, rng.chance(0.6), ArmSource::Ui).map_err(controls::ControlError::Refused),
+        2 => controls::apply(s, "vlj.order", ControlInput::Norm(rng.f()), external),
+        _ => controls::apply(s, "vlj.every", ControlInput::Value(rng.below(5) as f32), external),
+    };
 }
 
 /// A random executor bank (T-418), as `POST /api/executors` could send it
@@ -2379,6 +2440,12 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
     if spread_on {
         random_spread(&mut rig.s(), &mut spread_rng, true);
     }
+    // The autopilot (T-148), from its own stream.
+    let mut vlj_rng = Rng::new(seed ^ 0x0148_0148);
+    let autopilot_on = vlj_rng.chance(0.5);
+    if autopilot_on {
+        random_autopilot(&mut rig.s(), &mut vlj_rng, seed)?;
+    }
     let mut beats = 0;
     for frame in 0..frames {
         // The hang guard sees the session move on (T-486).
@@ -2562,6 +2629,18 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
         }
         if trng.chance(0.05) {
             random_transitions(&mut rig.s(), &mut trng);
+        }
+        if autopilot_on && vlj_rng.chance(0.08) {
+            let mut s = rig.s();
+            let armed = s.gate.is_armed();
+            if vlj_rng.chance(0.6) {
+                autopilot_on_soon(&mut s, &mut vlj_rng);
+            } else {
+                random_autopilot_move(&mut s, &mut vlj_rng);
+            }
+            if s.gate.is_armed() != armed {
+                return Err(format!("frame {frame}: an autopilot move changed the arming"));
+            }
         }
         if fx_on && xrng.chance(0.25) {
             let mut s = rig.s();
@@ -2751,6 +2830,13 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
             }
             (s.triggers.engine.fired_total(), s.triggers.enabled() && !s.estop.is_latched())
         };
+        let (changes_before, autopilot_may_act) = {
+            let s = rig.s();
+            if s.estop.is_latched() && s.autopilot.enabled() {
+                return Err(format!("frame {frame}: autopilot on with the e-stop latched"));
+            }
+            (s.autopilot.changes(), s.autopilot.enabled())
+        };
         rig.tick();
         if rig.s().gate.is_armed() && !armed_before {
             return Err(format!("frame {frame}: the engine frame armed the laser"));
@@ -2765,6 +2851,31 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
                 return Err(format!("frame {frame}: audio automation still on after an e-stop"));
             }
             cov.trigger_actions += fired;
+        }
+        {
+            let s = rig.s();
+            let changed = s.autopilot.changes() - changes_before;
+            if changed > 1 {
+                return Err(format!("frame {frame}: {changed} autopilot changes in one frame"));
+            }
+            if changed > 0 && (!autopilot_may_act || s.estop.is_latched()) {
+                return Err(format!("frame {frame}: an autopilot change with it off or the e-stop latched"));
+            }
+            if s.estop.is_latched() && s.autopilot.enabled() {
+                return Err(format!("frame {frame}: autopilot still on after an e-stop"));
+            }
+            if changed > 0 {
+                let id = s.autopilot.last_pick().unwrap_or_default();
+                let slot = s.deck.slot(id);
+                let public = slot.tags.iter().any(|t| crate::autopilot::PUBLIC_TAGS.contains(&t.to_lowercase().as_str()));
+                if slot.vlj_skip || slot.show.is_some() || (public && !s.autopilot.config().allow_audience) {
+                    return Err(format!("frame {frame}: the autopilot picked « {id} », a cell it must skip"));
+                }
+                if matches!(slot.mode.unwrap_or(s.deck.click_mode), ClickMode::Flash | ClickMode::Solo) {
+                    return Err(format!("frame {frame}: the autopilot picked the held cue « {id} »"));
+                }
+            }
+            cov.autopilot_changes += changed;
         }
         // The frame ran in the mode it ends in: the engine only ever ends
         // audience scanning, at its top (invariants 8 to 10).
@@ -3004,6 +3115,10 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.sent_lit_with_spread) > SPREAD_GATE, "only {} of {} frames sent light while a cue was spread", cov.sent_lit_with_spread, cov.frames);
         eprintln!("coverage: playbacks started by the agenda {}", cov.agenda_starts);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
+        eprintln!("coverage: autopilot changes {}", cov.autopilot_changes);
+        // ~22 at 1000 cases: the fuzz's own presses win over it most of
+        // the time (operator first), and its disarms switch it off.
+        assert!(cov.autopilot_changes > seeds.len() as u64 / 100, "only {} autopilot changes in {} cases", cov.autopilot_changes, seeds.len());
     }
 }
 

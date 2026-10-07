@@ -14,6 +14,7 @@ mod agenda;
 mod applog;
 mod artnet;
 mod audience;
+mod autopilot;
 mod audio;
 mod autosave;
 mod backup;
@@ -462,6 +463,10 @@ pub struct Shared {
     /// that press cues on a kick, a drop, a break… Their switch is memory
     /// only and off at start; they never arm.
     pub triggers: audio::triggers::TriggerStore,
+    /// Pilote automatique (autopilot.rs, autopilot.json, T-148): presses a
+    /// cue every N bars. Its switch is memory only and off at start; it
+    /// never arms.
+    pub autopilot: autopilot::AutopilotStore,
     /// The four cue layers and the point budget (layers.rs), saved to
     /// layers.json when changed.
     pub mixer: layers::Mixer,
@@ -956,6 +961,8 @@ impl Shared {
         // and so does the audio automation (T-240).
         external::sync(self);
         audio::triggers::sync_estop(self);
+        // The autopilot too (T-148); the reset doesn't switch it back on.
+        autopilot::sync_stops(self);
         // Timecode restarts nothing until TC-IN is armed again (T-168).
         timecode::sync(self);
         // The haze button lets go; the DMX output sends zeros (T-453).
@@ -1549,6 +1556,7 @@ fn startup_state(cli: &Cli) -> Shared {
         routes,
         fx,
         triggers: audio::triggers::TriggerStore::load(cli.data_dir.join("audio_triggers.json")),
+        autopilot: autopilot::AutopilotStore::load(cli.data_dir.join("autopilot.json")),
         mixer: {
             let mut m: layers::Mixer = load_json(&cli.data_dir.join("layers.json"));
             m.sanitize();
@@ -2120,6 +2128,10 @@ impl Engine {
             // and a disarm end them first.
             let macro_beat = s.tempo.beat_at(t);
             macros::frame(&mut s, t, macro_beat);
+            // Pilote automatique (T-148): on the bar it is due, one cue
+            // pressed on the boundary, before the deck. E-stop or disarm:
+            // switched off. It never arms.
+            autopilot::frame(&mut s, t);
             // Quantised launches due now start, finished transitions end;
             // with the e-stop latched, every transition is cut (T-158/159).
             controls::deck_frame(&mut s, t);

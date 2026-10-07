@@ -1665,6 +1665,20 @@
   #latMenu input[type=range] { width: 100%; padding: 0; font-size: inherit; text-shadow: none; }
   #latMenu .hint { margin: 0; font-size: 11px; }
   #latMenu button { background: #ffffff0d; color: #fff; }
+  /* Pilote automatique (T-148): one popover under whichever button opened
+     it (top bar or LIVE › Cues), on the common tokens (T-434). */
+  .vlj-open.active { border-color: var(--accent); color: var(--accent); }
+  .vlj-open.waiting { border-color: var(--warn); color: var(--warn); }
+  #vljMenu { position: fixed; z-index: 30; width: 280px; display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); box-shadow: 0 8px 24px #0008; }
+  #vljMenu[hidden] { display: none; }
+  #vljMenu .row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+  #vljMenu label, #vljMenu .vlj-sub { font-size: 12px; color: var(--muted); }
+  #vljMenu .vlj-title { font-weight: 600; }
+  #vljMenu .hint { margin: 0; font-size: var(--fs-small); }
+  .vlj-pages { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px var(--sp-2); max-height: 160px; overflow: auto; }
+  .vlj-pages .row { justify-content: flex-start; }
+  .vlj-pages label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #cueMenu .cm-vlj { justify-content: flex-start; gap: var(--sp-2); }
   #latFlash { width: 16px; height: 16px; border-radius: 50%; background: #2a2f44; }
   #latFlash.on { background: var(--accent); box-shadow: 0 0 12px var(--accent); }
   .beats span.suggest { outline: 2px dashed var(--warn); outline-offset: 2px; }
@@ -2047,10 +2061,29 @@
         <div class="hint">Ne retarde jamais l'arrêt : Échap, noir et désarmement agissent sur l'image suivante.</div>
       </div>
     </span>
+    <!-- Pilote automatique (T-148): a cue of the page every N bars. It only
+         launches cues: never arms; an e-stop or a disarm switches it off.
+         Also in LIVE › Cues (the top bar hides it under 1360 px). -->
+    <button id="vljBtn" class="tb-extra vlj-open" aria-haspopup="true" aria-expanded="false" aria-controls="vljMenu" title="Pilote automatique : change de cue toutes les N mesures (coupé)">Pilote</button>
     <!-- Temps 1 (T-235): the detected "1", dotted on its beat dot. -->
     <span class="hint hint--inline" id="downbeatHint" title="Temps 1 suggéré par l'analyse audio (voyant en pointillé). En Tempo auto, la mesure ne se recale seule que sur un drop ou quand la détection devient sûre." hidden>Temps 1 suggéré</span>
     <button id="downbeatAccept" data-ctl="tempo.downbeat_accept" data-control="tempo.downbeat_accept" title="tempo.downbeat_accept : recaler la mesure sur le temps 1 suggéré" hidden>Accepter</button>
     <span class="hint tb-extra hint--inline" id="phraseHint" title="Mesure dans la phrase (8 ou 16 mesures), comptée depuis le dernier drop ou la dernière fin de break" hidden></span>
+  </div>
+  <!-- The autopilot's menu (T-148), opened from the top bar or LIVE › Cues. -->
+  <div id="vljMenu" role="group" aria-label="Pilote automatique" hidden>
+    <div class="row"><span class="vlj-title">Pilote automatique</span><button id="vljToggle" aria-pressed="false" data-control="vlj.enabled" title="vlj.enabled : n'arme jamais le laser ; l'arrêt d'urgence ou un désarmement le coupe">Activer</button></div>
+    <label for="vljEvery">Changement</label>
+    <select id="vljEvery" data-control="vlj.every" title="vlj.every">
+      <option value="0">Toutes les mesures</option><option value="1">Toutes les 2 mesures</option><option value="2">Toutes les 4 mesures</option><option value="3">Toutes les 8 mesures</option>
+    </select>
+    <label for="vljOrder">Ordre</label>
+    <select id="vljOrder" data-control="vlj.order" title="vlj.order"><option value="0">Dans l'ordre</option><option value="1">Aléatoire</option></select>
+    <div class="vlj-sub" id="vljPagesLabel">Pages (aucune cochée = page affichée)</div>
+    <div id="vljPages" class="vlj-pages" role="group" aria-labelledby="vljPagesLabel"></div>
+    <div class="row"><label for="vljAudience" title="Cues dont la case porte l'étiquette « public » : jamais choisis sans cette case">Autoriser le contenu « public »</label><input type="checkbox" id="vljAudience"></div>
+    <div class="hint" id="vljStatus" role="status"></div>
+    <div class="hint">Il ne fait que lancer des cues : n'arme jamais, la sécurité s'applique ensuite. Un cue lancé à la main reprend la main ; l'arrêt d'urgence ou un désarmement le coupe.</div>
   </div>
   <!-- Maître (T-271): the same control as LIVE › Direct › Luminosité maître. -->
   <div class="tb-master" title="Luminosité maître : 100 % au plus, la limite de sécurité s'applique après">
@@ -3082,6 +3115,7 @@
         <select id="cueBeatMode" data-control="cue.beat_mode">
           <option value="0">Off</option><option value="1">1 temps</option><option value="2">2 temps</option><option value="3">4 temps</option><option value="4">8 temps</option><option value="5">16 temps</option>
         </select></label>
+      <button id="cueVljBtn" class="vlj-open" aria-haspopup="true" aria-expanded="false" aria-controls="vljMenu" title="Pilote automatique : change de cue toutes les N mesures (coupé)">Pilote auto</button>
       <button id="cueStore" class="lock-edit" aria-pressed="false" title="Enregistrer le look courant dans une case (Cmd/Ctrl+E) : activer, puis cliquer la case. Recliquer pour annuler.">Enregistrer dans une case</button>
       <button id="cueUpdate" class="lock-edit" title="Réenregistrer le look courant dans le cue utilisateur en cours (Cmd/Ctrl+Maj+E)">Mettre à jour</button>
       <select id="cueStoreFilter" aria-label="Ce que l'enregistrement prend du look" class="lock-edit" title="Ce que l'enregistrement prend du look courant">
@@ -5009,6 +5043,7 @@
   <div id="cueMenuSpread" class="spread" data-prefix="cmSp" title="Le look joué une fois par zone du groupe, décalé d'une zone à l'autre (zones du cue qui sont dans le groupe)"></div>
   <label class="check" title="« Arrêter les cues » et « Tout arrêter » le laissent jouer ; l'arrêt d'urgence coupe tout"><input type="checkbox" id="cueMenuProtStop"> Protégé de Tout arrêter</label>
   <label class="check" title="Reste affiché quand un autre cue est tenu en mode Solo"><input type="checkbox" id="cueMenuProtSolo"> Protégé du solo</label>
+  <div class="row cm-vlj"><label for="cueMenuVljSkip" title="Le pilote automatique ne choisit jamais ce cue (il reste jouable à la main)">Ignorer par le pilote</label><input type="checkbox" id="cueMenuVljSkip"></div>
   <label for="cueMenuCellColor">Couleur de la case</label>
   <div class="row cm-color"><input type="color" id="cueMenuCellColor" title="Couleur de la bande de la case (et des pads en mode « case »)"><button id="cueMenuCellColorNone" title="Couleur par défaut (catégorie ou cue utilisateur)">Aucune</button></div>
   <label for="cueMenuTagInput">Étiquettes</label>
@@ -6824,6 +6859,7 @@ function applyState(f, at, pushed) {
   const trig = pushed && f.audio_triggers ? { ...f.audio_triggers, rules: (f.audio_triggers.rules || []).map(r =>
     r.ago_s == null ? r : { ...r, ago_s: r.ago_s + (performance.now() - at) / 1000 }) } : f.audio_triggers;
   showTriggers(trig);
+  showAutopilot(f.autopilot);
   showStrobe(f.strobe);
   showAudioGuard(f.audio_guard);
   showDwell(f.dwell);
@@ -10599,6 +10635,86 @@ $('latBtn').addEventListener('click', e => {
   loadLatency();
 });
 document.addEventListener('click', e => { if (!$('latMenu').hidden && !e.target.closest('.lat-wrap')) latClose(); });
+
+// ---------- Pilote automatique (T-148) ----------
+// A cue of the page (or of the pages ticked) every N bars, in order or at
+// random. It only launches cues: never arms; an e-stop or a disarm
+// switches it off and it never comes back by itself. The switch, the
+// rhythm and the order are controls (vlj.*, allowed in show mode); the
+// pages and the public content are an edit (undone, locked in show mode).
+let VLJ = null;
+function showAutopilot(a) {
+  if (!a) return;
+  VLJ = a;
+  const name = id => (presetById.get(id) || { name: id }).name;
+  const state = !a.enabled ? 'coupé' : a.waiting ? 'en attente' : `toutes les ${a.every_bars} mesure${a.every_bars > 1 ? 's' : ''}`;
+  document.querySelectorAll('.vlj-open').forEach(btn => {
+    btn.classList.toggle('active', !!a.enabled && !a.waiting);
+    btn.classList.toggle('waiting', !!a.enabled && !!a.waiting);
+    btn.title = `Pilote automatique : ${state}` + (a.enabled && a.last_pick ? ` · dernier cue « ${name(a.last_pick)} »` : '');
+  });
+  $('vljToggle').setAttribute('aria-pressed', String(!!a.enabled));
+  $('vljToggle').classList.toggle('btn--on', !!a.enabled);
+  $('vljToggle').textContent = a.enabled ? 'Couper' : 'Activer';
+  const every = [1, 2, 4, 8].indexOf(a.every_bars);
+  if (document.activeElement !== $('vljEvery') && every >= 0) $('vljEvery').value = String(every);
+  if (document.activeElement !== $('vljOrder')) $('vljOrder').value = a.random ? '1' : '0';
+  $('vljAudience').checked = !!a.allow_audience;
+  $('vljPages').querySelectorAll('input').forEach(c => { c.checked = (a.pages || []).includes(+c.value); });
+  $('vljStatus').textContent = !a.enabled ? 'Coupé.'
+    : a.waiting ? a.waiting_label
+    : (a.next_bar != null ? `Prochain changement à la mesure ${a.next_bar + 1}` : 'Prochain changement au début de la mesure')
+      + (a.last_pick ? ` · en cours : « ${name(a.last_pick)} »` : '');
+}
+function vljRenderPages() {
+  const box = $('vljPages');
+  box.replaceChildren(...(grid.pages || []).map((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const id = `vljPage${i + 1}`;
+    const label = document.createElement('label');
+    label.htmlFor = id;
+    label.textContent = `${i + 1} · ${p.name || 'Page ' + (i + 1)}`;
+    label.title = label.textContent;
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.id = id;
+    check.value = String(i + 1);
+    check.checked = !!(VLJ && (VLJ.pages || []).includes(i + 1));
+    check.addEventListener('change', vljSaveContent);
+    row.append(label, check);
+    return row;
+  }));
+}
+async function vljSaveContent() {
+  const pages = [...$('vljPages').querySelectorAll('input:checked')].map(c => +c.value);
+  try {
+    const a = await apiJson('POST', '/api/autopilot', { pages, allow_audience: $('vljAudience').checked });
+    showAutopilot(a);
+  } catch { if (VLJ) showAutopilot(VLJ); /* refused: said by api(), the boxes put back */ }
+}
+function vljClose() {
+  $('vljMenu').hidden = true;
+  document.querySelectorAll('.vlj-open').forEach(b => b.setAttribute('aria-expanded', 'false'));
+}
+// One menu, under the button that opened it (kept inside the window).
+document.querySelectorAll('.vlj-open').forEach(btn => btn.addEventListener('click', e => {
+  e.stopPropagation();
+  const m = $('vljMenu');
+  if (!m.hidden && btn.getAttribute('aria-expanded') === 'true') return vljClose();
+  vljClose();
+  vljRenderPages();
+  m.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+  const r = btn.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(r.bottom + 6, innerHeight - m.offsetHeight - 8)) + 'px';
+}));
+document.addEventListener('click', e => { if (!$('vljMenu').hidden && !e.target.closest('#vljMenu, .vlj-open')) vljClose(); });
+$('vljToggle').addEventListener('click', () => post('/api/control', { id: 'vlj.enabled', value: VLJ && VLJ.enabled ? 0 : 1 }));
+$('vljEvery').addEventListener('change', () => post('/api/control', { id: 'vlj.every', value: +$('vljEvery').value }));
+$('vljOrder').addEventListener('change', () => post('/api/control', { id: 'vlj.order', value: +$('vljOrder').value }));
+$('vljAudience').addEventListener('change', vljSaveContent);
 // *Caler à l'oreille*: a click on every beat of the clock, on the Mac, and
 // a dot on every beat the effects play (the clock's, `offset` ahead).
 function latClick(at, accent) {
@@ -11458,6 +11574,7 @@ function openCueMenu(p, x, y, at) {
   $('cueMenuTransLen').disabled = !slot.transition;
   $('cueMenuProtStop').checked = !!slot.protect_stop;
   $('cueMenuProtSolo').checked = !!slot.protect_solo;
+  $('cueMenuVljSkip').checked = !!slot.vlj_skip;
   // T-430: the cell's colour (none = category or user cue), tags, notes.
   menuColor = slot.color || null;
   $('cueMenuCellColor').value = hex(slot.color || (p.user && p.color) || [0, 255, 0]);
@@ -11502,7 +11619,7 @@ async function saveCueMenu() {
   const own = slots[menuCue] && slots[menuCue].transition;
   const transition = kind ? { kind, length: TRANS_LENGTHS[+$('cueMenuTransLen').value], in_flash: !!(own && own.in_flash) } : null;
   $('cueMenuTransLen').disabled = !kind;
-  const protect_stop = $('cueMenuProtStop').checked, protect_solo = $('cueMenuProtSolo').checked;
+  const protect_stop = $('cueMenuProtStop').checked, protect_solo = $('cueMenuProtSolo').checked, vlj_skip = $('cueMenuVljSkip').checked;
   const scan = $('cueMenuScan').value || null;
   const notes = $('cueMenuNotes').value, tags = menuTags, color = menuColor;
   const speed_group = $('cueMenuSpeed').value ? +$('cueMenuSpeed').value : null;
@@ -11510,7 +11627,7 @@ async function saveCueMenu() {
   const refs = {};
   $('cueMenuRefs').querySelectorAll('select').forEach(sel => { if (sel.value) refs[sel.dataset.family] = sel.value; });
   const spread = spreadRead($('cueMenuSpread'));
-  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, scan, notes, tags, color, speed_group, zone_chaser, refs, spread });
+  await post('/api/cues/slot', { id: menuCue, mode, group, layer, show, zones, transition, protect_stop, protect_solo, vlj_skip, scan, notes, tags, color, speed_group, zone_chaser, refs, spread });
   if (Object.keys(refs).length || Object.keys(slots[menuCue]?.refs || {}).length) loadPools(false);
   await loadSlots();
 }
@@ -11657,7 +11774,7 @@ $('cueMenuCellColorNone').addEventListener('click', () => {
   saveCueMenu();
 });
 ['cueMenuRefPosition', 'cueMenuRefSize', 'cueMenuRefColor', 'cueMenuRefMotion'].forEach(id => $(id).addEventListener('change', saveCueMenu));
-['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuSpeed', 'cueMenuChaser', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo'].forEach(id => $(id).addEventListener('change', saveCueMenu));
+['cueMenuMode', 'cueMenuGroup', 'cueMenuLayer', 'cueMenuSpeed', 'cueMenuChaser', 'cueMenuScan', 'cueMenuShow', 'cueMenuTransition', 'cueMenuTransLen', 'cueMenuProtStop', 'cueMenuProtSolo', 'cueMenuVljSkip'].forEach(id => $(id).addEventListener('change', saveCueMenu));
 spreadWire($('cueMenuSpread'), () => saveCueMenu());
 
 // ---------- « En cours » (T-423) ----------
