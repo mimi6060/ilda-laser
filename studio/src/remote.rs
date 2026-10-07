@@ -69,6 +69,9 @@ const MAX_CONCURRENT: usize = 8;
 /// Connections served at once (T-481): a few per tablet, `MAX_REMOTES`
 /// tablets.
 const MAX_CONNECTIONS: usize = 16;
+/// Answer bytes waiting at once on all the connections (T-489): the page
+/// is 12 kB, the other answers smaller.
+const MAX_OUTPUT: usize = MAX_CONNECTIONS * 64 * 1024;
 const CODE_LEN: usize = 6;
 const COOKIE: &str = "ls_remote";
 const REMOTE_HTML: &str = include_str!("remote.html");
@@ -271,8 +274,9 @@ fn start(s: &mut Shared, shared: Arc<Mutex<Shared>>) -> Result<(), String> {
     // Timeouts (T-449): a stalled tablet frees its request thread. Bodies
     // (at most `MAX_BODY`) read on the connection's own thread, and at most
     // `MAX_CONNECTIONS` at once, the stalest pushed out (T-481): a flood
-    // from the LAN holds neither threads nor descriptors.
-    let server = crate::web::bind_with(addr, MAX_BODY, MAX_BODY * MAX_CONNECTIONS, MAX_CONNECTIONS).map_err(|e| format!("port {} indisponible : {e}", s.remote.settings.port))?;
+    // from the LAN holds neither threads nor descriptors. Answers written
+    // by their connection's thread, at most `MAX_OUTPUT` waiting (T-489).
+    let server = crate::web::bind_with(addr, MAX_BODY, MAX_BODY * MAX_CONNECTIONS, MAX_CONNECTIONS, MAX_OUTPUT).map_err(|e| format!("port {} indisponible : {e}", s.remote.settings.port))?;
     let port = server.server_addr().to_ip().map_or(s.remote.settings.port, |a| a.port());
     let running = Arc::new(AtomicBool::new(true));
     let thread = std::thread::Builder::new()

@@ -13,6 +13,8 @@ use crate::util::RefinedTcpStream;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use crate::util::{SequentialReader, SequentialReaderBuilder, SequentialWriterBuilder};
+use crate::util::outbox::{OutputBudget, Outbox, Sinks};
+use crate::connection::Connection;
 use crate::Request;
 
 /// Laser Studio patch (T-449): the longest request or header line, and the
@@ -36,7 +38,9 @@ pub struct ClientConnection {
 
     // sequence of Writers to the stream, to avoid writing response #2 before
     //  response #1
-    sink: SequentialWriterBuilder<BufWriter<RefinedTcpStream>>,
+    // Laser Studio patch (T-489): or the connection's `Outbox`, whose own
+    //  thread writes the answers.
+    sink: Sinks,
 
     // Reader to read the next header from
     next_header_source: SequentialReader<Source>,
@@ -73,8 +77,26 @@ impl ClientConnection {
     /// Creates a new `ClientConnection` that takes ownership of the `TcpStream`.
     pub fn new(
         write_socket: RefinedTcpStream,
-        mut read_socket: RefinedTcpStream,
+        read_socket: RefinedTcpStream,
     ) -> ClientConnection {
+        let sink = Sinks::Sequential(SequentialWriterBuilder::new(BufWriter::with_capacity(1024, write_socket)));
+        Self::with_sink(sink, read_socket)
+    }
+
+    /// Laser Studio patch (T-489): a connection whose answers are written
+    /// by its own thread (`util::outbox`); `handle`, a clone of the
+    /// socket, shuts it when the connection is dropped.
+    pub(crate) fn with_outbox(
+        write_socket: RefinedTcpStream,
+        read_socket: RefinedTcpStream,
+        budget: Arc<OutputBudget>,
+        handle: Option<Arc<Connection>>,
+    ) -> ClientConnection {
+        let outbox = Outbox::new(BufWriter::with_capacity(1024, write_socket), budget, handle);
+        Self::with_sink(Sinks::Outbox(outbox), read_socket)
+    }
+
+    fn with_sink(sink: Sinks, mut read_socket: RefinedTcpStream) -> ClientConnection {
         let remote_addr = read_socket.peer_addr();
         let secure = read_socket.secure();
 
@@ -85,7 +107,7 @@ impl ClientConnection {
 
         ClientConnection {
             source,
-            sink: SequentialWriterBuilder::new(BufWriter::with_capacity(1024, write_socket)),
+            sink,
             remote_addr,
             next_header_source: first_header,
             no_more_requests: false,
@@ -182,7 +204,7 @@ impl ClientConnection {
         };
 
         // building the writer for the request
-        let writer = self.sink.next().unwrap();
+        let writer = self.sink.next_writer();
 
         // follow-up for next potential request
         let mut data_source = self.source.next().unwrap();
@@ -237,13 +259,16 @@ impl Iterator for ClientConnection {
             if let Some(mark) = &self.mark {
                 mark.waiting();
             }
+            // Laser Studio patch (T-489): no more requests read while the
+            // client leaves its answers unread (`util::outbox`).
+            self.sink.wait_room();
             let read = self.read();
             if let Some(mark) = &self.mark {
                 mark.served();
             }
             let rq = match read {
                 Err(ReadError::WrongRequestLine) => {
-                    let writer = self.sink.next().unwrap();
+                    let writer = self.sink.next_writer();
                     let response = Response::new_empty(StatusCode(400));
                     response
                         .raw_print(writer, HTTPVersion(1, 1), &[], false, None)
@@ -253,7 +278,7 @@ impl Iterator for ClientConnection {
                 }
 
                 Err(ReadError::WrongHeader(ver)) => {
-                    let writer = self.sink.next().unwrap();
+                    let writer = self.sink.next_writer();
                     let response = Response::new_empty(StatusCode(400));
                     response.raw_print(writer, ver, &[], false, None).ok();
                     return None; // we don't know where the next request would start,
@@ -262,7 +287,7 @@ impl Iterator for ClientConnection {
 
                 Err(ReadError::ReadIoError(ref err)) if err.kind() == ErrorKind::TimedOut => {
                     // request timeout
-                    let writer = self.sink.next().unwrap();
+                    let writer = self.sink.next_writer();
                     let response = Response::new_empty(StatusCode(408));
                     response
                         .raw_print(writer, HTTPVersion(1, 1), &[], false, None)
@@ -271,7 +296,7 @@ impl Iterator for ClientConnection {
                 }
 
                 Err(ReadError::ExpectationFailed(ver)) => {
-                    let writer = self.sink.next().unwrap();
+                    let writer = self.sink.next_writer();
                     let response = Response::new_empty(StatusCode(417));
                     response.raw_print(writer, ver, &[], true, None).ok();
                     return None; // TODO: should be recoverable, but needs handling in case of body
@@ -282,13 +307,13 @@ impl Iterator for ClientConnection {
                 // Laser Studio patch (T-481): the body wasn't read whole;
                 // the connection can't go on.
                 Err(ReadError::TooLarge(ver)) => {
-                    let writer = self.sink.next().unwrap();
+                    let writer = self.sink.next_writer();
                     let response = Response::new_empty(StatusCode(413));
                     response.raw_print(writer, ver, &[], false, None).ok();
                     return None;
                 }
                 Err(ReadError::Busy(ver)) => {
-                    let writer = self.sink.next().unwrap();
+                    let writer = self.sink.next_writer();
                     let response = Response::new_empty(StatusCode(503));
                     response.raw_print(writer, ver, &[], false, None).ok();
                     return None;
@@ -299,7 +324,7 @@ impl Iterator for ClientConnection {
 
             // checking HTTP version
             if *rq.http_version() > (1, 1) {
-                let writer = self.sink.next().unwrap();
+                let writer = self.sink.next_writer();
                 let response = Response::from_string(
                     "This server only supports HTTP versions 1.0 and 1.1".to_owned(),
                 )

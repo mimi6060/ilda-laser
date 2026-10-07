@@ -38,6 +38,13 @@ pub struct ClientLimits {
     /// Requests handed over as soon as their head is read, the body left
     /// unread (a stop that must never wait for a slow body).
     pub head_only: Option<fn(&Method, &str) -> bool>,
+    /// Laser Studio patch (T-489): answers are written by their
+    /// connection's own thread (`util::outbox`), never by the thread that
+    /// calls `Request::respond`. The most answer bytes waiting at once on
+    /// all the connections; past it, a connection piling answers up (its
+    /// client doesn't read them) is dropped. An answer on a connection
+    /// that holds nothing else always goes.
+    pub output_budget: usize,
 }
 
 /// The longest unread rest of a body skipped to keep a connection
@@ -196,7 +203,7 @@ pub(crate) struct Readers {
     max: usize,
     epoch: Instant,
     next_id: AtomicU64,
-    open: Mutex<Vec<(Arc<Mark>, Connection)>>,
+    open: Mutex<Vec<(Arc<Mark>, Arc<Connection>)>>,
 }
 
 /// Since when a connection has been waiting for its client, in
@@ -241,7 +248,7 @@ impl Readers {
     /// it from here). At the cap, the connection waiting longest for its
     /// client is pushed out; `None` (the new one is dropped) when none is
     /// waiting, all of them being answered.
-    pub(crate) fn admit(self: &Arc<Self>, handle: Connection) -> Option<Admitted> {
+    pub(crate) fn admit(self: &Arc<Self>, handle: Arc<Connection>) -> Option<Admitted> {
         let mut open = self.open.lock().ok()?;
         if open.len() >= self.max {
             let oldest = open
@@ -267,7 +274,7 @@ mod tests {
     use super::*;
 
     fn prefetch(limit: usize, budget: usize) -> Arc<Prefetch> {
-        Prefetch::new(&ClientLimits { timeout: None, prefetch: limit, prefetch_budget: budget, max_connections: 4, head_only: None })
+        Prefetch::new(&ClientLimits { timeout: None, prefetch: limit, prefetch_budget: budget, max_connections: 4, head_only: None, output_budget: 0 })
     }
 
     #[test]
