@@ -174,6 +174,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/outputs/color", RouteClass::Safety),
     ("GET", "/api/outputs/scan_limits", RouteClass::Read),
     ("POST", "/api/outputs/scan_limits", RouteClass::Safety),
+    ("POST", "/api/outputs/fixed_rate", RouteClass::Safety),
     ("GET", "/api/testpattern", RouteClass::Read),
     ("POST", "/api/testpattern", RouteClass::Safety),
     ("POST", "/api/safety/trace", RouteClass::Safety),
@@ -1785,12 +1786,14 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 Err(e) => return e,
             };
             match body::<ScanLimitsBody>(request) {
-                Ok(b) => {
+                Ok(mut b) => {
                     let mut s = shared.lock().unwrap();
                     let s = &mut *s;
                     s.gate.sync_estop(&s.estop);
                     let armed = s.gate.is_armed();
                     let before = s.outputs.get(&id).map(|o| o.scan);
+                    // The fixed rate (T-463) has its own route: kept as it is.
+                    b.scan.fixed_fps = before.and_then(|b| b.fixed_fps);
                     // Safety lock (T-261): slower only.
                     let lock_on = safety_lock_on(s);
                     match s.outputs.set_scan(&id, b.scan, armed || lock_on) {
@@ -1805,6 +1808,43 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                         Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) if lock_on => safety_locked_list(&list),
                         Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) => with_status(
                             json_response(json!({ "error": "Désarmez le laser pour relever la vitesse max", "loosen": list, "armed": true })),
+                            409,
+                        ),
+                    }
+                }
+                Err(e) => e,
+            }
+        }
+        // Fixed frame rate for video capture (T-463) of one output,
+        // `?output=<id or index>` (default the main output). Body: `{fps:
+        // number | null}` (null = off). Not a number or outside 20..60 is
+        // 400. Turning it on or changing it while armed (or under the
+        // safety lock) is 409: every frame is resampled at once, a setting
+        // for before the show. Off always applies. Not a control: no MIDI,
+        // DMX, OSC or timeline reaches it. Refused in show mode.
+        (Method::Post, "/api/outputs/fixed_rate") => {
+            let id = match color_output(request.url(), &shared.lock().unwrap()) {
+                Ok(id) => id,
+                Err(e) => return e,
+            };
+            match body::<FixedRateBody>(request) {
+                Ok(b) => {
+                    let mut s = shared.lock().unwrap();
+                    let s = &mut *s;
+                    s.gate.sync_estop(&s.estop);
+                    let locked = s.gate.is_armed() || safety_lock_on(s);
+                    let before = s.outputs.get(&id).map(|o| o.scan);
+                    match s.outputs.set_fixed_fps(&id, b.fps, locked) {
+                        Ok(out) => {
+                            if let Some(mut change) = before.and_then(|before| crate::safety_log::settings_change(&before, &out.scan)) {
+                                change["output"] = json!(id);
+                                s.gate.log().record("output_scan", Some("ui"), change);
+                            }
+                            json_response(scan_limits_view(s, &id))
+                        }
+                        Err(crate::power::SetError::Invalid(msg)) => text(400, &msg),
+                        Err(crate::power::SetError::Raises(list) | crate::power::SetError::Armed(list)) => with_status(
+                            json_response(json!({ "error": "Désarmez le laser (et levez le verrouillage de sécurité) pour régler la cadence fixe", "loosen": list, "armed": true })),
                             409,
                         ),
                     }
@@ -4704,6 +4744,32 @@ struct ScanLimitsBody {
     scan: crate::power::OutputScan,
 }
 
+/// `POST /api/outputs/fixed_rate` (T-463): `fps` absent or null = off.
+#[derive(Deserialize)]
+struct FixedRateBody {
+    #[serde(default)]
+    fps: Option<f32>,
+}
+
+/// The fixed rate part of `scan_limits_view` (T-463): the choices, the
+/// points of one frame, what the engine measured (the main output's) and
+/// the warning when the content does not fit.
+fn fixed_rate_view(s: &Shared, id: &str, scan: &crate::power::OutputScan) -> serde_json::Value {
+    let points = scan.fixed_fps.map(|fps| crate::fixed_rate::target_points(s.pps, fps));
+    let status = if id == crate::power::MAIN_OUTPUT { s.fixed_rate } else { None };
+    let warning = status.filter(|st| st.report.over_step).map(|st| {
+        format!("Trop de points pour la cadence fixe : réduisez le budget de points à {} ou baissez la cadence.", st.report.output)
+    });
+    json!({
+        "fps": scan.fixed_fps,
+        "choices": crate::fixed_rate::FIXED_FPS_CHOICES,
+        "range": crate::fixed_rate::FIXED_FPS_RANGE,
+        "points": points,
+        "status": status,
+        "warning": warning,
+    })
+}
+
 /// `GET /api/outputs/scan_limits`: one output's scan limits, the rate it
 /// runs at, its last frame's points and estimated frames/s, the frame rate at which the UI warns, the speed range as the
 /// scan presets see it, and what does not fit (the projector sheet's
@@ -4721,6 +4787,7 @@ fn scan_limits_view(s: &Shared, id: &str) -> serde_json::Value {
         "alert_fps": cfg.scan.alert_fps(),
         "limits": cfg.scan.scan_limits(s.pps),
         "warnings": cfg.scan.warnings(s.pps, &cfg.projector),
+        "fixed": fixed_rate_view(s, id, &cfg.scan),
     })
 }
 
@@ -5648,6 +5715,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     v["safety_profile"] = crate::profiles::summary(s);
     // T-262: the outdoor mode and « Ciel coupé ».
     v["outdoor"] = outdoor_view(s);
+    // T-463: the main output's fixed frame rate, measured; null when off.
+    v["fixed_rate"] = json!(s.fixed_rate);
     v
 }
 
@@ -5871,6 +5940,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["autopilot"] = crate::autopilot::status(s);
     // T-448: 0 normal, 1 loaded, 2 late frames (the points indicator).
     v["perf_level"] = json!(s.perf.level());
+    // T-463: the main output's fixed frame rate, measured; null when off.
+    v["fixed_rate"] = json!(s.fixed_rate);
     // T-285: undo / redo counts and labels; `rev` moves on every change.
     v["history"] = s.history.summary();
     // T-447: the zone trace, its seconds left and its zone.
@@ -9737,6 +9808,46 @@ mod tests {
         let g = js(&t.request("GET", "/api/outputs/scan_limits", "").1);
         assert_eq!(g["warnings"].as_array().unwrap().len(), 2, "{g}");
         assert_eq!(g["scan"]["pps_max"], 60_000);
+        // The caps are untouched.
+        assert_eq!(t.shared.lock().unwrap().outputs.active_limits(), crate::power::OutputLimits::default());
+    }
+
+    /// T-463: the fixed frame rate through its own route: on, changed and
+    /// off disarmed; on or changed refused armed, off always applies;
+    /// out of range or not a number refused; the scan limits route keeps
+    /// it; the view gives the choices and the points of one frame.
+    #[test]
+    fn fixed_rate_over_http() {
+        let t = TestServer::start(false);
+        let js = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let g = js(&t.request("GET", "/api/outputs/scan_limits", "").1);
+        assert!(g["fixed"]["fps"].is_null() && g["fixed"]["points"].is_null(), "{g}");
+        assert_eq!(g["fixed"]["choices"], json!([24.0, 25.0, 30.0, 50.0, 60.0]));
+        let (code, reply) = t.request("POST", "/api/outputs/fixed_rate", r#"{"fps":25}"#);
+        assert_eq!(code, 200, "{reply}");
+        assert_eq!((js(&reply)["fixed"]["fps"].as_f64(), js(&reply)["fixed"]["points"].as_u64()), (Some(25.0), Some(1_200)));
+        // The engine's measure is in the state (null until a frame ran at the rate).
+        assert!(js(&t.request("GET", "/api/state", "").1).get("fixed_rate").is_some());
+        for bad in [r#"{"fps":10}"#, r#"{"fps":61}"#, r#"{"fps":"abc"}"#, r#"{"fps":1e40}"#] {
+            assert_eq!(t.request("POST", "/api/outputs/fixed_rate", bad).0, 400, "{bad}");
+        }
+        assert_eq!(t.request("POST", "/api/outputs/fixed_rate?output=nope", r#"{"fps":25}"#).0, 400);
+        // The scan limits route leaves it as it is.
+        assert_eq!(t.request("POST", "/api/outputs/scan_limits", r#"{"scan":{"min_points":300}}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().outputs.active().scan.fixed_fps, Some(25.0));
+        // Armed: changing it refused, the same value or off applies.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        let (code, reply) = t.request("POST", "/api/outputs/fixed_rate", r#"{"fps":30}"#);
+        assert_eq!(code, 409, "{reply}");
+        assert_eq!(js(&reply)["armed"], true);
+        assert_eq!(t.request("POST", "/api/outputs/fixed_rate", r#"{"fps":25}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/outputs/fixed_rate", r#"{"fps":null}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().outputs.active().scan.fixed_fps, None);
+        assert_eq!(t.request("POST", "/api/outputs/fixed_rate", r#"{"fps":25}"#).0, 409);
+        assert!(t.shared.lock().unwrap().gate.is_armed(), "a refusal never disarms");
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/outputs/fixed_rate", r#"{}"#).0, 200);
+        assert_eq!(t.shared.lock().unwrap().outputs.active().scan.fixed_fps, None);
         // The caps are untouched.
         assert_eq!(t.shared.lock().unwrap().outputs.active_limits(), crate::power::OutputLimits::default());
     }

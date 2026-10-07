@@ -99,7 +99,7 @@ impl OptimizeParams {
 const REORDER_GAIN: f32 = 0.2;
 
 /// How far `max_points` may stretch the lit step.
-const MAX_STEP_STRETCH: f32 = 2.0;
+pub const MAX_STEP_STRETCH: f32 = 2.0;
 
 /// Most points of one blanked travel (whatever the settings say).
 const MAX_TRAVEL_STEPS: usize = 600;
