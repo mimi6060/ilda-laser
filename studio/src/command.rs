@@ -107,6 +107,12 @@ pub struct Action {
 
 /// Lower case without accents: what keywords, ids and names are compared on.
 pub fn fold(s: &str) -> String {
+    folded(s).collect()
+}
+
+/// `fold`'s characters one by one, without building the string: a name
+/// lookup compares each candidate as it goes (T-486).
+fn folded(s: &str) -> impl Iterator<Item = char> + '_ {
     s.chars()
         .flat_map(char::to_lowercase)
         .map(|c| match c {
@@ -121,9 +127,14 @@ pub fn fold(s: &str) -> String {
             '’' => '\'',
             c => c,
         })
-        .collect::<String>()
-        .replace(['œ'], "oe")
-        .replace(['æ'], "ae")
+        .flat_map(|c| {
+            let (a, b) = match c {
+                'œ' => ('o', Some('e')),
+                'æ' => ('a', Some('e')),
+                c => (c, None),
+            };
+            std::iter::once(a).chain(b)
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -180,7 +191,9 @@ fn refused_word(tok: &Tok) -> Option<CommandError> {
     if parts.contains(&"reinitialiser") || (f.contains("estop") && f.contains("reset")) {
         return Some(CommandError::refused(tok, RESET_FR));
     }
-    let refused: Vec<String> = REFUSED_WORDS.iter().map(|w| fold(w)).collect();
+    // Folded once per process, not once per word checked (T-486).
+    static REFUSED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let refused = REFUSED.get_or_init(|| REFUSED_WORDS.iter().map(|w| fold(w)).collect());
     if parts.iter().any(|p| refused.iter().any(|w| w == p)) {
         return Some(CommandError::refused(tok, ARM_FR));
     }
@@ -301,7 +314,7 @@ fn parse_cue(toks: &[Tok], presets: &[Preset]) -> Result<Command, CommandError> 
         None => {
             let name = what.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
             let folded = fold(&name);
-            let preset = presets.iter().find(|p| fold(&p.name) == folded).ok_or_else(|| CommandError::new(&what[0], format!("Cue inconnu : « {name} »")))?;
+            let preset = presets.iter().find(|p| self::folded(&p.name).eq(folded.chars())).ok_or_else(|| CommandError::new(&what[0], format!("Cue inconnu : « {name} »")))?;
             CueTarget::Name(preset.name.clone())
         }
     };
@@ -454,7 +467,7 @@ pub fn execute(s: &mut Shared, cmd: &Command, source: ControlSource) -> Result<S
                 }
                 CueTarget::Name(name) => {
                     let folded = fold(name);
-                    let id = s.presets.iter().find(|p| fold(&p.name) == folded).map(|p| p.id.clone());
+                    let id = s.presets.iter().find(|p| self::folded(&p.name).eq(folded.chars())).map(|p| p.id.clone());
                     let id = id.ok_or_else(|| CommandError::at(name, 4, format!("Cue inconnu : « {name} »")))?;
                     (id, "cue".to_string())
                 }
@@ -568,6 +581,14 @@ pub fn actions(reg: &ControlRegistry, presets: &[Preset]) -> Vec<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-486: `fold` built from its character iterator: lower case,
+    /// accents dropped, ligatures spelled out.
+    #[test]
+    fn fold_lowers_drops_accents_and_spells_out_ligatures() {
+        assert_eq!(fold("Œuvre ÆTHER Été’s Çà NOËL ñ"), "oeuvre aether ete's ca noel n");
+        assert!(folded("Cœur").eq("coeur".chars()));
+    }
     use crate::test_support;
 
     fn reg() -> (ControlRegistry, Vec<Preset>) {

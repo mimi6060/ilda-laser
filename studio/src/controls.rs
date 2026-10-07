@@ -176,6 +176,7 @@ pub enum ControlError {
     Refused(&'static str),
 }
 
+#[derive(Clone)]
 pub struct ControlRegistry {
     descs: Vec<ControlDesc>,
     by_id: HashMap<String, usize>,
