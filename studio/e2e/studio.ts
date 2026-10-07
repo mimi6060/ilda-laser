@@ -292,6 +292,42 @@ export function useStudio(opts: StudioOptions = {}): Studio {
   return studio;
 }
 
+/**
+ * Every write this page sends to the studio, for « display only, nothing
+ * sent » checks. Two kinds run on their own and are kept apart:
+ * - the heartbeat (T-252), left out;
+ * - the operator's interface preferences (T-426): a display change made on
+ *   the page (2D/3D, a 3D layer switch…) is remembered and, 500 ms later,
+ *   saved to `POST /api/operators/<nom>`. These go to `prefSaves`, with
+ *   their body, so a spec checks they only carry `laserStudio.*`
+ *   preferences (see `expectOnlyPrefs`), never a look, cue or output.
+ */
+export function watchWrites(page: Page) {
+  const writes: string[] = [];
+  const prefSaves: { path: string; body: { views?: unknown[]; prefs?: Record<string, unknown> } }[] = [];
+  page.on('request', q => {
+    if (q.method() === 'GET') return;
+    const url = new URL(q.url());
+    if (url.pathname === '/api/heartbeat') return;
+    const op = /^\/api\/operators\/(.+)$/.exec(url.pathname);
+    if (q.method() === 'POST' && op && !['current', 'delete'].includes(decodeURIComponent(op[1]))) {
+      prefSaves.push({ path: url.pathname, body: q.postDataJSON() });
+      return;
+    }
+    writes.push(q.method() + ' ' + q.url());
+  });
+  return { writes, prefSaves };
+}
+
+/** The operator saves since `from` only carry interface preferences of the « Défaut » operator, views untouched. */
+export function expectOnlyPrefs(saves: ReturnType<typeof watchWrites>['prefSaves'], from = 0, views: unknown[] = []) {
+  for (const s of saves.slice(from)) {
+    expect(s.path).toBe('/api/operators/' + encodeURIComponent('Défaut'));
+    expect(s.body.views).toEqual(views);
+    expect(Object.keys(s.body.prefs ?? {}).every(k => k.startsWith('laserStudio.'))).toBe(true);
+  }
+}
+
 export type Workspace = 'live' | 'timeline' | 'creation' | 'settings' | 'desk';
 
 /** Click a workspace tab (T-295: LIVE, TIMELINE, CRÉATION, RÉGLAGES). */

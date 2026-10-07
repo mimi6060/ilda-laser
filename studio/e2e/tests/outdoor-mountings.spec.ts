@@ -5,7 +5,7 @@
 // value that is not a number is refused; show mode locks the settings.
 // The 3D view shows each projector's cut (display only). Preview only:
 // the fake output, never a laser.
-import { test, expect, useStudio, openUi, openWorkspace } from '../studio';
+import { test, expect, useStudio, openUi, openWorkspace, watchWrites, expectOnlyPrefs } from '../studio';
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
@@ -91,8 +91,9 @@ test('show mode locks the mountings', async () => {
 });
 
 test('the 3D view shows each projector\'s outdoor cut, display only', async ({ page }) => {
-  const posts: string[] = [];
-  page.on('request', q => { if (q.method() !== 'GET' && !q.url().endsWith('/api/heartbeat')) posts.push(q.method() + ' ' + q.url()); });
+  // The layer switch is remembered with the operator's preferences
+  // (T-426, `prefSaves`): that save is display only, nothing else is sent.
+  const { writes: posts, prefSaves } = watchWrites(page);
   await openUi(page, studio);
   await page.locator('#viewSeg [data-view="3d"]').click();
   await expect(page.locator('#beams')).toBeVisible();
@@ -103,15 +104,18 @@ test('the 3D view shows each projector\'s outdoor cut, display only', async ({ p
   expect(await page.evaluate('view3d.outdoor.every(c => Array.isArray(c) && c.length > 0)')).toBe(true);
   const size = () => page.evaluate('view3d.overlayTris') as Promise<number>;
   const withCut = await size();
-  const before = posts.length;
+  const before = posts.length, savesBefore = prefSaves.length;
   const frameBefore = (await studio.get('/api/frame')).points.length;
+  const revBefore = (await studio.get('/api/frame')).settings_rev;
   await page.locator('#r3sfOutdoor').uncheck();
   expect(await size()).toBeLessThan(withCut);
   await page.locator('#r3sfOutdoor').check();
   expect(await size()).toBe(withCut);
   // Display only: nothing sent, the frame is the studio's.
   expect(posts.slice(before)).toEqual([]);
+  expectOnlyPrefs(prefSaves, savesBefore);
   expect((await studio.get('/api/frame')).points.length).toBe(frameBefore);
+  expect((await studio.get('/api/frame')).settings_rev).toBe(revBefore);
   // The mode off: nothing cut, nothing drawn.
   const s = await safety();
   s.outdoor.enabled = false;

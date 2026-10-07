@@ -3,7 +3,7 @@
 // audience drawn red and counted. Display only: the overlays are worked out
 // in the page from frames it already has and never change /api/frame or the
 // output. Preview only: the studio has no output and stays disarmed.
-import { test, expect, useStudio, openUi } from '../studio';
+import { test, expect, useStudio, openUi, watchWrites, expectOnlyPrefs } from '../studio';
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
@@ -75,9 +75,9 @@ test('geometry: segment / audience volume, red beams, overlay layers', async ({ 
 });
 
 test('a look aimed down is red and counted; a Blank zone over the audience brings it to 0', async ({ page }) => {
-  const posts: string[] = [];
-  // Every write to the studio, except the page's heartbeat (T-252), which runs on its own.
-  page.on('request', q => { if (q.method() !== 'GET' && !q.url().endsWith('/api/heartbeat')) posts.push(q.method() + ' ' + q.url()); });
+  // Every write to the studio, except the page's heartbeat (T-252) and the
+  // operator's preference saves (T-426, display only: `prefSaves`).
+  const { writes: posts, prefSaves } = watchWrites(page);
   await openUi(page, studio);
   await page.locator('#viewSeg [data-view="3d"]').click();
   await expect(page.locator('#beams')).toBeVisible();
@@ -111,8 +111,9 @@ test('a look aimed down is red and counted; a Blank zone over the audience bring
 
   // Turning the overlays off is a page matter: nothing is sent to the
   // studio, the counter goes away, the layer switches grey out.
-  const before = posts.length;
+  const before = posts.length, savesBefore = prefSaves.length;
   const frameBefore = (await studio.get('/api/frame')).points.length;
+  const revBefore = (await studio.get('/api/frame')).settings_rev;
   await page.locator('#r3safety').uncheck();
   await expect(page.locator('#aud3d')).toBeHidden();
   await expect(page.locator('#stAudWrap')).toBeHidden();
@@ -122,7 +123,9 @@ test('a look aimed down is red and counted; a Blank zone over the audience bring
   await expect(page.locator('#aud3d')).toBeVisible();
   expect(await page.evaluate('view3d.overlayTris')).toBeGreaterThan(0);
   expect(posts.slice(before)).toEqual([]);
+  expectOnlyPrefs(prefSaves, savesBefore);
   expect((await studio.get('/api/frame')).points.length).toBe(frameBefore);
+  expect((await studio.get('/api/frame')).settings_rev).toBe(revBefore);
   expect((await studio.state()).armed).toBe(false);
 });
 
