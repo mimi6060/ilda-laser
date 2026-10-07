@@ -6107,7 +6107,7 @@ mod tests {
             let running = Arc::new(AtomicBool::new(true));
             let thread = std::thread::spawn({
                 let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
-                let calibration = std::env::temp_dir().join("laser-studio-test-unused/calibration.json");
+                let calibration = crate::test_support::scratch_dir().join("calibration.json");
                 move || serve(server, shared, estop, calibration, running)
             });
             let _guard = test_support::time_guard(&format!("web API test on {addr}"), Duration::from_secs(180));
@@ -8011,7 +8011,7 @@ mod tests {
     fn with_fake_outputs(t: &TestServer) -> Arc<crate::output_manager::OutputManager> {
         use crate::output_manager::{FakeBackend, OutputManager};
         let dev = DeviceInfo { kind: "etherdream".into(), id: "etherdream:a".into(), name: "Ether Dream a".into() };
-        let backend = FakeBackend::new(vec![dev.clone()], None, None, std::env::temp_dir());
+        let backend = FakeBackend::new(vec![dev.clone()], None, None, crate::test_support::scratch_dir());
         let list = Arc::new(DeviceList::fixed(vec![dev]));
         let mgr = Arc::new(OutputManager::new(Arc::new(backend), Arc::clone(&list), &Default::default(), 30_000));
         let mut s = t.shared.lock().unwrap();
@@ -8124,7 +8124,7 @@ mod tests {
         let dropped = Arc::new(AtomicBool::new(false));
         {
             let mut s = t.shared.lock().unwrap();
-            let backend = crate::output_manager::FakeBackend::new(Vec::new(), None, None, std::env::temp_dir());
+            let backend = crate::output_manager::FakeBackend::new(Vec::new(), None, None, crate::test_support::scratch_dir());
             let mgr = crate::output_manager::OutputManager::new(Arc::new(backend), Arc::new(DeviceList::fixed(vec![])), &Default::default(), 30_000);
             s.output_mgr = Arc::new(mgr.with_test_drop(Arc::clone(&dropped)));
         }
