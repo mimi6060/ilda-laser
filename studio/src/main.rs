@@ -10,6 +10,7 @@
 
 mod abstracts;
 mod about;
+mod agenda;
 mod applog;
 mod artnet;
 mod audience;
@@ -633,6 +634,9 @@ pub struct Shared {
     /// The show player (showlist.rs, T-444, `showlist.json`): the list is
     /// content (projects, history); what plays is memory only.
     pub showlist: showlist::ShowListRunner,
+    /// The agenda (agenda.rs, T-455, `agenda.json`): the machine's, not
+    /// the project's; its own thread starts the playbacks. Never arms.
+    pub agenda: agenda::AgendaRunner,
 }
 
 impl Shared {
@@ -1263,6 +1267,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
         keep_awake::system_blocker()
     };
     let keep_awake_thread = keep_awake::spawn(Arc::clone(&shared), Arc::clone(&running), blocker);
+    // The agenda (T-455): starts playbacks at their slots, never arms.
+    let agenda_thread = agenda::spawn(Arc::clone(&shared), Arc::clone(&running));
     let served = web::run(&addr, shared, estop, cli.data_dir.join("calibration.json"), Arc::clone(&running));
 
     running.store(false, Ordering::SeqCst);
@@ -1287,6 +1293,7 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
         std::thread::sleep(Duration::from_millis(10));
     }
     keep_awake_thread.join().ok(); // lets go of the sleep assertion
+    agenda_thread.join().ok();
     // The autosave thread writes what is unsaved, then stops; a stuck disk
     // must not hold the exit.
     let deadline = Instant::now() + AUTOSAVE_SHUTDOWN_WAIT;
@@ -1596,6 +1603,7 @@ fn startup_state(cli: &Cli) -> Shared {
         desks: desk::Desks::load(cli.data_dir.join("desks.json")),
         macros: macros::Macros::load(cli.data_dir.join("macros.json")),
         showlist: showlist::ShowListRunner::load(cli.data_dir.join("showlist.json")),
+        agenda: agenda::AgendaRunner::load(cli.data_dir.join("agenda.json")),
         remote: remote::Remote::load(cli.data_dir.join("remote.json"), cli.remote_bind),
     };
     usercues::sync_presets(&mut state);

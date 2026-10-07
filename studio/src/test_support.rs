@@ -177,6 +177,7 @@ pub fn shared() -> Shared {
         desks: crate::desk::Desks::in_memory(),
         macros: crate::macros::Macros::in_memory(),
         showlist: crate::showlist::ShowListRunner::in_memory(),
+        agenda: crate::agenda::AgendaRunner::in_memory(),
         remote: crate::remote::Remote::in_memory(),
     }
 }

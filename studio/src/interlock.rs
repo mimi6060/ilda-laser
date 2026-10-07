@@ -113,6 +113,8 @@ pub enum DisarmReason {
     /// The output stopped answering (T-401). Reconnecting never re-arms.
     OutputLost,
     Shutdown,
+    /// An *Arrêt et noir* entry of the agenda (T-455): it only ever disarms.
+    Schedule,
 }
 
 impl DisarmReason {
@@ -129,6 +131,7 @@ impl DisarmReason {
             DisarmReason::OutputChanged => "output_changed".into(),
             DisarmReason::OutputLost => "output_lost".into(),
             DisarmReason::Shutdown => "shutdown".into(),
+            DisarmReason::Schedule => "schedule".into(),
         }
     }
 
@@ -145,6 +148,7 @@ impl DisarmReason {
             DisarmReason::OutputChanged => "Changement de sortie".into(),
             DisarmReason::OutputLost => "Sortie perdue".into(),
             DisarmReason::Shutdown => "Arrêt du studio".into(),
+            DisarmReason::Schedule => "Agenda : arrêt programmé".into(),
         }
     }
 }

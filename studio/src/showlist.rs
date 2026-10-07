@@ -289,6 +289,9 @@ pub struct ShowListRunner {
     last_out_t: Option<f64>,
     first_in_t: Option<f64>,
     rev: u64,
+    /// Started by the agenda (T-455): this playback ignores *Boucler la
+    /// liste* and ends after the last item.
+    once: bool,
 }
 
 impl Default for ShowListRunner {
@@ -315,6 +318,7 @@ impl Default for ShowListRunner {
             last_out_t: None,
             first_in_t: None,
             rev: 0,
+            once: false,
         }
     }
 }
@@ -348,6 +352,16 @@ impl ShowListRunner {
 
     pub fn index(&self) -> Option<usize> {
         self.index
+    }
+
+    /// *Boucler la liste*, unless the agenda started this playback.
+    fn loops(&self) -> bool {
+        self.list.loop_list && !self.once
+    }
+
+    /// The agenda's « play it once » (T-455).
+    pub fn set_once(&mut self, once: bool) {
+        self.once = once;
     }
 
     pub fn is_active(&self) -> bool {
@@ -396,7 +410,7 @@ impl ShowListRunner {
         let n = self.list.items.len();
         let start = from.map_or(0, |i| i + 1);
         let mut out: Vec<usize> = (start..n).collect();
-        if self.list.loop_list {
+        if self.loops() {
             out.extend(0..start.min(n));
         }
         out
@@ -640,6 +654,22 @@ fn may_start(s: &Shared) -> Result<(), String> {
 /// *Lancer* from item `index` (none: the current one, else the first).
 /// Also *Reprendre la liste* (it starts the current item again).
 pub fn play(s: &mut Shared, index: Option<usize>) -> Result<(), String> {
+    s.showlist.once = false;
+    start(s, index)
+}
+
+/// The agenda (T-455): the list from its first item, once, without
+/// *Boucler la liste* (the saved list keeps it). Never arms.
+pub fn play_once(s: &mut Shared) -> Result<(), String> {
+    s.showlist.once = true;
+    let r = start(s, Some(0));
+    if r.is_err() {
+        s.showlist.once = false;
+    }
+    r
+}
+
+fn start(s: &mut Shared, index: Option<usize>) -> Result<(), String> {
     may_start(s)?;
     let n = s.showlist.list.items.len();
     let i = index.or(s.showlist.index).unwrap_or(0);
@@ -647,7 +677,7 @@ pub fn play(s: &mut Shared, index: Option<usize>) -> Result<(), String> {
         return Err(format!("pas d'élément {} dans la liste", i + 1));
     }
     s.showlist.problem = None;
-    let order: Vec<usize> = (i..n).chain(if s.showlist.list.loop_list { 0..i } else { 0..0 }).collect();
+    let order: Vec<usize> = (i..n).chain(if s.showlist.loops() { 0..i } else { 0..0 }).collect();
     start_from(s, order)
 }
 
@@ -660,6 +690,7 @@ pub fn stop(s: &mut Shared) {
     let r = &mut s.showlist;
     r.transport = ListTransport::Stopped;
     r.awaiting = false;
+    r.once = false;
 }
 
 /// *Suivant*: the next playable item (with the loop, the first after the

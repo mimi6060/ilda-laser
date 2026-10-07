@@ -2127,6 +2127,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// T-455: the agenda is the machine's: a project neither saves it nor
+    /// changes it when it opens (opening a project schedules nothing).
+    #[test]
+    fn opening_a_project_leaves_the_agenda_alone() {
+        use crate::agenda::{Agenda, AgendaEntry};
+        let dir = temp_dir("agenda");
+        let shared = studio(&dir);
+        post(&shared, &dir, "save-as", json!({ "path": "Sans agenda" })).unwrap();
+        let path = dir.join("projects/Sans agenda.lsproj");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v.get("agenda").is_none(), "not in the project");
+        let agenda = Agenda { enabled: true, entries: vec![AgendaEntry { name: "Soir".into(), days: [true; 7], ..Default::default() }] };
+        crate::agenda::set(&mut shared.lock().unwrap(), agenda).unwrap();
+        let before = shared.lock().unwrap().agenda.agenda().clone();
+        post(&shared, &dir, "open", json!({ "path": "Sans agenda.lsproj" })).unwrap();
+        assert_eq!(shared.lock().unwrap().agenda.agenda(), &before);
+        post(&shared, &dir, "new", json!({})).unwrap();
+        assert_eq!(shared.lock().unwrap().agenda.agenda(), &before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// T-422: presets and the references to them come back identical; a
     /// preset change changes the fingerprint; an older project (no pools,
     /// no refs) opens with none; a reference to an unknown preset opens
