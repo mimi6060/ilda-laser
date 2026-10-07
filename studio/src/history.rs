@@ -316,6 +316,17 @@ impl EditHistory {
         id
     }
 
+    /// `clear`, handing back what it held so the caller drops it with the
+    /// studio lock released (a long history holds whole sections, T-488).
+    pub fn take(&mut self) -> Vec<EditEntry> {
+        let mut gone = std::mem::take(&mut self.undo);
+        gone.append(&mut self.redo);
+        if !gone.is_empty() {
+            self.rev += 1;
+        }
+        gone
+    }
+
     /// Another project: nothing of the previous one can be undone.
     pub fn clear(&mut self) {
         if !self.undo.is_empty() || !self.redo.is_empty() {

@@ -268,8 +268,15 @@ pub fn preset_of(fig: &Figure) -> Preset {
 /// Rebuilds the « Figures » cue page (and the grid controls for MIDI)
 /// from the library. Called whenever the library changes.
 pub fn refresh(s: &mut crate::Shared) {
-    s.presets.retain(|p| p.category != CATEGORY);
     let figures: Vec<Preset> = s.figures.list().iter().map(preset_of).collect();
+    refresh_with(s, figures);
+}
+
+/// `refresh` with the presets of the library made beforehand (`preset_of`
+/// on `FigureStore::list`, or on `sorted` of the list it will hold): a
+/// project open makes them with the studio lock released (T-488).
+pub fn refresh_with(s: &mut crate::Shared, figures: Vec<Preset>) {
+    s.presets.retain(|p| p.category != CATEGORY);
     s.presets.extend(figures);
     crate::grid::refresh(s);
 }
@@ -361,10 +368,15 @@ impl FigureStore {
 
     /// A project's figures (already checked), memory only; `project.rs`
     /// writes the files.
-    pub fn replace_in_memory(&mut self, mut list: Vec<Figure>) {
-        list.sort_by(|a, b| a.name.cmp(&b.name));
-        self.list = list;
+    pub fn replace_in_memory(&mut self, list: Vec<Figure>) {
+        self.list = sorted(list);
     }
+}
+
+/// A library in the store's order (by name).
+pub fn sorted(mut list: Vec<Figure>) -> Vec<Figure> {
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list
 }
 
 fn read(path: &Path, name: &str) -> Result<Figure> {

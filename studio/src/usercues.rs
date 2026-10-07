@@ -243,10 +243,20 @@ impl UserCueStore {
     /// Takes `cues` (a project's), in memory only. Invalid and duplicate
     /// ids are dropped; the id counter never goes back.
     pub fn replace_in_memory(&mut self, cues: Vec<UserCue>) {
-        let mut seen = std::collections::HashSet::new();
-        self.cues = cues.into_iter().filter_map(|mut c| (sanitize(&mut c) && seen.insert(c.id.clone())).then_some(c)).take(MAX_CUES).collect();
+        self.replace_checked(checked(cues));
+    }
+
+    /// `replace_in_memory` of cues already passed through `checked` (a
+    /// project open does that with the studio lock released, T-488).
+    pub fn replace_checked(&mut self, cues: Vec<UserCue>) {
+        self.cues = cues;
         let top = self.cues.iter().filter_map(|c| number(&c.id)).max().unwrap_or(0);
         self.next = self.next.max(top + 1).max(1);
+    }
+
+    /// The next id's number, as `user_cues.json` keeps it.
+    pub fn next_id(&self) -> u64 {
+        self.next
     }
 
     /// A new cue with the next id. `name` defaults to « Cue <n> ».
@@ -299,10 +309,29 @@ impl UserCueStore {
         crate::datafile::replace(path, json.as_bytes()).with_context(|| format!("failed to write {}", path.display()))
     }
 
-    /// The file's bytes, for a project open (written lock released).
-    pub fn file_bytes(&self) -> serde_json::Result<Vec<u8>> {
-        serde_json::to_vec_pretty(&UserCueFile { next: self.next, cues: self.cues.clone() })
+}
+
+/// The cues `replace_in_memory` keeps: invalid and duplicate ids dropped,
+/// names and stored masters cleaned, at most `MAX_CUES`.
+pub fn checked(cues: Vec<UserCue>) -> Vec<UserCue> {
+    let mut seen = std::collections::HashSet::new();
+    cues.into_iter().filter_map(|mut c| (sanitize(&mut c) && seen.insert(c.id.clone())).then_some(c)).take(MAX_CUES).collect()
+}
+
+/// `user_cues.json` as a store with `next` and `cues` writes it, for a
+/// project open (serialised with the lock released).
+pub fn file_bytes(next: u64, cues: &[UserCue]) -> serde_json::Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct File<'a> {
+        next: u64,
+        cues: &'a [UserCue],
     }
+    serde_json::to_vec_pretty(&File { next, cues })
+}
+
+/// The presets of `cues`, as `sync_presets` makes them.
+pub fn presets_of(cues: &[UserCue]) -> Vec<Preset> {
+    cues.iter().map(preset_of).collect()
 }
 
 fn preset_of(c: &UserCue) -> Preset {
@@ -311,8 +340,14 @@ fn preset_of(c: &UserCue) -> Preset {
 
 /// The user cues into `Shared::presets`, without touching the grid.
 pub fn sync_presets(s: &mut Shared) {
+    let cues = presets_of(s.user_cues.list());
+    sync_presets_with(s, cues);
+}
+
+/// `sync_presets` with the presets of the store's cues made beforehand
+/// (`presets_of`, lock released).
+pub fn sync_presets_with(s: &mut Shared, cues: Vec<Preset>) {
     s.presets.retain(|p| p.category != CATEGORY);
-    let cues: Vec<Preset> = s.user_cues.list().iter().map(preset_of).collect();
     s.presets.extend(cues);
 }
 

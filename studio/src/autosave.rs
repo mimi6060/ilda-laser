@@ -150,7 +150,7 @@ pub struct SettingsRequest {
 /// Changes the settings and writes `prefs.json` (lock released for the write).
 pub fn set_settings(shared: &Mutex<Shared>, req: SettingsRequest) -> Result<()> {
     let (settings, path) = {
-        let mut s = shared.lock().unwrap();
+        let mut s = project::lock(shared);
         let a = &mut s.project.autosave;
         if let Some(on) = req.enabled {
             a.settings.enabled = on;
@@ -238,7 +238,7 @@ pub fn spawn(shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>) -> std::threa
 /// without waiting for the delay). Returns the file written, if any.
 pub fn tick(shared: &Mutex<Shared>, deb: &mut Debounce, now: f64, flush: bool) -> Option<PathBuf> {
     let (mut p, name, saved, shows, dir, settings, write, backup) = {
-        let s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let s = project::lock_even_poisoned(shared);
         let a = &s.project.autosave;
         // Disabled, or a recovery offer pending: changes are still
         // watched (so the delay and the baseline stay right), not written.
@@ -255,7 +255,7 @@ pub fn tick(shared: &Mutex<Shared>, deb: &mut Debounce, now: f64, flush: bool) -
     {
         // What `/api/frame` says (T-433), unless a save or an open moved
         // the baseline meanwhile (they set it themselves).
-        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = project::lock_even_poisoned(shared);
         if s.project.saved_fingerprint() == saved {
             s.project.last_modified = fp != saved;
         }
@@ -273,7 +273,7 @@ pub fn tick(shared: &Mutex<Shared>, deb: &mut Debounce, now: f64, flush: bool) -
         backup.queue(crate::backup::Job::autosave(&file, &name, settings.keep as usize, bytes));
         prune(&dir, &name, settings.keep as usize)
     });
-    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = project::lock_even_poisoned(shared);
     let a = &mut s.project.autosave;
     match result {
         Ok(()) => {
@@ -385,7 +385,7 @@ pub fn find_offer(s: &mut Shared) {
 /// *Ignorer*: forget the offer, and don't offer that autosave again.
 pub fn ignore(shared: &Mutex<Shared>) {
     let (offer, dir) = {
-        let mut s = shared.lock().unwrap();
+        let mut s = project::lock(shared);
         (s.project.autosave.offer.take(), s.project.autosave.dir.clone())
     };
     if let Some(offer) = offer {

@@ -183,12 +183,18 @@ impl CueGrid {
     /// Takes the layout of `other` (a project's, T-286). Memory only;
     /// `resolve` must follow.
     pub fn set_config(&mut self, other: &CueGrid) {
+        self.set_config_with(other, &crate::presets::catalog());
+    }
+
+    /// `set_config` with the built-in catalogue made beforehand (a project
+    /// open makes it with the studio lock released, T-488).
+    pub fn set_config_with(&mut self, other: &CueGrid, catalog: &[Preset]) {
         self.cols = other.cols;
         self.rows = other.rows;
         self.pages = other.pages.clone();
         self.late_pages = other.late_pages.clone();
         self.sanitize();
-        self.add_late_pages(&crate::presets::catalog());
+        self.add_late_pages(catalog);
     }
 
     /// The operator's own pages get the catalogue pages added since they

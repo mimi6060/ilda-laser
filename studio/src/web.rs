@@ -4185,7 +4185,8 @@ fn project_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, post: bool,
     // undone; a partial import (T-289) replaces sections the history can't.
     let real = !(action == "import-partial" && body_says_dry_run(&raw));
     if post && real && matches!(action, "new" | "open" | "recover" | "version-open" | "import-partial") && matches!(reply, Some(crate::project::Reply::Json(_))) {
-        shared.lock().unwrap().history.clear();
+        let gone = shared.lock().unwrap().history.take();
+        drop(gone);
     }
     match reply {
         Some(crate::project::Reply::Json(v)) => json_response(v),
