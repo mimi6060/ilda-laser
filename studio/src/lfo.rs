@@ -56,6 +56,20 @@ pub struct Modulator {
     /// moves that part's parameter only. `None` in older files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part: Option<PartTarget>,
+    /// *Largeur* (T-421): the part of each cycle the modulator is active,
+    /// 0..=1; outside it the wave rests at -1 (before depth). 1 in older
+    /// files: the wave as before.
+    pub width: f32,
+    /// *Attaque* / *Déclin*: the parts of the active part spent rising
+    /// from rest and falling back to it, 0..=1 each, at most 1 together.
+    /// 0 in older files.
+    pub attack: f32,
+    pub decay: f32,
+    /// *Étalement* (T-421, spread.rs): the phase shifted from zone to zone
+    /// of a group, on a master control (applied per zone with the master
+    /// stage). `None` in older files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread: Option<crate::spread::Spread>,
 }
 
 /// What a part modulator moves (T-441): one parameter of one part of a
@@ -115,6 +129,10 @@ impl Default for Modulator {
             enabled: true,
             speed_group: 0,
             part: None,
+            width: 1.0,
+            attack: 0.0,
+            decay: 0.0,
+            spread: None,
         }
     }
 }
@@ -129,11 +147,65 @@ impl Modulator {
 
     /// The wave, -1..1, at `t` seconds / `beat` beats.
     pub fn wave_at(&self, t: f64, beat: f64) -> f32 {
+        self.wave_shifted(t, beat, 0.0)
+    }
+
+    /// The wave with its phase moved by `shift` cycles (a zone of a spread,
+    /// T-421). The whole wave plays within the first `width` of the cycle,
+    /// shaped by the attack and decay ramps; the rest of the cycle rests at
+    /// -1. Width 1 without ramps: exactly the plain wave.
+    pub fn wave_shifted(&self, t: f64, beat: f64, shift: f64) -> f32 {
         let (cycle, p) = self.position(t, beat);
-        match self.wave {
-            Wave::Random => random(cycle, &self.target),
-            wave => shape(wave, p) as f32,
+        let p = if shift.is_finite() && shift != 0.0 { (p + shift).rem_euclid(1.0) } else { p };
+        let (width, attack, decay) = self.envelope_parts();
+        if width >= 1.0 && attack <= 0.0 && decay <= 0.0 {
+            return match self.wave {
+                Wave::Random => random(cycle, &self.target),
+                wave => shape(wave, p) as f32,
+            };
         }
+        if p >= width as f64 {
+            return -1.0;
+        }
+        let q = p / width as f64;
+        let w = match self.wave {
+            Wave::Random => random(cycle, &self.target) as f64,
+            wave => shape(wave, q),
+        };
+        let env = if attack > 0.0 && q < attack as f64 {
+            q / attack as f64
+        } else if decay > 0.0 && q > 1.0 - decay as f64 {
+            (1.0 - q) / decay as f64
+        } else {
+            1.0
+        };
+        (-1.0 + (w + 1.0) * env.clamp(0.0, 1.0)) as f32
+    }
+
+    /// Whether the wave is in the active part of its cycle (*Largeur*).
+    #[cfg(test)]
+    pub fn active_at(&self, t: f64, beat: f64) -> bool {
+        (self.position(t, beat).1) < self.envelope_parts().0 as f64
+    }
+
+    /// (width, attack, decay) as the wave uses them: within range whatever
+    /// the struct holds.
+    fn envelope_parts(&self) -> (f32, f32, f32) {
+        let width = if self.width.is_finite() { self.width.clamp(0.0, 1.0) } else { 1.0 };
+        let attack = if self.attack.is_finite() { self.attack.clamp(0.0, 1.0) } else { 0.0 };
+        let decay = if self.decay.is_finite() { self.decay.clamp(0.0, 1.0) } else { 0.0 };
+        let sum = attack + decay;
+        if sum > 1.0 {
+            (width, attack / sum, decay / sum)
+        } else {
+            (width, attack, decay)
+        }
+    }
+
+    /// Spreads per zone (T-421): a spread naming a group, on a master
+    /// control (a look parameter is drawn once for every zone).
+    pub fn spreads(&self) -> bool {
+        self.part.is_none() && self.target.starts_with("master.") && self.spread.as_ref().is_some_and(crate::spread::Spread::is_set)
     }
 
     /// Clamp every number to its range (NaN and infinities → defaults).
@@ -146,6 +218,9 @@ impl Modulator {
         if crate::speed::check_group(self.speed_group).is_err() {
             self.speed_group = 0;
         }
+        (self.width, self.attack, self.decay) = self.envelope_parts();
+        // A phase spread only: a modulator moves its phase, nothing else.
+        self.spread = self.spread.take().map(|s| crate::spread::Spread { param: crate::spread::SpreadParam::Phase, ..s }.sanitized()).filter(crate::spread::Spread::is_set);
         self.rate = match self.rate {
             Rate::Beats(b) => Rate::Beats(fin(b, 4.0).clamp(1.0 / 16.0, 64.0)),
             Rate::Hz(hz) => Rate::Hz(fin(hz, 1.0).clamp(0.0, 20.0)),
@@ -308,13 +383,40 @@ pub fn modulate_scaled(mods: &[Modulator], reg: &ControlRegistry, settings: &mut
 /// (T-419): `beat_of(group)` is that group's beat (0 = the master's).
 #[allow(clippy::too_many_arguments)]
 pub fn modulate_grouped(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settings, live: &mut LiveModifiers, t: f64, beat_of: &dyn Fn(u8) -> f64, share: f32) {
+    modulate_shifted(mods, reg, settings, live, t, beat_of, share, &|_| 0.0);
+}
+
+/// Splits the modulators for the engine (T-421): (those that spread per
+/// zone over a group of `cfg` with at least two zones, the others). The
+/// first are applied by `modulate_zone` on each zone's copy of the master
+/// modifiers, the others by `modulate_grouped` once for every zone.
+pub fn split_zoned(mods: &[Modulator], cfg: &crate::projection::ProjectionConfig) -> (Vec<Modulator>, Vec<Modulator>) {
+    mods.iter().cloned().partition(|m| m.spreads() && m.spread.as_ref().is_some_and(|s| !s.zones(cfg).is_empty()))
+}
+
+/// The zoned modulators (`split_zoned`) on the master modifiers of `zone`:
+/// each at its phase plus the zone's spread value (degrees → cycles); a
+/// zone outside a modulator's group gets its plain phase. Same rules as
+/// `modulate_grouped` (clamped, brightness only dims).
+#[allow(clippy::too_many_arguments)]
+pub fn modulate_zone(mods: &[Modulator], zone: u8, cfg: &crate::projection::ProjectionConfig, reg: &ControlRegistry, live: &mut LiveModifiers, t: f64, beat_of: &dyn Fn(u8) -> f64, share: f32) {
+    let shift = |m: &Modulator| {
+        let Some(s) = &m.spread else { return 0.0 };
+        s.zones(cfg).iter().find(|(id, _)| *id == zone).map_or(0.0, |(_, deg)| *deg as f64 / 360.0)
+    };
+    // Master targets only: the look's copy is not drawn per zone.
+    modulate_shifted(mods, reg, &mut Settings::default(), live, t, beat_of, share, &shift);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn modulate_shifted(mods: &[Modulator], reg: &ControlRegistry, settings: &mut Settings, live: &mut LiveModifiers, t: f64, beat_of: &dyn Fn(u8) -> f64, share: f32, shift: &dyn Fn(&Modulator) -> f64) {
     if share <= 0.0 {
         return;
     }
     let mut sums: Vec<(&str, f32)> = Vec::new();
     // Part modulators (T-441) move their part's modifiers, not a control.
     for m in mods.iter().filter(|m| m.enabled && m.depth > 0.0 && m.part.is_none()) {
-        let amount = share.min(1.0) * m.depth * (m.wave_at(t, beat_of(m.speed_group)) + m.offset);
+        let amount = share.min(1.0) * m.depth * (m.wave_shifted(t, beat_of(m.speed_group), shift(m)) + m.offset);
         match sums.iter_mut().find(|(id, _)| *id == m.target) {
             Some((_, sum)) => *sum += amount,
             None => sums.push((&m.target, amount)),
@@ -785,5 +887,118 @@ mod tests {
         let old: Modulator = serde_json::from_str(r#"{"target":"master.size"}"#).unwrap();
         assert_eq!(old.speed_group, 0);
         assert_eq!(Modulator { speed_group: 9, ..old }.sanitized().speed_group, 0);
+    }
+    /// T-421: *Largeur* 25 %: active a quarter of the cycle, at rest (-1)
+    /// the rest of it.
+    #[test]
+    fn a_quarter_width_is_active_a_quarter_of_the_cycle() {
+        let m = Modulator { wave: Wave::Sine, rate: Rate::Beats(1.0), width: 0.25, ..Default::default() };
+        let n = 1000;
+        let active = (0..n).filter(|i| m.active_at(0.0, *i as f64 / n as f64)).count();
+        assert_eq!(active, n / 4);
+        let moving = (0..n).filter(|i| m.wave_at(0.0, *i as f64 / n as f64) > -1.0 + 1e-4).count();
+        assert!((240..=250).contains(&moving), "{moving}");
+        for i in 250..1000 {
+            assert_eq!(m.wave_at(0.0, i as f64 / n as f64), -1.0);
+        }
+        // The whole wave plays within the active part: its peak at 1/16.
+        assert!((m.wave_at(0.0, 1.0 / 16.0) - 1.0).abs() < 1e-5);
+        // Width 0: always at rest.
+        let zero = Modulator { width: 0.0, ..m };
+        assert!((0..100).all(|i| zero.wave_at(0.0, i as f64 / 100.0) == -1.0));
+    }
+
+    #[test]
+    fn attack_and_decay_ramp_up_then_down_continuously() {
+        let m = Modulator { wave: Wave::Square, rate: Rate::Beats(1.0), attack: 0.25, decay: 0.25, ..Default::default() };
+        let at = |p: f64| m.wave_at(0.0, p);
+        assert_eq!(at(0.0), -1.0, "starts from rest");
+        assert!((at(0.125) - 0.0).abs() < 1e-5, "half way up the attack");
+        assert_eq!(at(0.3), 1.0, "full between the ramps (square high)");
+        assert!(at(0.9) < -1.0 + 1e-5, "square low stays at -1");
+        // A sine: continuous around the cycle (no jump larger than the
+        // steepest slope allows).
+        let sine = Modulator { wave: Wave::Sine, attack: 0.3, decay: 0.3, width: 0.5, ..m };
+        let n = 2000;
+        let values: Vec<f32> = (0..=n).map(|i| sine.wave_at(0.0, i as f64 / n as f64)).collect();
+        for w in values.windows(2) {
+            assert!((w[1] - w[0]).abs() < 0.03, "{w:?}");
+        }
+        assert!(values.iter().all(|v| (-1.0..=1.0).contains(v)));
+        // Attack + decay over 1 is scaled back.
+        let over = Modulator { attack: 0.8, decay: 0.8, ..Default::default() }.sanitized();
+        assert!((over.attack + over.decay - 1.0).abs() < 1e-6);
+        let wild = Modulator { width: f32::NAN, attack: -1.0, decay: 3.0, ..Default::default() }.sanitized();
+        assert_eq!((wild.width, wild.attack, wild.decay), (1.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn full_width_without_ramps_is_the_plain_wave() {
+        for wave in [Wave::Sine, Wave::Triangle, Wave::Square, Wave::SawUp, Wave::SawDown, Wave::Random] {
+            let m = Modulator { wave, rate: Rate::Beats(2.0), phase: 0.3, ..Default::default() };
+            for i in 0..200 {
+                let beat = i as f64 * 0.037;
+                let (cycle, p) = m.position(0.0, beat);
+                let plain = match wave {
+                    Wave::Random => random(cycle, &m.target),
+                    w => shape(w, p) as f32,
+                };
+                assert_eq!(m.wave_at(0.0, beat), plain);
+            }
+        }
+        // Older files: the new fields at their defaults.
+        let old: Modulator = serde_json::from_str(r#"{"target":"master.size","wave":"triangle"}"#).unwrap();
+        assert_eq!((old.width, old.attack, old.decay, old.spread.clone()), (1.0, 0.0, 0.0, None));
+        assert!(serde_json::to_value(&old).unwrap().get("spread").is_none());
+    }
+
+    /// T-421: six zones, phase 0→360°: six copies evenly shifted; two
+    /// wings: symmetric around the centre.
+    #[test]
+    fn a_phase_spread_shifts_each_zone() {
+        use crate::projection::{ProjectionConfig, ProjectionZone, ZoneGroup};
+        use crate::spread::{Spread, SpreadParam};
+        let cfg = ProjectionConfig {
+            zones: (1..=7).map(|id| ProjectionZone { id, ..Default::default() }).collect(),
+            groups: vec![ZoneGroup { name: "Six".into(), zones: vec![1, 2, 3, 4, 5, 6], master: 1.0 }],
+            ..Default::default()
+        };
+        let spread = Spread { group: "Six".into(), param: SpreadParam::Phase, from: 0.0, to: 360.0, ..Default::default() };
+        let m = Modulator { wave: Wave::Sine, rate: Rate::Beats(1.0), depth: 0.5, spread: Some(spread.clone()), ..Default::default() };
+        let size = |m: &Modulator, cfg: &ProjectionConfig, zone: u8, beat: f64| {
+            let (zoned, global) = split_zoned(std::slice::from_ref(m), cfg);
+            let mut live = LiveModifiers::default();
+            modulate_grouped(&global, &reg(), &mut Settings::default(), &mut live, 0.0, &|_| beat, 1.0);
+            modulate_zone(&zoned, zone, cfg, &reg(), &mut live, 0.0, &|_| beat, 1.0);
+            live.size
+        };
+        // Zone k at beat b reads the wave at b + k/6.
+        for k in 0..6u8 {
+            let want = 1.0 + 0.5 * (std::f64::consts::TAU * (0.1 + k as f64 / 6.0)).sin() as f32;
+            assert!((size(&m, &cfg, k + 1, 0.1) - want).abs() < 1e-4, "zone {}", k + 1);
+        }
+        // Zone 7 is not in the group: the plain wave.
+        assert!((size(&m, &cfg, 7, 0.25) - 1.5).abs() < 1e-4);
+        // Two wings: zone 1 = zone 6, 2 = 5, 3 = 4.
+        let wings = Modulator { spread: Some(Spread { wings: 2, ..spread.clone() }), ..m.clone() };
+        for (a, b) in [(1, 6), (2, 5), (3, 4)] {
+            assert!((size(&wings, &cfg, a, 0.13) - size(&wings, &cfg, b, 0.13)).abs() < 1e-5);
+        }
+        assert!((size(&wings, &cfg, 1, 0.13) - size(&wings, &cfg, 2, 0.13)).abs() > 1e-3);
+        // A seventh zone added to the group: the shifts follow, the
+        // modulator untouched.
+        let mut seven = cfg.clone();
+        seven.groups[0].zones.push(7);
+        let want = 1.0 + 0.5 * (std::f64::consts::TAU * (0.1 + 1.0 / 7.0)).sin() as f32;
+        assert!((size(&m, &seven, 2, 0.1) - want).abs() < 1e-4);
+        // A look parameter or a group of one: modulated once, unshifted.
+        let look = Modulator { target: "look.size".into(), ..m.clone() };
+        assert!(!look.spreads());
+        let mut one = cfg.clone();
+        one.groups[0].zones = vec![1];
+        assert!(split_zoned(std::slice::from_ref(&m), &one).0.is_empty());
+        // Sanitised: a phase spread whatever the file says.
+        let delay = Modulator { spread: Some(Spread { param: SpreadParam::Delay, ..spread }), ..m }.sanitized();
+        assert_eq!(delay.spread.unwrap().param, SpreadParam::Phase);
     }
 }

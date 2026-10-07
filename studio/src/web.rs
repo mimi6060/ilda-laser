@@ -6452,6 +6452,41 @@ mod tests {
         assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 400);
     }
 
+    /// T-421: spreads ride on the existing objects (no new route): a
+    /// cell's, a modulator's (with width and ramps) and an event's, each
+    /// sanitised; objects saved before load without them.
+    #[test]
+    fn spreads_over_the_existing_routes() {
+        let t = TestServer::start(false);
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        let spread = json!({ "group": " Côtés ", "param": "delay", "from": -1, "to": 9, "wings": 40, "blocks": 0, "shuffle": 7 });
+        assert_eq!(t.request("POST", "/api/cues/slot", &json!({ "id": cue, "zones": [1], "spread": spread }).to_string()).0, 200);
+        let slot = t.shared.lock().unwrap().deck.slot(&cue);
+        let sp = slot.spread.expect("kept");
+        assert_eq!((sp.group.as_str(), sp.from, sp.to, sp.wings, sp.blocks, sp.shuffle), ("Côtés", 0.0, crate::spread::MAX_DELAY_S, 16, 1, Some(7)));
+        let cues = js(&t.request("GET", "/api/cues", "").1);
+        assert_eq!(cues["slots"][&cue]["spread"]["param"], "delay");
+        // No group named: no spread kept.
+        assert_eq!(t.request("POST", "/api/cues/slot", &json!({ "id": cue, "spread": { "group": "" } }).to_string()).0, 200);
+        assert_eq!(t.shared.lock().unwrap().deck.slot(&cue).spread, None);
+        let lfos = json!([{ "target": "master.size", "width": 0.25, "attack": 0.8, "decay": 0.8, "spread": { "group": "Tout", "param": "speed", "to": 360 } }]);
+        assert_eq!(t.request("POST", "/api/lfos", &lfos.to_string()).0, 200);
+        let back = js(&t.request("GET", "/api/lfos", "").1);
+        let m = &back["lfos"][0];
+        assert_eq!((m["width"].as_f64(), m["spread"]["param"].as_str(), m["spread"]["to"].as_f64()), (Some(0.25), Some("phase"), Some(360.0)));
+        assert!((m["attack"].as_f64().unwrap() - 0.5).abs() < 1e-6, "attack + decay at most 1");
+        let old = js(&t.request("POST", "/api/lfos", r#"[{"target":"master.size"}]"#).1.replace("ok", "null"));
+        assert!(old.is_null());
+        let m = &js(&t.request("GET", "/api/lfos", "").1)["lfos"][0];
+        assert_eq!((m["width"].as_f64(), m["attack"].as_f64(), m.get("spread")), (Some(1.0), Some(0.0), None));
+        // A timeline event's own spread, kept through a save.
+        let show = json!({ "name": "étalé", "tracks": [{ "layer": 1, "events": [{ "id": 1, "start": 0, "len": 4, "source": { "kind": "cue", "id": cue }, "spread": { "group": "Tout", "param": "phase", "to": 1e9 } }] }] });
+        let (code, body) = t.request("POST", "/api/shows", &show.to_string());
+        assert_eq!(code, 200, "{body}");
+        let saved = t.shared.lock().unwrap().shows.load("étalé").expect("saved");
+        assert_eq!(saved.tracks[0].events[0].spread.as_ref().map(|s| s.to), Some(3600.0));
+    }
+
     /// T-419: the speed groups over the API: read, changed (bad values
     /// refused, nothing half applied), allowed in show mode (played live),
     /// in `/api/frame` as `tempo.groups` with their beats, and a cell's

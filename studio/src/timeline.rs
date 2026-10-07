@@ -297,6 +297,10 @@ pub struct Event {
     /// `modifiers`, every frame. None in older shows.
     #[serde(skip_serializing_if = "crate::pools::PresetRefs::is_empty")]
     pub refs: crate::pools::PresetRefs,
+    /// *Étalement* (T-421, spread.rs): the event drawn once per zone of a
+    /// group, shifted from zone to zone. None in older shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread: Option<crate::spread::Spread>,
 }
 
 impl Default for Event {
@@ -318,6 +322,7 @@ impl Default for Event {
             notes: String::new(),
             tags: Vec::new(),
             refs: Default::default(),
+            spread: None,
         }
     }
 }
@@ -389,6 +394,7 @@ impl Show {
                 e.envelopes.iter_mut().for_each(Envelope::sanitize);
                 crate::cues::sanitize_notes(&mut e.notes);
                 crate::cues::sanitize_tags(&mut e.tags);
+                e.spread = e.spread.take().map(crate::spread::Spread::sanitized).filter(crate::spread::Spread::is_set);
                 if e.id == 0 || !seen.insert(e.id) {
                     e.id = next_id;
                     seen.insert(next_id);
@@ -639,6 +645,8 @@ pub struct TimelineCue {
     pub scan: Option<String>,
     /// The event's referenced presets (T-422), resolved by the engine.
     pub refs: crate::pools::PresetRefs,
+    /// The event's spread (T-421), else the cue's (resolved by the engine).
+    pub spread: Option<crate::spread::Spread>,
 }
 
 struct Instance {
@@ -1164,6 +1172,7 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
                     },
                     scan: e.scan.clone(),
                     refs: e.refs.clone(),
+                    spread: e.spread.clone(),
                 },
                 accumulate_seconds,
                 seconds_estimate: local_c * 60.0 / c.bpm.max(1.0),
@@ -1740,6 +1749,7 @@ mod tests {
             elapsed_s: 0.0,
             scan: None,
             refs: Default::default(),
+            spread: None,
         };
         let s = look_of(&c, &presets).unwrap();
         assert!((s.brightness - presets[0].settings.brightness * 0.5).abs() < 1e-6);
