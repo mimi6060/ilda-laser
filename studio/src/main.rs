@@ -3702,7 +3702,7 @@ mod tests {
         let _guard = test_support::time_guard("a_push_reader_that_never_reads_does_not_slow_the_engine", Duration::from_secs(180));
         let (quiet, _) = engine_cadence(false);
         let (mean, worst) = engine_cadence_with(|shared, running| {
-            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let server = web::bind("127.0.0.1:0").unwrap();
             let addr = server.server_addr().to_ip().unwrap();
             let estop = Arc::clone(&shared.lock().unwrap().estop);
             let hub = Arc::clone(&shared.lock().unwrap().push);

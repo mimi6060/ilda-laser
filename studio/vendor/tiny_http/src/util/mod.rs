@@ -12,6 +12,8 @@ use std::str::FromStr;
 mod custom_stream;
 mod equal_reader;
 mod fused_reader;
+// Laser Studio patch (T-481): slow clients block only themselves.
+pub(crate) mod limits;
 mod messages_queue;
 pub(crate) mod refined_tcp_stream;
 mod sequential;

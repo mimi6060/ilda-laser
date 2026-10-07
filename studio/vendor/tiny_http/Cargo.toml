@@ -1,5 +1,5 @@
 # tiny_http 0.12.0 as published on crates.io (MIT OR Apache-2.0), with the
-# Laser Studio robustness patches of T-449 (each marked "Laser Studio
+# Laser Studio robustness patches of T-449 and T-481 (each marked "Laser Studio
 # patch" in the sources). The SSL dependencies and the test-only ones are
 # left out: Laser Studio serves plain HTTP on 127.0.0.1 (and the tablet
 # remote on the LAN) and never builds the `ssl-*` features.

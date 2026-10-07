@@ -2,6 +2,8 @@ use std::io::Read;
 use std::io::Result as IoResult;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// A `Reader` that reads exactly the number of bytes from a sub-reader.
 ///
@@ -18,6 +20,11 @@ where
     // Laser Studio patch (T-449): a read failed (a timeout, a reset): the
     // destructor doesn't wait on the socket again.
     failed: bool,
+    // Laser Studio patch (T-481): when set, the destructor doesn't drain
+    // the unread rest of the body (on whatever thread dropped the request)
+    // but leaves its size here for the connection's own thread to skip
+    // (`usize::MAX`: the read failed, the connection must end).
+    leftover: Option<Arc<AtomicUsize>>,
 }
 
 impl<R> EqualReader<R>
@@ -32,9 +39,16 @@ where
             size,
             last_read_signal: tx,
             failed: false,
+            leftover: None,
         };
 
         (r, rx)
+    }
+
+    /// Laser Studio patch (T-481): see `leftover`.
+    pub(crate) fn leaving_rest_to(mut self, leftover: Arc<AtomicUsize>) -> Self {
+        self.leftover = Some(leftover);
+        self
     }
 }
 
@@ -71,6 +85,12 @@ where
     R: Read,
 {
     fn drop(&mut self) {
+        // Laser Studio patch (T-481): left to the connection's thread.
+        if let Some(leftover) = &self.leftover {
+            let rest = if self.failed { usize::MAX } else { self.size };
+            leftover.store(rest, Ordering::SeqCst);
+            return;
+        }
         // Laser Studio patch (T-449): drain at most `DRAIN_LIMIT` bytes of
         // an unread body, through a small buffer. The original allocated a
         // buffer as big as the announced remainder: a request announcing an

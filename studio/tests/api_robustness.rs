@@ -1022,7 +1022,9 @@ fn hostile_connections_neither_crash_nor_hold_the_studio() {
     let mut cut = connect();
     write!(cut, "POST /api/settings HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n{{\"settings\":").unwrap();
     std::thread::sleep(Duration::from_millis(300));
-    the_worker_comes_free(&mut studio, "a body cut short");
+    // T-481: the body is read on the connection's own thread; the worker
+    // never waits on it.
+    the_worker_comes_free(&mut studio, "a body cut short", Duration::from_secs(1));
     // Answers never read: many requests on one connection whose page
     // doesn't read (a tiny receive buffer).
     let stuck = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
@@ -1036,7 +1038,7 @@ fn hostile_connections_neither_crash_nor_hold_the_studio() {
         }
     }
     std::thread::sleep(Duration::from_millis(300));
-    the_worker_comes_free(&mut studio, "answers never read");
+    the_worker_comes_free(&mut studio, "answers never read", Duration::from_secs(8));
     drop((cut, stuck));
     assert!(!studio.output_log().iter().any(|l| l == "arm"));
 }
@@ -1074,9 +1076,10 @@ fn running_out_of_file_descriptors_never_stops_the_server_for_good() {
     assert!(!studio.output_log().iter().any(|l| l == "arm"));
 }
 
-/// The stop answers at once; the other routes within the client timeout
-/// (5 s per stalled read or write) and some slack.
-fn the_worker_comes_free(studio: &mut Studio, what: &str) {
+/// The stop answers at once; the other routes within `limit`: the client
+/// timeout (5 s per stalled write) and some slack, or at once when the
+/// stalled client only sends.
+fn the_worker_comes_free(studio: &mut Studio, what: &str, limit: Duration) {
     let t = Instant::now();
     assert_eq!(http(studio.port, "POST", "/api/estop?source=ui", b"", Duration::from_secs(2)).unwrap().status, 200);
     assert!(t.elapsed() < Duration::from_millis(250), "{what}: e-stop took {:?}", t.elapsed());
@@ -1084,9 +1087,162 @@ fn the_worker_comes_free(studio: &mut Studio, what: &str) {
     let state = http(studio.port, "GET", "/api/state", b"", Duration::from_secs(60)).unwrap_or_else(|e| panic!("{what}: the worker never came free: {e}"));
     assert_eq!(state.status, 200);
     eprintln!("T-449 hostile: {what}: the worker was held {:?}", t.elapsed());
-    assert!(t.elapsed() < Duration::from_secs(8), "{what}: the worker was held {:?}", t.elapsed());
+    assert!(t.elapsed() < limit, "{what}: the worker was held {:?}", t.elapsed());
     assert_eq!(studio.post("/api/estop/reset", r#"{"source":"ui"}"#).unwrap().status, 200);
     studio.alive().unwrap();
+}
+
+// ------------------------------------------------------- slow clients (T-481)
+
+/// A request on its own connection, timed (`Err` on no answer or a 5xx).
+fn timed(port: u16, method: &str, path: &str, body: &str) -> Result<Duration, String> {
+    let t = Instant::now();
+    let r = http(port, method, path, body.as_bytes(), Duration::from_secs(10))?;
+    if r.status >= 500 {
+        return Err(format!("{method} {path}: {}", r.status));
+    }
+    Ok(t.elapsed())
+}
+
+const HEARTBEAT: &str = r#"{"client_id":"t481","visible":true}"#;
+
+/// The slowest of a heartbeat and a state read, `rounds` times, 50 ms apart.
+fn worst_heartbeat_and_state(port: u16, rounds: usize) -> Duration {
+    let mut worst = Duration::ZERO;
+    for _ in 0..rounds {
+        worst = worst.max(timed(port, "POST", "/api/heartbeat", HEARTBEAT).unwrap());
+        worst = worst.max(timed(port, "GET", "/api/state", "").unwrap());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    worst
+}
+
+/// Writes `bytes` to `stream` one a second, until `stop`.
+fn dribble(mut stream: TcpStream, bytes: Vec<u8>, stop: Arc<AtomicBool>) -> TcpStream {
+    for b in bytes {
+        if stop.load(Ordering::SeqCst) || stream.write_all(&[b]).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    stream
+}
+
+/// T-481: a client sending its request one byte a second (its head, or
+/// its body after a complete head) holds only its own connection. Before,
+/// a slow body was read on the single worker: no heartbeat (a disarm
+/// through « Interface perdue »), no state, no UI until it ended.
+#[test]
+fn a_client_sending_one_byte_a_second_delays_nothing() {
+    let mut studio = Studio::start("slow-client", &[]);
+    let port = studio.port;
+    let quiet = worst_heartbeat_and_state(port, 10);
+    let stop = Arc::new(AtomicBool::new(false));
+    let connect = || TcpStream::connect(("127.0.0.1", port)).unwrap();
+    // Its head, a byte a second.
+    let head = (b"POST /api/heartbeat HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}".to_vec(), connect(), Arc::clone(&stop));
+    // A complete head, then its body a byte a second (a heartbeat, what
+    // the worker serves most, padded past the 1 kB tiny_http itself reads
+    // ahead).
+    let padded = format!("{HEARTBEAT}{}", " ".repeat(2000));
+    let mut body = connect();
+    write!(body, "POST /api/heartbeat HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n", padded.len()).unwrap();
+    let body = (padded.into_bytes(), body, Arc::clone(&stop));
+    // A short body sent to its end: answered once it has all arrived.
+    let mut short = connect();
+    short.write_all(b"POST /api/heartbeat HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 3\r\n\r\n").unwrap();
+    let short_sent = Instant::now();
+    let short = (b"{} ".to_vec(), short, Arc::new(AtomicBool::new(false)));
+    let threads: Vec<_> = [head, body, short].into_iter().map(|(bytes, s, stop)| std::thread::spawn(move || dribble(s, bytes, stop))).collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let loaded = worst_heartbeat_and_state(port, 40);
+    let estop = studio.estop_roundtrip(Duration::from_millis(50)).unwrap();
+    // A stop whose body never comes is served on its head alone.
+    let mut slow_stop = connect();
+    slow_stop.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let t = Instant::now();
+    slow_stop.write_all(b"POST /api/estop?source=ui HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{").unwrap();
+    let mut first = [0u8; 12];
+    slow_stop.read_exact(&mut first).unwrap();
+    let slow_estop = t.elapsed();
+    assert_eq!(&first, b"HTTP/1.1 200", "a stop with a body still to come");
+    assert!(slow_estop < Duration::from_millis(50), "a stop with a body still to come took {slow_estop:?}");
+    assert!(studio.get("/api/arm").unwrap().json()["estop"].is_object(), "the stop latched");
+    assert_eq!(studio.post("/api/estop/reset", r#"{"source":"ui"}"#).unwrap().status, 200);
+    // A chunked body is read ahead too.
+    let mut chunked = connect();
+    chunked.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(chunked, "POST /api/heartbeat HTTP/1.1\r\nHost: x\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{HEARTBEAT}\r\n0\r\n\r\n", HEARTBEAT.len()).unwrap();
+    assert_eq!(read_response(&mut chunked).unwrap().status, 200, "a chunked heartbeat");
+    stop.store(true, Ordering::SeqCst);
+    let mut streams: Vec<TcpStream> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    // The short one got its answer, after its last byte.
+    let mut short = streams.pop().unwrap();
+    short.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let answer = read_response(&mut short).unwrap();
+    assert!(answer.status < 500, "the slow but complete request: {}", answer.status);
+    assert!(short_sent.elapsed() >= Duration::from_secs(2));
+    eprintln!("T-481 slow client: heartbeat and state worst {quiet:?} quiet, {loaded:?} beside clients sending 1 byte/s; e-stop {estop:?}");
+    assert!(loaded <= quiet + Duration::from_millis(100), "a client sending 1 byte/s delayed the heartbeat or the state: worst {loaded:?} against {quiet:?} quiet");
+    studio.alive().unwrap();
+    assert!(!studio.output_log().iter().any(|l| l == "arm"));
+}
+
+/// The studio's thread count (`ps -M`: one line per thread, and a header).
+fn threads(studio: &Studio) -> usize {
+    let out = Command::new("ps").args(["-M", "-p", &studio.child.id().to_string()]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).lines().count().saturating_sub(1)
+}
+
+/// T-481: hundreds of slow clients at once, more than the descriptors a
+/// Mac app gets by default (256) allow: the connections served are
+/// capped, the one waiting longest for its client pushed out by a new
+/// one. The stop always gets in and answers within 50 ms, the heartbeat
+/// and the state keep answering, and the threads stay bounded.
+#[test]
+fn a_flood_of_slow_clients_never_delays_the_stop() {
+    let mut studio = Studio::start_limited("slow-flood", &[], Some(256));
+    let port = studio.port;
+    let quiet = worst_heartbeat_and_state(port, 5);
+    let before = threads(&studio);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut flood = Vec::new();
+    for i in 0..300 {
+        let Ok(mut c) = TcpStream::connect(("127.0.0.1", port)) else { continue };
+        // Half stall in their head, half in their body.
+        let started = if i % 2 == 0 { c.write_all(b"GET /api/st") } else { c.write_all(b"POST /api/settings HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n{") };
+        if started.is_ok() {
+            flood.push(c);
+        }
+    }
+    // A byte a second on each (so they never time out); the ones pushed
+    // out fail to write and are let go.
+    let dribbler = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                flood.retain_mut(|c| c.write_all(b"a").is_ok());
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            flood.len()
+        })
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    let mut worst_estop = Duration::ZERO;
+    for _ in 0..20 {
+        let took = studio.estop_roundtrip(Duration::from_millis(50)).unwrap_or_else(|e| panic!("under a flood of slow clients: {e}"));
+        worst_estop = worst_estop.max(took);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let loaded = worst_heartbeat_and_state(port, 10);
+    let during = threads(&studio);
+    stop.store(true, Ordering::SeqCst);
+    let left = dribbler.join().unwrap();
+    eprintln!("T-481 flood: 300 slow clients ({left} still connected at the end), worst e-stop {worst_estop:?}, heartbeat and state worst {loaded:?} ({quiet:?} quiet), threads {before} → {during}");
+    assert!(loaded <= quiet + Duration::from_millis(100), "the flood delayed the heartbeat or the state: {loaded:?} against {quiet:?}");
+    assert!(during <= before + 48 + 8, "threads {before} → {during}");
+    studio.alive().unwrap();
+    assert!(!studio.output_log().iter().any(|l| l == "arm"));
 }
 
 /// Clients at once: fuzzing threads, slow readers that never read their
@@ -1155,8 +1311,9 @@ fn hammer(fuzz: &mut Fuzz, length: Duration, clients: usize) -> String {
         threads.push(std::thread::spawn(move || operator(port, seed, &stop, &failures, &sent)));
     }
     // Slow clients, now and then: answers never read, a body never
-    // finished. Each holds the single worker for up to the client timeout
-    // (5 s), by design; the stop is served beside it.
+    // finished. An answer never read holds the single worker for up to the
+    // client timeout (5 s), by design; a body never finished holds only
+    // its own connection (T-481). The stop is served beside them.
     {
         let stop = Arc::clone(&stop);
         threads.push(std::thread::spawn(move || {

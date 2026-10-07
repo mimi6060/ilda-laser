@@ -8,7 +8,10 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use crate::common::{HTTPVersion, Method};
+use crate::util::limits::{Mark, Prefetch, Skipping};
 use crate::util::RefinedTcpStream;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use crate::util::{SequentialReader, SequentialReaderBuilder, SequentialWriterBuilder};
 use crate::Request;
 
@@ -16,6 +19,10 @@ use crate::Request;
 /// most headers, a request may have.
 const MAX_LINE: usize = 64 * 1024;
 const MAX_HEADERS: usize = 128;
+
+/// Laser Studio patch (T-481): the connection's stream, which skips what a
+/// request left unread of its body before the next request is read.
+type Source = Skipping<BufReader<RefinedTcpStream>>;
 
 /// A ClientConnection is an object that will store a socket to a client
 /// and return Request objects.
@@ -25,20 +32,27 @@ pub struct ClientConnection {
 
     // sequence of Readers to the stream, so that the data is not read in
     //  the wrong order
-    source: SequentialReaderBuilder<BufReader<RefinedTcpStream>>,
+    source: SequentialReaderBuilder<Source>,
 
     // sequence of Writers to the stream, to avoid writing response #2 before
     //  response #1
     sink: SequentialWriterBuilder<BufWriter<RefinedTcpStream>>,
 
     // Reader to read the next header from
-    next_header_source: SequentialReader<BufReader<RefinedTcpStream>>,
+    next_header_source: SequentialReader<Source>,
 
     // set to true if we know that the previous request is the last one
     no_more_requests: bool,
 
     // true if the connection goes through SSL
     secure: bool,
+
+    // Laser Studio patch (T-481): bodies read before their request is
+    // handed over (see `util::limits`), what a streamed body left unread,
+    // and since when the connection has been waiting for its client.
+    prefetch: Option<Arc<Prefetch>>,
+    leftover: Arc<AtomicUsize>,
+    mark: Option<Arc<Mark>>,
 }
 
 /// Error that can happen when reading a request.
@@ -49,6 +63,10 @@ enum ReadError {
     /// the client sent an unrecognized `Expect` header
     ExpectationFailed(HTTPVersion),
     ReadIoError(IoError),
+    /// Laser Studio patch (T-481): a body past the prefetch limit (413).
+    TooLarge(HTTPVersion),
+    /// Laser Studio patch (T-481): the prefetch budget is spent (503).
+    Busy(HTTPVersion),
 }
 
 impl ClientConnection {
@@ -60,7 +78,9 @@ impl ClientConnection {
         let remote_addr = read_socket.peer_addr();
         let secure = read_socket.secure();
 
-        let mut source = SequentialReaderBuilder::new(BufReader::with_capacity(1024, read_socket));
+        let leftover = Arc::new(AtomicUsize::new(0));
+        let reader = Skipping::new(BufReader::with_capacity(1024, read_socket), Arc::clone(&leftover));
+        let mut source = SequentialReaderBuilder::new(reader);
         let first_header = source.next().unwrap();
 
         ClientConnection {
@@ -70,7 +90,18 @@ impl ClientConnection {
             next_header_source: first_header,
             no_more_requests: false,
             secure,
+            prefetch: None,
+            leftover,
+            mark: None,
         }
+    }
+
+    /// Laser Studio patch (T-481): bodies read before their request is
+    /// handed over, and the connection's mark among the server's readers.
+    pub(crate) fn with_limits(mut self, prefetch: Option<Arc<Prefetch>>, mark: Option<Arc<Mark>>) -> Self {
+        self.prefetch = prefetch;
+        self.mark = mark;
+        self
     }
 
     /// true if the connection is HTTPS
@@ -167,6 +198,7 @@ impl ClientConnection {
             *self.remote_addr.as_ref().unwrap(),
             data_source,
             writer,
+            self.prefetch.as_ref().map(|prefetch| crate::request::BodyPolicy { prefetch, leftover: &self.leftover }),
         )
         .map_err(|e| {
             use crate::request;
@@ -175,6 +207,8 @@ impl ClientConnection {
                 request::RequestCreationError::ExpectationFailed => {
                     ReadError::ExpectationFailed(version)
                 }
+                request::RequestCreationError::TooLarge => ReadError::TooLarge(version),
+                request::RequestCreationError::Busy => ReadError::Busy(version),
             }
         })?;
 
@@ -198,7 +232,16 @@ impl Iterator for ClientConnection {
         }
 
         loop {
-            let rq = match self.read() {
+            // Laser Studio patch (T-481): waiting for the client while the
+            // request is read, its head and (prefetched) body.
+            if let Some(mark) = &self.mark {
+                mark.waiting();
+            }
+            let read = self.read();
+            if let Some(mark) = &self.mark {
+                mark.served();
+            }
+            let rq = match read {
                 Err(ReadError::WrongRequestLine) => {
                     let writer = self.sink.next().unwrap();
                     let response = Response::new_empty(StatusCode(400));
@@ -235,6 +278,21 @@ impl Iterator for ClientConnection {
                 }
 
                 Err(ReadError::ReadIoError(_)) => return None,
+
+                // Laser Studio patch (T-481): the body wasn't read whole;
+                // the connection can't go on.
+                Err(ReadError::TooLarge(ver)) => {
+                    let writer = self.sink.next().unwrap();
+                    let response = Response::new_empty(StatusCode(413));
+                    response.raw_print(writer, ver, &[], false, None).ok();
+                    return None;
+                }
+                Err(ReadError::Busy(ver)) => {
+                    let writer = self.sink.next().unwrap();
+                    let response = Response::new_empty(StatusCode(503));
+                    response.raw_print(writer, ver, &[], false, None).ok();
+                    return None;
+                }
 
                 Ok(rq) => rq,
             };
