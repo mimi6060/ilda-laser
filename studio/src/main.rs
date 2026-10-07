@@ -1126,6 +1126,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let (netin_hub, netin_tx) = (Arc::clone(&state.netin.hub), state.netin.sender());
     // OSC feedback (T-416): the queue the engine fills and "osc-out" empties.
     let osc_out_rx = state.netin.feedback.take_receiver();
+    // Timecode output (T-417): the snapshots the engine queues for "tc-out".
+    let (tc_out_rx, tc_out_status) = (state.timecode.out.take_receiver(), Arc::clone(&state.timecode.out.status));
     let audio_hub = Arc::clone(&state.audio_in);
     let (song_hub, media) = (Arc::clone(&state.song), Arc::clone(&state.media));
     if let Some(kill) = output.as_ref().and_then(|o| o.kill_switch()) {
@@ -1198,6 +1200,16 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     });
     let watchdog = watchdog::spawn(Arc::clone(&health), Arc::clone(&estop), Arc::clone(&running));
 
+    // MTC goes out through the MIDI backend in use (the simulator with
+    // --midi-test), on a port the operator picks; none with --no-midi.
+    let mtc_opener: Option<timecode::out::MidiOpener> = if let Some(sim) = sim.clone() {
+        Some(Arc::new(move |name: &str| midi::backend::Backend::open_output(&mut sim.clone(), name)))
+    } else if cli.no_midi {
+        None
+    } else {
+        Some(Arc::new(|name: &str| midi::backend::Backend::open_output(&mut midi::backend::MidirBackend, name)))
+    };
+    let tc_out_thread = tc_out_rx.and_then(|rx| timecode::out::spawn(rx, tc_out_status, mtc_opener, Arc::clone(&running)));
     let midi_thread = if let Some(sim) = sim {
         println!("--midi-test: simulated APC40 mkII only, MIDI injection enabled (tests only).");
         midi::worker::spawn_on(sim, Arc::clone(&shared), Arc::clone(&running))
@@ -1294,6 +1306,9 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     }
     for t in netin_threads {
         t.join().ok(); // within one receive timeout (100 ms)
+    }
+    if let Some(t) = tc_out_thread {
+        t.join().ok(); // within one poll (20 ms); the stream simply stops
     }
     // The audio threads close the input within ~50 ms; a device stuck in
     // CoreAudio must not hold the exit.
@@ -2751,6 +2766,8 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
     // The live take (T-169) observes the deck and the masters, after the
     // playhead moved. Reads only.
     take::frame(s, &c);
+    // The timecode output (T-417) reads the playhead it ended on.
+    timecode::out::frame(s, &c);
     // A cue event plays the cue's grid program too (T-157).
     let with_program = |cue: &timeline::TimelineCue, look: Settings| match &cue.source {
         timeline::EventSource::Cue { id } => s.deck.with_program(id, look),

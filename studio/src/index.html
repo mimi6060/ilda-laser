@@ -784,6 +784,19 @@
   #tcStatus { margin: 0; }
   #tcStatus.warn { color: var(--warn); }
   #tcPanel .cue-bar label[hidden] { display: none; }
+  /* Timecode sortant (T-417), Theme (T-299) tokens. */
+  #tcoBar button, #tcoBar select, #tcoBar input { min-height: 44px; }
+  #tcoBar input[type=checkbox] { min-height: 0; width: 22px; height: 22px; }
+  #tcoBar .check { min-height: 44px; }
+  #tcoToggle { min-width: 88px; font-weight: 800; letter-spacing: .08em; }
+  #tcoToggle.on { background: var(--ok); color: var(--bg); border-color: var(--ok); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 45%, transparent); }
+  #tcoTarget { width: 170px; padding: 4px; }
+  #tcoState { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #tcoState[data-status="sending"] { color: var(--ok); border-color: var(--ok); }
+  #tcoState[data-status="waiting"] { color: var(--warn); border-color: var(--warn); }
+  #tcoState[data-status="error"] { color: var(--danger); border-color: var(--danger); }
+  #tcoMsg:empty { display: none; }
+  #tcoMsg { color: var(--danger); }
   /* Lecteur de shows (T-444), Theme (T-299) tokens. */
   #slPanel { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
   #slNow { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text); }
@@ -3103,6 +3116,23 @@
         <label title="Post-roll sans limite : sans timecode, le show continue seul"><input type="checkbox" id="tcKeep"> Continuer</label>
       </div>
       <div class="hint" id="tcMsg"></div>
+      <!-- Timecode sortant (T-417) : la position de la timeline en MTC et / ou en Art-Net, désactivé par défaut -->
+      <div class="cue-bar lock-edit" id="tcoBar" role="group" aria-label="Timecode sortant">
+        <button id="tcoToggle" aria-pressed="false" title="TC-OUT : émet la position de la timeline (shows en secondes) pendant la lecture, vers le port MIDI et / ou l'adresse choisis. N'arme jamais le laser.">TC-OUT</button>
+        <span id="tcoState" role="status" data-status="off">Émission : désactivée</span>
+        <label for="tcoPort">Port MIDI (MTC)</label>
+        <select id="tcoPort"><option value="">Aucun</option></select>
+        <label class="check" title="Timecode Art-Net : un paquet par image, depuis l'interface choisie"><input type="checkbox" id="tcoArtnet"> Art-Net</label>
+        <label for="tcoIface" class="tco-net">Interface réseau</label>
+        <select id="tcoIface" class="tco-net"></select>
+        <label for="tcoTarget" class="tco-net">Adresse cible</label>
+        <input type="text" id="tcoTarget" class="tco-net" autocomplete="off" spellcheck="false" placeholder="vide = diffusion" title="Une machine (IP ou IP:port, port 6454 par défaut). Vide : diffusion sur l'interface choisie.">
+        <label for="tcoFps">Images/s</label>
+        <select id="tcoFps"><option value="24">24</option><option value="25">25</option><option value="29.97df">29,97 drop</option><option value="30">30</option></select>
+        <label for="tcoOffset">Décalage (s)</label>
+        <input type="number" id="tcoOffset" step="0.04" min="-86400" max="86400" value="0" title="Timecode émis = position dans le show + décalage (3600 : le show démarre à 01:00:00:00)">
+      </div>
+      <div class="hint" id="tcoMsg" role="alert"></div>
     </section>
     <!-- Lecteur de shows (T-444) : une liste de shows enregistrés qui s'enchaînent -->
     <section id="slPanel" aria-labelledby="slTitle" data-help="timeline-lecteur">
@@ -6597,6 +6627,7 @@ function applyState(f, at, pushed) {
   showTimeline(f.timeline);
   lastTimeline = f.timeline;
   showTimecode(f.timecode);
+  showTcOut(f.timeline && f.timeline.timecode_out);
   showShowList(f.showlist);
   showSong(f.timeline, f.timeline_audio);
   tlOnState(f.timeline, f.tempo, at);
@@ -11946,8 +11977,9 @@ async function setTimecode(patch) {
   const r = await api('POST', '/api/timecode', patch, { quiet: true });
   if (r.ok) { $('tcMsg').textContent = ''; fillTimecode(await r.json()); return; }
   const t = await r.text();
+  // Reload first (it rewrites the hint), then say why it was refused.
+  await loadTimecode();
   if (r.status === 423) flash(t); else $('tcMsg').textContent = t;
-  loadTimecode();
 }
 $('tcArm').onclick = async () => {
   try {
@@ -11985,8 +12017,78 @@ $('tcOffsetNow').onclick = () => {
   setTcShowOr('offset_s', Math.round(((+m[1] * 60 + +m[2]) * 60 + +m[3] + +m[4] / Math.round(fps)) * 1000) / 1000);
 };
 $('timelinePanel').addEventListener('focusin', () => { if (!tcCfg) loadTimecode(); });
-setInterval(() => { if (!document.hidden && !$('timelinePanel').hidden) loadTimecode(); }, 2000);
+setInterval(() => { if (!document.hidden && !$('timelinePanel').hidden) { loadTimecode(); loadTcOut(); } }, 2000);
 loadTimecode();
+
+// ---------- Timecode sortant (T-417) ----------
+// TC-OUT sends the timeline's position (MTC on the MIDI port chosen,
+// Art-Net from the interface chosen) while a show in seconds plays.
+// Off by default; the summary comes with every frame
+// (`timeline.timecode_out`), the settings from GET /api/timecode/out.
+// Never arms the laser; not an external control (no shortcut).
+let tcoCfg = null;
+function showTcOut(o) {
+  if (!o) return;
+  $('tcoToggle').classList.toggle('on', o.enabled);
+  $('tcoToggle').setAttribute('aria-pressed', o.enabled);
+  const st = !o.enabled ? 'off' : o.error ? 'error' : o.sending ? 'sending' : o.blocked ? 'waiting' : 'idle';
+  $('tcoState').dataset.status = st;
+  $('tcoState').textContent = !o.enabled ? 'Émission : désactivée'
+    : o.sending ? 'Émission : ' + (o.last || '…')
+    : o.blocked ? 'Émission en attente : ' + o.blocked
+    : 'Émission : à l\'arrêt (timeline arrêtée)';
+  $('tcoState').title = o.error ? 'Dernière erreur d\'envoi : ' + o.error : '';
+}
+function fillTcOut(v) {
+  const c = v.config;
+  tcoCfg = c;
+  const keep = id => document.activeElement === $(id);
+  if (!keep('tcoPort')) {
+    const ports = [...new Set([...(v.midi_ports || []), ...(c.mtc_port ? [c.mtc_port] : [])])];
+    $('tcoPort').innerHTML = '<option value="">Aucun</option>' + ports.map(p => `<option>${esc(p)}</option>`).join('');
+    $('tcoPort').value = c.mtc_port || '';
+  }
+  $('tcoArtnet').checked = !!c.artnet;
+  document.querySelectorAll('#tcoBar .tco-net').forEach(el => { el.hidden = !c.artnet; });
+  if (!keep('tcoIface')) {
+    const ifs = v.interfaces || [];
+    const cur = c.artnet ? c.artnet.interface : '';
+    const ips = [...new Set([...ifs.map(i => i.ip), ...(cur ? [cur] : [])])];
+    $('tcoIface').innerHTML = ips.map(ip => { const i = ifs.find(x => x.ip === ip); return `<option value="${esc(ip)}">${esc(ip)}${i ? ' (' + esc(i.name) + ')' : ''}</option>`; }).join('');
+    $('tcoIface').value = cur || (ips[0] || '');
+  }
+  if (!keep('tcoTarget')) $('tcoTarget').value = c.artnet ? c.artnet.target : '';
+  if (!keep('tcoFps')) $('tcoFps').value = c.fps;
+  if (!keep('tcoOffset')) $('tcoOffset').value = +c.offset_s.toFixed(3);
+  showTcOut(v.summary);
+}
+async function loadTcOut() {
+  try { const r = await api('GET', '/api/timecode/out', undefined, { quiet: true }); if (r.ok) fillTcOut(await r.json()); } catch { /* studio restarting */ }
+}
+async function setTcOut(patch) {
+  const r = await api('POST', '/api/timecode/out', patch, { quiet: true });
+  if (r.ok) { $('tcoMsg').textContent = ''; fillTcOut(await r.json()); return; }
+  const t = await r.text();
+  if (r.status === 423) flash(t); else $('tcoMsg').textContent = t;
+  loadTcOut();
+}
+function tcoNet() {
+  return { interface: $('tcoIface').value, target: $('tcoTarget').value.trim() };
+}
+$('tcoToggle').onclick = () => setTcOut({ enabled: !(tcoCfg && tcoCfg.enabled) });
+$('tcoPort').onchange = e => setTcOut({ mtc_port: e.target.value || null });
+$('tcoArtnet').onchange = e => {
+  if (!e.target.checked) return setTcOut({ artnet: null });
+  // Loopback has no broadcast: start from a typed target there.
+  const n = tcoNet();
+  if (!n.interface) { e.target.checked = false; $('tcoMsg').textContent = 'Aucune interface réseau disponible.'; return; }
+  setTcOut({ artnet: n });
+};
+$('tcoIface').onchange = () => setTcOut({ artnet: tcoNet() });
+$('tcoTarget').onchange = () => setTcOut({ artnet: tcoNet() });
+$('tcoFps').onchange = e => setTcOut({ fps: e.target.value });
+$('tcoOffset').onchange = e => { const v = +e.target.value; if (Number.isFinite(v)) setTcOut({ offset_s: v }); };
+loadTcOut();
 
 $('tlShow').addEventListener('focus', loadShows);
 $('tlShow').addEventListener('change', async () => {

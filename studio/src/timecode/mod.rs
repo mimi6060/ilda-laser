@@ -48,6 +48,7 @@
 pub mod artnet;
 pub mod ltc;
 pub mod mtc;
+pub mod out;
 
 use crate::external;
 use crate::interlock::ArmSource;
@@ -133,7 +134,6 @@ impl Rate {
         }
     }
 
-    #[cfg(test)]
     pub fn mtc_code(self) -> u8 {
         match self {
             Rate::F24 => 0,
@@ -287,6 +287,9 @@ pub struct TcConfig {
     /// of RÉGLAGES › Entrées réseau; "" = none. With the Art-Net chart on,
     /// its socket carries the timecode as well.
     pub interface: String,
+    /// The timecode output (out.rs, T-417): off by default. Set through
+    /// `POST /api/timecode/out` only.
+    pub out: out::TimecodeOut,
 }
 
 impl Default for TcConfig {
@@ -301,6 +304,7 @@ impl Default for TcConfig {
             midi_port: None,
             ltc_channel: 0,
             interface: String::new(),
+            out: out::TimecodeOut::default(),
         }
     }
 }
@@ -452,6 +456,8 @@ pub struct TimecodeState {
     status: Status,
     /// Why the timecode doesn't drive the timeline right now.
     blocked: Option<String>,
+    /// The timecode output's queue and status (T-417).
+    pub out: out::OutRuntime,
 }
 
 impl TimecodeState {
@@ -478,6 +484,7 @@ impl TimecodeState {
             jumps: 0,
             status: Status::Off,
             blocked: None,
+            out: out::OutRuntime::default(),
         }
     }
 
@@ -485,9 +492,13 @@ impl TimecodeState {
         let mut raw: Value = crate::load_json(&path);
         TcConfig::migrate(&mut raw);
         let mut config: TcConfig = if raw.is_null() { TcConfig::default() } else { serde_json::from_value(raw).unwrap_or_default() };
+        if let Err(e) = config.out.validate() {
+            log::warn!("timecode.json (sortie) : {e} ; sortie désactivée");
+            config.out = out::TimecodeOut::default();
+        }
         if let Err(e) = config.validate() {
             log::warn!("timecode.json : {e} ; réglages par défaut");
-            config = TcConfig::default();
+            config = TcConfig { out: config.out, ..TcConfig::default() };
         }
         Self::with(config, Some(path))
     }
@@ -498,6 +509,11 @@ impl TimecodeState {
 
     pub fn config(&self) -> &TcConfig {
         &self.config
+    }
+
+    /// The output's settings (checked by `out::update`).
+    pub fn set_out(&mut self, cfg: out::TimecodeOut) {
+        self.config.out = cfg;
     }
 
     /// The source in use: the loaded show's, else the global one.
@@ -908,8 +924,9 @@ pub fn view(s: &mut Shared) -> Value {
 /// "offset_s" }` (or null) sets the loaded show's own settings, saved with
 /// the show. Returns whether anything changed; the caller saves the
 /// global settings. A new source forgets the old one's readings and drops
-/// TC-IN.
-pub fn update(s: &mut Shared, patch: &Value) -> Result<bool, String> {
+/// TC-IN. An input on the timecode output's port or interface is refused
+/// (409, the self-drive trap, T-417).
+pub fn update(s: &mut Shared, patch: &Value) -> Result<bool, out::Refused> {
     let obj = patch.as_object().ok_or("objet JSON attendu")?;
     let show_patch = match obj.get("show") {
         None => None,
@@ -925,13 +942,23 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<bool, String> {
     }
     let mut v = json!(s.timecode.config);
     for (k, val) in obj.iter().filter(|(k, _)| *k != "show") {
-        if v.get(k).is_none() {
-            return Err(format!("réglage inconnu : {k}"));
+        if v.get(k).is_none() || k == "out" {
+            return Err(format!("réglage inconnu : {k}").into());
         }
         v[k] = val.clone();
     }
     let cfg: TcConfig = serde_json::from_value(v).map_err(|e| format!("réglage invalide : {e}"))?;
     cfg.validate()?;
+    if cfg.out.enabled {
+        let source = match &show_patch {
+            Some(Some(st)) => st.source,
+            Some(None) => cfg.source,
+            None => s.timecode.show.as_ref().map_or(cfg.source, |sh| sh.source),
+        };
+        if let Some(why) = out::conflicts(&cfg.out, &cfg, source) {
+            return Err(out::Refused::conflict(why));
+        }
+    }
     let before = s.timecode.config.clone();
     let mut changed = false;
     if cfg != before {

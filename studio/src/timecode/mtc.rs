@@ -9,7 +9,8 @@
 //! else (reverse play, a lost byte) waits for the next piece 0.
 //!
 //! Pure and allocation-free: the MIDI worker calls it under the `Shared`
-//! lock, once per batch.
+//! lock, once per batch. The encoders below are the other half, for the
+//! timecode output (out.rs, T-417).
 
 use super::{Rate, Tc};
 
@@ -63,8 +64,8 @@ pub fn full_frame(bytes: &[u8]) -> Option<(Tc, Rate)> {
     tc.valid(rate).then_some((tc, rate))
 }
 
-/// The eight quarter-frame data bytes for `tc` (our own test source).
-#[cfg(test)]
+/// The eight quarter-frame data bytes for `tc`: piece k carries nibble k
+/// (T-417's MTC output, and our own test source).
 pub fn quarter_frames(tc: Tc, rate: Rate) -> [u8; 8] {
     let code = rate.mtc_code();
     let nib = [tc.f & 0x0F, tc.f >> 4, tc.s & 0x0F, tc.s >> 4, tc.m & 0x0F, tc.m >> 4, tc.h & 0x0F, ((tc.h >> 4) & 0x01) | (code << 1)];
@@ -75,8 +76,7 @@ pub fn quarter_frames(tc: Tc, rate: Rate) -> [u8; 8] {
     out
 }
 
-/// A full-frame SysEx for `tc` (our own test source).
-#[cfg(test)]
+/// A full-frame SysEx for `tc`, to every device (`7F`).
 pub fn full_frame_bytes(tc: Tc, rate: Rate) -> Vec<u8> {
     vec![0xF0, 0x7F, 0x7F, 0x01, 0x01, (rate.mtc_code() << 5) | tc.h, tc.m, tc.s, tc.f, 0xF7]
 }
