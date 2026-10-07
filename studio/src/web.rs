@@ -6,7 +6,11 @@
 //!
 //! One thread receives requests; `POST /api/estop` is handled right there,
 //! without the studio lock, ahead of everything queued. All other requests go, in order,
-//! to a single worker thread, so a slow handler never delays a stop. The
+//! to a single worker thread, so a slow handler never delays a stop.
+//! A request reaches them only once its head and its body (up to
+//! `MAX_JSON_BODY`) have arrived, read on the connection's own thread
+//! (T-481), so a client that sends slowly holds only itself; the stop is
+//! handed over as soon as its head is read, its body never waited for. The
 //! requests that may decode a song (import, waveform, attach: seconds, up
 //! to the decoding time limit) get their own thread, so they never hold up
 //! the heartbeats queued behind them (T-298: a slow or hanging decode must
@@ -355,12 +359,33 @@ pub fn route_class(method: &str, path: &str) -> Option<RouteClass> {
 /// client first.
 pub(crate) const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The most connections served at once (T-481). Past it, a new one pushes
+/// out the connection that has waited longest for its client (a slow or
+/// idle one), so a flood of slow clients holds neither all the threads
+/// and file descriptors nor the door: a stop on a new connection still
+/// gets in. A browser opens at most 6 per page; three descriptors each.
+pub(crate) const MAX_CONNECTIONS: usize = 48;
+
+/// The body bytes held at once by all the requests read in advance
+/// (T-481): four of the biggest JSON body. Past it, 503.
+const PREFETCH_BUDGET: usize = 4 * MAX_JSON_BODY;
+
 /// A server on `addr` whose connections time out reads and writes after
 /// `CLIENT_IO_TIMEOUT` (set on each accepted socket by our tiny_http
 /// patch, `vendor/tiny_http`: macOS sockets don't inherit the listener's).
-pub(crate) fn bind(addr: impl std::net::ToSocketAddrs) -> anyhow::Result<Server> {
+/// Bodies up to `prefetch` bytes are read on the connection's own thread
+/// before the request is handed over, at most `budget` bytes at once, and
+/// at most `max_connections` are served at once (T-481); the stop is
+/// handed over on its head alone.
+pub(crate) fn bind_with(addr: impl std::net::ToSocketAddrs, prefetch: usize, budget: usize, max_connections: usize) -> anyhow::Result<Server> {
     let listener = std::net::TcpListener::bind(addr)?;
-    Server::from_listener_with_timeout(listener, None, Some(CLIENT_IO_TIMEOUT)).map_err(|e| anyhow::anyhow!("{e}"))
+    let limits = tiny_http::ClientLimits { timeout: Some(CLIENT_IO_TIMEOUT), prefetch, prefetch_budget: budget, max_connections, head_only: Some(is_estop) };
+    Server::from_listener_with_limits(listener, None, limits).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The UI's server on `addr` (see `bind_with`).
+pub(crate) fn bind(addr: impl std::net::ToSocketAddrs) -> anyhow::Result<Server> {
+    bind_with(addr, MAX_JSON_BODY, PREFETCH_BUDGET, MAX_CONNECTIONS)
 }
 
 pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) -> anyhow::Result<()> {
@@ -389,6 +414,13 @@ pub(crate) fn serve(server: Server, shared: Arc<Mutex<Shared>>, estop: Arc<EStop
             for mut request in pending {
                 if may_decode(request.method(), request.url()) {
                     decode_aside(request, &shared, &calibration_path, &decoding);
+                    continue;
+                }
+                // T-481: a body that didn't fit in advance (bigger than any
+                // JSON body) would be read here, at the client's pace;
+                // only the long jobs above, on their own threads, take one.
+                if !request.body_buffered() {
+                    let _ = request.respond(text(413, &format!("requête trop grosse ({} Mo au plus)", MAX_JSON_BODY >> 20)));
                     continue;
                 }
                 let response = route(&mut request, &shared, &calibration_path);
@@ -6115,7 +6147,7 @@ mod tests {
             }
             let estop = Arc::clone(&state.estop);
             let shared = Arc::new(Mutex::new(state));
-            let server = Server::http("127.0.0.1:0").unwrap();
+            let server = bind("127.0.0.1:0").unwrap();
             let addr = server.server_addr().to_ip().unwrap();
             let running = Arc::new(AtomicBool::new(true));
             let thread = std::thread::spawn({

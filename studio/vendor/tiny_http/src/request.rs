@@ -7,7 +7,10 @@ use std::str::FromStr;
 
 use std::sync::mpsc::Sender;
 
+use crate::util::limits::{Prefetch, PrefetchError};
 use crate::util::{EqualReader, FusedReader};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use crate::{HTTPVersion, Header, Method, Response, StatusCode};
 use chunked_transfer::Decoder;
 
@@ -74,6 +77,10 @@ pub struct Request {
 
     // If Some, a message must be sent after responding
     notify_when_responded: Option<Sender<()>>,
+
+    // Laser Studio patch (T-481): true if the body was read whole before
+    // the request was handed over (or there is none).
+    body_buffered: bool,
 }
 
 struct NotifyOnDrop<R> {
@@ -108,6 +115,31 @@ pub enum RequestCreationError {
 
     /// Error while reading data from the socket during the creation of the `Request`.
     CreationIoError(IoError),
+
+    /// Laser Studio patch (T-481): a chunked body past the prefetch limit.
+    TooLarge,
+
+    /// Laser Studio patch (T-481): the prefetch memory budget is spent.
+    Busy,
+}
+
+/// Laser Studio patch (T-481): how a connection reads its bodies (see
+/// `util::limits`): `prefetch` reads them before the request is handed
+/// over; `leftover` receives what a streamed body left unread, which the
+/// connection's thread skips (instead of the thread dropping the request).
+pub(crate) struct BodyPolicy<'a> {
+    pub(crate) prefetch: &'a Arc<Prefetch>,
+    pub(crate) leftover: &'a Arc<AtomicUsize>,
+}
+
+impl From<PrefetchError> for RequestCreationError {
+    fn from(err: PrefetchError) -> RequestCreationError {
+        match err {
+            PrefetchError::Io(e) => RequestCreationError::CreationIoError(e),
+            PrefetchError::TooLarge => RequestCreationError::TooLarge,
+            PrefetchError::Busy => RequestCreationError::Busy,
+        }
+    }
 }
 
 impl From<IoError> for RequestCreationError {
@@ -134,7 +166,8 @@ pub fn new_request<R, W>(
     headers: Vec<Header>,
     remote_addr: Option<SocketAddr>,
     mut source_data: R,
-    writer: W,
+    mut writer: W,
+    policy: Option<BodyPolicy<'_>>,
 ) -> Result<Request, RequestCreationError>
 where
     R: Read + Send + 'static,
@@ -182,6 +215,66 @@ where
             _ => false,
         }
     };
+
+    // Laser Studio patch (T-481): with a body policy, the body is read
+    // here, on the connection's own thread, when it is small enough; a
+    // `Connection: upgrade` is never honoured (the body is bounded like
+    // any other); a `head_only` request is handed over at once.
+    if let Some(policy) = policy {
+        let head_only = policy.prefetch.head_only.is_some_and(|f| f(&method, &path));
+        let limit = policy.prefetch.limit;
+        let mut buffered = true;
+        let reader = match (content_length, transfer_encoding.is_some()) {
+            (Some(0), _) | (None, false) => Box::new(io::empty()) as Box<dyn Read + Send + 'static>,
+            (Some(n), _) if n <= limit && !head_only => {
+                send_continue(expects_continue, &mut writer, &version, &headers);
+                let body = policy.prefetch.read(source_data.by_ref().take(n as u64), n)?;
+                if body_len(&body) < n {
+                    let info = "Connection has been closed before we received enough data";
+                    return Err(RequestCreationError::CreationIoError(IoError::new(ErrorKind::ConnectionAborted, info)));
+                }
+                Box::new(body) as Box<dyn Read + Send + 'static>
+            }
+            (Some(n), _) => {
+                buffered = false;
+                let (data_reader, _) = EqualReader::new(source_data, n);
+                let data_reader = data_reader.leaving_rest_to(Arc::clone(policy.leftover));
+                Box::new(FusedReader::new(data_reader)) as Box<dyn Read + Send + 'static>
+            }
+            (None, true) if head_only => {
+                // The rest can't be skipped without decoding it: the
+                // connection ends after this request.
+                buffered = false;
+                policy.leftover.store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+                Box::new(io::empty()) as Box<dyn Read + Send + 'static>
+            }
+            (None, true) => {
+                send_continue(expects_continue, &mut writer, &version, &headers);
+                Box::new(policy.prefetch.read(Decoder::new(source_data), limit)?) as Box<dyn Read + Send + 'static>
+            }
+        };
+        return Ok(Request {
+            data_reader: Some(reader),
+            response_writer: Some(Box::new(writer) as Box<dyn Write + Send + 'static>),
+            remote_addr,
+            secure,
+            method,
+            path,
+            http_version: version,
+            headers,
+            body_length: content_length,
+            must_send_continue: expects_continue && !buffered,
+            notify_when_responded: None,
+            body_buffered: buffered,
+        });
+    }
+
+    // Laser Studio patch (T-481): whether the body below was read whole.
+    let buffered = !connection_upgrade
+        && match content_length {
+            Some(n) => n == 0 || (n <= 1024 && !expects_continue),
+            None => transfer_encoding.is_none(),
+        };
 
     // we wrap `source_data` around a reading whose nature depends on the transfer-encoding and
     // content-length headers
@@ -238,7 +331,23 @@ where
         body_length: content_length,
         must_send_continue: expects_continue,
         notify_when_responded: None,
+        body_buffered: buffered,
     })
+}
+
+/// Laser Studio patch (T-481): the `100 Continue` a client waits for
+/// before it sends the body we are about to read.
+fn send_continue<W: Write>(expects: bool, writer: &mut W, version: &HTTPVersion, headers: &[Header]) {
+    if expects {
+        let msg = Response::new_empty(StatusCode(100));
+        msg.raw_print(writer.by_ref(), version.clone(), headers, true, None).ok();
+        writer.flush().ok();
+    }
+}
+
+/// Laser Studio patch (T-481): the size of a prefetched body.
+fn body_len(body: &crate::util::limits::BufferedBody) -> usize {
+    body.len()
 }
 
 impl Request {
@@ -278,6 +387,14 @@ impl Request {
     #[inline]
     pub fn body_length(&self) -> Option<usize> {
         self.body_length
+    }
+
+    /// Laser Studio patch (T-481): true when the body was read whole
+    /// before the request was handed over (or there is none): reading it
+    /// can't wait on the client.
+    #[inline]
+    pub fn body_buffered(&self) -> bool {
+        self.body_buffered
     }
 
     /// Returns the address of the client that sent this request.

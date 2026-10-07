@@ -73,6 +73,7 @@ impl From<TestRequest> for Request {
             Some(mock.remote_addr),
             mock.body.as_bytes(),
             std::io::sink(),
+            None, // Laser Studio patch (T-481): no body policy
         )
         .unwrap()
     }

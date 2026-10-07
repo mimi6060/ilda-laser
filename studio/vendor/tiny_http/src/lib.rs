@@ -118,6 +118,8 @@ pub use connection::{ConfigListenAddr, ListenAddr, Listener};
 pub use request::{ReadWrite, Request};
 pub use response::{Response, ResponseBox};
 pub use test::TestRequest;
+// Laser Studio patch (T-481)
+pub use util::limits::ClientLimits;
 
 mod client;
 mod common;
@@ -257,7 +259,33 @@ impl Server {
         ssl_config: Option<SslConfig>,
         timeout: Option<Duration>,
     ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
+        Self::from_listener_impl(listener, ssl_config, timeout, None)
+    }
+
+    /// Laser Studio patch (T-481): like `from_listener_with_timeout`, and
+    /// a client that sends its request slowly holds only its own
+    /// connection's thread: bodies up to `limits.prefetch` are read there
+    /// before the request is handed over, an unread rest is skipped there,
+    /// and at most `limits.max_connections` are served at once (past it, a
+    /// new one pushes out the one waiting longest for its client). See
+    /// `util::limits`.
+    pub fn from_listener_with_limits<L: Into<Listener>>(
+        listener: L,
+        ssl_config: Option<SslConfig>,
+        limits: ClientLimits,
+    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
+        Self::from_listener_impl(listener, ssl_config, limits.timeout, Some(limits))
+    }
+
+    fn from_listener_impl<L: Into<Listener>>(
+        listener: L,
+        ssl_config: Option<SslConfig>,
+        timeout: Option<Duration>,
+        limits: Option<ClientLimits>,
+    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
         let listener = listener.into();
+        let prefetch = limits.as_ref().map(util::limits::Prefetch::new);
+        let readers = limits.as_ref().map(|l| util::limits::Readers::new(l.max_connections));
         // building the "close" variable
         let close_trigger = Arc::new(AtomicBool::new(false));
 
@@ -312,6 +340,16 @@ impl Server {
                         if timeout.is_some() && sock.set_timeouts(timeout).is_err() {
                             continue;
                         }
+                        // Laser Studio patch (T-481): a place among the
+                        // capped readers (a clone of the socket to shut it
+                        // from here), or the connection is dropped.
+                        let admitted = match &readers {
+                            None => None,
+                            Some(readers) => match sock.try_clone().ok().and_then(|h| readers.admit(h)) {
+                                Some(a) => Some(a),
+                                None => continue,
+                            },
+                        };
                         // Laser Studio patch (T-449): out of file
                         // descriptors, the connection is dropped (it used
                         // to panic and stop accepting for good).
@@ -335,18 +373,19 @@ impl Server {
                             continue;
                         };
 
-                        Ok(ClientConnection::new(write_closable, read_closable))
+                        let mark = admitted.as_ref().map(|a| Arc::clone(&a.mark));
+                        Ok((ClientConnection::new(write_closable, read_closable).with_limits(prefetch.clone(), mark), admitted))
                     }
                     Err(e) => Err(e),
                 };
 
                 match new_client {
-                    Ok(client) => {
+                    Ok((client, admitted)) => {
                         accept_failing = false;
                         let messages = inside_messages.clone();
-                        let mut client = Some(client);
+                        let mut client = Some((client, admitted));
                         tasks_pool.spawn(Box::new(move || {
-                            if let Some(client) = client.take() {
+                            if let Some((client, _admitted)) = client.take() {
                                 // Synchronization is needed for HTTPS requests to avoid a deadlock
                                 if client.secure() {
                                     let (sender, receiver) = mpsc::channel();
