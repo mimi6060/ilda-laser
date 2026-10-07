@@ -147,3 +147,61 @@ test('a locked target track is refused; Auto picks cues of a page', async ({ pag
   expect(laid.every(e => page1.includes(e[2] as string))).toBe(true);
   expect(laid[0][2]).not.toBe(laid[1][2]);
 });
+
+// T-166: the built-in pack, our own phrases, read-only, slots preset on
+// « Auto » of a catalogue page.
+test('the built-in pack: badge, read-only, preset Auto slots, laid as one edit', async ({ page }) => {
+  await seed('Modeles integres');
+  await openEditor(page, 'Modeles integres');
+  await page.locator('#tlTpl').click();
+  const dlg = page.locator('#tlTplDialog');
+  await expect(dlg).toBeVisible();
+  const names = ['Montée 8 mesures', 'Montée 16 mesures', 'Drop 16', 'Pause 8', 'Couplet 16', 'Sortie 8', 'Chenillard couleurs 4', 'Stroboscope final 1'];
+  for (const n of names) await expect(dlg.locator('.tl-ex', { hasText: n }).locator('.tl-tpl-badge')).toHaveText('Intégré');
+  const list = await studio.get<{ templates: { name: string; builtin: boolean; description: string }[] }>('/api/timeline/templates');
+  expect(list.templates.filter(t => t.builtin).map(t => t.name)).toEqual(names);
+  expect(list.templates.filter(t => t.builtin).every(t => t.description.length > 20)).toBe(true);
+
+  // Montée 8 mesures: no delete button, slots preset on their pages.
+  await dlg.locator('.tl-ex', { hasText: 'Montée 8 mesures' }).click();
+  await expect(dlg.locator('#tlTplDel')).toBeHidden();
+  await expect(dlg.locator('[data-slot="A"]')).toHaveValue('auto:Tunnels');
+  await expect(dlg.locator('[data-slot="B"]')).toHaveValue('auto:Faisceaux');
+  await expect(dlg.locator('#tlTplInfo')).toContainText('enveloppes de bus');
+  const axe = await new AxeBuilder({ page }).include('#tlTplDialog').withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
+  expect(axe.violations.filter(v => v.impact === 'serious' || v.impact === 'critical').map(v => v.id), 'axe on the dialog').toEqual([]);
+
+  // Étirer on bars 9-16 (16 s to 32 s at 120 BPM): A, then its strobed
+  // last bar, B from the middle, one bus event for the curves.
+  await dlg.locator('#tlTplFrom').fill('9');
+  await dlg.locator('#tlTplBars').fill('8');
+  await dlg.locator('#tlTplFit [data-fit="stretch"]').click();
+  await dlg.locator('#tlTplGo').click();
+  await expect(dlg.locator('#tlTplMsg')).toContainText('« Montée 8 mesures » posé : 4 événement(s)');
+  const tunnels = (await studio.presets()).presets.filter(p => p.category === 'Tunnels').map(p => p.id);
+  const a = (await starts(0)).slice(2);
+  expect(a.map(e => [e[0], e[1]])).toEqual([[16, 14], [30, 2]]);
+  expect(a.every(e => tunnels.includes(e[2] as string))).toBe(true);
+  expect((await starts(1)).map(e => [e[0], e[1]])).toEqual([[24, 8]]);
+  type Full = { tracks: { kind?: string; events: { start: number; len: number; modifiers?: { strobe?: { on: boolean } } }[] }[] };
+  const show = (await serverShow()) as unknown as Full;
+  expect(show.tracks.find(t => t.kind === 'bus')!.events.map(e => [e.start, e.len])).toEqual([[16, 16]]);
+  expect(show.tracks[0].events[3].modifiers!.strobe!.on, 'the last bar strobes').toBe(true);
+
+  // Drop 16 cut on bars 17-32: a flash on the first beat of every bar on
+  // the second track.
+  await dlg.locator('.tl-ex', { hasText: 'Drop 16' }).click();
+  await expect(dlg.locator('[data-slot="C"]')).toHaveValue('auto:Géométrie');
+  await dlg.locator('#tlTplFrom').fill('17');
+  await dlg.locator('#tlTplBars').fill('16');
+  await dlg.locator('#tlTplFit [data-fit="crop"]').click();
+  await dlg.locator('#tlTplGo').click();
+  await expect(dlg.locator('#tlTplMsg')).toContainText('« Drop 16 » posé : 19 événement(s)');
+  const flashes = (await starts(1)).filter(e => (e[0] as number) >= 32);
+  expect(flashes.map(e => e[0])).toEqual(Array.from({ length: 16 }, (_, i) => 32 + 2 * i));
+
+  // Annuler takes the Drop back in one step.
+  await dlg.locator('#tlTplClose').click();
+  await page.locator('#tlUndo').click();
+  await expect.poll(async () => (await starts(1)).length).toBe(1);
+});

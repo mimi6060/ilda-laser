@@ -19,12 +19,13 @@
 //! ones are written in code (`builtin`, filled by T-166), all our own.
 
 use crate::layers::LAYER_COUNT;
-use crate::live::LiveModifiers;
+use crate::evolving::KeyEase;
+use crate::live::{ChaseSpread, ColorOverride, LiveModifiers, Rate, Strobe};
 use crate::presets::Preset;
-use crate::timeline::{valid_show_name, EndAction, Envelope, Event, EventSource, Key, Show, TimeBase, TimeMode, Track, TrackKind, MAX_ENVELOPES, MAX_ENV_KEYS, MAX_EVENTS, MAX_LABEL, MAX_TRACKS};
+use crate::timeline::{valid_show_name, EndAction, EnvMode, Envelope, Event, EventSource, Key, Show, TimeBase, TimeMode, Track, TrackKind, MAX_ENVELOPES, MAX_ENV_KEYS, MAX_EVENTS, MAX_LABEL, MAX_TRACKS};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 /// Slots « A » to « Z ».
@@ -95,11 +96,16 @@ pub struct Template {
     /// Envelopes over the whole phrase, on a *Bus* track of the first
     /// target track's layer; node positions in beats from the phrase start.
     pub bus_envelopes: Vec<Envelope>,
+    /// The catalogue page each slot suggests (« Auto : page »), preselected
+    /// in the dialog; the operator can still pick anything. Built-ins
+    /// fill it, a saved selection leaves it empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub auto_pages: BTreeMap<String, String>,
 }
 
 impl Default for Template {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), length_bars: 8, beats_per_bar: 4, slots: Vec::new(), events: Vec::new(), bus_envelopes: Vec::new() }
+        Self { name: String::new(), description: String::new(), length_bars: 8, beats_per_bar: 4, slots: Vec::new(), events: Vec::new(), bus_envelopes: Vec::new(), auto_pages: BTreeMap::new() }
     }
 }
 
@@ -164,6 +170,11 @@ impl Template {
                 bail!("événement hors du modèle (début ou durée invalide)");
             }
             check_envelopes(&e.envelopes)?;
+        }
+        for (slot, page) in &self.auto_pages {
+            if !self.slots.contains(slot) || page.is_empty() || page.chars().count() > 64 {
+                bail!("page suggérée invalide pour l'emplacement {}", slot.chars().take(20).collect::<String>());
+            }
         }
         check_envelopes(&self.bus_envelopes)
     }
@@ -485,10 +496,178 @@ pub fn from_selection(show: &Show, ids: &[u64], name: &str, description: &str) -
     Ok((t, warnings))
 }
 
-/// The built-in templates, written in code from our own presets (the
-/// pack is T-166). Their names can't be taken by a user template.
+// ---- The built-in pack (T-166) ----------------------------------------
+//
+// Eight phrases of our own, written here in beats on a 4/4 grid. Every slot
+// is filled from a page of our catalogue (`auto_pages`, « Auto » by
+// default), so a phrase never names a cue: it is a shape (when things
+// start, how long they last, which curves move them) that the operator
+// fills with any cue. Only controls that LFOs may move are automated
+// (`lfo::modulatable`); a brightness curve only dims, a latched strobe in
+// an event goes through the strobe limiter like the operator's own, and
+// nothing here touches the arm state.
+
+/// Built-in palettes (`live::builtin_palettes`), by index.
+const PAL_COLD: usize = 0;
+const PAL_WARM: usize = 1;
+const PAL_FIRE: usize = 2;
+const PAL_OCEAN: usize = 3;
+const PAL_NEON: usize = 4;
+
+/// An envelope through `keys` (beats, value), eased as given.
+fn curve(target: &str, mode: EnvMode, keys: &[(f64, f32)], ease: KeyEase) -> Envelope {
+    Envelope { target: target.into(), mode, keys: keys.iter().map(|&(at, value)| Key { at, value, ease }).collect() }
+}
+
+/// An event of slot `slot` on template track `track`, beats `start..start+len`.
+fn at(track: u8, slot: &str, start: f64, len: f64) -> TemplateEvent {
+    TemplateEvent { track, start_beat: start, len_beats: len, slot: slot.into(), ..Default::default() }
+}
+
+impl TemplateEvent {
+    /// A latched strobe synced on the tempo, one flash every `beats`.
+    fn strobe(mut self, beats: f32, duty: f32) -> Self {
+        self.modifiers.strobe = Strobe { on: true, hold: false, rate: Rate::Beats(beats), duty };
+        self
+    }
+    /// The whole frame or each stroke takes the next colour of `palette`
+    /// every `step` beats.
+    fn chase(mut self, palette: usize, step: f32, spread: ChaseSpread) -> Self {
+        self.modifiers.color = ColorOverride::Chase { palette, step: Rate::Beats(step), spread };
+        self
+    }
+    fn speed(mut self, speed: f32) -> Self {
+        self.modifiers.speed = speed;
+        self
+    }
+    fn with(mut self, env: Envelope) -> Self {
+        self.envelopes.push(env);
+        self
+    }
+}
+
+/// A 4/4 template of `bars` bars; `slots` are (slot, suggested page).
+fn phrase(name: &str, description: &str, bars: u16, slots: &[(&str, &str)], events: Vec<TemplateEvent>, bus: Vec<Envelope>) -> Template {
+    Template {
+        name: name.into(),
+        description: description.into(),
+        length_bars: bars,
+        beats_per_bar: 4,
+        slots: slots.iter().map(|(s, _)| s.to_string()).collect(),
+        events,
+        bus_envelopes: bus,
+        auto_pages: slots.iter().map(|(s, p)| (s.to_string(), p.to_string())).collect(),
+    }
+}
+
+/// A build-up over `bars` bars: slot A grows and speeds up (bus curves),
+/// slot B fades in on the second half, and the last bar strobes. From 16
+/// bars on, the strobe starts a bar earlier at half the rate.
+fn build_up(name: &str, description: &str, bars: u16) -> Template {
+    let beats = bars as f64 * 4.0;
+    let half = beats / 2.0;
+    let mut events = Vec::new();
+    if bars >= 16 {
+        events.push(at(0, "A", 0.0, beats - 8.0));
+        events.push(at(0, "A", beats - 8.0, 4.0).strobe(0.5, 0.5));
+    } else {
+        events.push(at(0, "A", 0.0, beats - 4.0));
+    }
+    events.push(at(0, "A", beats - 4.0, 4.0).strobe(0.25, 0.4));
+    events.push(at(1, "B", half, half).with(curve("master.brightness", EnvMode::Absolute, &[(0.0, 0.3), (half, 1.0)], KeyEase::EaseIn)));
+    let bus = vec![
+        curve("master.size", EnvMode::Relative, &[(0.0, 0.5), (beats, 1.0)], KeyEase::EaseIn),
+        curve("master.speed", EnvMode::Relative, &[(0.0, 0.6), (beats, 2.0)], KeyEase::EaseIn),
+    ];
+    phrase(name, description, bars, &[("A", "Tunnels"), ("B", "Faisceaux")], events, bus)
+}
+
+/// Whether `name` is a built-in template's (read-only) name.
+pub fn is_builtin(name: &str) -> bool {
+    builtin().iter().any(|b| b.name == name.trim())
+}
+
+/// The built-in templates (T-166), all our own, written procedurally from
+/// the shapes above; their slots are filled from our catalogue pages.
+/// Their names can't be taken by a user template and they can't be deleted.
 pub fn builtin() -> Vec<Template> {
-    Vec::new()
+    let drop = {
+        // Beams with a colour chase on the beat, a second beam over the
+        // last 4 bars; the second track flashes on every bar's first beat.
+        let mut events = vec![at(0, "A", 0.0, 48.0).chase(PAL_NEON, 1.0, ChaseSpread::Whole), at(0, "B", 48.0, 16.0).chase(PAL_NEON, 0.5, ChaseSpread::Whole)];
+        events.extend((0..16).map(|bar| at(1, "C", bar as f64 * 4.0, 1.0)));
+        phrase(
+            "Drop 16",
+            "Faisceaux en chenillard de couleurs au temps, un flash sur le premier temps de chaque mesure (deuxième piste), relance sur les 4 dernières mesures.",
+            16,
+            &[("A", "Faisceaux"), ("B", "Faisceaux"), ("C", "Géométrie")],
+            events,
+            vec![curve("master.size", EnvMode::Relative, &[(0.0, 1.0), (48.0, 1.0), (64.0, 1.15)], KeyEase::Smooth)],
+        )
+    };
+    let pause = phrase(
+        "Pause 8",
+        "Un graphique lent en couleurs froides, à 60 % de luminosité, qui respire doucement : pour un break.",
+        8,
+        &[("A", "Vagues")],
+        vec![at(0, "A", 0.0, 32.0).speed(0.4).chase(PAL_COLD, 8.0, ChaseSpread::Stroke)],
+        vec![
+            curve("master.brightness", EnvMode::Absolute, &[(0.0, 0.6), (32.0, 0.6)], KeyEase::Linear),
+            curve("master.size", EnvMode::Relative, &[(0.0, 0.9), (16.0, 1.0), (32.0, 0.9)], KeyEase::Smooth),
+        ],
+    );
+    let verse = phrase(
+        "Couplet 16",
+        "Deux cues qui alternent toutes les 4 mesures (A B A B), avec une lente rotation qui revient à mi-phrase.",
+        16,
+        &[("A", "Géométrie"), ("B", "Géométrie")],
+        (0..4).map(|i| at(0, if i % 2 == 0 { "A" } else { "B" }, i as f64 * 16.0, 16.0)).collect(),
+        vec![curve("master.rot_z.angle", EnvMode::Absolute, &[(0.0, 0.0), (32.0, 45.0), (64.0, 0.0)], KeyEase::Smooth)],
+    );
+    let outro = phrase(
+        "Sortie 8",
+        "Le cue ralentit et s'éteint en fondu jusqu'au noir sur 8 mesures.",
+        8,
+        &[("A", "Abstraits")],
+        vec![at(0, "A", 0.0, 32.0)],
+        vec![
+            curve("master.brightness", EnvMode::Absolute, &[(0.0, 1.0), (32.0, 0.0)], KeyEase::EaseOut),
+            curve("master.speed", EnvMode::Relative, &[(0.0, 1.0), (32.0, 0.3)], KeyEase::Linear),
+        ],
+    );
+    let colours = phrase(
+        "Chenillard couleurs 4",
+        "Les traits du cue changent de couleur à chaque demi-temps, une palette par mesure : néon, froid, feu, océan.",
+        4,
+        &[("A", "Balayages")],
+        [PAL_NEON, PAL_COLD, PAL_FIRE, PAL_OCEAN].iter().enumerate().map(|(bar, &p)| at(0, "A", bar as f64 * 4.0, 4.0).chase(p, 0.5, ChaseSpread::Stroke)).collect(),
+        Vec::new(),
+    );
+    let finale = phrase(
+        "Stroboscope final 1",
+        "Une mesure de stroboscope qui accélère (au demi-temps puis au quart de temps) en couleurs chaudes, pour finir une phrase.",
+        1,
+        &[("A", "Faisceaux")],
+        vec![
+            at(0, "A", 0.0, 2.0).strobe(0.5, 0.5).chase(PAL_WARM, 1.0, ChaseSpread::Whole),
+            at(0, "A", 2.0, 2.0).strobe(0.25, 0.4).chase(PAL_WARM, 0.5, ChaseSpread::Whole),
+        ],
+        vec![curve("master.size", EnvMode::Relative, &[(0.0, 1.0), (4.0, 1.2)], KeyEase::EaseIn)],
+    );
+    vec![
+        build_up("Montée 8 mesures", "Le cue grandit et accélère sur 8 mesures, un faisceau entre en fondu à mi-phrase, stroboscope sur la dernière mesure.", 8),
+        build_up(
+            "Montée 16 mesures",
+            "La même montée sur 16 mesures : taille et vitesse qui montent, faisceau en fondu sur la seconde moitié, stroboscope sur les deux dernières mesures.",
+            16,
+        ),
+        drop,
+        pause,
+        verse,
+        outro,
+        colours,
+        finale,
+    ]
 }
 
 /// A template as listed: its content and where it comes from.
@@ -548,10 +727,13 @@ impl TemplateStore {
         list
     }
 
-    /// Built-in templates first, then the user's.
+    /// Built-in templates first, then the user's (a user file named like a
+    /// built-in, from before the pack, is hidden: the built-in wins).
     pub fn all(&self) -> Vec<TemplateView> {
-        let user = self.list().into_iter().map(|template| TemplateView { template, builtin: false });
-        builtin().into_iter().map(|template| TemplateView { template, builtin: true }).chain(user).collect()
+        let builtins = builtin();
+        let user: Vec<TemplateView> =
+            self.list().into_iter().filter(|t| !builtins.iter().any(|b| b.name == t.name)).map(|template| TemplateView { template, builtin: false }).collect();
+        builtins.into_iter().map(|template| TemplateView { template, builtin: true }).chain(user).collect()
     }
 
     /// A template by name, built-in or the user's.
@@ -568,7 +750,7 @@ impl TemplateStore {
 
     pub fn save(&self, t: &Template) -> Result<()> {
         t.validate()?;
-        if builtin().iter().any(|b| b.name == t.name) {
+        if is_builtin(&t.name) {
             bail!("« {} » est un modèle intégré : choisissez un autre nom", t.name);
         }
         let path = self.path(&t.name)?;
@@ -577,7 +759,7 @@ impl TemplateStore {
     }
 
     pub fn delete(&self, name: &str) -> Result<()> {
-        if builtin().iter().any(|b| b.name == name.trim()) {
+        if is_builtin(name) {
             bail!("un modèle intégré ne se supprime pas");
         }
         let path = self.path(name)?;
@@ -801,6 +983,115 @@ mod tests {
         store.delete("Phrase").unwrap();
         assert!(store.delete("Phrase").is_err());
         assert!(store.list().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each slot on its suggested page (« Auto »), as the dialog preselects.
+    fn auto_choices(t: &Template) -> HashMap<String, SlotChoice> {
+        t.slots.iter().map(|s| (s.clone(), SlotChoice::Auto(t.auto_pages[s].clone()))).collect()
+    }
+
+    #[test]
+    fn the_builtin_pack_is_eight_valid_french_phrases_on_our_pages() {
+        let pack = builtin();
+        let names: Vec<&str> = pack.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Montée 8 mesures", "Montée 16 mesures", "Drop 16", "Pause 8", "Couplet 16", "Sortie 8", "Chenillard couleurs 4", "Stroboscope final 1"]
+        );
+        let catalog = crate::presets::catalog();
+        let reg = crate::controls::ControlRegistry::build(&catalog);
+        for t in &pack {
+            t.validate().unwrap_or_else(|e| panic!("{}: {e:#}", t.name));
+            assert!(t.description.chars().count() > 20, "{}: a French description", t.name);
+            assert!(!t.slots.is_empty() && t.slots.iter().all(|s| t.auto_pages.contains_key(s)), "{}: a page per slot", t.name);
+            for page in t.auto_pages.values() {
+                assert!(crate::presets::CATEGORIES.contains(&page.as_str()) && catalog.iter().any(|p| p.category == page), "{}: page {page}", t.name);
+            }
+            for env in t.bus_envelopes.iter().chain(t.events.iter().flat_map(|e| &e.envelopes)) {
+                assert!(crate::lfo::modulatable(&reg, &env.target).is_some(), "{}: {} is not automatable", t.name, env.target);
+            }
+            assert!(t.events.iter().all(|e| e.start_beat + e.len_beats <= t.beats() + EPS), "{}: inside the phrase", t.name);
+            assert!(t.events.iter().all(|e| !e.modifiers.strobe.hold && !e.modifiers.black && !e.modifiers.freeze), "{}: nothing momentary", t.name);
+            // Through JSON (the list route) and back, unchanged.
+            let back: Template = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+            assert_eq!(&back, t);
+        }
+        // Montées: size and speed rise; the last bar strobes.
+        for t in &pack[..2] {
+            let last = t.events.iter().filter(|e| e.track == 0).max_by(|a, b| a.start_beat.total_cmp(&b.start_beat)).unwrap();
+            assert!(last.modifiers.strobe.on && (last.start_beat - (t.beats() - 4.0)).abs() < EPS);
+            for target in ["master.size", "master.speed"] {
+                let env = t.bus_envelopes.iter().find(|e| e.target == target).unwrap();
+                assert!(env.keys.last().unwrap().value > env.keys[0].value, "{target} rises");
+            }
+        }
+        // Drop 16: a flash on beat 1 of every bar on the second track.
+        let flashes: Vec<f64> = pack[2].events.iter().filter(|e| e.track == 1).map(|e| e.start_beat).collect();
+        assert_eq!(flashes, (0..16).map(|b| b as f64 * 4.0).collect::<Vec<_>>());
+        // Sortie 8 ends in black.
+        let fade = pack[5].bus_envelopes.iter().find(|e| e.target == "master.brightness").unwrap();
+        assert_eq!(fade.keys.last().unwrap().value, 0.0);
+    }
+
+    #[test]
+    fn every_builtin_lays_on_8_16_and_32_bars_with_existing_cues_inside_the_region() {
+        let catalog = crate::presets::catalog();
+        let reg = crate::controls::ControlRegistry::build(&catalog);
+        for base in [TimeBase::Beats, TimeBase::Seconds] {
+            // An empty 64-bar show (128 BPM in Secondes).
+            let mut show = Show::new_empty("Vide", base);
+            if base == TimeBase::Seconds {
+                show.tempo_map = vec![TempoPoint { at_s: 0.0, bpm: 128.0, beats_per_bar: 4 }];
+            }
+            let u_at_bar = |bar: f64| match base {
+                TimeBase::Beats => bar * 4.0,
+                TimeBase::Seconds => bar * 4.0 * 60.0 / 128.0,
+            };
+            for t in builtin() {
+                for bars in [8.0, 16.0, 32.0] {
+                    for fit in [Fit::Stretch, Fit::Repeat, Fit::Crop] {
+                        let (from, to) = (u_at_bar(16.0), u_at_bar(16.0 + bars));
+                        let o = ApplyOptions { from, to, fit, slots: auto_choices(&t), ..Default::default() };
+                        let r = render(&show, &t, &o, &catalog).unwrap_or_else(|e| panic!("{} {bars} {fit:?}: {e:#}", t.name));
+                        let what = format!("{} on {bars} bars, {fit:?}, {base:?}", t.name);
+                        assert!(r.added > 0, "{what}");
+                        r.show.validate_edit(|id| catalog.iter().any(|p| p.id == id)).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                        assert!(r.show.unknown_envelope_targets(|id| crate::lfo::modulatable(&reg, id).is_some()).is_empty(), "{what}");
+                        for e in r.show.tracks.iter().flat_map(|t| &t.events) {
+                            assert!(e.start >= from - 1e-9 && e.start + e.len <= to + 1e-9 && e.len > 0.0, "{what}: {} + {}", e.start, e.len);
+                            // Cut copies keep their later nodes (never read
+                            // after the event's end); stretched ones fit.
+                            if fit == Fit::Stretch {
+                                assert!(e.envelopes.iter().flat_map(|env| &env.keys).all(|k| k.at <= e.len + 1e-9), "{what}: nodes inside the event");
+                            }
+                            let EventSource::Cue { id } = &e.source else { panic!("{what}: a look") };
+                            let bus = r.show.tracks.iter().any(|tr| tr.kind == TrackKind::Bus && tr.events.iter().any(|b| b.id == e.id));
+                            assert!(bus || catalog.iter().any(|p| &p.id == id), "{what}: unknown cue {id}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn builtins_are_read_only() {
+        let dir = std::env::temp_dir().join(format!("laser-studio-test-templates-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = TemplateStore::new(dir.join("templates"));
+        let all = store.all();
+        assert_eq!((all.len(), all.iter().all(|v| v.builtin)), (8, true));
+        let mut mine = builtin().remove(2);
+        assert!(store.save(&mine).is_err(), "can't be overwritten");
+        assert!(store.delete("Drop 16").is_err(), "can't be deleted");
+        assert_eq!(store.find("Drop 16").unwrap(), builtin()[2]);
+        // A file of the same name (from before the pack) is hidden.
+        std::fs::create_dir_all(dir.join("templates")).unwrap();
+        mine.description = "ancien".into();
+        std::fs::write(dir.join("templates/Drop 16.json"), serde_json::to_string(&mine).unwrap()).unwrap();
+        assert_eq!(store.all().len(), 8);
+        assert_eq!(store.find("Drop 16").unwrap(), builtin()[2]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12860,7 +12860,7 @@ $('tlRedo').onclick = tlRedo;
 // /api/timeline/templates/render, which changes nothing); the result goes
 // out through tlChange like any edit: one undo step, locked tracks and
 // show mode refused by /api/timeline/edit. Never touches the arm state.
-const TPL = { list: [], categories: [], cur: null, fit: 'repeat', region: null };
+const TPL = { list: [], categories: [], cur: null, shown: null, fit: 'repeat', region: null };
 function tplMsg(text, err = false) { $('tlTplMsg').textContent = text; $('tlTplMsg').classList.toggle('err', err); }
 async function openTlTemplates() {
   if (!TL.show) { tlMsg('Ouvrez ou créez un show d\'abord.', true); return; }
@@ -12895,7 +12895,15 @@ function tplShow() {
   const keep = {};
   $('tlTplSlots').querySelectorAll('select').forEach(s => { keep[s.dataset.slot] = s.value; });
   $('tlTplSlots').innerHTML = t.slots.map(s => `<label>${esc(s)} : <select data-slot="${esc(s)}" aria-label="Cue de l'emplacement ${esc(s)}"><option value="">— choisir un cue —</option><optgroup label="Auto (un cue de la page)">${autoOpts}</optgroup>${cueOpts}</select></label>`).join('');
-  $('tlTplSlots').querySelectorAll('select').forEach(s => { if (keep[s.dataset.slot]) s.value = keep[s.dataset.slot]; });
+  // On the same template the operator's choices stay; on another one the
+  // page it suggests (built-ins, T-166) comes first, then the last choice.
+  const pages = t.auto_pages || {}, same = TPL.shown === t.name;
+  TPL.shown = t.name;
+  $('tlTplSlots').querySelectorAll('select').forEach(s => {
+    const page = pages[s.dataset.slot], kept = keep[s.dataset.slot];
+    const suggested = page && TPL.categories.includes(page) ? 'auto:' + page : '';
+    s.value = (same && kept) || suggested || kept || '';
+  });
   $('tlTplTrack').innerHTML = TL.show.tracks.map((tr, i) => tr.kind === 'bus' ? '' : `<option value="${i}">${esc(tr.name)}${tr.locked ? ' (verrouillée)' : ''}</option>`).join('') + `<option value="${TL.show.tracks.length}">Nouvelle piste</option>`;
   $('tlTplFit').querySelectorAll('[data-fit]').forEach(b => { b.classList.toggle('active', b.dataset.fit === TPL.fit); b.setAttribute('aria-pressed', String(b.dataset.fit === TPL.fit)); });
   tplPreview(t);
