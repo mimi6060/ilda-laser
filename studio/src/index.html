@@ -4750,6 +4750,25 @@
         <div class="hint sf-error" id="oscanWarn" role="status"></div>
         <div class="hint" id="oscanInfo"></div>
         <div class="hint">Appliqué à l'image avant toute la sécurité (zones, horizon, limiteur, faisceau statique, plafonds), qui garde le dernier mot. Relever la vitesse max se fait laser désarmé. Une vitesse au-delà de la fiche du projecteur est signalée, jamais corrigée en silence.</div>
+        <div class="sf-sub">Cadence fixe (captation vidéo)</div>
+        <div class="row">
+          <label for="ofrChoice">Cadence fixe</label>
+          <select id="ofrChoice">
+            <option value="">Désactivée</option>
+            <option value="24">24 im/s</option>
+            <option value="25">25 im/s</option>
+            <option value="30">30 im/s</option>
+            <option value="50">50 im/s</option>
+            <option value="60">60 im/s</option>
+            <option value="other">Autre…</option>
+          </select>
+          <label for="ofrValue">Images/s (20 à 60)</label><input type="number" id="ofrValue" min="20" max="60" step="0.01" disabled>
+          <button id="ofrApply" disabled>Appliquer</button>
+        </div>
+        <div class="hint" id="ofrInfo" role="status"></div>
+        <div class="hint hint--warn" id="ofrWarn" role="status"></div>
+        <div class="hint sf-error" id="ofrError"></div>
+        <div class="hint">Chaque image laser dure exactement le même temps, pour éviter les bandes à l'image. Accordez la cadence à celle de la caméra. Chaque image est complétée (points répartis le long du tracé, ou éteints) ou réduite au même nombre de points, avant toute la sécurité, qui garde le dernier mot. Se règle laser désarmé ; la désactiver est toujours possible.</div>
       </div>
       <div class="sf-sub">Couleurs de la sortie</div>
       <div id="ocBox">
@@ -6591,9 +6610,12 @@ function showPoints(points) {
   $('galvoLong').hidden = !GALVO.long;
   const n = points.length, fps = n ? pps / n : 0;
   $('stPoints').textContent = n;
-  $('stFps').textContent = n ? fps.toFixed(1) : '–';
-  $('stFps').classList.toggle('bad', n && fps < scanAlertFps);
+  // A fixed rate (T-463) shows as « 25 im/s fixe »: the frame size is the rate's.
+  const fixed = lastFixedRate && lastFixedRate.target_fps;
+  $('stFps').textContent = fixed ? frNumber(+fixed, Number.isInteger(+fixed) ? 0 : 2) + ' im/s fixe' : n ? fps.toFixed(1) : '–';
+  $('stFps').classList.toggle('bad', !fixed && n && fps < scanAlertFps);
 }
+var lastFixedRate = null;
 async function pushFrame() {
   const fetchedAt = performance.now();
   const r = await api('GET', '/api/frame.bin' + (LINK.seq === undefined ? '' : '?after=' + LINK.seq), undefined, { cache: 'no-store', quiet: true });
@@ -6709,6 +6731,11 @@ function applyState(f, at, pushed) {
   else if (checklist && f.shownet && (f.shownet.active !== (checklist.output === 'shownet') || f.shownet.hw_stop_ok !== checklist.hw_stop_ok)) reloadChecklist();
   showArmed(); showPresence(f); showKeepAwake(f.keep_awake);
   if (f.perf_level !== undefined) showPerfLevel(f.perf_level);
+  // The main output's fixed rate (T-463): the top bar, and the settings line when it shows the main output.
+  if (f.fixed_rate !== undefined) {
+    lastFixedRate = f.fixed_rate;
+    if (($('pwTarget').value || 'main') === 'main') showFixedRateStatus(f.fixed_rate);
+  }
   $('output').textContent = f.output_state === 'lost' ? 'Sortie perdue'
     : f.output_state === 'connecting' ? 'Connexion de la sortie…'
     : f.output_error ? '⚠ ' + f.output_error
@@ -16365,7 +16392,59 @@ function showScanLimits(j) {
   $('oscanInfo').textContent = `La sortie tourne à ${j.pps} points/s : vitesse de balayage de ${Math.round(j.limits.min_scan_pct)} à ${Math.round(j.limits.max_scan_pct)} %. `
     + `Alerte sous ${+j.alert_fps.toFixed(1)} images/s.`;
   $('oscanWarn').textContent = j.warnings.join(' ');
+  showFixedRate(j.fixed);
 }
+
+// Cadence fixe (T-463): an output setting, not a control (no shortcut, no
+// MIDI). Turned on or changed laser disarmed; off always applies. The
+// line under it shows the points of one frame and the rate measured.
+const FR_CHOICES = ['24', '25', '30', '50', '60'];
+var fixedRateView = null;
+function frNumber(v, d) { return v.toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d }); }
+function showFixedRate(fx) {
+  fixedRateView = fx || null;
+  if (!fx) return;
+  const sel = $('ofrChoice');
+  if (document.activeElement !== sel && document.activeElement !== $('ofrValue')) {
+    const v = fx.fps == null ? '' : String(+fx.fps);
+    sel.value = fx.fps == null ? '' : FR_CHOICES.includes(v) ? v : 'other';
+    $('ofrValue').value = fx.fps == null ? '' : +fx.fps;
+  }
+  const other = sel.value === 'other';
+  $('ofrValue').disabled = !other;
+  $('ofrApply').disabled = !other;
+  showFixedRateStatus(fx.status);
+}
+function showFixedRateStatus(st) {
+  const fx = fixedRateView;
+  if (!st && (!fx || fx.fps == null)) { $('ofrInfo').textContent = 'Désactivée : le nombre de points suit le contenu.'; $('ofrWarn').textContent = ''; return; }
+  const pts = (st && st.points) || fx.points;
+  $('ofrInfo').textContent = `${frNumber(pts, 0)} points par image`
+    + (st && st.measured_fps ? ` · cadence mesurée ${frNumber(st.measured_fps, 2)} im/s (écart ${frNumber(st.deviation_pct, 1)} %)` : '');
+  $('ofrWarn').textContent = st && st.report && st.report.over_step
+    ? `Trop de points pour la cadence fixe : réduisez le budget de points à ${frNumber(st.report.output, 0)} ou baissez la cadence.` : '';
+}
+async function saveFixedRate(fps) {
+  const r = await api('POST', '/api/outputs/fixed_rate?output=' + encodeURIComponent(pwTargetId()), { fps }, { quiet: true });
+  $('ofrError').textContent = '';
+  if (r.ok) { showScanLimits(await r.json()); return; }
+  const msg = r.status === 409 ? (j => j.error + ' (' + j.loosen.join(' · ') + ')')(await r.json()) : await r.text();
+  await reloadScanLimits();
+  $('ofrError').textContent = msg;
+}
+$('ofrChoice').addEventListener('change', () => {
+  const v = $('ofrChoice').value;
+  const other = v === 'other';
+  $('ofrValue').disabled = !other;
+  $('ofrApply').disabled = !other;
+  if (other) { $('ofrValue').focus(); return; }
+  saveFixedRate(v === '' ? null : +v);
+});
+$('ofrApply').addEventListener('click', () => {
+  const v = +$('ofrValue').value;
+  if (!Number.isFinite(v) || v < 20 || v > 60) { $('ofrError').textContent = 'Cadence fixe : une valeur de 20 à 60 images/s.'; return; }
+  saveFixedRate(v);
+});
 async function reloadScanLimits() {
   try {
     const r = await api('GET', '/api/outputs/scan_limits?output=' + encodeURIComponent(pwTargetId()), undefined, { quiet: true });

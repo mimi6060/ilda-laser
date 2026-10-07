@@ -185,11 +185,16 @@ pub struct OutputScan {
     pub max_points: usize,
     /// Frame rate aimed at, frames/s. The UI warns below 7/8 of it.
     pub min_fps: f32,
+    /// Fixed frame rate for video capture (T-463), frames/s within
+    /// `fixed_rate::FIXED_FPS_RANGE`; None = off (the default, and what
+    /// older files load as). On, every frame is `round(pps / fps)` points
+    /// and `min_points` / `min_fps` no longer apply.
+    pub fixed_fps: Option<f32>,
 }
 
 impl Default for OutputScan {
     fn default() -> Self {
-        Self { pps_min: 10_000, pps_max: 40_000, min_points: 200, max_points: 0, min_fps: 40.0 }
+        Self { pps_min: 10_000, pps_max: 40_000, min_points: 200, max_points: 0, min_fps: 40.0, fixed_fps: None }
     }
 }
 
@@ -389,7 +394,11 @@ impl OutputScan {
         if self.max_points != 0 && self.min_points > self.max_points {
             bail!("Points minimum ({}) au-dessus du maximum ({})", self.min_points, self.max_points);
         }
-        check(self.min_fps, SCAN_FPS, "Images/s visées")
+        check(self.min_fps, SCAN_FPS, "Images/s visées")?;
+        if let Some(fps) = self.fixed_fps {
+            check(fps, crate::fixed_rate::FIXED_FPS_RANGE, "Cadence fixe (images/s)")?;
+        }
+        Ok(())
     }
 
     /// Clamped into range, for a file edited by hand. A minimum above the
@@ -399,7 +408,27 @@ impl OutputScan {
         let pps_max = self.pps_max.clamp(SCAN_PPS.0, SCAN_PPS.1);
         let max_points = if self.max_points == 0 { 0 } else { self.max_points.clamp(SCAN_POINTS.0, SCAN_POINTS.1) };
         let min_points = self.min_points.min(if max_points == 0 { SCAN_POINTS.1 } else { max_points });
-        Self { pps_min: self.pps_min.clamp(SCAN_PPS.0, pps_max), pps_max, min_points, max_points, min_fps: fix(self.min_fps, SCAN_FPS, d.min_fps) }
+        Self {
+            pps_min: self.pps_min.clamp(SCAN_PPS.0, pps_max),
+            pps_max,
+            min_points,
+            max_points,
+            min_fps: fix(self.min_fps, SCAN_FPS, d.min_fps),
+            // Not a number = off: a broken file never forces a rate.
+            fixed_fps: self.fixed_fps.and_then(crate::fixed_rate::sanitize_fps),
+        }
+    }
+
+    /// The fixed rate (T-463) for an output at `pps`, or None when off.
+    /// `lit_step` is the optimiser's lit step (`Mixer::optimizer`): the
+    /// longest lit step allowed is that step stretched as far as the
+    /// optimiser may (`optimize::MAX_STEP_STRETCH`) at the fastest scan
+    /// the galvos take (`scan_limits`).
+    pub fn fixed_target(&self, pps: u32, lit_step: f32) -> Option<crate::fixed_rate::FixedTarget> {
+        let fps = self.sanitized().fixed_fps?;
+        let step = if lit_step.is_finite() && lit_step > 0.0 { lit_step } else { crate::optimize::OptimizeParams::default().lit_step };
+        let max_step = step * crate::optimize::MAX_STEP_STRETCH * self.scan_limits(pps).max_scan_pct / 100.0;
+        Some(crate::fixed_rate::FixedTarget { fps, pps, points: crate::fixed_rate::target_points(pps, fps), max_step })
     }
 
     /// The scan speed range as a % of the output's rate `pps`, for the
@@ -736,6 +765,24 @@ impl OutputStore {
         }
         self.file = file;
         Ok(next)
+    }
+
+    /// Turns an output's fixed frame rate (T-463) on, changes it or turns
+    /// it off. On or changed while `armed` is refused: the frames are
+    /// resampled at once (a longer lit step, more or fewer points), which
+    /// is a setting for before the show. Off always applies: it brings
+    /// back the frames as they were.
+    pub fn set_fixed_fps(&mut self, id: &str, fps: Option<f32>, armed: bool) -> std::result::Result<OutputConfig, SetError> {
+        let Some(current) = self.get(id).cloned() else {
+            return Err(SetError::Invalid(format!("Sortie inconnue : « {id} »")));
+        };
+        let scan = OutputScan { fixed_fps: fps, ..current.scan };
+        scan.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
+        if armed && fps.is_some() && fps != current.scan.fixed_fps {
+            let was = current.scan.fixed_fps.map_or("désactivée".to_string(), |f| format!("{f} im/s"));
+            return Err(SetError::Armed(vec![format!("Cadence fixe : {was} → {} im/s", fps.unwrap_or_default())]));
+        }
+        self.set_scan(id, scan, false)
     }
 
     /// Changes an output's colour rendering (T-414). Darker or equal
@@ -1153,7 +1200,7 @@ mod tests {
         assert_eq!(store.active().scan, d);
         assert_eq!(store.active_limits().max_power, 0.2);
         // Saved, and back after a restart.
-        let mine = OutputScan { pps_min: 12_000, pps_max: 30_000, min_points: 150, max_points: 900, min_fps: 30.0 };
+        let mine = OutputScan { pps_min: 12_000, pps_max: 30_000, min_points: 150, max_points: 900, min_fps: 30.0, fixed_fps: Some(25.0) };
         store.set_scan(MAIN_OUTPUT, mine, false).unwrap();
         assert_eq!(OutputStore::load_or_create(path.clone()).active().scan, mine);
         // Out of range or inconsistent: refused, nothing changed.
@@ -1164,6 +1211,9 @@ mod tests {
             OutputScan { max_points: 50, ..d },
             OutputScan { min_points: 900, max_points: 500, ..d },
             OutputScan { min_fps: f32::NAN, ..d },
+            OutputScan { fixed_fps: Some(f32::NAN), ..d },
+            OutputScan { fixed_fps: Some(19.9), ..d },
+            OutputScan { fixed_fps: Some(60.5), ..d },
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
             assert!(matches!(store.set_scan(MAIN_OUTPUT, bad, false), Err(SetError::Invalid(_))));
@@ -1171,10 +1221,36 @@ mod tests {
         assert!(matches!(store.set_scan("p9", d, false), Err(SetError::Invalid(_))));
         assert_eq!(store.active().scan, mine);
         // A hand-edited file is brought into range.
-        std::fs::write(&path, r#"{"outputs":[{"id":"main","scan":{"pps_min":90000,"pps_max":5,"min_points":99999,"max_points":3,"min_fps":-1}}]}"#).unwrap();
+        std::fs::write(&path, r#"{"outputs":[{"id":"main","scan":{"pps_min":90000,"pps_max":5,"min_points":99999,"max_points":3,"min_fps":-1,"fixed_fps":500}}]}"#).unwrap();
         let s = OutputStore::load_or_create(path).active().scan;
         assert!(s.validate().is_ok(), "{s:?}");
+        assert_eq!(s.sanitized().fixed_fps, Some(60.0));
+        assert_eq!(OutputScan { fixed_fps: Some(f32::NAN), ..d }.sanitized().fixed_fps, None, "not a number = off");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_fixed_rate_is_refused_while_armed_but_always_turns_off() {
+        let mut store = OutputStore::in_memory();
+        assert!(matches!(store.set_fixed_fps(MAIN_OUTPUT, Some(25.0), true), Err(SetError::Armed(_))));
+        assert_eq!(store.active().scan.fixed_fps, None);
+        store.set_fixed_fps(MAIN_OUTPUT, Some(25.0), false).unwrap();
+        assert!(matches!(store.set_fixed_fps(MAIN_OUTPUT, Some(30.0), true), Err(SetError::Armed(_))));
+        // The same value again, or off, applies armed.
+        store.set_fixed_fps(MAIN_OUTPUT, Some(25.0), true).unwrap();
+        store.set_fixed_fps(MAIN_OUTPUT, None, true).unwrap();
+        assert_eq!(store.active().scan.fixed_fps, None);
+        for bad in [f32::NAN, f32::INFINITY, 10.0, 75.0] {
+            assert!(matches!(store.set_fixed_fps(MAIN_OUTPUT, Some(bad), false), Err(SetError::Invalid(_))), "{bad}");
+        }
+        assert!(matches!(store.set_fixed_fps("p9", None, false), Err(SetError::Invalid(_))));
+        // The target: 30 kpps at 25 im/s = 1 200 points; off = None.
+        let on = OutputScan { fixed_fps: Some(25.0), ..OutputScan::default() };
+        let t = on.fixed_target(30_000, 0.025).unwrap();
+        assert_eq!((t.points, t.fps, t.pps), (1_200, 25.0, 30_000));
+        assert!((t.max_step - 0.025 * 2.0 * 133.333 / 100.0).abs() < 1e-4, "{t:?}");
+        assert_eq!(OutputScan::default().fixed_target(30_000, 0.025), None);
+        assert!(on.fixed_target(30_000, f32::NAN).unwrap().max_step > 0.0);
     }
 
     #[test]

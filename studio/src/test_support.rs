@@ -125,6 +125,7 @@ pub fn shared() -> Shared {
         projection: crate::projection::ProjectionStore::in_memory(),
         audio_guard: Default::default(),
         dwell: Default::default(),
+        fixed_rate: None,
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         take: crate::take::Recorder::default(),

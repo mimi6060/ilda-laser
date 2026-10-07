@@ -6,8 +6,10 @@
 use crate::interlock::{blank_unless, EStop};
 use crate::patterns::Point;
 use anyhow::{Context, Result};
-use laser_dac::{list_devices, open_device, Frame, FrameSession, FrameSessionConfig, LaserPoint, OutputModel};
+use laser_dac::{default_transition, list_devices, open_device, Frame, FrameSession, FrameSessionConfig, LaserPoint, OutputModel, TransitionPlan};
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub trait Output: Send {
     fn name(&self) -> &str;
@@ -57,6 +59,15 @@ pub trait Output: Send {
     fn status(&self) -> Option<serde_json::Value> {
         None
     }
+    /// Fixed frame rate (T-463): `on`, the output inserts the same number
+    /// of (dark) points between any two frames, and returns it, so the
+    /// engine sends frames of `N - seam` points and every frame lasts N.
+    /// Off, it goes back to its own seam. Called every frame: cheap.
+    /// Outputs that add nothing between frames (the preview, the test
+    /// outputs) keep the default, 0.
+    fn fixed_seam(&mut self, _on: bool) -> usize {
+        0
+    }
 }
 
 /// What a cue-playing output needs beside the points (T-301), read by the
@@ -102,6 +113,12 @@ impl OutputStage {
     /// The active output's frame size limit (`Output::max_points`).
     pub fn max_points(&self) -> Option<usize> {
         self.output.as_ref().and_then(|o| o.max_points())
+    }
+
+    /// Points the installed output adds between frames at a fixed rate
+    /// (`Output::fixed_seam`), 0 without an output.
+    pub fn fixed_seam(&mut self, on: bool) -> usize {
+        self.output.as_mut().map_or(0, |o| o.fixed_seam(on))
     }
 
     /// `hold_ok` false (hold-to-run released) sends a dark frame but keeps
@@ -270,6 +287,10 @@ pub struct DacOutput {
     /// Most points per frame this DAC takes, for frame-swap DACs (Helios
     /// USB: 4095), less room for the blanked loop-back `laser-dac` adds.
     max_points: Option<usize>,
+    /// Fixed frame rate on (T-463): the session's seam has a constant
+    /// length (`fixed_transition`), read by its scheduler thread.
+    fixed: Arc<AtomicBool>,
+    pps: u32,
 }
 
 impl DacOutput {
@@ -283,14 +304,62 @@ impl DacOutput {
             device.to_string()
         };
         let dac = open_device(&id).map_err(|e| anyhow::anyhow!("{e}")).context("failed to open device")?;
+        let fixed = Arc::new(AtomicBool::new(false));
         let (session, info) = dac
-            .start_frame_session(FrameSessionConfig::new(pps))
+            .start_frame_session(FrameSessionConfig::new(pps).with_transition_fn(seam_fn(pps, Arc::clone(&fixed))))
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("failed to start frame session")?;
         let max_points = (info.caps.output_model == OutputModel::UsbFrameSwap)
             .then(|| info.caps.max_points_per_chunk.saturating_sub(loop_back_points(pps)).max(2));
-        Ok(Self { name: format!("{} ({id})", info.name), session, max_points })
+        Ok(Self { name: format!("{} ({id})", info.name), session, max_points, fixed, pps })
     }
+}
+
+/// Fixed-rate transit between two frames: always this many points,
+/// `laser-dac`'s longest (its own transit takes 0..64 points by distance),
+/// so the galvos never move faster between frames than without the mode.
+const FIXED_TRANSIT: usize = 64;
+
+/// `laser-dac`'s dwells around a frame change (100 us at the end of a
+/// frame, 400 us before the next), in points at `pps`.
+fn seam_dwells(pps: u32) -> (usize, usize) {
+    let pts = |us: f64| (us * pps as f64 / 1_000_000.0).round() as usize;
+    (pts(100.0), pts(400.0))
+}
+
+/// Points the fixed-rate seam inserts between two frames at `pps`.
+pub fn fixed_seam_points(pps: u32) -> usize {
+    let (end, start) = seam_dwells(pps);
+    end + FIXED_TRANSIT + start
+}
+
+/// The seam between two frames at a fixed rate (T-463): `laser-dac`
+/// promotes a new frame only once the current one has played to its end
+/// (latest wins, a frame is never cut), and inserts a transition there,
+/// whose length depends on the distance; here it is always
+/// `fixed_seam_points`, all dark: a dwell where the frame ends, an eased
+/// move, a dwell where the next starts. Even when the same frame loops
+/// (no new one yet) the seam is the same length, so every frame lasts
+/// the same time.
+pub fn fixed_transition(pps: u32, from: &LaserPoint, to: &LaserPoint) -> Vec<LaserPoint> {
+    let (end, start) = seam_dwells(pps);
+    let mut out = Vec::with_capacity(end + FIXED_TRANSIT + start);
+    out.extend((0..end).map(|_| LaserPoint::blanked(from.x, from.y)));
+    for i in 0..FIXED_TRANSIT {
+        // Smoothstep ease: slow off the end point, slow onto the next.
+        let t = (i + 1) as f32 / (FIXED_TRANSIT + 1) as f32;
+        let e = t * t * (3.0 - 2.0 * t);
+        out.push(LaserPoint::blanked(from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e));
+    }
+    out.extend((0..start).map(|_| LaserPoint::blanked(to.x, to.y)));
+    out
+}
+
+/// The session's transition: `laser-dac`'s own, or the fixed-rate one
+/// while `fixed` is set.
+fn seam_fn(pps: u32, fixed: Arc<AtomicBool>) -> laser_dac::TransitionFn {
+    let default = default_transition(pps);
+    Box::new(move |from: &LaserPoint, to: &LaserPoint| if fixed.load(Ordering::Relaxed) { TransitionPlan::Transition(fixed_transition(pps, from, to)) } else { default(from, to) })
 }
 
 /// Points `laser-dac` adds to loop a frame-swap frame back to its start
@@ -466,6 +535,15 @@ impl Output for DacOutput {
         self.max_points
     }
 
+    fn fixed_seam(&mut self, on: bool) -> usize {
+        self.fixed.store(on, Ordering::Relaxed);
+        if on {
+            fixed_seam_points(self.pps)
+        } else {
+            0
+        }
+    }
+
     fn send(&mut self, points: &[Point]) {
         // The output stage already fitted the frame; this only guards a
         // caller that bypassed it, and only ever removes light.
@@ -559,6 +637,37 @@ mod tests {
 
     fn lit() -> Vec<Point> {
         vec![Point::lit(0.0, 0.0, 1.0, 1.0, 1.0), Point::lit(0.2, 0.2, 0.0, 1.0, 0.0)]
+    }
+
+    /// T-463: at a fixed rate the DAC session's seam is the same length
+    /// whatever the two frames (a jump across the field, the same frame
+    /// looping), all dark, from where one ends to where the next starts,
+    /// never steeper than `laser-dac`'s own; off, it is `laser-dac`'s.
+    #[test]
+    fn the_fixed_rate_seam_is_constant_and_dark() {
+        let pps = 30_000;
+        assert_eq!(fixed_seam_points(pps), 3 + 64 + 12);
+        let fixed = Arc::new(AtomicBool::new(true));
+        let seam = seam_fn(pps, Arc::clone(&fixed));
+        let default = default_transition(pps);
+        let pts = |plan: TransitionPlan| match plan {
+            TransitionPlan::Transition(p) => p,
+            TransitionPlan::Coalesce => Vec::new(),
+        };
+        let a = LaserPoint::new(-1.0, -1.0, 65_535, 0, 0, 65_535);
+        for b in [LaserPoint::blanked(1.0, 1.0), LaserPoint::blanked(-1.0, -1.0), LaserPoint::new(0.01, -0.99, 0, 65_535, 0, 65_535)] {
+            let ours = pts(seam(&a, &b));
+            assert_eq!(ours.len(), fixed_seam_points(pps));
+            assert!(ours.iter().all(|p| p.r == 0 && p.g == 0 && p.b == 0 && p.intensity == 0));
+            assert_eq!((ours[0].x, ours[0].y), (a.x, a.y));
+            assert_eq!((ours.last().unwrap().x, ours.last().unwrap().y), (b.x, b.y));
+            let steepest = |p: &[LaserPoint]| p.windows(2).map(|w| (w[1].x - w[0].x).abs().max((w[1].y - w[0].y).abs())).fold(0.0f32, f32::max);
+            let theirs = pts(default(&a, &b));
+            assert!(steepest(&ours) <= steepest(&theirs).max(1e-6) * 1.6, "{} vs {}", steepest(&ours), steepest(&theirs));
+        }
+        fixed.store(false, Ordering::Relaxed);
+        let b = LaserPoint::blanked(0.3, 0.1);
+        assert_eq!(pts(seam(&a, &b)).len(), pts(default(&a, &b)).len());
     }
 
     #[test]

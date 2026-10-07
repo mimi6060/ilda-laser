@@ -290,6 +290,13 @@ struct Wire {
     signal: Option<crate::output::CueSignal>,
     /// Set by a test: the output reports this fault (unplugged, T-277).
     fault: Option<String>,
+    /// Set by a test: the points this output adds between frames at a
+    /// fixed rate (T-463, a DAC's constant seam).
+    seam: usize,
+    /// Whether a fixed rate was asked of it on the last frame.
+    fixed_on: bool,
+    /// Set by a test: every frame's length is kept here (T-463).
+    lengths: Option<Vec<usize>>,
 }
 
 /// The recording output, with an optional frame size limit (like a Helios
@@ -311,9 +318,21 @@ impl Output for Recorder {
         let mut w = self.0.lock().unwrap();
         w.last = points.to_vec();
         w.frames += 1;
+        if let Some(l) = w.lengths.as_mut() {
+            l.push(points.len());
+        }
     }
     fn max_points(&self) -> Option<usize> {
         self.1
+    }
+    fn fixed_seam(&mut self, on: bool) -> usize {
+        let mut w = self.0.lock().unwrap();
+        w.fixed_on = on;
+        if on {
+            w.seam
+        } else {
+            0
+        }
     }
     fn cue_signal(&mut self, signal: &crate::output::CueSignal) {
         self.0.lock().unwrap().signal = Some(signal.clone());
@@ -713,6 +732,9 @@ fn random_zone_chase(s: &mut Shared, rng: &mut Rng, setup: bool) {
 
 /// Half of what the fuzz measures (T-473 rule) at 1000 cases.
 const SPREAD_GATE: f64 = 0.011;
+
+/// Half of what the fuzz measures (T-473 rule) at 1000 cases (T-463).
+const FIXED_RATE_GATE: f64 = 0.016;
 
 /// A spread (T-421) as the cell menu, the timeline or `/api/lfos` could
 /// send it: on a group that exists or not, any parameter, values out of
@@ -1496,6 +1518,8 @@ struct Coverage {
     sent_lit_with_spread: usize,
     /// Playbacks the agenda started (T-455).
     agenda_starts: usize,
+    /// Frames that sent light at a fixed frame rate (T-463).
+    sent_lit_with_fixed_rate: usize,
 }
 
 impl Coverage {
@@ -1528,6 +1552,7 @@ impl Coverage {
             sent_lit_with_zone_chase,
             sent_lit_with_spread,
             agenda_starts,
+            sent_lit_with_fixed_rate,
         } = o;
         self.frames += frames;
         self.sent_lit += sent_lit;
@@ -1553,6 +1578,7 @@ impl Coverage {
         self.sent_lit_with_zone_chase += sent_lit_with_zone_chase;
         self.sent_lit_with_spread += sent_lit_with_spread;
         self.agenda_starts += agenda_starts;
+        self.sent_lit_with_fixed_rate += sent_lit_with_fixed_rate;
     }
 }
 
@@ -2856,6 +2882,16 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
             return Err(format!("frame {frame}: {held} delayed frames kept through a stop"));
         }
         cov.sent_lit_with_spread += (lit > 0 && spreading(&s)) as usize;
+        // A fixed rate (T-463): the frame sent is its size (dark points
+        // added after the safety stage), unless the zone mask overflowed it.
+        if let Some(fr) = s.fixed_rate {
+            let sent = rig.wire.lock().unwrap().last.len();
+            let n = max_points.map_or(fr.points, |m| fr.points.min(m.max(2)));
+            if sent < n {
+                return Err(format!("frame {frame}: {sent} points sent at a fixed rate of {n}"));
+            }
+            cov.sent_lit_with_fixed_rate += (lit > 0) as usize;
+        }
     }
     cov.sessions += 1;
     cov.sessions_lit += session_lit as usize;
@@ -3003,6 +3039,8 @@ fn random_sessions_keep_every_output_invariant() {
         eprintln!("coverage: sent lit with a spread {:.4}", share(cov.sent_lit_with_spread));
         assert!(share(cov.sent_lit_with_spread) > SPREAD_GATE, "only {} of {} frames sent light while a cue was spread", cov.sent_lit_with_spread, cov.frames);
         eprintln!("coverage: playbacks started by the agenda {}", cov.agenda_starts);
+        eprintln!("coverage: sent lit at a fixed frame rate {:.4}", share(cov.sent_lit_with_fixed_rate));
+        assert!(share(cov.sent_lit_with_fixed_rate) > FIXED_RATE_GATE, "only {} of {} frames sent light at a fixed frame rate", cov.sent_lit_with_fixed_rate, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
     }
 }
@@ -3950,6 +3988,15 @@ fn random_output_scan(rng: &mut Rng) -> crate::power::OutputScan {
         min_points: if rng.chance(0.2) { 0 } else { rng.below(1_500) },
         max_points: if rng.chance(0.5) { 0 } else { rng.below(3_000) },
         min_fps: if rng.chance(0.05) { f32::NAN } else { rng.range(-5.0, 150.0) },
+        // The fixed rate (T-463): off, a menu value, a free one, or out
+        // of range / not a number (refused).
+        fixed_fps: match rng.below(6) {
+            0 | 1 => None,
+            2 => Some(*rng.pick(&crate::fixed_rate::FIXED_FPS_CHOICES)),
+            3 => Some(rng.range(20.0, 60.0)),
+            4 => Some(rng.range(-10.0, 200.0)),
+            _ => Some(f32::NAN),
+        },
     }
 }
 
@@ -4019,6 +4066,151 @@ fn run_scan_limits_case(seed: u64) -> Result<(), String> {
         return Err(format!("traced at {traced} points/s for {pps} with pps_max {} (master {master})", scan.pps_max));
     }
     Ok(())
+}
+
+/// T-463: the safety stage at a fixed frame rate, on one frame: `shape`
+/// (exactly N - reserve points, within the field, never a brighter guard
+/// cell nor a brighter mean when completed), the zones and horizon, then
+/// `top_up`, which adds only dark points and removes or relights nothing;
+/// nothing lit crosses a Blank zone.
+fn run_fixed_rate_case(seed: u64) -> Result<(), String> {
+    use crate::fixed_rate::{shape, top_up};
+    let mut rng = Rng::new(seed);
+    let frame = random_strokes(&mut rng);
+    let n = 16 + rng.below(2_000);
+    let reserve = rng.below(n / 4 + 1);
+    let cfg = SafetySettings { zones: random_safety(&mut rng).zones, horizon: Horizon { y: -1.0, ..Default::default() }, ..Default::default() };
+    let grid = cfg.dwell.sanitized().grid as usize;
+    let (shaped, report) = shape(&frame, n, reserve, rng.range(0.001, 0.2), grid);
+    let m = n.saturating_sub(reserve).max(2);
+    if shaped.len() != m || report.output != m {
+        return Err(format!("{} points shaped for {m}", shaped.len()));
+    }
+    if let Some(p) = shaped.iter().find(|p| !(-1.0..=1.0).contains(&p.x) || !(-1.0..=1.0).contains(&p.y)) {
+        return Err(format!("{p:?} out of the field"));
+    }
+    // The static-beam guard measures no higher dose once completed.
+    if !report.reduced {
+        let dose = |f: Vec<Point>| {
+            let mut st = dwell::DwellState::default();
+            st.apply(f, 0.0, &cfg.dwell, &dwell::StrictArea::below(-1.0), true);
+            st.status().max_dose
+        };
+        let (before, after) = (dose(frame.clone()), dose(shaped.clone()));
+        if after > before * 1.0001 + 1e-7 {
+            return Err(format!("completing raised the guard's highest dose {before} -> {after}"));
+        }
+    }
+    let safe = safety::apply(shaped, 0.0, &cfg, &mut safety::StrobeLimiter::default());
+    let up = top_up(safe.clone(), n);
+    if up.len() != n.max(safe.len()) {
+        return Err(format!("{} points topped up to {n}", up.len()));
+    }
+    let bits = |p: &Point| [p.x, p.y, p.r, p.g, p.b].map(f32::to_bits);
+    if up.iter().zip(&safe).any(|(a, b)| bits(a) != bits(b)) || up[safe.len()..].iter().any(|p| p.is_lit()) {
+        return Err("topping up changed a point or added a lit one".into());
+    }
+    let v = zones::blank_violations(&up, &cfg.zones);
+    if v > 0 {
+        return Err(format!("{v} lit segments through a Blank zone at a fixed rate"));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_fixed_rate_never_adds_light_past_the_safety_stage() {
+    run_property("a_fixed_rate_never_adds_light_past_the_safety_stage", 463, 1000, run_fixed_rate_case);
+}
+
+/// T-463 through the engine: at 25 im/s and 30 kpps, with an output whose
+/// seam is 79 points, every frame sent is 1 121 points whatever plays (a
+/// square, a long text, a beam), the preview shows the same frame, and
+/// the rate measured is 25 im/s. Disarmed, e-stopped: the same size, dark.
+/// Off: the sizes vary again.
+#[test]
+fn a_fixed_rate_sends_frames_of_one_size_whatever_plays() {
+    let mut s = test_support::shared();
+    s.pps = 30_000;
+    s.outputs.set_fixed_fps(MAIN_OUTPUT, Some(25.0), false).unwrap();
+    let mut rig = Rig::new(s, "fixed-rate", 463);
+    {
+        let mut w = rig.wire.lock().unwrap();
+        w.seam = 79;
+        w.lengths = Some(Vec::new());
+    }
+    let looks = [
+        Content::Shape { shape: "square".into() },
+        Content::Text { text: "LASER STUDIO 2026 CAPTATION".into(), style: Default::default() },
+        Content::Shape { shape: "circle".into() },
+    ];
+    let play = |rig: &mut Rig, look: &Content| {
+        rig.s().settings = Settings { content: look.clone(), ..Settings::default() };
+        for _ in 0..40 {
+            rig.tick();
+        }
+    };
+    play(&mut rig, &looks[0]);
+    assert!(rig.wire.lock().unwrap().fixed_on, "the output was asked for its fixed seam");
+    rig.s().request_arm(ArmSource::Ui).unwrap();
+    let mut lit_frames = 0;
+    for look in &looks {
+        play(&mut rig, look);
+        lit_frames += rig.wire.lock().unwrap().last.iter().any(|p| p.is_lit()) as usize;
+        assert_eq!(rig.s().frame.len(), 1_121, "the preview shows the frame sent");
+    }
+    assert_eq!(lit_frames, 3);
+    let st = rig.s().fixed_rate.expect("fixed rate status");
+    assert!((st.measured_fps - 25.0).abs() < 0.25 && st.deviation_pct < 1.0, "{st:?}");
+    assert_eq!(st.points, 1_200);
+    // The e-stop: the next frame is dark, still of the same size.
+    rig.s().emergency_stop(ArmSource::Ui);
+    rig.tick();
+    {
+        let w = rig.wire.lock().unwrap();
+        assert!(w.last.iter().all(|p| !p.is_lit()) && w.last.len() == 1_121);
+    }
+    let lengths = rig.wire.lock().unwrap().lengths.replace(Vec::new()).unwrap();
+    assert!(lengths.iter().all(|&l| l == 1_121), "sizes sent: {:?}", lengths.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    // Off (allowed armed): the output's own sizes come back, and no status.
+    {
+        let mut s = rig.s();
+        let estop = Arc::clone(&s.estop);
+        s.gate.reset_estop(&estop);
+    }
+    rig.s().outputs.set_fixed_fps(MAIN_OUTPUT, None, true).unwrap();
+    for look in &looks {
+        play(&mut rig, look);
+    }
+    assert!(rig.s().fixed_rate.is_none());
+    assert!(!rig.wire.lock().unwrap().fixed_on);
+    let sizes: std::collections::BTreeSet<usize> = rig.wire.lock().unwrap().lengths.take().unwrap().into_iter().collect();
+    assert!(sizes.len() > 1, "off, the sizes vary: {sizes:?}");
+}
+
+/// T-463 with the static-beam guard (T-256): a figure shrunk to a small
+/// spot is completed by dark points and spread lit ones, so the guard
+/// measures no higher dose at a fixed rate than on the frame as drawn
+/// (the output's own completion, T-171, off on both sides).
+#[test]
+fn a_fixed_rate_never_raises_the_static_beam_guard_dose() {
+    let run = |fixed: Option<f32>| -> f32 {
+        let mut s = test_support::shared();
+        s.settings = Settings { content: Content::Shape { shape: "circle".into() }, scale: 0.08, ..Settings::default() };
+        s.outputs.set_scan(MAIN_OUTPUT, crate::power::OutputScan { min_points: 0, fixed_fps: fixed, ..Default::default() }, false).unwrap();
+        let mut rig = Rig::new(s, &format!("fixed-dwell-{fixed:?}"), 256);
+        rig.s().request_arm(ArmSource::Ui).unwrap();
+        let mut top = 0.0f32;
+        for _ in 0..60 {
+            rig.tick();
+            top = top.max(rig.s().dwell.max_dose);
+        }
+        top
+    };
+    let plain = run(None);
+    for fps in [20.0, 25.0, 60.0] {
+        let fixed = run(Some(fps));
+        assert!(fixed <= plain * 1.001 + 1e-6, "{fps} im/s: dose {fixed} against {plain}");
+    }
 }
 
 /// The engine applies the output's points per frame (T-171) before the
@@ -5951,6 +6143,9 @@ fn every_export_is_never_brighter_than_its_projectors_live_output() {
                 let mut scan = random_output_scan(&mut rng);
                 // Thinning is proven by T-476; here both sides keep every point.
                 scan.max_points = 0;
+                // No export runs at a fixed rate (T-463: it resamples the
+                // live frame for a camera); its own test is below.
+                scan.fixed_fps = None;
                 let _ = s.outputs.set_scan(p, scan, false);
             }
             // Projection zones bound to projectors, outputs or nothing, groups.

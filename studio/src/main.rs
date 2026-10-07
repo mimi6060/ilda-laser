@@ -38,6 +38,7 @@ mod examples;
 mod desk;
 mod executors;
 mod fans;
+mod fixed_rate;
 mod fx;
 mod festival;
 mod figure_import;
@@ -487,6 +488,9 @@ pub struct Shared {
     pub audio_guard: audio::safety::GuardStatus,
     /// What the static beam guard (dwell.rs) did on the last frame.
     pub dwell: dwell::DwellStatus,
+    /// The main output's fixed frame rate (T-463) on the last frame, None
+    /// when off.
+    pub fixed_rate: Option<fixed_rate::FixedRateStatus>,
     /// Evolving cues on show in the last frame: (animator id, where it is).
     /// Id 0 is the manual look.
     pub evolving: Vec<(u64, evolving::Progress)>,
@@ -1551,6 +1555,7 @@ fn startup_state(cli: &Cli) -> Shared {
         projection: projection::ProjectionStore::load_or_create(cli.data_dir.join("projection.json")),
         audio_guard: audio::safety::GuardStatus::default(),
         dwell: dwell::DwellStatus::default(),
+        fixed_rate: None,
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
         take: take::Recorder::default(),
@@ -1778,6 +1783,8 @@ struct ProjectorStage {
     strobe_log: safety_log::LimiterTracker,
     /// The hand-over of its installed output, for loss reports.
     gen: u64,
+    /// Its fixed frame rate between frames (T-463).
+    fixed: fixed_rate::FixedRateState,
 }
 
 impl ProjectorStage {
@@ -1789,6 +1796,7 @@ impl ProjectorStage {
             dwell_guard: dwell::DwellState::default(),
             strobe_log: safety_log::LimiterTracker::new("strobe"),
             gen: 0,
+            fixed: fixed_rate::FixedRateState::default(),
         }
     }
 }
@@ -1802,6 +1810,8 @@ struct ProjectorPlan {
     color: colorcal::ColorCalibration,
     /// Its points per frame (T-171).
     frame_limits: output::FrameLimits,
+    /// Its fixed frame rate, if on (T-463).
+    fixed: Option<fixed_rate::FixedTarget>,
     /// For an Art-Net output (T-301).
     cue_signal: Option<output::CueSignal>,
 }
@@ -1872,11 +1882,28 @@ fn projector_lost(shared: &Mutex<Shared>, st: &mut ProjectorStage, estop: &EStop
     mgr.report_lost_projector(&st.id, st.gen, error);
 }
 
+/// A fixed frame rate (T-463) as the safety chain applies it: the
+/// output's target, the points its seam adds between frames, and its
+/// state between frames.
+struct FixedChain<'a> {
+    target: fixed_rate::FixedTarget,
+    seam: usize,
+    state: &'a mut fixed_rate::FixedRateState,
+}
+
+/// Points of one frame the engine sends at a fixed rate: the target less
+/// the output's seam, within the DAC's frame size (a Helios USB), at
+/// least 2.
+fn fixed_frame_points(target: &fixed_rate::FixedTarget, seam: usize, max_points: Option<usize>) -> usize {
+    let n = target.points.saturating_sub(seam).max(2);
+    max_points.map_or(n, |m| n.min(m.max(2)))
+}
+
 /// The safety stage of one projector's frame, in its order (see
 /// `Engine::tick`): frame size, colour rendering, strobe limiter and
 /// horizon, static-beam guard, power caps, the limiter's check on the
-/// output. Every projector runs it with
-/// its own limiter, guard, colour and caps (T-277).
+/// output, then (fixed rate only) dark points up to the frame size. Every
+/// projector runs it with its own limiter, guard, colour and caps (T-277).
 #[allow(clippy::too_many_arguments)]
 fn safety_chain(
     frame: Vec<Point>,
@@ -1889,13 +1916,28 @@ fn safety_chain(
     dwell_guard: &mut dwell::DwellState,
     armed: bool,
     caps: &power::OutputLimits,
+    fixed: Option<FixedChain>,
 ) -> Vec<Point> {
     // Points per frame of the output (T-171: its own range, and the
     // Helios USB frame size, T-303): thinned or completed here, before
     // the safety stage (T-353), so zones, horizon, strobe limiter, static
     // beam guard and caps all apply to the frame that really goes out.
-    // Nothing after the safety stage adds light.
-    let mut frame = output::fit_frame_limits(frame, frame_limits, max_points);
+    // At a fixed rate (T-463), resampled to exactly its frame size less a
+    // reserve for the zone mask instead. Nothing after the safety stage
+    // adds light.
+    let fixed = fixed.map(|f| {
+        let n = fixed_frame_points(&f.target, f.seam, max_points);
+        let reserve = f.state.reserve(&f.target, n);
+        (f, n, reserve)
+    });
+    let (mut frame, shaped) = match &fixed {
+        Some((f, n, reserve)) => {
+            let (out, report) = fixed_rate::shape(&frame, *n, *reserve, f.target.max_step, safety_cfg.dwell.sanitized().grid as usize);
+            (out, Some(report))
+        }
+        None => (output::fit_frame_limits(frame, frame_limits, max_points), None),
+    };
+    let shaped_len = frame.len();
     // The output's colour rendering (T-414): curve, white balance and
     // colour delay, on the frame that goes out, *before* the safety
     // stage. Channels stay within 0..1, a dark point stays dark (the
@@ -1923,6 +1965,13 @@ fn safety_chain(
     // light alternate as well; a flash out that would exceed the burst
     // stays dark. It only darkens, so everything above still holds.
     limiter.finish(&mut frame, t, safety_cfg);
+    // Fixed rate (T-463): dark points held where the frame ends, up to
+    // its size; nothing removed, nothing lit. A frame the zone mask made
+    // longer than that goes out as it is, counted.
+    if let (Some((f, n, _)), Some(report)) = (fixed, shaped) {
+        f.state.after_safety(report, shaped_len, frame.len(), n);
+        frame = fixed_rate::top_up(frame, n);
+    }
     frame
 }
 
@@ -1972,6 +2021,8 @@ struct Engine {
     last: Instant,
     /// If this thread panics, unwinding drops the stage: dark frame + disarm.
     stage: OutputStage,
+    /// The main output's fixed frame rate between frames (T-463).
+    fixed: fixed_rate::FixedRateState,
     limiter: safety::StrobeLimiter,
     /// Strobe limiter engagements go to the safety log, at most one line a
     /// second (T-259); nothing is allocated on the frames that write none.
@@ -2014,6 +2065,7 @@ impl Engine {
             frames_since_save: 0,
             last: Instant::now(),
             stage: OutputStage::new(output),
+            fixed: fixed_rate::FixedRateState::default(),
             limiter: safety::StrobeLimiter::default(),
             safety_log,
             strobe_log: safety_log::LimiterTracker::new("strobe"),
@@ -2051,7 +2103,7 @@ impl Engine {
         self.last = now;
 
         let record_due;
-        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods, zone_live), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan), trace) = {
+        let (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods, zone_live), clock, mixer, calibration, audio, armed, hold_ok, live, user_palettes, estop, health, t, safety_cfg, (caps, frame_limits, fixed), color, pattern, routing, cue_signal, plans, (festival_palette, balance), (look_scan, show_scan), trace) = {
             let mut s = shared.lock().unwrap();
             // E-stop latch, watchdog trip, heartbeats and hold-to-run, then
             // the audience mode, which ends with any of them (T-255).
@@ -2321,7 +2373,8 @@ impl Engine {
                         });
                         artnet::cue_signal(&s, s.deck.on_show(t), &live, timeline_cue, pattern.is_some() || trace.is_some(), &cfg.limits)
                     });
-                    ProjectorPlan { id: p.id.clone(), output: p.output.clone(), caps: cfg.limits, color: cfg.color, frame_limits: cfg.scan.frame_limits(), cue_signal }
+                    let fixed = cfg.scan.fixed_target(s.pps, s.mixer.optimizer.lit_step);
+                    ProjectorPlan { id: p.id.clone(), output: p.output.clone(), caps: cfg.limits, color: cfg.color, frame_limits: cfg.scan.frame_limits(), fixed, cue_signal }
                 })
                 .collect();
             let festival = (s.festival.colors(), s.festival.balance);
@@ -2329,7 +2382,7 @@ impl Engine {
             // before the safety chain; nothing else changes.
             // The projector it records (T-478): its frame, not the main one's.
             record_due = s.recorder.due(t).then(|| s.recorder.output().to_string());
-            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods, zone_live), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits()), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
+            (looks, (transition_fx, exec_gains), show_cues, (starts, look_groups, layer_groups, speed, speed_off), (cue_masters, levels, part_mods, zone_live), clock, mixer, s.calibration, audio, armed, hold_ok, live, s.palettes.list().to_vec(), Arc::clone(&s.estop), Arc::clone(&s.health), t, s.effective_safety(), (caps, s.outputs.active().scan.frame_limits(), s.outputs.active().scan.fixed_target(s.pps, s.mixer.optimizer.lit_step)), s.outputs.active_color(), pattern, routing, cue_signal, plans, festival, (look_scan, show_scan), trace)
         };
 
         // « Figer »: no time passes for the animators and the rotations,
@@ -2611,7 +2664,13 @@ impl Engine {
         // The safety stage (`safety_chain`): frame size, colour rendering,
         // strobe limiter and horizon, static beam guard, power caps, the
         // limiter's check on the output.
-        let frame = safety_chain(frame, frame_limits, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps);
+        // Fixed rate (T-463): the output's seam is made constant first.
+        let seam = self.stage.fixed_seam(fixed.is_some());
+        if fixed.is_none() && self.fixed.is_on() {
+            self.fixed.clear();
+        }
+        let chain = fixed.map(|target| FixedChain { target, seam, state: &mut self.fixed });
+        let frame = safety_chain(frame, frame_limits, self.stage.max_points(), &color, t, &safety_cfg, &mut self.limiter, &mut self.dwell_guard, armed, &caps, chain);
         let output_at = measuring.then(Instant::now);
 
         // Last stage: the gate. `armed` was read under the lock at the top
@@ -2639,7 +2698,14 @@ impl Engine {
             }
             _ => None,
         };
+        // The rate measured on what went out (seam included).
+        let fixed_status = fixed.map(|target| {
+            let sent = self.stage.max_points().map_or(frame.len(), |m| frame.len().min(m));
+            self.fixed.record(t, sent + seam, target.pps);
+            self.fixed.status()
+        });
         let mut s = shared.lock().unwrap();
+        s.fixed_rate = fixed_status;
         if let Some(report) = report {
             s.perf = report;
         }
@@ -2713,7 +2779,16 @@ impl Engine {
             // without one it cuts its whole field while the mode is on.
             let mut cfg = safety_cfg.clone();
             cfg.outdoor.projector = plan.id.clone();
-            let frame = safety_chain(frame, plan.frame_limits, st.stage.max_points(), &plan.color, t, &cfg, &mut st.limiter, &mut st.dwell_guard, armed, &plan.caps);
+            let seam = st.stage.fixed_seam(plan.fixed.is_some());
+            if plan.fixed.is_none() && st.fixed.is_on() {
+                st.fixed.clear();
+            }
+            let chain = plan.fixed.map(|target| FixedChain { target, seam, state: &mut st.fixed });
+            let frame = safety_chain(frame, plan.frame_limits, st.stage.max_points(), &plan.color, t, &cfg, &mut st.limiter, &mut st.dwell_guard, armed, &plan.caps, chain);
+            if let Some(target) = plan.fixed {
+                let sent = st.stage.max_points().map_or(frame.len(), |m| frame.len().min(m));
+                st.fixed.record(t, sent + seam, target.pps);
+            }
             if let Some(signal) = &plan.cue_signal {
                 st.stage.cue_signal(signal);
             }
