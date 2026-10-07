@@ -50,6 +50,73 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// The studio lock, timed (T-488). Every lock taken here (and in
+/// autosave.rs) goes through it: a hold over 5 ms is logged (debug), and
+/// tests read the calling thread's longest hold (`longest_hold`) to check
+/// that no project step keeps the engine waiting.
+pub(crate) struct Held<'a> {
+    guard: std::sync::MutexGuard<'a, Shared>,
+    since: std::time::Instant,
+    at: &'static std::panic::Location<'static>,
+}
+
+#[track_caller]
+pub(crate) fn lock(shared: &Mutex<Shared>) -> Held<'_> {
+    let guard = shared.lock().unwrap();
+    Held { guard, since: std::time::Instant::now(), at: std::panic::Location::caller() }
+}
+
+/// `lock` that also takes a poisoned lock (the autosave thread).
+#[track_caller]
+pub(crate) fn lock_even_poisoned(shared: &Mutex<Shared>) -> Held<'_> {
+    let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+    Held { guard, since: std::time::Instant::now(), at: std::panic::Location::caller() }
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = Shared;
+    fn deref(&self) -> &Shared {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Shared {
+        &mut self.guard
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let held = self.since.elapsed();
+        if held > std::time::Duration::from_millis(5) {
+            log::debug!("project: studio lock held {:.1} ms at {}:{}", held.as_secs_f64() * 1e3, self.at.file(), self.at.line());
+        }
+        #[cfg(test)]
+        LONGEST.with(|l| {
+            if l.get().0 < held {
+                l.set((held, Some(self.at)));
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+type Hold = (std::time::Duration, Option<&'static std::panic::Location<'static>>);
+
+#[cfg(test)]
+thread_local! {
+    static LONGEST: std::cell::Cell<Hold> = const { std::cell::Cell::new((std::time::Duration::ZERO, None)) };
+}
+
+/// The longest hold of the studio lock by this thread since the last call
+/// (which resets it), and where it was taken.
+#[cfg(test)]
+pub(crate) fn longest_hold() -> (std::time::Duration, String) {
+    let (d, at) = LONGEST.with(|l| l.replace((std::time::Duration::ZERO, None)));
+    (d, at.map(|a| format!("{}:{}", a.file(), a.line())).unwrap_or_default())
+}
+
 /// Current format (T-288): `MIGRATIONS` leads every older one here.
 pub const PROJECT_FORMAT: u32 = 1;
 /// Project migrations: `MIGRATIONS[i]` takes format `i + 1` to `i + 2`,
@@ -271,6 +338,21 @@ struct RecentFile {
     recent: Vec<String>,
 }
 
+/// `recent.json` copied under the lock, written after (`write_atomic`
+/// syncs to disk: never with the lock held, T-488).
+struct RecentWrite {
+    path: PathBuf,
+    file: RecentFile,
+}
+
+impl RecentWrite {
+    fn write(self) {
+        if let Err(e) = serde_json::to_vec_pretty(&self.file).map_err(anyhow::Error::from).and_then(|b| write_atomic(&self.path, &b)) {
+            log::warn!("failed to save {}: {e:#}", self.path.display());
+        }
+    }
+}
+
 /// The open project, part of `Shared`.
 pub struct ProjectState {
     pub data_dir: PathBuf,
@@ -329,10 +411,12 @@ impl ProjectState {
     }
 
     fn save_recent(&self) {
-        let file = RecentFile { current: self.current.clone(), recent: self.recent.clone() };
-        if let Err(e) = serde_json::to_vec_pretty(&file).map_err(anyhow::Error::from).and_then(|b| write_atomic(&self.recent_path, &b)) {
-            log::warn!("failed to save {}: {e:#}", self.recent_path.display());
-        }
+        self.recent_file().write();
+    }
+
+    /// `recent.json` as it is now, to write once the lock is released.
+    fn recent_file(&self) -> RecentWrite {
+        RecentWrite { path: self.recent_path.clone(), file: RecentFile { current: self.current.clone(), recent: self.recent.clone() } }
     }
 
     pub fn path_of(&self, name: &str) -> PathBuf {
@@ -706,23 +790,46 @@ pub fn snapshot(s: &Shared) -> Project {
     }
 }
 
+/// What `apply` needs that depends on the project alone, made with the
+/// studio lock released (T-488): the figures in the store's order, the
+/// user cues as the store keeps them, their presets and the built-in
+/// catalogue.
+struct Prepared {
+    catalog: Vec<crate::presets::Preset>,
+    figure_presets: Vec<crate::presets::Preset>,
+    user_cue_presets: Vec<crate::presets::Preset>,
+}
+
+fn prepare(p: &mut Project) -> Prepared {
+    p.figures = crate::figures::sorted(std::mem::take(&mut p.figures));
+    p.user_cues = crate::usercues::checked(std::mem::take(&mut p.user_cues));
+    Prepared {
+        catalog: crate::presets::catalog(),
+        figure_presets: p.figures.iter().map(crate::figures::preset_of).collect(),
+        user_cue_presets: crate::usercues::presets_of(&p.user_cues),
+    }
+}
+
 /// Swaps a checked project into memory. Infallible, so the switch is all
 /// or nothing. Transport stops (playlist, timeline); playing cues stay.
 /// Never touches calibration, safety, presence, MIDI safety, the gate or
-/// the e-stop.
-fn apply(s: &mut Shared, p: &Project) {
-    s.scenes.replace_in_memory(p.scenes.clone());
+/// the e-stop. Runs under the lock: `p` went through `prepare` and its
+/// sections are moved in, never copied. Leaves `p` with its `grid`,
+/// `timelines`, `pools` and `extra`; the other sections are taken.
+fn apply(s: &mut Shared, p: &mut Project, prep: Prepared) {
+    use std::mem::take;
+    s.scenes.replace_in_memory(take(&mut p.scenes));
     s.playlist = None;
     s.deck.set_config(&p.grid);
     // Resolved by figures::refresh below, with the project's figures.
-    s.grid.set_config(&p.pages);
+    s.grid.set_config_with(&p.pages, &prep.catalog);
     s.timeline.stop();
     let t = s.now_s();
     s.tempo.set_bpm_manual(p.tempo.bpm, t);
     s.tempo.beats_per_bar = p.tempo.beats_per_bar;
-    s.live = p.live.clone();
+    s.live = take(&mut p.live);
     s.live.release_momentary();
-    s.mixer = p.layers.clone();
+    s.mixer = take(&mut p.layers);
     // Group masters by group order (missing: 100 %); projection.json is
     // written by the engine within the second.
     s.projection.set_masters(&p.group_masters);
@@ -731,16 +838,17 @@ fn apply(s: &mut Shared, p: &Project) {
     let (beat, t_eff, bpb) = s.speed_clock();
     s.speed.replace(&p.speed, beat, t_eff, bpb);
     s.speed_dirty = true;
-    s.lfos.replace_in_memory(p.lfos.clone());
-    s.routes.replace_in_memory(p.audio_routes.clone(), &s.controls);
-    s.palettes.replace_in_memory(p.palettes.clone());
-    s.scan_presets.replace_in_memory(p.scan_presets.clone());
-    s.midi.store.replace_user_in_memory(p.midi.profiles.clone());
-    s.figures.replace_in_memory(p.figures.clone());
-    s.user_cues.replace_in_memory(p.user_cues.clone());
-    s.cue_lists.replace_in_memory(p.cue_lists.clone());
-    s.executors.set_bank(p.executors.clone());
-    s.desks.set_tabs(p.desks.clone());
+    s.lfos.replace_in_memory(take(&mut p.lfos));
+    s.routes.replace_in_memory(take(&mut p.audio_routes), &s.controls);
+    s.palettes.replace_in_memory(take(&mut p.palettes));
+    s.scan_presets.replace_in_memory(take(&mut p.scan_presets));
+    s.midi.store.replace_user_in_memory(take(&mut p.midi.profiles));
+    // Already in the store's order (prepare).
+    s.figures.replace_in_memory(take(&mut p.figures));
+    s.user_cues.replace_checked(take(&mut p.user_cues));
+    s.cue_lists.replace_in_memory(take(&mut p.cue_lists));
+    s.executors.set_bank(take(&mut p.executors));
+    s.desks.set_tabs(take(&mut p.desks));
     // The loaded list follows its new version, or goes (another project).
     match s.cue_list.list.as_ref().and_then(|l| s.cue_lists.get(&l.name)).cloned() {
         Some(l) => {
@@ -749,11 +857,11 @@ fn apply(s: &mut Shared, p: &Project) {
         }
         None => s.cue_list.unload(),
     }
-    s.macros.replace_in_memory(p.macros.clone());
-    s.showlist.replace_in_memory(p.show_list.clone());
+    s.macros.replace_in_memory(take(&mut p.macros));
+    s.showlist.replace_in_memory(take(&mut p.show_list));
     s.pools.replace_in_memory(p.pools.clone());
-    crate::usercues::sync_presets(s);
-    crate::figures::refresh(s);
+    crate::usercues::sync_presets_with(s, prep.user_cue_presets);
+    crate::figures::refresh_with(s, prep.figure_presets);
     // Lines checked on the registry just rebuilt (macros included): a bad
     // one disables its macro, with a warning the open report carries.
     crate::macros::revalidate(s);
@@ -775,8 +883,8 @@ struct WorkingPaths {
     scan_presets: PathBuf,
     midi: Option<PathBuf>,
     figures: Option<PathBuf>,
-    /// `user_cues.json` and its content (with the id counter) as opened.
-    user_cues: Option<(PathBuf, Vec<u8>)>,
+    /// `user_cues.json` and the store's id counter once opened.
+    user_cues: Option<(PathBuf, u64)>,
     cue_lists: Option<PathBuf>,
     executors: Option<PathBuf>,
     desks: Option<PathBuf>,
@@ -785,8 +893,6 @@ struct WorkingPaths {
     pools: Option<PathBuf>,
     live: PathBuf,
     layers: PathBuf,
-    /// Macros disabled on opening (T-425) and references to unknown presets (T-422), for the open report.
-    macro_warnings: Vec<String>,
 }
 
 fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
@@ -801,7 +907,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         scan_presets: s.scan_presets.path().to_path_buf(),
         midi: s.midi.store.dir().map(|d| d.join("profiles")),
         figures: s.figures.dir().map(Path::to_path_buf),
-        user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.file_bytes().unwrap_or_default())),
+        user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.next_id())),
         cue_lists: s.cue_lists.path().map(Path::to_path_buf),
         executors: s.executors.path().map(Path::to_path_buf),
         desks: s.desks.path().map(Path::to_path_buf),
@@ -810,7 +916,6 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         pools: s.pools.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
         layers: data_dir.join("layers.json"),
-        macro_warnings: Vec::new(),
     }
 }
 
@@ -831,8 +936,8 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     if let Some(pages) = &w.pages {
         put(pages, serde_json::to_vec_pretty(&p.pages));
     }
-    if let Some((path, bytes)) = &w.user_cues {
-        put(path, Ok(bytes.clone()));
+    if let Some((path, next)) = &w.user_cues {
+        put(path, crate::usercues::file_bytes(*next, &p.user_cues));
     }
     if let Some(path) = &w.cue_lists {
         put(path, serde_json::to_vec_pretty(&p.cue_lists));
@@ -1002,6 +1107,9 @@ impl From<Vec<String>> for Done {
     }
 }
 
+/// Held through a whole `POST /api/project/…` (see `route`).
+static PROJECT_ACTIONS: Mutex<()> = Mutex::new(());
+
 /// `GET /api/project`, `POST /api/project/{new,open,save,save-as}`, for
 /// autosave (T-287) `POST /api/project/{autosave,recover,recover-ignore}`,
 /// and for named versions (T-288) `GET /api/project/versions`,
@@ -1011,9 +1119,13 @@ impl From<Vec<String>> for Done {
 pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Option<Reply> {
     let path_req = || serde_json::from_str::<PathRequest>(body).map_err(|e| Reply::Text(400, format!("JSON invalide : {e}")));
     let version_req = || serde_json::from_str::<VersionRequest>(body).map_err(|e| Reply::Text(400, format!("JSON invalide : {e}")));
+    // One project action at a time (T-488): they read, swap and write in
+    // steps with the studio lock released in between, so two of them never
+    // interleave (recent.json, the saved fingerprint, the working copy).
+    let _one_at_a_time = post.then(|| PROJECT_ACTIONS.lock().unwrap_or_else(|e| e.into_inner()));
     if post && matches!(action, "new" | "open" | "save" | "save-as" | "version-open") {
         // Another project, or a save: the recovery question is moot.
-        shared.lock().unwrap().project.autosave.offer = None;
+        lock(shared).project.autosave.offer = None;
     }
     let reply = match (post, action) {
         (false, "") => return Some(Reply::Json(info(shared))),
@@ -1036,7 +1148,7 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
         (true, "delete-template") => template_req(body).and_then(|req| delete_template(shared, &req.name)),
         (true, "open") => match path_req() {
             Ok(req) => {
-                let dir = shared.lock().unwrap().project.dir.clone();
+                let dir = lock(shared).project.dir.clone();
                 match resolve(&dir, &req.path) {
                     Ok(path) => open_project(shared, Some(&path), Project::default()),
                     Err(e) => Err(Reply::Text(400, format!("{e:#}"))),
@@ -1046,7 +1158,7 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
         },
         (true, "save") => {
             let (current, read_only) = {
-                let s = shared.lock().unwrap();
+                let s = lock(shared);
                 (s.project.current.clone(), s.project.read_only)
             };
             match (current, read_only) {
@@ -1058,7 +1170,7 @@ pub fn route(shared: &Mutex<Shared>, post: bool, action: &str, body: &str) -> Op
         (true, "save-as") => match path_req() {
             Ok(req) => {
                 let (dir, current, read_only) = {
-                    let s = shared.lock().unwrap();
+                    let s = lock(shared);
                     (s.project.dir.clone(), s.project.current.clone(), s.project.read_only)
                 };
                 match resolve(&dir, &req.path) {
@@ -1100,31 +1212,62 @@ fn read_only_fr(v: u32) -> String {
     format!("{NEWER_FR} (format {v}) : « Enregistrer » est désactivé ; « Enregistrer sous… » en fait une copie au format actuel")
 }
 
+/// What `swap_in` did.
+struct Swapped {
+    /// Macros disabled on opening (T-425) and references to unknown
+    /// presets (T-422), for the open report.
+    notes: Vec<String>,
+    /// Files of the working copy that could not be written.
+    unwritten: Vec<String>,
+    /// The state right after the swap with the project's timelines, when
+    /// asked: what opening calls « saved ».
+    state: Option<Project>,
+}
+
+impl Swapped {
+    /// What the reply lists: the notes, then the files not written.
+    fn warnings(self) -> Vec<String> {
+        self.notes.into_iter().chain(self.unwritten.into_iter().map(|e| format!("impossible d'écrire {e}"))).collect()
+    }
+}
+
 /// Checks `p` against the controls and swaps it in, then writes the
-/// working copy (lock released). Returns the files not written.
-fn swap_in(shared: &Mutex<Shared>, p: &Project) -> Result<Vec<String>, Reply> {
-    let w = {
-        let mut s = shared.lock().unwrap();
-        check_lfos(p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
-        apply(&mut s, p);
+/// working copy. `then` runs in the same critical section as the swap (the
+/// open project's name and flags), so nobody ever sees half of an open.
+/// The lock is held for the check and the swap only (T-488): the project
+/// is prepared before, hashed and written after.
+fn swap_in(shared: &Mutex<Shared>, mut p: Project, want_state: bool, then: impl FnOnce(&mut Shared, &mut Project)) -> Result<Swapped, Reply> {
+    let prep = prepare(&mut p);
+    // `apply` takes the sections of `p`; the working copy is written from
+    // this copy, with the lock released.
+    let mut keep = p.clone();
+    let (w, notes, state) = {
+        let mut s = lock(shared);
+        check_lfos(&p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+        apply(&mut s, &mut p, prep);
         let data_dir = s.project.data_dir.clone();
-        let mut w = working_paths(&s, &data_dir);
-        w.macro_warnings = s.macros.warnings.clone();
+        let w = working_paths(&s, &data_dir);
+        let mut notes = s.macros.warnings.clone();
         // References to presets the project doesn't hold (T-422): ignored
         // when rendering (the cues' own values), said once here.
-        w.macro_warnings.extend(crate::pools::dangling(&p.grid, &p.timelines, &p.pools, &|cue| crate::pools::cue_label(&s, cue)));
-        w
+        notes.extend(crate::pools::dangling(&p.grid, &p.timelines, &p.pools, &|cue| crate::pools::cue_label(&s, cue)));
+        // The macros as revalidated (some may be disabled) go to the working copy.
+        keep.macros = s.macros.list().to_vec();
+        let state = want_state.then(|| snapshot(&s));
+        then(&mut s, &mut p);
+        (w, notes, state)
     };
-    // The macros as revalidated (some may be disabled) go to the working copy.
-    let mut p = p.clone();
-    p.macros = shared.lock().unwrap().macros.list().to_vec();
-    let warnings = persist(&w, &p);
-    for e in &warnings {
+    let unwritten = persist(&w, &keep);
+    for e in &unwritten {
         log::warn!("project open: failed to write {e}");
     }
     // The show list's times, from the shows just written (T-444).
-    crate::showlist::refresh(&mut shared.lock().unwrap());
-    Ok(w.macro_warnings.iter().cloned().chain(warnings.into_iter().map(|e| format!("impossible d'écrire {e}"))).collect())
+    crate::showlist::refresh(&mut lock(shared));
+    let state = state.map(|mut now| {
+        now.timelines = std::mem::take(&mut keep.timelines);
+        now
+    });
+    Ok(Swapped { notes, unwritten, state })
 }
 
 /// Opens `path`, or with `None` the untitled project `fresh` (*Nouveau
@@ -1145,7 +1288,28 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>, fresh: Project) -> 
     };
     let name = path.map(name_of);
     p.name = name.clone().unwrap_or_else(|| UNTITLED.into());
-    let mut warnings = swap_in(shared, &p)?;
+    let shown = name.clone().unwrap_or_else(|| UNTITLED.into());
+    let (mut recent, mut site) = (None, Ok(None));
+    let mut swapped = swap_in(shared, p, true, |s, p| {
+        s.project.last_modified = false;
+        s.project.extra = std::mem::take(&mut p.extra);
+        s.project.read_only = newer;
+        match &name {
+            Some(name) => s.project.remember(name),
+            None => s.project.current = None,
+        }
+        recent = Some(s.project.recent_file());
+        s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": shown, "new": name.is_none(), "armed": s.gate.is_armed() }));
+        // A site profile in the project (T-289): offered, never applied here.
+        site = match crate::sites::of_project(s) {
+            Ok(Some(site)) if !crate::sites::differences(s, &site).is_empty() || !crate::sites::loosenings(s, &site).is_empty() => Ok(Some(site.name)),
+            Ok(_) => Ok(None),
+            Err(e) => Err(e),
+        };
+    })?;
+    recent.into_iter().for_each(RecentWrite::write);
+    let opened = swapped.state.take().unwrap_or_default();
+    let mut warnings = swapped.warnings();
     let mut notice = newer.map(read_only_fr);
     if let (Some(path), Some((l, text)), Some(_)) = (path, &loaded, migrated) {
         // The file follows, its original copied first (lock released).
@@ -1154,30 +1318,19 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>, fresh: Project) -> 
             Err(e) => warnings.push(format!("{e:#} : le fichier garde son ancien format")),
         }
     }
-    let mut s = shared.lock().unwrap();
-    let mut now = snapshot(&s);
-    now.timelines = p.timelines.clone();
-    s.project.saved = now.fingerprint();
-    s.project.last_modified = false;
-    s.project.extra = std::mem::take(&mut p.extra);
-    s.project.read_only = newer;
-    match &name {
-        Some(name) => s.project.remember(name),
-        None => s.project.current = None,
+    // The baseline « nothing to save » is the state as swapped in, hashed
+    // with the lock released.
+    let saved = opened.fingerprint();
+    {
+        let mut s = lock(shared);
+        s.project.saved = saved;
+        s.project.last_modified = false;
     }
-    s.project.save_recent();
-    let shown = name.clone().unwrap_or_else(|| UNTITLED.into());
     log::info!("Projet ouvert : « {shown} »{}", if warnings.is_empty() { "" } else { " (avec des erreurs d'écriture)" });
-    s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": shown, "new": name.is_none(), "armed": s.gate.is_armed() }));
-    // A site profile in the project (T-289): offered, never applied here.
-    let site_offer = match crate::sites::of_project(&s) {
-        Ok(Some(site)) if !crate::sites::differences(&s, &site).is_empty() || !crate::sites::loosenings(&s, &site).is_empty() => Some(site.name),
-        Ok(_) => None,
-        Err(e) => {
-            warnings.push(format!("profil de site du projet ignoré : {e:#}"));
-            None
-        }
-    };
+    let site_offer = site.unwrap_or_else(|e| {
+        warnings.push(format!("profil de site du projet ignoré : {e:#}"));
+        None
+    });
     Ok(Done { warnings, notice, site_offer, ..Done::default() })
 }
 
@@ -1185,35 +1338,26 @@ fn open_project(shared: &Mutex<Shared>, path: Option<&Path>, fresh: Project) -> 
 /// modified: the project's name and saved fingerprint stay, so the
 /// recovered work shows as unsaved. Same checks and swap as opening.
 fn recover(shared: &Mutex<Shared>) -> Result<Vec<String>, Reply> {
-    let offer = shared.lock().unwrap().project.autosave.offer.clone().ok_or_else(|| Reply::Text(409, "aucune sauvegarde auto à récupérer".into()))?;
-    let mut p = read(&offer.path).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
-    let w = {
-        let mut s = shared.lock().unwrap();
-        check_lfos(&p, &s.controls).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
-        apply(&mut s, &p);
+    let offer = lock(shared).project.autosave.offer.clone().ok_or_else(|| Reply::Text(409, "aucune sauvegarde auto à récupérer".into()))?;
+    let p = read(&offer.path).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
+    let file = offer.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let swapped = swap_in(shared, p, false, |s, p| {
         s.project.autosave.offer = None;
         s.project.last_modified = true;
-        let file = offer.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         log::info!("Sauvegarde auto récupérée : {file}");
         s.gate.log().record("autosave_recovered", Some("ui"), serde_json::json!({ "file": file, "armed": s.gate.is_armed() }));
         s.project.extra = std::mem::take(&mut p.extra);
-        let data_dir = s.project.data_dir.clone();
-        working_paths(&s, &data_dir)
-    };
-    let warnings = persist(&w, &p);
-    for e in &warnings {
-        log::warn!("autosave recovery: failed to write {e}");
-    }
-    crate::showlist::refresh(&mut shared.lock().unwrap());
-    Ok(warnings.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
+    })?;
+    Ok(swapped.unwritten.into_iter().map(|e| format!("impossible d'écrire {e}")).collect())
 }
 
 /// Saves the current state as project `name` (in `projects/`), then hands
 /// the same bytes to the copy to a second location (T-450), which writes
-/// them on its own thread: its result never decides the save's.
+/// them on its own thread: its result never decides the save's. The lock
+/// is held to copy the state, then to mark it saved (T-488).
 fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply> {
     let (mut p, path, shows, backup) = {
-        let s = shared.lock().unwrap();
+        let s = lock(shared);
         let mut p = snapshot(&s);
         p.extra = s.project.extra.clone();
         (p, s.project.path_of(name), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()), std::sync::Arc::clone(&s.project.backup))
@@ -1227,12 +1371,16 @@ fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply
     })?;
     log::info!("Projet enregistré : « {name} »");
     backup.queue(crate::backup::Job::project(name, bytes));
-    let mut s = shared.lock().unwrap();
-    s.project.saved = p.fingerprint();
-    s.project.last_modified = false;
-    s.project.read_only = None;
-    s.project.remember(name);
-    s.project.save_recent();
+    let saved = p.fingerprint();
+    let recent = {
+        let mut s = lock(shared);
+        s.project.saved = saved;
+        s.project.last_modified = false;
+        s.project.read_only = None;
+        s.project.remember(name);
+        s.project.recent_file()
+    };
+    recent.write();
     Ok(Vec::new())
 }
 
@@ -1240,7 +1388,7 @@ fn save_project(shared: &Mutex<Shared>, name: &str) -> Result<Vec<String>, Reply
 /// and named: what *Enregistrer* would write (lock held only to copy).
 pub fn current_project(shared: &Mutex<Shared>) -> Project {
     let (mut p, name, shows) = {
-        let s = shared.lock().unwrap();
+        let s = lock(shared);
         let mut p = snapshot(&s);
         p.extra = s.project.extra.clone();
         (p, s.project.current.clone().unwrap_or_else(|| UNTITLED.into()), crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()))
@@ -1266,7 +1414,7 @@ fn template_req(body: &str) -> Result<TemplateRequest, Reply> {
 }
 
 fn templates_dir(shared: &Mutex<Shared>) -> PathBuf {
-    shared.lock().unwrap().project.data_dir.join(TEMPLATES_DIR)
+    lock(shared).project.data_dir.join(TEMPLATES_DIR)
 }
 
 /// A template's file in `dir`: the same name rules as a project.
@@ -1338,7 +1486,7 @@ fn delete_template(shared: &Mutex<Shared>, name: &str) -> Result<Done, Reply> {
 
 /// The versions folder of the open project, and its name.
 fn versions_dir(shared: &Mutex<Shared>) -> (PathBuf, String) {
-    let s = shared.lock().unwrap();
+    let s = lock(shared);
     let project = s.project.current.clone().unwrap_or_else(|| UNTITLED.into());
     (crate::versions::dir_of(&s.project.data_dir, &project), project)
 }
@@ -1377,17 +1525,20 @@ fn open_version(shared: &Mutex<Shared>, file: &str) -> Result<Done, Reply> {
     }
     let mut p = loaded.project;
     p.name = UNTITLED.into();
-    let warnings = swap_in(shared, &p)?;
-    let mut s = shared.lock().unwrap();
-    // Unsaved: nothing on disk is this copy yet.
-    s.project.saved = 0;
-    s.project.last_modified = true;
-    s.project.extra = std::mem::take(&mut p.extra);
-    s.project.read_only = None;
-    s.project.current = None;
-    s.project.save_recent();
-    log::info!("Version « {label} » du projet « {project} » ouverte comme copie");
-    s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": UNTITLED, "version_of": project, "version": label, "armed": s.gate.is_armed() }));
+    let mut recent = None;
+    let swapped = swap_in(shared, p, false, |s, p| {
+        // Unsaved: nothing on disk is this copy yet.
+        s.project.saved = 0;
+        s.project.last_modified = true;
+        s.project.extra = std::mem::take(&mut p.extra);
+        s.project.read_only = None;
+        s.project.current = None;
+        recent = Some(s.project.recent_file());
+        log::info!("Version « {label} » du projet « {project} » ouverte comme copie");
+        s.gate.log().record("project_open", Some("ui"), serde_json::json!({ "name": UNTITLED, "version_of": project, "version": label, "armed": s.gate.is_armed() }));
+    })?;
+    recent.into_iter().for_each(RecentWrite::write);
+    let warnings = swapped.warnings();
     let suggested: String = format!("{project} {label}").chars().take(64).collect::<String>().trim().to_string();
     Ok(Done {
         warnings,
@@ -1656,7 +1807,7 @@ pub fn merge(cur: &mut Project, src: &Project, sections: &[String], conflict: Co
 /// saved). Same checks and swap as opening. An embedded site is only
 /// carried (offered later), never applied. Never arms.
 fn import_partial(shared: &Mutex<Shared>, req: &PartialRequest) -> Result<Done, Reply> {
-    let dir = shared.lock().unwrap().project.dir.clone();
+    let dir = lock(shared).project.dir.clone();
     let path = resolve(&dir, &req.from).map_err(|e| Reply::Text(400, format!("{e:#}")))?;
     let (loaded, _) = load_file(&path).map_err(|e| Reply::Text(if path.exists() { 400 } else { 404 }, format!("{e:#}")))?;
     if let Some(v) = loaded.newer() {
@@ -1665,7 +1816,7 @@ fn import_partial(shared: &Mutex<Shared>, req: &PartialRequest) -> Result<Done, 
     let src = loaded.project;
     let mut cur = current_project(shared);
     if req.sections.iter().any(|s| s == "pages") {
-        let presets = shared.lock().unwrap().presets.clone();
+        let presets = lock(shared).presets.clone();
         cur.pages.materialize(&presets);
     }
     let name = cur.name.clone();
@@ -1674,12 +1825,13 @@ fn import_partial(shared: &Mutex<Shared>, req: &PartialRequest) -> Result<Done, 
     if req.dry_run {
         return Ok(Done { import: Some(report), ..Done::default() });
     }
-    let warnings = swap_in(shared, &cur)?;
-    let mut s = shared.lock().unwrap();
-    s.project.extra = cur.extra.clone();
-    s.project.last_modified = true;
-    log::info!("Projet « {name} » : import partiel depuis « {} » ({})", name_of(&path), req.sections.join(", "));
-    s.gate.log().record("project_import", Some("ui"), serde_json::json!({ "from": name_of(&path), "sections": req.sections, "armed": s.gate.is_armed() }));
+    let swapped = swap_in(shared, cur, false, |s, cur| {
+        s.project.extra = std::mem::take(&mut cur.extra);
+        s.project.last_modified = true;
+        log::info!("Projet « {name} » : import partiel depuis « {} » ({})", name_of(&path), req.sections.join(", "));
+        s.gate.log().record("project_import", Some("ui"), serde_json::json!({ "from": name_of(&path), "sections": req.sections, "armed": s.gate.is_armed() }));
+    })?;
+    let warnings = swapped.warnings();
     Ok(Done { warnings, import: Some(report), notice: Some(format!("Importé depuis « {} »", name_of(&path))), ..Done::default() })
 }
 
@@ -1689,7 +1841,7 @@ fn import_partial(shared: &Mutex<Shared>, req: &PartialRequest) -> Result<Done, 
 /// Read under the lock, the timelines from disk after it is released.
 pub fn diagnostic_snapshot(shared: &Mutex<Shared>) -> Value {
     let (mut p, shows) = {
-        let s = shared.lock().unwrap();
+        let s = lock(shared);
         let mut p = snapshot(&s);
         p.name = s.project.current.clone().unwrap_or_else(|| UNTITLED.into());
         (p, crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()))
@@ -1708,7 +1860,7 @@ pub fn diagnostic_snapshot(shared: &Mutex<Shared>) -> Value {
 /// or saved, the projects folder's files and the recent list.
 fn info(shared: &Mutex<Shared>) -> Value {
     let (mut p, current, saved, dir, recent, shows, autosave, read_only, backup) = {
-        let s = shared.lock().unwrap();
+        let s = lock(shared);
         let pr = &s.project;
         let shows = crate::timeline::ShowStore::new(s.shows.dir().to_path_buf());
         (snapshot(&s), pr.current.clone(), pr.saved, pr.dir.clone(), pr.recent.clone(), shows, pr.autosave.status(), pr.read_only, pr.backup.view())
@@ -1754,7 +1906,7 @@ pub struct QuitCheck {
 /// from disk with the lock released), never the cached `last_modified`.
 pub fn quit_check(shared: &Mutex<Shared>) -> QuitCheck {
     let (mut p, current, saved, shows, timeline) = {
-        let s = shared.lock().unwrap();
+        let s = lock(shared);
         (snapshot(&s), s.project.current.clone(), s.project.saved, crate::timeline::ShowStore::new(s.shows.dir().to_path_buf()), s.timeline.unsaved().map(str::to_string))
     };
     p.timelines = shows.load_all();
@@ -1788,6 +1940,9 @@ mod tests {
     use super::*;
     use crate::engine::Settings;
     use crate::test_support;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("laser-studio-project-{tag}-{}", std::process::id()));
@@ -1829,6 +1984,13 @@ mod tests {
             Reply::Json(v) => Ok(v),
             Reply::Text(code, t) => Err((code, t)),
         }
+    }
+
+    /// `apply` of a copy of `p`, prepared as `swap_in` does.
+    fn apply_copy(s: &mut Shared, p: &Project) {
+        let mut p = p.clone();
+        let prep = prepare(&mut p);
+        apply(s, &mut p, prep);
     }
 
     fn modified(shared: &Mutex<Shared>) -> bool {
@@ -1947,7 +2109,7 @@ mod tests {
         assert!(old.layers.layers.iter().all(|l| l.speed_group == 0));
         assert!(old.lfos.iter().all(|m| m.speed_group == 0));
         let mut s = shared.lock().unwrap();
-        apply(&mut s, &old);
+        apply_copy(&mut s, &old);
         assert!(s.speed.groups.iter().all(|g| *g == SpeedMode::Multiple { mult: 1.0 }));
         assert_eq!(s.speed.rate(), 1.0);
         assert!(!s.gate.is_armed());
@@ -1982,7 +2144,7 @@ mod tests {
         let old: Project = serde_json::from_str("{}").unwrap();
         assert!(old.group_masters.is_empty());
         let mut s = shared.lock().unwrap();
-        apply(&mut s, &old);
+        apply_copy(&mut s, &old);
         assert_eq!(s.projection.masters(), [1.0, 1.0]);
         assert!(!s.gate.is_armed());
         drop(s);
@@ -2012,7 +2174,7 @@ mod tests {
         let old: Project = serde_json::from_str("{}").unwrap();
         assert_eq!(old.executors, ExecutorBank::default());
         let mut s = shared.lock().unwrap();
-        apply(&mut s, &old);
+        apply_copy(&mut s, &old);
         assert_eq!(s.executors.bank.pages.len(), 1);
         assert_eq!(s.executors.bank.pages[0].handles[2], Executor::default());
         assert!(!s.gate.is_armed());
@@ -2047,7 +2209,7 @@ mod tests {
         let old: Project = serde_json::from_str("{}").unwrap();
         assert!(old.desks.is_empty());
         let mut s = shared.lock().unwrap();
-        apply(&mut s, &old);
+        apply_copy(&mut s, &old);
         assert!(s.desks.tabs.is_empty());
         assert!(!s.gate.is_armed());
         drop(s);
@@ -3165,6 +3327,106 @@ mod tests {
         let p = current_project(&shared);
         assert_eq!(p.scenes.len(), 1, "the open project is intact");
         assert_eq!(p.palettes.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A big show (T-488): 1,000 scenes, 1,000 user cues, 60 figures of
+    /// 16 frames × 10 strokes × 50 points (480,000 points), 10 timelines.
+    fn fill_big(shared: &Mutex<Shared>) {
+        use crate::figures::{FigureFrame, Stroke};
+        let mut s = shared.lock().unwrap();
+        s.scenes.replace_in_memory((0..1000).map(|i| scene(&format!("Scène {i}"), 0.5)).collect());
+        let cues = (1..=1000).map(|i| UserCue { id: format!("u-{i}"), name: format!("Cue {i}"), ..Default::default() }).collect();
+        s.user_cues.replace_in_memory(cues);
+        crate::usercues::sync_presets(&mut s);
+        let figure = |n: usize| {
+            let frame = |f: usize| FigureFrame {
+                strokes: (0..10).map(|k| Stroke { points: (0..50).map(|i| [i as f32 / 50.0 - 0.5, (f + k) as f32 / 30.0 - 0.5]).collect(), color: [255, 0, 0], lit: true, part: 0 }).collect(),
+            };
+            Figure { name: format!("Figure {n}"), frames: (0..16).map(frame).collect(), ..Default::default() }
+        };
+        s.figures.replace_in_memory((0..60).map(figure).collect());
+        crate::figures::refresh(&mut s);
+        for i in 0..10 {
+            s.shows.save(&Show::new_empty(&format!("Show {i}"), crate::timeline::TimeBase::default())).unwrap();
+        }
+    }
+
+    /// The longest hold of the studio lock by `step` (best of three runs,
+    /// so a preemption of the test thread is not counted).
+    fn hold_of(step: &mut dyn FnMut()) -> (Duration, String) {
+        (0..3)
+            .map(|_| {
+                longest_hold();
+                step();
+                longest_hold()
+            })
+            .min_by_key(|(d, _)| *d)
+            .unwrap()
+    }
+
+    /// T-488: saving and opening a big show hold the studio lock for a copy
+    /// or a swap only, never for hashing, serialising or the disk (before:
+    /// 39 ms to save, 90 ms to open, release; 340 ms in a debug build).
+    /// The bound is 2 ms in a release build (`cargo test --release`); a
+    /// debug build is about 3× slower, so it gets 4 ms for a copy and 8 ms
+    /// for a swap.
+    #[test]
+    fn saving_and_opening_a_big_project_hold_the_studio_lock_under_2_ms() {
+        let dir = temp_dir("lock-hold");
+        let shared = Arc::new(studio(&dir));
+        fill_big(&shared);
+        // A stand-in for the engine: takes the lock every millisecond and
+        // keeps its longest wait. Reported, not checked: on a loaded Mac the
+        // wait also counts the scheduler. The holds below are the check.
+        let stop = Arc::new(AtomicBool::new(false));
+        let engine = std::thread::spawn({
+            let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
+            move || {
+                let mut worst = Duration::ZERO;
+                while !stop.load(Ordering::SeqCst) {
+                    let t = std::time::Instant::now();
+                    drop(shared.lock().unwrap());
+                    worst = worst.max(t.elapsed());
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                worst
+            }
+        });
+        let (copy_bound, swap_bound) = if cfg!(debug_assertions) { (Duration::from_millis(4), Duration::from_millis(8)) } else { (Duration::from_millis(2), Duration::from_millis(2)) };
+        let mut deb = crate::autosave::Debounce::default();
+        type Step<'a> = (&'static str, Duration, Box<dyn FnMut() + 'a>);
+        let mut steps: Vec<Step> = vec![
+            ("save-as", copy_bound, Box::new(|| drop(post(&shared, &dir, "save-as", json!({ "path": "Gros show" })).unwrap()))),
+            ("save", copy_bound, Box::new(|| drop(post(&shared, &dir, "save", json!({})).unwrap()))),
+            ("open", swap_bound, Box::new(|| drop(post(&shared, &dir, "open", json!({ "path": "Gros show" })).unwrap()))),
+            ("info", copy_bound, Box::new(|| drop(info(&shared)))),
+            ("autosave", copy_bound, Box::new(|| drop(crate::autosave::tick(&shared, &mut deb, 1e6, true)))),
+            ("new (keep pages)", swap_bound, Box::new(|| drop(post(&shared, &dir, "new", json!({ "keep": { "pages": true } })).unwrap()))),
+        ];
+        let mut report = Vec::new();
+        let mut over = Vec::new();
+        for (name, bound, step) in &mut steps {
+            let (d, at) = hold_of(step.as_mut());
+            let line = format!("{name}: {:.2} ms ({at})", d.as_secs_f64() * 1e3);
+            if d > *bound {
+                over.push(line.clone());
+            }
+            report.push(line);
+        }
+        drop(steps);
+        stop.store(true, Ordering::SeqCst);
+        let worst = engine.join().unwrap();
+        eprintln!("studio lock hold, big project:\n  {}\n  engine's longest wait: {:.2} ms", report.join("\n  "), worst.as_secs_f64() * 1e3);
+        assert!(over.is_empty(), "held too long: {over:?}");
+        // It was the big show: opened whole, and nothing to save after.
+        post(&shared, &dir, "open", json!({ "path": "Gros show" })).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!((s.figures.list().len(), s.user_cues.list().len(), s.scenes.list().len()), (60, 1000, 1000));
+            assert!(!s.project.last_modified);
+        }
+        assert!(!modified(&shared), "just opened");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
