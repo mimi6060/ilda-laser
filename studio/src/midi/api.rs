@@ -292,6 +292,10 @@ pub fn route(s: &mut Shared, post: bool, path: &str, body: &str) -> Option<Reply
             Ok(req) => plug(s, &req.port),
             Err(e) => e,
         },
+        (true, "/api/midi/unplug") if s.midi.sim.is_some() => match parse::<PlugRequest>(body) {
+            Ok(req) => unplug(s, &req.port),
+            Err(e) => e,
+        },
         (true, "/api/midi/inject") if s.midi.sim.is_some() => match parse::<InjectRequest>(body) {
             Ok(req) => inject(s, req),
             Err(e) => e,
@@ -387,6 +391,18 @@ fn plug(s: &Shared, port: &str) -> Reply {
         return Reply::Text(409, format!("{SIM_MAX} appareils simulés au plus"));
     }
     sim.plug(port, super::testing::FakeApc::generic());
+    ok()
+}
+
+/// Pulls a simulated device's cable (T-487): the worker's next scan sees
+/// it gone exactly like a real unplug (« Contrôleur MIDI déconnecté »
+/// banner, opt-in blackout), so e2e tests drive the real state.
+fn unplug(s: &Shared, port: &str) -> Reply {
+    let Some(sim) = &s.midi.sim else { return Reply::Text(404, "not found".into()) };
+    if !sim.ports().iter().any(|p| p == port) {
+        return Reply::Text(404, format!("aucun appareil simulé « {port} »"));
+    }
+    sim.unplug(port);
     ok()
 }
 
@@ -615,6 +631,7 @@ mod tests {
         let mut s = test_support::shared();
         assert!(route(&mut s, true, "/api/midi/inject", r#"{"bytes":[144,32,127]}"#).is_none(), "404 in web.rs");
         assert!(route(&mut s, false, "/api/midi/sent", "").is_none());
+        assert!(route(&mut s, true, "/api/midi/unplug", r#"{"port":"Test APC40 mkII"}"#).is_none());
         assert_eq!(json(route(&mut s, false, "/api/midi", ""))["test"], false);
     }
 
@@ -771,6 +788,44 @@ mod tests {
         assert_eq!(led(), Some(127), "lit by the studio");
         let sent = sim.with_device("Pad 2000", |d| d.received.clone()).unwrap();
         assert!(sent.iter().all(|m| m.first() != Some(&0xF0) || m[..] == crate::midi::detect::DEVICE_INQUIRY), "no APC SysEx");
+        assert!(!shared.lock().unwrap().gate.is_armed());
+    }
+
+    /// T-487 in `--midi-test`: unplugging a simulated device over HTTP
+    /// flags it lost (the page's banner), plugging it back clears it.
+    #[test]
+    fn unplugged_simulated_device_is_lost_until_plugged_back() {
+        use crate::midi::testing::SimMidi;
+        use crate::midi::worker::Worker;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let sim = SimMidi::default();
+        let shared = Arc::new(Mutex::new(test_support::shared()));
+        {
+            let mut s = shared.lock().unwrap();
+            s.midi.enabled = true;
+            s.midi.sim = Some(sim.clone());
+        }
+        let call = |post, path: &str, body: &str| route(&mut shared.lock().unwrap(), post, path, body);
+        let lost = |v: Value| v["devices"].as_array().unwrap().iter().find(|d| d["name"] == "Pad 2000").map(|d| (d["connected"].clone(), d["lost"].clone()));
+        assert_eq!(status(call(true, "/api/midi/unplug", r#"{"port":"Pad 2000"}"#)), 404, "not plugged");
+        assert_eq!(status(call(true, "/api/midi/unplug", "[")), 400);
+        assert_eq!(status(call(true, "/api/midi/plug", r#"{"port":"Pad 2000"}"#)), 200);
+        let mut w = Worker::new(sim.clone(), Arc::clone(&shared));
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        w.step(t0, None);
+        assert_eq!(lost(json(call(false, "/api/midi", ""))), Some((json!(true), json!(false))));
+
+        assert_eq!(status(call(true, "/api/midi/unplug", r#"{"port":"Pad 2000"}"#)), 200);
+        assert!(!sim.ports().iter().any(|p| p == "Pad 2000"));
+        w.step(at(3000), None);
+        assert_eq!(lost(json(call(false, "/api/midi", ""))), Some((json!(false), json!(true))), "lost: banner on");
+
+        assert_eq!(status(call(true, "/api/midi/plug", r#"{"port":"Pad 2000"}"#)), 200);
+        w.step(at(6000), None);
+        assert_eq!(lost(json(call(false, "/api/midi", ""))), Some((json!(true), json!(false))), "back: banner off");
         assert!(!shared.lock().unwrap().gate.is_armed());
     }
 
