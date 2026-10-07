@@ -1910,6 +1910,8 @@
     <button id="tempoAuto" data-control="tempo.auto" title="tempo.auto : le tempo suit la musique détectée (un tap reprend la main)">Auto</button>
     <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" title="tempo.guide : tapez le tempo pour guider la détection, sans l'imposer" hidden>Guider</button>
     <span class="hint" id="tempoSrc" style="margin:0" title="Tempo auto : état du suivi et confiance de la détection" hidden></span>
+    <!-- Horloge MIDI (T-207): the followed clock's tempo; Tap and Nudge are ignored meanwhile. -->
+    <span class="hint" id="midiClockHint" role="status" style="margin:0" title="Le tempo suit l'horloge MIDI : Tap, Nudge et BPM sont ignorés (RÉGLAGES › Horloge MIDI)" hidden></span>
     <!-- Groupes de vitesse (T-419): the groups not at ×1, and the Cadence if not 100 %. -->
     <span class="hint" id="speedHint" role="status" style="margin:0" title="Groupes de vitesse qui ne suivent pas le tempo à ×1, et la cadence des fondus (LIVE › Direct › Vitesses)" hidden></span>
     <!-- Compensation de latence (T-246): the effects read the beat ahead; never a frame held back. -->
@@ -4380,6 +4382,18 @@
           <label class="check"><input type="checkbox" id="midiBlackoutLost"> Blackout si le contrôleur se déconnecte</label>
         </div>
         <div class="hint" id="midiHint"></div>
+      </details>
+      <!-- Horloge MIDI (T-207): follow a deck's clock, send ours (off by default). -->
+      <details id="midiClockPanel" data-search="Horloge MIDI : suivre le tempo d'une platine ou d'un logiciel DJ, envoyer l'horloge, source du tempo">
+        <summary>Horloge MIDI</summary>
+        <div class="hint">Le tempo peut suivre l'horloge MIDI (24 tops par temps) d'une platine ou d'un logiciel DJ. Pendant le suivi, Tap, Nudge et le BPM sont ignorés. Sans horloge pendant 2 s, le tempo repasse en manuel à sa dernière valeur, sans saut. L'horloge ne change que le tempo : elle n'arme jamais le laser.</div>
+        <div class="row"><label for="mclkSource">Source du tempo</label><select id="mclkSource"><option value="">Manuel</option></select></div>
+        <div class="hint" id="mclkInState" role="status"></div>
+        <label class="check"><input type="checkbox" id="mclkSend"> Envoyer l'horloge MIDI</label>
+        <div class="row"><label for="mclkOut">Port de sortie</label><select id="mclkOut"><option value="">Choisir un port…</option></select></div>
+        <div class="hint" id="mclkOutState" role="status"></div>
+        <div class="hint">Désactivé par défaut. Jamais vers le port d'où vient l'horloge suivie (le studio se suivrait lui-même). L'APC40 mkII reçoit déjà sa propre horloge pour faire pulser ses pads (option « Pulsation calculée par le studio »).</div>
+        <div class="hint sf-error" id="mclkError" role="alert"></div>
       </details>
     </section>
 
@@ -10245,10 +10259,65 @@ function showTempo(t) {
   const phrase = t.phrase_bar != null;
   $('phraseHint').hidden = !phrase;
   $('phraseHint').textContent = phrase ? `phrase ${t.phrase_bar + 1}/${t.phrase_bars}` : '';
+  // Horloge MIDI (T-207): the followed clock; the studio refuses Tap,
+  // Nudge and BPM meanwhile (and says so).
+  const mc = t.midi_clock, follow = !!(mc && mc.follow);
+  $('midiClockHint').hidden = !follow;
+  if (follow) $('midiClockHint').textContent = midiClockText(mc);
 }
 $('tempoAuto').addEventListener('click', () => post('/api/control', { id: 'tempo.auto', value: $('tempoAuto').classList.contains('active') ? 0 : 1 }));
 document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => { const id = scopedId(b.dataset.ctl); if (id) post('/api/control', { id }); }));
 $('bpm').addEventListener('change', () => post('/api/control', { id: 'tempo.bpm', value: +$('bpm').value }));
+
+// ---------- horloge MIDI (T-207) ----------
+// Follow a deck's MIDI clock (tempo only, never arming), send ours to a
+// port the operator picks (off by default, never back to the followed port).
+let mclkTimer = null;
+function frBpm(bpm) { return bpm.toFixed(1).replace('.', ',') + ' BPM'; }
+function midiClockText(mc) {
+  const bpm = mc.bpm != null ? frBpm(mc.bpm) : '';
+  return { waiting: 'Horloge MIDI : en attente', following: 'Horloge MIDI : ' + (bpm || '…'), stopped: 'Horloge MIDI : arrêtée' + (bpm ? ` (${bpm})` : ''), lost: 'Horloge MIDI perdue : tempo manuel' }[mc.state] || 'Horloge MIDI';
+}
+function fillPorts(sel, ports, first, current, label) {
+  if (document.activeElement === sel) return;
+  const list = [...ports];
+  if (current && !list.includes(current)) list.push(current);
+  const html = `<option value="">${esc(first)}</option>` + list.map(p => `<option value="${esc(p)}">${esc(label(p) + (ports.includes(p) ? '' : ' (déconnecté)'))}</option>`).join('');
+  if (sel.dataset.html !== html) { sel.innerHTML = html; sel.dataset.html = html; }
+  sel.value = current || '';
+}
+function showMidiClock(v) {
+  const c = v.config, i = v.input, o = v.output;
+  fillPorts($('mclkSource'), v.inputs, 'Manuel', c.follow ? c.in_port : '', p => `Horloge MIDI (${p})`);
+  fillPorts($('mclkOut'), v.outputs, 'Choisir un port…', c.out_port, p => p);
+  $('mclkSend').checked = c.send;
+  $('mclkInState').textContent = !v.midi_enabled ? 'MIDI désactivé : pas d\'horloge.'
+    : c.follow ? `${midiClockText({ state: i.state, bpm: i.bpm })} · ${i.ticks} tops reçus` : 'Tempo manuel (ou Tap, ou Tempo auto).';
+  $('mclkOutState').textContent = !c.send ? 'Horloge non envoyée.'
+    : o.open ? `Envoyée sur ${o.open} · ${o.ticks} tops` : (o.error || 'Ouverture du port…');
+}
+async function loadMidiClock() {
+  clearTimeout(mclkTimer);
+  try { showMidiClock(await apiJson('GET', '/api/midi/clock', undefined, { quiet: true })); } catch { /* shown on the next refresh */ }
+  if ($('midiClockPanel').open) mclkTimer = setTimeout(loadMidiClock, 1000);
+}
+async function postMidiClock(patch) {
+  const r = await api('POST', '/api/midi/clock', patch, { quiet: true });
+  $('mclkError').textContent = r.ok ? '' : (await r.text()).trim();
+  if (r.ok) showMidiClock(await r.json()); else loadMidiClock();
+}
+$('midiClockPanel').addEventListener('toggle', () => { if ($('midiClockPanel').open) loadMidiClock(); });
+$('mclkSource').addEventListener('change', () => {
+  const p = $('mclkSource').value;
+  postMidiClock(p ? { follow: true, in_port: p } : { follow: false });
+});
+$('mclkSend').addEventListener('change', () => {
+  postMidiClock($('mclkSend').checked ? { send: true, out_port: $('mclkOut').value || null } : { send: false });
+});
+$('mclkOut').addEventListener('change', () => {
+  const p = $('mclkOut').value;
+  postMidiClock(p ? { out_port: p } : { send: false, out_port: null });
+});
 
 // ---------- compensation de latence (T-246) ----------
 // *Décalage de sortie*: the effects read the beat ahead by this much, so the

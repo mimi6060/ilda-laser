@@ -1123,6 +1123,7 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     );
     let (estop, health) = (Arc::clone(&state.estop), Arc::clone(&state.health));
     let sim = state.midi.sim.clone();
+    let (clock_rx, clock_status) = (state.midi.clock.out.take_receiver(), Arc::clone(&state.midi.clock.out.status));
     let (netin_hub, netin_tx) = (Arc::clone(&state.netin.hub), state.netin.sender());
     // OSC feedback (T-416): the queue the engine fills and "osc-out" empties.
     let osc_out_rx = state.netin.feedback.take_receiver();
@@ -1200,16 +1201,12 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     });
     let watchdog = watchdog::spawn(Arc::clone(&health), Arc::clone(&estop), Arc::clone(&running));
 
-    // MTC goes out through the MIDI backend in use (the simulator with
-    // --midi-test), on a port the operator picks; none with --no-midi.
-    let mtc_opener: Option<timecode::out::MidiOpener> = if let Some(sim) = sim.clone() {
-        Some(Arc::new(move |name: &str| midi::backend::Backend::open_output(&mut sim.clone(), name)))
-    } else if cli.no_midi {
-        None
-    } else {
-        Some(Arc::new(|name: &str| midi::backend::Backend::open_output(&mut midi::backend::MidirBackend, name)))
-    };
-    let tc_out_thread = tc_out_rx.and_then(|rx| timecode::out::spawn(rx, tc_out_status, mtc_opener, Arc::clone(&running)));
+    // MTC (T-417) and the MIDI clock (T-207) go out through the MIDI
+    // backend in use (the simulator with --midi-test), each on a port the
+    // operator picks; none with --no-midi.
+    let midi_opener = midi::clock::opener(sim.clone(), cli.no_midi);
+    let tc_out_thread = tc_out_rx.and_then(|rx| timecode::out::spawn(rx, tc_out_status, midi_opener.clone(), Arc::clone(&running)));
+    let clock_thread = clock_rx.and_then(|rx| midi::clock::spawn(rx, clock_status, midi_opener, Arc::clone(&running)));
     let midi_thread = if let Some(sim) = sim {
         println!("--midi-test: simulated APC40 mkII only, MIDI injection enabled (tests only).");
         midi::worker::spawn_on(sim, Arc::clone(&shared), Arc::clone(&running))
@@ -1303,6 +1300,9 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     }
     if let Some(midi_thread) = midi_thread {
         midi_thread.join().ok(); // lets it switch the APC LEDs off
+    }
+    if let Some(t) = clock_thread {
+        t.join().ok(); // sends Stop on its way out
     }
     for t in netin_threads {
         t.join().ok(); // within one receive timeout (100 ms)
@@ -2079,6 +2079,9 @@ impl Engine {
             advance_playlist(&mut s);
             // MIDI faders/encoders: at most one write per control per frame.
             midi::engine::frame(&mut s, now);
+            // MIDI clock (T-207): a lost clock gives the tempo back; the
+            // output thread gets the tempo (never waits).
+            midi::clock::frame(&mut s, now);
             // OSC and Art-Net: what the listeners queued, then signal loss.
             netin::frame(&mut s, now);
             // Native capture, else the browser's features, else silence

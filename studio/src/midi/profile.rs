@@ -173,6 +173,9 @@ pub struct DevicesFile {
     /// Global MIDI safety options (T-208).
     #[serde(default)]
     pub safety: MidiSafety,
+    /// MIDI clock in / out (T-207): all off by default.
+    #[serde(default)]
+    pub clock: super::clock::ClockPrefs,
     /// Fields added later, kept on save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -373,6 +376,11 @@ impl ProfileStore {
             }
         }
         self.devices.ports.entry(port.to_string()).or_default().profile = slug.map(str::to_string);
+        self.save_devices()
+    }
+
+    pub fn set_clock(&mut self, clock: super::clock::ClockPrefs) -> Result<(), String> {
+        self.devices.clock = clock;
         self.save_devices()
     }
 

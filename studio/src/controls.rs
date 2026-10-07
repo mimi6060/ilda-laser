@@ -559,6 +559,14 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
                 s.gate.disarm(DisarmReason::User, ArmSource::Ui)
             }
         }
+        // MIDI clock followed (T-207): the clock owns the tempo; *Sync 1*
+        // stays the operator's.
+        "tempo.tap" | "tempo.nudge_up" | "tempo.nudge_down" | "tempo.bpm" | "tempo.double" | "tempo.half" if s.tempo.source == tempo::TempoSource::MidiClock => {
+            return Err(ControlError::Refused(crate::midi::clock::FOLLOWING));
+        }
+        "tempo.auto" if s.tempo.source == tempo::TempoSource::MidiClock && truthy(input) => {
+            return Err(ControlError::Refused(crate::midi::clock::FOLLOWING));
+        }
         "tempo.tap" => {
             let t = s.now_s();
             s.tempo.tap(t);

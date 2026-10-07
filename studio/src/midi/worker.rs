@@ -11,6 +11,7 @@
 //! in time with the studio's tempo.
 
 use super::backend::{Backend, InputCallback, InputHandle, MidirBackend, OutputPort};
+use super::clock::Ticker;
 use super::decode::Decoder;
 use super::detect::{self, Model, DEVICE_INQUIRY, MODE_GENERIC};
 use super::led::{self, LedFrame, LedState};
@@ -32,36 +33,9 @@ const IDLE_WAIT: Duration = Duration::from_millis(20);
 /// A generic device with no LED to drive is looked at this often (a LED
 /// added to one of its mappings shows within that time).
 const GENERIC_IDLE: Duration = Duration::from_millis(250);
-/// MIDI clock: ticks per beat, and the most sent at once after a late wake-up.
-const CLOCK_PPQ: f64 = 24.0;
-const CLOCK_BURST: i64 = 3;
 /// A mkII that needs no clock (LEDs off, pulses made by the studio) is
 /// looked at again this often.
 const CLOCK_IDLE: Duration = Duration::from_millis(250);
-
-/// MIDI clock sent to one device, from the studio's tempo clock (T-150).
-#[derive(Debug, Default)]
-struct ClockOut {
-    /// Last tick sent (index on the tempo clock: beat × 24).
-    last: Option<i64>,
-    next_at: Option<Instant>,
-}
-
-impl ClockOut {
-    /// At `beat` (tempo `bpm`): how many ticks to send now, and how long
-    /// until the next one is due. A tempo clock moved back (tap, resync)
-    /// or far ahead restarts from the current tick.
-    fn advance(&mut self, beat: f64, bpm: f64) -> (i64, Duration) {
-        let tick = (beat * CLOCK_PPQ).floor() as i64;
-        let ticks = match self.last {
-            Some(last) if (0..=CLOCK_PPQ as i64).contains(&(tick - last)) => (tick - last).min(CLOCK_BURST),
-            _ => 1,
-        };
-        self.last = Some(tick);
-        let to_next = ((tick + 1) as f64 / CLOCK_PPQ - beat) * 60.0 / bpm.max(1.0);
-        (ticks, Duration::from_secs_f64(to_next.clamp(0.001, 0.1)))
-    }
-}
 
 /// Starts the MIDI thread on CoreMIDI. Returns `None` (and logs) if the
 /// thread can't be created; the studio then simply runs without MIDI.
@@ -98,7 +72,7 @@ struct Slot {
     /// What its LEDs show (T-205).
     leds: LedState,
     /// MIDI clock to an APC40 mkII (T-206).
-    clock: ClockOut,
+    clock: Ticker,
 }
 
 enum Plan {
@@ -193,6 +167,8 @@ impl<B: Backend> Worker<B> {
             super::engine::handle_batch(&mut s, &events);
             // MIDI Time Code (T-168): read here, applied by the engine.
             crate::timecode::midi(&mut s, &events);
+            // MIDI clock (T-207): the followed port's ticks move the tempo.
+            super::clock::input(&mut s, &events);
         }
 
         if now >= self.next_scan {
@@ -221,7 +197,8 @@ impl<B: Backend> Worker<B> {
             let t = s.now_s();
             due.into_iter()
                 .map(|name| {
-                    let wanted = s.midi.store.port_leds(&name) && !s.midi.store.port_prefs(&name).pulse_by_studio;
+                    // The clock output (T-207) drives this port itself: one clock only.
+                    let wanted = s.midi.store.port_leds(&name) && !s.midi.store.port_prefs(&name).pulse_by_studio && !super::clock::output_drives(&s, &name);
                     let plan = wanted.then(|| (s.tempo.beat_at(t), s.tempo.bpm));
                     (name, plan)
                 })
@@ -230,10 +207,11 @@ impl<B: Backend> Worker<B> {
         for (name, plan) in plans {
             let Some(slot) = self.slots.get_mut(&name) else { continue };
             let Some((beat, bpm)) = plan else {
-                slot.clock = ClockOut { last: None, next_at: Some(now + CLOCK_IDLE) };
+                slot.clock = Ticker { last: None, next_at: Some(now + CLOCK_IDLE) };
                 continue;
             };
-            let (ticks, wait) = slot.clock.advance(beat, bpm);
+            let (range, _, wait) = slot.clock.advance(beat, bpm);
+            let ticks = range.count();
             slot.clock.next_at = Some(now + wait);
             let Some(out) = slot.output.as_mut() else { continue };
             for _ in 0..ticks {
@@ -380,7 +358,7 @@ impl<B: Backend> Worker<B> {
         let detecting = output.as_mut().and_then(|out| out.send(&DEVICE_INQUIRY).ok()).map(|_| now + INQUIRY_TIMEOUT);
         let model = if detecting.is_some() { Model::Unknown } else { Model::from_port_name(name) };
         log::info!("MIDI : {name} connecté");
-        self.slots.insert(name.to_string(), Slot { _input: input, output, detecting, model, profile: None, introduced: None, leds: LedState::default(), clock: ClockOut::default() });
+        self.slots.insert(name.to_string(), Slot { _input: input, output, detecting, model, profile: None, introduced: None, leds: LedState::default(), clock: Ticker::default() });
     }
 
     /// Applies UI changes (enabled, chosen profile) and the profile of
@@ -975,16 +953,16 @@ pub mod tests {
     /// T-206: 24 ticks per beat, each when due; never a flood.
     #[test]
     fn clock_ticks_follow_the_tempo() {
-        let mut c = ClockOut::default();
+        let mut c = Ticker::default();
         // 120 BPM: a tick every 1/48 s.
-        let (n, wait) = c.advance(0.0, 120.0);
-        assert_eq!(n, 1);
+        let (n, _, wait) = c.advance(0.0, 120.0);
+        assert_eq!(n.count(), 1);
         assert!((wait.as_secs_f64() - 1.0 / 48.0).abs() < 1e-3, "{wait:?}");
-        assert_eq!(c.advance(0.01, 120.0).0, 0, "same tick: nothing");
-        assert_eq!(c.advance(1.0 / 24.0 + 1e-6, 120.0).0, 1);
-        assert_eq!(c.advance(0.5, 120.0).0, CLOCK_BURST, "woken late: a few at most");
-        assert_eq!(c.advance(0.1, 120.0).0, 1, "tempo clock moved back: start again");
-        assert_eq!(c.advance(50.0, 120.0).0, 1, "far ahead: start again");
+        assert_eq!(c.advance(0.01, 120.0).0.count(), 0, "same tick: nothing");
+        assert_eq!(c.advance(1.0 / 24.0 + 1e-6, 120.0).0.count(), 1);
+        assert_eq!(c.advance(0.5, 120.0).0.count(), 3, "woken late: a few at most");
+        assert_eq!(c.advance(0.1, 120.0).0.count(), 1, "tempo clock moved back: start again");
+        assert_eq!(c.advance(50.0, 120.0).0.count(), 1, "far ahead: start again");
     }
 
     #[test]
