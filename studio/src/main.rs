@@ -8,6 +8,7 @@
 //! laser output. The HTTP handlers in `web.rs` only ever edit that shared
 //! state.
 
+mod ableton_link;
 mod abstracts;
 mod about;
 mod agenda;
@@ -422,6 +423,8 @@ pub struct Shared {
     pub speed: tempo::SpeedGroups,
     pub speed_dirty: bool,
     pub speed_path: Option<PathBuf>,
+    /// Ableton Link (ableton_link.rs, T-154): off at every start.
+    pub link: ableton_link::LinkState,
     pub epoch: Instant,
     /// Tests only: the simulated « now » `now_s` reads, set by the test
     /// rigs that drive the engine on a simulated clock (wall-clock time
@@ -1536,6 +1539,7 @@ fn startup_state(cli: &Cli) -> Shared {
         speed: load_json::<tempo::SpeedGroups>(&cli.data_dir.join("speed.json")).sanitized(),
         speed_dirty: false,
         speed_path: Some(cli.data_dir.join("speed.json")),
+        link: Default::default(),
         epoch,
         #[cfg(test)]
         sim_now: None,
@@ -2153,6 +2157,8 @@ impl Engine {
             // MIDI clock (T-207): a lost clock gives the tempo back; the
             // output thread gets the tempo (never waits).
             midi::clock::frame(&mut s, now);
+            // Ableton Link (T-154): only when the operator turned it on.
+            ableton_link::frame(&mut s, now);
             // OSC and Art-Net: what the listeners queued, then signal loss.
             netin::frame(&mut s, now);
             // Native capture, else the browser's features, else silence

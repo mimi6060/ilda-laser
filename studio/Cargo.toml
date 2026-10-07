@@ -35,6 +35,9 @@ socket2 = "0.5"  # MIT OR Apache-2.0: SO_REUSEADDR + multicast join for sACN (T-
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 zip = { version = "4", default-features = false, features = ["deflate-flate2"] }  # MIT: the `.lspack` package (T-289), deflate only (flate2 already in the tree)
 sha2 = "0.10"  # MIT OR Apache-2.0 (RustCrypto): media fingerprints in the `.lspack` manifest (T-289)
+# GPL-2.0-or-later (wraps Ableton's official Link library, GPLv2+): ONLY
+# behind the `ableton-link` feature below, never in a default build (T-154).
+rusty_link = { version = "0.4.9", optional = true }
 
 [features]
 # Native ShowNET output foundation (T-471), off by default. Without the
@@ -44,6 +47,13 @@ shownet = []
 # The menu-bar item of the macOS application (T-413), off by default so
 # `cargo build`, `cargo test` and the e2e runs pull in no GUI code. Built
 # by `studio/packaging/macos/build_app.sh`. objc2 family: MIT.
+# Ableton Link tempo source (T-154), off by default. It compiles
+# Ableton's Link library, which is GPLv2+: a binary built with it is a
+# GPL combined work, for private use only and never distributed (the
+# default build has no GPL code: `cargo tree -p laser-studio`). It can't
+# be combined with `shownet` (a proprietary SDK under NDA). Building it
+# needs CMake and Xcode's libclang.
+ableton-link = ["dep:rusty_link"]
 macos-app = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:block2"]
 
 [target.'cfg(target_os = "macos")'.dependencies]

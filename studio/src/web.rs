@@ -350,6 +350,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/timeline/*", RouteClass::Edit),
     ("GET", "/api/midi/clock", RouteClass::Read),
     ("POST", "/api/midi/clock", RouteClass::Safety),
+    ("GET", "/api/link", RouteClass::Read),
+    ("POST", "/api/link", RouteClass::Safety),
     ("*", "/api/midi*", RouteClass::Edit),
     ("*", "/api/external*", RouteClass::Safety),
     ("*", "/api/dmx/*", RouteClass::Safety),
@@ -3279,6 +3281,20 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // MIDI clock (T-207): its own lines in ROUTES (POST is Safety).
         (Method::Get, "/api/midi/clock") => midi_route(request, shared, false, "/api/midi/clock"),
         (Method::Post, "/api/midi/clock") => midi_route(request, shared, true, "/api/midi/clock"),
+        // Ableton Link (T-154): `{ "enabled", "quantum" }`; 501 when the
+        // build has no Link (the default), 409 while the MIDI clock is
+        // followed. Tempo only: nothing here can arm.
+        (Method::Get, "/api/link") => json_response(crate::ableton_link::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/link") => match body::<crate::ableton_link::LinkRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match crate::ableton_link::update(&mut s, req) {
+                    Ok(()) => json_response(crate::ableton_link::view(&s)),
+                    Err((code, e)) => text(code, &e),
+                }
+            }
+            Err(e) => e,
+        },
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
         (Method::Get, "/api/netin") => json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now())),
         (Method::Post, "/api/netin") => match body::<serde_json::Value>(request) {
@@ -5855,6 +5871,7 @@ struct MacroIdRequest {
 fn tempo_view(s: &Shared) -> serde_json::Value {
     let mut v = json!(s.tempo.state(s.now_s()));
     v["midi_clock"] = crate::midi::clock::summary(s);
+    v["link"] = crate::ableton_link::summary(s);
     let speed = s.speed.view(s.tempo.bpm);
     for key in ["groups", "rate", "change_on_bar"] {
         v[key] = speed[key].clone();

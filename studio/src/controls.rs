@@ -585,6 +585,14 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         "tempo.auto" if s.tempo.source == tempo::TempoSource::MidiClock && truthy(input) => {
             return Err(ControlError::Refused(crate::midi::clock::FOLLOWING));
         }
+        // Ableton Link followed (T-154): the phase belongs to the session;
+        // a BPM (field, Tap, ×2, ÷2) goes to it (ableton_link.rs).
+        "tempo.nudge_up" | "tempo.nudge_down" | "tempo.resync" if s.tempo.source == tempo::TempoSource::Link => {
+            return Err(ControlError::Refused(crate::ableton_link::FOLLOWING));
+        }
+        "tempo.auto" if s.tempo.source == tempo::TempoSource::Link && truthy(input) => {
+            return Err(ControlError::Refused(crate::ableton_link::FOLLOWING));
+        }
         "tempo.tap" => {
             let t = s.now_s();
             s.tempo.tap(t);

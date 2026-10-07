@@ -97,6 +97,7 @@ pub fn shared() -> Shared {
         speed: Default::default(),
         speed_dirty: false,
         speed_path: None,
+        link: Default::default(),
         epoch: Instant::now(),
         sim_now: None,
         live: live::LiveModifiers::default(),

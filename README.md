@@ -271,6 +271,24 @@ jump. Keep the point budget under 4000 for the full detail.
 
 Scenes and calibration are saved in `studio-data/` (`--data-dir` to change).
 
+### Ableton Link (optional, GPL, off by default)
+
+The tempo can follow an Ableton Link session (tempo and phase) with the
+Cargo feature `ableton-link`. It compiles Ableton's Link library, which
+is licensed GPLv2+, so it is **not** in a default build (no GPL code there:
+check with `cargo tree -p laser-studio`), and *Réglages › Ableton Link*
+stays greyed. A binary built with the feature is a GPL combined work: keep
+it for your own use, do not distribute it. It can't be combined with the
+`shownet` feature (a proprietary SDK): the build refuses.
+
+```sh
+# needs CMake (and Xcode's command line tools, for libclang)
+cargo run --release -p laser-studio --features ableton-link
+```
+
+Link is off at every start; once turned on it discovers peers by multicast
+on the local network. It only moves the tempo: it never arms the laser.
+
 ## Usage (`pc-client`)
 
 ```

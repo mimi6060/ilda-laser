@@ -644,6 +644,10 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<(), (u16, String)> {
     }
     let cfg: ClockPrefs = serde_json::from_value(v).map_err(|e| (400, format!("réglage invalide : {e}")))?;
     cfg.validate().map_err(|e| (400, e))?;
+    if cfg.follow && !before.follow && s.link.enabled() {
+        // One external tempo source at a time (T-154).
+        return Err((409, crate::ableton_link::LINK_ON.into()));
+    }
     if (cfg.follow || cfg.send) && !s.midi.enabled {
         return Err((400, "MIDI désactivé : pas d'horloge".into()));
     }
