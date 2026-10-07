@@ -4798,7 +4798,7 @@
         <div class="row"><button id="doSave">Enregistrer</button></div>
         <div class="hint" id="doMsg" role="status"></div>
         <div id="doLive" role="status" data-on="false">Arrêté</div>
-        <div class="hint">Arrêt d'urgence (Échap) : tous les canaux à 0 tant qu'il est verrouillé. Désactiver la sortie ou fermer le studio envoie trois trames à 0 avant de couper. Désarmer le laser ne touche pas au DMX. <b>Une machine à brouillard chauffe et peut déclencher une alarme incendie</b> : la durée max d'un jet est un garde-fou, pas une garantie ; ce que fait le nœud quand le réseau s'arrête dépend de lui. Gardez l'interrupteur de la machine à portée de main.</div>
+        <div class="hint">Arrêt d'urgence (Échap) : tous les canaux à 0 tant qu'il est verrouillé. Désactiver la sortie ou fermer le studio envoie trois trames à 0 avant de couper. Désarmer ou « Noir » (toute cause) remet chaque canal à sa valeur de repos, pompe et ventilateur à 0 : les événements DMX ne reviennent qu'à une nouvelle « Lecture », laser réarmé, et le brouillard qu'à un nouvel appui. <b>Une machine à brouillard chauffe et peut déclencher une alarme incendie</b> : la durée max d'un jet est un garde-fou, pas une garantie ; ce que fait le nœud quand le réseau s'arrête dépend de lui. Gardez l'interrupteur de la machine à portée de main.</div>
       </details>
       <div class="sf-sub">Limites de sécurité</div>
       <div id="pwTargetRow" hidden>
@@ -16795,9 +16795,9 @@ function showDmxOutLive(d) {
   if (!d) return;
   const live = $('doLive');
   live.dataset.on = !!d.sending;
-  live.dataset.warn = !!(d.blocked || d.error || d.warning || d.estop);
+  live.dataset.warn = !!(d.blocked || d.error || d.warning || d.estop || (d.enabled && d.held));
   live.textContent = (d.sending ? `Envoi : ${d.rate_hz} trames/s` : 'Arrêté')
-    + (d.estop ? " — arrêt d'urgence : tous les canaux à 0" : '') + (d.blocked ? ' — ' + d.blocked : '')
+    + (d.estop ? " — arrêt d'urgence : tous les canaux à 0" : d.enabled && d.held ? ' — ' + d.held : '') + (d.blocked ? ' — ' + d.blocked : '')
     + (d.error ? ' — ' + d.error : '') + (d.warning ? ' — ' + d.warning : '');
   $('hazeBox').hidden = !d.haze.available;
   $('hazeFanRow').hidden = !d.haze.has_fan;

@@ -695,6 +695,9 @@ pub struct Player {
     /// Counts every discontinuity of the playhead (load, play, pause, stop,
     /// seek, loop wrap, halt), so the song player knows when to re-seek.
     jumps: u64,
+    /// Counts every start of playback (`play`), so the DMX output (T-453)
+    /// knows the operator started the show again after a disarm.
+    plays: u64,
     /// Counts every change of the loaded show (load, edit, song, loop
     /// region, save), so the editor knows when to fetch it again (T-162).
     rev: u64,
@@ -806,6 +809,11 @@ impl Player {
         self.jumps
     }
 
+    /// See `plays` on the struct.
+    pub fn plays(&self) -> u64 {
+        self.plays
+    }
+
     /// Follow an outside clock (the song, T-161): while a Secondes show
     /// plays, pull the playhead towards `position`. Small errors are taken
     /// up by 10 % a frame (callback jitter is smoothed, a steady drift
@@ -886,6 +894,7 @@ impl Player {
         };
         self.transport = Transport::Playing;
         self.jumps += 1;
+        self.plays += 1;
         true
     }
 

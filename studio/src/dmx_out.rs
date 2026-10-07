@@ -23,7 +23,15 @@
 //!   SIGTERM, an engine panic) send `OFF_FRAMES` frames of zeros before
 //!   the socket closes: a node that holds its last values holds zeros.
 //!   An engine that stops feeding the thread (`STALE`) gets zeros too.
-//!   Disarming the laser does not touch the DMX (haze is not the laser).
+//! - **Disarm and blackout** (any reason: the operator, « Noir », an
+//!   interlock, the presence, the watchdog, a profile, the agenda's
+//!   « Arrêt et noir », a lost output…, seen as a new `last_disarm` of the
+//!   gate): every channel goes back to its rest value at once, the pump
+//!   and the fan to 0, the haze button lets go and the fan slider goes to
+//!   0. The output keeps sending those values (`Hold`): the timeline's
+//!   DMX events come back only once the show is started again (*Lecture*)
+//!   with the laser re-armed, the haze only from a new press. The thread
+//!   sends such a change at once, not at its next tick.
 //! - The engine never waits: once per frame it `try_send`s the universe
 //!   it computed into a bounded queue; the "dmx-out" thread sends the
 //!   newest at `rate_hz` (30 Hz by default).
@@ -77,6 +85,7 @@ const SACN_SOURCE: &str = "Laser Studio";
 const SACN_PRIORITY: u8 = 100;
 
 pub const SELF_DRIVE: &str = "L'univers de sortie doit être différent des univers d'entrée, sinon le studio se pilote lui-même";
+pub const HELD: &str = "Laser désarmé : canaux DMX au repos jusqu'à une nouvelle lecture, laser réarmé";
 pub const LASER_TARGET: &str = "Cette adresse est celle de la sortie laser : la sortie DMX ne pilote jamais le laser";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +414,8 @@ pub struct Snapshot {
     pub universe: Box<[u8; UNIVERSE_LEN]>,
     /// The e-stop is latched: zeros.
     pub zero: bool,
+    /// Counts the disarms and blackouts seen: a new one is sent at once.
+    pub holds: u64,
     pub at: Instant,
 }
 
@@ -452,6 +463,15 @@ pub struct DmxOutState {
     pub pump_on: bool,
     pub blocked: Option<&'static str>,
     pub warning: Option<String>,
+    /// The gate's last disarm seen (None: not looked at yet; the start-up
+    /// one is not a new disarm).
+    disarm_seen: Option<Option<std::time::SystemTime>>,
+    /// After a disarm or a blackout: the timeline's DMX events are held at
+    /// rest until `Player::plays` moves on while armed.
+    timeline_held: bool,
+    held_plays: u64,
+    /// Disarms and blackouts seen.
+    holds: u64,
 }
 
 impl DmxOutState {
@@ -472,6 +492,10 @@ impl DmxOutState {
             pump_on: false,
             blocked: None,
             warning: None,
+            disarm_seen: None,
+            timeline_held: false,
+            held_plays: 0,
+            holds: 0,
         }
     }
 
@@ -548,6 +572,38 @@ pub fn estop(s: &mut Shared) {
     d.haze_held = false;
     d.burst_from = None;
     d.fan = 0.0;
+}
+
+/// A disarm or a blackout: everything back to rest, the haze off, and the
+/// timeline's DMX events held until the show is started again armed.
+fn hold(s: &mut Shared) {
+    estop(s);
+    let plays = s.timeline.plays();
+    let d = &mut s.dmx_out;
+    d.timeline_held = true;
+    d.held_plays = plays;
+    d.holds += 1;
+}
+
+/// Watches the gate (once per frame and from `frame`): a new disarm, of
+/// any reason, holds the output at rest. A start of the show while armed,
+/// after the hold, lets the timeline's events through again.
+fn follow_gate(s: &mut Shared) {
+    let last = s.gate.last_disarm().map(|(_, at)| at);
+    let seen = s.dmx_out.disarm_seen.replace(last);
+    if seen.is_some_and(|before| before != last) {
+        hold(s);
+    }
+    let (armed, plays) = (s.gate.is_armed(), s.timeline.plays());
+    let d = &mut s.dmx_out;
+    if d.timeline_held {
+        if !armed {
+            // A start while disarmed doesn't count: only one after re-arming.
+            d.held_plays = plays;
+        } else if plays != d.held_plays {
+            d.timeline_held = false;
+        }
+    }
 }
 
 pub fn haze_held(s: &Shared) -> bool {
@@ -634,7 +690,8 @@ pub fn frame(s: &mut Shared, c: &Clock) {
     if latched {
         estop(s);
     }
-    let levels = s.timeline.dmx(c);
+    follow_gate(s);
+    let levels = if s.dmx_out.timeline_held { Vec::new() } else { s.timeline.dmx(c) };
     let why = blocked(s);
     let warning = show_warning(s);
     let d = &mut s.dmx_out;
@@ -648,7 +705,7 @@ pub fn frame(s: &mut Shared, c: &Clock) {
     let values = if latched { d.cfg.channels.iter().map(|ch| (ch.name.clone(), 0)).collect() } else { mix(&d.cfg, &levels, pump, fan) };
     let universe = if latched { Box::new([0u8; UNIVERSE_LEN]) } else { universe_of(&d.cfg, &values) };
     (d.values, d.pump_on, d.blocked, d.warning) = (values, pump_on && !latched, why, warning);
-    let snap = Snapshot { cfg: d.cfg.clone(), blocked: why, universe, zero: latched, at: Instant::now() };
+    let snap = Snapshot { cfg: d.cfg.clone(), blocked: why, universe, zero: latched, holds: d.holds, at: Instant::now() };
     d.publish(snap);
 }
 
@@ -741,6 +798,7 @@ fn run(rx: Receiver<Snapshot>, status: &Mutex<OutStatus>, estop: &EStop, running
     let mut retry: Option<(Route, Instant)> = None;
     let mut next_send = Instant::now();
     let mut was_dark = false;
+    let mut holds_sent = 0;
     while running.load(Ordering::SeqCst) {
         match rx.recv_timeout(POLL) {
             Ok(s) => snap = Some(rx.try_iter().last().unwrap_or(s)),
@@ -783,9 +841,11 @@ fn run(rx: Receiver<Snapshot>, status: &Mutex<OutStatus>, estop: &EStop, running
         };
         // The latch is read here, without the engine: zeros at once.
         let dark = estop.is_latched() || s.zero || now.saturating_duration_since(s.at) > STALE;
-        if now < next_send && !(dark && !was_dark) {
+        // A new e-stop, disarm or blackout goes out now, not at the next tick.
+        if now < next_send && !(dark && !was_dark) && s.holds == holds_sent {
             continue;
         }
+        holds_sent = s.holds;
         let period = Duration::from_secs_f64(1.0 / s.cfg.rate_hz.clamp(MIN_RATE_HZ, MAX_RATE_HZ) as f64);
         next_send = now + period;
         let zero = [0u8; UNIVERSE_LEN];
@@ -830,6 +890,7 @@ pub fn summary(s: &Shared) -> Value {
         "values": values,
         "estop": s.estop.is_latched(),
         "blocked": d.blocked,
+        "held": d.timeline_held.then_some(HELD),
         "warning": d.warning,
         "error": st.error,
         "haze": {
@@ -1147,14 +1208,221 @@ mod tests {
         assert_eq!(s.gate.is_armed(), armed_before);
     }
 
-    #[test]
-    fn disarming_the_laser_leaves_the_dmx_alone() {
+    use crate::interlock::DisarmReason;
+
+    /// The rig with a 10 s DMX event on « Face » (rest 20) playing, armed,
+    /// the haze held and the fan on: Pompe 200, Ventilateur 255, Face 220.
+    fn lit_rig(t: f64) -> Shared {
         let mut s = shared();
         s.dmx_out.cfg = rig();
+        frame(&mut s, &clock(t));
+        s.gate.request_arm(ArmSource::Ui).unwrap();
+        s.timeline.load(dmx_show(vec![dmx_event(1, 0.0, 100.0, "Face", 220)]));
+        s.timeline.play(&clock(t));
+        set_haze(&mut s, true);
         set_fan(&mut s, 1.0).unwrap();
-        s.gate.disarm(crate::interlock::DisarmReason::User, ArmSource::Ui);
-        frame(&mut s, &clock(0.0));
-        assert_eq!(value(&s, "Ventilateur"), 255);
+        step(&mut s, t);
+        assert_eq!(all(&s), [200, 255, 220]);
+        s
+    }
+
+    /// One engine frame, as `timeline_cues` runs it (the e-stop halts the timeline).
+    fn step(s: &mut Shared, t: f64) {
+        let c = clock(t);
+        if s.estop.is_latched() {
+            s.timeline.halt(&c);
+        }
+        s.timeline.frame(&c);
+        frame(s, &c);
+    }
+
+    fn all(s: &Shared) -> Vec<u8> {
+        s.dmx_out.values.iter().map(|v| v.1).collect()
+    }
+
+    /// Rest values (Face 20), pump and fan 0, the haze button let go.
+    fn at_rest(s: &Shared, why: &str) {
+        assert_eq!(all(s), [0, 0, 20], "{why}");
+        assert!(!haze_held(s) && s.dmx_out.fan == 0.0, "{why}");
+        assert_eq!(summary(s)["held"], HELD, "{why}");
+    }
+
+    #[test]
+    fn every_disarm_sends_the_rest_values_and_holds_them_until_a_new_explicit_action() {
+        let reasons = [
+            DisarmReason::User,
+            DisarmReason::UiLost,
+            DisarmReason::HoldReleased,
+            DisarmReason::Interlock("presence".into()),
+            DisarmReason::ProfileChange,
+            DisarmReason::OutputChanged,
+            DisarmReason::OutputLost,
+            DisarmReason::Shutdown,
+            DisarmReason::Schedule,
+            DisarmReason::EngineStall,
+        ];
+        for reason in reasons {
+            let why = reason.id();
+            let mut s = lit_rig(0.0);
+            s.gate.disarm(reason, ArmSource::System);
+            step(&mut s, 0.1);
+            at_rest(&s, &why);
+            // Held, whatever the timeline does by itself.
+            for t in [0.5, 1.0, 5.0] {
+                step(&mut s, t);
+                at_rest(&s, &why);
+            }
+            // Re-arming alone brings nothing back; starting again while
+            // disarmed neither.
+            s.timeline.stop();
+            s.timeline.play(&clock(5.1));
+            step(&mut s, 5.2);
+            at_rest(&s, &why);
+            s.gate.request_arm(ArmSource::Ui).unwrap();
+            step(&mut s, 5.3);
+            at_rest(&s, &why);
+            // Lecture, armed: the event again. The haze: only a new press.
+            s.timeline.stop();
+            s.timeline.play(&clock(6.0));
+            step(&mut s, 6.1);
+            assert_eq!(all(&s), [0, 0, 220], "{why}");
+            assert!(summary(&s)["held"].is_null());
+            set_haze(&mut s, true);
+            step(&mut s, 6.2);
+            assert_eq!(value(&s, "Pompe"), 200, "{why}");
+        }
+    }
+
+    #[test]
+    fn the_other_disarm_paths_hold_too_interlock_watchdog_noir_while_disarmed() {
+        // An interlock dropping while armed (the output lost its link).
+        let mut s = lit_rig(0.0);
+        s.gate.set_output_ready(false);
+        assert!(!s.gate.is_armed());
+        step(&mut s, 0.1);
+        at_rest(&s, "interlock");
+        // The engine watchdog.
+        let mut s = lit_rig(0.0);
+        s.gate.watchdog_trip();
+        step(&mut s, 0.1);
+        at_rest(&s, "watchdog");
+        // « Noir » while already disarmed (the haze running in a rehearsal).
+        let mut s = shared();
+        s.dmx_out.cfg = rig();
+        step(&mut s, 0.0);
+        set_haze(&mut s, true);
+        set_fan(&mut s, 0.5).unwrap();
+        step(&mut s, 0.1);
+        assert_eq!(all(&s), [200, 128, 20]);
+        // Frames while disarmed are not disarms: the haze keeps running.
+        step(&mut s, 0.2);
+        assert_eq!(all(&s), [200, 128, 20]);
+        s.gate.disarm(DisarmReason::User, ArmSource::Ui);
+        step(&mut s, 0.3);
+        at_rest(&s, "noir");
+        // A new press (and the fan moved again) bring the haze back.
+        set_haze(&mut s, true);
+        set_fan(&mut s, 0.5).unwrap();
+        step(&mut s, 0.4);
+        assert_eq!(all(&s), [200, 128, 20]);
+    }
+
+    #[test]
+    fn a_blackout_zeroes_then_holds_at_rest_after_the_reset() {
+        let mut s = lit_rig(0.0);
+        crate::controls::apply(&mut s, "transport.blackout", crate::controls::ControlInput::Norm(1.0), true).unwrap();
+        step(&mut s, 0.1);
+        assert_eq!(all(&s), [0, 0, 0], "latched: zeros");
+        let reset = s.estop.clone();
+        s.gate.reset_estop(&reset);
+        step(&mut s, 0.2);
+        at_rest(&s, "after the reset");
+        s.gate.request_arm(ArmSource::Ui).unwrap();
+        step(&mut s, 0.3);
+        at_rest(&s, "re-armed, not started");
+        s.timeline.play(&clock(0.4));
+        step(&mut s, 0.5);
+        assert_eq!(value(&s, "Face"), 220);
+        // The external inputs' blackout channel latches the same stop.
+        s.emergency_stop(ArmSource::Dmx);
+        step(&mut s, 0.6);
+        assert_eq!(all(&s), [0, 0, 0]);
+    }
+
+    /// Property (SAFETY_CASES): random operation of the rig. After every
+    /// frame: e-stop latched → zeros; otherwise each channel is what the
+    /// model allows: Face at its event only once started armed after the
+    /// last disarm, the pump only from a press since then, the fan only
+    /// from a move since then.
+    #[test]
+    fn property_nothing_comes_back_after_a_disarm_without_a_new_action() {
+        for seed in crate::safety_invariants::seeds(453, 40) {
+            let mut rng = crate::safety_invariants::Rng::new(seed);
+            let mut s = shared();
+            s.dmx_out.cfg = rig();
+            s.dmx_out.cfg.haze.max_burst_s = 1000.0;
+            s.timeline.load(dmx_show(vec![dmx_event(1, 0.0, 1.0e6, "Face", 220)]));
+            let mut t = 0.0;
+            step(&mut s, t);
+            // The model.
+            let (mut started_ok, mut pump, mut fan) = (true, false, 0.0f32);
+            for _ in 0..200 {
+                t += 0.05;
+                match rng.below(10) {
+                    0 => {
+                        if s.gate.request_arm(ArmSource::Ui).is_ok() {}
+                    }
+                    1 => {
+                        s.gate.disarm(DisarmReason::User, ArmSource::Ui);
+                        (started_ok, pump, fan) = (false, false, 0.0);
+                    }
+                    2 => {
+                        s.emergency_stop(ArmSource::Ui);
+                        (started_ok, pump, fan) = (false, false, 0.0);
+                    }
+                    3 => {
+                        let e = s.estop.clone();
+                        s.gate.reset_estop(&e);
+                    }
+                    4 => {
+                        set_haze(&mut s, true);
+                        pump = !s.estop.is_latched();
+                    }
+                    5 => {
+                        set_haze(&mut s, false);
+                        pump = false;
+                    }
+                    6 => {
+                        let v = rng.f();
+                        set_fan(&mut s, v).unwrap();
+                        // Latched, the next frame puts it back to 0.
+                        fan = if s.estop.is_latched() { 0.0 } else { v };
+                    }
+                    7 => {
+                        let was = s.timeline.is_playing();
+                        s.timeline.play(&clock(t));
+                        if !was && s.gate.is_armed() {
+                            started_ok = true;
+                        }
+                    }
+                    8 => s.timeline.stop(),
+                    _ => {
+                        let reason = rng.pick(&[DisarmReason::OutputLost, DisarmReason::Schedule, DisarmReason::ProfileChange]).clone();
+                        s.gate.disarm(reason, ArmSource::System);
+                        (started_ok, pump, fan) = (false, false, 0.0);
+                    }
+                }
+                step(&mut s, t);
+                let v = all(&s);
+                if s.estop.is_latched() {
+                    assert_eq!(v, [0, 0, 0], "seed {seed}: e-stop");
+                    continue;
+                }
+                let face = if started_ok && s.timeline.is_playing() { 220 } else { 20 };
+                let want = [if pump { 200 } else { 0 }, level(fan * 255.0), face];
+                assert_eq!(v, want, "seed {seed}");
+            }
+        }
     }
 
     #[test]
@@ -1294,7 +1562,51 @@ mod tests {
     }
 
     fn snapshot(cfg: &DmxOutSettings, values: &[(String, u8)]) -> Snapshot {
-        Snapshot { cfg: cfg.clone(), blocked: None, universe: universe_of(cfg, values), zero: false, at: Instant::now() }
+        Snapshot { cfg: cfg.clone(), blocked: None, universe: universe_of(cfg, values), zero: false, holds: 0, at: Instant::now() }
+    }
+
+    /// A disarm or blackout (a new `holds`) goes out at once, even at
+    /// 1 frame a second, and the thread keeps sending the rest values.
+    #[test]
+    fn loopback_a_disarm_or_blackout_is_sent_at_once_and_kept() {
+        let (rx, port) = receiver();
+        let cfg = DmxOutSettings { rate_hz: 1, ..loopback(port, DmxProtocol::ArtNet) };
+        let (tx, qrx) = sync_channel(QUEUE_LEN);
+        let status = Arc::new(Mutex::new(OutStatus::default()));
+        let (estop, running) = (Arc::new(EStop::default()), Arc::new(AtomicBool::new(true)));
+        let handle = spawn(qrx, Arc::clone(&status), estop, Arc::clone(&running)).unwrap();
+        let lit = vec![("Pompe".to_string(), 200u8), ("Face".to_string(), 220)];
+        let rest = vec![("Pompe".to_string(), 0u8), ("Face".to_string(), 20)];
+        tx.send(snapshot(&cfg, &lit)).unwrap();
+        assert!(until(&rx, |d| d[0] == 200 && d[9] == 220));
+        // Just after a frame: the next tick is ~1 s away.
+        let mut held = snapshot(&cfg, &rest);
+        held.holds = 1;
+        let t0 = Instant::now();
+        tx.send(held).unwrap();
+        assert!(until(&rx, |d| d[0] == 0 && d[9] == 20));
+        assert!(t0.elapsed() < Duration::from_millis(300), "at once: {:?}", t0.elapsed());
+        // Kept: the following frames (one a second) carry the rest values too.
+        let mut frames: Vec<(u8, u8)> = Vec::new();
+        let t1 = Instant::now();
+        rx.set_nonblocking(true).unwrap();
+        while t1.elapsed() < Duration::from_millis(2300) {
+            let mut again = snapshot(&cfg, &rest);
+            again.holds = 1;
+            tx.send(again).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = rx.recv(&mut buf) {
+                if let Ok(crate::netin::artnet::Packet::Dmx { data, .. }) = crate::netin::artnet::decode(&buf[..n]) {
+                    frames.push((data[0], data[9]));
+                }
+            }
+        }
+        rx.set_nonblocking(false).unwrap();
+        assert!(frames.len() >= 2, "{} frames", frames.len());
+        assert!(frames.iter().all(|f| *f == (0, 20)), "{frames:?}");
+        running.store(false, Ordering::SeqCst);
+        handle.join().unwrap();
     }
 
     /// The real thread, on loopback: values at the rate, zeros on the
