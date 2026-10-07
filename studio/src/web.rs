@@ -343,6 +343,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("*", "/api/dmx/*", RouteClass::Safety),
     ("*", "/api/timecode", RouteClass::Safety),
     ("*", "/api/timecode/arm", RouteClass::Safety),
+    ("*", "/api/timecode/out", RouteClass::Safety),
     ("*", "/api/project", RouteClass::Edit),
     ("*", "/api/project/*", RouteClass::Edit),
     ("GET", "/api/remote", RouteClass::Read),
@@ -3227,7 +3228,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Err(e) => e,
         },
         (method, p) if p.starts_with("/api/external") || p.starts_with("/api/dmx/") => external_route(request, shared, method, p),
-        (method, p) if p == "/api/timecode" || p == "/api/timecode/arm" => timecode_route(request, shared, method, p),
+        (method, p) if p == "/api/timecode" || p == "/api/timecode/arm" || p == "/api/timecode/out" => timecode_route(request, shared, method, p),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         // The tablet remote (T-428): turned on, watched and cut from here
         // only (this server listens on 127.0.0.1); the remote's own
@@ -5332,6 +5333,8 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 /// - `POST /api/timecode/arm` `{ "on": bool }` or `{ "toggle": true }`:
 ///   TC-IN, from this Mac's interface only (like the external gate).
 ///   Never arms the laser.
+/// - `GET/POST /api/timecode/out` (T-417): the timecode output's settings
+///   and status. Safety class: never from the tablet remote.
 fn timecode_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Method, path: &str) -> HttpResponse {
     match (method, path) {
         (Method::Get, "/api/timecode") => json_response(crate::timecode::view(&mut shared.lock().unwrap())),
@@ -5349,7 +5352,27 @@ fn timecode_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
                         }
                         json_response(crate::timecode::view(&mut shared.lock().unwrap()))
                     }
-                    Err(e) => text(400, &e),
+                    Err(e) => text(e.status, &e.message),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Get, "/api/timecode/out") => json_response(crate::timecode::out::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/timecode/out") => match body::<serde_json::Value>(request) {
+            Ok(patch) => {
+                let (result, job) = {
+                    let mut s = shared.lock().unwrap();
+                    let r = crate::timecode::out::update(&mut s, &patch);
+                    (r, s.timecode.save_job())
+                };
+                match result {
+                    Ok(changed) => {
+                        if let (true, Some((path, cfg))) = (changed, job) {
+                            crate::save_json(&path, &cfg);
+                        }
+                        json_response(crate::timecode::out::view(&shared.lock().unwrap()))
+                    }
+                    Err(e) => text(e.status, &e.message),
                 }
             }
             Err(e) => e,
@@ -5546,6 +5569,8 @@ fn diagnostic_report(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 fn timeline_with_timecode(s: &Shared) -> serde_json::Value {
     let mut tl = json!(s.timeline.state(&s.timeline_clock()));
     tl["timecode"] = crate::timecode::summary(s);
+    // The timecode output (T-417): on, sending, the last time sent.
+    tl["timecode_out"] = crate::timecode::out::summary(s);
     // The live take (T-169): its button and counters.
     tl["take"] = s.take.view();
     tl
@@ -8137,6 +8162,34 @@ mod tests {
         t.shared.lock().unwrap().test_hooks = true;
         assert_eq!(t.request("POST", "/api/test/stall?ms=99999", "").0, 200);
         assert_eq!(t.shared.lock().unwrap().test_stall_ms, 2_000, "bounded");
+    }
+
+    /// T-417: the timecode output is off by default, set over the API
+    /// (Safety class), refuses the self-drive trap with a 409 and shows up
+    /// under `timeline.timecode_out`.
+    #[test]
+    fn the_timecode_output_routes() {
+        let t = TestServer::start(false);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.midi.enabled = true;
+            s.midi.device_mut("Sortie MTC").output = true;
+        }
+        let (status, body) = t.request("GET", "/api/timecode/out", "");
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["config"]["enabled"].as_bool(), v["config"]["fps"].as_str()), (Some(false), Some("25")));
+        assert_eq!(v["midi_ports"], json!(["Sortie MTC"]));
+        assert_eq!(t.request("POST", "/api/timecode/out", r#"{"enabled":true,"mtc_port":"Sortie MTC"}"#).0, 200);
+        let frame: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
+        assert_eq!(frame["timeline"]["timecode_out"]["enabled"], true);
+        assert_eq!(frame["timeline"]["timecode_out"]["sending"], false);
+        let (status, body) = t.request("POST", "/api/timecode", r#"{"source":"mtc","midi_port":"Sortie MTC"}"#);
+        assert_eq!((status, body.as_str()), (409, crate::timecode::out::SELF_DRIVE_MIDI));
+        assert_eq!(t.request("POST", "/api/timecode", r#"{"out":{"enabled":false}}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/timecode/out", r#"{"artnet":{"interface":"127.0.0.1","target":"224.0.0.1"}}"#).0, 400);
+        assert_eq!(ROUTES.iter().find(|r| r.0 == "*" && r.1 == "/api/timecode/out").map(|r| r.2), Some(RouteClass::Safety));
+        assert_eq!(arm_status(&t)["armed"], false, "never arms");
     }
 
     /// T-409: Art-Net timecode injection, `--test-hooks` only, taken only
