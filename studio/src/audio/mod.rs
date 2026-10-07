@@ -29,6 +29,7 @@ pub mod bpm;
 pub mod capture;
 pub mod decode;
 pub mod downbeat;
+pub mod health;
 pub mod isolate;
 pub mod media;
 pub mod onsets;
@@ -330,6 +331,8 @@ pub struct NativeSnapshot {
     pub sections: SectionState,
     /// Suggested "1" and phrases (T-235). A proposal only, like the tempo.
     pub downbeat: downbeat::DownbeatDetection,
+    /// The signal's own verdict (T-242): zeros, silence, too quiet, clipping.
+    pub health: health::InputHealth,
     /// Audio time of the end of the last hop, seconds since the studio
     /// epoch (the tempo clock's time base).
     pub t: f64,
@@ -349,6 +352,8 @@ pub enum Active {
 struct Info {
     status: CaptureStatus,
     devices: Vec<InputDevice>,
+    /// The last problem seen (T-242): message and when.
+    last_error: Option<(String, Instant)>,
 }
 
 /// The meeting point of the audio threads, the engine and the HTTP API.
@@ -392,7 +397,7 @@ impl AudioHub {
         } else {
             CaptureStatus { state: CaptureState::Disabled, message: "Capture audio désactivée (--no-audio)".into(), ..Default::default() }
         };
-        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new() }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }), guide: Mutex::new((None, 0)), ltc_tap: Arc::new(AtomicI32::new(-1)), ltc: Mutex::new((0, None)) }
+        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new(), last_error: None }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }), guide: Mutex::new((None, 0)), ltc_tap: Arc::new(AtomicI32::new(-1)), ltc: Mutex::new((0, None)) }
     }
 
     /// From `<data_dir>/audio.json`, then `--audio-device` (for this run).
@@ -460,8 +465,22 @@ impl AudioHub {
     pub fn set_status(&self, status: CaptureStatus) -> bool {
         let mut info = lock(&self.info);
         let changed = info.status.state != status.state || info.status.message != status.message;
+        if changed && matches!(status.state, CaptureState::NoDevice | CaptureState::DeviceLost | CaptureState::PermissionDenied | CaptureState::Error) {
+            info.last_error = Some((status.message.clone(), Instant::now()));
+        }
         info.status = status;
         changed
+    }
+
+    /// A problem found outside the capture state (the analysis thread's
+    /// likely refusal, T-242), kept as the last error.
+    pub fn note_error(&self, message: &str) {
+        lock(&self.info).last_error = Some((message.to_string(), Instant::now()));
+    }
+
+    /// The last problem seen and how long ago.
+    pub fn last_error(&self, now: Instant) -> Option<(String, Duration)> {
+        lock(&self.info).last_error.as_ref().map(|(m, at)| (m.clone(), now.saturating_duration_since(*at)))
     }
 
     pub fn set_overruns(&self, overruns: u64) {
@@ -621,6 +640,51 @@ impl AudioHub {
         })
     }
 
+    /// The input's health (T-242) for the native source: the capture state
+    /// first, then the fresh analysis' verdict. `None` for another source,
+    /// or with nothing to judge yet.
+    fn health(&self, source: AudioInputSource, status: &CaptureStatus, native: Option<&NativeSnapshot>) -> Option<health::InputHealth> {
+        if source != AudioInputSource::Native {
+            return None;
+        }
+        health::combine(status.state, native.map(|n| n.health))
+    }
+
+    fn health_view(h: Option<health::InputHealth>) -> Value {
+        match h {
+            Some(h) => json!({ "state": h, "label": h.label(), "tone": h.tone(), "help": h.help() }),
+            None => Value::Null,
+        }
+    }
+
+    /// `GET /api/audio/diagnostics` (T-242): read-only, for the *Entrée
+    /// audio* panel of RÉGLAGES. Nothing is recorded or sent anywhere.
+    pub fn diagnostics(&self, now: Instant) -> Value {
+        let (config, _) = self.config();
+        let status = self.status();
+        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && config.source == AudioInputSource::Native);
+        let health = self.health(config.source, &status, native.as_ref());
+        let running = status.state == CaptureState::Running;
+        json!({
+            "source": config.source,
+            "capture": self.capture_enabled,
+            "state": status.state,
+            "message": status.message,
+            "device": status.device,
+            "wanted": config.device,
+            "devices": self.devices(),
+            "sample_rate": if running { Some(status.sample_rate) } else { None },
+            "channels": if running { Some(status.channels) } else { None },
+            "buffer_frames": config.buffer_frames,
+            "overruns": status.overruns,
+            "level_db": native.map(|n| n.rms_db),
+            "peak_db": native.map(|n| n.peak_db),
+            "signal_present": running && health.is_some_and(|h| h.signal_present()),
+            "health": Self::health_view(health),
+            "last_error": self.last_error(now).map(|(message, ago)| json!({ "message": message, "ago_s": ago.as_secs_f64() })),
+        })
+    }
+
     /// `/api/state.audio`.
     pub fn view(&self, browser: AudioFeatures, browser_at: Instant, now: Instant) -> Value {
         let (features, active) = self.features_view(browser, browser_at, now);
@@ -663,6 +727,9 @@ impl AudioHub {
             // (T-235); null when nothing fresh is captured.
             "downbeat": native.map(|n| n.downbeat),
             "stats": stats,
+            // Input health (T-242): state, French label and help, colour;
+            // null for another source or with nothing to judge yet.
+            "health": Self::health_view(self.health(config.source, &status, native.as_ref())),
             // What the engine uses (T-237), whichever the source: the legacy
             // three, then the whole snapshot. `bands` always present, 0..1.
             "level": features.level,
@@ -695,7 +762,7 @@ mod tests {
         let onsets = Onsets { kick: beat, onset: beat + 2, ..Default::default() };
         let tempo = TempoEstimate { bpm: 128.0, confidence: 0.8, beat_time: 0.9, next_beat: 1.37, state: bpm::DetectState::Locked };
         let sections = SectionState { section: Section::Buildup, buildup: 0.4, drop: 2, ..Default::default() };
-        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], sections, downbeat: Default::default(), t: 1.0, at }
+        NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], sections, downbeat: Default::default(), health: Default::default(), t: 1.0, at }
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {
