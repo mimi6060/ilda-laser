@@ -1716,6 +1716,26 @@
   #viewsMenu button[aria-current="true"] { color: var(--accent); }
   #viewsMenu hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
   #viewsMenu .hint { padding: 4px 6px; }
+  /* Vidéo de la vue 3D (T-459): the button, its options, the red dot while recording. */
+  .vid3d { display: inline-flex; align-items: center; gap: 4px; }
+  .vid3d[hidden] { display: none; }
+  #vidBtn.recording { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #vidBtn:disabled { opacity: .5; cursor: not-allowed; }
+  #vidOptBtn { padding: 5px 8px; }
+  html.touch #vidOptBtn { min-width: 44px; }
+  #vidStatus { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .vid3d { min-width: 0; flex: 0 1 auto; }
+  /* One line: the 3D hint gives way to the buttons (its full text stays in its title). */
+  .viewbar #hint3d { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #vidBtn { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #vidMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 4px; width: 280px; padding: 10px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); box-shadow: 0 10px 30px #000a; }
+  #vidMenu[hidden] { display: none; }
+  #vidMenu label:not(.check) { font-size: 12px; color: var(--muted); }
+  #vidMenu .hint { margin: 2px 0 0; font-size: 11px; }
+  #vidAudioRow:has(input:disabled) { opacity: .6; }
+  /* Drawn at the video size while recording: shown whole, never stretched. */
+  .view > canvas#beams.rec-fixed { object-fit: contain; background: #000; }
   .help-title { display: inline-flex; align-items: center; gap: 6px; }
   .help-q { flex: none; width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; font-weight: 700; line-height: 18px; text-transform: none; letter-spacing: 0;
     color: var(--muted); }
@@ -2166,6 +2186,19 @@
 </div>
 <!-- Aide (T-437, T-438): the menu behind « ? Aide », no shortcut of its own. -->
 <div id="viewsMenu" role="menu" aria-label="Vues enregistrées" hidden></div>
+<div id="vidMenu" role="group" aria-label="Options de la vidéo de la vue 3D" hidden>
+  <label for="vidSeconds">Durée</label>
+  <select id="vidSeconds">
+    <option value="5">5 s</option><option value="10">10 s</option><option value="30">30 s</option><option value="60">60 s</option><option value="0">Jusqu'à l'arrêt (5 min au plus)</option>
+  </select>
+  <label for="vidSize">Taille</label>
+  <select id="vidSize">
+    <option value="vue">Taille de la vue</option><option value="720p">1280×720</option><option value="1080p">1920×1080</option>
+  </select>
+  <label class="check" id="vidAudioRow"><input type="checkbox" id="vidAudio" disabled> Avec le son du show</label>
+  <div class="hint" id="vidAudioWhy">Le morceau du show est joué par le studio sur sa sortie audio, pas par cette page : le navigateur ne peut pas l'ajouter à la vidéo.</div>
+  <div class="hint">La vidéo est enregistrée dans cette page puis téléchargée par le navigateur ; rien n'est envoyé au studio ni ailleurs. Elle porte toujours la mention « Simulation — Laser Studio » : ce n'est pas une prise de vue du laser, et elle ne prouve rien sur la sécurité.</div>
+</div>
 <div id="winMenu" role="menu" aria-label="Ouvrir une fenêtre" hidden>
   <button role="menuitem" data-vue="sortie" title="L'aperçu seul, sans aucun contrôle, pour un écran ou un client">Sortie</button>
   <button role="menuitem" data-vue="grille" title="La grille de cues et la barre du haut, pour un écran tactile">Grille</button>
@@ -2526,7 +2559,13 @@
       </div>
       <button id="prepBtn" data-search="Préparer (vue Préparé, sans envoyer au laser)" aria-pressed="false" title="Préparer : un clic sur une case (ou une lettre) charge le cue dans la vue « Préparé » sans l'envoyer au laser. Alt + clic prépare sans activer le mode.">Préparer</button>
       <button id="recenter3d" hidden title="Double-clic sur la vue : même effet">Recentrer</button>
-      <span class="hint" id="hint3d" hidden>Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer</span>
+      <!-- Vidéo de la vue 3D (T-459): recorded in the page, never sent anywhere. -->
+      <span class="vid3d" id="vid3d" hidden>
+        <button id="vidBtn" aria-pressed="false" data-search="Enregistrer la vue 3D en vidéo" title="Enregistre la vue 3D. La vidéo porte la mention « Simulation » : ce n'est pas une prise de vue du laser. (Alt+R)">● Enregistrer</button>
+        <button id="vidOptBtn" aria-haspopup="true" aria-expanded="false" aria-controls="vidMenu" aria-label="Options de la vidéo : durée, taille, son" title="Durée, taille, son">▾</button>
+        <span id="vidStatus" class="hint" role="status" aria-live="polite"></span>
+      </span>
+      <span class="hint" id="hint3d" hidden title="Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer">Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer</span>
     </div>
     <div class="view">
       <canvas id="preview" width="900" height="900"></canvas>
@@ -3706,7 +3745,7 @@
         <label for="macName">Nom</label>
         <input type="text" id="macName" maxlength="32" autocomplete="off" placeholder="Montée">
         <label for="macKey">Touche</label>
-        <select id="macKey" title="Alt + cette lettre lance la macro en LIVE (Alt+C, P, S, T et X sont déjà pris)"></select>
+        <select id="macKey" title="Alt + cette lettre lance la macro en LIVE (Alt+B, C, P, R, S, T et X sont déjà pris)"></select>
         <label class="check"><input type="checkbox" id="macOn"><span>Active</span></label>
         <h3>Étapes</h3>
         <div id="macSteps"></div>
@@ -5852,9 +5891,9 @@ const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas' && z !== 'ask
 const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live' && z !== 'grid');
 const LIVE_ZONES = ['live', 'grid'];
 // Macros (T-425): Alt + letter, read by position (e.code). Alt+B (the
-// haze, T-453), Alt+C (« Ciel coupé », T-262), P, S, T and X already
-// have a role.
-const MACRO_TAKEN = ['B', 'C', 'P', 'S', 'T', 'X'];
+// haze, T-453), Alt+C (« Ciel coupé », T-262), Alt+R (the 3D video,
+// T-459), P, S, T and X already have a role.
+const MACRO_TAKEN = ['B', 'C', 'P', 'R', 'S', 'T', 'X'];
 const MACRO_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter(l => !MACRO_TAKEN.includes(l));
 const SAFETY_SHORTCUTS = [
   { id: 'estop', group: 'Sécurité', keys: ['Escape'], meta: '*', alt: '*', zones: '*', typing: true, show: true,
@@ -5892,6 +5931,12 @@ function buildShortcuts() {
       down: e => { if (!e.repeat) toggleSky('keyboard'); } },
     // Points de vue de la vue 3D (T-278): Alt+Maj+chiffre, while it is shown
     // (Alt+chiffre is the cue page, the digit alone an executor).
+    // Vidéo de la vue 3D (T-459): Alt+R in LIVE (R alone is a cue key),
+    // read by position like the other Alt letters.
+    { id: 'view3d.record', group: 'Vue 3D', codes: ['KeyR'], alt: true, zones: LIVE_ZONES, show: true,
+      label: 'Enregistrer la vue 3D en vidéo (démarrer / arrêter ; vue 3D affichée)',
+      when: () => !!REC.rec || vidReady(),
+      down: e => { if (!e.repeat) vidToggle(); } },
     { id: 'view3d.camera', group: 'Vue 3D', codes: ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'], alt: true, shift: true, zones: '*', show: true,
       cap: () => '1 … 6', label: 'Point de vue : Public (régie), Premier rang, Scène, Dessus, Côté, Libre (vue 3D affichée)',
       when: () => show3d && !!view3d,
@@ -6068,7 +6113,7 @@ function buildShortcuts() {
     // Macros (T-425): Alt + the macro's letter, LIVE only (letters alone
     // are the cues, Alt + digit the pages).
     { id: 'macro', group: 'Macros', codes: MACRO_LETTERS.map(l => 'Key' + l), alt: true, zones: LIVE_ZONES, show: true,
-      cap: () => 'A … Z', label: 'Lancer la macro liée à cette lettre (CRÉATION › Macros ; sauf B, C, P, S, T, X)',
+      cap: () => 'A … Z', label: 'Lancer la macro liée à cette lettre (CRÉATION › Macros ; sauf B, C, P, R, S, T, X)',
       down: (e, i) => { const m = macroForKey(MACRO_LETTERS[i]); if (!m) return false; if (!e.repeat) macRun(m.id, 'keyboard'); } },
     // Cue letters, LIVE only (T-272); Maj = flash.
     { id: 'cue', group: 'Cues et pages', codes: CUE_CODES, shift: '*', zones: LIVE_ZONES, show: true,
@@ -7006,6 +7051,11 @@ async function setView(mode) {
   $('beams').hidden = !show3d;
   $('beamsMsg').hidden = !want3d || !!view3d;
   for (const id of ['recenter3d', 'hint3d', 'render3d']) $(id).hidden = !show3d;
+  // Vidéo (T-459): shown with the 3D view (greyed if it cannot record);
+  // leaving the 3D view ends a recording and offers its file.
+  $('vid3d').hidden = !want3d;
+  if (!show3d) { vidStop('vue'); closeRecMenu(); }
+  vidShow();
   if (show3d) { venueTo3d(); safetyTo3d(); view3d.setFrame(lastShown, lastShown === lastPoints ? null : lastPoints); view3d.start(); pollFrames3d(); }
   else view3d?.stop();
   showAud3d();
@@ -7013,6 +7063,208 @@ async function setView(mode) {
   remember(STAGE_KEY, mode);
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
+
+// ---------- Vidéo de la vue 3D (T-459) ----------
+// Everything happens in this page: after each 3D image (view3d.onDrawn)
+// the picture is copied into a 2D composition canvas that adds the
+// « Simulation » watermark, and that canvas is what MediaRecorder encodes.
+// Nothing is sent to the studio (no route) nor anywhere else: the file is
+// offered to the browser's download. Display only: the engine, the output
+// and the arming never see it, and it works with the laser disarmed.
+const REC_MAX_S = 300, REC_FPS = 30, REC_WATERMARK = 'Simulation — Laser Studio';
+// Memory bound: the encoded chunks stay in the page until the download.
+const REC_MAX_BYTES = 400 * 1024 * 1024;
+const REC_KEY = 'laserStudio.record3d';
+const REC_SECONDS = [5, 10, 30, 60, 0]; // 0: until « Arrêter » (REC_MAX_S at most)
+const REC_SIZES = { vue: null, '720p': [1280, 720], '1080p': [1920, 1080] };
+const REC_FORMATS = [['video/webm;codecs=vp9', 'webm'], ['video/webm;codecs=vp8', 'webm'], ['video/webm', 'webm'], ['video/mp4', 'mp4']];
+const REC = { rec: null, stream: null, cv: null, ctx: null, chunks: [], bytes: 0, fmt: null, name: '', t0: 0, limit: 0, elapsed: 0,
+  timer: null, tick: null, stamp: '', stampS: -1, why: '', last: null };
+function vidPrefs() {
+  let p = {};
+  try { p = JSON.parse(localStorage.getItem(REC_KEY) || '{}') || {}; } catch { p = {}; }
+  return {
+    seconds: REC_SECONDS.includes(p.seconds) ? p.seconds : 10,
+    size: Object.hasOwn(REC_SIZES, p.size) ? p.size : 'vue',
+    // The show's song is played by the studio on its own audio output,
+    // never by this page: there is no track to add, the box stays greyed.
+    audio: false,
+  };
+}
+function vidSavePrefs() {
+  const p = { seconds: +$('vidSeconds').value, size: $('vidSize').value, audio: $('vidAudio').checked };
+  try { localStorage.setItem(REC_KEY, JSON.stringify(p)); } catch { /* private window: not remembered */ }
+}
+// The first format this browser can write, or null.
+function vidFormat() {
+  if (typeof MediaRecorder !== 'function' || typeof MediaRecorder.isTypeSupported !== 'function') return null;
+  if (typeof HTMLCanvasElement === 'undefined' || typeof HTMLCanvasElement.prototype.captureStream !== 'function') return null;
+  for (const [mime, ext] of REC_FORMATS) { try { if (MediaRecorder.isTypeSupported(mime)) return { mime, ext }; } catch { /* next */ } }
+  return null;
+}
+const vidReady = () => !!view3d && show3d && !!vidFormat();
+const vidPad = n => String(n).padStart(2, '0');
+function vidClock(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return `${vidPad(Math.floor(s / 60))}:${vidPad(s % 60)}`; }
+function vidMb(bytes) { return (bytes / 1048576).toLocaleString('fr-FR', { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + ' Mo'; }
+function vidShow() {
+  const btn = $('vidBtn'), on = !!REC.rec, ok = on || vidReady();
+  btn.disabled = !ok;
+  btn.classList.toggle('recording', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = !ok ? 'Enregistrement vidéo indisponible sur ce navigateur'
+    : on ? 'Arrêter et télécharger la vidéo (Alt+R)'
+    : "Enregistre la vue 3D. La vidéo porte la mention « Simulation » : ce n'est pas une prise de vue du laser. (Alt+R)";
+  if (on) {
+    const left = REC.limit * 1000 - (REC.t0 ? performance.now() - REC.t0 : 0);
+    btn.textContent = `■ Arrêter — ${vidClock(left + 999)}`;
+  } else btn.textContent = '● Enregistrer';
+  $('vidOptBtn').disabled = on || !ok;
+}
+// The date in the watermark, rebuilt once a second.
+function vidStamp() {
+  const d = new Date(), s = Math.floor(d.getTime() / 1000);
+  if (s !== REC.stampS) {
+    REC.stampS = s;
+    REC.stamp = `${vidPad(d.getDate())}/${vidPad(d.getMonth() + 1)}/${d.getFullYear()} ${vidPad(d.getHours())}:${vidPad(d.getMinutes())}:${vidPad(d.getSeconds())}`;
+  }
+  return REC.stamp;
+}
+// Bottom right, on a dark plate so it reads on any picture. Always drawn:
+// there is no option to leave it out.
+function vidWatermark(c, W, H) {
+  const fs = Math.max(14, Math.round(H / 30)), pad = Math.round(fs * 0.6), small = Math.round(fs * 0.8);
+  const date = vidStamp();
+  c.font = `600 ${fs}px system-ui, sans-serif`;
+  const w1 = c.measureText(REC_WATERMARK).width;
+  c.font = `${small}px system-ui, sans-serif`;
+  const w2 = c.measureText(date).width;
+  const bw = Math.max(w1, w2) + pad * 2, bh = fs + small + pad * 2.4;
+  c.fillStyle = 'rgba(0, 0, 0, 0.65)';
+  c.fillRect(W - bw - pad, H - bh - pad, bw, bh);
+  c.fillStyle = '#ffffff'; c.textAlign = 'right'; c.textBaseline = 'bottom';
+  c.font = `600 ${fs}px system-ui, sans-serif`;
+  c.fillText(REC_WATERMARK, W - pad * 2, H - pad * 2.2 - small);
+  c.font = `${small}px system-ui, sans-serif`;
+  c.fillText(date, W - pad * 2, H - pad * 1.6);
+}
+// One video image: the 3D picture fitted whole (black bars), then the watermark.
+function vidCompose(src) {
+  const c = REC.ctx;
+  if (!c) return;
+  const W = REC.cv.width, H = REC.cv.height;
+  c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+  if (src && src.width && src.height) {
+    const k = Math.min(W / src.width, H / src.height), w = src.width * k, h = src.height * k;
+    c.drawImage(src, (W - w) / 2, (H - h) / 2, w, h);
+  }
+  vidWatermark(c, W, H);
+}
+const vidEven = n => Math.max(16, Math.round(n / 2) * 2);
+function vidFileStamp(d) {
+  return `${d.getFullYear()}${vidPad(d.getMonth() + 1)}${vidPad(d.getDate())}-${vidPad(d.getHours())}${vidPad(d.getMinutes())}${vidPad(d.getSeconds())}`;
+}
+function vidStart() {
+  if (REC.rec || !vidReady()) return;
+  const fmt = vidFormat(), pref = vidPrefs(), size = REC_SIZES[pref.size], bc = $('beams');
+  // « Taille de la vue »: its proportions, 360 px high or wide at least, 4K at most.
+  const k = Math.min(Math.max(1, 360 / Math.max(1, Math.min(bc.width, bc.height))), 3840 / Math.max(1, bc.width), 2160 / Math.max(1, bc.height));
+  // A view squeezed to a strip (small window, panels open): 1280×720, the picture fitted whole.
+  const odd = !size && (bc.width / bc.height > 4 || bc.height / bc.width > 4);
+  const [W, H] = size || (odd ? REC_SIZES['720p'] : [vidEven(bc.width * k), vidEven(bc.height * k)]);
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  let rec;
+  try {
+    REC.cv = cv; REC.ctx = cv.getContext('2d', { alpha: false });
+    vidCompose(null);
+    REC.stream = cv.captureStream(REC_FPS);
+    // ~0.1 bit per pixel and image: 1080p ≈ 6 Mbit/s, 5 min ≈ 230 Mo.
+    rec = new MediaRecorder(REC.stream, { mimeType: fmt.mime, videoBitsPerSecond: Math.round(Math.min(8e6, Math.max(1e6, W * H * REC_FPS * 0.1))) });
+  } catch (e) {
+    console.warn('vidéo 3D :', e);
+    vidCleanup();
+    $('vidStatus').textContent = 'Enregistrement vidéo impossible sur ce navigateur';
+    return;
+  }
+  REC.rec = rec; REC.fmt = fmt; REC.chunks = []; REC.bytes = 0; REC.t0 = 0; REC.elapsed = 0; REC.why = '';
+  REC.limit = pref.seconds || REC_MAX_S;
+  REC.name = `laser-studio-simulation-${vidFileStamp(new Date())}.${fmt.ext}`;
+  if (size) { view3d.setRenderSize(size); bc.classList.add('rec-fixed'); }
+  view3d.onDrawn = vidCompose;
+  rec.ondataavailable = e => {
+    if (!e.data || !e.data.size) return;
+    REC.chunks.push(e.data); REC.bytes += e.data.size;
+    if (REC.bytes > REC_MAX_BYTES && REC.rec === rec) vidStop('taille');
+  };
+  rec.onstart = () => {
+    REC.t0 = performance.now();
+    REC.timer = setTimeout(() => vidStop('fin'), REC.limit * 1000);
+  };
+  rec.onstop = () => vidFinish(rec);
+  rec.onerror = e => { console.warn('vidéo 3D :', e.error || e); vidStop('erreur'); };
+  rec.start(1000);
+  REC.tick = setInterval(vidShow, 250);
+  $('vidStatus').textContent = '';
+  closeRecMenu();
+  vidShow();
+}
+// Ends the recording (its file is then offered): `why` says what stopped it.
+function vidStop(why = 'arrêt') {
+  const rec = REC.rec;
+  if (!rec || REC.why) return;
+  REC.why = why;
+  clearTimeout(REC.timer); REC.timer = null;
+  clearInterval(REC.tick); REC.tick = null;
+  REC.elapsed = REC.t0 ? (performance.now() - REC.t0) / 1000 : 0;
+  if (view3d) { view3d.onDrawn = null; view3d.setRenderSize(null); }
+  $('beams').classList.remove('rec-fixed');
+  try { if (rec.state !== 'inactive') rec.stop(); else vidFinish(rec); } catch (e) { console.warn('vidéo 3D :', e); vidFinish(rec); }
+}
+function vidCleanup() {
+  try { REC.stream?.getTracks().forEach(t => t.stop()); } catch { /* already stopped */ }
+  REC.stream = null; REC.rec = null; REC.ctx = null;
+}
+function vidFinish(rec) {
+  if (REC.rec !== rec) return;
+  const chunks = REC.chunks, bytes = REC.bytes, fmt = REC.fmt, name = REC.name, why = REC.why;
+  REC.chunks = []; REC.bytes = 0; REC.why = '';
+  vidCleanup();
+  vidShow();
+  if (!bytes) { $('vidStatus').textContent = 'Vidéo vide : rien à télécharger'; return; }
+  const blob = new Blob(chunks, { type: fmt.mime.split(';')[0] });
+  REC.last = { name, bytes: blob.size, seconds: REC.elapsed, mime: blob.type, why };
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  const said = { vue: ' (vue 3D quittée)', espace: ' (espace de travail changé)', page: ' (page masquée)', taille: ' (taille maximale atteinte)', erreur: ' (erreur du navigateur)' }[why] || '';
+  $('vidStatus').textContent = `Vidéo prête (${vidMb(blob.size)})${said}`;
+}
+function vidToggle() { if (REC.rec) vidStop('arrêt'); else vidStart(); }
+// The options menu, beside the button.
+function closeRecMenu() { $('vidMenu').hidden = true; $('vidOptBtn').setAttribute('aria-expanded', 'false'); }
+function openRecMenu() {
+  const p = vidPrefs();
+  $('vidSeconds').value = String(p.seconds); $('vidSize').value = p.size; $('vidAudio').checked = false;
+  const menu = $('vidMenu'), r = $('vidOptBtn').getBoundingClientRect();
+  menu.hidden = false;
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
+  $('vidOptBtn').setAttribute('aria-expanded', 'true');
+  $('vidSeconds').focus();
+}
+$('vidBtn').onclick = vidToggle;
+$('vidOptBtn').onclick = e => { e.stopPropagation(); if ($('vidMenu').hidden) openRecMenu(); else closeRecMenu(); };
+for (const id of ['vidSeconds', 'vidSize', 'vidAudio']) $(id).addEventListener('change', vidSavePrefs);
+document.addEventListener('click', e => { if (!$('vidMenu').hidden && !e.target.closest('#vidMenu, #vidOptBtn')) closeRecMenu(); });
+// A hidden page draws no more images: the recording ends there.
+document.addEventListener('visibilitychange', () => { if (document.hidden) vidStop('page'); });
+// For the e2e tests and the console: read only.
+window.__rec = {
+  canvas: () => REC.cv, recording: () => !!REC.rec, last: () => REC.last,
+  format: () => { const f = vidFormat(); return f && f.mime; },
+};
+vidShow();
 
 // ---------- « Préparer » (T-274) ----------
 // A cue loaded blind into its own view, « Préparé », drawn from
@@ -7358,6 +7610,8 @@ function setWorkspace(ws) {
   if (showMode && (ws === 'creation' || ws === 'settings')) ws = 'live'; // T-283
   // PUPITRE (T-427): leaving lets go of what it held and of full screen.
   if (activeWs === 'desk' && ws !== 'desk' && typeof deskLeave === 'function') deskLeave();
+  // Vidéo de la vue 3D (T-459): another workspace ends the recording.
+  if (ws !== activeWs) vidStop('espace');
   activeWs = ws;
   $('workspace').dataset.wsActive = ws;
   document.querySelectorAll('[data-ws]').forEach(el => { el.hidden = el.dataset.ws !== ws; });
