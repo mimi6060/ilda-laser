@@ -140,7 +140,10 @@
 //!
 //! The generator is a small seeded xorshift (no new dependency); every
 //! failure prints its seed. `SAFETY_SEED=<n>` replays one seed,
-//! `SAFETY_CASES=<n>` runs more (or fewer) cases.
+//! `SAFETY_CASES=<n>` runs more (or fewer) cases. The seeds of a property
+//! are spread over every core (`SAFETY_THREADS=<n>` to choose, T-486):
+//! the same cases, sums and first failing seed whatever the number; a hang
+//! is caught per case (no progress for a while), not by the total time.
 //!
 //! **Coverage** (T-473): every session has a show phase where the
 //! operator keeps the laser armed and lit while every stream keeps
@@ -369,6 +372,15 @@ impl Rig {
 impl Drop for Rig {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.take() {
+            // The session's live and layer moves are not written out at
+            // shutdown: no check reads them back (the shutdown save has
+            // tests of its own, T-287), and writing two files per session
+            // was a fifth of the fuzz's time in release (T-486). The
+            // shutdown itself (disarm, dark output) still runs.
+            if let Ok(mut s) = self.shared.lock() {
+                s.live_dirty = false;
+                s.mixer_dirty = false;
+            }
             engine.shutdown(&self.shared);
         }
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -1303,7 +1315,7 @@ fn prepare_scanning(s: &mut Shared, rng: &mut Rng) {
 
 /// How much light the fuzz really exercised, so a generator that stops
 /// lighting anything can't make the checks pass vacuously.
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq)]
 struct Coverage {
     frames: usize,
     /// Frames that sent lit points to the output.
@@ -1352,6 +1364,60 @@ struct Coverage {
     sent_lit_with_trace: usize,
     /// Frames that sent light while a zone chaser had an active step (T-170).
     sent_lit_with_zone_chase: usize,
+}
+
+impl Coverage {
+    /// Adds another worker's counts (T-486): plain sums, so the total is
+    /// the same whatever worker ran which case. Destructured in full: a
+    /// new counter that isn't added here does not compile.
+    fn add(&mut self, o: &Coverage) {
+        let Coverage {
+            frames,
+            sent_lit,
+            sessions,
+            sessions_lit,
+            show_frames,
+            show_sent_lit,
+            sent_lit_with_group_master,
+            lit_with_zones,
+            lit_with_horizon,
+            lit_with_projection,
+            lit_with_group_master,
+            lit_with_remote,
+            lit_with_public_above,
+            lit_with_public_scanning,
+            lit_with_transition,
+            trigger_actions,
+            lit_with_effects,
+            lit_with_fx,
+            lit_with_levels,
+            lit_with_exec,
+            sent_lit_with_trace,
+            sent_lit_with_zone_chase,
+        } = o;
+        self.frames += frames;
+        self.sent_lit += sent_lit;
+        self.sessions += sessions;
+        self.sessions_lit += sessions_lit;
+        self.show_frames += show_frames;
+        self.show_sent_lit += show_sent_lit;
+        self.sent_lit_with_group_master += sent_lit_with_group_master;
+        self.lit_with_zones += lit_with_zones;
+        self.lit_with_horizon += lit_with_horizon;
+        self.lit_with_projection += lit_with_projection;
+        self.lit_with_group_master += lit_with_group_master;
+        self.lit_with_remote += lit_with_remote;
+        self.lit_with_public_above += lit_with_public_above;
+        self.lit_with_public_scanning += lit_with_public_scanning;
+        self.lit_with_transition += lit_with_transition;
+        self.trigger_actions += trigger_actions;
+        self.lit_with_effects += lit_with_effects;
+        self.lit_with_fx += lit_with_fx;
+        self.lit_with_levels += lit_with_levels;
+        self.lit_with_exec += lit_with_exec;
+        self.sent_lit_with_trace += sent_lit_with_trace;
+        self.sent_lit_with_zone_chase += sent_lit_with_zone_chase;
+    }
 }
 
 /// A random executor bank (T-418), as `POST /api/executors` could send it
@@ -1925,7 +1991,7 @@ fn keep_show_on(rig: &mut Rig, rng: &mut Rng, first: bool) {
     }
 }
 
-fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> {
+fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let (s, _) = random_case(&mut rng);
     // One case in three on an output with a small frame size limit, taken
@@ -2096,6 +2162,8 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage) -> Result<(), String> 
     }
     let mut beats = 0;
     for frame in 0..frames {
+        // The hang guard sees the session move on (T-486).
+        beat();
         let in_show = show.contains(&frame);
         if in_show {
             keep_show_on(&mut rig, &mut orng, frame == show.start);
@@ -2544,27 +2612,105 @@ fn property_guard(name: &str, cases: usize, default_cases: usize) -> test_suppor
     test_support::time_guard(name, std::time::Duration::from_secs(180) * runs)
 }
 
-fn run_property(name: &str, property: u64, cases: usize, case: impl Fn(u64) -> Result<(), String>) {
+/// T-486: how long one case of a `run_property` property may run: what
+/// the whole property once had at its default case count (T-358), so a
+/// case still going after it is hung, whatever the machine's load.
+const CASE_STALL: Duration = Duration::from_secs(180);
+
+/// A property over its seeds, spread over every core like the random
+/// sessions (T-486): the same seeds and checks, the first failure in seed
+/// order, a hang caught per case.
+fn run_property(name: &str, property: u64, cases: usize, case: impl Fn(u64) -> Result<(), String> + Sync) {
     let seeds = seeds(property, cases);
-    let _guard = property_guard(name, seeds.len(), cases);
-    for seed in seeds {
-        if let Err(e) = case(seed) {
-            panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
-        }
+    let threads = sweep_threads(seeds.len());
+    let guard = test_support::progress_guard(name, threads, CASE_STALL);
+    let ((), result) = sweep_seeds(&seeds, threads, &guard, |seed, _: &mut (), _| case(seed), |_, ()| {});
+    drop(guard);
+    if let Err((seed, e)) = result {
+        panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
     }
 }
 
-/// Invariants 1, 2, 3, 5, 6 and 8 to 10 over random sessions.
+/// T-486: how long one random session may go without a frame before the
+/// fuzz is called hung. A frame takes about a millisecond (debug build,
+/// idle machine): even a hundred times slower under load stays far below.
+const SESSION_STALL: Duration = Duration::from_secs(60);
+
+/// The workers of a seed sweep: one per core (`SAFETY_THREADS` overrides),
+/// never more than seeds.
+fn sweep_threads(seeds: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+    env_u64("SAFETY_THREADS").map_or(cores, |n| n as usize).clamp(1, seeds.max(1))
+}
+
+/// T-486: runs `case` on every seed over `threads` workers, each with its
+/// own tally `C` (a `Coverage`), merged at the end. Deterministic whatever the threads:
+/// every case depends on its seed only, the sums don't depend on the
+/// order, and the failure reported is the first one in seed order (a
+/// worker takes no seed past a failed one, and every seed before it runs
+/// to the end), so a run fails on the same seed as one worker would. A
+/// panic in a case is reported with its seed too. `guard` watches every
+/// case: the case calls the `beat` it is given each time it moves on.
+fn sweep_seeds<C: Default + Send>(
+    seeds: &[u64],
+    threads: usize,
+    guard: &test_support::ProgressGuard,
+    case: impl Fn(u64, &mut C, &dyn Fn()) -> Result<(), String> + Sync,
+    merge: impl Fn(&mut C, C) + Sync,
+) -> (C, Result<(), (u64, String)>) {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let next = AtomicUsize::new(0);
+    let failed_at = AtomicUsize::new(usize::MAX);
+    let failures = Mutex::new(Vec::new());
+    let total = Mutex::new(C::default());
+    std::thread::scope(|scope| {
+        for worker in 0..threads {
+            let (next, failed_at, failures, total, case, merge) = (&next, &failed_at, &failures, &total, &case, &merge);
+            scope.spawn(move || {
+                let mut cov = C::default();
+                loop {
+                    let i = next.fetch_add(1, SeqCst);
+                    if i >= seeds.len() || i > failed_at.load(SeqCst) {
+                        break;
+                    }
+                    let seed = seeds[i];
+                    guard.begin(worker, seed);
+                    let beat = || guard.beat(worker);
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| case(seed, &mut cov, &beat)));
+                    guard.end(worker);
+                    let r = r.unwrap_or_else(|p| {
+                        let msg = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()));
+                        Err(format!("panicked: {}", msg.unwrap_or_default()))
+                    });
+                    if let Err(e) = r {
+                        failed_at.fetch_min(i, SeqCst);
+                        failures.lock().unwrap().push((i, seed, e));
+                    }
+                }
+                merge(&mut total.lock().unwrap(), cov);
+            });
+        }
+    });
+    let first = failures.into_inner().unwrap().into_iter().min_by_key(|f| f.0);
+    (total.into_inner().unwrap(), first.map_or(Ok(()), |(_, seed, e)| Err((seed, e))))
+}
+
+fn add_coverage(total: &mut Coverage, part: Coverage) {
+    total.add(&part);
+}
+
+/// Invariants 1, 2, 3, 5, 6 and 8 to 10 over random sessions, on every
+/// core (T-486); the hang guard watches each session, not the whole run.
 #[test]
 fn random_sessions_keep_every_output_invariant() {
     let name = "random_sessions_keep_every_output_invariant";
-    let mut cov = Coverage::default();
     let seeds = seeds(1, 1000);
-    let _guard = property_guard(name, seeds.len(), 1000);
-    for &seed in &seeds {
-        if let Err(e) = run_case(seed, 30, &mut cov) {
-            panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
-        }
+    let threads = sweep_threads(seeds.len());
+    let guard = test_support::progress_guard(name, threads, SESSION_STALL);
+    let (cov, result) = sweep_seeds(&seeds, threads, &guard, |seed, cov, beat| run_case(seed, 30, cov, beat), add_coverage);
+    drop(guard);
+    if let Err((seed, e)) = result {
+        panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
     }
     if seeds.len() > 100 {
         let share = |n: usize| n as f64 / cov.frames as f64;
@@ -2597,6 +2743,103 @@ fn random_sessions_keep_every_output_invariant() {
         eprintln!("coverage: sent lit with a zone chase {:.4}", share(cov.sent_lit_with_zone_chase));
         assert!(share(cov.sent_lit_with_zone_chase) > ZONE_CHASE_GATE, "only {} of {} frames sent light while a zone chase ran", cov.sent_lit_with_zone_chase, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
+    }
+}
+
+/// T-486: a session that stops making progress is caught and named by
+/// its seed, while the other workers' sessions go on. A hang injected into
+/// the real sweep: one seed's session never moves until the guard fires.
+#[test]
+fn a_session_that_stops_making_progress_is_caught() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let seeds: Vec<u64> = (0..24).map(|i| 1_000_003 + i).collect();
+    let hung = seeds[9];
+    let caught = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let on_stall = {
+        let caught = Arc::clone(&caught);
+        move |msg: String| {
+            caught.store(true, SeqCst);
+            let _ = tx.send(msg);
+        }
+    };
+    // Real sessions beat every frame: two seconds without one is a hang
+    // even on a loaded machine.
+    let guard = test_support::progress_guard_with(4, Some(Duration::from_secs(2)), on_stall);
+    let started = Instant::now();
+    let (cov, result) = sweep_seeds(&seeds, 4, &guard, |seed, cov: &mut Coverage, beat| {
+        if seed == hung {
+            // Hung: no frame, no beat, until the guard notices.
+            while !caught.load(SeqCst) {
+                assert!(started.elapsed() < Duration::from_secs(60), "the hang was never caught");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return Err("hung".into());
+        }
+        run_case(seed, 30, cov, beat)
+    }, add_coverage);
+    drop(guard);
+    let msg = rx.try_recv().expect("the guard reported the hang");
+    assert!(msg.contains(&format!("SAFETY_SEED={hung} ")), "names the stuck seed: {msg}");
+    assert_eq!(result, Err((hung, "hung".to_string())));
+    assert!(cov.sessions >= 9, "the sessions before the hung one all ran: {}", cov.sessions);
+}
+
+/// T-486: a sweep that keeps moving is never called hung, however long
+/// it runs in all: the guard watches each case's progress, not the total.
+#[test]
+fn a_long_sweep_that_keeps_moving_is_not_a_hang() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let fired = Arc::new(AtomicBool::new(false));
+    let guard = {
+        let fired = Arc::clone(&fired);
+        test_support::progress_guard_with(2, Some(Duration::from_millis(300)), move |_| fired.store(true, SeqCst))
+    };
+    // Four cases of 0.6 s each on two workers: 1.2 s in all, four times
+    // the limit, with a beat every 20 ms.
+    let (cov, result) = sweep_seeds(&[1, 2, 3, 4], 2, &guard, |_, cov: &mut Coverage, beat| {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(20));
+            beat();
+        }
+        cov.sessions += 1;
+        Ok(())
+    }, add_coverage);
+    drop(guard);
+    assert_eq!(result, Ok(()));
+    assert_eq!(cov.sessions, 4);
+    assert!(!fired.load(SeqCst), "a moving sweep was called hung");
+}
+
+/// T-486: the sweep gives the same coverage and fails on the same seed
+/// whatever the number of workers: the first failure in seed order, as a
+/// single worker would, with a panic reported like a failure.
+#[test]
+fn a_sweep_is_the_same_on_one_worker_or_many() {
+    let seeds: Vec<u64> = (0..12).map(|i| 1_000_003 + i).collect();
+    let run = |threads: usize, fail: &[u64]| {
+        let guard = test_support::progress_guard_with(threads, None, |_| {});
+        sweep_seeds(&seeds, threads, &guard, |seed, cov: &mut Coverage, beat| {
+            if fail.contains(&seed) {
+                if seed % 2 == 0 {
+                    panic!("boom {seed}");
+                }
+                return Err(format!("bad {seed}"));
+            }
+            run_case(seed, 30, cov, beat)
+        }, add_coverage)
+    };
+    let (one, r1) = run(1, &[]);
+    let (many, r4) = run(4, &[]);
+    assert_eq!((r1, r4), (Ok(()), Ok(())));
+    assert_eq!(one.sessions, seeds.len());
+    assert_eq!(one, many, "the same coverage on one worker or four");
+    let (late, early) = (seeds[7], seeds[4]);
+    for threads in [1, 3, 8] {
+        let (_, r) = run(threads, &[late, early]);
+        let (seed, e) = r.expect_err("a failure");
+        assert_eq!(seed, early, "the first failure in seed order, on {threads} workers");
+        assert!(e.contains(&format!("{early}")), "{e}");
     }
 }
 
@@ -2974,17 +3217,23 @@ fn sweep_every_cue(name: &str, self_flash: bool, per_cue: usize) {
     for (i, c) in cues.iter().enumerate() {
         jobs.extend((0..n).map(|k| (seeds[(i * n + k) % seeds.len()], c.as_str())));
     }
-    let _guard = property_guard(name, if deep { 4 } else { 1 }, 1);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let failures = Mutex::new(Vec::new());
-    // Half the machine: the other tests (some of them timed) run meanwhile.
+    // Half the machine: the other tests run meanwhile.
     let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
+    // A hang is caught per run, not by the total: a deep sweep on a busy
+    // machine is long but always moving (T-486).
+    let guard = test_support::progress_guard(name, threads, CASE_STALL);
     std::thread::scope(|scope| {
-        for _ in 0..threads {
-            scope.spawn(|| loop {
+        for worker in 0..threads {
+            let (next, failures, jobs, guard) = (&next, &failures, &jobs, &guard);
+            scope.spawn(move || loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(&(seed, cue)) = jobs.get(i) else { break };
-                if let Err(e) = strobe_case(seed, Some(Forced { cue, self_flash })) {
+                guard.begin(worker, seed);
+                let r = strobe_case(seed, Some(Forced { cue, self_flash }));
+                guard.end(worker);
+                if let Err(e) = r {
                     failures.lock().unwrap().push(format!("{e} (replay: SAFETY_SEED={seed} SAFETY_CUE={cue} cargo test -p laser-studio {name})"));
                 }
             });
@@ -3882,14 +4131,15 @@ fn run_group_master_case(seed: u64) -> Result<bool, String> {
 
 #[test]
 fn a_group_master_never_brightens_the_output() {
-    let (cases, dimmed) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    let (cases, dimmed) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0));
     run_property("a_group_master_never_brightens_the_output", 420, 60, |seed| {
-        cases.set(cases.get() + 1);
-        dimmed.set(dimmed.get() + run_group_master_case(seed)? as usize);
+        cases.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        dimmed.fetch_add(run_group_master_case(seed)? as usize, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     });
     // Not vacuous: most cases really dim something that reached the output.
-    assert!(dimmed.get() * 3 >= cases.get(), "only {} of {} cases dimmed the output", dimmed.get(), cases.get());
+    let (cases, dimmed) = (cases.into_inner(), dimmed.into_inner());
+    assert!(dimmed * 3 >= cases, "only {dimmed} of {cases} cases dimmed the output");
 }
 
 /// T-479: seed 420001627 presses an evolving cue during the setup. The
@@ -4589,13 +4839,15 @@ fn run_multi_case(seed: u64, cov: &mut [usize; 3]) -> Result<(), String> {
 #[test]
 fn every_projector_keeps_every_output_invariant() {
     let name = "every_projector_keeps_every_output_invariant";
-    let mut cov = [0usize; 3];
     let seeds = seeds(277, 300);
-    let _guard = property_guard(name, seeds.len(), 300);
-    for &seed in &seeds {
-        if let Err(e) = run_multi_case(seed, &mut cov) {
-            panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
-        }
+    // Over every core, a hang caught per case (T-486).
+    let threads = sweep_threads(seeds.len());
+    let guard = test_support::progress_guard(name, threads, CASE_STALL);
+    let add = |t: &mut [usize; 3], c: [usize; 3]| (0..3).for_each(|i| t[i] += c[i]);
+    let (cov, result) = sweep_seeds(&seeds, threads, &guard, |seed, cov, _| run_multi_case(seed, cov), add);
+    drop(guard);
+    if let Err((seed, e)) = result {
+        panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
     }
     if seeds.len() >= 100 {
         let [lit, unplugs, frames] = cov;
@@ -4646,7 +4898,7 @@ const PREVIEWS: [usize; 4] = [0, 0, 1, 2];
 /// generator, transition, LFO, live stage, optimizer) advances per projector.
 #[test]
 fn a_preview_projector_leaves_the_main_output_exactly_as_it_was() {
-    let lit = std::cell::Cell::new(0usize);
+    let lit = std::sync::atomic::AtomicUsize::new(0);
     run_property("a_preview_projector_leaves_the_main_output_exactly_as_it_was", 361, 12, |seed| {
         let mut rigs: Vec<(Rig, Rng, u64)> = (0..PREVIEWS.len())
             .map(|n| {
@@ -4668,11 +4920,11 @@ fn a_preview_projector_leaves_the_main_output_exactly_as_it_was() {
                 rig.tick();
             }
             let sent = same_main_frame(&rigs.iter().map(|(r, _, _)| r).collect::<Vec<_>>(), || format!("frame {frame}"))?;
-            lit.set(lit.get() + sent.iter().any(|p| p.is_lit()) as usize);
+            lit.fetch_add(sent.iter().any(|p| p.is_lit()) as usize, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     });
-    assert!(lit.get() > 0, "the sessions sent light");
+    assert!(lit.into_inner() > 0, "the sessions sent light");
 }
 
 /// Every cue of the catalogue (generators, texts, graphics, cue programs
@@ -5030,7 +5282,7 @@ fn prepared_rig(seed: u64, n: usize) -> (Rig, Arc<Mutex<Wire>>, Rng) {
 /// Then « Envoyer » on the third plays the prepared cue through the deck.
 #[test]
 fn nothing_prepared_reaches_any_output_before_it_is_sent() {
-    let lit = std::cell::Cell::new(0usize);
+    let lit = std::sync::atomic::AtomicUsize::new(0);
     run_property("nothing_prepared_reaches_any_output_before_it_is_sent", 274, 12, |seed| {
         let mut rigs: Vec<(Rig, Arc<Mutex<Wire>>, Rng, u64)> = (0..3)
             .map(|n| {
@@ -5070,7 +5322,7 @@ fn nothing_prepared_reaches_any_output_before_it_is_sent() {
             if rigs[2].0.s().frame != rigs[0].0.s().frame {
                 return Err(format!("frame {frame}: /api/frame's points changed with a cue prepared"));
             }
-            lit.set(lit.get() + main[0].iter().any(|p| p.is_lit()) as usize);
+            lit.fetch_add(main[0].iter().any(|p| p.is_lit()) as usize, std::sync::atomic::Ordering::Relaxed);
         }
         // « Envoyer »: the prepared cue is pressed like any cue.
         let mut s = rigs[2].0.s();
@@ -5084,7 +5336,7 @@ fn nothing_prepared_reaches_any_output_before_it_is_sent() {
         }
         Ok(())
     });
-    assert!(lit.get() > 0, "the sessions sent light");
+    assert!(lit.into_inner() > 0, "the sessions sent light");
 }
 
 /// Armed, nothing on show: a prepared cue, its view rendered every
@@ -5258,92 +5510,102 @@ fn every_export_keeps_the_outdoor_cut() {
     const TOL_DEG: f32 = 0.01;
     let name = "every_export_keeps_the_outdoor_cut";
     let seeds = seeds(477, 60);
-    let _guard = property_guard(name, seeds.len(), 60);
-    let (mut files, mut lit_files, mut cut_files, mut refused) = (0usize, 0usize, 0usize, 0usize);
     let dir = std::env::temp_dir().join(format!("laser-studio-t477-{}", std::process::id()));
-    for &seed in &seeds {
-        let replay = format!("(replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
-        let mut rng = Rng::new(seed);
-        let mut s = test_support::shared();
-        for id in ["p2", "p3", "p4"] {
-            s.outputs.ensure(id).unwrap();
-        }
-        let mut cfg = s.safety.get();
-        let on = rng.chance(0.85);
-        cfg.outdoor = random_outdoor(&mut rng, on);
-        s.safety.set(cfg, true).unwrap_or_else(|e| panic!("setup: outdoor refused: {e:?} {replay}"));
-        s.sky_off = rng.chance(0.3);
-        s.calibration = random_calibration(&mut rng);
-        // random_outdoor sometimes declares p2 and p3; never p4.
-        let output = rng.pick(&[MAIN_OUTPUT, MAIN_OUTPUT, "p2", "p3", "p4"]).to_string();
-        let mut reference = s.safety.get().outdoor;
-        reference.sky_off = s.sky_off;
-        reference.projector = output.clone();
-        let chain = ExportSafety::of(&s, &output).unwrap();
-        let (_, mut look) = random_preset(&s, &mut rng);
-        if matches!(look.content, Content::Ilda { .. }) {
-            look = Settings { content: Content::Shape { shape: "circle".into() }, ..Settings::default() };
-        }
-        look.scale = rng.range(0.3, 1.0);
-        look.brightness = 1.0;
-        let mut check = |bytes: &[u8], what: &str| {
-            let back = crate::ilda::read(bytes).unwrap_or_else(|e| panic!("{name}: {what}: unreadable: {e} {replay}"));
-            for f in &back {
-                let v = crate::outdoor::violations(&f.points, &reference, TOL_DEG);
-                assert_eq!(v, 0, "{name}: {what}, image {}: {v} lit samples/segments outside the declared angles of « {output} » ({reference:?}) {replay}", f.name);
+    // Over every core, a hang caught per case (T-486).
+    let threads = sweep_threads(seeds.len());
+    let guard = test_support::progress_guard(name, threads, CASE_STALL);
+    let add = |t: &mut [usize; 4], c: [usize; 4]| (0..4).for_each(|i| t[i] += c[i]);
+    let (tally, result) = sweep_seeds(&seeds, threads, &guard, |seed, tally: &mut [usize; 4], _| {
+            let (mut files, mut lit_files, mut cut_files, mut refused) = (0usize, 0usize, 0usize, 0usize);
+            let replay = format!("(replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+            let mut rng = Rng::new(seed);
+            let mut s = test_support::shared();
+            for id in ["p2", "p3", "p4"] {
+                s.outputs.ensure(id).unwrap();
             }
-            files += 1;
-            lit_files += back.iter().flat_map(|f| &f.points).any(|p| p.is_lit()) as usize;
-            cut_files += reference.active() as usize;
-        };
-        // 1. The look export (what the SD bank runs for each slot).
-        match export_look(&look, 8, 25.0, 120.0, &chain) {
-            Ok(e) => check(&e.bytes, "look export"),
-            Err(_) => refused += 1,
-        }
-        // 2. The SD bank through its own prepare / export (every 4th case: files on disk).
-        if seed % 4 == 0 {
-            let id = s.presets.iter().find(|p| !matches!(p.settings.content, Content::Ilda { .. })).unwrap().id.clone();
-            s.sdbank.set(crate::sdbank::SdBank { slots: vec![crate::sdbank::SdSlot { number: 7, cue_id: id, seconds: 0.2 }] }).unwrap();
-            let card = dir.join(format!("card-{seed}"));
-            match crate::sdbank::prepare(&s, &output).and_then(|job| crate::sdbank::export(&job, &card)) {
-                Ok(_) => check(&std::fs::read(card.join("007.ild")).unwrap(), "SD bank"),
+            let mut cfg = s.safety.get();
+            let on = rng.chance(0.85);
+            cfg.outdoor = random_outdoor(&mut rng, on);
+            s.safety.set(cfg, true).unwrap_or_else(|e| panic!("setup: outdoor refused: {e:?} {replay}"));
+            s.sky_off = rng.chance(0.3);
+            s.calibration = random_calibration(&mut rng);
+            // random_outdoor sometimes declares p2 and p3; never p4.
+            let output = rng.pick(&[MAIN_OUTPUT, MAIN_OUTPUT, "p2", "p3", "p4"]).to_string();
+            let mut reference = s.safety.get().outdoor;
+            reference.sky_off = s.sky_off;
+            reference.projector = output.clone();
+            let chain = ExportSafety::of(&s, &output).unwrap();
+            let (_, mut look) = random_preset(&s, &mut rng);
+            if matches!(look.content, Content::Ilda { .. }) {
+                look = Settings { content: Content::Shape { shape: "circle".into() }, ..Settings::default() };
+            }
+            look.scale = rng.range(0.3, 1.0);
+            look.brightness = 1.0;
+            let mut check = |bytes: &[u8], what: &str| {
+                let back = crate::ilda::read(bytes).unwrap_or_else(|e| panic!("{name}: {what}: unreadable: {e} {replay}"));
+                for f in &back {
+                    let v = crate::outdoor::violations(&f.points, &reference, TOL_DEG);
+                    assert_eq!(v, 0, "{name}: {what}, image {}: {v} lit samples/segments outside the declared angles of « {output} » ({reference:?}) {replay}", f.name);
+                }
+                files += 1;
+                lit_files += back.iter().flat_map(|f| &f.points).any(|p| p.is_lit()) as usize;
+                cut_files += reference.active() as usize;
+            };
+            // 1. The look export (what the SD bank runs for each slot).
+            match export_look(&look, 8, 25.0, 120.0, &chain) {
+                Ok(e) => check(&e.bytes, "look export"),
                 Err(_) => refused += 1,
             }
-            let _ = std::fs::remove_dir_all(&card);
-        }
-        // 3. A live recording: the engine's frames, calibrated, before the safety stage.
-        let mut animator = crate::engine::Animator::starting_at(0.0);
-        let clock = crate::engine::BeatClock { beat: 0.0, bpm: 120.0, beats_per_bar: 4 };
-        let raw: Vec<Vec<Point>> = (0..8)
-            .map(|i| {
-                animator
-                    .render(&look, crate::engine::AudioFeatures::default(), if i == 0 { 0.0 } else { 0.04 }, &clock)
-                    .into_iter()
-                    .map(|p| {
-                        let (x, y) = s.calibration.apply(p.x, p.y);
-                        Point { x, y, ..p }
-                    })
-                    .collect()
-            })
-            .collect();
-        match record::bake(&raw, 25, &chain) {
-            Ok((bytes, ..)) => check(&bytes, "live recording"),
-            Err(_) => refused += 1,
-        }
-        // 4. A timeline export: the show rendered offline, then the same chain.
-        let mut show = Show::new_empty("t477", TimeBase::Seconds);
-        let event = Event { id: 1, start: 0.0, len: 1.0, source: EventSource::Look { settings: look.clone() }, ..Default::default() };
-        show.tracks = vec![Track { name: "Piste 1".into(), layer: 1, events: vec![event], ..Default::default() }];
-        show.sanitize();
-        let job = TimelineJob { show, presets: Vec::new(), palettes: Vec::new(), mixer: crate::layers::Mixer::default(), cue_zones: Default::default(), bpm: 120.0, beats_per_bar: 4, from_s: 0.0, to_s: 0.32 };
-        let rendered = record::render_timeline(&job, 25, &chain, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
-        match record::bake(&rendered, 25, &chain) {
-            Ok((bytes, ..)) => check(&bytes, "timeline export"),
-            Err(_) => refused += 1,
-        }
-    }
+            // 2. The SD bank through its own prepare / export (every 4th case: files on disk).
+            if seed % 4 == 0 {
+                let id = s.presets.iter().find(|p| !matches!(p.settings.content, Content::Ilda { .. })).unwrap().id.clone();
+                s.sdbank.set(crate::sdbank::SdBank { slots: vec![crate::sdbank::SdSlot { number: 7, cue_id: id, seconds: 0.2 }] }).unwrap();
+                let card = dir.join(format!("card-{seed}"));
+                match crate::sdbank::prepare(&s, &output).and_then(|job| crate::sdbank::export(&job, &card)) {
+                    Ok(_) => check(&std::fs::read(card.join("007.ild")).unwrap(), "SD bank"),
+                    Err(_) => refused += 1,
+                }
+                let _ = std::fs::remove_dir_all(&card);
+            }
+            // 3. A live recording: the engine's frames, calibrated, before the safety stage.
+            let mut animator = crate::engine::Animator::starting_at(0.0);
+            let clock = crate::engine::BeatClock { beat: 0.0, bpm: 120.0, beats_per_bar: 4 };
+            let raw: Vec<Vec<Point>> = (0..8)
+                .map(|i| {
+                    animator
+                        .render(&look, crate::engine::AudioFeatures::default(), if i == 0 { 0.0 } else { 0.04 }, &clock)
+                        .into_iter()
+                        .map(|p| {
+                            let (x, y) = s.calibration.apply(p.x, p.y);
+                            Point { x, y, ..p }
+                        })
+                        .collect()
+                })
+                .collect();
+            match record::bake(&raw, 25, &chain) {
+                Ok((bytes, ..)) => check(&bytes, "live recording"),
+                Err(_) => refused += 1,
+            }
+            // 4. A timeline export: the show rendered offline, then the same chain.
+            let mut show = Show::new_empty("t477", TimeBase::Seconds);
+            let event = Event { id: 1, start: 0.0, len: 1.0, source: EventSource::Look { settings: look.clone() }, ..Default::default() };
+            show.tracks = vec![Track { name: "Piste 1".into(), layer: 1, events: vec![event], ..Default::default() }];
+            show.sanitize();
+            let job = TimelineJob { show, presets: Vec::new(), palettes: Vec::new(), mixer: crate::layers::Mixer::default(), cue_zones: Default::default(), bpm: 120.0, beats_per_bar: 4, from_s: 0.0, to_s: 0.32 };
+            let rendered = record::render_timeline(&job, 25, &chain, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+            match record::bake(&rendered, 25, &chain) {
+                Ok((bytes, ..)) => check(&bytes, "timeline export"),
+                Err(_) => refused += 1,
+            }
+            add(tally, [files, lit_files, cut_files, refused]);
+            Ok(())
+    }, add);
+    drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
+    if let Err((seed, e)) = result {
+        panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+    }
+    let [files, lit_files, cut_files, refused] = tally;
     // Both sides of the cut must be exercised: files with light, files cut.
     if seeds.len() >= 30 {
         assert!(lit_files * 4 > files, "only {lit_files} files with light of {files} ({refused} refused)");
@@ -5400,159 +5662,169 @@ fn every_export_is_never_brighter_than_its_projectors_live_output() {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     let name = "every_export_is_never_brighter_than_its_projectors_live_output";
     let seeds = seeds(478, 40);
-    let _guard = property_guard(name, seeds.len(), 40);
     let dir = std::env::temp_dir().join(format!("laser-studio-t478-{}", std::process::id()));
-    let (mut files, mut lit_files, mut placed_cases, mut dimmed_cases, mut extra_files) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    for &seed in &seeds {
-        let replay = format!("(replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
-        let mut rng = Rng::new(seed);
-        let mut s = test_support::shared();
-        s.tempo.set_bpm_manual(120.0, 0.0);
-        s.mixer.point_budget = crate::layers::MAX_POINT_BUDGET;
-        // The venue: main, then up to two more, some bound to an output.
-        let extras = rng.below(3);
-        let mut venue = s.venue.get().clone();
-        for i in 0..extras {
-            let output = rng.chance(0.5).then(|| format!("rec{}", i + 2));
-            venue.projectors.push(crate::venue::Projector { id: format!("p{}", i + 2), output, ..Default::default() });
-        }
-        s.venue.set(venue).unwrap_or_else(|e| panic!("{name}: venue refused: {e:#} {replay}"));
-        let projectors: Vec<String> = std::iter::once(MAIN_OUTPUT.to_string()).chain((0..extras).map(|i| format!("p{}", i + 2))).collect();
-        for p in &projectors {
-            s.outputs.ensure(p).unwrap();
-            let _ = s.outputs.set(p, Some(random_limits(&mut rng)), None, false, true);
-            let _ = s.outputs.set_color(p, random_color(&mut rng), false, true);
-            let mut scan = random_output_scan(&mut rng);
-            // Thinning is proven by T-476; here both sides keep every point.
-            scan.max_points = 0;
-            let _ = s.outputs.set_scan(p, scan, false);
-        }
-        // Projection zones bound to projectors, outputs or nothing, groups.
-        let mut projection = random_projection(&mut rng);
-        for z in &mut projection.zones {
-            if rng.chance(0.5) {
-                z.output = Some(rng.pick(&["main", "p2", "p3", "rec2", "test"]).to_string());
+    // Over every core, a hang caught per case (T-486).
+    let threads = sweep_threads(seeds.len());
+    let guard = test_support::progress_guard(name, threads, CASE_STALL);
+    let add = |t: &mut [usize; 5], c: [usize; 5]| (0..5).for_each(|i| t[i] += c[i]);
+    let (tally, result) = sweep_seeds(&seeds, threads, &guard, |seed, tally: &mut [usize; 5], _| {
+            let (mut files, mut lit_files, mut placed_cases, mut dimmed_cases, mut extra_files) = (0usize, 0usize, 0usize, 0usize, 0usize);
+            let replay = format!("(replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+            let mut rng = Rng::new(seed);
+            let mut s = test_support::shared();
+            s.tempo.set_bpm_manual(120.0, 0.0);
+            s.mixer.point_budget = crate::layers::MAX_POINT_BUDGET;
+            // The venue: main, then up to two more, some bound to an output.
+            let extras = rng.below(3);
+            let mut venue = s.venue.get().clone();
+            for i in 0..extras {
+                let output = rng.chance(0.5).then(|| format!("rec{}", i + 2));
+                venue.projectors.push(crate::venue::Projector { id: format!("p{}", i + 2), output, ..Default::default() });
             }
-        }
-        let ids: Vec<u8> = projection.zones.iter().map(|z| z.id).collect();
-        projection.groups = random_groups(&mut rng, &ids);
-        let _ = s.projection.set(projection);
-        s.calibration = random_calibration(&mut rng);
-        let mut cfg = random_safety(&mut rng);
-        for z in &mut cfg.zones {
-            z.audience = rng.chance(0.2);
-        }
-        if rng.chance(0.3) {
-            cfg.outdoor = random_outdoor(&mut rng, true);
-        }
-        if s.safety.set(cfg.clone(), true).is_err() {
-            cfg.outdoor = Default::default();
-            let _ = s.safety.set(cfg, true);
-        }
-        s.sky_off = rng.chance(0.3);
-        // A static look, launched as a cue routed to random zones.
-        let shape = rng.pick(&["square", "circle", "triangle", "star"]).to_string();
-        let channel = |rng: &mut Rng| if rng.chance(0.5) { 255 } else { rng.below(256) as u8 };
-        let look = Settings {
-            content: Content::Shape { shape },
-            color: [channel(&mut rng), channel(&mut rng), channel(&mut rng)],
-            scale: rng.range(0.2, 0.9),
-            rotation_speed: 0.0,
-            brightness: 1.0,
-            ..Settings::default()
-        };
-        let k = s.presets.iter().position(|p| !matches!(p.settings.content, Content::Ilda { .. })).unwrap();
-        s.presets[k].settings = look.clone();
-        let cue = s.presets[k].id.clone();
-        let mut zones: Vec<u8> = (0..rng.below(3)).map(|_| *rng.pick(&ids)).collect();
-        if rng.chance(0.1) {
-            zones.push(MAX_ZONES + 1); // a zone that does not exist
-        }
-        let slot = s.deck.slot(&cue);
-        s.deck.set_slot(&cue, CueSlot { zones: zones.clone(), ..slot });
-        assert!(controls::send_prepared(&mut s, &cue, Some(ClickMode::Toggle), look.clone(), None), "{name}: cue not launched {replay}");
-        // The live reference, with a live recording of one projector.
-        let target = rng.pick(&projectors).clone();
-        let mut rig = Rig::new(s, "export-parity", seed);
-        for _ in 0..60 {
-            rig.tick();
-        }
-        let req = RecordRequest { seconds: 0.4, fps: 25, output: Some(target.clone()), ..Default::default() };
-        let rx = {
-            let mut s = rig.s();
-            let now = s.now_s();
-            s.recorder.start(&req, now, &target).unwrap().1
-        };
-        for _ in 0..30 {
-            rig.tick();
-        }
-        let recorded: Vec<Vec<Point>> = rx.try_iter().collect();
-        assert_eq!(recorded.len(), 10, "{name}: recorded images {replay}");
-        let live_of = |s: &Shared, p: &str| -> Vec<Point> {
-            if p == MAIN_OUTPUT {
-                s.frame.clone()
-            } else {
-                s.projector_frames.iter().find(|f| f.id == p).unwrap_or_else(|| panic!("{name}: no live frame for {p} {replay}")).points.clone()
+            s.venue.set(venue).unwrap_or_else(|e| panic!("{name}: venue refused: {e:#} {replay}"));
+            let projectors: Vec<String> = std::iter::once(MAIN_OUTPUT.to_string()).chain((0..extras).map(|i| format!("p{}", i + 2))).collect();
+            for p in &projectors {
+                s.outputs.ensure(p).unwrap();
+                let _ = s.outputs.set(p, Some(random_limits(&mut rng)), None, false, true);
+                let _ = s.outputs.set_color(p, random_color(&mut rng), false, true);
+                let mut scan = random_output_scan(&mut rng);
+                // Thinning is proven by T-476; here both sides keep every point.
+                scan.max_points = 0;
+                let _ = s.outputs.set_scan(p, scan, false);
             }
-        };
-        let mut check = |s: &Shared, bytes: &[u8], p: &str, what: &str| {
-            let live = live_of(s, p);
-            let back = crate::ilda::read(bytes).unwrap_or_else(|e| panic!("{name}: {what}: unreadable: {e} {replay}"));
-            for f in &back {
-                let bad = brighter_than_live(&f.points, &live);
-                assert!(
-                    bad.is_empty(),
-                    "{name}: {what} for « {p} », image {}: {} lit points brighter or less cut than its live output, first: {} {replay}",
-                    f.name,
-                    bad.len(),
-                    bad[0]
-                );
+            // Projection zones bound to projectors, outputs or nothing, groups.
+            let mut projection = random_projection(&mut rng);
+            for z in &mut projection.zones {
+                if rng.chance(0.5) {
+                    z.output = Some(rng.pick(&["main", "p2", "p3", "rec2", "test"]).to_string());
+                }
             }
-            files += 1;
-            extra_files += (p != MAIN_OUTPUT) as usize;
-            lit_files += back.iter().flat_map(|f| &f.points).any(|q| q.is_lit()) as usize;
-        };
-        // The SD bank (every 3rd case) exports this cue in slot 7.
-        if seed % 3 == 0 {
-            rig.s().sdbank.set(crate::sdbank::SdBank { slots: vec![crate::sdbank::SdSlot { number: 7, cue_id: cue.clone(), seconds: 0.2 }] }).unwrap();
-        }
-        let s = rig.s();
-        for p in &projectors {
-            let chain = ExportSafety::of(&s, p).unwrap();
-            // 1. The look export (what `GET /api/media/ilda/export?id=` runs).
-            if let Ok(e) = export_cue(&look, &zones, 6, 25.0, 120.0, &chain) {
-                check(&s, &e.bytes, p, "look export");
+            let ids: Vec<u8> = projection.zones.iter().map(|z| z.id).collect();
+            projection.groups = random_groups(&mut rng, &ids);
+            let _ = s.projection.set(projection);
+            s.calibration = random_calibration(&mut rng);
+            let mut cfg = random_safety(&mut rng);
+            for z in &mut cfg.zones {
+                z.audience = rng.chance(0.2);
             }
-            // 2. A timeline export of the cue.
-            let mut show = Show::new_empty("t478", TimeBase::Seconds);
-            let event = Event { id: 1, start: 0.0, len: 1.0, source: EventSource::Cue { id: cue.clone() }, ..Default::default() };
-            show.tracks = vec![Track { name: "Piste 1".into(), layer: 1, events: vec![event], ..Default::default() }];
-            show.sanitize();
-            let job = TimelineJob::of(&s, show, 0.0, 0.24);
-            let rendered = record::render_timeline(&job, 25, &chain, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
-            if let Ok((bytes, ..)) = record::bake(&rendered, 25, &chain) {
-                check(&s, &bytes, p, "timeline export");
+            if rng.chance(0.3) {
+                cfg.outdoor = random_outdoor(&mut rng, true);
             }
-        }
-        // 3. The live recording, baked for its projector.
-        let chain = ExportSafety::of(&s, &target).unwrap();
-        if let Ok((bytes, ..)) = record::bake(&recorded, 25, &chain) {
-            check(&s, &bytes, &target, "live recording");
-        }
-        // 4. The SD bank through its own prepare / export.
-        if seed % 3 == 0 {
-            let card = dir.join(format!("card-{seed}"));
-            if crate::sdbank::prepare(&s, &target).and_then(|job| crate::sdbank::export(&job, &card)).is_ok() {
-                check(&s, &std::fs::read(card.join("007.ild")).unwrap(), &target, "SD bank");
+            if s.safety.set(cfg.clone(), true).is_err() {
+                cfg.outdoor = Default::default();
+                let _ = s.safety.set(cfg, true);
             }
-            let _ = std::fs::remove_dir_all(&card);
-        }
-        // What the case exercised: a placement that moves the look, a dimmer.
-        let cfg = s.projection.get();
-        placed_cases += cfg.zones.iter().any(|z| !z.geometry.is_identity() || z.output.is_some()) as usize;
-        dimmed_cases += cfg.groups.iter().any(|g| g.master < 1.0) as usize;
-    }
+            s.sky_off = rng.chance(0.3);
+            // A static look, launched as a cue routed to random zones.
+            let shape = rng.pick(&["square", "circle", "triangle", "star"]).to_string();
+            let channel = |rng: &mut Rng| if rng.chance(0.5) { 255 } else { rng.below(256) as u8 };
+            let look = Settings {
+                content: Content::Shape { shape },
+                color: [channel(&mut rng), channel(&mut rng), channel(&mut rng)],
+                scale: rng.range(0.2, 0.9),
+                rotation_speed: 0.0,
+                brightness: 1.0,
+                ..Settings::default()
+            };
+            let k = s.presets.iter().position(|p| !matches!(p.settings.content, Content::Ilda { .. })).unwrap();
+            s.presets[k].settings = look.clone();
+            let cue = s.presets[k].id.clone();
+            let mut zones: Vec<u8> = (0..rng.below(3)).map(|_| *rng.pick(&ids)).collect();
+            if rng.chance(0.1) {
+                zones.push(MAX_ZONES + 1); // a zone that does not exist
+            }
+            let slot = s.deck.slot(&cue);
+            s.deck.set_slot(&cue, CueSlot { zones: zones.clone(), ..slot });
+            assert!(controls::send_prepared(&mut s, &cue, Some(ClickMode::Toggle), look.clone(), None), "{name}: cue not launched {replay}");
+            // The live reference, with a live recording of one projector.
+            let target = rng.pick(&projectors).clone();
+            let mut rig = Rig::new(s, "export-parity", seed);
+            for _ in 0..60 {
+                rig.tick();
+            }
+            let req = RecordRequest { seconds: 0.4, fps: 25, output: Some(target.clone()), ..Default::default() };
+            let rx = {
+                let mut s = rig.s();
+                let now = s.now_s();
+                s.recorder.start(&req, now, &target).unwrap().1
+            };
+            for _ in 0..30 {
+                rig.tick();
+            }
+            let recorded: Vec<Vec<Point>> = rx.try_iter().collect();
+            assert_eq!(recorded.len(), 10, "{name}: recorded images {replay}");
+            let live_of = |s: &Shared, p: &str| -> Vec<Point> {
+                if p == MAIN_OUTPUT {
+                    s.frame.clone()
+                } else {
+                    s.projector_frames.iter().find(|f| f.id == p).unwrap_or_else(|| panic!("{name}: no live frame for {p} {replay}")).points.clone()
+                }
+            };
+            let mut check = |s: &Shared, bytes: &[u8], p: &str, what: &str| {
+                let live = live_of(s, p);
+                let back = crate::ilda::read(bytes).unwrap_or_else(|e| panic!("{name}: {what}: unreadable: {e} {replay}"));
+                for f in &back {
+                    let bad = brighter_than_live(&f.points, &live);
+                    assert!(
+                        bad.is_empty(),
+                        "{name}: {what} for « {p} », image {}: {} lit points brighter or less cut than its live output, first: {} {replay}",
+                        f.name,
+                        bad.len(),
+                        bad[0]
+                    );
+                }
+                files += 1;
+                extra_files += (p != MAIN_OUTPUT) as usize;
+                lit_files += back.iter().flat_map(|f| &f.points).any(|q| q.is_lit()) as usize;
+            };
+            // The SD bank (every 3rd case) exports this cue in slot 7.
+            if seed % 3 == 0 {
+                rig.s().sdbank.set(crate::sdbank::SdBank { slots: vec![crate::sdbank::SdSlot { number: 7, cue_id: cue.clone(), seconds: 0.2 }] }).unwrap();
+            }
+            let s = rig.s();
+            for p in &projectors {
+                let chain = ExportSafety::of(&s, p).unwrap();
+                // 1. The look export (what `GET /api/media/ilda/export?id=` runs).
+                if let Ok(e) = export_cue(&look, &zones, 6, 25.0, 120.0, &chain) {
+                    check(&s, &e.bytes, p, "look export");
+                }
+                // 2. A timeline export of the cue.
+                let mut show = Show::new_empty("t478", TimeBase::Seconds);
+                let event = Event { id: 1, start: 0.0, len: 1.0, source: EventSource::Cue { id: cue.clone() }, ..Default::default() };
+                show.tracks = vec![Track { name: "Piste 1".into(), layer: 1, events: vec![event], ..Default::default() }];
+                show.sanitize();
+                let job = TimelineJob::of(&s, show, 0.0, 0.24);
+                let rendered = record::render_timeline(&job, 25, &chain, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+                if let Ok((bytes, ..)) = record::bake(&rendered, 25, &chain) {
+                    check(&s, &bytes, p, "timeline export");
+                }
+            }
+            // 3. The live recording, baked for its projector.
+            let chain = ExportSafety::of(&s, &target).unwrap();
+            if let Ok((bytes, ..)) = record::bake(&recorded, 25, &chain) {
+                check(&s, &bytes, &target, "live recording");
+            }
+            // 4. The SD bank through its own prepare / export.
+            if seed % 3 == 0 {
+                let card = dir.join(format!("card-{seed}"));
+                if crate::sdbank::prepare(&s, &target).and_then(|job| crate::sdbank::export(&job, &card)).is_ok() {
+                    check(&s, &std::fs::read(card.join("007.ild")).unwrap(), &target, "SD bank");
+                }
+                let _ = std::fs::remove_dir_all(&card);
+            }
+            // What the case exercised: a placement that moves the look, a dimmer.
+            let cfg = s.projection.get();
+            placed_cases += cfg.zones.iter().any(|z| !z.geometry.is_identity() || z.output.is_some()) as usize;
+            dimmed_cases += cfg.groups.iter().any(|g| g.master < 1.0) as usize;
+            add(tally, [files, lit_files, placed_cases, dimmed_cases, extra_files]);
+            Ok(())
+    }, add);
+    drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
+    if let Err((seed, e)) = result {
+        panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+    }
+    let [files, lit_files, placed_cases, dimmed_cases, extra_files] = tally;
     if seeds.len() >= 30 {
         assert!(lit_files * 3 > files, "only {lit_files} files with light of {files}");
         assert!(extra_files * 5 > files, "only {extra_files} files for other projectors of {files}");

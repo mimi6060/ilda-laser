@@ -21,6 +21,25 @@ pub fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("laser-studio-test-{}-{}", std::process::id(), SCRATCH_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
 }
 
+/// T-486: the preset catalogue, the control registry built from it and
+/// the default cue grid resolved on it, as `main` builds them at startup:
+/// built once per test binary (they depend on nothing but the code) and
+/// cloned for each `shared()`, so a test that adds a preset or a control
+/// still only changes its own copy. Building them was a tenth of the
+/// safety fuzz's time.
+fn catalog() -> (Vec<presets::Preset>, controls::ControlRegistry, crate::grid::CueGrid) {
+    static BUILT: std::sync::OnceLock<(Vec<presets::Preset>, controls::ControlRegistry, crate::grid::CueGrid)> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let presets = presets::catalog();
+            let controls = controls::ControlRegistry::build(&presets);
+            let mut grid = crate::grid::CueGrid::default();
+            grid.resolve(&presets);
+            (presets, controls, grid)
+        })
+        .clone()
+}
+
 /// A fresh `Shared` like the one `main` builds. Its stores (scenes, LFOs,
 /// audio routes...) live in a `scratch_dir` of its own: they start empty,
 /// and what a test saves is seen by that test only.
@@ -36,10 +55,7 @@ pub fn shared() -> Shared {
         &Default::default(),
         30_000,
     ));
-    let presets = presets::catalog();
-    let controls = controls::ControlRegistry::build(&presets);
-    let mut grid = crate::grid::CueGrid::default();
-    grid.resolve(&presets);
+    let (presets, controls, grid) = catalog();
     let lfos = lfo::LfoStore::load_or_create(data.join("lfos.json"), &controls);
     let routes = crate::audio::routes::RouteStore::load_or_create(data.join("audio_routes.json"), &controls);
     let fx = crate::fx::FxStore::in_memory(&controls);
@@ -216,6 +232,127 @@ pub fn time_guard(what: &str, limit: std::time::Duration) -> TimeGuard {
         });
     }
     TimeGuard { done }
+}
+
+/// T-486: a hang guard for a test made of many cases, run by one or more
+/// workers: it fires when one case makes no progress for `limit`, not
+/// when the whole test runs long. A total-time limit fired on sound runs
+/// of a busy machine (other test binaries, other worktrees) and so could
+/// not tell a slow run from a hang; this one catches a real hang in
+/// `limit` whatever the machine's load, and names the stuck case.
+///
+/// A worker calls `begin` when it starts a case, `beat` whenever the case
+/// moves on (each frame), `end` when it is done. Dropping the guard (the
+/// test finished, passed or panicked) switches it off.
+#[must_use = "the guard only watches while it is alive"]
+pub struct ProgressGuard {
+    inner: std::sync::Arc<ProgressInner>,
+}
+
+struct ProgressInner {
+    start: Instant,
+    /// Per worker: whether it runs a case, which one, and when it last
+    /// moved (milliseconds since `start`).
+    busy: Vec<std::sync::atomic::AtomicBool>,
+    case: Vec<std::sync::atomic::AtomicU64>,
+    last_ms: Vec<std::sync::atomic::AtomicU64>,
+    done: (std::sync::Mutex<bool>, std::sync::Condvar),
+}
+
+impl ProgressInner {
+    fn now_ms(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+}
+
+impl ProgressGuard {
+    /// Worker `worker` starts case `case` (a seed).
+    pub fn begin(&self, worker: usize, case: u64) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let i = &self.inner;
+        i.last_ms[worker].store(i.now_ms(), SeqCst);
+        i.case[worker].store(case, SeqCst);
+        i.busy[worker].store(true, SeqCst);
+    }
+
+    /// Worker `worker`'s case moved on.
+    pub fn beat(&self, worker: usize) {
+        let i = &self.inner;
+        i.last_ms[worker].store(i.now_ms(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Worker `worker` finished its case.
+    pub fn end(&self, worker: usize) {
+        self.inner.busy[worker].store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        let (lock, cv) = &self.inner.done;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_all();
+    }
+}
+
+/// T-486: a `ProgressGuard` for `workers` workers that ends the test
+/// binary, with a message naming the stuck case, when one case makes no
+/// progress for `limit` (times `LASER_STUDIO_TEST_TIME_SCALE`; `0` turns
+/// it off).
+pub fn progress_guard(what: &str, workers: usize, limit: std::time::Duration) -> ProgressGuard {
+    let scale = time_scale();
+    let what = what.to_string();
+    let on_stall = move |msg: String| {
+        // Straight to stderr: `eprintln!` would be captured by the test
+        // harness, and lost with the process.
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "\n*** T-486: test « {what} »: {msg}: hung? Stopping the test binary. \
+             (LASER_STUDIO_TEST_TIME_SCALE=4 gives a busy machine more time, 0 turns the limits off) ***\n"
+        );
+        std::process::exit(101);
+    };
+    progress_guard_with(workers, (scale > 0.0).then(|| limit.mul_f64(scale)), on_stall)
+}
+
+/// `progress_guard` with what to do on a stall (called once, with a
+/// message naming the case) and an exact limit (`None`: never fires).
+pub fn progress_guard_with(workers: usize, limit: Option<std::time::Duration>, on_stall: impl FnOnce(String) + Send + 'static) -> ProgressGuard {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    let inner = std::sync::Arc::new(ProgressInner {
+        start: Instant::now(),
+        busy: (0..workers).map(|_| AtomicBool::new(false)).collect(),
+        case: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+        last_ms: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+        done: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+    });
+    if let Some(limit) = limit {
+        let watched = std::sync::Arc::clone(&inner);
+        // Looks a few times per limit: a stall is reported at most a
+        // quarter of the limit late.
+        let every = (limit / 4).clamp(std::time::Duration::from_millis(10), std::time::Duration::from_secs(1));
+        let limit_ms = limit.as_millis() as u64;
+        std::thread::spawn(move || {
+            let (lock, cv) = &watched.done;
+            let mut finished = lock.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                finished = cv.wait_timeout(finished, every).unwrap_or_else(|e| e.into_inner()).0;
+                if *finished {
+                    return;
+                }
+                let now = watched.now_ms();
+                let stuck = (0..workers).find(|&w| watched.busy[w].load(SeqCst) && now.saturating_sub(watched.last_ms[w].load(SeqCst)) > limit_ms);
+                if let Some(w) = stuck {
+                    let case = watched.case[w].load(SeqCst);
+                    drop(finished);
+                    on_stall(format!("case SAFETY_SEED={case} made no progress for {limit:?}"));
+                    return;
+                }
+            }
+        });
+    }
+    ProgressGuard { inner }
 }
 
 /// T-358: the whole unit-test binary normally runs in about a minute; a

@@ -913,9 +913,21 @@ pub fn blank_violations(frame: &[Point], zones: &[Zone]) -> usize {
     let polys: Vec<Poly> = zones.iter().filter(|z| z.kind == ZoneKind::Blank).filter_map(Poly::new).collect();
     let inside = |x: f32, y: f32| polys.iter().any(|z| z.covers(x, y));
     let samples = frame.iter().filter(|p| p.is_lit() && inside(p.x, p.y)).count();
+    // A segment whose box (grown by a margin above any rounding of the
+    // samples) meets no zone's box has no sample in a zone: skipped
+    // without sampling (T-486). Non-finite ends are always sampled.
+    let may_meet = |a: &Point, b: &Point| {
+        if !(a.x.is_finite() && a.y.is_finite() && b.x.is_finite() && b.y.is_finite()) {
+            return true;
+        }
+        let m = ON_EDGE + 1e-4 * (1.0 + a.x.abs().max(a.y.abs()).max(b.x.abs()).max(b.y.abs()));
+        let (lo, hi) = ((a.x.min(b.x) - m, a.y.min(b.y) - m), (a.x.max(b.x) + m, a.y.max(b.y) + m));
+        polys.iter().any(|z| !(hi.0 < z.min.0 || lo.0 > z.max.0 || hi.1 < z.min.1 || lo.1 > z.max.1))
+    };
     let segments = frame
         .windows(2)
         .filter(|w| w[0].is_lit() || w[1].is_lit())
+        .filter(|w| may_meet(&w[0], &w[1]))
         .filter(|w| (1..20).any(|s| {
             let t = s as f32 / 20.0;
             inside(w[0].x + (w[1].x - w[0].x) * t, w[0].y + (w[1].y - w[0].y) * t)
@@ -1646,6 +1658,48 @@ mod tests {
             // And the mask, applied after, finds nothing to darken.
             let (_, darkened) = mask(&forbidden).apply(&f);
             assert_eq!(darkened, 0, "seed {seed}");
+        }
+    }
+
+    /// T-486: `blank_violations` skips the segments whose box meets no
+    /// zone; it counts exactly what sampling every segment counts.
+    #[test]
+    fn blank_violations_counts_what_sampling_every_segment_counts() {
+        fn sampled(frame: &[Point], zones: &[Zone]) -> usize {
+            let polys: Vec<Poly> = zones.iter().filter(|z| z.kind == ZoneKind::Blank).filter_map(Poly::new).collect();
+            let inside = |x: f32, y: f32| polys.iter().any(|z| z.covers(x, y));
+            let samples = frame.iter().filter(|p| p.is_lit() && inside(p.x, p.y)).count();
+            let segments = frame
+                .windows(2)
+                .filter(|w| w[0].is_lit() || w[1].is_lit())
+                .filter(|w| (1..20).any(|s| {
+                    let t = s as f32 / 20.0;
+                    inside(w[0].x + (w[1].x - w[0].x) * t, w[0].y + (w[1].y - w[0].y) * t)
+                }))
+                .count();
+            samples + segments
+        }
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut f = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32 * 2.4 - 1.2
+        };
+        let mut hits = 0;
+        for _ in 0..300 {
+            let (x, y, w, h) = (f(), f(), f().abs() * 0.5, f().abs() * 0.5);
+            let zones = vec![rect(x, y, x + w, y + h, ZoneKind::Blank), rect(-x, -y, -x + h, -y + w, ZoneKind::Blank)];
+            let frame: Vec<Point> = (0..40).map(|i| if i % 5 == 0 { Point::blanked(f(), f()) } else { white(f(), f()) }).collect();
+            let n = blank_violations(&frame, &zones);
+            assert_eq!(n, sampled(&frame, &zones));
+            hits += (n > 0) as usize;
+        }
+        assert!(hits > 30, "the frames do cross the zones: {hits}");
+        // Ends exactly on a zone's corner and edge, and outside -1..1.
+        let zones = [rect(0.2, 0.2, 0.4, 0.4, ZoneKind::Blank)];
+        for frame in [vec![white(0.0, 0.2), white(0.2, 0.0)], vec![white(0.4, 0.5), white(0.6, 0.4)], vec![white(-3.0, 0.3), white(3.0, 0.3)]] {
+            assert_eq!(blank_violations(&frame, &zones), sampled(&frame, &zones), "{frame:?}");
         }
     }
 }

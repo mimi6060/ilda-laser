@@ -207,10 +207,12 @@ pub struct ProfileStore {
 
 impl ProfileStore {
     pub fn in_memory() -> Self {
-        let builtin = BUILTIN
-            .iter()
-            .map(|(slug, json)| (slug.to_string(), Profile::parse(json).unwrap_or_else(|e| panic!("built-in profile {slug}: {e}"))))
-            .collect();
+        // Parsed once per process: the same text every time (T-486, the
+        // test fuzz builds a studio per session).
+        static PARSED: std::sync::OnceLock<Vec<(String, Profile)>> = std::sync::OnceLock::new();
+        let builtin = PARSED
+            .get_or_init(|| BUILTIN.iter().map(|(slug, json)| (slug.to_string(), Profile::parse(json).unwrap_or_else(|e| panic!("built-in profile {slug}: {e}")))).collect())
+            .clone();
         ProfileStore { dir: None, builtin, user: BTreeMap::new(), devices: DevicesFile::default(), errors: Vec::new() }
     }
 
