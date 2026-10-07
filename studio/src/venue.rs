@@ -160,11 +160,88 @@ impl Default for Projector {
 pub struct RenderSettings {
     pub haze: f32,
     pub room_light: f32,
+    /// *Simuler les galvos* (T-280): the previews draw the frame as a
+    /// scanner would trace it. Display only, see `GalvoSim`.
+    pub galvo: GalvoSim,
+    /// *Divergence (mrad)* (T-280): full-angle divergence the 3D view
+    /// draws beams with (0: a fixed thin line). Display only.
+    pub divergence_mrad: f32,
 }
 
 impl Default for RenderSettings {
     fn default() -> Self {
-        Self { haze: 0.5, room_light: 0.1 }
+        Self { haze: 0.5, room_light: 0.1, galvo: GalvoSim::default(), divergence_mrad: DEFAULT_DIVERGENCE_MRAD }
+    }
+}
+
+/// Bounds of the galvo simulation's *Réponse (ms)* (T-280).
+pub const GALVO_RESPONSE_MS: (f32, f32) = (0.05, 5.0);
+/// Bounds of the 3D view's *Divergence (mrad)* (T-280).
+pub const DIVERGENCE_MRAD: (f32, f32) = (0.0, 20.0);
+const DEFAULT_RESPONSE_MS: f32 = 0.3;
+const DEFAULT_DIVERGENCE_MRAD: f32 = 1.0;
+
+/// The galvo simulation of the previews (T-280): the page runs the frame
+/// through a second-order low-pass filter at the output's point rate, so
+/// corners round off and an overlong frame flickers, as on a real
+/// scanner. **Display only**: the server only stores these numbers for
+/// the page. They never reach the engine, the safety chain, an output or
+/// an export: the frame sent and `/api/frame` are the same with the
+/// simulation on or off.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GalvoSim {
+    pub enabled: bool,
+    /// The scanner's 10–90 % rise time for a step, milliseconds.
+    pub response_ms: f32,
+}
+
+impl Default for GalvoSim {
+    fn default() -> Self {
+        Self { enabled: false, response_ms: DEFAULT_RESPONSE_MS }
+    }
+}
+
+/// `POST /api/venue/sim` (T-280): the fields to change.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimPatch {
+    pub enabled: Option<bool>,
+    pub response_ms: Option<f32>,
+    pub divergence_mrad: Option<f32>,
+}
+
+impl RenderSettings {
+    /// Every number in range; not finite → its default.
+    pub fn sanitized(&self) -> Self {
+        Self {
+            haze: fix(self.haze, 0.0, 1.0, 0.5),
+            room_light: fix(self.room_light, 0.0, 1.0, 0.1),
+            galvo: GalvoSim { enabled: self.galvo.enabled, response_ms: fix(self.galvo.response_ms, GALVO_RESPONSE_MS.0, GALVO_RESPONSE_MS.1, DEFAULT_RESPONSE_MS) },
+            divergence_mrad: fix(self.divergence_mrad, DIVERGENCE_MRAD.0, DIVERGENCE_MRAD.1, DEFAULT_DIVERGENCE_MRAD),
+        }
+    }
+
+    /// Applies a patch from the API: a number that is not finite is
+    /// refused (French message), one out of range is clamped.
+    pub fn with_sim(&self, patch: &SimPatch) -> Result<Self> {
+        let mut next = *self;
+        if let Some(on) = patch.enabled {
+            next.galvo.enabled = on;
+        }
+        if let Some(ms) = patch.response_ms {
+            if !ms.is_finite() {
+                bail!("Réponse (ms) : nombre invalide");
+            }
+            next.galvo.response_ms = ms;
+        }
+        if let Some(d) = patch.divergence_mrad {
+            if !d.is_finite() {
+                bail!("Divergence (mrad) : nombre invalide");
+            }
+            next.divergence_mrad = d;
+        }
+        Ok(next.sanitized())
     }
 }
 
@@ -347,7 +424,7 @@ impl Venue {
             audience: AudienceArea { rect_m: self.audience.rect_m.map(|v| fix(v, -500.0, 500.0, 0.0)), min_height_m: fix(self.audience.min_height_m, 0.0, 20.0, 3.0) },
             screens,
             projectors,
-            render: RenderSettings { haze: fix(self.render.haze, 0.0, 1.0, 0.5), room_light: fix(self.render.room_light, 0.0, 1.0, 0.1) },
+            render: self.render.sanitized(),
             camera: self.camera.sanitized(),
         }
     }
@@ -467,6 +544,17 @@ impl VenueStore {
         }
         &self.venue.camera
     }
+
+    /// Saves the previews' galvo simulation and divergence (T-280); the
+    /// rest of the venue is untouched. A number that is not finite is
+    /// refused, one out of range clamped.
+    pub fn set_sim(&mut self, patch: &SimPatch) -> Result<RenderSettings> {
+        self.venue.render = self.venue.render.with_sim(patch)?;
+        if let Some(path) = &self.path {
+            crate::datafile::save_json(Path::new(path), &self.venue);
+        }
+        Ok(self.venue.render)
+    }
 }
 
 #[cfg(test)]
@@ -506,6 +594,31 @@ mod tests {
         assert_eq!(store.get().projectors, before);
         let back: Venue = serde_json::from_str(&serde_json::to_string(store.get()).unwrap()).unwrap();
         assert_eq!(back.camera.preset, "top");
+    }
+
+    /// T-280: a venue saved before the galvo simulation loads with it off;
+    /// numbers are clamped, a non-finite one refused by the API and
+    /// repaired in a file; the store changes nothing else.
+    #[test]
+    fn the_galvo_simulation_loads_off_and_is_clamped() {
+        let v: Venue = serde_json::from_str(r#"{"render":{"haze":0.2}}"#).unwrap();
+        assert_eq!((v.render.galvo, v.render.divergence_mrad, v.render.haze), (GalvoSim { enabled: false, response_ms: 0.3 }, 1.0, 0.2));
+        let r = RenderSettings::default();
+        let on = r.with_sim(&SimPatch { enabled: Some(true), response_ms: Some(99.0), divergence_mrad: Some(-3.0) }).unwrap();
+        assert_eq!((on.galvo.enabled, on.galvo.response_ms, on.divergence_mrad), (true, GALVO_RESPONSE_MS.1, 0.0));
+        let low = r.with_sim(&SimPatch { response_ms: Some(0.0), divergence_mrad: Some(500.0), ..Default::default() }).unwrap();
+        assert_eq!((low.galvo.enabled, low.galvo.response_ms, low.divergence_mrad), (false, GALVO_RESPONSE_MS.0, DIVERGENCE_MRAD.1));
+        assert!(r.with_sim(&SimPatch { response_ms: Some(f32::NAN), ..Default::default() }).is_err());
+        assert!(r.with_sim(&SimPatch { divergence_mrad: Some(f32::INFINITY), ..Default::default() }).is_err());
+        let hand = RenderSettings { galvo: GalvoSim { enabled: true, response_ms: f32::NAN }, divergence_mrad: f32::NAN, ..r }.sanitized();
+        assert_eq!((hand.galvo.response_ms, hand.divergence_mrad, hand.galvo.enabled), (0.3, 1.0, true));
+        let mut store = VenueStore::in_memory();
+        let before = store.get().clone();
+        assert!(store.set_sim(&SimPatch { response_ms: Some(f32::NAN), ..Default::default() }).is_err());
+        assert_eq!(store.get(), &before, "a refused patch changes nothing");
+        let saved = store.set_sim(&SimPatch { enabled: Some(true), response_ms: Some(1.0), ..Default::default() }).unwrap();
+        assert_eq!(saved.galvo, GalvoSim { enabled: true, response_ms: 1.0 });
+        assert_eq!((&store.get().projectors, store.get().room, &store.get().camera), (&before.projectors, before.room, &before.camera));
     }
 
     #[test]

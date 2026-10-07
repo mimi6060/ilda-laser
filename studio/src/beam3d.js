@@ -24,6 +24,13 @@
 // Viewpoints (T-278): ready-made cameras computed from the venue (control
 // desk, front row, stage, plan, elevation) plus *Libre*, the last manual
 // position, reached in 400 ms. The page saves the choice in venue.json.
+//
+// Galvo simulation and divergence (T-280): the page may hand frames that
+// it ran through its galvo filter, with the frame as sent (`raw`) beside
+// them; a beam counts as entering the audience if either version of the
+// point does, so the simulation never hides an audience hit. `setSim`
+// sets the flicker gain (never below what the page allows) and the beam
+// divergence. Display only, an approximation of what a projector draws.
 
 export const DEFAULT_ROOM = { w: 10, d: 15, h: 5 };
 export const DEFAULT_PROJECTOR = { pos: [0, 3, 11], yaw: 0, pitch: 0, roll: 0, scanDeg: 40 };
@@ -37,6 +44,8 @@ const DEG = Math.PI / 180;
 // but readable plane at exposure 1 and haze 50 %.
 const BEAM_GAIN = 6, SHEET_GAIN = 5, SPOT_GAIN = 3;
 const BEAM_WIDTH_PX = 2;
+/** Beam diameter at the aperture with divergence on (T-280), metres. */
+const BEAM_W0_M = 0.004;
 const BEAM_STRIDE = 7;   // hit x,y,z, r,g,b, weight
 const SHEET_STRIDE = 7;  // pos x,y,z, r,g,b, weight (3 vertices per triangle)
 /** Colour of a beam that enters the audience volume. */
@@ -148,9 +157,11 @@ function grow(a, need, unit) {
  * from a frame, from item `at.beams` / `at.sheets` on (several projectors
  * share the buffers). Buffers are reused and only grow. Returns the counts.
  * With an audience box (T-279), a beam that enters it is drawn red, and so
- * is a sheet next to it; `inAudience` counts those beams.
+ * is a sheet next to it; `inAudience` counts those beams. `raw` (T-280):
+ * the frame as sent when `points` is its galvo simulation (same length):
+ * a beam is red if its sent point would enter the audience too.
  */
-export function buildGeometry(points, projector, room, geo, withSheets = true, at = { beams: 0, sheets: 0 }, audience = null) {
+export function buildGeometry(points, projector, room, geo, withSheets = true, at = { beams: 0, sheets: 0 }, audience = null, raw = null) {
   const n = points.length;
   geo.beam = grow(geo.beam, (at.beams + n) * BEAM_STRIDE, BEAM_STRIDE);
   if (withSheets) geo.sheet = grow(geo.sheet, (at.sheets + n) * 3 * SHEET_STRIDE, 3 * SHEET_STRIDE);
@@ -158,14 +169,21 @@ export function buildGeometry(points, projector, room, geo, withSheets = true, a
   const mx = projector.mirrorX ? -1 : 1;
   const dir = [0, 0, 0];
   let beams = 0, sheets = 0, inAudience = 0, prev = -1, prevHot = false; // prev = beam index of the previous point if it was lit
-  const hit = [0, 0, 0];
+  const hit = [0, 0, 0], rawDir = [0, 0, 0], rawHit = [0, 0, 0];
   for (let i = 0; i < n; i++) {
     const p = points[i];
     if (!isLit(p)) { prev = -1; continue; }
     pointToDir(mx * p[0], p[1], projector, dir, basis);
     const t = rayBox(o, dir, room).t;
     hit[0] = o[0] + dir[0] * t; hit[1] = o[1] + dir[1] * t; hit[2] = o[2] + dir[2] * t;
-    const hot = !!audience && segmentHitsBox(o, hit, audience);
+    let hot = !!audience && segmentHitsBox(o, hit, audience);
+    const q = raw && raw.length === n ? raw[i] : null;
+    if (!hot && audience && q && (q[0] !== p[0] || q[1] !== p[1])) {
+      pointToDir(mx * q[0], q[1], projector, rawDir, basis);
+      const tr = rayBox(o, rawDir, room).t;
+      rawHit[0] = o[0] + rawDir[0] * tr; rawHit[1] = o[1] + rawDir[1] * tr; rawHit[2] = o[2] + rawDir[2] * tr;
+      hot = segmentHitsBox(o, rawHit, audience);
+    }
     if (hot) inAudience++;
     const [cr, cg, cb] = hot ? AUDIENCE_HIT_RGB : [p[2], p[3], p[4]];
     const b = geo.beam, k = (at.beams + beams) * BEAM_STRIDE;
@@ -373,11 +391,14 @@ layout(location=0) in vec2 aCorner;   // x: 0 at the projector, 1 at the hit; y:
 layout(location=1) in vec3 iHit;
 layout(location=2) in vec4 iColor;    // rgb, weight 1/N
 uniform mat4 uViewProj; uniform vec3 uOrigin; uniform vec2 uViewport; uniform float uWidth;
-out vec3 vWorld; out vec4 vColor; out float vSide;
+// Divergence (T-280): beam width in metres = uW0 + distance · uDivTan,
+// drawn uFocal px per metre at depth 1 (0: a fixed uWidth px line).
+uniform float uW0, uDivTan, uFocal;
+out vec3 vWorld; out vec4 vColor; out float vSide; out float vThin;
 void main() {
   vec4 c0 = uViewProj * vec4(uOrigin, 1.0), c1 = uViewProj * vec4(iHit, 1.0);
   const float E = 0.05;  // keep the segment in front of the camera
-  vColor = iColor; vSide = aCorner.y;
+  vColor = iColor; vSide = aCorner.y; vThin = 1.0;
   if (c0.w < E && c1.w < E) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vWorld = uOrigin; vColor = vec4(0.0); return; }
   float t0 = c0.w < E ? (E - c0.w) / (c1.w - c0.w) : 0.0;
   float t1 = c1.w < E ? (E - c0.w) / (c1.w - c0.w) : 1.0;
@@ -387,7 +408,14 @@ void main() {
   vec2 dir = (b.xy / b.w - a.xy / a.w) * uViewport;
   float len = length(dir);
   vec2 n = len > 1e-4 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
-  c.xy += n * aCorner.y * uWidth / uViewport * c.w;
+  float w = uWidth;
+  if (uFocal > 0.0) {
+    float metres = uW0 + distance(uOrigin, iHit) * t * uDivTan;
+    w = max(uWidth, metres * uFocal / max(c.w, E));
+    // The same light over a wider beam: dimmer, never below a fifth.
+    vThin = max(0.2, uWidth / w);
+  }
+  c.xy += n * aCorner.y * w / uViewport * c.w;
   gl_Position = c;
   vWorld = mix(uOrigin, iHit, t);
 }`;
@@ -395,13 +423,13 @@ void main() {
 const VS_SHEET = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec4 aColor;
 uniform mat4 uViewProj;
-out vec3 vWorld; out vec4 vColor; out float vSide;
-void main() { gl_Position = uViewProj * vec4(aPos, 1.0); vWorld = aPos; vColor = aColor; vSide = 0.0; }`;
+out vec3 vWorld; out vec4 vColor; out float vSide; out float vThin;
+void main() { gl_Position = uViewProj * vec4(aPos, 1.0); vWorld = aPos; vColor = aColor; vSide = 0.0; vThin = 1.0; }`;
 
 // Shared by beams and sheets: energy weight × haze × exp(-σ·d) × clouds.
 const FS_HAZE = `#version 300 es
 precision highp float;
-in vec3 vWorld; in vec4 vColor; in float vSide;
+in vec3 vWorld; in vec4 vColor; in float vSide; in float vThin;
 uniform vec3 uOrigin; uniform float uGain, uSigma, uNoise, uTime;
 out vec4 o;
 float hash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
@@ -412,7 +440,7 @@ float vnoise(vec3 x) {
 }
 void main() {
   float d = distance(vWorld, uOrigin);
-  float k = uGain * vColor.a * exp(-uSigma * d) * (1.0 - vSide * vSide);
+  float k = uGain * vColor.a * vThin * exp(-uSigma * d) * (1.0 - vSide * vSide);
   if (uNoise > 0.0) {
     vec3 p = vWorld * 0.35 + vec3(0.07, 0.02, 0.05) * uTime;
     float n = vnoise(p) * 0.65 + vnoise(p * 2.3) * 0.35;
@@ -485,6 +513,10 @@ export class BeamView {
     // the main one, fed by setFrame. `selected` is drawn highlighted.
     this.projectors = [{ ...projector, pos: [...projector.pos] }];
     this.frames = [[]]; this.selected = -1; this.parts = [];
+    // T-280: the frames as sent, when `frames` hold their galvo simulation.
+    this.rawFrames = [null];
+    // T-280: flicker gain (≤ 1) and divergence; display only.
+    this.sim = { gain: 1, divergenceMrad: 0 };
     this.render = { ...DEFAULT_RENDER, ...render };
     // Safety overlays (T-279): the venue's audience area, the safety
     // settings' zones and horizon, the audience mode. Display only.
@@ -606,12 +638,23 @@ export class BeamView {
   // ----- data in -----
 
   /** A new frame: [x, y, r, g, b] points, as the frame endpoint sends them. */
-  setFrame(points) { this.frames[0] = points; this.dirty = true; }
+  /** `raw` (T-280): the frame as sent, when `points` is its galvo simulation. */
+  setFrame(points, raw = null) { this.frames[0] = points; this.rawFrames[0] = raw; this.dirty = true; }
 
   /** Projector `i`'s frame (T-277: the page hands each projector's points). */
-  setProjectorFrame(i, points) {
+  setProjectorFrame(i, points, raw = null) {
     if (i < 0 || i >= this.projectors.length) return;
-    this.frames[i] = points; this.dirty = true;
+    this.frames[i] = points; this.rawFrames[i] = raw; this.dirty = true;
+  }
+
+  /**
+   * The galvo simulation's display (T-280): `gain` dims the beams of an
+   * overlong frame (clamped to 0.5..1: a beam is never hidden), and
+   * `divergenceMrad` (0..20, full angle) widens the beams with distance.
+   */
+  setSim({ gain, divergenceMrad } = {}) {
+    if (Number.isFinite(gain)) this.sim.gain = clamp(gain, 0.5, 1);
+    if (Number.isFinite(divergenceMrad)) this.sim.divergenceMrad = clamp(divergenceMrad, 0, 20);
   }
 
   /**
@@ -626,6 +669,7 @@ export class BeamView {
     if (projectors && projectors.length) {
       this.projectors = projectors.map(p => ({ ...DEFAULT_PROJECTOR, ...p, pos: [...(p.pos || DEFAULT_PROJECTOR.pos)] }));
       this.frames = this.projectors.map((_, i) => this.frames[i] || []);
+      this.rawFrames = this.projectors.map((_, i) => this.rawFrames[i] || null);
     }
     this.selected = selected;
     this.buildRoom(); this.dirty = true;
@@ -669,7 +713,7 @@ export class BeamView {
     const at = { beams: 0, sheets: 0 }, aud = this.audienceVolume();
     let inAudience = 0;
     this.parts = this.projectors.map((p, i) => {
-      const c = buildGeometry(this.frames[i] || [], p, this.room, this.geo, f.sheets, at, aud);
+      const c = buildGeometry(this.frames[i] || [], p, this.room, this.geo, f.sheets, at, aud, this.rawFrames[i]);
       inAudience += c.inAudience;
       const part = { origin: p.pos, beamStart: at.beams, beams: c.beams, sheetStart: at.sheets, sheets: f.sheets ? c.sheets : 0 };
       at.beams += c.beams; at.sheets += part.sheets;
@@ -961,7 +1005,9 @@ export class BeamView {
       if (this.overlayLines) gl.drawArrays(gl.LINES, this.overlayTris, this.overlayLines);
     }
 
-    const hazeGain = r.exposure * r.haze, sigma = 0.04 * r.haze, noise = f.noise ? 1 : 0;
+    // T-280: an overlong frame's flicker dims everything a little (gain ≥ 0.5).
+    const exposure = r.exposure * this.sim.gain;
+    const hazeGain = exposure * r.haze, sigma = 0.04 * r.haze, noise = f.noise ? 1 : 0;
     const setHaze = (P, gain) => {
       gl.uniformMatrix4fv(P.u.uViewProj, false, vp);
       gl.uniform1f(P.u.uGain, gain); gl.uniform1f(P.u.uSigma, sigma); gl.uniform1f(P.u.uNoise, noise); gl.uniform1f(P.u.uTime, timeS);
@@ -979,6 +1025,10 @@ export class BeamView {
     if (hazeGain > 0 && this.counts.beams) {
       P = this.progs.beam; gl.useProgram(P.p); setHaze(P, hazeGain * BEAM_GAIN);
       gl.uniform2f(P.u.uViewport, S.w, S.h); gl.uniform1f(P.u.uWidth, BEAM_WIDTH_PX * Math.max(0.75, f.scale));
+      // Divergence (T-280): width w0 + d·tan(div), at the camera's scale.
+      const div = this.sim.divergenceMrad / 1000;
+      gl.uniform1f(P.u.uW0, BEAM_W0_M); gl.uniform1f(P.u.uDivTan, Math.tan(div));
+      gl.uniform1f(P.u.uFocal, div > 0 ? S.h / 2 / Math.tan((this.cam.fov || DEFAULT_FOV) * DEG / 2) : 0);
       gl.bindVertexArray(this.beamVao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.beamBuf);
       for (const part of this.parts) {
@@ -993,7 +1043,7 @@ export class BeamView {
     }
     if (r.spots && this.counts.beams) {
       P = this.progs.spot; gl.useProgram(P.p);
-      gl.uniformMatrix4fv(P.u.uViewProj, false, vp); gl.uniform1f(P.u.uGain, r.exposure * SPOT_GAIN);
+      gl.uniformMatrix4fv(P.u.uViewProj, false, vp); gl.uniform1f(P.u.uGain, exposure * SPOT_GAIN);
       gl.uniform1f(P.u.uSize, Math.max(3, 7 * f.scale * (S.h / 800)));
       gl.bindVertexArray(this.spotVao);
       gl.drawArrays(gl.POINTS, 0, this.counts.beams);

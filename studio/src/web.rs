@@ -186,6 +186,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/venue", RouteClass::Safety),
     ("POST", "/api/venue/preset", RouteClass::Safety),
     ("POST", "/api/venue/camera", RouteClass::Play),
+    ("POST", "/api/venue/sim", RouteClass::Play),
     ("GET", "/api/frames", RouteClass::Read),
     ("GET", "/api/projection", RouteClass::Read),
     ("GET", "/api/groups", RouteClass::Read),
@@ -1905,6 +1906,17 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // touches the projectors, the outputs or the arm state.
         (Method::Post, "/api/venue/camera") => match body::<crate::venue::CameraState>(request) {
             Ok(camera) => json_response(json!({ "camera": shared.lock().unwrap().venue.set_camera(camera) })),
+            Err(e) => e,
+        },
+        // The previews' galvo simulation and divergence (T-280): display
+        // settings the page reads back, like the camera. Display only:
+        // nothing here reaches the engine, the safety chain, an output or
+        // an export. A non-finite number is refused, the rest clamped.
+        (Method::Post, "/api/venue/sim") => match body::<crate::venue::SimPatch>(request) {
+            Ok(patch) => match shared.lock().unwrap().venue.set_sim(&patch) {
+                Ok(render) => json_response(json!({ "render": render })),
+                Err(e) => text(400, &e.to_string()),
+            },
             Err(e) => e,
         },
         (Method::Get, "/api/frames") => frames(shared),
@@ -4746,6 +4758,9 @@ pub(crate) fn apply_venue(s: &mut Shared, venue: crate::venue::Venue) -> Result<
     // The viewpoint (T-278) only changes through `/api/venue/camera`: a
     // venue edit or an undo never moves the camera back.
     next.camera = s.venue.get().camera.clone();
+    // Nor the previews' galvo simulation (T-280): `/api/venue/sim` only.
+    let cur = s.venue.get().render;
+    (next.render.galvo, next.render.divergence_mrad) = (cur.galvo, cur.divergence_mrad);
     s.gate.sync_estop(&s.estop);
     if let Some(main) = s.output_mgr.selected() {
         if let Some(p) = next.extras().find(|p| p.output.as_deref() == Some(main.as_str())) {
@@ -6288,6 +6303,39 @@ mod tests {
         assert_eq!((v["venue"]["camera"]["preset"].as_str(), v["venue"]["room"]["width_m"].as_f64()), (Some("front"), Some(12.0)));
         assert_eq!(t.request("POST", "/api/venue/camera", r#"{"preset":"nulle-part"}"#).0, 200);
         assert_eq!(js(&t.request("GET", "/api/venue", "").1)["venue"]["camera"]["preset"], "", "unknown preset: the default view");
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+    }
+
+    /// T-280: the previews' galvo simulation is a view setting: allowed in
+    /// show mode, never undone, clamped, a bad number refused, kept by a
+    /// venue edit, and the arm state and frame are untouched.
+    #[test]
+    fn the_galvo_simulation_is_a_view_setting() {
+        let t = TestServer::start(false);
+        let undo = |t: &TestServer| js(&t.request("GET", "/api/state", "").1)["history"]["undo"].as_u64().unwrap();
+        let n = undo(&t);
+        let v = js(&t.request("GET", "/api/venue", "").1);
+        assert_eq!(v["venue"]["render"]["galvo"]["enabled"], false, "off by default");
+        assert!((v["venue"]["render"]["galvo"]["response_ms"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+        assert_eq!(v["venue"]["render"]["divergence_mrad"].as_f64(), Some(1.0));
+        t.shared.lock().unwrap().show_mode.on = true;
+        let (code, body) = t.request("POST", "/api/venue/sim", r#"{"enabled":true,"response_ms":40,"divergence_mrad":2.5}"#);
+        assert_eq!(code, 200, "a display setting: allowed in show mode");
+        let r = js(&body)["render"].clone();
+        assert_eq!((r["galvo"]["enabled"].as_bool(), r["galvo"]["response_ms"].as_f64(), r["divergence_mrad"].as_f64()), (Some(true), Some(5.0), Some(2.5)), "clamped");
+        t.shared.lock().unwrap().show_mode.on = false;
+        assert_eq!(undo(&t), n, "never in the undo history");
+        for bad in [r#"{"response_ms":"vite"}"#, r#"{"response_ms":1e999}"#, r#"{"divergence_mrad":null,"x":1}"#, "pas du json"] {
+            assert_eq!(t.request("POST", "/api/venue/sim", bad).0, 400, "{bad}");
+        }
+        assert_eq!(js(&t.request("GET", "/api/venue", "").1)["venue"]["render"]["galvo"]["response_ms"].as_f64(), Some(5.0), "a refused post changes nothing");
+        // A venue edit carrying older settings keeps the saved ones.
+        let mut venue = js(&t.request("GET", "/api/venue", "").1)["venue"].clone();
+        venue["render"]["galvo"] = json!({ "enabled": false, "response_ms": 0.3 });
+        venue["room"]["width_m"] = json!(12.0);
+        assert_eq!(t.request("POST", "/api/venue", &venue.to_string()).0, 200);
+        let v = js(&t.request("GET", "/api/venue", "").1);
+        assert_eq!((v["venue"]["render"]["galvo"]["enabled"].as_bool(), v["venue"]["room"]["width_m"].as_f64()), (Some(true), Some(12.0)));
         assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
