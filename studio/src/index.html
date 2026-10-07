@@ -1805,6 +1805,15 @@
   :is(#cmdErr, #cmdEcho)[hidden] { display: none; }
   .found { outline: 2px solid var(--accent) !important; outline-offset: 2px; animation: found-blink .5s ease-in-out 4 alternate; }
   @keyframes found-blink { from { outline-color: var(--accent); box-shadow: 0 0 14px var(--accent); } to { outline-color: transparent; box-shadow: none; } }
+  /* ---------- Cibles miroir (T-109) ---------- */
+  .mtrow { display: flex; flex-wrap: wrap; align-items: end; gap: 6px 10px; padding: 6px 0; border-bottom: 1px solid var(--line, #ffffff14); }
+  .mtrow .mtnum { min-width: 1.6em; font-weight: 600; align-self: center; }
+  .mtrow .mtfield { display: flex; flex-direction: column; }
+  .mtrow .mtfield input[type=number] { width: 5.5em; }
+  .mtrow .mtfield input[type=text] { width: 9em; }
+  .mtrow .mtstatus { flex-basis: 100%; }
+  .mtrow.aiming { outline: 2px solid var(--warn); outline-offset: 2px; }
+  #gTargets { display: flex; flex-wrap: wrap; gap: 4px 12px; }
   /* ---------- Mode nuit (T-282), Theme (T-299) tokens ----------
      The neutral and accent tokens are mixed with black down to --nl; the
      state tokens (--danger, --warn, --ok) and the *-full ones are left
@@ -3531,6 +3540,15 @@
             <option value="3">Pyramide</option><option value="4">Globe</option>
           </select>
         </div>
+        <div id="gTargetsRow" hidden>
+          <div class="sf-sub" id="gTargetsTitle">Cibles allumées</div>
+          <div id="gTargets" role="group" aria-labelledby="gTargetsTitle"></div>
+          <label for="gTargetMode">Allumage</label>
+          <select id="gTargetMode">
+            <option value="0">Toutes ensemble</option><option value="1">Une par pas (chase)</option>
+          </select>
+          <div class="hint">Les cibles se règlent dans RÉGLAGES › Cibles miroir. Chaque faisceau passe par toute la sécurité ; une cible coupée reste noire.</div>
+        </div>
         <div id="gTurnsRow" hidden>
           <label>Vitesse (tours par temps)</label>
           <select id="gTurns">
@@ -4373,6 +4391,19 @@
         <label>Luminosité de la mire <span class="v" id="tpBrightV"></span></label><input type="range" id="tpBright" data-default="20" min="0" max="100" step="1" value="20">
         <div class="row"><button id="tpExit" disabled>Quitter la mire</button></div>
         <div class="hint">Une mire remplace la sortie jusqu'à « Quitter la mire » : les cues restent actifs et la timeline est en pause. Elle passe par la calibration ci-dessus et par toute la sécurité (zones, horizon, plafonds de puissance) ; elle n'arme jamais le laser.</div>
+      </details>
+      <details class="slk-guard" id="mtPanel" data-search="Cibles miroir : boules à facettes, miroirs, faisceaux fixes, viser des points">
+        <summary>Cibles miroir</summary>
+        <div class="shownet-help" id="mtBanner"><b>Faisceaux fixes.</b> Une cible reçoit un faisceau immobile, le contenu le plus dangereux. Il passe par toute la sécurité sans exception (horizon, zones sans laser et Public, mode extérieur et ciel coupé, garde anti-point fixe, limiteur de strobe, plafonds de puissance). Cela ne suffit pas : l'arrêt réel reste matériel (interlock, arrêt d'urgence, clé). Visez laser désarmé, dans l'aperçu, puis vérifiez à faible puissance.</div>
+        <div id="mtList"></div>
+        <div class="row"><button id="mtAdd">Ajouter une cible</button></div>
+        <div class="hint" id="mtAimHint" role="status" hidden>Cliquez l'endroit visé sur l'aperçu 2D. <button id="mtAimCancel">Annuler la visée</button></div>
+        <div id="mtLoosen" hidden>
+          <div id="mtLoosenText"></div>
+          <div class="row"><button id="mtLoosenOk">Confirmer l'assouplissement</button><button id="mtLoosenCancel">Annuler</button></div>
+        </div>
+        <div class="hint sf-error" id="mtError" role="alert"></div>
+        <div class="hint">Jusqu'à 16 cibles, en coordonnées du look (avant la calibration), visées avec le cue sur la zone de projection par défaut. Ajouter ou déplacer une cible demande une confirmation et est refusé laser armé, sous le verrouillage de sécurité et en mode spectacle ; supprimer ou renommer s'applique tout de suite. Une cible sous l'horizon est refusée : un faisceau y est toujours coupé. Une cible dans une zone sans laser ou Public, hors des angles déclarés ou sous le ciel coupé reste noire ; le garde anti-point fixe plafonne la dose d'un faisceau tenu (profil Faisceaux) ou le coupe (profil Strict). Les cues l'allument avec l'effet « Cibles miroir ».</div>
       </details>
     </section>
 
@@ -5579,6 +5610,8 @@ function showSettings() {
     setVal('gLoop', p.loop_mode ?? 'ping_pong');
     setVal('gChase', String(Math.min(7, Math.max(0, Math.round(p.a)))));
     setVal('gSolid', String(Math.min(4, Math.max(0, Math.round(p.a)))));
+    setVal('gTargetMode', p.b >= 0.5 ? '1' : '0');
+    if (s.content.generator === 'mirror_targets') showTargetPicker(p.a);
     showGenHelp(s.content.generator);
   }
   document.querySelectorAll('#shapes button').forEach(b => b.classList.toggle('active', kind === 'shape' && b.dataset.shape === s.content.shape));
@@ -5708,6 +5741,7 @@ const LOOK_EDITS = {
   gLoop: v => genEdit(c => { c.params.loop_mode = v; }),
   gChase: v => genEdit(c => { c.params.a = +v; }),
   gSolid: v => genEdit(c => { c.params.a = +v; }),
+  gTargetMode: v => genEdit(c => { c.params.b = +v; }),
 };
 for (const [id, edit] of Object.entries(LOOK_EDITS)) {
   $(id).addEventListener('input', () => {
@@ -6587,6 +6621,7 @@ function draw(points, c = cv) {
   g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
   const px = p => [(p[0] + 1) / 2 * W, (1 - (p[1] + 1) / 2) * H];
   if (out) drawSafetyOverlay(W, H, px);
+  if (out) drawTargetsOverlay(px);
   // Boost dim colors so a low-brightness look is still visible on screen.
   // T-280: an overlong frame flickers a little when the galvos are simulated.
   const gain = out ? GALVO.gain : 1;
@@ -9670,6 +9705,164 @@ $('preview').addEventListener('click', e => {
   sfDrawing.points.push([q((e.clientX - r.left) / r.width * 2 - 1), q(1 - (e.clientY - r.top) / r.height * 2)]);
   if (sfDrawing.points.length >= 24) finishDrawing();
 });
+// ---------- Cibles miroir (T-109) ----------
+// The machine's targets (GET /api/targets): each one's output point and
+// what the safety stage does there. Adding or moving one asks for the
+// confirmation (409 → « Confirmer »); aiming = the next click on the 2D
+// preview moves it (through the inverse of the calibration).
+let mtView = null, mtPending = null, mtAiming = null;
+async function reloadTargets() {
+  const r = await api('GET', '/api/targets', undefined, { quiet: true });
+  if (!r.ok) return;
+  mtView = await r.json();
+  showTargets();
+}
+function mtItems() { return mtView ? mtView.items.map(t => ({ ...t })) : []; }
+/** The rows' values; a coordinate that is not a number keeps the stored one. */
+function mtFromControls() {
+  const items = mtItems();
+  $('mtList').querySelectorAll('.mtrow').forEach(row => {
+    const t = items[+row.dataset.i];
+    if (!t) return;
+    const num = (cls, old) => { const v = parseFloat(row.querySelector(cls).value); return Number.isFinite(v) ? v : old; };
+    t.name = row.querySelector('.mtname').value.trim() || t.name;
+    t.x = num('.mtx', t.x); t.y = num('.mty', t.y);
+  });
+  return items;
+}
+function showTargets() {
+  const v = mtView;
+  if (!v) return;
+  const el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+  $('mtAdd').disabled = v.items.length >= v.max;
+  if (!v.items.length) $('mtList').replaceChildren(el('div', { className: 'hint', textContent: 'Aucune cible. « Ajouter une cible », puis « Viser » dans l’aperçu.' }));
+  else $('mtList').replaceChildren(...v.items.map((t, i) => {
+    const row = el('div', { className: 'mtrow' + (mtAiming === i ? ' aiming' : '') });
+    row.dataset.i = i;
+    const field = (label, input) => {
+      const f = el('div', { className: 'mtfield' });
+      f.append(el('label', { htmlFor: input.id, textContent: label }), input);
+      return f;
+    };
+    const st = v.status[i] || { reasons: [], level: 1 };
+    const cut = st.level <= 0, dimmed = st.level < 1 || st.guard != null;
+    const msg = st.reasons.length ? st.reasons.join(' · ') : 'Rien sur le trajet : allumée si un cue la vise.';
+    const guard = st.guard != null ? ` · garde anti-point fixe : ${Math.round(st.guard * 100)} %` : '';
+    row.append(
+      el('span', { className: 'mtnum', textContent: String(i + 1) }),
+      field('Nom', el('input', { type: 'text', id: `mtName${i}`, className: 'mtname', maxLength: 40, value: t.name, autocomplete: 'off' })),
+      field('X', el('input', { type: 'number', id: `mtX${i}`, className: 'mtx', min: -1, max: 1, step: 0.01, value: t.x.toFixed(3) })),
+      field('Y', el('input', { type: 'number', id: `mtY${i}`, className: 'mty', min: -1, max: 1, step: 0.01, value: t.y.toFixed(3) })),
+      el('button', { className: 'mtaim', textContent: mtAiming === i ? 'Visée…' : 'Viser', ariaLabel: `Viser la cible ${i + 1} dans l’aperçu` }),
+      el('button', { className: 'mtdel', textContent: 'Supprimer', ariaLabel: `Supprimer la cible ${i + 1}` }),
+      el('div', { className: 'hint mtstatus' + (cut ? ' sf-error' : dimmed ? ' sf-warn' : ''), textContent: (cut ? 'Coupée : ' : dimmed ? 'Atténuée : ' : '') + msg + guard }),
+    );
+    return row;
+  }));
+  $('mtAimHint').hidden = mtAiming == null;
+  if (settings && settings.content && settings.content.generator === 'mirror_targets') showTargetPicker(settings.content.params.a);
+  if (lastPoints && show2d) draw(lastShown);
+}
+/** The look's target checkboxes (bit i = target i + 1). */
+function showTargetPicker(a) {
+  const n = mtView ? mtView.items.length : 0, mask = Number.isFinite(+a) && a > 0 ? Math.round(a) : 0;
+  if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#gTargets')) return;
+  const el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+  if (!n) { $('gTargets').replaceChildren(el('div', { className: 'hint', textContent: 'Aucune cible réglée (RÉGLAGES › Cibles miroir).' })); return; }
+  $('gTargets').replaceChildren(...mtView.items.map((t, i) => {
+    const label = el('label', { className: 'check' });
+    const box = el('input', { type: 'checkbox', checked: !!(mask & (1 << i)) });
+    box.dataset.bit = i;
+    label.append(box, el('span', { textContent: `${i + 1}. ${t.name}` }));
+    return label;
+  }));
+}
+$('gTargets').addEventListener('change', e => {
+  if (!e.target.matches('input[type=checkbox]')) return;
+  let mask = 0;
+  $('gTargets').querySelectorAll('input[type=checkbox]').forEach(b => { if (b.checked) mask |= 1 << +b.dataset.bit; });
+  editLook(genEdit(c => { c.params.a = mask; }));
+});
+async function mtSave(items, confirm = false) {
+  const body = confirm ? { items, confirm_loosen: true } : { items };
+  const r = await api('POST', '/api/targets', body, { quiet: true, ignore: [409] });
+  if (r.ok) {
+    mtView = await r.json(); mtPending = null;
+    $('mtLoosen').hidden = true; $('mtError').textContent = '';
+    showTargets();
+    return;
+  }
+  const text = await r.text();
+  let j = null;
+  try { j = JSON.parse(text); } catch { /* plain text */ }
+  if (r.status === 409 && j && !j.armed) {
+    mtPending = items;
+    $('mtLoosenText').textContent = 'Assouplir la sécurité ? ' + j.loosen.join(' · ');
+    $('mtLoosen').hidden = false;
+    return;
+  }
+  await reloadTargets();
+  $('mtError').textContent = (j && j.error) || text;
+}
+$('mtPanel').addEventListener('toggle', () => { if ($('mtPanel').open) reloadTargets(); });
+$('mtList').addEventListener('change', e => { if (e.target.matches('input')) mtSave(mtFromControls()); });
+$('mtList').addEventListener('click', e => {
+  const row = e.target.closest('.mtrow');
+  if (!row) return;
+  const i = +row.dataset.i;
+  if (e.target.matches('.mtdel')) {
+    const items = mtFromControls();
+    items.splice(i, 1);
+    if (mtAiming != null) mtAiming = null;
+    mtSave(items);
+  } else if (e.target.matches('.mtaim')) {
+    mtAiming = mtAiming === i ? null : i;
+    showTargets();
+  }
+});
+$('mtAdd').addEventListener('click', () => {
+  const items = mtFromControls();
+  items.push({ name: `Cible ${items.length + 1}`, x: 0, y: 0.5 });
+  mtSave(items);
+});
+$('mtAimCancel').addEventListener('click', () => { mtAiming = null; showTargets(); });
+$('mtLoosenOk').addEventListener('click', () => { if (mtPending) mtSave(mtPending, true); });
+$('mtLoosenCancel').addEventListener('click', () => { mtPending = null; $('mtLoosen').hidden = true; reloadTargets(); });
+/** A preview point (output coordinates) back through the calibration. */
+function uncalibrate(x, y) {
+  const c = calibration || {};
+  const sx = c.scale_x || 1, sy = c.scale_y || 1, a = -(c.rotation_deg || 0) * Math.PI / 180;
+  const u = (x - (c.offset_x || 0)) / sx, v = (y - (c.offset_y || 0)) / sy;
+  const clamp = n => Math.round(Math.min(1, Math.max(-1, n)) * 1000) / 1000;
+  return [clamp(u * Math.cos(a) - v * Math.sin(a)), clamp(u * Math.sin(a) + v * Math.cos(a))];
+}
+$('preview').addEventListener('click', e => {
+  if (mtAiming == null || sfDrawing || sfGradPick) return;
+  const r = $('preview').getBoundingClientRect();
+  const [x, y] = uncalibrate((e.clientX - r.left) / r.width * 2 - 1, 1 - (e.clientY - r.top) / r.height * 2);
+  const items = mtFromControls(), i = mtAiming;
+  mtAiming = null;
+  if (!items[i]) return showTargets();
+  items[i].x = x; items[i].y = y;
+  mtSave(items);
+});
+/** The targets on the 2D preview, while their panel is open, one is being
+ * aimed or the look lights them: a ring and the number, red when cut. */
+function drawTargetsOverlay(px) {
+  const lookOn = settings && settings.content && settings.content.generator === 'mirror_targets';
+  if (!mtView || !mtView.items.length || !($('mtPanel').open || mtAiming != null || lookOn)) return;
+  g.save(); g.lineWidth = 2; g.font = '600 22px system-ui, sans-serif'; g.textBaseline = 'bottom';
+  mtView.items.forEach((t, i) => {
+    const st = mtView.status[i];
+    if (!st) return;
+    const [x, y] = px(st.out), cut = st.level <= 0;
+    g.strokeStyle = g.fillStyle = cut ? 'rgba(255,77,79,0.95)' : mtAiming === i ? '#ffb020' : 'rgba(61,220,132,0.95)';
+    g.beginPath(); g.arc(x, y, 14, 0, Math.PI * 2); g.stroke();
+    g.beginPath(); g.moveTo(x - 20, y); g.lineTo(x + 20, y); g.moveTo(x, y - 20); g.lineTo(x, y + 20); g.stroke();
+    g.fillText(String(i + 1), x + 16, y - 10);
+  });
+  g.restore();
+}
 /** Zones and horizon over the 2D preview (translucent red), under the laser. */
 function drawSafetyOverlay(W, H, px) {
   if (!safety || !$('sfOverlay').checked) return;
@@ -15024,12 +15217,15 @@ const GEN_NAMES = { lissajous: 'Lissajous', spirograph: 'Spirographe', rose: 'Ro
   slats: 'Lamelles', aurora: 'Aurore', grid: 'Grille', chase_fan: 'Chaser',
   scissor: 'Ciseaux (X)', hot_beam: 'Faisceau chaud', bundle_burst: 'Faisceaux qui s’ouvrent', beam_v: 'V de faisceaux',
   starfield: 'Ciel étoilé', lightning: 'Éclairs', fat_beams: 'Faisceaux épais',
-  countdown: 'Compte à rebours', wire3d: 'Objet 3D' };
+  countdown: 'Compte à rebours', wire3d: 'Objet 3D', mirror_targets: 'Cibles miroir' };
 
 // Festival fans (T-102) and sheets (T-106): what Nombre / A / B mean for
 // each, plus how the tempo settings drive it. Old generators keep the
 // generic labels. Sheets stay above the audience (never scan it).
 const GEN_HELP = {
+  // Mirror targets (T-109).
+  mirror_targets: ['Non utilisé.', 'Masque des cibles : cochez-les ci-dessous (1 = cible 1, 2 = cible 2, 4 = cible 3…).', 'Allumage : 0 = toutes ensemble, 1 = une par pas.',
+    'En chase, une cible par pas (Pas par temps 1 = une par temps), jamais plus vite que le limiteur de strobe ; ← : dans l’autre sens. Taille et rotation ne déplacent pas les cibles.'],
   // Graphics (T-108).
   countdown: ['Nombre de départ (4 = 4, 3, 2, 1 ; jusqu’à 99).', 'Non utilisé.', 'Non utilisé.',
     'Un nombre par pas depuis le début du cue (Pas par temps 1/4 = un par mesure, 1 = un par temps), puis noir dès le dernier 1/2 temps. Taille = hauteur du chiffre.'],
@@ -15093,6 +15289,7 @@ const GEN_HELP = {
     'La grille défile d’une ligne par temps ; ← : dans l’autre sens.'],
 };
 const GEN_DEFAULTS = {
+  mirror_targets: { count: 1, a: 1, b: 0, period: 4, steps: 1 },
   countdown: { count: 4, a: 0, b: 0, period: 4, steps: 0.25 },
   wire3d: { count: 1, a: 0, b: 0, period: 8, steps: 1 },
   starfield: { count: 6, a: 0, b: 0.1, period: 4, steps: 4 },
@@ -15128,6 +15325,8 @@ function showGenHelp(name) {
   $('gSnapRow').hidden = name !== 'polygon_tunnel';
   $('gChaseRow').hidden = name !== 'chase_fan';
   $('gSolidRow').hidden = name !== 'wire3d';
+  $('gTargetsRow').hidden = name !== 'mirror_targets';
+  if (name === 'mirror_targets' && !mtView) reloadTargets();
   $('gCrossRow').hidden = name !== 'scissor';
   // Slow rotations (1/64 turn per beat) need any value; the ceiling's
   // ripple (0.01 to 0.03) needs hundredths.

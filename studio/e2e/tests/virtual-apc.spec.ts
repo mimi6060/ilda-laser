@@ -101,7 +101,9 @@ test('the drawing never arms: Shift + Stop All is a blackout even with MIDI armi
   await studio.post('/api/midi/safety', { allow_arm: true });
   try {
     await page.locator('#vapcShift').check();
-    // Held past the 1 s arming gesture of the hardware.
+    // Held past the 1 s arming gesture of the hardware (scrolled into view
+    // first: the mouse presses at viewport coordinates).
+    await el(page, 'stop_all').scrollIntoViewIfNeeded();
     const b = await el(page, 'stop_all').boundingBox();
     await page.mouse.move(b!.x + b!.width / 2, b!.y + b!.height / 2);
     await page.mouse.down();

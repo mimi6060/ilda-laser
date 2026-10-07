@@ -175,6 +175,8 @@ pub const GENERATOR_NAMES: &[&str] = &[
     "starfield", "lightning", "fat_beams",
     // Countdown and 3D wireframes (T-108), see `graphics.rs`.
     "countdown", "wire3d",
+    // Mirror targets (T-109), see `targets.rs`.
+    "mirror_targets",
 ];
 
 pub struct Geometry {
@@ -483,7 +485,8 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
             .or_else(|| crate::chases::generate(name, p, ctx))
             .or_else(|| crate::crossings::generate(name, p, ctx))
             .or_else(|| crate::textures::generate(name, p, ctx))
-            .or_else(|| crate::graphics::generate(name, p, ctx)),
+            .or_else(|| crate::graphics::generate(name, p, ctx))
+            .or_else(|| crate::targets::generate(name, p, ctx)),
     }
 }
 

@@ -88,6 +88,8 @@ pub const HANDLER: &[&str] = &[
     "/api/safety/trace",
     "/api/remote",
     "/api/external/gate",
+    // Removing or renaming a mirror target (T-109) only tightens.
+    "/api/targets",
 ];
 
 /// Whether the route gate lets `path` (a Safety-class POST) through while

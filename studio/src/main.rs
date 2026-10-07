@@ -110,6 +110,7 @@ mod record;
 mod remote;
 mod sdbank;
 mod sheets;
+mod targets;
 mod tempo;
 mod take;
 mod templates;
@@ -468,6 +469,9 @@ pub struct Shared {
     /// cue every N bars. Its switch is memory only and off at start; it
     /// never arms.
     pub autopilot: autopilot::AutopilotStore,
+    /// Mirror targets (targets.rs, targets.json, T-109): calibrated points
+    /// of the room. Machine settings, like the calibration.
+    pub targets: targets::TargetStore,
     /// The four cue layers and the point budget (layers.rs), saved to
     /// layers.json when changed.
     pub mixer: layers::Mixer,
@@ -1561,6 +1565,7 @@ fn startup_state(cli: &Cli) -> Shared {
         fx,
         triggers: audio::triggers::TriggerStore::load(cli.data_dir.join("audio_triggers.json")),
         autopilot: autopilot::AutopilotStore::load(cli.data_dir.join("autopilot.json")),
+        targets: targets::TargetStore::load(cli.data_dir.join("targets.json")),
         mixer: {
             let mut m: layers::Mixer = load_json(&cli.data_dir.join("layers.json"));
             m.sanitize();
