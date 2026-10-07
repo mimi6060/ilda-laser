@@ -498,6 +498,8 @@
   #outTag { position: absolute; top: 44px; left: 12px; padding: 2px 10px; border-radius: 999px; background: #000c; color: var(--text); border: 1px solid var(--line); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
   #outTag[hidden] { display: none; }
   .cue.prepared { box-shadow: inset 0 0 0 2px var(--ws-timeline); }
+  /* The cue last pressed in another window (T-281). */
+  .cue.linked { outline: 2px dashed var(--accent); outline-offset: -4px; }
   body.prep-mode #cues .cue { cursor: copy; }
   @media (max-width: 900px) {
     main, main[data-ws-active] { display: flex; flex-direction: column; height: auto; }
@@ -1775,6 +1777,52 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   }
+  /* ---------- Fenêtres supplémentaires (T-281) ----------
+     « Ouvrir une fenêtre ▾ » in the tab bar opens the same page with
+     ?vue=sortie|grille|direct|3d: one region of the interface, the rest
+     hidden. Every one shows the laser state; Échap stops in every one. */
+  #wsTabs #winBtn { align-self: center; margin-left: 6px; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); font-weight: 600; letter-spacing: 0; font-size: 12px; white-space: nowrap; }
+  #wsTabs #winBtn::before { display: none; }
+  #winBtn .short { display: none; }
+  #winBtn svg { width: 14px; height: 14px; vertical-align: -2px; }
+  @media (max-width: 1399px) { #winBtn .long { display: none; } #winBtn .short { display: inline; } }
+  #winMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 2px; min-width: 180px; padding: 6px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
+  #winMenu[hidden] { display: none; }
+  #winMenu button { text-align: left; min-height: 36px; }
+  html.touch #winMenu button { min-height: 44px; }
+  #vueBar { display: flex; align-items: center; gap: 12px; padding: 4px 16px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  #vueBar[hidden] { display: none; }
+  #vueName { font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; color: var(--muted); }
+  #vueHint { margin: 0 auto 0 0; }
+  #vueFull { min-height: 44px; padding: 6px 16px; }
+  #vueArm { padding: 6px 14px; border-radius: 8px; border: 2px solid var(--danger); color: var(--danger); font-weight: 800; letter-spacing: .06em; font-size: 13px; white-space: nowrap; background: #000c; }
+  #vueArm[data-state="armed"] { background: var(--danger); color: #fff; box-shadow: 0 0 18px #ff4d4f88; }
+  #vueArm[data-state="estop"] { background: #d0021b; border-color: #fff; color: #fff; }
+  #vueArm[data-state="lost"] { border-color: var(--warn); color: var(--warn); }
+  html.night #vueArm { color: var(--text-full); }
+  html.night #vueArm:not([data-state="armed"]):not([data-state="estop"]) { color: var(--danger); }
+  /* The top bar shows the arm button in Grille and Direct. */
+  body:is([data-vue="grille"], [data-vue="direct"]) #vueArm { display: none; }
+  /* No workspace tabs in a window: it stays what it was opened as. */
+  body[data-vue] #wsTabs { display: none; }
+  body[data-vue] main, body[data-vue] main[data-ws-active] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  /* Grille: the cue grid alone under the top bar. */
+  body[data-vue="grille"] main[data-ws-active] { grid-template-areas: "cues"; }
+  body[data-vue="grille"] :is(main > .stage, #layerRegion, #livePanel) { display: none !important; }
+  /* Direct: the Direct panel alone, full width. */
+  body[data-vue="direct"] main[data-ws-active] { grid-template-areas: "panel"; }
+  body[data-vue="direct"] :is(main > .stage, #layerRegion, #cueRegion, #liveTabs) { display: none !important; }
+  /* Sortie and 3D: the picture fills the window, the state over it. */
+  body:is([data-vue="sortie"], [data-vue="3d"]) main[data-ws-active] { grid-template-areas: "stage"; height: 100vh; padding: 8px; }
+  body:is([data-vue="sortie"], [data-vue="3d"]) :is(#top > :not(#vueBar), #layerRegion, #livePanel, #cueRegion, .modal, #tourBubble, #tourRing) { display: none !important; }
+  body:is([data-vue="sortie"], [data-vue="3d"]) #vueBar { position: fixed; z-index: 30; top: 10px; right: 10px; gap: 8px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: #000c; }
+  body:is([data-vue="sortie"], [data-vue="3d"]) :is(#vueName, #vueHint) { display: none; }
+  body[data-vue="sortie"] :is(.viewbar, .stats, #render3d, #evoBar, #prepPane, #outTag, #toasts) { display: none !important; }
+  body[data-vue="3d"] :is(#viewSeg, #prepBtn, #prepPane, #outTag, #evoBar) { display: none !important; }
+  body[data-vue="sortie"] .view canvas { pointer-events: none; } /* nothing to turn or click */
+  body[data-vue="sortie"].vue-idle,body[data-vue="sortie"].vue-idle * { cursor: none !important; }
+  body[data-vue="sortie"].vue-idle #vueFull { opacity: 0; }
 </style>
 </head>
 <body>
@@ -1913,6 +1961,9 @@
     <button id="historyBtn" aria-haspopup="true" aria-expanded="false" aria-label="Historique" title="Historique des modifications (cliquer une ligne annule jusqu'à elle)"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.6"/></svg></button>
   </div>
   <!-- Vues enregistrées (T-426): the screen's layout, recalled with Alt+F1…; never the output. -->
+  <!-- Fenêtres supplémentaires (T-281): the same interface, cut down, for a second screen or a touch screen. -->
+  <button id="winBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="winMenu" aria-label="Ouvrir une fenêtre"
+    title="Ouvrir une fenêtre : Sortie, Grille, Direct ou 3D, pour un deuxième écran ou un écran tactile. Chaque fenêtre montre l'état du laser et Échap y reste l'arrêt d'urgence."><span class="long">Ouvrir une fenêtre</span><svg class="short" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="1.5" y="4.5" width="9" height="8" rx="1"/><path d="M5.5 4.5V2.5h9v8h-4"/></svg> ▾</button>
   <button id="viewsBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewsMenu" title="Vues enregistrées : rappeler l'arrangement de l'écran (Alt+F1 … F4, F6 … F9). La sortie ne change pas.">Vues ▾</button>
   <!-- Recherche globale (T-429): Cmd+K or Cmd+F, from every workspace; in the tab bar, the top bar is full. -->
   <button id="searchBtn" aria-haspopup="dialog" aria-expanded="false" title="Rechercher un cue, une page, une scène, un show, un contrôle, un réglage ou une page d'aide (Cmd+K ou Cmd+F)">
@@ -1925,6 +1976,15 @@
   <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
   <button id="helpBtn" aria-haspopup="menu" aria-expanded="false" title="Aide intégrée, raccourcis et visite guidée">? Aide</button>
 </nav>
+<!-- Fenêtre supplémentaire (T-281, ?vue=…): its name, the laser state and
+     « Plein écran ». A strip under the top bar in Grille and Direct; over
+     the picture in Sortie and 3D, where the top bar is not shown. -->
+<div id="vueBar" hidden>
+  <span id="vueName"></span>
+  <span id="vueArm" role="status" aria-live="polite" data-state="off">LASER OFF</span>
+  <span class="hint" id="vueHint">Échap = arrêt d'urgence</span>
+  <button id="vueFull" aria-pressed="false" title="Plein écran. Échap reste l'arrêt d'urgence : quitter le plein écran autrement que par ce bouton arrête aussi le laser.">Plein écran</button>
+</div>
 </div>
 <!-- Recherche globale (T-429): results lead to a place; only « Jouer »
      plays a cue, through the same press as the grid. -->
@@ -1938,6 +1998,12 @@
 </div>
 <!-- Aide (T-437, T-438): the menu behind « ? Aide », no shortcut of its own. -->
 <div id="viewsMenu" role="menu" aria-label="Vues enregistrées" hidden></div>
+<div id="winMenu" role="menu" aria-label="Ouvrir une fenêtre" hidden>
+  <button role="menuitem" data-vue="sortie" title="L'aperçu seul, sans aucun contrôle, pour un écran ou un client">Sortie</button>
+  <button role="menuitem" data-vue="grille" title="La grille de cues et la barre du haut, pour un écran tactile">Grille</button>
+  <button role="menuitem" data-vue="direct" title="La barre du haut et le panneau Direct">Direct</button>
+  <button role="menuitem" data-vue="3d" title="Le visualiseur 3D seul, avec ses réglages">3D</button>
+</div>
 <div id="helpMenu" role="menu" aria-label="Aide" hidden>
   <button role="menuitem" id="helpMenuToc">Sommaire de l'aide</button>
   <button role="menuitem" id="helpMenuFirst">Premier show avec MadMapper et le ShowNET</button>
@@ -4624,6 +4690,22 @@ let settings = null, calibration = null, armed = false, pps = 30000;
 // « Vitesse » presets (research §4.1: glacial … very fast).
 const ROTATING = new Set(['finger_tunnel', 'twin_tunnel', 'sunburst']);
 const TURNS = [0.015625, 0.03125, 0.0625, 0.25, 0.5];
+// Fenêtre supplémentaire (T-281): ?vue=sortie|grille|direct|3d shows one
+// region of this interface (set up further down, « Fenêtres »); null = the
+// whole interface. Read first: the layout code below obeys it.
+const VUES = ['sortie', 'grille', 'direct', '3d'];
+const VUE = (v => VUES.includes(v) ? v : null)(new URLSearchParams(location.search).get('vue'));
+// The layout keys a window never writes (WS_KEY, PANEL_KEY, STAGE_KEY).
+const VUE_LAYOUT_KEYS = ['laserStudio.workspace', 'laserStudio.livePanel', 'laserStudio.stageTab'];
+const VUE_RENDU = (v => ['3d', 'both'].includes(v) ? v : '2d')(new URLSearchParams(location.search).get('rendu'));
+if (VUE) document.body.dataset.vue = VUE;
+// Set when the page goes away: the last requests (releasing what this
+// window held) must outlive it.
+let pageLeaving = false;
+// Windows talk to each other here: { type: 'page', page } and
+// { type: 'select', id } (the cue last pressed, marked in the others).
+const winChan = 'BroadcastChannel' in window ? new BroadcastChannel('laser-studio') : null;
+let linkedCue = null;
 
 // ---------- notification centre (T-432) ----------
 // One place where what went wrong is said, and stays readable: every
@@ -4905,7 +4987,7 @@ const apiSource = path => (API_SOURCES.find(([re]) => re.test(path)) || [null, '
 async function api(method, path, body, opts = {}) {
   const init = { method };
   if (opts.cache) init.cache = opts.cache;
-  if (opts.keepalive) init.keepalive = true;
+  if (opts.keepalive || pageLeaving) init.keepalive = true;
   if (body !== undefined && method !== 'GET') {
     if (body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body)) init.body = body;
     else { init.body = typeof body === 'string' ? body : JSON.stringify(body); init.headers = { 'Content-Type': 'application/json' }; }
@@ -5348,11 +5430,12 @@ function showArmed() {
   $('armBtn').classList.toggle('todo', todo);
   $('armBtn').textContent = armed ? 'LASER ON' : !todo ? 'LASER OFF' : hwStopPending() ? 'Arrêt matériel à vérifier' : 'Liste de contrôle à faire';
   $('offBadge').classList.toggle('hidden', armed);
-  if (!arm) return;
+  if (!arm) return showVueArm();
   $('estopBanner').hidden = !arm.estop;
   const d = arm.last_disarm;
   $('armInfo').textContent = arm.armed ? `Armé depuis ${since(arm.since)} (${arm.source_fr})`
     : d ? `Désarmé — raison : ${d.reason_fr} (${d.source_fr}), ${clock(d.at)}` : 'Désarmé';
+  showVueArm();
 }
 // ShowNET output (T-472): the hardware-stop reminder and the Wi-Fi pill,
 // a permanent warning while the link to the box is the Wi-Fi.
@@ -5702,7 +5785,7 @@ document.addEventListener('keydown', e => {
   downCodes.add(e.code);
   if (pickingHoldKey) { e.preventDefault(); pickHoldKey(e.code); return; }
   const hit = shortcutFor(e, allShortcuts(), shortcutZone(), isTyping());
-  if (!hit) return;
+  if (!hit || !vueAllows(hit.s)) return;
   if (hit.s.down(e, hit.i) !== false) e.preventDefault();
 });
 document.addEventListener('keyup', e => {
@@ -5840,8 +5923,12 @@ window.shortcutsDebug = {
   zone: () => shortcutZone(),
 };
 // A key or button released while the window had no focus never sends its
-// keyup: end every flash still held.
-window.addEventListener('blur', () => {
+// keyup: end every flash still held. Closing the window (or leaving the
+// page) lets go the same way: another window may keep the studio alive,
+// so the presence timeout would not (T-281).
+window.addEventListener('blur', releaseHeld);
+window.addEventListener('pagehide', () => { pageLeaving = true; releaseHeld(); });
+function releaseHeld() {
   for (const id of heldKeys.values()) cueUp(id);
   heldKeys.clear();
   if (pointerCue) { cueUp(pointerCue); pointerCue = null; }
@@ -5852,7 +5939,9 @@ window.addEventListener('blur', () => {
   try { FX_HOLDS.forEach(id => fxHold(id, false)); } catch (err) { console.warn('effets', err); }
   // Executor buttons held by a key or the pointer (T-418).
   try { execReleaseAll(); } catch (err) { console.warn('exécuteurs', err); }
-});
+  // PUPITRE buttons and pads held by the pointer (T-427).
+  try { deskReleaseAll(); } catch (err) { console.warn('pupitre', err); }
+}
 // The look's strobe before S was held (null = not held). Released, the
 // look gets its own strobe back.
 let strobeHeldFrom = null;
@@ -5908,7 +5997,7 @@ beatNow();
 document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible') setHold(false); beatNow(); });
 // Closing the page: gone at once, without waiting for the timeout.
 window.addEventListener('pagehide', () => navigator.sendBeacon('/api/heartbeat', beatBody(true)));
-window.addEventListener('pageshow', e => { if (e.persisted) beatNow(); });
+window.addEventListener('pageshow', e => { if (e.persisted) { pageLeaving = false; beatNow(); } });
 
 function setHold(down) {
   if (holdDown === down) return;
@@ -6422,6 +6511,10 @@ const STAGE_KEY = 'laserStudio.stageTab';
 let show2d = true;
 async function setView(mode) {
   if (!['2d', '3d', 'both'].includes(mode)) mode = '2d';
+  // Windows (T-281): 3D shows the 3D view; Sortie the one its address asks
+  // for (&rendu=3d or both), 2D by default.
+  if (VUE === '3d') mode = '3d';
+  if (VUE === 'sortie') mode = VUE_RENDU;
   const want3d = mode !== '2d';
   if (want3d && !view3d && $('beamsMsg').hidden) {
     try {
@@ -6459,7 +6552,8 @@ document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setV
 let prepMode = false, prepared = null, prepRev = -1, prepTimer = null, prepBusy = false;
 const prepCv = $('prepared');
 function showPrepPane() {
-  const c = prepared && prepared.cue, on = prepMode || !!c;
+  // Not in the Sortie and 3D windows (T-281): the picture stays the output's.
+  const c = prepared && prepared.cue, on = (prepMode || !!c) && VUE !== 'sortie' && VUE !== '3d';
   $('prepPane').hidden = !on; $('outTag').hidden = !on;
   $('preview').parentElement.classList.toggle('prep', on);
   $('prepBtn').classList.toggle('active', prepMode);
@@ -6675,7 +6769,12 @@ const WS_KEY = 'laserStudio.workspace', PANEL_KEY = 'laserStudio.livePanel';
 const WORKSPACES = ['live', 'timeline', 'creation', 'settings', 'desk'];
 let activeWs = 'live';
 function remembered(key) { try { return localStorage.getItem(key); } catch { return null; } }
-function remember(key, v) { try { localStorage.setItem(key, v); } catch { /* private window: not remembered */ } opTouched(); }
+function remember(key, v) {
+  // A window (T-281) shows a fixed layout: it never becomes the main window's.
+  if (VUE && VUE_LAYOUT_KEYS.includes(key)) return;
+  try { localStorage.setItem(key, v); } catch { /* private window: not remembered */ }
+  opTouched();
+}
 // Opérateur (T-426): this browser's localStorage is a cache of the
 // operator's preferences, kept on the studio (<data-dir>/operators). Set
 // up here because remember() runs from the first lines below; the rest is
@@ -6784,7 +6883,7 @@ document.addEventListener('click', e => {
   if (performance.now() - longPressAt < 800) { longPressAt = -Infinity; e.preventDefault(); e.stopImmediatePropagation(); }
 }, true);
 function setWorkspace(ws) {
-  if (!WORKSPACES.includes(ws)) ws = 'live';
+  if (!WORKSPACES.includes(ws) || VUE) ws = 'live'; // every window (T-281) is cut from LIVE
   if (showMode && (ws === 'creation' || ws === 'settings')) ws = 'live'; // T-283
   // PUPITRE (T-427): leaving lets go of what it held and of full screen.
   if (activeWs === 'desk' && ws !== 'desk' && typeof deskLeave === 'function') deskLeave();
@@ -6806,6 +6905,7 @@ function setWorkspace(ws) {
 function setLivePanel(name) {
   const tabs = [...document.querySelectorAll('#liveTabs [data-panel-tab]')];
   if (!tabs.some(b => b.dataset.panelTab === name) || (showMode && name !== 'running' && name !== 'cuelist' && name !== 'fx' && name !== 'macros')) name = 'direct';
+  if (VUE === 'direct') name = 'direct';
   tabs.forEach(b => {
     b.classList.toggle('active', b.dataset.panelTab === name);
     b.setAttribute('aria-selected', String(b.dataset.panelTab === name));
@@ -6824,7 +6924,7 @@ $('midiStatus').style.cursor = 'pointer';
 $('midiStatus').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('midiPanel').open = true; };
 setWorkspace(remembered(WS_KEY));
 setLivePanel(remembered(PANEL_KEY));
-{ const v = remembered(STAGE_KEY); if (v === '3d' || v === 'both') setView(v); }
+{ const v = remembered(STAGE_KEY); if (VUE || v === '3d' || v === 'both') setView(v); }
 
 // ---------- Vues enregistrées et préférences d'opérateur (T-426) ----------
 // A view is the screen's layout (workspace, LIVE panel tab, CRÉATION tab,
@@ -7094,6 +7194,117 @@ renderViewsMenu();
 setTimeout(opInit, 0); // once the whole script has run (grid, timeline, filters)
 // The e2e tests read the operator here: read only.
 window.__operator = () => ({ name: OP.name, ready: OP.ready, views: OP.views.map(v => ({ ...v })), last: OP.last });
+
+// ---------- Fenêtres supplémentaires (T-281) ----------
+// « Ouvrir une fenêtre ▾ » opens this page again with ?vue=…, one window
+// per kind (choosing it again brings it forward), for a second monitor, a
+// touch screen or a client. Every window is a full page of its own: it
+// beats (presence, T-252), reads the engine state from the studio (the
+// pushed state, T-411), shows the laser state, and Échap stops the laser
+// from any of them. It lets go of what it holds (flashes, held buttons,
+// executors) when it loses focus or closes; closing it never arms or
+// disarms by itself. The grid page and the cue last pressed reach the
+// other windows at once through `winChan`, without waiting for the studio.
+const VUE_NAMES = { sortie: 'Sortie', grille: 'Grille', direct: 'Direct', '3d': '3D' };
+const VUE_SIZES = { sortie: [900, 900], grille: [1280, 820], direct: [560, 900], '3d': [1200, 820] };
+function winSend(msg) {
+  try { winChan?.postMessage(msg); } catch (err) { console.warn('fenêtres', err); }
+}
+if (winChan) winChan.onmessage = ({ data: d }) => {
+  if (!d || typeof d !== 'object') return;
+  if (d.type === 'page' && Number.isInteger(d.page) && grid.pages[d.page] && d.page !== gridPage) { gridPage = d.page; renderCues(); }
+  if (d.type === 'select' && typeof d.id === 'string') { linkedCue = d.id; paintCues(); refreshLook(); }
+};
+function openVueWindow(v) {
+  if (!VUE_NAMES[v]) return;
+  const [w, h] = VUE_SIZES[v];
+  const win = window.open('/?vue=' + v, 'laser-studio-' + v, `popup,width=${w},height=${h}`);
+  if (!win) return flash('Fenêtre refusée par le navigateur (fenêtres surgissantes bloquées ?)');
+  try { win.focus(); } catch { /* another origin cannot happen; kept quiet */ }
+}
+function closeWinMenu() { $('winMenu').hidden = true; $('winBtn').setAttribute('aria-expanded', 'false'); }
+$('winBtn').onclick = e => {
+  e.stopPropagation();
+  if (!$('winMenu').hidden) { closeWinMenu(); return; }
+  const r = $('winBtn').getBoundingClientRect(), menu = $('winMenu');
+  menu.hidden = false;
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
+  $('winBtn').setAttribute('aria-expanded', 'true');
+  menu.querySelector('button')?.focus();
+};
+$('winMenu').querySelectorAll('[data-vue]').forEach(b => b.onclick = () => { closeWinMenu(); openVueWindow(b.dataset.vue); });
+$('winMenu').addEventListener('keydown', e => {
+  const items = [...$('winMenu').querySelectorAll('button')], i = items.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus(); }
+});
+document.addEventListener('click', e => { if (!$('winMenu').hidden && !e.target.closest('#winMenu, #winBtn')) closeWinMenu(); });
+// The laser state in the window's own bar: the top bar is not shown in
+// Sortie and 3D. Armed always shows, even with the engine link lost.
+function showVueArm() {
+  if (!VUE) return;
+  const estop = !$('estopBanner').hidden, lost = !$('linkLost').hidden;
+  const [state, text] = estop ? ['estop', 'ARRÊT D\'URGENCE'] : armed ? ['armed', 'LASER ARMÉ'] : lost ? ['lost', 'LASER OFF · MOTEUR ?'] : ['off', 'LASER OFF'];
+  const el = $('vueArm');
+  const full = armed && lost ? text + ' · MOTEUR ?' : text;
+  if (el.dataset.state === state && el.textContent === full) return;
+  el.dataset.state = state;
+  el.textContent = full;
+}
+// « Plein écran »: the whole page, so the laser state stays on screen. As
+// in PUPITRE, Échap is the emergency stop: with the keyboard lock the page
+// gets it; without, the browser uses it to leave full screen, so any exit
+// not asked for with this button stops the laser too.
+const VUEFS = { full: false, ownExit: false };
+async function vueEnterFull() {
+  try { await document.documentElement.requestFullscreen(); } catch { flash('Plein écran refusé par le navigateur'); return; }
+  try { await navigator.keyboard?.lock?.(['Escape']); } catch { /* not available */ }
+  VUEFS.full = true; VUEFS.ownExit = false;
+  $('vueFull').setAttribute('aria-pressed', 'true');
+  $('vueFull').textContent = 'Quitter le plein écran';
+}
+function vueExitFull() {
+  VUEFS.ownExit = true;
+  try { navigator.keyboard?.unlock?.(); } catch { /* not available */ }
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  vueFullOff();
+}
+function vueFullOff() {
+  VUEFS.full = false;
+  $('vueFull').setAttribute('aria-pressed', 'false');
+  $('vueFull').textContent = 'Plein écran';
+}
+document.addEventListener('fullscreenchange', () => {
+  if (document.fullscreenElement || !VUEFS.full) return;
+  const ours = VUEFS.ownExit;
+  vueFullOff();
+  if (!ours) { emergencyStop('keyboard'); afterEscape(); }
+});
+$('vueFull').onclick = () => { if (VUEFS.full) vueExitFull(); else vueEnterFull(); };
+if (VUE) {
+  $('vueBar').hidden = false;
+  $('vueName').textContent = 'Fenêtre ' + VUE_NAMES[VUE];
+  document.title = VUE_NAMES[VUE] + ' — Laser Studio';
+  showVueArm();
+  setInterval(showVueArm, 250);
+  // Sortie: the pointer hides after 2 s without moving.
+  if (VUE === 'sortie') {
+    let idle = 0;
+    const wake = () => { document.body.classList.remove('vue-idle'); clearTimeout(idle); idle = setTimeout(() => document.body.classList.add('vue-idle'), 2000); };
+    ['pointermove', 'pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, wake, { passive: true }));
+    wake();
+  }
+}
+// Which shortcuts a window takes: Sortie and 3D only the safety ones
+// (not arming: their bar has no laser button), and 3D its viewpoints;
+// Grille and Direct all but those that change the workspace or the view.
+function vueAllows(s) {
+  if (!VUE) return true;
+  if (VUE === 'sortie' || VUE === '3d') return (s.group === 'Sécurité' && s.id !== 'arm') || (VUE === '3d' && s.group === 'Vue 3D');
+  return s.group !== 'Espaces de travail' && s.group !== 'Vues';
+}
+// For the e2e tests: read only.
+window.__vue = () => ({ vue: VUE, rendu: VUE === 'sortie' ? VUE_RENDU : null, page: gridPage, linked: linkedCue, channel: !!winChan, full: VUEFS.full });
 // The workspace grid fills the window below the top bar, whose height
 // changes with the banners.
 if (globalThis.ResizeObserver) new ResizeObserver(() => {
@@ -10086,6 +10297,7 @@ const pageKey = i => i < PAGE_FKEYS.length ? PAGE_FKEYS[i] : i < 9 ? `Alt+${i + 
 function selectPage(i) {
   if (!grid.pages[i]) return;
   gridPage = i; renderCues();
+  winSend({ type: 'page', page: i });
   post('/api/control', { id: 'page.' + (i + 1) });
 }
 function renderCues() {
@@ -10422,6 +10634,7 @@ function paintCues() {
     b.classList.toggle('pending', waiting.has(id));
     b.classList.toggle('ending', ending.has(id) && !latched.has(id) && !held.has(id));
     b.classList.toggle('prepared', !!(prepared && prepared.cue && prepared.cue.id === id));
+    b.classList.toggle('linked', id === linkedCue); // pressed in another window (T-281)
     // Playing, for assistive tech (T-436; a gridcell takes aria-selected, not aria-pressed).
     const on = String(latched.has(id) || held.has(id));
     if (b.getAttribute('aria-selected') !== on) b.setAttribute('aria-selected', on);
@@ -10446,7 +10659,10 @@ function showCueDeck(c) {
   paintCues();
 }
 async function cueDown(id, mode) {
-  if (await post('/api/cue', { id, down: true, mode })) refreshLook();
+  if (!(await post('/api/cue', { id, down: true, mode }))) return;
+  refreshLook();
+  if (linkedCue) { linkedCue = null; paintCues(); }
+  winSend({ type: 'select', id });
 }
 async function cueUp(id) {
   if (await post('/api/cue', { id, down: false })) refreshLook();
@@ -17264,7 +17480,7 @@ function showAutosave(a) {
   $('asDelay').disabled = !a.enabled;
   $('asInfo').textContent = a.enabled ? `Sauvegarde ${a.delay_s} s après la dernière modification, dans ${a.dir}` : 'Désactivée';
   const offer = a.offer;
-  if (offer && $('recoverAsk').hidden) {
+  if (offer && $('recoverAsk').hidden && !VUE) { // asked in the main window only (T-281)
     const when = new Date(offer.saved_at_ms).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
     $('recoverWhen').textContent = `Projet « ${offer.project} » : sauvegarde auto du ${when}, plus récente que le projet enregistré.`;
     $('recoverError').textContent = '';
@@ -17596,7 +17812,7 @@ $('whatsNewClose').onclick = async () => {
   $('whatsNew').hidden = true;
   try { await api('POST', '/api/about/seen', {}); } catch { /* shown again on the next load */ }
 };
-checkWhatsNew();
+if (!VUE) checkWhatsNew(); // the main window only (T-281)
 $('projOk').onclick = projDialogOk;
 $('projCancel').onclick = () => { $('projDialog').hidden = true; };
 $('projPath').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); projDialogOk(); } });
@@ -20373,7 +20589,7 @@ setTimeout(dataWarnLoop, 5000);
 midiLoop();
 loadPresence().catch(() => {});
 // T-437: the tour on a fresh data folder, once the page has its state.
-setTimeout(maybeStartTour, 600);
+if (!VUE) setTimeout(maybeStartTour, 600); // the main window only (T-281)
 // T-438: the help, fetched once so it still opens if the network goes.
 setTimeout(() => helpLoad().catch(() => {}), 1500);
 </script>
