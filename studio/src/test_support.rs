@@ -110,6 +110,7 @@ pub fn shared() -> Shared {
         dwell: Default::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
+        take: crate::take::Recorder::default(),
         figures: crate::figures::FigureStore::in_memory(),
         user_cues: crate::usercues::UserCueStore::in_memory(),
         shows: timeline::ShowStore::new(data.join("shows")),

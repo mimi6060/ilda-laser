@@ -315,6 +315,13 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/timeline/templates", RouteClass::Edit),
     ("POST", "/api/timeline/templates/delete", RouteClass::Edit),
     ("POST", "/api/timeline/templates/render", RouteClass::Edit),
+    // Enregistrer le jeu en direct (T-169): recording only observes (Play,
+    // allowed in show mode); laying the take out is an edit's preview.
+    ("GET", "/api/timeline/record", RouteClass::Read),
+    ("POST", "/api/timeline/record/start", RouteClass::Play),
+    ("POST", "/api/timeline/record/stop", RouteClass::Play),
+    ("POST", "/api/timeline/record/discard", RouteClass::Play),
+    ("POST", "/api/timeline/record/take", RouteClass::Edit),
     ("GET", "/api/netin", RouteClass::Read),
     ("POST", "/api/netin", RouteClass::Safety),
     ("GET", "/api/osc/addresses", RouteClass::Read),
@@ -3116,6 +3123,35 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Ok(req) => render_template(req, shared),
             Err(e) => e,
         },
+        // Enregistrer le jeu en direct (T-169, take.rs).
+        (Method::Get, "/api/timeline/record") => json_response(shared.lock().unwrap().take.view()),
+        (Method::Post, "/api/timeline/record/start") => {
+            let mut s = shared.lock().unwrap();
+            if s.timeline.show.is_none() {
+                return text(409, "aucun show chargé");
+            }
+            if s.estop.is_latched() {
+                return text(409, "arrêt d'urgence actif : réinitialiser avant d'enregistrer");
+            }
+            match s.take.start() {
+                Ok(()) => json_response(s.take.view()),
+                Err(why) => text(409, why),
+            }
+        }
+        (Method::Post, "/api/timeline/record/stop") => {
+            let mut s = shared.lock().unwrap();
+            s.take.stop(crate::take::EndReason::User);
+            json_response(s.take.view())
+        }
+        (Method::Post, "/api/timeline/record/discard") => {
+            let mut s = shared.lock().unwrap();
+            s.take.discard();
+            json_response(s.take.view())
+        }
+        (Method::Post, "/api/timeline/record/take") => match body::<TakeRequest>(request) {
+            Ok(req) => take_layout(req, shared),
+            Err(e) => e,
+        },
         (Method::Post, p) if p.starts_with("/api/timeline/") => timeline_route(request, shared, &p["/api/timeline/".len()..]),
         (method, p) if p.starts_with("/api/midi") => midi_route(request, shared, method == Method::Post, p),
         (Method::Get, "/api/netin") => json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now())),
@@ -3830,6 +3866,38 @@ fn timeline_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, action: &s
         _ => return text(404, "not found"),
     }
     json_response(json!(s.timeline.state(&c)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct TakeRequest {
+    /// The page's copy of the show; default: the loaded show.
+    show: Option<crate::timeline::Show>,
+    quantize: crate::take::Quantize,
+}
+
+/// `POST /api/timeline/record/take` (T-169): the pending take laid out as
+/// new tracks *Prise n* added to the show, returned for the page to apply
+/// through `/api/timeline/edit` (one undo step, locks and show mode
+/// checked there). Changes nothing here; the take stays pending until
+/// *Jeter* (the page drops it once the edit is accepted).
+fn take_layout(req: TakeRequest, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let s = shared.lock().unwrap();
+    let Some(take) = s.take.take.as_ref() else { return text(409, "aucune prise à garder") };
+    let Some(loaded) = s.timeline.show.as_ref() else { return text(409, "aucun show chargé") };
+    if loaded.name != take.show || loaded.time_base != take.time_base {
+        return text(409, &format!("la prise a été jouée sur « {} » : rouvrez ce show pour la garder", take.show));
+    }
+    let mut show = req.show.unwrap_or_else(|| loaded.clone());
+    show.sanitize();
+    let built = match crate::take::build(take, &show, req.quantize, s.tempo.beats_per_bar, |id| s.presets.iter().any(|p| p.id == id)) {
+        Ok(b) => b,
+        Err(e) => return text(400, &format!("{e:#}")),
+    };
+    let names: Vec<String> = built.tracks.iter().map(|t| t.name.clone()).collect();
+    show.tracks.extend(built.tracks);
+    show.sanitize();
+    json_response(json!({ "show": show, "added": built.events, "skipped": built.skipped, "tracks": names, "number": built.number }))
 }
 
 #[derive(Deserialize, Default)]
@@ -5345,6 +5413,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     });
     // The show player (T-444).
     v["showlist"] = json!(crate::showlist::summary(s));
+    // The live take (T-169).
+    v["take"] = s.take.view();
     // T-450: free space and the copy to a second location.
     v["storage"] = json!(s.project.backup.status());
     // T-447: the zone trace, its seconds left and its zone.
@@ -5408,6 +5478,8 @@ fn diagnostic_report(url: &str, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
 fn timeline_with_timecode(s: &Shared) -> serde_json::Value {
     let mut tl = json!(s.timeline.state(&s.timeline_clock()));
     tl["timecode"] = crate::timecode::summary(s);
+    // The live take (T-169): its button and counters.
+    tl["take"] = s.take.view();
     tl
 }
 
@@ -6945,6 +7017,51 @@ mod tests {
             assert!(ROUTES.contains(&(m, p, RouteClass::Arm)), "{p}");
         }
         assert!(is_known_route("POST", "/api/timeline/play") && is_known_route("GET", "/api/midi/devices") && !is_known_route("GET", "/nope"));
+    }
+
+    /// T-169: the live take over the API: recording is allowed in show
+    /// mode (it only observes), keeping it is not; the take is laid out as
+    /// new tracks without touching the loaded show; nothing is armed.
+    #[test]
+    fn the_live_take_over_the_api() {
+        use crate::take::{EndReason, Take, TakeEvent};
+        use crate::timeline::{Show, TimeBase};
+        let t = TestServer::start(false);
+        assert_eq!(t.request("POST", "/api/timeline/record/start", "").0, 409, "no show");
+        let cue = t.shared.lock().unwrap().presets[0].id.clone();
+        t.shared.lock().unwrap().timeline.load(Show::new_empty("Morceau", TimeBase::Seconds));
+        assert_eq!(route_class("POST", "/api/timeline/record/start"), Some(RouteClass::Play));
+        assert_eq!(route_class("POST", "/api/timeline/record/take"), Some(RouteClass::Edit));
+        t.shared.lock().unwrap().show_mode.on = true;
+        let (st, body) = t.request("POST", "/api/timeline/record/start", "");
+        assert_eq!((st, js(&body)["state"].clone()), (200, json!("waiting")), "{body}");
+        assert_eq!(js(&t.request("GET", "/api/state", "").1)["take"]["state"], "waiting");
+        assert_eq!(js(&t.request("POST", "/api/timeline/record/stop", "").1)["state"], "idle");
+        let take = Take {
+            show: "Morceau".into(),
+            time_base: TimeBase::Seconds,
+            start: 0.0,
+            end: 4.0,
+            events: vec![TakeEvent { cue: cue.clone(), layer: 2, start: 0.8, end: 3.0 }],
+            envelopes: Vec::new(),
+            reason: EndReason::User,
+        };
+        t.shared.lock().unwrap().take.take = Some(take);
+        assert_eq!(t.request("POST", "/api/timeline/record/start", "").0, 409, "a take waits");
+        assert_eq!(t.request("POST", "/api/timeline/record/take", "{}").0, 423, "keeping it is an edit");
+        t.shared.lock().unwrap().show_mode.on = false;
+        let (st, body) = t.request("POST", "/api/timeline/record/take", r#"{"quantize":"bar"}"#);
+        assert_eq!(st, 200, "{body}");
+        let v = js(&body);
+        assert_eq!((v["added"].clone(), v["tracks"].clone()), (json!(1), json!(["Prise 1"])));
+        let track = &v["show"]["tracks"][2];
+        assert_eq!((track["name"].clone(), track["layer"].clone(), track["events"][0]["start"].clone()), (json!("Prise 1"), json!(2), json!(0.0)));
+        assert_eq!(t.shared.lock().unwrap().timeline.show.as_ref().unwrap().tracks.len(), 2, "the loaded show is untouched");
+        // Another show loaded: the take's positions are not its own.
+        t.shared.lock().unwrap().timeline.load(Show::new_empty("Autre", TimeBase::Seconds));
+        assert_eq!(t.request("POST", "/api/timeline/record/take", "{}").0, 409);
+        assert!(js(&t.request("POST", "/api/timeline/record/discard", "").1)["take"].is_null());
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     /// T-428: the remote access over the main API: off by default, on

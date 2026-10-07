@@ -106,6 +106,7 @@ mod remote;
 mod sdbank;
 mod sheets;
 mod tempo;
+mod take;
 mod templates;
 mod testpattern;
 mod textures;
@@ -486,6 +487,9 @@ pub struct Shared {
     /// The timeline player (timeline.rs): its events play through the
     /// same layers and live stage as the cues. Never arms anything.
     pub timeline: timeline::Player,
+    /// The live take recorder (take.rs, T-169): observes the cues and
+    /// master moves while the timeline plays. Reads only, never arms.
+    pub take: take::Recorder,
     /// Saved shows, `studio-data/shows/`.
     pub shows: timeline::ShowStore,
     /// Timeline templates (templates.rs, T-165), `studio-data/templates/`:
@@ -930,6 +934,8 @@ impl Shared {
         zonetrace::stop(self, "estop");
         // Fades end and waiting cues are dropped at once (T-158 / T-159).
         self.deck.cut_transitions();
+        // A live take ends here, keeping what it captured (T-169).
+        self.take.finish(take::EndReason::EStop);
         // The cue list pauses; it never starts again by itself (T-410).
         self.cue_list.halt();
         self.gate.sync_estop(&self.estop);
@@ -1518,6 +1524,7 @@ fn startup_state(cli: &Cli) -> Shared {
         dwell: dwell::DwellStatus::default(),
         evolving: Vec::new(),
         timeline: timeline::Player::default(),
+        take: take::Recorder::default(),
         shows: timeline::ShowStore::new(cli.data_dir.join("shows")),
         templates: templates::TemplateStore::new(cli.data_dir.join("templates")),
         timecode: timecode::TimecodeState::load(cli.data_dir.join("timecode.json")),
@@ -2710,13 +2717,16 @@ fn timeline_cues(s: &mut Shared, t: f64, clock: &engine::BeatClock) -> Vec<(time
     s.song_sync.sync(&song, &mut s.timeline, &c);
     // Incoming timecode (T-168) has the last word on the playhead.
     timecode::frame(s, &c);
+    let cues = s.timeline.frame(&c);
+    // The live take (T-169) observes the deck and the masters, after the
+    // playhead moved. Reads only.
+    take::frame(s, &c);
     // A cue event plays the cue's grid program too (T-157).
     let with_program = |cue: &timeline::TimelineCue, look: Settings| match &cue.source {
         timeline::EventSource::Cue { id } => s.deck.with_program(id, look),
         timeline::EventSource::Look { .. } => look,
     };
-    s.timeline
-        .frame(&c)
+    cues
         .into_iter()
         .filter_map(|mut cue| {
             let mut look = with_program(&cue, timeline::look_of(&cue, &s.presets)?);
