@@ -616,6 +616,15 @@ impl ProjectionStore {
         }
     }
 
+    /// `save` without waiting for the disk: the engine's once-a-second
+    /// save of the group masters, written by the writer thread after any
+    /// earlier `save` of the zones (T-482).
+    pub fn save_later(&self) {
+        if let Some(path) = &self.path {
+            crate::datafile::save_json_later(Path::new(path), &self.cfg);
+        }
+    }
+
     /// Group `n`'s master (1-based), if the group exists.
     pub fn master(&self, n: usize) -> Option<f32> {
         self.cfg.groups.get(n.checked_sub(1)?).map(|g| g.master)

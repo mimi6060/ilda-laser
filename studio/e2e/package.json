@@ -4,6 +4,7 @@
   "description": "End-to-end click tests for Laser Studio (Playwright, headless Chromium, preview only)",
   "scripts": {
     "test": "playwright test",
+    "soak": "LASER_STUDIO_SOAK=1 caffeinate -dims playwright test --project=soak",
     "install-browser": "playwright install chromium"
   },
   "devDependencies": {

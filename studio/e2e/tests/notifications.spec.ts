@@ -160,6 +160,23 @@ test('Échap stays the emergency stop with toasts on screen, and the stop is pin
   await expect(page.locator('#noticePinned .n-row', { hasText: "Arrêt d'urgence" })).toHaveCount(0);
 });
 
+// T-482 (found by the soak): an open notification or history panel stayed
+// open after Échap, over the e-stop banner, and hid its reset button.
+test('Échap closes the bell and history panels, so the e-stop reset is never covered', async ({ page }) => {
+  for (const [btn, panel] of [['#noticeBtn', '#noticePanel'], ['#historyBtn', '#historyPanel']]) {
+    await page.locator(btn).click();
+    await expect(page.locator(panel)).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#estopBanner')).toBeVisible();
+    await expect(page.locator(panel)).toBeHidden();
+    await expect(page.locator(btn)).toHaveAttribute('aria-expanded', 'false');
+    // A real click: it fails if anything lies over the button.
+    await page.locator('#estopReset').click({ timeout: 3_000 });
+    await expect(page.locator('#estopBanner')).toBeHidden();
+  }
+  expect((await studio.state()).armed).toBe(false);
+});
+
 test('the studio\'s own notices are read only, with ids to read on from', async () => {
   const j = await studio.get('/api/notices?since=0');
   expect(Array.isArray(j.notices)).toBe(true);

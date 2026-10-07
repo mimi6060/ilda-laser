@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 
 /// Folder of the data directory where damaged files are moved.
 pub const QUARANTINE: &str = "quarantine";
@@ -190,9 +190,103 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Like `write_atomic` (temporary file then rename, so a cut write never
 /// leaves half a file; frozen paths skipped) but without waiting for the
-/// disk: for the small settings files saved while the engine lock is held
-/// or from the engine thread, where an fsync could stall a frame.
+/// disk: for the small settings files saved while the engine lock is held.
+/// Written by the one writer thread (see `replace_later`), after every
+/// write queued before it; returns once the file is written.
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let (done, result) = mpsc::channel();
+    match submit(Job { write: Some((path.to_path_buf(), bytes.to_vec())), done: Some(done) }) {
+        // A writer gone in the middle of the job: written here.
+        Ok(()) => result.recv().unwrap_or_else(|_| replace_now(path, bytes)),
+        Err(_) => replace_now(path, bytes),
+    }
+}
+
+/// `replace` without waiting (T-482), for the engine thread's
+/// once-a-second saves (`live.json`, `layers.json`, `speed.json`,
+/// `fx.json`, the group masters in `projection.json`). Written on the
+/// engine thread with its lock held, one such save took up to 130 ms
+/// under disk load: as many frames late. One thread writes every
+/// `replace`, in the order they were asked for, so an older queued copy
+/// never lands over a newer `replace` of the same file (a route saving
+/// the FX grid or the zones). A failure is logged and reported to the
+/// notification centre.
+pub fn replace_later(path: &Path, bytes: Vec<u8>) {
+    if let Err(job) = submit(Job { write: Some((path.to_path_buf(), bytes)), done: None }) {
+        if let Some((path, bytes)) = job.write {
+            report(&path, replace_now(&path, &bytes));
+        }
+    }
+}
+
+/// `save_json` through `replace_later`: serialised now, written by the
+/// writer thread.
+pub fn save_json_later<T: Serialize>(path: &Path, value: &T) {
+    match serde_json::to_vec_pretty(value) {
+        Ok(json) => replace_later(path, json),
+        Err(e) => log::warn!("failed to serialize {}: {e}", path.display()),
+    }
+}
+
+/// Waits until every write queued so far is done (shutdown, tests).
+pub fn flush() {
+    let (done, result) = mpsc::channel();
+    if submit(Job { write: None, done: Some(done) }).is_ok() {
+        let _ = result.recv();
+    }
+}
+
+/// One write for the writer thread; `write: None` marks a `flush`.
+struct Job {
+    write: Option<(PathBuf, Vec<u8>)>,
+    done: Option<mpsc::Sender<Result<()>>>,
+}
+
+/// The writer thread's queue, started on the first write.
+static WRITER: Mutex<Option<mpsc::Sender<Job>>> = Mutex::new(None);
+
+fn submit(job: Job) -> std::result::Result<(), Job> {
+    let mut writer = lock(&WRITER);
+    if writer.is_none() {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let spawned = std::thread::Builder::new().name("datafile-writer".into()).spawn(move || {
+            for job in rx {
+                let result = match &job.write {
+                    Some((path, bytes)) => replace_now(path, bytes),
+                    None => Ok(()),
+                };
+                match (job.done, &job.write) {
+                    (Some(done), _) => {
+                        let _ = done.send(result);
+                    }
+                    (None, Some((path, _))) => report(path, result),
+                    (None, None) => {}
+                }
+            }
+        });
+        if spawned.is_err() {
+            return Err(job);
+        }
+        *writer = Some(tx);
+    }
+    let Some(tx) = writer.as_ref() else { return Err(job) };
+    tx.send(job).map_err(|mpsc::SendError(job)| {
+        // The thread is gone: the next write starts a new one.
+        *writer = None;
+        job
+    })
+}
+
+/// A write nobody waits for: logged if it failed, and reported.
+fn report(path: &Path, result: Result<()>) {
+    if let Err(e) = &result {
+        log::warn!("failed to save {}: {e:#}", path.display());
+    }
+    crate::notices::report_write(path, result.map_err(|e| format!("{e:#}")));
+}
+
+/// The write itself, on the calling thread.
+fn replace_now(path: &Path, bytes: &[u8]) -> Result<()> {
     if is_frozen(path) {
         log::warn!("{} not saved: its damaged file could not be moved aside", path.display());
         return Ok(());
@@ -293,6 +387,100 @@ pub mod tests {
         assert!(matches!(load::<Vec<u32>>(&dir.join("a.json"), &q, false), Loaded::Missing));
         assert!(!q.exists());
         assert!(take_pending(&q).is_empty());
+    }
+
+    /// Holds the writer thread (T-482): a queued write whose temporary file
+    /// is a FIFO waits in `open` until `release` (or the drop) reads it.
+    #[cfg(unix)]
+    struct HeldWriter {
+        fifo: PathBuf,
+        released: bool,
+    }
+
+    #[cfg(unix)]
+    impl HeldWriter {
+        fn new(dir: &Path) -> Self {
+            let fifo = dir.join(".held.json.tmp");
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+            assert!(made.success());
+            replace_later(&dir.join("held.json"), b"1".to_vec());
+            Self { fifo, released: false }
+        }
+        fn release(&mut self) {
+            if !std::mem::replace(&mut self.released, true) {
+                let _ = std::fs::read(&self.fifo);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for HeldWriter {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn later_writes_never_wait_for_the_disk_and_keep_their_order() {
+        let dir = temp_dir("later");
+        let path = dir.join("a.json");
+        let mut held = HeldWriter::new(&dir);
+        let t0 = std::time::Instant::now();
+        replace_later(&path, b"1".to_vec());
+        save_json_later(&path, &2);
+        assert!(t0.elapsed() < std::time::Duration::from_millis(100), "queued without waiting: {:?}", t0.elapsed());
+        assert!(!path.exists(), "still queued behind the held write");
+        // A plain `replace` asked now lands after them, and waits for it.
+        let p = path.clone();
+        let sync = std::thread::spawn(move || replace(&p, b"3"));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!sync.is_finished(), "`replace` returns once written");
+        held.release();
+        sync.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"3", "an older queued copy never lands over a newer write");
+        save_json_later(&path, &4);
+        flush();
+        assert_eq!(std::fs::read(&path).unwrap(), b"4");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-482 (found by the interface soak): the engine saved live.json and
+    /// the other stores itself, with its lock held, once a second; under
+    /// disk load one save held a frame for up to 130 ms. Now a tick with
+    /// every store dirty returns while the disk (the writer) is held.
+    #[cfg(unix)]
+    #[test]
+    fn the_engine_never_waits_for_the_disk() {
+        let dir = temp_dir("engine");
+        let shared = Mutex::new(crate::test_support::shared());
+        let mut engine = crate::Engine::new(&shared, None, dir.join("live.json"), dir.join("layers.json"));
+        let mut now = std::time::Instant::now();
+        engine.last = now;
+        let mut held = HeldWriter::new(&dir);
+        {
+            let mut s = shared.lock().unwrap();
+            s.speed_path = Some(dir.join("speed.json"));
+            (s.live_dirty, s.mixer_dirty, s.speed_dirty, s.groups_dirty, s.fx.dirty) = (true, true, true, true, true);
+        }
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..61 {
+            now += std::time::Duration::from_millis(16);
+            let t0 = std::time::Instant::now();
+            engine.tick(&shared, now);
+            worst = worst.max(t0.elapsed());
+        }
+        let s = shared.lock().unwrap();
+        assert!(!(s.live_dirty || s.mixer_dirty || s.speed_dirty || s.groups_dirty || s.fx.dirty), "saved (queued)");
+        drop(s);
+        assert!(!dir.join("live.json").exists(), "the writer is held: nothing written yet");
+        assert!(worst < std::time::Duration::from_millis(500), "a tick waited for the disk: {worst:?}");
+        held.release();
+        flush();
+        for f in ["live.json", "layers.json", "speed.json"] {
+            assert!(dir.join(f).exists(), "{f} written by the writer thread");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

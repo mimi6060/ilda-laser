@@ -21,7 +21,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 export const REPO_ROOT = path.resolve(__dirname, '..', '..');
-export const STUDIO_BIN = process.env.LASER_STUDIO_BIN ?? path.join(REPO_ROOT, 'target', 'debug', 'laser-studio');
+/**
+ * T-482: `npm run soak` sets LASER_STUDIO_SOAK=1 and runs a release build,
+ * where the engine's « no frame over 50 ms » criterion applies.
+ */
+export const SOAK_RUN = process.env.LASER_STUDIO_SOAK === '1';
+export const STUDIO_BIN = process.env.LASER_STUDIO_BIN ?? path.join(REPO_ROOT, 'target', SOAK_RUN ? 'release' : 'debug', 'laser-studio');
 const USER_PORT = 8080;
 /** `onboarding.json` of a data dir whose guided tour was seen (T-437). */
 export const TOUR_SEEN = '{"tour_done":true,"tour_version":1}';
@@ -112,6 +117,8 @@ export class Studio {
   constructor(private readonly opts: StudioOptions = {}) {}
 
   get url() { return `http://127.0.0.1:${this.port}`; }
+  /** The studio process's PID while it runs (the soak reads its memory and open files). */
+  get pid() { return this.proc?.pid ?? null; }
 
   async start() {
     if (!this.dataDir) {
