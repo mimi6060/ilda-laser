@@ -19,6 +19,7 @@
 //! The source file is never stored: only the resulting figure is saved,
 //! by the user, in `studio-data/figures`.
 
+pub mod obj;
 mod raster;
 mod svg;
 
@@ -239,7 +240,7 @@ pub fn import(bytes: &[u8], file_name: &str, opts: &Options) -> Result<Imported>
 
 /// A valid figure name from a file name: its stem, unsupported characters
 /// replaced by spaces.
-fn default_name(file_name: &str) -> String {
+pub fn default_name(file_name: &str) -> String {
     let base = file_name.rsplit(['/', '\\']).next().unwrap_or("");
     let stem = base.rsplit_once('.').map_or(base, |(s, _)| s);
     let cleaned: String = stem.chars().map(|c| if c.is_alphanumeric() || "-_".contains(c) { c } else { ' ' }).collect();

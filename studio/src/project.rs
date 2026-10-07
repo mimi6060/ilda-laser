@@ -188,6 +188,9 @@ pub struct Project {
     /// The figure library (`figures/`). Missing in projects saved before
     /// T-296: they open with no figures.
     pub figures: Vec<Figure>,
+    /// The 3D object library (`objects/`, T-462). Missing in projects
+    /// saved before T-462: they open with no objects.
+    pub objects: Vec<crate::wire::WireObject>,
     /// The operator's own cues (`user_cues.json`, T-405). Missing in
     /// projects saved before T-405: they open with none.
     pub user_cues: Vec<UserCue>,
@@ -247,6 +250,7 @@ impl Default for Project {
             palettes: Vec::new(),
             midi: MidiSection::default(),
             figures: Vec::new(),
+            objects: Vec::new(),
             user_cues: Vec::new(),
             cue_lists: Vec::new(),
             scan_presets: Vec::new(),
@@ -426,7 +430,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 17] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json", "showlist.json", "pools.json"];
+const WORKING_FILES: [&str; 18] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "objects", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json", "showlist.json", "pools.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -716,6 +720,14 @@ fn check(p: &mut Project) -> Result<()> {
         }
     }
     p.figures.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut objects = HashSet::new();
+    for obj in &mut p.objects {
+        obj.validate()?;
+        if !objects.insert(obj.name.clone()) {
+            bail!("objet 3D en double : « {} »", obj.name);
+        }
+    }
+    p.objects.sort_by(|a, b| a.name.cmp(&b.name));
     crate::usercues::validate(&mut p.user_cues)?;
     let mut lists = HashSet::new();
     for l in &mut p.cue_lists {
@@ -776,6 +788,7 @@ pub fn snapshot(s: &Shared) -> Project {
         palettes: s.palettes.list().to_vec(),
         midi: MidiSection { profiles: s.midi.store.user_profiles().clone() },
         figures: s.figures.list().to_vec(),
+        objects: s.objects.list().to_vec(),
         user_cues: s.user_cues.list().to_vec(),
         cue_lists: s.cue_lists.list().to_vec(),
         scan_presets: s.scan_presets.user().to_vec(),
@@ -797,15 +810,18 @@ pub fn snapshot(s: &Shared) -> Project {
 struct Prepared {
     catalog: Vec<crate::presets::Preset>,
     figure_presets: Vec<crate::presets::Preset>,
+    object_presets: Vec<crate::presets::Preset>,
     user_cue_presets: Vec<crate::presets::Preset>,
 }
 
 fn prepare(p: &mut Project) -> Prepared {
     p.figures = crate::figures::sorted(std::mem::take(&mut p.figures));
+    p.objects = crate::wire::sorted(std::mem::take(&mut p.objects));
     p.user_cues = crate::usercues::checked(std::mem::take(&mut p.user_cues));
     Prepared {
         catalog: crate::presets::catalog(),
         figure_presets: p.figures.iter().map(crate::figures::preset_of).collect(),
+        object_presets: p.objects.iter().map(crate::wire::preset_of).collect(),
         user_cue_presets: crate::usercues::presets_of(&p.user_cues),
     }
 }
@@ -845,6 +861,7 @@ fn apply(s: &mut Shared, p: &mut Project, prep: Prepared) {
     s.midi.store.replace_user_in_memory(take(&mut p.midi.profiles));
     // Already in the store's order (prepare).
     s.figures.replace_in_memory(take(&mut p.figures));
+    s.objects.replace_in_memory(take(&mut p.objects));
     s.user_cues.replace_checked(take(&mut p.user_cues));
     s.cue_lists.replace_in_memory(take(&mut p.cue_lists));
     s.executors.set_bank(take(&mut p.executors));
@@ -861,6 +878,8 @@ fn apply(s: &mut Shared, p: &mut Project, prep: Prepared) {
     s.showlist.replace_in_memory(take(&mut p.show_list));
     s.pools.replace_in_memory(p.pools.clone());
     crate::usercues::sync_presets_with(s, prep.user_cue_presets);
+    // The grid is rebuilt once, by the figures' refresh.
+    crate::wire::set_presets(s, prep.object_presets);
     crate::figures::refresh_with(s, prep.figure_presets);
     // Lines checked on the registry just rebuilt (macros included): a bad
     // one disables its macro, with a warning the open report carries.
@@ -883,6 +902,7 @@ struct WorkingPaths {
     scan_presets: PathBuf,
     midi: Option<PathBuf>,
     figures: Option<PathBuf>,
+    objects: Option<PathBuf>,
     /// `user_cues.json` and the store's id counter once opened.
     user_cues: Option<(PathBuf, u64)>,
     cue_lists: Option<PathBuf>,
@@ -907,6 +927,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         scan_presets: s.scan_presets.path().to_path_buf(),
         midi: s.midi.store.dir().map(|d| d.join("profiles")),
         figures: s.figures.dir().map(Path::to_path_buf),
+        objects: s.objects.dir().map(Path::to_path_buf),
         user_cues: s.user_cues.path().map(|p| (p.to_path_buf(), s.user_cues.next_id())),
         cue_lists: s.cue_lists.path().map(Path::to_path_buf),
         executors: s.executors.path().map(Path::to_path_buf),
@@ -974,11 +995,17 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
             put(&dir.join(format!("{}.json", fig.name)), serde_json::to_vec_pretty(fig));
         }
     }
+    if let Some(dir) = &w.objects {
+        for obj in &p.objects {
+            put(&dir.join(format!("{}.json", obj.name)), serde_json::to_vec_pretty(obj));
+        }
+    }
     // The previous project's timelines, MIDI profiles and figures go: only plain
     // `<name>.json` files directly in those folders, never anything else.
     let keep_shows: HashSet<&str> = p.timelines.iter().map(|s| s.name.as_str()).collect();
     let keep_midi: HashSet<&str> = p.midi.profiles.keys().map(String::as_str).collect();
     let keep_figures: HashSet<&str> = p.figures.iter().map(|f| f.name.as_str()).collect();
+    let keep_objects: HashSet<&str> = p.objects.iter().map(|o| o.name.as_str()).collect();
     let mut prune = |dir: &Path, keep: &HashSet<&str>, valid: &dyn Fn(&str) -> bool| {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for path in entries.flatten().map(|e| e.path()) {
@@ -998,6 +1025,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(dir) = &w.figures {
         prune(dir, &keep_figures, &valid_show_name);
+    }
+    if let Some(dir) = &w.objects {
+        prune(dir, &keep_objects, &valid_show_name);
     }
     // The engine's own files go through the writer thread, after any
     // older copy it queued before the swap (T-482).
@@ -1969,6 +1999,7 @@ mod tests {
         s.scan_presets = crate::scan::ScanPresetStore::load_or_create(dir.join("scan_presets.json"));
         s.midi.store = ProfileStore::load(dir.join("midi"));
         s.figures = crate::figures::FigureStore::load(dir.join("figures"));
+        s.objects = crate::wire::WireStore::load(dir.join("objects"));
         s.user_cues = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));
         s.cue_lists = crate::cuelist::CueListStore::load_or_create(dir.join("cuelists.json"));
         s.macros = crate::macros::Macros::load(dir.join("macros.json"));
@@ -2537,6 +2568,57 @@ mod tests {
         std::fs::write(dir.join("projects/ancien.lsproj"), json!({ "format_version": 1, "name": "ancien" }).to_string()).unwrap();
         post(&shared, &dir, "open", json!({ "path": "ancien" })).unwrap();
         assert!(shared.lock().unwrap().figures.list().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-462: 3D objects travel with the project; a project saved before
+    /// them opens with none; a bad one in a project file is refused.
+    #[test]
+    fn objects_are_saved_in_the_project_and_old_projects_still_open() {
+        let dir = temp_dir("objects");
+        let shared = studio(&dir);
+        let cube = crate::wire::test_cube("Cube");
+        {
+            let mut s = shared.lock().unwrap();
+            s.objects.save(cube.clone()).unwrap();
+            crate::wire::refresh(&mut s);
+        }
+        assert!(modified(&shared), "a new object is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Avec objets" })).unwrap();
+        {
+            let mut s = shared.lock().unwrap();
+            s.objects.save(crate::wire::test_cube("Autre")).unwrap();
+            s.objects.remove("Cube").unwrap();
+            crate::wire::refresh(&mut s);
+        }
+        post(&shared, &dir, "open", json!({ "path": "Avec objets" })).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.objects.list(), &[cube.clone()][..], "reopened identical");
+            assert!(s.presets.iter().any(|p| p.id == "object:Cube"), "its cue is back");
+            assert!(!s.presets.iter().any(|p| p.id == "object:Autre"));
+            let page = s.grid.view().iter().find(|v| v.name == crate::wire::CATEGORY).expect("the page");
+            assert_eq!(page.cells[0].as_deref(), Some("object:Cube"));
+        }
+        assert!(dir.join("objects/Cube.json").is_file());
+        assert!(!dir.join("objects/Autre.json").exists(), "the working copy is the project's");
+        // Back after a restart (the store reads the working copy).
+        assert_eq!(crate::wire::WireStore::load(dir.join("objects")).list(), &[cube.clone()][..]);
+        // A project from before objects (no « objects » section) opens, with none.
+        std::fs::write(dir.join("projects/ancien.lsproj"), json!({ "format_version": 1, "name": "ancien" }).to_string()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "ancien" })).unwrap();
+        assert!(shared.lock().unwrap().objects.list().is_empty());
+        assert!(!shared.lock().unwrap().presets.iter().any(|p| p.id.starts_with(crate::wire::ID_PREFIX)));
+        // A hostile project: a name leaving the folder, too many edges, a duplicate.
+        for (tag, objects) in [
+            ("evil", json!([{ "name": "../../evil" }])),
+            ("big", json!([{ "name": "big", "edges": vec![[0, 1]; crate::wire::MAX_EDGES + 1] }])),
+            ("dup", json!([{ "name": "a" }, { "name": "a" }])),
+        ] {
+            std::fs::write(dir.join(format!("projects/{tag}.lsproj")), json!({ "format_version": 1, "objects": objects }).to_string()).unwrap();
+            assert!(post(&shared, &dir, "open", json!({ "path": tag })).is_err(), "{tag}");
+        }
+        assert!(!dir.join("evil.json").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

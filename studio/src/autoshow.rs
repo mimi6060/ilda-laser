@@ -581,7 +581,7 @@ pub struct CuePools {
 
 /// Pages the auto-show doesn't draw from. « Festival » repeats looks
 /// that are already in the pools (T-110).
-const LEFT_OUT: &[&str] = &["Audio", "Texte & horloge", crate::figures::CATEGORY, crate::ilda_library::CATEGORY, crate::presets::FESTIVAL];
+const LEFT_OUT: &[&str] = &["Audio", "Texte & horloge", crate::figures::CATEGORY, crate::ilda_library::CATEGORY, crate::wire::CATEGORY, crate::presets::FESTIVAL];
 
 impl CuePools {
     pub fn from_presets(presets: &[Preset]) -> Self {

@@ -1985,6 +1985,82 @@ fn random_abstract(rng: &mut Rng) -> Settings {
     }
 }
 
+/// A random 3D object look (T-462) as a client could send it, never
+/// validated: vertices far outside the unit sphere or not finite, edges
+/// naming missing vertices, settings out of range; bright enough to be
+/// seen in the show phase.
+fn random_wire_look(rng: &mut Rng) -> Settings {
+    use crate::figures::RateUnit;
+    use crate::wire::WireObject;
+    let wild = |rng: &mut Rng, lo: f32, hi: f32| match rng.below(16) {
+        0 => f32::NAN,
+        1 => f32::INFINITY,
+        2 => rng.range(-1e5, 1e5),
+        _ => rng.range(lo, hi),
+    };
+    let n = 2 + rng.below(30);
+    let vertices = (0..n).map(|_| [wild(rng, -1.5, 1.5), wild(rng, -1.5, 1.5), wild(rng, -1.5, 1.5)]).collect();
+    let edges = (0..1 + rng.below(60)).map(|_| [rng.below(n + 3) as u32, rng.below(n + 3) as u32]).collect();
+    let obj = WireObject {
+        name: format!("Fuzz {}", rng.below(4)),
+        vertices,
+        edges,
+        color: [rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8],
+        period_beats: wild(rng, -4.0, 64.0),
+        per: if rng.chance(0.3) { RateUnit::Second } else { RateUnit::Beat },
+        axis_ratio: wild(rng, -8.0, 8.0),
+        perspective: wild(rng, -2.0, 30.0),
+        depth_color: rng.chance(0.5),
+    };
+    Settings {
+        content: Content::Wire(obj),
+        color: [rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8],
+        scale: rng.range(0.2, 1.4),
+        rotation_speed: if rng.chance(0.3) { rng.range(-720.0, 720.0) } else { 0.0 },
+        brightness: rng.range(0.4, 1.0),
+        ..Settings::default()
+    }
+}
+
+/// A random OBJ text read by the importer (T-462) - faces, polylines,
+/// negative and missing indices, junk lines - saved to the library when
+/// it reads (its cue on the « Objets 3D » page). Returns the cue id, or
+/// `None` when the file was refused.
+fn random_wire_cue(s: &mut Shared, rng: &mut Rng) -> Option<String> {
+    use crate::figure_import::obj::{parse_obj, ObjOptions, UpAxis};
+    let n = 3 + rng.below(40);
+    let mut text = String::from("# fuzz\nmtllib ../../ailleurs.mtl\n");
+    for _ in 0..n {
+        text += &format!("v {} {} {}\n", rng.range(-50.0, 50.0), rng.range(-50.0, 50.0), rng.range(-50.0, 50.0));
+    }
+    let idx = |rng: &mut Rng| -> String {
+        match rng.below(10) {
+            0 => format!("-{}", 1 + rng.below(n + 2)),
+            1 => "0".into(),
+            _ => format!("{}/{}/{}", 1 + rng.below(n + 2), rng.below(3), rng.below(3)),
+        }
+    };
+    for _ in 0..1 + rng.below(40) {
+        let kind = *rng.pick(&["f", "f", "l", "vt", "o"]);
+        let count = 2 + rng.below(5);
+        let ids: Vec<String> = (0..count).map(|_| idx(rng)).collect();
+        text += &format!("{kind} {}\n", ids.join(" "));
+    }
+    let opts = ObjOptions {
+        merge_coplanar_deg: rng.range(-5.0, 40.0),
+        up: if rng.chance(0.5) { UpAxis::Y } else { UpAxis::Z },
+        keep_longest: rng.chance(0.3).then(|| rng.below(20)),
+    };
+    let (mut obj, _) = parse_obj(&text, &opts).ok()?;
+    obj.name = format!("Objet {}", rng.below(4));
+    let name = obj.name.clone();
+    // Saved once per name (a library refresh rebuilds the grid: costly).
+    if s.objects.get(&name).is_none() && s.objects.save(obj).is_ok() {
+        crate::wire::refresh(s);
+    }
+    s.objects.get(&name).map(|o| crate::wire::cue_id(&o.name))
+}
+
 /// A random figure with parts (T-441) saved to the library (its cue on
 /// the « Figures » page), random per-part modifiers in its cell (mangled
 /// ones written past validation) and random part modulators added to the
@@ -2450,6 +2526,10 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
     // Figure parts (T-441), from their own stream.
     let mut qrng = Rng::new(seed ^ 0x0441_0441);
     let parts_on = qrng.chance(0.35);
+    // 3D objects (T-462), from their own stream: wild looks and imported
+    // OBJ texts played as cues.
+    let mut wrng = Rng::new(seed ^ 0x0462_0462);
+    let wires_on = wrng.chance(0.3);
     // Zone chasers (T-170), from their own stream: chasers over the zone
     // groups, started and stopped, the rate, a cue tied to one.
     let mut hrng = Rng::new(seed ^ 0x0170_0170);
@@ -2514,6 +2594,13 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
                 let cue = random_figure_parts(&mut s, &mut qrng);
                 controls::press_cue(&mut s, &cue, None, true);
             }
+            if wires_on && wrng.chance(0.08) {
+                if wrng.chance(0.5) {
+                    controls::set_look(&mut s, random_wire_look(&mut wrng));
+                } else if let Some(cue) = random_wire_cue(&mut s, &mut wrng) {
+                    controls::press_cue(&mut s, &cue, None, true);
+                }
+            }
             // Held buttons are let go of: « Noir » and « Figer » don't
             // stay down for the whole session.
             if (s.live.black || s.live.freeze || s.live.strobe.hold) && erng.chance(0.7) {
@@ -2521,7 +2608,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
                 let _ = controls::apply(&mut s, id, ControlInput::Value(0.0), erng.chance(0.5));
             }
             if s.gate.is_armed() != armed {
-                return Err(format!("frame {frame}: a live effect, a level, a preset, an abstract or a figure part changed the arming"));
+                return Err(format!("frame {frame}: a live effect, a level, a preset, an abstract, a figure part or a 3D object changed the arming"));
             }
         }
         if exec_on && brng.chance(0.35) {

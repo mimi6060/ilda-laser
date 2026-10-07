@@ -46,8 +46,9 @@ pub const FESTIVAL: &str = "Festival";
 /// evolve by themselves over 16 or 32 beats (builds, drops, breaks).
 pub const EVOLVING: &str = "Festival évolutifs";
 
-/// Cue pages, in display order. Figures (`figures.rs`) and ILDA files
-/// (`ilda_library.rs`) hold the operator's libraries, not built-in cues.
+/// Cue pages, in display order. Figures (`figures.rs`), ILDA files
+/// (`ilda_library.rs`) and 3D objects (`wire.rs`) hold the operator's
+/// libraries, not built-in cues.
 /// The last `LATE_PAGES` came later: in the default grid they go after
 /// the overflow pages of the ones above (« Abstraits 2 », « Faisceaux
 /// 2 »), so every older page keeps its number (`page.N`, F-keys, MIDI,
@@ -65,10 +66,11 @@ pub const CATEGORIES: &[&str] = &[
     crate::ilda_library::CATEGORY,
     FESTIVAL,
     EVOLVING,
+    crate::wire::CATEGORY,
 ];
 
 /// How many of the last `CATEGORIES` are appended pages (see above).
-pub const LATE_PAGES: usize = 2;
+pub const LATE_PAGES: usize = 3;
 
 const GREEN: [u8; 3] = [0, 255, 0];
 const RED: [u8; 3] = [255, 0, 0];
@@ -1223,7 +1225,7 @@ mod tests {
     #[test]
     fn every_category_has_cues_and_every_cue_has_a_known_category() {
         let all = catalog();
-        for c in CATEGORIES.iter().filter(|c| **c != crate::figures::CATEGORY && **c != crate::ilda_library::CATEGORY) {
+        for c in CATEGORIES.iter().filter(|c| ![crate::figures::CATEGORY, crate::ilda_library::CATEGORY, crate::wire::CATEGORY].contains(*c)) {
             assert!(all.iter().any(|p| p.category == *c), "empty page '{c}'");
         }
         assert!(all.iter().all(|p| CATEGORIES.contains(&p.category)));

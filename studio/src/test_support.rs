@@ -131,6 +131,7 @@ pub fn shared() -> Shared {
         timeline: timeline::Player::default(),
         take: crate::take::Recorder::default(),
         figures: crate::figures::FigureStore::in_memory(),
+        objects: crate::wire::WireStore::in_memory(),
         user_cues: crate::usercues::UserCueStore::in_memory(),
         shows: timeline::ShowStore::new(data.join("shows")),
         templates: crate::templates::TemplateStore::new(data.join("templates")),
