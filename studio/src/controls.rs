@@ -332,6 +332,12 @@ impl ControlRegistry {
         add("showlist.prev".into(), "Lecteur de shows : précédent".into(), "timeline", ControlKind::Trigger, true);
         add("showlist.loop".into(), "Lecteur de shows : boucler la liste".into(), "timeline", ControlKind::Toggle { default: false }, true);
 
+        // The haze panel of the DMX output (T-453): MIDI and the UI only (the
+        // group is in no network scope). Held: the pump runs at most its
+        // max burst. Never the laser.
+        add("haze.burst".into(), "Brouillard (maintenir)".into(), "haze", ControlKind::Momentary, true);
+        add("haze.fan".into(), "Ventilateur du brouillard".into(), "haze", cont(0.0, 1.0, 0.0, Unit::Percent), true);
+
         add("page.next".into(), "Page de cues suivante".into(), "page", ControlKind::Trigger, true);
         add("page.prev".into(), "Page de cues précédente".into(), "page", ControlKind::Trigger, true);
         // At least one per category, so saved mappings to page.N stay known
@@ -636,6 +642,8 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             })?
         }
         "showlist.loop" => crate::showlist::set_loop(s, truthy(input)),
+        "haze.burst" => crate::dmx_out::set_haze(s, truthy(input)),
+        "haze.fan" => crate::dmx_out::set_fan(s, value(input)).map_err(ControlError::Refused)?,
         "cue.mode" => {
             s.deck.click_mode = CLICK_MODES[choice_index(&desc.kind, input)];
             s.deck.save();
@@ -1063,6 +1071,8 @@ pub fn current(s: &Shared, desc: &ControlDesc) -> Option<serde_json::Value> {
         "timeline.loop" => json!(s.timeline.loop_on),
         "showlist.play" => json!(s.showlist.is_active()),
         "showlist.loop" => json!(s.showlist.list().loop_list),
+        "haze.burst" => json!(crate::dmx_out::haze_held(s)),
+        "haze.fan" => json!(s.dmx_out.fan),
         "cue.mode" => json!(CLICK_MODES.iter().position(|&m| m == s.deck.click_mode).unwrap_or(0)),
         "cue.multi" => json!(s.deck.multi),
         "cue.max_active" => json!(s.deck.max_active),

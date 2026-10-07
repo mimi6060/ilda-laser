@@ -387,6 +387,7 @@ pub fn uses_audio(show: &Show, presets: &[Preset]) -> bool {
         || show.tracks.iter().flat_map(|t| &t.events).any(|e| match &e.source {
             timeline::EventSource::Look { settings } => settings.audio.enabled,
             timeline::EventSource::Cue { id } => presets.iter().any(|p| &p.id == id && p.settings.audio.enabled),
+            timeline::EventSource::Dmx { .. } => false,
         })
 }
 
@@ -479,7 +480,7 @@ pub fn render_timeline(job: &TimelineJob, fps: u8, chain: &ExportSafety, progres
             // Its zones as the engine routes it (`Routing::read`).
             let zones = match &cue.source {
                 timeline::EventSource::Cue { id } => job.cue_zones.get(id).cloned().unwrap_or_default(),
-                timeline::EventSource::Look { .. } => Vec::new(),
+                timeline::EventSource::Look { .. } | timeline::EventSource::Dmx { .. } => Vec::new(),
             };
             rendered.push((cue.layer, pts, zones));
         }

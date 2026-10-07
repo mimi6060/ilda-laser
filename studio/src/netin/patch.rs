@@ -289,6 +289,11 @@ fn learn(s: &mut Shared, universe: u16, data: &[u8]) {
     let mut file = s.netin.hub.file();
     file.dmx.mappings.retain(|o| o.control != control && !(o.universe == universe && (o.channel == m.channel || o.fine == Some(m.channel))));
     file.dmx.mappings.push(m.clone());
+    // Never the DMX output's own universe (T-453).
+    if let Some(why) = crate::dmx_out::refuses_input(s, &file) {
+        log::warn!("Apprendre DMX : {why}");
+        return;
+    }
     if let Err(e) = s.netin.hub.store(file) {
         log::warn!("Apprendre DMX : {e}");
         return;

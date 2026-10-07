@@ -15,6 +15,9 @@ const armed = async () => (await studio.state()).armed as boolean;
 test.beforeAll(async () => {
   const list = await studio.get<{ id: string; kind: Kind }[]>('/api/controls');
   kinds = Object.fromEntries((Array.isArray(list) ? list : (list as any).controls).map((c: { id: string; kind: Kind }) => [c.id, c.kind]));
+  // The haze fan slider (T-453) shows once a pump channel is chosen; the
+  // DMX output itself stays off (nothing is sent).
+  expect(await studio.post('/api/dmx-out', { channels: [{ name: 'Pompe', address: 1 }, { name: 'Ventilo', address: 2 }], haze: { pump: 'Pompe', fan: 'Ventilo' } })).toBe(200);
 });
 
 test.beforeEach(async ({ page }) => {

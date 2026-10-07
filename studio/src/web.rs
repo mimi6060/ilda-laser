@@ -351,6 +351,11 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("*", "/api/timecode", RouteClass::Safety),
     ("*", "/api/timecode/arm", RouteClass::Safety),
     ("*", "/api/timecode/out", RouteClass::Safety),
+    // DMX output (T-453): its settings are Safety (outputs, never the
+    // remote); the haze button and fan are live play.
+    ("GET", "/api/dmx-out", RouteClass::Read),
+    ("POST", "/api/dmx-out", RouteClass::Safety),
+    ("POST", "/api/dmx-out/haze", RouteClass::Play),
     ("*", "/api/project", RouteClass::Edit),
     ("*", "/api/project/*", RouteClass::Edit),
     ("GET", "/api/remote", RouteClass::Read),
@@ -3232,7 +3237,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                         }
                         json_response(crate::netin::view(&shared.lock().unwrap(), Instant::now()))
                     }
-                    Err(e) => text(400, &e),
+                    Err(e) => text(netin_refusal(&e), &e),
                 }
             }
             Err(e) => e,
@@ -3269,6 +3274,8 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         },
         (method, p) if p.starts_with("/api/external") || p.starts_with("/api/dmx/") => external_route(request, shared, method, p),
         (method, p) if p == "/api/timecode" || p == "/api/timecode/arm" || p == "/api/timecode/out" => timecode_route(request, shared, method, p),
+        (Method::Get, "/api/dmx-out") => json_response(crate::dmx_out::view(&shared.lock().unwrap())),
+        (Method::Post, p) if p == "/api/dmx-out" || p == "/api/dmx-out/haze" => dmx_out_route(request, shared, p),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         // The tablet remote (T-428): turned on, watched and cut from here
         // only (this server listens on 127.0.0.1); the remote's own
@@ -4157,7 +4164,7 @@ fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
                         let cfg = hub.file();
                         json_response(json!({ "artnet": cfg.artnet, "sacn": cfg.sacn, "dmx": cfg.dmx, "loss": cfg.loss, "changed": changed }))
                     }
-                    Err(e) => text(400, &e),
+                    Err(e) => text(netin_refusal(&e), &e),
                 }
             }
             Err(e) => e,
@@ -5366,6 +5373,69 @@ fn state(shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     json_response(state_json(&mut s))
 }
 
+/// A refused input setting: 409 for the DMX output's self-drive trap
+/// (T-453), 400 otherwise.
+fn netin_refusal(e: &str) -> u16 {
+    if e == crate::dmx_out::SELF_DRIVE {
+        409
+    } else {
+        400
+    }
+}
+
+/// The DMX output (T-453):
+/// - `GET /api/dmx-out` (in `dispatch`): settings, status, values, interfaces.
+/// - `POST /api/dmx-out` `{ "enabled": true, "channels": [...], … }`: the
+///   settings given (Safety class: never from the tablet remote); 409 on
+///   the self-drive trap or the laser's own address.
+/// - `POST /api/dmx-out/haze` `{ "on": bool }` and / or `{ "fan": 0..1 }`:
+///   the *Brouillard* button (held) and the fan slider.
+fn dmx_out_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, path: &str) -> HttpResponse {
+    match path {
+        "/api/dmx-out" => match body::<serde_json::Value>(request) {
+            Ok(patch) => {
+                let (result, job) = {
+                    let mut s = shared.lock().unwrap();
+                    let r = crate::dmx_out::update(&mut s, &patch);
+                    (r, s.dmx_out.save_job())
+                };
+                match result {
+                    Ok(changed) => {
+                        if let (true, Some((path, cfg))) = (changed, job) {
+                            crate::save_json(&path, &cfg);
+                        }
+                        json_response(crate::dmx_out::view(&shared.lock().unwrap()))
+                    }
+                    Err(e) => text(e.status, &e.message),
+                }
+            }
+            Err(e) => e,
+        },
+        "/api/dmx-out/haze" => match body::<serde_json::Value>(request) {
+            Ok(req) => {
+                let (on, fan) = (req.get("on").map(|v| v.as_bool()), req.get("fan").map(|v| v.as_f64()));
+                if on.is_none() && fan.is_none() {
+                    return text(400, "attendu : \"on\" et / ou \"fan\"");
+                }
+                let mut s = shared.lock().unwrap();
+                if let Some(fan) = fan {
+                    let Some(v) = fan else { return text(400, "valeur du ventilateur invalide") };
+                    if let Err(e) = crate::dmx_out::set_fan(&mut s, v as f32) {
+                        return text(400, e);
+                    }
+                }
+                if let Some(on) = on {
+                    let Some(on) = on else { return text(400, "\"on\" : true ou false") };
+                    crate::dmx_out::set_haze(&mut s, on);
+                }
+                json_response(crate::dmx_out::summary(&s))
+            }
+            Err(e) => e,
+        },
+        _ => text(405, "méthode non permise"),
+    }
+}
+
 /// Incoming timecode (T-168):
 /// - `GET /api/timecode`: settings, TC-IN, status, readout, MIDI ports
 ///   and audio input.
@@ -5547,6 +5617,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     v["showlist"] = json!(crate::showlist::summary(s));
     // The agenda (T-455): the next slot and the last runs.
     v["agenda"] = crate::agenda::state(s);
+    // The DMX output (T-453): values by channel, haze panel, sending.
+    v["dmx_out"] = crate::dmx_out::summary(s);
     // The live take (T-169).
     v["take"] = s.take.view();
     // T-450: free space and the copy to a second location.
@@ -5774,6 +5846,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["showlist"] = json!(crate::showlist::summary(s));
     // The agenda (T-455): the top bar's « Agenda actif — prochain 20:30 ».
     v["agenda"] = crate::agenda::summary(s);
+    // The DMX output (T-453): values, haze panel, sending.
+    v["dmx_out"] = crate::dmx_out::summary(s);
     // T-448: 0 normal, 1 loaded, 2 late frames (the points indicator).
     v["perf_level"] = json!(s.perf.level());
     // T-285: undo / redo counts and labels; `rev` moves on every change.
@@ -8288,6 +8362,43 @@ mod tests {
         t.shared.lock().unwrap().test_hooks = true;
         assert_eq!(t.request("POST", "/api/test/stall?ms=99999", "").0, 200);
         assert_eq!(t.shared.lock().unwrap().test_stall_ms, 2_000, "bounded");
+    }
+
+    /// T-453: the DMX output is off by default, its settings are Safety
+    /// (never the remote), the self-drive trap is a 409 both ways, the haze
+    /// button is live play and the values show under `dmx_out`.
+    #[test]
+    fn the_dmx_output_routes() {
+        let t = TestServer::start(false);
+        let (status, body) = t.request("GET", "/api/dmx-out", "");
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["config"]["enabled"].as_bool(), v["config"]["universe"].as_u64()), (Some(false), Some(1)));
+        let cfg = r#"{"channels":[{"name":"Pompe","address":1},{"name":"Face","address":10,"rest":40}],"haze":{"pump":"Pompe","pump_level":180}}"#;
+        assert_eq!(t.request("POST", "/api/dmx-out", cfg).0, 200);
+        assert_eq!(t.request("POST", "/api/dmx-out", r#"{"enabled":true}"#).0, 400, "no destination");
+        assert_eq!(t.request("POST", "/api/netin", r#"{"artnet":{"enabled":true,"universe":1}}"#).0, 200);
+        let (code, msg) = t.request("POST", "/api/dmx-out", r#"{"enabled":true,"interface":"127.0.0.1","target":"127.0.0.1:7999"}"#);
+        assert_eq!((code, msg.as_str()), (409, crate::dmx_out::SELF_DRIVE));
+        assert_eq!(t.request("POST", "/api/dmx-out", r#"{"enabled":true,"interface":"127.0.0.1","target":"127.0.0.1:7999","universe":2}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/netin", r#"{"artnet":{"universe":2}}"#).0, 409);
+        assert_eq!(t.request("POST", "/api/dmx/config", r#"{"artnet":{"universe":2}}"#).0, 409);
+        assert_eq!(t.request("POST", "/api/dmx-out/haze", r#"{"on":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/dmx-out/haze", r#"{"fan":"x"}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/dmx-out/haze", "{}").0, 400);
+        {
+            let mut s = t.shared.lock().unwrap();
+            let c = s.timeline_clock();
+            crate::dmx_out::frame(&mut s, &c);
+        }
+        let st: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/state", "").1).unwrap();
+        assert_eq!((st["dmx_out"]["values"]["Pompe"].as_u64(), st["dmx_out"]["values"]["Face"].as_u64()), (Some(180), Some(40)));
+        assert_eq!(st["dmx_out"]["haze"]["held"], true);
+        let frame: serde_json::Value = serde_json::from_str(&t.request("GET", "/api/frame", "").1).unwrap();
+        assert_eq!(frame["dmx_out"]["enabled"], true);
+        assert!(ROUTES.contains(&("POST", "/api/dmx-out", RouteClass::Safety)));
+        assert!(ROUTES.contains(&("POST", "/api/dmx-out/haze", RouteClass::Play)));
+        assert_eq!(arm_status(&t)["armed"], false, "never arms");
     }
 
     /// T-417: the timecode output is off by default, set over the API

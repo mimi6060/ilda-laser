@@ -104,6 +104,10 @@ pub enum TrackKind {
     /// Envelopes applied to every track of its layer (evaluated by T-163);
     /// a bus track plays no content.
     Bus,
+    /// DMX events (T-453, dmx_out.rs): each sets a named channel of the DMX
+    /// output (haze machine, simple lights) for its length. Plays no
+    /// content and never touches the laser.
+    Dmx,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -138,6 +142,9 @@ pub enum EventSource {
     Cue { id: String },
     /// A look stored in the show itself.
     Look { settings: Settings },
+    /// A DMX track's event (T-453): the named channel of the DMX output
+    /// (`dmx_out.json`) at `value` for the event's length, with its fades.
+    Dmx { channel: String, value: u8 },
 }
 
 /// Which clock the event's content runs on.
@@ -395,6 +402,9 @@ impl Show {
                 crate::cues::sanitize_notes(&mut e.notes);
                 crate::cues::sanitize_tags(&mut e.tags);
                 e.spread = e.spread.take().map(crate::spread::Spread::sanitized).filter(crate::spread::Spread::is_set);
+                if let EventSource::Dmx { channel, .. } = &mut e.source {
+                    *channel = channel.trim().chars().take(MAX_LABEL).collect();
+                }
                 if e.id == 0 || !seen.insert(e.id) {
                     e.id = next_id;
                     seen.insert(next_id);
@@ -441,10 +451,20 @@ impl Show {
                 bail!("événement {} : début ou durée invalide", e.id);
             }
             // A bus event plays nothing: its source is never read.
-            if let (TrackKind::Cues, EventSource::Cue { id }) = (track.kind, &e.source) {
-                if id.is_empty() || id.len() > MAX_CUE_ID || !known(id) {
-                    bail!("cue inconnu : {}", id.chars().take(40).collect::<String>());
+            match (track.kind, &e.source) {
+                (TrackKind::Cues, EventSource::Cue { id }) => {
+                    if id.is_empty() || id.len() > MAX_CUE_ID || !known(id) {
+                        bail!("cue inconnu : {}", id.chars().take(40).collect::<String>());
+                    }
                 }
+                (TrackKind::Cues, EventSource::Dmx { .. }) => bail!("événement {} : un événement DMX va sur une piste DMX", e.id),
+                (TrackKind::Dmx, EventSource::Dmx { channel, .. }) => {
+                    if channel.trim().is_empty() || channel.chars().count() > MAX_LABEL {
+                        bail!("événement {} : canal DMX invalide", e.id);
+                    }
+                }
+                (TrackKind::Dmx, _) => bail!("événement {} : une piste DMX ne reçoit que des événements DMX", e.id),
+                _ => {}
             }
             if e.envelopes.len() > MAX_ENVELOPES {
                 bail!("événement {} : {} enveloppes au plus", e.id, MAX_ENVELOPES);
@@ -509,7 +529,7 @@ impl Show {
             .flat_map(|t| &t.events)
             .filter_map(|e| match &e.source {
                 EventSource::Cue { id } => Some(id.as_str()),
-                EventSource::Look { .. } => None,
+                EventSource::Look { .. } | EventSource::Dmx { .. } => None,
             })
             .collect()
     }
@@ -986,6 +1006,19 @@ impl Player {
         cues
     }
 
+    /// The DMX tracks' levels at the playhead (T-453), apart from the cues:
+    /// never through the layers, never the laser. Paused: the frozen
+    /// position's; stopped (or waiting for the bar at the top): none, so
+    /// every channel is back at rest. Call after `frame`.
+    pub fn dmx(&self, c: &Clock) -> Vec<DmxLevel> {
+        let Some(show) = &self.show else { return Vec::new() };
+        match self.transport {
+            Transport::Stopped => Vec::new(),
+            Transport::Playing if self.clock_value(c) < self.anchor_clock && self.position <= EPS => Vec::new(),
+            Transport::Playing | Transport::Paused => dmx_levels(show, self.position, c),
+        }
+    }
+
     pub fn state(&self, c: &Clock) -> TimelineState {
         let show = self.show.as_ref();
         let base = self.base();
@@ -1100,6 +1133,45 @@ fn bus_envelopes(show: &Show, pos: f64, show_end: f64) -> [Vec<EnvValue>; LAYER_
     out
 }
 
+/// One channel's level from a DMX track (T-453): `value` (0..255) reached
+/// at `gain` 1; the output mixes it with the channel's rest value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DmxLevel {
+    pub channel: String,
+    pub value: f32,
+    /// Fade in / fade out, 0..1.
+    pub gain: f32,
+}
+
+/// The DMX events active at `pos` on the unmuted DMX tracks: per track
+/// and channel, the last one started wins. An event lasts its length
+/// (no *Garder* / *Continuer*).
+fn dmx_levels(show: &Show, pos: f64, c: &Clock) -> Vec<DmxLevel> {
+    let mut out = Vec::new();
+    for track in show.tracks.iter().filter(|t| t.kind == TrackKind::Dmx && !t.mute) {
+        let mut mine: Vec<DmxLevel> = Vec::new();
+        // Sorted by start (`sanitize`): a later start replaces.
+        for e in &track.events {
+            let EventSource::Dmx { channel, value } = &e.source else { continue };
+            let end = e.start + e.len;
+            if pos < e.start || pos >= end {
+                continue;
+            }
+            let fade_in = span(show, e.fade_in, e.start, c);
+            let fade_out = span_before(show, e.fade_out, end, c).min(e.len);
+            let gain_in = ramp(pos, e.start, fade_in);
+            let gain_out = if fade_out > EPS { 1.0 - ramp(pos, end - fade_out, fade_out) } else { 1.0 };
+            let level = DmxLevel { channel: channel.clone(), value: *value as f32, gain: gain_in.min(gain_out) as f32 };
+            match mine.iter_mut().find(|l| l.channel == *channel) {
+                Some(l) => *l = level,
+                None => mine.push(level),
+            }
+        }
+        out.extend(mine);
+    }
+    out
+}
+
 /// Every event of an audible cue track active at `pos`.
 fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Active> {
     let show_end = show.end();
@@ -1112,6 +1184,10 @@ fn active_events(show: &Show, pos: f64, c: &Clock, frozen_all: bool) -> Vec<Acti
         }
         let events = &track.events;
         for (i, e) in events.iter().enumerate() {
+            // A DMX event is never drawn (refused on a cue track by the editor).
+            if matches!(e.source, EventSource::Dmx { .. }) {
+                continue;
+            }
             let next_start = events.get(i + 1).map(|n| n.start);
             let base_end = base_end(e, next_start, show_end);
             // Transition to the next event: (effective end, fade-out window).
@@ -1211,6 +1287,7 @@ pub fn look_of(cue: &TimelineCue, presets: &[Preset]) -> Option<Settings> {
     let mut settings = match &cue.source {
         EventSource::Cue { id } => presets.iter().find(|p| &p.id == id)?.settings.clone(),
         EventSource::Look { settings } => settings.clone(),
+        EventSource::Dmx { .. } => return None,
     };
     settings.brightness = (settings.brightness * cue.gain).clamp(0.0, 1.0);
     Some(settings)
