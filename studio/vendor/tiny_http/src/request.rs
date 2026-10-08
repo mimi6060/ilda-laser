@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::mpsc::Sender;
 
 use crate::util::limits::{Prefetch, PrefetchError};
+use crate::util::outbox::{Job, Sink};
 use crate::util::{EqualReader, FusedReader};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -55,7 +56,9 @@ pub struct Request {
     data_reader: Option<Box<dyn Read + Send + 'static>>,
 
     // if this writer is empty, then the request has been answered
-    response_writer: Option<Box<dyn Write + Send + 'static>>,
+    // Laser Studio patch (T-489): a `Sink`, which may take the whole answer
+    //  to write it on the connection's own thread.
+    response_writer: Option<Box<dyn Sink>>,
 
     remote_addr: Option<SocketAddr>,
 
@@ -171,7 +174,7 @@ pub fn new_request<R, W>(
 ) -> Result<Request, RequestCreationError>
 where
     R: Read + Send + 'static,
-    W: Write + Send + 'static,
+    W: Sink + 'static,
 {
     // finding the transfer-encoding header
     let transfer_encoding = headers
@@ -255,7 +258,7 @@ where
         };
         return Ok(Request {
             data_reader: Some(reader),
-            response_writer: Some(Box::new(writer) as Box<dyn Write + Send + 'static>),
+            response_writer: Some(Box::new(writer) as Box<dyn Sink>),
             remote_addr,
             secure,
             method,
@@ -321,7 +324,7 @@ where
 
     Ok(Request {
         data_reader: Some(reader),
-        response_writer: Some(Box::new(writer) as Box<dyn Write + Send + 'static>),
+        response_writer: Some(Box::new(writer) as Box<dyn Sink>),
         remote_addr,
         secure,
         method,
@@ -521,7 +524,7 @@ impl Request {
     /// as the object returned by `into_writer` above.
     ///
     /// This may only be called once on a single request.
-    fn extract_writer_impl(&mut self) -> Box<dyn Write + Send + 'static> {
+    fn extract_writer_impl(&mut self) -> Box<dyn Sink> {
         use std::mem;
 
         assert!(self.response_writer.is_some());
@@ -545,10 +548,15 @@ impl Request {
     }
 
     /// Sends a response to this request.
+    ///
+    /// Laser Studio patch (T-489): on a server with `ClientLimits`, the
+    /// response is handed to its connection, whose own thread writes it:
+    /// this returns at once, whether the client reads or not (errors
+    /// writing it are then not reported here). Hence `Send + 'static`.
     #[inline]
     pub fn respond<R>(mut self, response: Response<R>) -> Result<(), IoError>
     where
-        R: Read,
+        R: Read + Send + 'static,
     {
         let res = self.respond_impl(response);
         if let Some(sender) = self.notify_when_responded.take() {
@@ -559,21 +567,35 @@ impl Request {
 
     fn respond_impl<R>(&mut self, response: Response<R>) -> Result<(), IoError>
     where
-        R: Read,
+        R: Read + Send + 'static,
     {
         let mut writer = self.extract_writer_impl();
 
         let do_not_send_body = self.method == Method::Head;
 
-        Self::ignore_client_closing_errors(response.raw_print(
-            writer.by_ref(),
-            self.http_version.clone(),
-            &self.headers,
-            do_not_send_body,
-            None,
-        ))?;
+        let size = response.data_length().unwrap_or(0);
+        let (version, headers) = (self.http_version.clone(), self.headers.clone());
+        // A body still on the socket (not read ahead) is let go only once
+        // the answer is out, as upstream: dropping it shuts the read side,
+        // and data arriving after that may reset the connection before the
+        // client has read the answer (a 413 to a body too big to read).
+        let unread = if self.body_buffered { None } else { self.data_reader.take() };
+        let job: Job = Box::new(move |writer: &mut dyn Write| {
+            let _unread = unread;
+            Self::ignore_client_closing_errors(response.raw_print(
+                &mut *writer,
+                version,
+                &headers,
+                do_not_send_body,
+                None,
+            ))?;
 
-        Self::ignore_client_closing_errors(writer.flush())
+            Self::ignore_client_closing_errors(writer.flush())
+        });
+        match writer.defer(job, size) {
+            Ok(()) => Ok(()),
+            Err(job) => job(&mut writer),
+        }
     }
 
     fn ignore_client_closing_errors(result: io::Result<()>) -> io::Result<()> {

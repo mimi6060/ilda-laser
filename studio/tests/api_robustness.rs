@@ -1038,7 +1038,9 @@ fn hostile_connections_neither_crash_nor_hold_the_studio() {
         }
     }
     std::thread::sleep(Duration::from_millis(300));
-    the_worker_comes_free(&mut studio, "answers never read", Duration::from_secs(8));
+    // T-489: the answers are written by the connection's own thread; the
+    // worker never waits on a client that doesn't read.
+    the_worker_comes_free(&mut studio, "answers never read", Duration::from_secs(1));
     drop((cut, stuck));
     assert!(!studio.output_log().iter().any(|l| l == "arm"));
 }
@@ -1076,9 +1078,9 @@ fn running_out_of_file_descriptors_never_stops_the_server_for_good() {
     assert!(!studio.output_log().iter().any(|l| l == "arm"));
 }
 
-/// The stop answers at once; the other routes within `limit`: the client
-/// timeout (5 s per stalled write) and some slack, or at once when the
-/// stalled client only sends.
+/// The stop answers at once; the other routes within `limit` (at once
+/// since T-481 and T-489: neither a stalled sender nor a stalled reader
+/// holds the worker).
 fn the_worker_comes_free(studio: &mut Studio, what: &str, limit: Duration) {
     let t = Instant::now();
     assert_eq!(http(studio.port, "POST", "/api/estop?source=ui", b"", Duration::from_secs(2)).unwrap().status, 200);
@@ -1184,6 +1186,60 @@ fn a_client_sending_one_byte_a_second_delays_nothing() {
     assert!(short_sent.elapsed() >= Duration::from_secs(2));
     eprintln!("T-481 slow client: heartbeat and state worst {quiet:?} quiet, {loaded:?} beside clients sending 1 byte/s; e-stop {estop:?}");
     assert!(loaded <= quiet + Duration::from_millis(100), "a client sending 1 byte/s delayed the heartbeat or the state: worst {loaded:?} against {quiet:?} quiet");
+    studio.alive().unwrap();
+    assert!(!studio.output_log().iter().any(|l| l == "arm"));
+}
+
+/// A connection whose client never reads: a receive buffer of 4 kB, then
+/// `requests` sent in a row (as far as the server takes them).
+fn never_reading(port: u16, requests: &[u8]) -> TcpStream {
+    let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    s.set_recv_buffer_size(4096).unwrap();
+    s.connect(&std::net::SocketAddr::from(([127, 0, 0, 1], port)).into()).unwrap();
+    let mut s: TcpStream = s.into();
+    s.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    let _ = s.write_all(requests);
+    s
+}
+
+/// T-489: clients that never read their answers (pipelined state reads,
+/// the 1.4 MB page, frames) hold only their own connections. Before, each
+/// answer was written by the single worker, which waited out the write
+/// timeout (5 s): no heartbeat (a disarm through « Interface perdue »), no
+/// state, a frozen UI, ~10 s with answers queued behind.
+#[test]
+fn a_client_that_never_reads_delays_nothing() {
+    let mut studio = Studio::start("slow-reader", &[]);
+    let port = studio.port;
+    let quiet = worst_heartbeat_and_state(port, 10);
+    let before = threads(&studio);
+    let rss = studio.rss_kb();
+    let mut stuck = Vec::new();
+    for i in 0..6 {
+        let one = match i % 3 {
+            0 => &b"GET /api/state HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+            1 => &b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+            _ => &b"GET /api/frame.bin HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+        };
+        stuck.push(never_reading(port, &one.repeat(100)));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let loaded = worst_heartbeat_and_state(port, 40);
+    let estop = studio.estop_roundtrip(Duration::from_millis(50)).unwrap();
+    let during = threads(&studio);
+    let grew = studio.rss_kb().saturating_sub(rss);
+    eprintln!("T-489 slow reader: heartbeat and state worst {quiet:?} quiet, {loaded:?} beside 6 clients that never read; e-stop {estop:?}; threads {before} → {during}; memory +{} MB", grew >> 10);
+    assert!(loaded <= quiet + Duration::from_millis(100), "a client that never reads delayed the heartbeat or the state: worst {loaded:?} against {quiet:?} quiet");
+    // One writing thread per stuck connection at most, beside the frame
+    // threads (at most 16 frame requests waiting, push.rs), and the
+    // answers piled up are bounded by the output budget (64 MB).
+    assert!(during <= before + 6 + 16 + 4, "threads {before} → {during}");
+    assert!(grew < 200 * 1024, "memory +{} MB", grew >> 10);
+    // Past the write timeout their connections are dropped; the studio
+    // still answers.
+    std::thread::sleep(Duration::from_secs(6));
+    assert_eq!(studio.get("/api/state").unwrap().status, 200);
+    drop(stuck);
     studio.alive().unwrap();
     assert!(!studio.output_log().iter().any(|l| l == "arm"));
 }
@@ -1311,9 +1367,8 @@ fn hammer(fuzz: &mut Fuzz, length: Duration, clients: usize) -> String {
         threads.push(std::thread::spawn(move || operator(port, seed, &stop, &failures, &sent)));
     }
     // Slow clients, now and then: answers never read, a body never
-    // finished. An answer never read holds the single worker for up to the
-    // client timeout (5 s), by design; a body never finished holds only
-    // its own connection (T-481). The stop is served beside them.
+    // finished. Each holds only its own connection (T-481, T-489). The
+    // stop is served beside them.
     {
         let stop = Arc::clone(&stop);
         threads.push(std::thread::spawn(move || {

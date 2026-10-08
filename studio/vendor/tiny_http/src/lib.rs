@@ -268,7 +268,10 @@ impl Server {
     /// before the request is handed over, an unread rest is skipped there,
     /// and at most `limits.max_connections` are served at once (past it, a
     /// new one pushes out the one waiting longest for its client). See
-    /// `util::limits`.
+    /// `util::limits`. Laser Studio patch (T-489): and a client that
+    /// doesn't read its answers holds only its connection: they are
+    /// written by the connection's own thread, `Request::respond` returns
+    /// at once (`limits.output_budget`, `util::outbox`).
     pub fn from_listener_with_limits<L: Into<Listener>>(
         listener: L,
         ssl_config: Option<SslConfig>,
@@ -286,6 +289,8 @@ impl Server {
         let listener = listener.into();
         let prefetch = limits.as_ref().map(util::limits::Prefetch::new);
         let readers = limits.as_ref().map(|l| util::limits::Readers::new(l.max_connections));
+        // Laser Studio patch (T-489)
+        let output = limits.as_ref().map(|l| util::outbox::OutputBudget::new(l.output_budget));
         // building the "close" variable
         let close_trigger = Arc::new(AtomicBool::new(false));
 
@@ -343,9 +348,15 @@ impl Server {
                         // Laser Studio patch (T-481): a place among the
                         // capped readers (a clone of the socket to shut it
                         // from here), or the connection is dropped.
+                        // Laser Studio patch (T-489): the same clone shuts
+                        // a connection dropped by its `Outbox`.
+                        let mut handle = None;
                         let admitted = match &readers {
                             None => None,
-                            Some(readers) => match sock.try_clone().ok().and_then(|h| readers.admit(h)) {
+                            Some(readers) => match sock.try_clone().ok().map(Arc::new).and_then(|h| {
+                                handle = Some(Arc::clone(&h));
+                                readers.admit(h)
+                            }) {
                                 Some(a) => Some(a),
                                 None => continue,
                             },
@@ -374,7 +385,11 @@ impl Server {
                         };
 
                         let mark = admitted.as_ref().map(|a| Arc::clone(&a.mark));
-                        Ok((ClientConnection::new(write_closable, read_closable).with_limits(prefetch.clone(), mark), admitted))
+                        let client = match &output {
+                            Some(budget) => ClientConnection::with_outbox(write_closable, read_closable, Arc::clone(budget), handle),
+                            None => ClientConnection::new(write_closable, read_closable),
+                        };
+                        Ok((client.with_limits(prefetch.clone(), mark), admitted))
                     }
                     Err(e) => Err(e),
                 };

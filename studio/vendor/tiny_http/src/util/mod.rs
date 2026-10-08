@@ -15,6 +15,8 @@ mod fused_reader;
 // Laser Studio patch (T-481): slow clients block only themselves.
 pub(crate) mod limits;
 mod messages_queue;
+// Laser Studio patch (T-489): answers written on their connection's thread.
+pub(crate) mod outbox;
 pub(crate) mod refined_tcp_stream;
 mod sequential;
 mod task_pool;

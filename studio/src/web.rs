@@ -399,22 +399,38 @@ pub(crate) const MAX_CONNECTIONS: usize = 48;
 /// (T-481): four of the biggest JSON body. Past it, 503.
 const PREFETCH_BUDGET: usize = 4 * MAX_JSON_BODY;
 
+/// The answer bytes waiting at once on all the connections (T-489), past
+/// the one each connection is writing: a page that pipelines requests and
+/// never reads the answers is dropped past it. Four of the biggest JSON
+/// body; `/api/state` is far smaller.
+const OUTPUT_BUDGET: usize = 4 * MAX_JSON_BODY;
+
 /// A server on `addr` whose connections time out reads and writes after
 /// `CLIENT_IO_TIMEOUT` (set on each accepted socket by our tiny_http
 /// patch, `vendor/tiny_http`: macOS sockets don't inherit the listener's).
 /// Bodies up to `prefetch` bytes are read on the connection's own thread
 /// before the request is handed over, at most `budget` bytes at once, and
 /// at most `max_connections` are served at once (T-481); the stop is
-/// handed over on its head alone.
-pub(crate) fn bind_with(addr: impl std::net::ToSocketAddrs, prefetch: usize, budget: usize, max_connections: usize) -> anyhow::Result<Server> {
+/// handed over on its head alone. Answers are written by their
+/// connection's own thread, never by the one that answers (T-489): a
+/// client that doesn't read them holds only its connection; at most
+/// `output` bytes of them wait at once.
+pub(crate) fn bind_with(addr: impl std::net::ToSocketAddrs, prefetch: usize, budget: usize, max_connections: usize, output: usize) -> anyhow::Result<Server> {
     let listener = std::net::TcpListener::bind(addr)?;
-    let limits = tiny_http::ClientLimits { timeout: Some(CLIENT_IO_TIMEOUT), prefetch, prefetch_budget: budget, max_connections, head_only: Some(is_estop) };
+    let limits = tiny_http::ClientLimits {
+        timeout: Some(CLIENT_IO_TIMEOUT),
+        prefetch,
+        prefetch_budget: budget,
+        max_connections,
+        head_only: Some(is_estop),
+        output_budget: output,
+    };
     Server::from_listener_with_limits(listener, None, limits).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// The UI's server on `addr` (see `bind_with`).
 pub(crate) fn bind(addr: impl std::net::ToSocketAddrs) -> anyhow::Result<Server> {
-    bind_with(addr, MAX_JSON_BODY, PREFETCH_BUDGET, MAX_CONNECTIONS)
+    bind_with(addr, MAX_JSON_BODY, PREFETCH_BUDGET, MAX_CONNECTIONS, OUTPUT_BUDGET)
 }
 
 pub fn run(addr: &str, shared: Arc<Mutex<Shared>>, estop: Arc<EStop>, calibration_path: PathBuf, running: Arc<AtomicBool>) -> anyhow::Result<()> {
@@ -579,9 +595,11 @@ fn put_back(state: &mut serde_json::Value, moved: Vec<(&'static str, &'static st
 /// `GET /api/events` (T-411): `text/event-stream` on its own thread. First
 /// the current state, then each new one (`id` = its version), and a
 /// comment after `KEEPALIVE` without change. At most `MAX_STREAMS` (503).
-/// A page that stops reading blocks this thread in a write until it goes
-/// away (tiny_http gives no send timeout on its connections); the write
-/// holds no lock: the event is a copy taken from the hub beforehand.
+/// A page that stops reading blocks this thread in a write until the
+/// client timeout (`CLIENT_IO_TIMEOUT`) drops it; the write holds no
+/// lock: the event is a copy taken from the hub beforehand. A stream
+/// writes directly, on this thread, once the answers before it on its
+/// connection are out (T-489).
 fn stream_aside(request: Request, hub: &Arc<Hub>) {
     let Some(slot) = hub.open_stream() else {
         let _ = request.respond(text(503, "trop de flux d'état ouverts"));
@@ -645,7 +663,9 @@ fn send_frame(request: Request, slot: push::OwnedSlot, hub: &Hub) {
     if let Err(e) = request.respond(response) {
         log::debug!("failed to send a frame: {e}");
     }
-    // Held until sent: a client that doesn't read keeps its slot.
+    // Handed to the connection's own thread (T-489): a client that doesn't
+    // read holds only that thread, and its unread frames count in the
+    // output budget, past which its connection is dropped.
     drop(slot);
 }
 
