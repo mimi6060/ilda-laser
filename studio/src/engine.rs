@@ -51,6 +51,9 @@ pub enum Content {
     /// An abstract (T-440, `abstracts.rs`): a curve made of stacked
     /// oscillators on X, Y and the hue, edited in CRÉATION › Abstraits.
     Abstract(AbstractShape),
+    /// A wireframe 3D object (T-462, `wire.rs`), imported from an OBJ
+    /// file in CRÉATION › Objets 3D, turning in perspective.
+    Wire(crate::wire::WireObject),
 }
 
 impl Content {
@@ -69,6 +72,7 @@ impl Content {
             // Editing the oscillators reshapes the drawing; it doesn't
             // start the animation over.
             (Content::Abstract(_), Content::Abstract(_)) => true,
+            (Content::Wire(a), Content::Wire(b)) => a.name == b.name,
             _ => false,
         }
     }
@@ -450,6 +454,8 @@ pub struct Animator {
     ilda_time: f64,
     /// Seconds a text has been on show (for scrolling per second).
     text_time: f64,
+    /// Seconds a free-running 3D object has been turning (T-462).
+    wire_time: f64,
     /// The text's glyph layout, kept until the text or its style change.
     text_cache: fonts::TextCache,
     flash: f32,
@@ -711,6 +717,9 @@ impl Animator {
         if let Content::Text { .. } = &s.content {
             self.text_time += dt as f64;
         }
+        if let Content::Wire(_) = &s.content {
+            self.wire_time += dt as f64;
+        }
 
         // size = 0 leaves the scale alone; size = 1 swings it 0.5x..1.5x.
         let scale = s.scale * (1.0 - 0.5 * react.size * (react.enabled as u8 as f32) + react.size * bass);
@@ -757,6 +766,18 @@ impl Animator {
                 } else {
                     fig.frame_points(index, scale, paint)
                 }
+            }
+            // Its own colour, like a figure's strokes; one turn per period
+            // of the tempo clock (or of seconds).
+            Content::Wire(obj) => {
+                let pos = match obj.per {
+                    crate::figures::RateUnit::Beat => beat_pos,
+                    crate::figures::RateUnit::Second => self.wire_time,
+                };
+                obj.points(pos, scale, |c| {
+                    let (r, g, b) = shift_hue(c, hue_shift);
+                    (r * gain, g * gain, b * gain)
+                })
             }
             // Its own hue offsets on top of the look's colour (T-440); the
             // drift follows the tempo clock (`beat_pos`).

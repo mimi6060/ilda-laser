@@ -202,7 +202,7 @@ impl<'a> Builder<'a> {
     /// The built-in cue called `name` (never a figure, ILDA file or
     /// operator cue that happens to have the same name).
     fn find(&mut self, name: &str) -> Option<&'a Preset> {
-        let own = [crate::figures::CATEGORY, crate::ilda_library::CATEGORY, crate::usercues::CATEGORY];
+        let own = [crate::figures::CATEGORY, crate::ilda_library::CATEGORY, crate::wire::CATEGORY, crate::usercues::CATEGORY];
         let found = self.presets.iter().find(|p| p.name == name && !own.contains(&p.category));
         if found.is_none() {
             self.missing.push(name.to_string());

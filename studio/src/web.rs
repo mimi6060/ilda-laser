@@ -300,6 +300,10 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/figures/delete", RouteClass::Edit),
     ("POST", "/api/figures/import", RouteClass::Edit),
     ("POST", "/api/figures/text", RouteClass::Edit),
+    ("GET", "/api/objects", RouteClass::Read),
+    ("POST", "/api/objects", RouteClass::Edit),
+    ("POST", "/api/objects/import", RouteClass::Edit),
+    ("POST", "/api/objects/delete", RouteClass::Edit),
     ("GET", "/api/fonts", RouteClass::Read),
     ("GET", "/api/timeline", RouteClass::Read),
     ("GET", "/api/timeline/markers.csv", RouteClass::Read),
@@ -758,6 +762,8 @@ fn may_decode(method: &Method, url: &str) -> bool {
             | (Method::Get, "/api/timeline/waveform")
             | (Method::Post, "/api/timeline/audio")
             | (Method::Post, "/api/figures/import")
+            // OBJ import (T-462): up to 8 MB of text parsed and chained.
+            | (Method::Post, "/api/objects/import")
             // ILDA import parses up to 64 MB; an export renders and encodes
             // up to `MAX_EXPORT_FRAMES` images (T-011).
             | (Method::Post, "/api/media/ilda")
@@ -3111,6 +3117,68 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // Import (T-297): the raw file in the body, settings in the query.
         // Returns a preview; nothing is saved (« Créer la figure » does).
         (Method::Post, "/api/figures/import") => import_figure(request, shared),
+        // 3D objects (T-462): the library, also the « Objets 3D » cue page.
+        (Method::Get, "/api/objects") => {
+            let s = shared.lock().unwrap();
+            let list: Vec<_> = s.objects.list().iter().map(object_summary).collect();
+            json_response(json!({
+                "objects": list,
+                "budget": s.mixer.point_budget,
+                "max_bytes": crate::figure_import::obj::MAX_OBJ_BYTES,
+                "max_edges": crate::wire::MAX_EDGES,
+            }))
+        }
+        // An object's properties (and its name): never its edges.
+        (Method::Post, "/api/objects") => match body::<ObjectProps>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                let Some(mut obj) = s.objects.get(&req.name).cloned() else {
+                    return text(404, &format!("objet introuvable : {}", req.name.trim()));
+                };
+                let old = obj.name.clone();
+                if let Some(name) = req.rename.as_deref().map(str::trim).filter(|n| *n != old) {
+                    if s.objects.get(name).is_some() {
+                        return text(409, &format!("un objet s'appelle déjà « {name} »"));
+                    }
+                    obj.name = name.to_string();
+                }
+                obj.color = req.color.unwrap_or(obj.color);
+                obj.period_beats = req.period_beats.unwrap_or(obj.period_beats);
+                obj.per = req.per.unwrap_or(obj.per);
+                obj.axis_ratio = req.axis_ratio.unwrap_or(obj.axis_ratio);
+                obj.perspective = req.perspective.unwrap_or(obj.perspective);
+                obj.depth_color = req.depth_color.unwrap_or(obj.depth_color);
+                match s.objects.save(obj) {
+                    Ok(kept) => {
+                        if kept.name != old {
+                            if let Err(e) = s.objects.remove(&old) {
+                                log::warn!("renamed object: the old one stays: {e:#}");
+                            }
+                        }
+                        crate::wire::refresh(&mut s);
+                        json_response(object_summary(&kept))
+                    }
+                    Err(e) => text(400, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/objects/delete") => match body::<NameRequest>(request) {
+            Ok(req) => {
+                let mut s = shared.lock().unwrap();
+                match s.objects.remove(&req.name) {
+                    Ok(()) => {
+                        crate::wire::refresh(&mut s);
+                        ok()
+                    }
+                    Err(e) => text(404, &format!("{e:#}")),
+                }
+            }
+            Err(e) => e,
+        },
+        // The OBJ file in the body, options in the query; `preview=1`
+        // answers without saving.
+        (Method::Post, "/api/objects/import") => import_object(request, shared),
         // The editor's text tool: a laser font as strokes. No state.
         (Method::Post, "/api/figures/text") => match body::<TextRequest>(request) {
             Ok(req) => {
@@ -6250,6 +6318,103 @@ fn import_figure(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResp
     }
 }
 
+/// An object of the library as the page lists it.
+fn object_summary(o: &crate::wire::WireObject) -> serde_json::Value {
+    json!({
+        "name": o.name,
+        "id": crate::wire::cue_id(&o.name),
+        "vertices": o.vertices.len(),
+        "edges": o.edges.len(),
+        "strokes": o.strokes(),
+        "est_points": o.estimated_points(),
+        "color": o.color,
+        "period_beats": o.period_beats,
+        "per": o.per,
+        "axis_ratio": o.axis_ratio,
+        "perspective": o.perspective,
+        "depth_color": o.depth_color,
+    })
+}
+
+/// `POST /api/objects` (T-462): what « Propriétés de l'objet » changes.
+#[derive(Deserialize)]
+struct ObjectProps {
+    name: String,
+    #[serde(default)]
+    rename: Option<String>,
+    #[serde(default)]
+    color: Option<[u8; 3]>,
+    #[serde(default)]
+    period_beats: Option<f32>,
+    #[serde(default)]
+    per: Option<crate::figures::RateUnit>,
+    #[serde(default)]
+    axis_ratio: Option<f32>,
+    #[serde(default)]
+    perspective: Option<f32>,
+    #[serde(default)]
+    depth_color: Option<bool>,
+}
+
+/// `POST /api/objects/import?name=…&coplanar=…&up=y|z&keep=…[&preview=1]`
+/// (T-462): an OBJ file (body, at most `MAX_OBJ_BYTES`) → a wireframe
+/// object. Parsed on its own thread without the lock held; a panic in the
+/// reader is caught and reported. With `preview=1`: `{object, report,
+/// budget}`, nothing saved; otherwise saved in the library under `name`
+/// (refused if that name is taken), its cue on the « Objets 3D » page.
+fn import_object(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    use crate::figure_import::obj::{self, ObjOptions, UpAxis};
+    use std::io::Read;
+    let limit = obj::MAX_OBJ_BYTES;
+    let mut bytes = Vec::new();
+    if let Err(e) = request.as_reader().take(limit as u64 + 1).read_to_end(&mut bytes) {
+        return text(400, &format!("Fichier OBJ illisible : {e}"));
+    }
+    if bytes.len() > limit {
+        return text(413, &format!("Fichier OBJ trop gros : {} Mo au plus. Exportez l'objet avec moins de détails.", limit / (1024 * 1024)));
+    }
+    let url = request.url().to_string();
+    let q = |k: &str| query_str(&url, k);
+    let num = |k: &str| q(k).and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite());
+    let d = ObjOptions::default();
+    let opts = ObjOptions {
+        merge_coplanar_deg: num("coplanar").map_or(d.merge_coplanar_deg, |v| v.clamp(0.0, obj::MAX_COPLANAR_DEG)),
+        up: q("up").and_then(|u| UpAxis::parse(&u)).unwrap_or(d.up),
+        keep_longest: num("keep").filter(|v| *v >= 1.0).map(|v| v.min(1e9) as usize),
+    };
+    let preview = q("preview").is_some_and(|v| v == "1");
+    let name = crate::figure_import::default_name(&q("name").unwrap_or_default());
+    // Its own thread, so a file can't take the HTTP worker down; a panic
+    // is caught as well.
+    let job = std::thread::Builder::new()
+        .name("object-import".into())
+        .spawn(move || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| obj::parse_obj_bytes(&bytes, &opts))));
+    let (mut object, report) = match job.map(|h| h.join()) {
+        Ok(Ok(Ok(Ok(result)))) => result,
+        Ok(Ok(Ok(Err(e)))) => return text(400, &format!("{e:#}")),
+        _ => {
+            log::warn!("object import failed internally on {name:?}");
+            return text(400, "Fichier OBJ impossible à importer (erreur interne).");
+        }
+    };
+    object.name = name;
+    let mut s = shared.lock().unwrap();
+    let budget = s.mixer.point_budget;
+    if preview {
+        return json_response(json!({ "object": object, "report": report, "budget": budget }));
+    }
+    if s.objects.get(&object.name).is_some() {
+        return text(409, &format!("un objet s'appelle déjà « {} » : choisissez un autre nom", object.name));
+    }
+    match s.objects.save(object) {
+        Ok(kept) => {
+            crate::wire::refresh(&mut s);
+            json_response(json!({ "name": kept.name, "id": crate::wire::cue_id(&kept.name), "report": report, "budget": budget }))
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
 fn parse_hex(s: &str) -> Option<[u8; 3]> {
     let h = s.trim().trim_start_matches('#');
     if h.len() != 6 || !h.is_ascii() {
@@ -7936,6 +8101,83 @@ mod tests {
         assert_eq!(t.request("GET", "/api/arm", "").0, 200);
         assert_eq!(parse_hex("#00ff80"), Some([0, 255, 128]));
         assert_eq!(parse_hex("#00ff8"), None);
+    }
+
+    /// T-462: an OBJ file previewed, imported (its cue on the « Objets 3D »
+    /// page), edited, undone, refused in show mode and when hostile, deleted.
+    #[test]
+    fn object_import_previews_saves_undoes_and_refuses_bad_files() {
+        let t = TestServer::start(false);
+        let cube = "v -1 -1 -1\nv 1 -1 -1\nv 1 1 -1\nv -1 1 -1\nv -1 -1 1\nv 1 -1 1\nv 1 1 1\nv -1 1 1\n\
+            f 1 2 3\nf 1 3 4\nf 5 8 7\nf 5 7 6\nf 1 5 6\nf 1 6 2\nf 2 6 7\nf 2 7 3\nf 3 7 8\nf 3 8 4\nf 5 1 4\nf 5 4 8\n";
+        let (status, body) = t.request("POST", "/api/objects/import?name=Mon%20cube.obj&preview=1", cube);
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["object"]["name"].as_str(), v["report"]["edges"].as_u64(), v["report"]["faces"].as_u64()), (Some("Mon cube"), Some(12), Some(12)));
+        assert_eq!(v["budget"], crate::layers::DEFAULT_POINT_BUDGET);
+        let (_, body) = t.request("POST", "/api/objects/import?name=c&preview=1&coplanar=0", cube);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["report"]["edges"], 18);
+        assert!(t.shared.lock().unwrap().objects.list().is_empty(), "a preview saves nothing");
+        assert!(t.shared.lock().unwrap().history.view()["undo"].as_array().unwrap().is_empty());
+
+        // Imported: in the library, a cue of the « Objets 3D » page, one undo step.
+        let (status, body) = t.request("POST", "/api/objects/import?name=Mon%20cube", cube);
+        assert_eq!(status, 200, "{body}");
+        {
+            let s = t.shared.lock().unwrap();
+            assert_eq!(s.objects.list().len(), 1);
+            let p = s.presets.iter().find(|p| p.id == "object:Mon cube").expect("its cue");
+            assert_eq!(p.category, crate::wire::CATEGORY);
+            let page = s.grid.view().iter().find(|v| v.name == crate::wire::CATEGORY).expect("its page");
+            assert_eq!(page.cells[0].as_deref(), Some("object:Mon cube"));
+        }
+        assert_eq!(t.request("POST", "/api/objects/import?name=Mon%20cube", cube).0, 409, "the name is taken");
+        let (_, list) = t.request("GET", "/api/objects", "");
+        let list: serde_json::Value = serde_json::from_str(&list).unwrap();
+        assert_eq!((list["objects"][0]["edges"].as_u64(), list["max_edges"].as_u64()), (Some(12), Some(2000)));
+        // Properties, then undone.
+        let (status, body) = t.request("POST", "/api/objects", r#"{"name":"Mon cube","color":[255,0,0],"perspective":99,"rename":"Cube rouge"}"#);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(t.shared.lock().unwrap().objects.get("Cube rouge").map(|o| (o.color, o.perspective)), Some(([255, 0, 0], crate::wire::MAX_PERSPECTIVE)));
+        assert!(t.shared.lock().unwrap().objects.get("Mon cube").is_none());
+        assert_eq!(t.request("POST", "/api/undo", "").0, 200);
+        assert!(t.shared.lock().unwrap().objects.get("Mon cube").is_some_and(|o| o.color == [0, 255, 0]));
+        assert_eq!(t.request("POST", "/api/undo", "").0, 200);
+        assert!(t.shared.lock().unwrap().objects.list().is_empty(), "the import undone");
+        assert!(!t.shared.lock().unwrap().presets.iter().any(|p| p.id.starts_with(crate::wire::ID_PREFIX)));
+        assert_eq!(t.request("POST", "/api/redo", "").0, 200);
+        assert_eq!(t.shared.lock().unwrap().objects.list().len(), 1);
+
+        // Show mode: every edit is locked (423), the list still reads.
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/objects/import?name=x", cube).0, 423);
+        assert_eq!(t.request("POST", "/api/objects/delete", r#"{"name":"Mon cube"}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/objects", r#"{"name":"Mon cube"}"#).0, 423);
+        assert_eq!(t.request("GET", "/api/objects", "").0, 200);
+        t.shared.lock().unwrap().show_mode.on = false;
+
+        // Hostile or empty files: a French message, nothing saved, still serving.
+        for (file, msg) in [
+            ("", "le fichier est vide"),
+            ("# rien\nvt 0 0\n", "aucun sommet"),
+            ("v 0 0 0\nv nan 1 1\nl 1 2\n", "non finie"),
+            ("\u{0}\u{1}binaire", "pas un fichier texte"),
+        ] {
+            let (status, body) = t.request("POST", "/api/objects/import?name=bad", file);
+            assert_eq!(status, 400, "{file:?}");
+            assert!(body.contains(msg), "{body}");
+        }
+        let huge = "#".repeat(crate::figure_import::obj::MAX_OBJ_BYTES + 10);
+        let (status, body) = t.request("POST", "/api/objects/import?name=big", &huge);
+        assert_eq!(status, 413);
+        assert!(body.contains("8 Mo au plus"), "{body}");
+        assert_eq!(t.shared.lock().unwrap().objects.list().len(), 1);
+        assert_eq!(t.request("POST", "/api/objects/delete", r#"{"name":"Mon cube"}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/objects/delete", r#"{"name":"Mon cube"}"#).0, 404);
+        assert!(t.shared.lock().unwrap().objects.list().is_empty());
+        assert_eq!(t.request("GET", "/api/arm", "").0, 200);
+        assert!(may_decode(&Method::Post, "/api/objects/import?name=a"));
+        assert!(!may_decode(&Method::Post, "/api/objects/delete"));
     }
 
     #[test]

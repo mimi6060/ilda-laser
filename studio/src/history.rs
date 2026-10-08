@@ -62,6 +62,8 @@ pub enum Section {
     AudioRoutes,
     CueLists,
     Figures,
+    /// The 3D object library (T-462).
+    Objects,
     Venue,
     /// Projection zones (T-012).
     Projection,
@@ -89,7 +91,7 @@ pub enum Section {
 
 use Section::*;
 
-const ALL: [Section; 20] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda, Autopilot];
+const ALL: [Section; 21] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Objects, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda, Autopilot];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -104,6 +106,7 @@ impl Section {
             AudioRoutes => "audio_routes",
             CueLists => "cue_lists",
             Figures => "figures",
+            Objects => "objects",
             Venue => "venue",
             Projection => "projection",
             Fx => "fx",
@@ -137,6 +140,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/audio/routes" | "/api/audio/preset" => &[AudioRoutes],
         "/api/cuelists" | "/api/cuelists/delete" => &[CueLists],
         "/api/figures" | "/api/figures/delete" => &[Figures],
+        "/api/objects" | "/api/objects/import" | "/api/objects/delete" => &[Objects],
         "/api/venue" | "/api/venue/preset" => &[Venue],
         "/api/projection" => &[Projection],
         "/api/fx" => &[Fx],
@@ -164,6 +168,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         AudioRoutes => json!(s.routes.routing()),
         CueLists => json!(s.cue_lists.list()),
         Figures => json!(s.figures.list()),
+        Objects => json!(s.objects.list()),
         Venue => json!(s.venue.get()),
         // Without the group masters and the running chasers (T-170):
         // playing values, never undone, never a reason for a stale undo.
@@ -249,6 +254,19 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
                 }
             }
             crate::figures::refresh(s);
+        }
+        Objects => {
+            let target: Vec<crate::wire::WireObject> = from(v)?;
+            let gone: Vec<String> = s.objects.list().iter().filter(|o| !target.iter().any(|t| t.name == o.name)).map(|o| o.name.clone()).collect();
+            for name in gone {
+                s.objects.remove(&name).map_err(io)?;
+            }
+            for obj in target {
+                if s.objects.get(&obj.name) != Some(&obj) {
+                    s.objects.save(obj).map_err(bad)?;
+                }
+            }
+            crate::wire::refresh(s);
         }
         Venue => crate::web::apply_venue(s, from(v)?).map_err(crate::web::VenueRefusal::status_and_text)?,
         Projection => s.projection.set(from(v)?).map_err(bad)?,
@@ -533,6 +551,8 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, ScanPresets) => named(list_change(old, new, "id", "name"), "Préréglage de balayage", "Préréglages de balayage", false, "ajouté"),
         (_, CueLists) => named(list_change(old, new, "name", "name"), "Liste de cues", "Listes de cues", true, "créé"),
         (_, Figures) => named(list_change(old, new, "name", "name"), "Figure", "Figures", true, "enregistré"),
+        ("/api/objects/import", Objects) => named(list_change(old, new, "name", "name"), "Objet 3D", "Objets 3D", false, "importé"),
+        (_, Objects) => named(list_change(old, new, "name", "name"), "Objet 3D", "Objets 3D", false, "enregistré"),
         (_, CueProps) => {
             let (a, b) = (old.as_object(), new.as_object());
             let id = match (a, b) {

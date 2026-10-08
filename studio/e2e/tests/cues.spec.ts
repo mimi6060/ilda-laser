@@ -25,14 +25,15 @@ test.beforeEach(async ({ page }) => {
 test('shows one tab per page (categories first) and the first page of cues', async ({ page }) => {
   const tabs = page.locator('#cueTabs button');
   const grid = await getGrid();
-  // T-110, T-112: « Festival » and « Festival évolutifs », the last two
-  // categories, came later: they follow the overflow pages, so the older
-  // pages keep their numbers.
-  const early = catalog.categories.slice(0, -2);
+  // T-110, T-112, T-462: « Festival », « Festival évolutifs » and
+  // « Objets 3D », the last three categories, came later: they follow the
+  // overflow pages, so the older pages keep their numbers.
+  const early = catalog.categories.slice(0, -3);
   expect(grid.pages.slice(0, early.length).map(p => p.name)).toEqual(early);
   const names = grid.pages.map(p => p.name);
   expect(names.indexOf('Festival')).toBeGreaterThan(names.indexOf('Faisceaux 2'));
   expect(names.indexOf('Festival évolutifs')).toBe(names.indexOf('Festival') + 1);
+  expect(names.indexOf('Objets 3D')).toBe(names.indexOf('Festival évolutifs') + 1);
   await expect(tabs).toHaveCount(grid.pages.length);
   const first = catalog.categories[0];
   await expect(tabs.first().locator('.pn')).toHaveText(`${first} (40)`);

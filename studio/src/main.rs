@@ -130,6 +130,7 @@ mod zones;
 mod zonetrace;
 mod web;
 mod wifi;
+mod wire;
 
 #[cfg(test)]
 mod test_support;
@@ -521,6 +522,9 @@ pub struct Shared {
     /// The operator's figures (figures.rs, `studio-data/figures/`), also
     /// the cues of the « Figures » page.
     pub figures: figures::FigureStore,
+    /// The operator's 3D objects (wire.rs, T-462, `studio-data/objects/`),
+    /// also the cues of the « Objets 3D » page.
+    pub objects: wire::WireStore,
     /// The operator's own cues (usercues.rs, T-405, `user_cues.json`):
     /// looks stored into grid cells, also in `presets`.
     pub user_cues: usercues::UserCueStore,
@@ -1589,6 +1593,7 @@ fn startup_state(cli: &Cli) -> Shared {
         templates: templates::TemplateStore::new(cli.data_dir.join("templates")),
         timecode: timecode::TimecodeState::load(cli.data_dir.join("timecode.json")),
         figures: figures::FigureStore::load(cli.data_dir.join("figures")),
+        objects: wire::WireStore::load(cli.data_dir.join("objects")),
         user_cues: usercues::UserCueStore::load_or_create(cli.data_dir.join("user_cues.json")),
         media: Arc::new(audio::media::MediaStore::new(&cli.data_dir).isolated(audio::isolate::Isolation::child(
             &cli.data_dir,
@@ -1639,6 +1644,8 @@ fn startup_state(cli: &Cli) -> Shared {
         dmx_out: dmx_out::DmxOutState::load(cli.data_dir.join("dmx_out.json")),
     };
     usercues::sync_presets(&mut state);
+    let objects = state.objects.list().iter().map(wire::preset_of).collect();
+    wire::set_presets(&mut state, objects);
     figures::refresh(&mut state);
     // Macro lines checked against the registry they will run on (T-425).
     macros::revalidate(&mut state);
