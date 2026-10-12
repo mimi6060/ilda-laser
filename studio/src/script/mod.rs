@@ -59,6 +59,29 @@ const MAX_CONSOLE: usize = 100;
 /// think of), a script starts at most four times a second.
 pub const MIN_RUN_INTERVAL_S: f64 = 0.25;
 pub const TOO_SOON_FR: &str = "relancé trop vite (moins de 250 ms après le lancement précédent) : lancement refusé";
+/// One engine frame (60 fps): the tolerance of the beat triggers' gap.
+const FRAME_S: f64 = 1.0 / 60.0;
+/// The shortest gap between two *À chaque temps* starts of one script: a
+/// beat at `tempo::MAX_BPM`, less a frame (a beat is seen on the frame
+/// after it), so the fastest tempo still fires every beat. *À chaque
+/// mesure* waits that many times the beats of a bar. `MIN_RUN_INTERVAL_S`
+/// is longer than a beat at 250 BPM, so the triggers have this gate
+/// instead; a script moving the tempo's phase meets it (as well as the
+/// jump being ignored, `PHASE_JUMP_BEATS`).
+pub fn min_trigger_gap_s(trigger: ScriptTrigger, beats_per_bar: u8) -> f64 {
+    let beat = 60.0 / crate::tempo::MAX_BPM - FRAME_S;
+    match trigger {
+        ScriptTrigger::EveryBar => beat * beats_per_bar.max(1) as f64,
+        _ => beat,
+    }
+}
+/// A move of the tempo's phase larger than this in one frame (a nudge
+/// from a button or a script, a resync, a tap) is a jump: a beat it
+/// crosses is not a beat that passed, the triggers ignore it. Smaller
+/// moves (the audio and MIDI clock followers' corrections, at most a
+/// 1/64 beat per MIDI tick) are the clock keeping time: they count.
+const PHASE_JUMP_BEATS: f64 = 1.0 / 16.0;
+pub const TRIGGER_TOO_SOON_FR: &str = "temps trop proche du lancement précédent (phase du tempo déplacée ?) : lancement sauté";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -267,8 +290,12 @@ pub struct Scripts {
     pub halted: bool,
     /// Bumped by every stop: a run being applied stops at it.
     stops: u64,
+    /// The beat and bar of the last frame (none before the first), the
+    /// beats per bar they were counted in, and the clock's `phase_shift`.
     last_beat: Option<i64>,
     last_bar: Option<i64>,
+    last_bpb: u8,
+    last_shift: f64,
     was_armed: bool,
     audio: AudioSeen,
     worker: Option<Worker>,
@@ -646,11 +673,18 @@ pub fn script_origin(s: &Shared, source: ControlSource) -> bool {
 }
 
 /// Runs `f` with a script at the origin of what it applies.
+/// The mark is lifted even if `f` panics (a drop guard): a mark left
+/// behind would refuse every later launch, the operator's included.
 pub fn with_script_origin<R>(s: &mut Shared, f: impl FnOnce(&mut Shared) -> R) -> R {
+    struct Origin<'a>(&'a mut Shared);
+    impl Drop for Origin<'_> {
+        fn drop(&mut self) {
+            self.0.scripts.origin -= 1;
+        }
+    }
     s.scripts.origin += 1;
-    let r = f(s);
-    s.scripts.origin -= 1;
-    r
+    let g = Origin(s);
+    f(&mut *g.0)
 }
 
 /// The operator's own hand on the main screen: a button, a key, the
@@ -892,26 +926,50 @@ pub fn frame(s: &mut Shared, t: f64, audio: &crate::engine::AudioFeatures) {
             return;
         }
     }
-    // The triggers: on the tempo clock, when the beat or the bar changes.
-    let beat = s.tempo.beat_at(t).floor() as i64;
-    let bar = beat.div_euclid(s.tempo.beats_per_bar.max(1) as i64);
-    let new_beat = s.scripts.last_beat.is_some_and(|b| b != beat);
-    let new_bar = s.scripts.last_bar.is_some_and(|b| b != bar);
+    // The triggers: on the tempo clock, when time carries it past a beat
+    // or a bar. Only forward: a beat the clock jumps back over (a nudge
+    // down, a resync) or forward over (a nudge up) in one frame is a phase
+    // move, not a beat that passed; else a script nudging the phase 32
+    // times re-fires itself on every frame (review 3 of T-458).
+    let bpb = s.tempo.beats_per_bar.max(1);
+    let beat_f = s.tempo.beat_at(t);
+    let shift = s.tempo.phase_shift();
+    let moved = shift - std::mem::replace(&mut s.scripts.last_shift, shift);
+    let timed = if moved.abs() > PHASE_JUMP_BEATS { beat_f - moved } else { beat_f };
+    let (beat, timed_beat) = (beat_f.floor() as i64, timed.floor() as i64);
+    let (bar, timed_bar) = (beat.div_euclid(bpb as i64), timed_beat.div_euclid(bpb as i64));
+    let new_beat = s.scripts.last_beat.is_some_and(|b| timed_beat > b);
+    // A new metre counts its bars afresh: no bar crossed this frame.
+    let new_bar = s.scripts.last_bpb == bpb && s.scripts.last_bar.is_some_and(|b| timed_bar > b);
     s.scripts.last_beat = Some(beat);
     s.scripts.last_bar = Some(bar);
+    s.scripts.last_bpb = bpb;
     if !(new_beat || new_bar) || s.scripts.halted || !s.scripts.trusted() {
         return;
     }
-    let due: Vec<u32> = s
+    let due: Vec<(u32, ScriptTrigger)> = s
         .scripts
         .list
         .iter()
         .filter(|sc| sc.enabled && ((new_beat && sc.trigger == ScriptTrigger::EveryBeat) || (new_bar && sc.trigger == ScriptTrigger::EveryBar)))
-        .map(|sc| sc.id)
-        .filter(|id| !s.scripts.is_running(*id) && !s.scripts.status.get(id).is_some_and(|st| st.blocked))
+        .map(|sc| (sc.id, sc.trigger))
+        .filter(|(id, _)| !s.scripts.is_running(*id) && !s.scripts.status.get(id).is_some_and(|st| st.blocked))
         .collect();
     let mut state = None;
-    for id in due {
+    for (id, trigger) in due {
+        // The gate of the triggers: at most one start per beat at the
+        // fastest tempo (per bar for *À chaque mesure*), whatever moves
+        // the clock.
+        // The same time base as `last_start_s` (`enqueue`).
+        let (gap, now) = (min_trigger_gap_s(trigger, bpb), s.now_s());
+        if s.scripts.status.get(&id).and_then(|st| st.last_start_s).is_some_and(|last| now - last < gap) {
+            let st = s.scripts.status_mut(id);
+            if !st.refusal_logged {
+                st.refusal_logged = true;
+                st.log(TRIGGER_TOO_SOON_FR.to_string());
+            }
+            continue;
+        }
         if !runnable(s, id) {
             continue;
         }
@@ -1507,5 +1565,136 @@ mod tests {
             let script = Script { id: 1, name: name.into(), source: source.into(), trigger, enabled: true };
             check_one(&script, &s.controls, &s.presets).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
+    }
+
+    /// Runs `secs` of 60 fps frames from now and returns, per script id,
+    /// the instants it started (`last_start_s` changing).
+    fn starts_over(s: &mut Shared, ids: &[u32], secs: f64) -> Vec<Vec<f64>> {
+        let start = s.sim_now.unwrap_or(s.epoch);
+        let frame = std::time::Duration::from_micros(16_667);
+        let mut seen: Vec<Option<f64>> = ids.iter().map(|id| s.scripts.status.get(id).and_then(|st| st.last_start_s)).collect();
+        let mut starts = vec![Vec::new(); ids.len()];
+        for f in 1..=(secs * 60.0).round() as u32 {
+            s.sim_now = Some(start + frame * f);
+            tick(s);
+            for (i, id) in ids.iter().enumerate() {
+                let last = s.scripts.status.get(id).and_then(|st| st.last_start_s);
+                if last != seen[i] {
+                    starts[i].push(last.unwrap());
+                    seen[i] = last;
+                }
+            }
+        }
+        starts
+    }
+
+    /// Review 3: an *À chaque temps* script moving the tempo's phase by a
+    /// whole beat (32 nudges, down or up) no longer re-fires itself, nor a
+    /// second *À chaque temps* script, on every frame (30 runs a second
+    /// before): about one start per beat that passes.
+    #[test]
+    fn a_script_nudging_the_tempo_does_not_refire_the_beat_triggers() {
+        for dir in ["down", "up"] {
+            let nudger = format!("for i in 0..32 {{ commande(\"tempo.nudge_{dir}\") }}");
+            let mut s = with(vec![sc(1, "Phase", &nudger, ScriptTrigger::EveryBeat), sc(2, "Suit", "journal(1)", ScriptTrigger::EveryBeat), sc(3, "Mesure", "journal(1)", ScriptTrigger::EveryBar)]);
+            s.tempo.set_bpm_manual(120.0, s.now_s());
+            let starts = starts_over(&mut s, &[1, 2, 3], 1.0);
+            // 120 BPM: two beats in a second, the first may come at once.
+            for (i, st) in starts.iter().take(2).enumerate() {
+                assert!((1..=3).contains(&st.len()), "nudge_{dir}, script {}: {st:?}", i + 1);
+            }
+            assert!(status(&s, 1).runs >= 1, "nudge_{dir}: the nudger ran");
+            assert!(starts[2].len() <= 1, "nudge_{dir}, bar: {:?}", starts[2]);
+            // A few seconds more: still at most one start per beat of time.
+            let starts = starts_over(&mut s, &[1, 2, 3], 4.0);
+            for (i, st) in starts.iter().take(2).enumerate() {
+                assert!(st.len() <= 9, "nudge_{dir}, script {}: {} starts in 4 s", i + 1, st.len());
+                for w in st.windows(2) {
+                    assert!(w[1] - w[0] >= min_trigger_gap_s(ScriptTrigger::EveryBeat, 4) - 1e-6, "nudge_{dir}: {st:?}");
+                }
+            }
+            assert!(starts[2].len() <= 3, "nudge_{dir}, bar: {:?}", starts[2]);
+        }
+    }
+
+    /// The gap behind the jump rule: a clock pushed forward a little every
+    /// frame (each move too small to be a jump) still starts an *À chaque
+    /// temps* script at most once per beat at `MAX_BPM`, and says so once.
+    #[test]
+    fn beat_triggers_wait_a_beat_at_the_fastest_tempo() {
+        let mut s = with(vec![sc(1, "Temps", "journal(1)", ScriptTrigger::EveryBeat)]);
+        s.tempo.set_bpm_manual(120.0, s.now_s());
+        let start = s.sim_now.unwrap_or(s.epoch);
+        let frame = std::time::Duration::from_micros(16_667);
+        let mut starts = Vec::new();
+        let mut seen = None;
+        for f in 1..=120 {
+            s.tempo.nudge(PHASE_JUMP_BEATS);
+            s.sim_now = Some(start + frame * f);
+            tick(&mut s);
+            let last = s.scripts.status.get(&1).and_then(|st| st.last_start_s);
+            if last != seen {
+                starts.push(last.unwrap());
+                seen = last;
+            }
+        }
+        // ~0.096 beat per frame: a beat every ~10 frames, faster than 250 BPM.
+        assert!(starts.len() >= 4, "{starts:?}");
+        for w in starts.windows(2) {
+            assert!(w[1] - w[0] >= min_trigger_gap_s(ScriptTrigger::EveryBeat, 4) - 1e-6, "{starts:?}");
+        }
+        assert!(starts.len() <= 9, "{starts:?}");
+        assert!(console_has(&s, 1, "trop proche") >= 1);
+    }
+
+    /// Normal operation at `MAX_BPM`: every beat fires, every bar too.
+    #[test]
+    fn every_beat_still_fires_at_the_fastest_tempo() {
+        let mut s = with(vec![sc(1, "Temps", "journal(1)", ScriptTrigger::EveryBeat), sc(2, "Mesure", "journal(1)", ScriptTrigger::EveryBar)]);
+        s.tempo.set_bpm_manual(crate::tempo::MAX_BPM, s.now_s());
+        tick(&mut s);
+        let t0 = s.now_s();
+        let starts = starts_over(&mut s, &[1, 2], 10.0);
+        let t1 = s.now_s();
+        let beats = s.tempo.beat_at(t1).floor() - s.tempo.beat_at(t0).floor();
+        assert_eq!(starts[0].len() as f64, beats, "{:?}", starts[0]);
+        let bars = (s.tempo.beat_at(t1) / 4.0).floor() - (s.tempo.beat_at(t0) / 4.0).floor();
+        assert_eq!(starts[1].len() as f64, bars, "{:?}", starts[1]);
+        assert_eq!(console_has(&s, 1, "trop proche"), 0);
+    }
+
+    /// A backward jump (a nudge down, a resync onto an earlier bar) fires
+    /// nothing; a change of metre starts no bar.
+    #[test]
+    fn backward_jumps_and_a_new_metre_fire_nothing() {
+        let mut s = with(vec![sc(1, "Temps", "journal(1)", ScriptTrigger::EveryBeat), sc(2, "Mesure", "journal(1)", ScriptTrigger::EveryBar)]);
+        s.tempo.set_bpm_manual(60.0, s.now_s());
+        s.sim_now = Some(s.epoch + std::time::Duration::from_secs_f64(20.3));
+        tick(&mut s);
+        let serial = s.scripts.next_serial;
+        s.tempo.nudge(-0.5);
+        tick(&mut s);
+        s.tempo.nudge(-2.0);
+        tick(&mut s);
+        s.tempo.beats_per_bar = 3;
+        tick(&mut s);
+        assert_eq!(s.scripts.next_serial, serial, "a jump back started a script");
+    }
+
+    /// Review 3: `with_script_origin` lifts its mark even if what it runs
+    /// panics, so later launches aren't refused for good.
+    #[test]
+    fn the_script_origin_mark_survives_a_panic() {
+        let mut s = with(vec![sc(1, "A", "journal(1)", ScriptTrigger::Manual)]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_script_origin(&mut s, |s| {
+                with_script_origin(s, |_| -> () { panic!("boom") });
+            })
+        }));
+        assert!(r.is_err());
+        assert_eq!(s.scripts.origin, 0);
+        assert_eq!(with_script_origin(&mut s, |s| s.scripts.origin), 1);
+        assert_eq!(s.scripts.origin, 0);
+        request_run(&mut s, 1, ControlSource::Ui).unwrap();
     }
 }
