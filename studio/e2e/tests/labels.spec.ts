@@ -24,7 +24,7 @@ test('no visible element shows a missing key, in any workspace', async ({ page }
       for (const el of document.querySelectorAll<HTMLElement>('body *')) {
         if (!el.checkVisibility()) continue;
         const own = [...el.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('');
-        for (const s of [own, el.title, el.getAttribute('aria-label') ?? '', el.getAttribute('placeholder') ?? '']) {
+        for (const s of [own, el.getAttribute('title') ?? '', el.getAttribute('aria-label') ?? '', el.getAttribute('placeholder') ?? '']) {
           if (s.includes('⟦')) out.push(s);
         }
       }
