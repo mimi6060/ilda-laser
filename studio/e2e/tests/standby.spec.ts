@@ -11,7 +11,7 @@ import { createServer } from 'node:net';
 const main = useStudio();
 const backup = useStudio();
 
-interface Standby { role: string; link: boolean; lag_ms: number; paired: boolean; code: string; bound_port: number | null; lost_s: number | null }
+interface Standby { role: string; link: boolean; lag_ms: number; paired: boolean; code: string; bound_port: number | null; lost_s: number | null; backup_lost: boolean; takeover_after_s: number; peer_held_s: number | null }
 interface State { armed: boolean; timeline: { name: string | null; playing: boolean; position: number }; standby: Standby }
 
 function freePort(): Promise<number> {
@@ -91,12 +91,29 @@ test('the backup follows the main machine, never arms, and takes over disarmed',
   await page.waitForTimeout(1200);
   expect((await backup.get<State>('/api/state')).timeline.playing).toBe(true);
 
-  // « Prendre le relais »: confirmed, then main, still disarmed.
+  // Too early: the main machine's lease (3 s) plus the margin has not run
+  // out, whatever the 1 s grace says. Refused, still in standby.
+  const lost = await backup.get<Standby>('/api/standby');
+  expect(lost.takeover_after_s).toBeGreaterThanOrEqual(4);
+  expect(lost.lost_s ?? 0).toBeLessThan(lost.takeover_after_s);
+  page.once('dialog', d => { d.accept().catch(() => {}); });
+  const early = page.waitForResponse(r => r.url().endsWith('/api/standby/takeover'));
+  await page.locator('#takeoverBtn').click();
+  const refused = await early;
+  expect(refused.status()).toBe(409);
+  expect(await refused.text()).toContain('reprise possible après');
+  expect((await backup.get<Standby>('/api/standby')).role).toBe('standby');
+  await expect.poll(async () => (await backup.get<Standby>('/api/standby')).lost_s ?? 0, { timeout: 10000 }).toBeGreaterThanOrEqual(lost.takeover_after_s);
+
+  // « Prendre le relais »: confirmed (with the hardware check), then main,
+  // still disarmed.
   let asked = '';
   page.once('dialog', d => { asked = d.message(); d.accept().catch(() => {}); });
   await page.locator('#takeoverBtn').click();
   await expect(page.locator('#standbyPill')).toHaveText(/^PRINCIPALE/);
   expect(asked).toContain('Le laser restera désarmé');
+  expect(asked).toContain('Vérifiez d\'abord que la machine principale est arrêtée ou que sa sortie est coupée (arrêt matériel).');
+  expect(asked).toMatch(/tenant une sortie|tenait une sortie/);
   await expect(page.locator('#takeoverBtn')).toBeHidden();
   const after = await backup.get<State>('/api/state');
   expect(after.standby.role).toBe('primary');
@@ -121,4 +138,30 @@ test('Autonome by default: no sync port, the panel says so', async ({ page }) =>
   await page.locator('#standbyPanel > summary').click();
   await expect(page.locator('#sbRole')).toHaveValue('standalone');
   await expect(page.locator('#sbLink')).toContainText('aucun port ouvert');
+});
+
+test('a main machine whose backup goes silent disarms itself and says so', async ({ page }) => {
+  // Both studios running again (the first test stopped the main one).
+  const s = await main.get<Standby>('/api/standby').catch(() => null);
+  if (s === null) await main.start();
+  const port = await freePort();
+  expect(await main.post('/api/standby', { role: 'primary', port })).toBe(200);
+  const m = await main.get<Standby>('/api/standby');
+  expect(await backup.post('/api/standby', { role: 'standalone' })).toBe(200);
+  expect(await backup.post('/api/standby', { peer: `127.0.0.1:${port}`, role: 'standby' })).toBe(200);
+  expect(await backup.post('/api/standby/pair', { code: m.code })).toBe(200);
+  await expect.poll(async () => (await backup.get<Standby>('/api/standby')).link, { timeout: 5000 }).toBe(true);
+  await openUi(page, main);
+  await expect(page.locator('#standbyPill')).toHaveText(/^PRINCIPALE$/);
+  expect((await main.get<Standby>('/api/standby')).backup_lost).toBe(false);
+
+  // The backup stops polling: after the lease, the main machine warns,
+  // stays main and disarmed (it never arms by itself).
+  await backup.stop();
+  await expect(page.locator('#standbyPill')).toContainText('Secours injoignable', { timeout: 8000 });
+  await expect(page.locator('#standbyPill')).toHaveClass(/warn/);
+  const after = await main.get<State>('/api/state');
+  expect(after.standby.role).toBe('primary');
+  expect(after.standby.backup_lost).toBe(true);
+  expect(after.armed).toBe(false);
 });

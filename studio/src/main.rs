@@ -2180,6 +2180,9 @@ impl Engine {
             // The zone trace (T-447) ends on its time, an e-stop, a disarm
             // or its page gone, before this frame's output is chosen.
             zonetrace::sync(&mut s, now);
+            // A main machine whose backup stopped polling disarms itself
+            // before the backup may take over (T-456).
+            standby::check_lease(&mut s, now);
             s.health.tick(s.gate.is_armed());
             if s.test_stall_ms > 0 {
                 // `--test-hooks` only: a stall while holding the lock.

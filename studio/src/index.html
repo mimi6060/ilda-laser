@@ -4746,7 +4746,7 @@
         </div>
         <div class="hint" id="sbLink" role="status"></div>
         <div id="sbError" class="merr" role="alert"></div>
-        <div class="hint">Les deux machines doivent connaître l'adresse de l'autre : une principale qui revient après une reprise voit l'autre machine principale et passe en <b>Autonome</b>, désarmée, sans sortie. Pas de bascule automatique. Le trafic n'est pas chiffré : réseau de la régie uniquement, en filaire. Ce n'est pas un arrêt matériel : gardez l'arrêt d'urgence physique et la clé du projecteur à portée de main sur chaque machine.</div>
+        <div class="hint">Une principale appairée qui ne reçoit plus rien de sa machine de secours pendant 3 s se <b>désarme d'elle-même</b> (sortie gardée, images noires, avertissement) ; la reprise n'est permise qu'après ce délai plus une marge, jamais avant le délai réglé ici. Seul l'opérateur réarme. Les deux machines doivent connaître l'adresse de l'autre : une principale qui revient après une reprise voit l'autre machine principale et passe en <b>Autonome</b>, désarmée, sans sortie. Pas de bascule automatique. Le trafic n'est pas chiffré : réseau de la régie uniquement, en filaire. Ce n'est pas un arrêt matériel : gardez l'arrêt d'urgence physique et la clé du projecteur à portée de main sur chaque machine.</div>
       </details>
     </section>
 
@@ -19158,10 +19158,11 @@ $('dmxPill').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspa
 $('extPanel').addEventListener('toggle', () => { if ($('extPanel').open) { extKey = ''; loadExt(); } });
 setInterval(() => { if (!document.hidden) loadExt(); }, 1000);
 loadExt();
-// Télécommande (T-428): RÉGLAGES › Télécommande and the top-bar pill.
 // Machine de secours (T-456): the top bar from every frame (`f.standby`),
 // the panel from GET /api/standby. Taking over never arms the laser.
 let standby = null;
+let standbyBar = null;
+const BACKUP_LOST_FR = 'Machine de secours injoignable : laser désarmé — elle peut prendre le relais. Arrêt réel : matériel';
 function standbyLinkText(v) {
   if (v.role === 'standby') {
     if (!v.paired) return 'Non appairée : saisissez le code de la machine principale';
@@ -19169,18 +19170,20 @@ function standbyLinkText(v) {
   }
   if (v.role === 'primary') {
     if (v.conflict) return 'Une autre machine est principale : choisissez laquelle reste principale';
+    if (v.backup_lost) return BACKUP_LOST_FR;
     return v.link ? 'Lien : établi' : 'Lien : aucune réponse de la machine de secours';
   }
   return v.demoted || 'Autonome : aucune synchronisation, aucun port ouvert';
 }
 function showStandbyBar(v) {
+  standbyBar = v;
   const pill = $('standbyPill');
   pill.hidden = v.role === 'standalone' && !v.demoted;
   pill.classList.toggle('standby', v.role === 'standby');
-  pill.classList.toggle('warn', v.role !== 'standby' && (!!v.conflict || !!v.demoted));
+  pill.classList.toggle('warn', v.role !== 'standby' && (!!v.conflict || !!v.demoted || !!v.backup_lost));
   pill.textContent = v.role === 'standby'
     ? 'SECOURS — en veille' + (v.paired && !v.link ? ` · Lien perdu depuis ${v.lost_s ?? 0} s` : '') + (v.project_mismatch ? ' · Projet différent' : '')
-    : v.role === 'primary' ? 'PRINCIPALE' + (v.conflict ? ' · conflit' : '') : 'Autonome (relais pris ailleurs)';
+    : v.role === 'primary' ? 'PRINCIPALE' + (v.conflict ? ' · conflit' : '') + (v.backup_lost ? ' · Secours injoignable : désarmé' : '') : 'Autonome (relais pris ailleurs)';
   pill.title = standbyLinkText(v) + ' — clic = RÉGLAGES › Machine de secours';
   $('takeoverBtn').hidden = v.role !== 'standby';
   document.body.classList.toggle('standby-mode', v.role === 'standby');
@@ -19237,7 +19240,11 @@ $('sbPairBtn').onclick = () => standbyPost('/api/standby/pair', { code: $('sbPai
 $('sbReceiveBtn').onclick = () => standbyPost('/api/standby/receive');
 // No shortcut: a voluntary action, always confirmed.
 $('takeoverBtn').onclick = async () => {
-  if (!confirm('Prendre le relais ? Le laser restera désarmé : vous devrez l\'armer vous-même.')) return;
+  const v = standbyBar || {};
+  const held = v.peer_held_s == null ? 'La machine principale n\'a pas été vue tenant une sortie depuis l\'appairage.'
+    : `La machine principale tenait une sortie il y a ${v.peer_held_s} s${v.peer_holds_output ? ' (dernière réponse)' : ''}.`;
+  if (!confirm('Prendre le relais ? Le laser restera désarmé : vous devrez l\'armer vous-même.\n\n'
+    + 'Vérifiez d\'abord que la machine principale est arrêtée ou que sa sortie est coupée (arrêt matériel).\n\n' + held)) return;
   const err = await standbyPost('/api/standby/takeover');
   flash(err ? err : 'Cette machine est maintenant la principale. Laser désarmé.');
 };
@@ -19246,6 +19253,7 @@ setInterval(() => { if (!document.hidden && $('standbyPanel').open) loadStandby(
 $('standbyPanel').addEventListener('toggle', () => { if ($('standbyPanel').open) loadStandby(); });
 loadStandby();
 
+// Télécommande (T-428): RÉGLAGES › Télécommande and the top-bar pill.
 // Off at every start; the code and the remotes are shown here only.
 let remote = null;
 function showRemote(v) {
