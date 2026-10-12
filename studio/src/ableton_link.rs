@@ -18,8 +18,13 @@
 //!   quantum, 4 beats by default) and `TempoClock::follow_link` takes it:
 //!   same BPM, beat aligned modulo the quantum, so the bar's "1" is the
 //!   session's. A session tempo outside 40–250 BPM is not taken (shown).
-//! - A BPM changed here (field, Tap, ×2, ÷2, an OSC or MIDI control) is
-//!   proposed to the session, which every peer then follows. Nudge,
+//! - A BPM the operator sets here (field, Tap, ×2, ÷2, the same controls
+//!   from OSC, MIDI, the keyboard or the command line) is proposed to the
+//!   session, which every peer then follows: `operator_tempo`, called by
+//!   controls.rs, is the only way in. Any other BPM change (opening a
+//!   project, a macro, a show list, a timeline, the autopilot…) stays
+//!   local and the session's tempo overwrites it on the next frame: the
+//!   studio never changes a whole session's tempo on its own. Nudge,
 //!   *Sync 1* and *Tempo auto* are refused meanwhile (controls.rs): the
 //!   phase belongs to the session. Following the MIDI clock and Link at
 //!   once is refused (409), either way round.
@@ -30,6 +35,7 @@
 //! fake in every build; the real one (`native`) exists with the feature
 //! only. Tests never start the real one, except one opt-in LAN test.
 
+use crate::controls::ControlSource;
 use crate::interlock::ArmSource;
 use crate::tempo::TempoSource;
 use crate::Shared;
@@ -90,13 +96,13 @@ pub struct LinkState {
     /// BPM changes sent to the session.
     pub proposed: u64,
     session: Option<Box<dyn LinkSession>>,
-    /// The clock's BPM after the last frame: another one is the operator's.
-    last_bpm: Option<f64>,
+    /// An operator's BPM waiting for the next frame (`operator_tempo`).
+    pending: Option<f64>,
 }
 
 impl Default for LinkState {
     fn default() -> Self {
-        Self { quantum: DEFAULT_QUANTUM, peers: 0, status: LinkStatus::Off, session_bpm: None, proposed: 0, session: None, last_bpm: None }
+        Self { quantum: DEFAULT_QUANTUM, peers: 0, status: LinkStatus::Off, session_bpm: None, proposed: 0, session: None, pending: None }
     }
 }
 
@@ -133,7 +139,7 @@ fn start(s: &mut Shared, mut session: Box<dyn LinkSession>) {
     session.enable(true);
     log::info!("Ableton Link activé ({:.1} BPM)", s.tempo.bpm);
     s.link.session = Some(session);
-    s.link.last_bpm = None;
+    s.link.pending = None;
     s.link.status = LinkStatus::Off;
 }
 
@@ -146,7 +152,7 @@ fn stop(s: &mut Shared) {
     s.link.peers = 0;
     s.link.status = LinkStatus::Off;
     s.link.session_bpm = None;
-    s.link.last_bpm = None;
+    s.link.pending = None;
     s.tempo.set_link(false);
 }
 
@@ -159,9 +165,10 @@ pub fn frame(s: &mut Shared, now: Instant) {
     let lag = Instant::now().saturating_duration_since(now).as_micros() as i64;
     let at = session.clock_micros() - lag;
     link.peers = session.peers();
-    // A BPM changed here since the last frame goes to the session.
-    if link.last_bpm.is_some_and(|b| (b - tempo.bpm).abs() > 1e-9) {
-        session.propose_tempo(tempo.bpm, at);
+    // The operator's BPM goes to the session; any other local change is
+    // overwritten by the session's tempo just below.
+    if let Some(bpm) = link.pending.take() {
+        session.propose_tempo(bpm, at);
         link.proposed += 1;
     }
     let (bpm, beat) = session.capture(at, link.quantum);
@@ -176,7 +183,33 @@ pub fn frame(s: &mut Shared, now: Instant) {
         }
         LinkStatus::OutOfRange
     };
-    link.last_bpm = Some(tempo.bpm);
+}
+
+/// Whether a control from `source` is the operator's own hand (proposes a
+/// BPM to the session) rather than a programmed action.
+fn is_operator(source: ControlSource) -> bool {
+    match source {
+        ControlSource::Ui
+        | ControlSource::Keyboard
+        | ControlSource::Midi
+        | ControlSource::Dmx
+        | ControlSource::Osc
+        | ControlSource::Network
+        | ControlSource::Remote
+        | ControlSource::Api
+        | ControlSource::Command => true,
+        ControlSource::Timeline | ControlSource::Audio | ControlSource::Macro | ControlSource::System | ControlSource::Autopilot => false,
+    }
+}
+
+/// The operator's tempo controls (controls.rs: field, Tap, ×2, ÷2) after
+/// they changed the BPM: with Link on, the clock's BPM is proposed to the
+/// session at the next frame. The only way a BPM reaches the session;
+/// `TempoClock::set_bpm_manual` and the other setters stay local.
+pub fn operator_tempo(s: &mut Shared, source: ControlSource) {
+    if s.link.enabled() && is_operator(source) {
+        s.link.pending = Some(s.tempo.bpm);
+    }
 }
 
 /// The tempo bar's readout (`/api/state.tempo.link`).
@@ -327,25 +360,25 @@ mod native {
     }
 }
 
+/// A fake Link session for tests here and in the modules whose BPM
+/// changes must not reach the session (project, show list, macros).
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
     use super::*;
-    use crate::controls::{apply, ControlInput};
-    use crate::test_support::shared;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     /// One simulated Link timeline that several fake peers share: a tempo
     /// and a beat that is a pure function of the host time, kept
     /// continuous when the tempo changes (as Link does).
-    struct Timeline {
+    pub struct Timeline {
         base: Instant,
         bpm: f64,
         /// (host µs, beat) the tempo last changed at.
         anchor: (i64, f64),
         now: Instant,
-        peers: usize,
-        proposals: Vec<f64>,
+        pub peers: usize,
+        pub proposals: Vec<f64>,
     }
 
     impl Timeline {
@@ -359,23 +392,23 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct Fake(Arc<Mutex<Timeline>>);
+    pub struct Fake(pub Arc<Mutex<Timeline>>);
 
     impl Fake {
-        fn new(bpm: f64, base: Instant) -> Self {
+        pub fn new(bpm: f64, base: Instant) -> Self {
             // A beat origin that is not a whole bar: alignment is tested.
             Self(Arc::new(Mutex::new(Timeline { base, bpm, anchor: (1_000_000_000, 1.3), now: base, peers: 0, proposals: Vec::new() })))
         }
-        fn at(&self, now: Instant) {
+        pub fn at(&self, now: Instant) {
             self.0.lock().unwrap().now = now;
         }
-        fn set_tempo(&self, bpm: f64) {
+        pub fn set_tempo(&self, bpm: f64) {
             let mut tl = self.0.lock().unwrap();
             let at = tl.micros(tl.now);
             tl.anchor = (at, tl.beat(at));
             tl.bpm = bpm;
         }
-        fn beat_at(&self, now: Instant) -> f64 {
+        pub fn beat_at(&self, now: Instant) -> f64 {
             let tl = self.0.lock().unwrap();
             tl.beat(tl.micros(now))
         }
@@ -404,13 +437,13 @@ mod tests {
         }
     }
 
-    fn on(s: &mut Shared, fake: &Fake) {
+    pub fn on(s: &mut Shared, fake: &Fake) {
         let f = fake.clone();
         update_with(s, LinkRequest { enabled: Some(true), quantum: None }, move |_| Ok(Box::new(f))).unwrap();
     }
 
     /// Runs `frames` engine frames of 1/60 s from `*now`.
-    fn run(s: &mut Shared, fake: &Fake, now: &mut Instant, frames: u32) {
+    pub fn run(s: &mut Shared, fake: &Fake, now: &mut Instant, frames: u32) {
         for _ in 0..frames {
             *now += Duration::from_micros(16_667);
             s.sim_now = Some(*now);
@@ -418,6 +451,20 @@ mod tests {
             frame(s, *now);
         }
     }
+
+    /// What the studio proposed to the session so far.
+    pub fn proposals(fake: &Fake) -> Vec<f64> {
+        fake.0.lock().unwrap().proposals.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::{on, run, Fake};
+    use super::*;
+    use crate::controls::{apply, ControlInput};
+    use crate::test_support::shared;
+    use std::time::Duration;
 
     /// Phase error between the clock and the session, in ms, modulo the bar.
     fn phase_error_ms(s: &Shared, fake: &Fake, now: Instant) -> f64 {
@@ -495,6 +542,57 @@ mod tests {
         // Nothing changed here: nothing more is proposed.
         run(&mut s, &fake, &mut now, 20);
         assert_eq!(s.link.proposed, 1);
+    }
+
+    #[test]
+    fn only_the_operators_tempo_controls_reach_the_session() {
+        use crate::controls::{apply_as, apply_from};
+        let mut s = shared();
+        let mut now = s.epoch + Duration::from_secs(5);
+        let fake = Fake::new(120.0, s.epoch);
+        on(&mut s, &fake);
+        run(&mut s, &fake, &mut now, 2);
+        // Programmed changes: a macro or the command line of a macro, a cue
+        // list action (System), the timeline, and the local setter that
+        // project and show-list loads use. All stay local, and the
+        // session's tempo wins at the next frame.
+        apply_from(&mut s, "tempo.bpm", ControlInput::Value(90.0), ControlSource::Macro).unwrap();
+        run(&mut s, &fake, &mut now, 2);
+        apply_from(&mut s, "tempo.double", ControlInput::Value(1.0), ControlSource::Timeline).unwrap();
+        run(&mut s, &fake, &mut now, 2);
+        apply_as(&mut s, "tempo.half", ControlInput::Value(1.0), ArmSource::System).unwrap();
+        run(&mut s, &fake, &mut now, 2);
+        let t = s.now_s();
+        s.tempo.set_bpm_manual(100.0, t);
+        run(&mut s, &fake, &mut now, 2);
+        assert!(super::fake::proposals(&fake).is_empty(), "{:?}", super::fake::proposals(&fake));
+        assert_eq!((s.tempo.source, s.link.proposed), (TempoSource::Link, 0));
+        assert!((s.tempo.bpm - 120.0).abs() <= 0.01, "the session won: {}", s.tempo.bpm);
+        // The operator's: the field (UI), ×2 from MIDI, ÷2 from OSC.
+        apply(&mut s, "tempo.bpm", ControlInput::Value(110.0), false).unwrap();
+        run(&mut s, &fake, &mut now, 1);
+        apply(&mut s, "tempo.double", ControlInput::Value(1.0), true).unwrap();
+        run(&mut s, &fake, &mut now, 1);
+        apply_as(&mut s, "tempo.half", ControlInput::Value(1.0), ArmSource::Osc).unwrap();
+        run(&mut s, &fake, &mut now, 1);
+        assert_eq!(super::fake::proposals(&fake), vec![110.0, 220.0, 110.0]);
+        assert!((s.tempo.bpm - 110.0).abs() <= 0.01);
+        // The same BPM again changes nothing: nothing proposed.
+        apply(&mut s, "tempo.bpm", ControlInput::Value(110.0), false).unwrap();
+        run(&mut s, &fake, &mut now, 1);
+        assert_eq!(s.link.proposed, 3);
+    }
+
+    #[test]
+    fn an_operator_bpm_with_link_off_proposes_nothing_later() {
+        let mut s = shared();
+        apply(&mut s, "tempo.bpm", ControlInput::Value(100.0), false).unwrap();
+        let mut now = s.epoch + Duration::from_secs(5);
+        let fake = Fake::new(120.0, s.epoch);
+        on(&mut s, &fake);
+        run(&mut s, &fake, &mut now, 2);
+        assert!(super::fake::proposals(&fake).is_empty());
+        assert!((s.tempo.bpm - 120.0).abs() <= 0.01);
     }
 
     #[test]

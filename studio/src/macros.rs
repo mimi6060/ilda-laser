@@ -758,6 +758,23 @@ mod tests {
     }
 
     #[test]
+    fn a_macros_tempo_is_never_proposed_to_ableton_link() {
+        use crate::ableton_link::fake::{on, proposals, run, Fake};
+        let mut s = with(vec![mac("m1", "Tempo", vec![step("tempo.bpm 95", Wait::None), step("tempo.double", Wait::None)])]);
+        let fake = Fake::new(120.0, s.epoch);
+        on(&mut s, &fake);
+        let mut now = s.epoch + std::time::Duration::from_secs(2);
+        run(&mut s, &fake, &mut now, 2);
+        // Started by the operator, but its steps are the macro's.
+        start(&mut s, "m1", ControlSource::Keyboard).unwrap();
+        frame(&mut s, 0.0, 0.0);
+        assert!(s.macros.player.runs.is_empty());
+        run(&mut s, &fake, &mut now, 3);
+        assert!(proposals(&fake).is_empty(), "{:?}", proposals(&fake));
+        assert!((s.tempo.bpm - 120.0).abs() <= 0.01, "the session wins");
+    }
+
+    #[test]
     fn steps_without_waits_run_in_one_frame_in_order() {
         let mut s = with(vec![mac("m1", "Deux", vec![step("master.size 50", Wait::None), step("", Wait::None), step("master.size 70", Wait::None)])]);
         start(&mut s, "m1", ControlSource::Keyboard).unwrap();

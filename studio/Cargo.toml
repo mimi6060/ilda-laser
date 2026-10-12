@@ -44,9 +44,6 @@ rusty_link = { version = "0.4.9", optional = true }
 # Laserworld SDK binding (private, never in the repository: see
 # `src/shownet.rs`) it only adds the code and its tests with a fake box.
 shownet = []
-# The menu-bar item of the macOS application (T-413), off by default so
-# `cargo build`, `cargo test` and the e2e runs pull in no GUI code. Built
-# by `studio/packaging/macos/build_app.sh`. objc2 family: MIT.
 # Ableton Link tempo source (T-154), off by default. It compiles
 # Ableton's Link library, which is GPLv2+: a binary built with it is a
 # GPL combined work, for private use only and never distributed (the
@@ -54,6 +51,9 @@ shownet = []
 # be combined with `shownet` (a proprietary SDK under NDA). Building it
 # needs CMake and Xcode's libclang.
 ableton-link = ["dep:rusty_link"]
+# The menu-bar item of the macOS application (T-413), off by default so
+# `cargo build`, `cargo test` and the e2e runs pull in no GUI code. Built
+# by `studio/packaging/macos/build_app.sh`. objc2 family: MIT.
 macos-app = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:block2"]
 
 [target.'cfg(target_os = "macos")'.dependencies]

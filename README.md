@@ -288,6 +288,11 @@ cargo run --release -p laser-studio --features ableton-link
 
 Link is off at every start; once turned on it discovers peers by multicast
 on the local network. It only moves the tempo: it never arms the laser.
+Only the operator's tempo controls (BPM field, Tap, ×2, ÷2, and the same
+controls from MIDI, OSC or the keyboard) propose a tempo to the session;
+opening a project, a macro or a show list never changes the session's
+tempo. `--all-features` fails to build on purpose (`ableton-link` and
+`shownet` exclude each other).
 
 ## Usage (`pc-client`)
 
