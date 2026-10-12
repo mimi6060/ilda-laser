@@ -114,10 +114,13 @@ test('assign and calibrate a tracker; the beam follows it, goes dark when the da
     // The data stops: dark after the loss delay, and back when it resumes.
     // Once the last packet has landed, the studio says « perdu » and the
     // frame is dark (the loss delay is 500 ms; the default expect timeout
-    // leaves room for a loaded machine).
+    // leaves room for a loaded machine to report « perdu »).
+    // Once « perdu » is reported, the very next engine frame (~17 ms at
+    // 60 fps) must be dark: 1 s allows ~60 frames of scheduling slack under
+    // load, yet still fails if the beam stays lit after the loss is known.
     await feed.pause();
     await expect.poll(async () => (await studio.get('/api/psn')).status.links[0].state).toBe('perdu');
-    await expect.poll(async () => (await lit()).length).toBe(0);
+    await expect.poll(async () => (await lit()).length, { timeout: 1000 }).toBe(0);
     await expect(page.locator('.psnstate')).toContainText('Perdu');
     feed.at([3, 1.5, 0]);
     await expect.poll(async () => (await lit()).length).toBeGreaterThan(0);
