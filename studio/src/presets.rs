@@ -1084,6 +1084,12 @@ const THUMB_POINTS: usize = 160;
 /// whole grid's pictures stay a light request. Display only: it never
 /// reaches the output.
 pub fn thumbnail(settings: &Settings) -> String {
+    pack(&thumbnail_points(settings))
+}
+
+/// The points of `thumbnail`, not thinned: the same still, for the
+/// console's pictures (CITP, T-454). Display only.
+pub fn thumbnail_points(settings: &Settings) -> Vec<crate::patterns::Point> {
     let audio = AudioFeatures { level: 0.6, bass: 0.6, ..AudioFeatures::default() };
     let mut animator = Animator::starting_at(0.0);
     let mut points = Vec::new();
@@ -1091,7 +1097,7 @@ pub fn thumbnail(settings: &Settings) -> String {
         let clock = BeatClock { beat: i as f64 / 30.0, ..BeatClock::default() };
         points = animator.render(settings, audio, 1.0 / 60.0, &clock);
     }
-    pack(&points)
+    points
 }
 
 /// Points → a thumbnail string (see `thumbnail`).

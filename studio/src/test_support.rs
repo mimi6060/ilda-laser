@@ -183,6 +183,7 @@ pub fn shared() -> Shared {
         agenda: crate::agenda::AgendaRunner::in_memory(),
         remote: crate::remote::Remote::in_memory(),
         dmx_out: crate::dmx_out::DmxOutState::in_memory(),
+        citp: crate::citp::CitpState::in_memory(),
     }
 }
 
