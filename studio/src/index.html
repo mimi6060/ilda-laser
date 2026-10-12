@@ -958,7 +958,7 @@
         <select id="micSelect" title="Entrées vues par le navigateur"><option value="">Par défaut</option></select>
         <select id="musDevice" aria-label="Entrée audio" title="Entrées du Mac (liste du studio), et « Son du Mac » : ce que le Mac joue" hidden><option value="">Entrée par défaut du Mac</option></select>
       </div>
-      <div class="hint" id="musSysNote" hidden></div>
+      <div class="hint" id="musSysNote" role="status" aria-live="polite" hidden></div>
       <div class="row" id="musSysRow" hidden>
         <button type="button" class="btn btn--small" id="musSysHelp" title="Écouter la musique jouée par le Mac (Spotify, lecteur, logiciel DJ) : BlackHole ou « Son du Mac »">Comment écouter le son du Mac ?</button>
       </div>
@@ -2640,6 +2640,7 @@
             </div>
             <div id="paActive" hidden>
               <div class="pa-banner" id="paTitle" role="status" aria-live="polite"></div>
+              <div class="pa-banner" id="paPattern" role="status" aria-live="polite" hidden></div>
               <canvas id="paCanvas" width="240" height="240" aria-label="Zone enregistrée (trait plein) et proposition du téléphone (pointillé)"></canvas>
               <div class="hint" id="paCorners"></div>
               <div class="row">
@@ -2649,6 +2650,7 @@
               </div>
             </div>
             <div class="hint sf-error" id="paError" role="alert"></div>
+            <div class="hint" id="paNote" role="status" aria-live="polite"></div>
           </div>
         </div>
         <div id="pzGroupsBlock" data-search="Groupes de zones (maîtres de groupe)">

@@ -177,6 +177,12 @@ mod tests {
         for must in ["désarmé", "Échap", "verrouillé", "Réinitialiser l'arrêt d'urgence", "ne remplace ni", "réglementation", "Arrêt matériel testé", "Public"] {
             assert!(body.contains(must), "securite-laser misses {must:?}");
         }
+        // T-492: why the bar after « Sync 1 » or a MIDI Start fires no
+        // « À chaque mesure » script.
+        let scripts = page("creation-scripts").unwrap().body_html;
+        for must in ["« Sync 1 »", "Start MIDI", "ne lance pas les scripts « À chaque mesure »"] {
+            assert!(scripts.contains(must), "creation-scripts misses {must:?}");
+        }
         let trouble = page("depannage").unwrap().body_html;
         for must in ["ne s'arme pas", "Pas de son", "MIDI", "aperçu", "projet"] {
             assert!(trouble.contains(must), "depannage misses {must:?}");

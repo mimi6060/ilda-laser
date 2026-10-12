@@ -56,6 +56,8 @@
   .pad .down { grid-column: 2; grid-row: 3; }
   #alignWait { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--warn); color: var(--warn); font-weight: 600; }
   #alignMsg { color: var(--danger); min-height: 1.3em; }
+  #alignPattern { margin-top: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--danger); color: var(--danger); font-weight: 600; }
+  #alignPattern[hidden] { display: none; }
   /* The stop stays on screen, alignment included. */
   .stopbar { position: sticky; bottom: 0; z-index: 2; }
   .hint { color: var(--muted); font-size: 14px; }
@@ -115,6 +117,7 @@
       <p class="hint" id="alignAsk">Demandez l'ouverture de l'alignement sur l'écran principal</p>
       <div id="alignOn" hidden>
         <div id="alignWait" role="status" aria-live="polite">En attente de confirmation sur l'écran principal</div>
+        <div id="alignPattern" role="status" aria-live="polite" hidden></div>
         <p>Zone : <b id="alignZone"></b></p>
         <div class="corners" role="group" aria-label="Coin à déplacer">
           <button data-corner="3" aria-pressed="false">Haut gauche</button>
@@ -280,6 +283,10 @@ function showAlign(a) {
   if (!a.open) return;
   $('alignZone').textContent = a.zone ? `${a.zone.id} · ${a.zone.name}` : '';
   $('alignWait').textContent = a.changed ? 'En attente de confirmation sur l\'écran principal' : 'Aucun déplacement proposé';
+  // No test pattern on the main screen: the laser no longer shows the draft.
+  const note = a.pattern_note || '';
+  $('alignPattern').hidden = !note;
+  if ($('alignPattern').textContent !== note) $('alignPattern').textContent = note;
   document.querySelectorAll('[data-corner]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.corner === corner)));
   const p = a.draft[corner];
   $('alignCorner').textContent = `${a.corners[corner]} : ${p[0].toFixed(3)} ; ${p[1].toFixed(3)} (pas ${x5 ? 5 * a.step : a.step})`;

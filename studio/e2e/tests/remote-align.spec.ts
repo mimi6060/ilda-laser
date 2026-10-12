@@ -97,6 +97,17 @@ test('the phone proposes, the main screen applies or rejects', async ({ page, br
   // The draft is on the output; the saved zone is not touched.
   await expect.poll(rightEdge).toBeLessThan(before - 0.0005);
   expect((await zone1()).geometry.warp.enabled).toBe(false);
+  // The pattern turned off (T-492): both screens say the draft is no
+  // longer drawn; the session stays open. The Grid back: gone.
+  await expect(page.locator('#paPattern')).toBeHidden();
+  await expect(phone.locator('#alignPattern')).toBeHidden();
+  expect(await studio.post('/api/testpattern', { pattern: null })).toBe(200);
+  await expect(page.locator('#paPattern')).toContainText('Mire coupée');
+  await expect(phone.locator('#alignPattern')).toContainText('Mire coupée sur l\'écran principal');
+  expect((await align())?.remote).toBe('Téléphone e2e');
+  expect(await studio.post('/api/testpattern', { pattern: 'grid' })).toBe(200);
+  await expect(page.locator('#paPattern')).toBeHidden();
+  await expect(phone.locator('#alignPattern')).toBeHidden();
   // The phone can't write a zone, arm or reset anything.
   for (const path of ['/api/zones/align/apply', '/api/zones/align/open', '/api/projection', '/api/safety', '/api/calibration', '/api/arm']) {
     expect((await phone.request.post(`${base}${path}`, { data: { zone: 1, remote: 'Téléphone e2e', on: true } })).status(), path).toBe(403);

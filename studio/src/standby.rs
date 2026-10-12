@@ -52,7 +52,9 @@
 //! - Taking over is a manual action on the backup (`takeover`): it is
 //!   refused while the main machine answers and holds an output, or
 //!   answered less than the delay above ago; it leaves the laser
-//!   disarmed. Nothing switches over by itself.
+//!   disarmed. Nothing switches over by itself. Changing or clearing the
+//!   peer address in Secours forgets what the old address answered, so
+//!   no delay is left to wait: a deliberate operator action.
 //! - A main machine that comes back sees the other one main with a newer
 //!   generation (`term`) and becomes *Autonome*, disarmed, its outputs let
 //!   go (`demote`).
@@ -122,6 +124,10 @@ const SAMPLES: usize = 20;
 pub const MAX_PAIR_ATTEMPTS: u8 = 5;
 pub const PAIR_BLOCK: Duration = Duration::from_secs(30);
 const CODE_LEN: usize = 6;
+/// The body of the main machine's 401: only this answer counts as « main
+/// machine heard » for an unpaired backup (any other device that asks
+/// for authentication at that address does not).
+const UNPAIRED: &str = "non appairé";
 /// The address the ShowNET was seen at (CLAUDE.md): never a peer.
 const SHOWNET_SEEN: Ipv4Addr = Ipv4Addr::new(192, 168, 129, 51);
 
@@ -694,16 +700,26 @@ fn note_poll(s: &mut Shared, now: Instant) {
 /// machine's lease does not disarm it again (only a poll restarts it). So
 /// arming then needs the operator's explicit confirmation of that risk
 /// (`confirmed`, sent only by the page's confirmation): `Err` otherwise.
-/// Logged when confirmed. Anything else: nothing to confirm.
-pub fn arm_check(s: &mut Shared, confirmed: bool, src: ArmSource) -> Result<(), String> {
-    if s.standby.settings.role != Role::Primary || s.standby.state.lease_lost_at.is_none() || s.gate.is_armed() {
+/// Anything else: nothing to confirm. Logged by `note_armed`, once the
+/// gate has really armed (an interlock may still refuse).
+pub fn arm_check(s: &Shared, confirmed: bool) -> Result<(), String> {
+    if !backup_lost(s) || s.gate.is_armed() || confirmed {
         return Ok(());
     }
-    if !confirmed {
-        return Err(BACKUP_LOST_ARM_FR.into());
+    Err(BACKUP_LOST_ARM_FR.into())
+}
+
+/// After a successful arm: a main machine armed while its backup is
+/// unreachable logs the operator's confirmation. Nothing when the gate
+/// stayed disarmed or there was nothing to confirm.
+pub fn note_armed(s: &Shared, src: ArmSource) {
+    if backup_lost(s) && s.gate.is_armed() {
+        s.gate.log().record("standby_arm_backup_lost", Some(src.id()), json!({ "confirmed": true }));
     }
-    s.gate.log().record("standby_arm_backup_lost", Some(src.id()), json!({ "confirmed": true }));
-    Ok(())
+}
+
+fn backup_lost(s: &Shared) -> bool {
+    s.standby.settings.role == Role::Primary && s.standby.state.lease_lost_at.is_some()
 }
 
 /// Parses a message refusing every key its types do not know, nested ones
@@ -770,7 +786,7 @@ fn poll_once(shared: &Arc<Mutex<Shared>>, peer: SocketAddr, token: &str) {
                 // Ignored whole: the link is not counted as up.
                 Err(e) => s.standby.state.last_error = Some(format!("message ignoré : {e}")),
             },
-            Ok((401, _)) => {
+            Ok((code, body)) if is_unpaired(code, &body) => {
                 // A restarted main machine forgot the token: it is up, and
                 // it has no lease for this backup (it never disarms by
                 // itself). Heard, not followed.
@@ -802,13 +818,22 @@ fn poll_once(shared: &Arc<Mutex<Shared>>, peer: SocketAddr, token: &str) {
 }
 
 /// An unpaired backup still asks for the state, without a token: a 401
-/// means a main machine answers at that address (restarted after a crash,
-/// say), so the takeover waits as if it had been followed. Nothing else is
-/// read.
+/// from a studio (`is_unpaired`) means a main machine answers at that
+/// address (restarted after a crash, say), so the takeover waits as if it
+/// had been followed. Nothing else is read.
 fn listen_unpaired(shared: &Arc<Mutex<Shared>>, peer: SocketAddr) {
-    if let Ok((401, _)) = http(peer, "GET", "/sync/state", None, None, REQUEST_TIMEOUT, 1024) {
-        heard_unpaired(&mut shared.lock().unwrap(), Instant::now());
+    if let Ok((code, body)) = http(peer, "GET", "/sync/state", None, None, REQUEST_TIMEOUT, 1024) {
+        if is_unpaired(code, &body) {
+            heard_unpaired(&mut shared.lock().unwrap(), Instant::now());
+        }
     }
+}
+
+/// The studio's own « not paired » answer: a 401 whose body is exactly
+/// `UNPAIRED`. Another device asking for authentication (a router, a
+/// printer) is not a main machine and never delays a takeover.
+fn is_unpaired(code: u16, body: &[u8]) -> bool {
+    code == 401 && body == UNPAIRED.as_bytes()
 }
 
 /// A 401 from the main machine: it is up, without a lease for this
@@ -1026,7 +1051,7 @@ fn gate_request(s: &Shared, auth: Option<&str>) -> Option<Reply> {
         (Some(t), Some(mine)) => ct_eq(t.as_bytes(), mine.as_bytes()),
         _ => false,
     };
-    (!ok).then(|| Reply::text(401, "non appairé"))
+    (!ok).then(|| Reply::text(401, UNPAIRED))
 }
 
 /// The whitelist. `auth`: the `Authorization` header; `peer`: the IP.
@@ -1290,6 +1315,10 @@ pub fn set_settings(shared: &Arc<Mutex<Shared>>, req: SettingsRequest) -> Result
         s.standby.save();
         let after = &s.standby.settings;
         s.gate.log().record("standby_settings", Some(ArmSource::Ui.id()), json!({ "role": after.role, "peer": after.peer, "port": after.port }));
+        // A new or cleared peer address in Secours restarts the link from
+        // nothing (`apply_role`): what the old address answered no longer
+        // delays a takeover. Deliberate: only the operator changes it, and
+        // the main machine's own lease still disarms it first.
         before.role != after.role || before.port != after.port || before.interface != after.interface || before.peer != after.peer
     };
     if restart {
@@ -1922,19 +1951,18 @@ mod tests {
         let t0 = Instant::now();
         let (mut s, auth) = paired_main(t0);
         arm_on_output(&mut s);
-        assert_eq!(arm_check(&mut s, false, ArmSource::Ui), Ok(()), "armed: nothing to confirm");
+        assert_eq!(arm_check(&s, false), Ok(()), "armed: nothing to confirm");
         let lost = t0 + s.standby.lease;
         check_lease(&mut s, lost);
         assert!(!s.gate.is_armed());
-        assert_eq!(arm_check(&mut s, false, ArmSource::Ui).unwrap_err(), BACKUP_LOST_ARM_FR);
-        assert_eq!(arm_check(&mut s, false, ArmSource::Keyboard).unwrap_err(), BACKUP_LOST_ARM_FR);
+        assert_eq!(arm_check(&s, false).unwrap_err(), BACKUP_LOST_ARM_FR);
         // MIDI cannot confirm: refused even with its opt-in.
         s.midi.store.devices.safety.allow_arm = true;
         assert!(s.request_arm_midi_opt_in().unwrap_err().contains(&BACKUP_LOST_ARM_FR.to_string()));
         assert!(!s.gate.is_armed());
         // Confirmed: allowed (and logged); the lease stays lost, so this
         // machine no longer disarms by itself until a poll comes back.
-        assert_eq!(arm_check(&mut s, true, ArmSource::Ui), Ok(()));
+        assert_eq!(arm_check(&s, true), Ok(()));
         s.request_arm(ArmSource::Ui).unwrap();
         check_lease(&mut s, lost + Duration::from_secs(60));
         assert!(s.gate.is_armed(), "the risk the confirmation states");
@@ -1943,14 +1971,14 @@ mod tests {
         s.gate.disarm(DisarmReason::User, ArmSource::Ui);
         let back = lost + Duration::from_secs(61);
         assert_eq!(handle(&mut s, "GET", "/sync/state", Some(&auth), "10.0.0.2", b"", back).status, 200);
-        assert_eq!(arm_check(&mut s, false, ArmSource::Ui), Ok(()));
+        assert_eq!(arm_check(&s, false), Ok(()));
         s.request_arm(ArmSource::Ui).unwrap();
         let lease = s.standby.lease;
         check_lease(&mut s, back + lease);
         assert!(!s.gate.is_armed());
         // Unpaired, Autonome or Secours: nothing to confirm.
-        let mut other = shared();
-        assert_eq!(arm_check(&mut other, false, ArmSource::Ui), Ok(()));
+        let other = shared();
+        assert_eq!(arm_check(&other, false), Ok(()));
     }
 
     #[test]
@@ -1972,6 +2000,57 @@ mod tests {
         assert_eq!(v["main_fenced"], json!(false), "unpaired: the main machine has no lease for this backup");
         assert_eq!(v["paired"], json!(false));
         assert_eq!(v["link"], json!(false), "heard is not followed");
+    }
+
+    /// Design note (T-492): a new or cleared peer address in Secours
+    /// forgets what the old one answered; no delay is left to wait.
+    #[test]
+    fn changing_the_peer_address_in_standby_restarts_the_takeover_delay() {
+        let backup = arc(shared());
+        set_settings(&backup, SettingsRequest { role: Some(Role::Standby), peer: Some("127.0.0.1:9".into()), ..Default::default() }).unwrap();
+        for peer in ["127.0.0.1:10", ""] {
+            let now = Instant::now();
+            {
+                let mut s = backup.lock().unwrap();
+                s.standby.state.last_ok = Some(now);
+                s.standby.state.last_heard = Some(now);
+                assert!(release_check(&s.standby.state, 1, None, now).is_err(), "heard just now: wait");
+            }
+            set_settings(&backup, SettingsRequest { peer: Some(peer.into()), ..Default::default() }).unwrap();
+            let s = backup.lock().unwrap();
+            assert!(s.standby.is_standby(), "still in standby, still unable to arm");
+            assert_eq!((s.standby.state.last_ok, s.standby.state.last_heard), (None, None), "{peer:?}");
+            assert!(release_check(&s.standby.state, 1, None, Instant::now()).is_ok(), "{peer:?}");
+        }
+        stop(&backup);
+    }
+
+    /// Only the studio's own 401 counts as « main machine heard »: another
+    /// device asking for authentication at the peer address does not.
+    #[test]
+    fn only_the_studios_401_counts_as_heard_by_an_unpaired_backup() {
+        assert!(is_unpaired(401, UNPAIRED.as_bytes()));
+        assert!(!is_unpaired(401, b"Unauthorized"));
+        assert!(!is_unpaired(401, b""));
+        assert!(!is_unpaired(403, UNPAIRED.as_bytes()));
+        // One answer per connection, on loopback.
+        let device = |body: &'static str| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = l.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let (mut c, _) = l.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = c.read(&mut buf);
+                let reply = format!("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                c.write_all(reply.as_bytes()).unwrap();
+            });
+            addr
+        };
+        let backup = arc(shared());
+        listen_unpaired(&backup, device("Unauthorized"));
+        assert!(backup.lock().unwrap().standby.state.last_heard.is_none(), "another device is not a main machine");
+        listen_unpaired(&backup, device(UNPAIRED));
+        assert!(backup.lock().unwrap().standby.state.last_heard.is_some());
     }
 
     /// Two studios on loopback: the main machine restarts (a new listener
