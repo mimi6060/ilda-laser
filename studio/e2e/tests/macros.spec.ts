@@ -6,8 +6,9 @@ import { test, expect, useStudio, openUi, focusPage, reveal } from '../studio';
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
+type Waiting = { kind: string; left?: number };
 type Run = { id: string; step: number; go: boolean };
-const frame = async () => (await studio.frame()) as unknown as { live: { size: number }; tempo: { beat: number }; armed: boolean; estop: boolean; macros: { running: Run[] } };
+const frame = async () => (await studio.frame()) as unknown as { live: { size: number }; tempo: { beat: number }; frame_seq: number; armed: boolean; estop: boolean; macros: { running: Run[] } };
 
 test.beforeEach(async ({ page }) => {
   await studio.post('/api/estop/reset', {});
@@ -44,22 +45,47 @@ test('taille 50, attendre 1 temps, taille 100: the second step lands on the beat
   const pad = page.locator('#macButtons .mac-btn', { hasText: 'Montée' });
   await expect(pad).toBeVisible();
   await pad.click();
-  const seen: { size: number; beat: number }[] = [];
+  const seen: { size: number; beat: number; seq: number }[] = [];
+  // The beat the wait ends on, from the studio's own count: « En cours »
+  // gives the beats left (to 0.01) at an instant between two frames polled
+  // around it, so the due beat lies in [lo + left, hi + left].
+  let wait: { lo: number; left: number } | null = null;
+  let due: [number, number] | null = null;
   const t0 = Date.now();
   while (Date.now() - t0 < 3000) {
     const f = await frame();
-    seen.push({ size: f.live.size, beat: f.tempo.beat });
-    if (seen.some(s => Math.abs(s.size - 0.5) < 1e-6) && Math.abs(f.live.size - 1) < 1e-6) break;
+    seen.push({ size: f.live.size, beat: f.tempo.beat, seq: f.frame_seq });
+    if (wait && !due) due = [wait.lo + wait.left - 0.005, f.tempo.beat + wait.left + 0.005];
+    if (!wait && Math.abs(f.live.size - 0.5) < 1e-6) {
+      const w = (await studio.get<{ macros: { waiting: Waiting }[] }>('/api/running')).macros[0]?.waiting;
+      if (w?.kind === 'beats') wait = { lo: f.tempo.beat, left: w.left! };
+    }
+    if (due && Math.abs(f.live.size - 1) < 1e-6) break;
   }
   const first = seen.findIndex(s => Math.abs(s.size - 0.5) < 1e-6);
   expect(first).toBeGreaterThanOrEqual(0);
   const back = seen.findIndex((s, i) => i > first && Math.abs(s.size - 1) < 1e-6);
   expect(back).toBeGreaterThan(first);
-  // Launched at beat b, the step is due on round(b + 1): never before it,
-  // and the last frame at 50 % was before it (within one frame, 0.04 beat at 120 BPM).
-  const target = Math.round(seen[first].beat + 1);
-  expect(seen[back].beat).toBeGreaterThanOrEqual(target - 0.04);
-  expect(seen[back - 1].beat).toBeLessThan(target + 0.04);
+  // Launched at beat b, the step is due on round(b + 1): a whole beat, the
+  // only one in that interval (it spans far less than a beat).
+  expect(due, 'the run was never seen waiting in « En cours »').not.toBeNull();
+  const whole: number[] = [];
+  for (let n = Math.ceil(due![0]); n <= due![1]; n++) whole.push(n);
+  expect(whole, `due between beats ${due}`).toHaveLength(1);
+  const target = whole[0];
+  expect(target - seen[first].beat).toBeLessThanOrEqual(1.5);
+  // `tempo.beat` is the clock when an answer is served, `frame_seq` the
+  // last engine frame finished then. Never before the beat: the first
+  // answer at 100 % comes after the frame that ran the step, so later.
+  expect(seen[back].beat).toBeGreaterThanOrEqual(target - 1e-6);
+  // Never after it: an engine frame reads its clock after the previous
+  // frame is published, then runs the due steps first. So once an answer
+  // was served at beat >= target with frame N, frame N + 2 read a clock
+  // past the target and ran the step: no answer from frame N + 2 on still
+  // shows 50 %. A loaded machine delays the engine's frames, not this.
+  const at = seen.find(s => s.beat >= target)!; // seen[back] at least
+  const late = seen.filter(s => s.seq >= at.seq + 2 && Math.abs(s.size - 0.5) < 1e-6);
+  expect(late, `step due on beat ${target}, answer at ${at.beat} (frame ${at.seq})`).toEqual([]);
   expect((await frame()).armed).toBe(false);
 });
 
