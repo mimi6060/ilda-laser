@@ -28,6 +28,8 @@ pub fn snapshot(s: &Shared) -> Value {
         "cuelist": cuelist(s),
         // Running macros (T-425), with the step they are at.
         "macros": crate::macros::running(s),
+        // Scripts (T-458): runs in flight and automatic triggers armed.
+        "scripts": crate::script::running(s),
         "lfos": lfos(s),
         "audio_links": audio_links(s),
         "masters": masters(s),
@@ -361,6 +363,14 @@ pub fn stop(s: &mut Shared, req: &StopRequest) -> Result<(), String> {
             }
         }
         "macros" => crate::macros::stop_all(s),
+        // A script (T-458): its run dropped, its trigger held.
+        "script" => {
+            let id = req.id.as_deref().and_then(|i| i.parse::<u32>().ok()).ok_or("script manquant")?;
+            if !crate::script::stop(s, id) {
+                return Err("ce script ne tourne plus".into());
+            }
+        }
+        "scripts" => crate::script::stop_all(s),
         // The cue list back to *Début* (T-410).
         "cuelist" => s.cue_list.top(),
         "timeline" => {

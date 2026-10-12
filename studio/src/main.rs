@@ -105,6 +105,7 @@ mod shownet;
 mod speed;
 mod spread;
 mod scan;
+mod script;
 mod scenes;
 mod record;
 mod remote;
@@ -646,6 +647,10 @@ pub struct Shared {
     /// Macros (macros.rs, T-425, `macros.json`): the list is content
     /// (projects, history); what runs is memory only.
     pub macros: macros::Macros,
+    /// Sandboxed scripts (script/, T-458, `scripts.json`): the list is
+    /// content (projects, history); runs and their trust are machine and
+    /// memory state (`scripts_trust.json`).
+    pub scripts: script::Scripts,
     /// The tablet remote (remote.rs, T-428): off at every start; only
     /// its port is saved (`remote.json`).
     pub remote: remote::Remote,
@@ -958,6 +963,8 @@ impl Shared {
         self.estop.trip(src);
         // No macro step runs after the stop (T-425).
         self.macros.player.stop_all();
+        // Script runs are dropped, their triggers held (T-458).
+        script::stop_all(self);
         // The show list stops chaining until *Lancer* (T-444).
         self.showlist.halt();
         // The zone trace ends at once (T-447); starting it again takes a click.
@@ -1638,6 +1645,7 @@ fn startup_state(cli: &Cli) -> Shared {
         executors: executors::Executors::load(cli.data_dir.join("executors.json")),
         desks: desk::Desks::load(cli.data_dir.join("desks.json")),
         macros: macros::Macros::load(cli.data_dir.join("macros.json")),
+        scripts: script::Scripts::load(&cli.data_dir),
         showlist: showlist::ShowListRunner::load(cli.data_dir.join("showlist.json")),
         agenda: agenda::AgendaRunner::load(cli.data_dir.join("agenda.json")),
         remote: remote::Remote::load(cli.data_dir.join("remote.json"), cli.remote_bind),
@@ -1649,6 +1657,8 @@ fn startup_state(cli: &Cli) -> Shared {
     figures::refresh(&mut state);
     // Macro lines checked against the registry they will run on (T-425).
     macros::revalidate(&mut state);
+    // Scripts too (T-458): a refused line switches its script off.
+    script::revalidate(&mut state);
     // The show list's times, read by its worker (T-444).
     showlist::refresh(&mut state);
     if cli.test_hooks {
@@ -2192,6 +2202,10 @@ impl Engine {
             // and a disarm end them first.
             let macro_beat = s.tempo.beat_at(t);
             macros::frame(&mut s, t, macro_beat);
+            // Scripts (T-458): the runs finished in their thread since the
+            // last frame apply their lines (never waited for), then the
+            // beat and bar triggers post new runs. Stops first.
+            script::frame(&mut s, t, &audio);
             // Pilote automatique (T-148): on the bar it is due, one cue
             // pressed on the boundary, before the deck. E-stop or disarm:
             // switched off. It never arms.

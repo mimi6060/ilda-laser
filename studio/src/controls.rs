@@ -50,6 +50,8 @@ pub enum ControlSource {
     Command,
     /// The autopilot (T-148).
     Autopilot,
+    /// Sandboxed scripts (T-458).
+    Script,
 }
 
 impl ControlSource {
@@ -69,6 +71,7 @@ impl ControlSource {
             ControlSource::System => "Système",
             ControlSource::Command => "Ligne de commande",
             ControlSource::Autopilot => "Pilote auto",
+            ControlSource::Script => "Script",
         }
     }
 
@@ -472,6 +475,19 @@ impl ControlRegistry {
         }
     }
 
+    /// `script.<id>.run` for each script (T-458), labelled with its name:
+    /// a trigger controllers may use (a run never arms).
+    pub fn add_scripts(&mut self, scripts: &[crate::script::Script]) {
+        for sc in scripts {
+            let id = format!("script.{}.run", sc.id);
+            if self.by_id.contains_key(&id) {
+                continue;
+            }
+            self.by_id.insert(id.clone(), self.descs.len());
+            self.descs.push(ControlDesc { id, label_fr: sc.name.clone(), group: "script", kind: ControlKind::Trigger, external: true });
+        }
+    }
+
     /// Looks up an id, accepting `live.<param>` as an alias of `master.<param>`.
     pub fn get(&self, id: &str) -> Option<&ControlDesc> {
         let canonical = match id.strip_prefix("live.") {
@@ -775,6 +791,9 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
             }
             if let Some(m) = other.strip_prefix("macro.").and_then(|r| r.strip_suffix(".go")) {
                 return crate::macros::start(s, m, source).map_err(ControlError::Refused);
+            }
+            if let Some(n) = other.strip_prefix("script.").and_then(|r| r.strip_suffix(".run")).and_then(|n| n.parse::<u32>().ok()) {
+                return crate::script::request_run(s, n, source).map_err(ControlError::Refused);
             }
             if let Some(n) = other.strip_prefix("page.").and_then(|n| n.parse::<usize>().ok()) {
                 if (1..=s.grid.page_count()).contains(&n) {
@@ -1343,8 +1362,10 @@ pub fn stop_cues(s: &mut Shared) {
 /// timeline, the playlist and the cue list (back to *Début*, T-410). Leaves the arm
 /// state, the modulators, the audio links and the masters alone.
 pub fn stop_running(s: &mut Shared) {
-    // The macros first (T-425): none relaunches what this stops.
+    // The macros first (T-425): none relaunches what this stops; the
+    // scripts too (T-458), their triggers held until *Reprendre*.
     crate::macros::stop_all(s);
+    crate::script::stop_all(s);
     stop_cues(s);
     // The show list first (T-444): nothing chains after this stop.
     crate::showlist::stop(s);

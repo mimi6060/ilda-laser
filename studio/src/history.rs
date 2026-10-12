@@ -87,11 +87,14 @@ pub enum Section {
     /// The autopilot's pages and public content (T-148). Not its switch,
     /// rhythm and order: those are live controls.
     Autopilot,
+    /// The script list (T-458). Not what runs, nor the trust: playback
+    /// and machine state.
+    Scripts,
 }
 
 use Section::*;
 
-const ALL: [Section; 21] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Objects, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda, Autopilot];
+const ALL: [Section; 22] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Objects, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda, Autopilot, Scripts];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -117,6 +120,7 @@ impl Section {
             Pools => "pools",
             Agenda => "agenda",
             Autopilot => "autopilot",
+            Scripts => "scripts",
         }
     }
 
@@ -151,6 +155,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/agenda" => &[Agenda],
         "/api/pools" | "/api/pools/delete" | "/api/pools/capture" => &[Pools],
         "/api/autopilot" => &[Autopilot],
+        "/api/scripts" => &[Scripts],
         _ => return None,
     })
 }
@@ -183,6 +188,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         Pools => json!(s.pools.list()),
         Agenda => json!(s.agenda.agenda()),
         Autopilot => crate::autopilot::capture(s),
+        Scripts => json!(s.scripts.list()),
     }
 }
 
@@ -294,6 +300,8 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         Agenda => crate::agenda::set(s, from(v)?).map_err(|e| (400, e))?,
         // Checked again (a page it names may be gone since).
         Autopilot => crate::autopilot::set_config(s, from(v)?).map_err(|e| (400, e))?,
+        // Checked again (a refused line never comes back).
+        Scripts => crate::script::set(s, from(v)?).map_err(|e| (400, e.message_fr))?,
     }
     Ok(())
 }
@@ -547,6 +555,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, UserCues) => named(list_change(old, new, "id", "name"), "Cue", "Cues", true, "créé"),
         (_, Palettes) => named(list_change(old, new, "name", "name"), "Palette", "Palettes", true, "ajouté"),
         (_, Autopilot) => "Pilote automatique modifié".into(),
+        (_, Scripts) => named(list_change(old, new, "id", "name"), "Script", "Scripts", false, "créé"),
         (_, Pools) => named(list_change(old, new, "id", "name"), "Préréglage", "Préréglages", false, "ajouté"),
         (_, ScanPresets) => named(list_change(old, new, "id", "name"), "Préréglage de balayage", "Préréglages de balayage", false, "ajouté"),
         (_, CueLists) => named(list_change(old, new, "name", "name"), "Liste de cues", "Listes de cues", true, "créé"),

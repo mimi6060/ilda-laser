@@ -257,6 +257,15 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/macros/run", RouteClass::Play),
     ("POST", "/api/macros/stop", RouteClass::Play),
     ("POST", "/api/macros/go", RouteClass::Play),
+    // Scripts (T-458): the list is an edit; running and stopping are
+    // playback; checking a source reads only; approving a project's
+    // scripts is an edit (never in show mode).
+    ("GET", "/api/scripts", RouteClass::Read),
+    ("POST", "/api/scripts", RouteClass::Edit),
+    ("POST", "/api/scripts/run", RouteClass::Play),
+    ("POST", "/api/scripts/stop", RouteClass::Play),
+    ("POST", "/api/scripts/check", RouteClass::Read),
+    ("POST", "/api/scripts/trust", RouteClass::Edit),
     ("GET", "/api/showlist", RouteClass::Read),
     ("POST", "/api/showlist", RouteClass::Edit),
     ("POST", "/api/showlist/play", RouteClass::Play),
@@ -833,6 +842,8 @@ fn emergency_stop(request: Request, estop: &EStop, shared: &Mutex<Shared>, hub: 
         // Macros end now (T-425); if the lock is busy, the engine's next
         // frame ends them before any step, as it sees the latch.
         s.macros.player.stop_all();
+        // Script runs are dropped and their triggers held (T-458).
+        crate::script::stop_all(s);
         // The show list stops chaining (T-444); the engine halts its show.
         s.showlist.halt();
     }
@@ -2774,6 +2785,66 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     None => crate::macros::stop_all(s),
                 }
                 json_response(crate::macros::view(s))
+            }
+            Err(e) => e,
+        },
+        // Scripts (T-458): GET the list, the states and consoles; POST
+        // replaces the list (checked: refused lines never saved; an edit,
+        // in the history, locked in show mode). Run and stop are playback.
+        (Method::Get, "/api/scripts") => json_response(crate::script::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/scripts") => match body::<ScriptListRequest>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                match crate::script::set(s, req.scripts) {
+                    Ok(()) => json_response(crate::script::view(s)),
+                    Err(e) => with_status(json_response(json!(e)), 400),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/scripts/run") => match body::<ScriptIdRequest>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                let r = match req.id {
+                    Some(id) => crate::script::request_run(s, id, controls::ControlSource::from_id(req.source.as_deref())),
+                    // No id: *Reprendre les scripts*.
+                    None => crate::script::resume(s),
+                };
+                match r {
+                    Ok(()) => json_response(crate::script::view(s)),
+                    Err(why) => text(409, why),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/scripts/stop") => match body::<ScriptIdRequest>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                match req.id {
+                    Some(id) => {
+                        crate::script::stop(s, id);
+                    }
+                    None => crate::script::stop_all(s),
+                }
+                json_response(crate::script::view(s))
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/scripts/check") => match body::<ScriptCheckRequest>(request) {
+            Ok(req) => {
+                let s = &*shared.lock().unwrap();
+                match crate::script::check_source(s, &req.source) {
+                    None => json_response(json!({ "ok": true })),
+                    Some(e) => json_response(json!({ "ok": false, "error": e })),
+                }
+            }
+            Err(e) => e,
+        },
+        (Method::Post, "/api/scripts/trust") => match body::<ScriptTrustRequest>(request) {
+            Ok(req) => {
+                let s = &mut *shared.lock().unwrap();
+                crate::script::approve(s, req.approve);
+                json_response(crate::script::view(s))
             }
             Err(e) => e,
         },
@@ -6007,6 +6078,32 @@ struct MacroListRequest {
     macros: Vec<crate::macros::Macro>,
 }
 
+/// `POST /api/scripts` (T-458).
+#[derive(serde::Deserialize)]
+struct ScriptListRequest {
+    scripts: Vec<crate::script::Script>,
+}
+
+/// `POST /api/scripts/run` / `stop` (no id: resume / stop every script).
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct ScriptIdRequest {
+    id: Option<u32>,
+    source: Option<String>,
+}
+
+/// `POST /api/scripts/check`.
+#[derive(serde::Deserialize)]
+struct ScriptCheckRequest {
+    source: String,
+}
+
+/// `POST /api/scripts/trust`.
+#[derive(serde::Deserialize)]
+struct ScriptTrustRequest {
+    approve: bool,
+}
+
 /// `POST /api/macros/run` / `stop` (no id: every macro).
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -6122,6 +6219,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["desk"] = crate::desk::view(s);
     // Macros (T-425): the list's revision and what runs (step, Go).
     v["macros"] = crate::macros::live_view(s);
+    // Scripts (T-458): the list's revision, what runs, the banner.
+    v["scripts"] = crate::script::live_view(s);
     // T-146: what plays on the FX grid, each line's level now.
     v["fx"] = s.fx.view();
     // T-274: what is prepared (no points: those are `/api/preview-frame`).

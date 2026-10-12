@@ -309,6 +309,7 @@ fn launches(cmd: &Command) -> Option<&str> {
 fn registry_for(s: &Shared, list: &[Macro]) -> ControlRegistry {
     let mut reg = ControlRegistry::build_for(&s.presets, &s.grid);
     reg.add_macros(list);
+    reg.add_scripts(s.scripts.list());
     reg
 }
 
