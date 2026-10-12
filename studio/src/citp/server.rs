@@ -348,13 +348,15 @@ impl Server {
         }
     }
 
-    /// For a console that missed ELUps: everything may have changed.
+    /// For a console that missed ELUps: everything may have changed. The
+    /// per-page ELUps go to every version (they name only pages that
+    /// exist); the root one is not sent to MSEX 1.0, which has none.
     fn resend_all(&mut self, i: usize) {
         let Some(idx) = self.index.clone() else { return };
         let c = &mut self.conns[i];
         c.missed_update = false;
         let v = c.version();
-        for u in everything(&idx).into_iter().filter(|u| u.for_version(v)) {
+        for u in everything(&idx).into_iter().filter(|u| v != Version::V1_0 || u.library != wire::ROOT) {
             c.msex(v, u.into_msex(), 0);
         }
     }
@@ -755,13 +757,15 @@ pub(crate) fn updates(old: &MediaIndex, new: &MediaIndex) -> Vec<Update> {
 }
 
 /// "Everything may have changed": every page added/removed on the root
-/// (1.1+), every page's elements (1.0).
+/// (1.1+), and for every existing page, all its elements updated, added
+/// or removed (every version).
 fn everything(idx: &MediaIndex) -> Vec<Update> {
     let mut root = Update { library: wire::ROOT, flags: wire::UP_LIBRARIES_ADDED_REMOVED, elements: [0; 32], libraries: [0; 32] };
     let mut out = Vec::new();
+    let flags = wire::UP_ELEMENTS_UPDATED | wire::UP_ELEMENTS_ADDED_REMOVED | wire::UP_ALL_ELEMENTS;
     for p in 0..idx.pages.len() {
         wire::set_bit(&mut root.libraries, p as u8);
-        out.push(Update { library: wire::library_id(p as u8), flags: wire::UP_ELEMENTS_ADDED_REMOVED | wire::UP_ALL_ELEMENTS, elements: [0; 32], libraries: [0; 32] });
+        out.push(Update { library: wire::library_id(p as u8), flags, elements: [0; 32], libraries: [0; 32] });
     }
     out.insert(0, root);
     out
@@ -1230,6 +1234,136 @@ pub(crate) mod tests {
         server.step(now);
         assert_eq!(d.read().1, Message::PNam { name: "Laser Studio".into() });
         drop(c);
+    }
+
+    /// Whole messages that have arrived on a non-blocking client.
+    fn arrived(c: &mut Client, buf: &mut Vec<u8>) -> Vec<Message> {
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            match c.stream.read(&mut chunk) {
+                Ok(0) => panic!("closed by the server"),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => break,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        let mut out = Vec::new();
+        while buf.len() >= wire::HEADER_LEN {
+            let size = wire::Header::parse(buf).unwrap().size as usize;
+            if buf.len() < size {
+                break;
+            }
+            let bytes: Vec<u8> = buf.drain(..size).collect();
+            out.push(wire::decode(&bytes).unwrap().1);
+        }
+        out
+    }
+
+    #[test]
+    fn a_console_that_missed_updates_is_told_everything_once_drained() {
+        let shared = Arc::new(Mutex::new(shared()));
+        // Two pages of our own at the end: a cue on the first is renamed,
+        // the second is deleted while the consoles are not reading.
+        let (page, gone) = {
+            let mut s = shared.lock().unwrap();
+            let mut g = s.grid.clone();
+            let page = g.new_page("Editee", &s.presets).unwrap();
+            let gone = g.new_page("Supprimee", &s.presets).unwrap();
+            s.grid = g;
+            crate::grid::refresh(&mut s);
+            crate::usercues::store(&mut s, page, 0, Some("Avant"), Default::default(), false).unwrap();
+            let idx = MediaIndex::build(&s);
+            assert_eq!((idx.pages.len(), idx.pages[page].name.as_str(), idx.pages[gone].name.as_str()), (gone + 1, "Editee", "Supprimee"));
+            assert_eq!(idx.pages[page].cues.len(), 1);
+            (page as u8, gone as u8)
+        };
+        let hub = Arc::clone(&shared.lock().unwrap().citp.hub);
+        super::super::update(&mut shared.lock().unwrap(), &json!({ "enabled": true, "interface": "127.0.0.1", "thumb_max_px": 256 })).unwrap();
+        let mut server = Server::new(Arc::clone(&shared), Arc::clone(&hub));
+        let mut now = Instant::now();
+        server.step(now);
+        let addr = hub.status().local.expect("listening");
+        // A 1.2 console (CInf) and a 1.0 one (none): many big pictures
+        // asked, nothing read, so both queues go past the cap.
+        let req = ThumbRequest { format: wire::FMT_RGB8, width: 256, height: 256, flags: 0, library_type: MEDIA };
+        let mut c12 = Client::connect(&addr);
+        c12.msex(Msex::CInf { versions: vec![Version::V1_2.word()] });
+        let mut c10 = Client::connect(&addr);
+        for _ in 0..20 {
+            c12.msex(Msex::Geth { req: req.clone(), library: wire::library_id(0), elements: None });
+            c10.send(Message::Msex { version: Version::V1_0, body: Msex::Geth { req: req.clone(), library: wire::library_id(0), elements: None } });
+        }
+        let addrs = [c12.stream.local_addr().unwrap(), c10.stream.local_addr().unwrap()];
+        let conn = |server: &Server, n: usize| server.conns.iter().position(|c| c.peer == addrs[n]);
+        let full = |server: &Server| (0..2).all(|n| conn(server, n).is_some_and(|i| server.conns[i].sinf_sent && !server.conns[i].has_room()));
+        for _ in 0..2000 {
+            now += Duration::from_millis(5);
+            server.step(now);
+            if full(&server) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(full(&server), "both queues past the cap, SInf sent");
+        let session = |server: &Server, n: usize| server.conns[conn(server, n).unwrap()].version();
+        assert_eq!((session(&server, 0), session(&server, 1)), (Version::V1_2, Version::V1_0));
+        // The grid changes: a cue renamed on an existing page, a page gone.
+        {
+            let mut s = shared.lock().unwrap();
+            crate::usercues::edit(&mut s, crate::usercues::GridEdit::Rename { from: (page as usize, 0), name: "Apres".into() }).unwrap();
+            let presets = s.presets.clone();
+            s.grid.delete_page(gone as usize, &presets).unwrap();
+            crate::grid::refresh(&mut s);
+            assert_eq!(MediaIndex::build(&s).pages.len(), gone as usize);
+        }
+        now += REV_EVERY;
+        server.step(now);
+        for n in 0..2 {
+            let c = &server.conns[conn(&server, n).unwrap()];
+            assert!(c.missed_update && !c.has_room(), "console {n}: the ELUp was deferred");
+        }
+        // The consoles read: once drained, they are told everything.
+        for c in [&mut c12, &mut c10] {
+            c.stream.set_nonblocking(true).unwrap();
+        }
+        let mut bufs = [Vec::new(), Vec::new()];
+        let mut elups: [Vec<(LibraryId, u8, [u8; 32])>; 2] = [Vec::new(), Vec::new()];
+        let quiet = |server: &Server| {
+            (0..2).all(|n| {
+                let c = &server.conns[conn(server, n).unwrap()];
+                !c.missed_update && c.output.is_empty() && c.input.is_empty()
+            })
+        };
+        for round in 0..20_000 {
+            now += Duration::from_millis(1);
+            server.step(now);
+            assert_eq!(server.conns.len(), 2, "both consoles still connected");
+            for (n, c) in [&mut c12, &mut c10].into_iter().enumerate() {
+                for m in arrived(c, &mut bufs[n]) {
+                    if let Message::Msex { body: Msex::Elup { library, flags, libraries, .. }, .. } = m {
+                        elups[n].push((library, flags, libraries));
+                    }
+                }
+            }
+            if quiet(&server) && bufs.iter().all(Vec::is_empty) && elups.iter().all(|e| !e.is_empty()) {
+                break;
+            }
+            assert!(round < 19_999, "never drained");
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        let all = wire::UP_ELEMENTS_UPDATED | wire::UP_ELEMENTS_ADDED_REMOVED | wire::UP_ALL_ELEMENTS;
+        for (n, got) in elups.iter().enumerate() {
+            // The changed page: all its elements.
+            assert!(got.iter().any(|&(l, f, _)| l == wire::library_id(page) && f & all == all), "console {n}: {got:?}");
+            // Nothing names the deleted page.
+            for &(l, _, libs) in got {
+                assert!(l == wire::ROOT || (0..gone).any(|p| l == wire::library_id(p)), "console {n} told of {l:?}");
+                assert_eq!(libs[gone as usize / 8] & (1 << (gone % 8)), 0, "console {n}: the root names the deleted page");
+            }
+        }
+        // The root: MSEX 1.1+ only.
+        assert!(elups[0].iter().any(|&(l, f, _)| l == wire::ROOT && f & wire::UP_LIBRARIES_ADDED_REMOVED != 0), "{:?}", elups[0]);
+        assert!(elups[1].iter().all(|&(l, ..)| l != wire::ROOT), "no root for MSEX 1.0");
     }
 
     #[test]
