@@ -89,6 +89,7 @@ const LABELS = Object.freeze({
   'tempo.guide.info': 'tempo.guide : tapez le tempo pour guider la détection, sans l\'imposer',
   'tempo.source.info': 'Tempo auto : état du suivi et confiance de la détection',
   'tempo.horloge_midi.info': 'Le tempo suit l\'horloge MIDI : Tap, Nudge et BPM sont ignorés (RÉGLAGES › Horloge MIDI)',
+  'tempo.ableton_link.info': 'Le tempo suit Ableton Link : Nudge, Sync 1 et Tempo auto sont ignorés, le BPM est envoyé à la session (RÉGLAGES › Ableton Link)',
   'tempo.vitesses.info': 'Groupes de vitesse qui ne suivent pas le tempo à ×1, et la cadence des fondus (LIVE › Direct › Vitesses)',
   'tempo.temps1.suggere': 'Temps 1 suggéré',
   'tempo.temps1.info': 'Temps 1 suggéré par l\'analyse audio (voyant en pointillé). En Tempo auto, la mesure ne se recale seule que sur un drop ou quand la détection devient sûre.',

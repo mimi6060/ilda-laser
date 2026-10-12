@@ -113,6 +113,10 @@ pub enum TempoSource {
     /// Follows an incoming MIDI clock (T-207, midi/clock.rs): Tap and Nudge
     /// are ignored meanwhile.
     MidiClock,
+    /// Follows an Ableton Link session (T-154, ableton_link.rs): Nudge,
+    /// *Sync 1* and *Tempo auto* are ignored meanwhile; a local BPM goes
+    /// to the session.
+    Link,
 }
 
 /// How the clock follows the detection. Defaults from the task (T-234).
@@ -418,6 +422,40 @@ impl TempoClock {
         } else if self.source == TempoSource::MidiClock {
             self.set_source(TempoSource::Manual);
         }
+    }
+
+    /// Ableton Link (T-154): on, the clock is driven by the session (*Tempo
+    /// auto* stops); off, back to manual at the current BPM and phase, so
+    /// nothing jumps. Off does nothing under another source.
+    pub fn set_link(&mut self, on: bool) {
+        if on {
+            self.set_source(TempoSource::Link);
+        } else if self.source == TempoSource::Link {
+            self.set_source(TempoSource::Manual);
+        }
+    }
+
+    /// Ableton Link (T-154): takes the session's tempo, and moves the phase
+    /// by the least amount (at most half a `quantum`) that puts this
+    /// clock's beat on the session's beat modulo `quantum`: with a quantum
+    /// equal to the bar, both "ones" coincide. Link's timeline is
+    /// continuous, so after the first alignment the moves are nil. A tempo
+    /// outside this clock's range is not taken (returns false).
+    pub fn follow_link(&mut self, bpm: f64, session_beat: f64, quantum: f64, t: f64) -> bool {
+        if !(MIN_BPM..=MAX_BPM).contains(&bpm) || !session_beat.is_finite() || !t.is_finite() || quantum.is_nan() || quantum <= 0.0 {
+            return false;
+        }
+        if self.source != TempoSource::Link {
+            self.set_link(true);
+        }
+        self.set_bpm(bpm, t);
+        let ours = self.beat_at(t);
+        let mut d = (ours - session_beat).rem_euclid(quantum);
+        if d > quantum / 2.0 {
+            d -= quantum;
+        }
+        self.origin_s = t - (ours - d) * 60.0 / self.bpm;
+        true
     }
 
     pub fn set_bpm_manual(&mut self, bpm: f64, t: f64) {
@@ -1340,5 +1378,26 @@ mod tests {
         assert_eq!(c.downbeat.realigns, 1);
         let after = c.beat_at(t) - c.beat_at(t).floor();
         assert!((after - before).abs() < 0.02, "phase {before} → {after}");
+    }
+
+    #[test]
+    fn follow_link_aligns_the_bar_by_the_least_move() {
+        let mut c = TempoClock::default();
+        let t = 10.0;
+        // Ours is at beat 20 (120 BPM); the session at -2.5 (a negative
+        // beat, as Link has before its origin): 20 ≡ 0, -2.5 ≡ 1.5 mod 4.
+        assert!(c.follow_link(120.0, -2.5, 4.0, t));
+        assert_eq!(c.source, TempoSource::Link);
+        assert!((c.beat_at(t) - 21.5).abs() < 1e-9, "{}", c.beat_at(t));
+        // The session one beat later at a new tempo: still the least move.
+        assert!(c.follow_link(90.0, 3.4, 4.0, t));
+        assert!((c.beat_at(t) - 23.4).abs() < 1e-9 && c.bpm == 90.0);
+        // Out of range or garbage: nothing taken.
+        for (bpm, beat, q) in [(300.0, 0.0, 4.0), (120.0, f64::NAN, 4.0), (120.0, 0.0, 0.0)] {
+            assert!(!c.follow_link(bpm, beat, q, t));
+        }
+        assert_eq!(c.bpm, 90.0);
+        c.set_link(false);
+        assert_eq!((c.source, c.bpm), (TempoSource::Manual, 90.0));
     }
 }

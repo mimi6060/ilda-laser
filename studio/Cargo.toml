@@ -37,6 +37,9 @@ zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 sha2 = "0.10"  # MIT OR Apache-2.0 (RustCrypto): media fingerprints in the `.lspack` manifest (T-289), approved script lists (T-458)
 # Scripts (T-458): the interpreter is our own code (src/script/lang.rs, same
 # licence as the studio); no scripting crate is pulled in.
+# GPL-2.0-or-later (wraps Ableton's official Link library, GPLv2+): ONLY
+# behind the `ableton-link` feature below, never in a default build (T-154).
+rusty_link = { version = "0.4.9", optional = true }
 
 [features]
 # Native ShowNET output foundation (T-471), off by default. Without the
@@ -49,6 +52,13 @@ shownet = []
 # operator's "Enregistrement audio du système" permission. Without it the
 # studio offers the BlackHole route (help page `son-du-mac`).
 system-audio = []
+# Ableton Link tempo source (T-154), off by default. It compiles
+# Ableton's Link library, which is GPLv2+: a binary built with it is a
+# GPL combined work, for private use only and never distributed (the
+# default build has no GPL code: `cargo tree -p laser-studio`). It can't
+# be combined with `shownet` (a proprietary SDK under NDA). Building it
+# needs CMake and Xcode's libclang.
+ableton-link = ["dep:rusty_link"]
 # The menu-bar item of the macOS application (T-413), off by default so
 # `cargo build`, `cargo test` and the e2e runs pull in no GUI code. Built
 # by `studio/packaging/macos/build_app.sh`. objc2 family: MIT.

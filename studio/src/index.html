@@ -2117,6 +2117,8 @@
     <span class="hint hint--inline" id="tempoSrc" data-t-title="tempo.source.info" hidden></span>
     <!-- Horloge MIDI (T-207): the followed clock's tempo; Tap and Nudge are ignored meanwhile. -->
     <span class="hint hint--inline" id="midiClockHint" role="status" data-t-title="tempo.horloge_midi.info" hidden></span>
+    <!-- Ableton Link (T-154): the session followed and its peers. -->
+    <span class="hint hint--inline" id="linkHint" role="status" data-t-title="tempo.ableton_link.info" hidden></span>
     <!-- Groupes de vitesse (T-419): the groups not at ×1, and the Cadence if not 100 %. -->
     <span class="hint hint--inline" id="speedHint" role="status" data-t-title="tempo.vitesses.info" hidden></span>
     <!-- Compensation de latence (T-246): the effects read the beat ahead; never a frame held back. -->
@@ -4858,6 +4860,16 @@
         <div class="hint" id="mclkOutState" role="status"></div>
         <div class="hint">Désactivé par défaut. Jamais vers le port d'où vient l'horloge suivie (le studio se suivrait lui-même). L'APC40 mkII reçoit déjà sa propre horloge pour faire pulser ses pads (option « Pulsation calculée par le studio »).</div>
         <div class="hint sf-error" id="mclkError" role="alert"></div>
+      </details>
+      <!-- Ableton Link (T-154): tempo and phase of a Link session; only in a build with the `ableton-link` feature (GPL), greyed otherwise. -->
+      <details id="linkPanel" data-search="Ableton Link : synchroniser le tempo et la phase avec Ableton Live, un logiciel DJ ou une application sur le réseau, source du tempo, pairs">
+        <summary>Ableton Link</summary>
+        <div class="hint">Le tempo et la phase suivent une session Ableton Link du réseau local (Ableton Live, logiciels DJ, applications). Un BPM changé ici est envoyé à la session. Pendant le suivi, Nudge, Sync 1 et Tempo auto sont ignorés. Link ne change que le tempo : il n'arme jamais le laser.</div>
+        <div class="row"><label class="check"><input type="checkbox" id="linkOn" disabled> Ableton Link</label><span class="hint hint--inline" id="linkOnState" role="status">Désactivé</span></div>
+        <div class="row"><label for="linkQuantum">Quantum (temps par mesure)</label><select id="linkQuantum" disabled><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4" selected>4</option><option value="8">8</option><option value="16">16</option></select></div>
+        <div class="hint" id="linkState" role="status"></div>
+        <div class="hint">Désactivé à chaque démarrage. Activé, le studio annonce sa présence par multicast sur le réseau local ; préférez un réseau câblé.</div>
+        <div class="hint sf-error" id="linkError" role="alert"></div>
       </details>
     </section>
 
@@ -11356,6 +11368,10 @@ function showTempo(t) {
   const mc = t.midi_clock, follow = !!(mc && mc.follow);
   $('midiClockHint').hidden = !follow;
   if (follow) $('midiClockHint').textContent = midiClockText(mc);
+  // Ableton Link (T-154): the session and its peers.
+  const lk = t.link, linked = !!(lk && lk.enabled);
+  $('linkHint').hidden = !linked;
+  if (linked) $('linkHint').textContent = linkText(lk);
 }
 $('tempoAuto').addEventListener('click', () => post('/api/control', { id: 'tempo.auto', value: $('tempoAuto').classList.contains('active') ? 0 : 1 }));
 document.querySelectorAll('[data-ctl]').forEach(b => b.addEventListener('click', () => { const id = scopedId(b.dataset.ctl); if (id) post('/api/control', { id }); }));
@@ -11410,6 +11426,37 @@ $('mclkOut').addEventListener('change', () => {
   const p = $('mclkOut').value;
   postMidiClock(p ? { out_port: p } : { send: false, out_port: null });
 });
+
+// ---------- Ableton Link (T-154) ----------
+// Tempo and phase from a Link session, only when the operator turns it on
+// (never at start-up); greyed in a build without the `ableton-link` feature.
+let linkTimer = null;
+function linkText(lk) {
+  const peers = `Pairs : ${lk.peers}`;
+  if (lk.state === 'out_of_range') return `Ableton Link : tempo de la session hors plage (${lk.session_bpm != null ? frBpm(lk.session_bpm) : '?'}) · ${peers}`;
+  return `Ableton Link${lk.session_bpm != null ? ' : ' + frBpm(lk.session_bpm) : ''} · ${peers}`;
+}
+function showLink(v) {
+  $('linkOn').disabled = !v.available;
+  $('linkQuantum').disabled = !v.available;
+  $('linkOn').checked = v.enabled;
+  $('linkOnState').textContent = v.enabled ? 'Activé' : 'Désactivé';
+  if (document.activeElement !== $('linkQuantum')) $('linkQuantum').value = String(v.quantum);
+  $('linkState').textContent = !v.available ? v.why : v.enabled ? linkText(v) : 'Tempo du studio (manuel, Tap, Tempo auto ou horloge MIDI).';
+}
+async function loadLink() {
+  clearTimeout(linkTimer);
+  try { showLink(await apiJson('GET', '/api/link', undefined, { quiet: true })); } catch { /* shown on the next refresh */ }
+  if ($('linkPanel').open) linkTimer = setTimeout(loadLink, 1000);
+}
+async function postLink(patch) {
+  const r = await api('POST', '/api/link', patch, { quiet: true });
+  $('linkError').textContent = r.ok ? '' : (await r.text()).trim();
+  if (r.ok) showLink(await r.json()); else loadLink();
+}
+$('linkPanel').addEventListener('toggle', () => { if ($('linkPanel').open) loadLink(); });
+$('linkOn').addEventListener('change', () => postLink({ enabled: $('linkOn').checked }));
+$('linkQuantum').addEventListener('change', () => postLink({ quantum: +$('linkQuantum').value }));
 
 // ---------- compensation de latence (T-246) ----------
 // *Décalage de sortie*: the effects read the beat ahead by this much, so the

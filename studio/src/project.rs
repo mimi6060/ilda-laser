@@ -2742,6 +2742,35 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_project_never_proposes_its_tempo_to_ableton_link() {
+        use crate::ableton_link::fake::{on, proposals, run, Fake};
+        let dir = temp_dir("link");
+        let shared = studio(&dir);
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        let text = json!({ "format_version": 1, "tempo": { "bpm": 90.0, "beats_per_bar": 4 } }).to_string();
+        std::fs::write(dir.join("projects/lent.lsproj"), text).unwrap();
+        let fake = {
+            let mut s = shared.lock().unwrap();
+            let fake = Fake::new(128.0, s.epoch);
+            on(&mut s, &fake);
+            fake
+        };
+        let mut now = shared.lock().unwrap().epoch + std::time::Duration::from_secs(3);
+        run(&mut shared.lock().unwrap(), &fake, &mut now, 2);
+        post(&shared, &dir, "open", json!({ "path": "lent" })).unwrap();
+        let mut s = shared.lock().unwrap();
+        assert_eq!(s.tempo.bpm, 90.0, "the project's tempo, locally");
+        run(&mut s, &fake, &mut now, 3);
+        // The DJ's session is never changed by a project; it wins here.
+        assert!(proposals(&fake).is_empty(), "{:?}", proposals(&fake));
+        assert_eq!(s.link.proposed, 0);
+        assert!((s.tempo.bpm - 128.0).abs() <= 0.01);
+        assert_eq!(s.tempo.source, crate::tempo::TempoSource::Link);
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn an_invalid_project_changes_nothing() {
         let dir = temp_dir("atomic");
         let shared = studio(&dir);

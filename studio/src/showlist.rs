@@ -984,6 +984,27 @@ mod tests {
     }
 
     #[test]
+    fn a_show_lists_tempo_is_never_proposed_to_ableton_link() {
+        use crate::ableton_link::fake::{on, proposals, run, Fake};
+        let mut s = studio("link", &[]);
+        let mut fast = show("Rapide", 10.0);
+        fast.tempo_map = vec![crate::timeline::TempoPoint { bpm: 150.0, ..Default::default() }];
+        s.shows.save(&fast).unwrap();
+        let mut list = items(&["Rapide"]);
+        list.items[0].follow_system_tempo = false;
+        set(&mut s, list).unwrap();
+        let fake = Fake::new(120.0, s.epoch);
+        on(&mut s, &fake);
+        let mut now = s.sim_now.unwrap();
+        run(&mut s, &fake, &mut now, 2);
+        play(&mut s, None).unwrap();
+        assert_eq!(s.tempo.bpm, 150.0, "the show's tempo, locally");
+        run(&mut s, &fake, &mut now, 3);
+        assert!(proposals(&fake).is_empty(), "{:?}", proposals(&fake));
+        assert!((s.tempo.bpm - 120.0).abs() <= 0.01, "the session wins");
+    }
+
+    #[test]
     fn remaining_times_in_seconds_and_in_beats() {
         let mut s = studio("times", &[("A", 10.0)]);
         let mut beats = show("T", 8.0);

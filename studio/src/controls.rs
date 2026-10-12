@@ -561,6 +561,7 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         ControlKind::Continuous { min, max, .. } => native(min, max, i),
         _ => 0.0,
     };
+    let bpm_before = s.tempo.bpm;
 
     match desc.id.as_str() {
         "look.size" => s.settings.scale = value(input),
@@ -600,6 +601,14 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
         }
         "tempo.auto" if s.tempo.source == tempo::TempoSource::MidiClock && truthy(input) => {
             return Err(ControlError::Refused(crate::midi::clock::FOLLOWING));
+        }
+        // Ableton Link followed (T-154): the phase belongs to the session;
+        // a BPM (field, Tap, ×2, ÷2) goes to it (ableton_link.rs).
+        "tempo.nudge_up" | "tempo.nudge_down" | "tempo.resync" if s.tempo.source == tempo::TempoSource::Link => {
+            return Err(ControlError::Refused(crate::ableton_link::FOLLOWING));
+        }
+        "tempo.auto" if s.tempo.source == tempo::TempoSource::Link && truthy(input) => {
+            return Err(ControlError::Refused(crate::ableton_link::FOLLOWING));
         }
         "tempo.tap" => {
             let t = s.now_s();
@@ -809,6 +818,11 @@ fn apply_inner(s: &mut Shared, id: &str, input: ControlInput, from_external: boo
     }
     if desc.id.starts_with("look.") || (desc.id.starts_with("audio.") && desc.id != "audio.triggers.enabled") {
         s.settings_rev += 1;
+    }
+    // Ableton Link (T-154): only the operator's tempo controls propose a
+    // BPM to the session; `ableton_link::operator_tempo` checks the source.
+    if matches!(desc.id.as_str(), "tempo.bpm" | "tempo.tap" | "tempo.double" | "tempo.half") && s.tempo.bpm != bpm_before {
+        crate::ableton_link::operator_tempo(s, source);
     }
     Ok(())
 }
