@@ -50,10 +50,13 @@ pub enum SourceKind {
     Timecode,
     /// The tablet remote (T-428, remote.rs): pairing is its access.
     Remote,
+    /// Target tracking (T-457, psn.rs): moves the linked mobile targets
+    /// only, never a control. Its access is the *Activer le suivi* switch.
+    Psn,
 }
 
 impl SourceKind {
-    pub const ALL: [SourceKind; 4] = [SourceKind::Dmx, SourceKind::Osc, SourceKind::Timecode, SourceKind::Remote];
+    pub const ALL: [SourceKind; 5] = [SourceKind::Dmx, SourceKind::Osc, SourceKind::Timecode, SourceKind::Remote, SourceKind::Psn];
 
     pub fn label_fr(self) -> &'static str {
         match self {
@@ -61,6 +64,7 @@ impl SourceKind {
             SourceKind::Osc => "OSC",
             SourceKind::Timecode => "Timecode",
             SourceKind::Remote => "Télécommande",
+            SourceKind::Psn => "PosiStageNet",
         }
     }
 
@@ -69,7 +73,7 @@ impl SourceKind {
         match self {
             SourceKind::Dmx => ArmSource::Dmx,
             SourceKind::Osc => ArmSource::Osc,
-            SourceKind::Timecode => ArmSource::Network,
+            SourceKind::Timecode | SourceKind::Psn => ArmSource::Network,
             SourceKind::Remote => ArmSource::Remote,
         }
     }
@@ -82,12 +86,15 @@ pub struct ScopeSet {
     pub groups: &'static [&'static str],
 }
 
-pub const SCOPE_SETS: [ScopeSet; 5] = [
+pub const SCOPE_SETS: [ScopeSet; 6] = [
     ScopeSet { id: "masters", label_fr: "Maîtres", groups: &["master", "look", "layer"] },
     ScopeSet { id: "cues", label_fr: "Cues", groups: &["grid", "cue", "page"] },
     ScopeSet { id: "tempo", label_fr: "Tempo", groups: &["tempo"] },
     ScopeSet { id: "timeline", label_fr: "Timeline", groups: &["timeline"] },
     ScopeSet { id: "audio", label_fr: "Audio", groups: &["audio"] },
+    // No control is in this group: it lets tracking data (T-457) move the
+    // mobile targets, nothing else.
+    ScopeSet { id: "tracking", label_fr: "Suivi de cible", groups: &["tracking"] },
 ];
 
 /// Accepted from everywhere, always.
@@ -135,6 +142,8 @@ impl SourceScope {
         let sets: &[usize] = match source {
             SourceKind::Timecode => &[3],
             SourceKind::Remote => &[0, 1, 2],
+            // Tracking moves the mobile targets only (T-457).
+            SourceKind::Psn => &[5],
             _ => &[0],
         };
         let groups = sets.iter().flat_map(|&i| SCOPE_SETS[i].groups.iter().map(|g| g.to_string())).collect();
@@ -440,6 +449,30 @@ pub fn timecode_allows(s: &mut Shared) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Whether tracking data (PosiStageNet, T-457) may move the mobile
+/// targets: the gate open, the *Activer le suivi* switch as its access
+/// when required, *Suivi de cible* in its scope. Checked every frame;
+/// counted only on frames that brought new data (`fresh`). Never applies
+/// a control: the caller only moves targets already linked.
+pub fn tracking(s: &mut Shared, fresh: bool, _now: Instant) -> Result<(), Refusal> {
+    sync(s);
+    let scope = s.external.config.scope(SourceKind::Psn);
+    let r = if !s.external.gate.open {
+        Err(Refusal::GateClosed)
+    } else if scope.require_access && !s.psn.settings().enabled {
+        Err(Refusal::NoAccess)
+    } else if !scope.groups.iter().any(|g| g == "tracking") {
+        Err(Refusal::OutOfScope)
+    } else {
+        Ok(())
+    };
+    if fresh {
+        count(s, SourceKind::Psn, "positions", r)
+    } else {
+        r
+    }
+}
+
 /// Whether an instance with its access raised may shape its zone's image
 /// (`group`: « master »). Checked every frame, so not counted.
 pub fn instance_allows(s: &mut Shared, group: &str) -> Result<(), Refusal> {
@@ -499,6 +532,8 @@ pub fn view(s: &mut Shared, now: Instant) -> Value {
                 SourceKind::Osc | SourceKind::Remote => !clients.is_empty(),
                 // TC-IN (T-168).
                 SourceKind::Timecode => s.timecode.armed,
+                // *Activer le suivi* (T-457).
+                SourceKind::Psn => s.psn.settings().enabled,
                 _ => has_access(gate, &access_key(src, ""), now),
             };
             let sets: Vec<&str> = SCOPE_SETS.iter().filter(|set| set.groups.iter().all(|g| scope.groups.iter().any(|h| h == g))).map(|set| set.id).collect();
@@ -574,6 +609,8 @@ mod tests {
             let want: &[&str] = match src {
                 SourceKind::Timecode => &["timeline"],
                 SourceKind::Remote => &["cue", "grid", "layer", "look", "master", "page", "tempo"],
+                // Tracking moves the mobile targets only (T-457).
+                SourceKind::Psn => &["tracking"],
                 _ => &["layer", "look", "master"],
             };
             assert_eq!(sc.groups, want);

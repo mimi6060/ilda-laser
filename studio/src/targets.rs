@@ -40,6 +40,12 @@
 //! period of the strobe limit (`safety::DEFAULT_MAX_HZ`), whatever the
 //! tempo: a beam hopping between two targets can't make either of them
 //! flash faster than the limiter allows. No target lit: one dark point.
+//!
+//! **Mobile targets** (T-457, psn.rs): moved by tracking data, resolved
+//! every frame and placed after the fixed ones (bit = number of fixed
+//! targets + link index). A mobile target the tracking darkens (lost,
+//! outside the zones, a jump, no calibration) is a dark dot. They are
+//! never written to `targets.json`.
 
 use crate::engine::Calibration;
 use crate::generators::{BeamStyle, GenCtx, GenParams, Geometry};
@@ -328,6 +334,43 @@ fn publish(t: &Targets) {
     CURRENT.with(|c| *c.borrow_mut() = points);
 }
 
+/// The mobile targets (PosiStageNet, T-457, psn.rs): after the fixed
+/// ones, in the order of their links; `None` = dark this frame. Written by
+/// the engine once per frame, never saved.
+type Mobile = Arc<Vec<Option<(f32, f32)>>>;
+
+#[cfg(not(test))]
+static MOBILE: LazyLock<RwLock<Mobile>> = LazyLock::new(Default::default);
+
+#[cfg(test)]
+thread_local! {
+    static MOBILE: std::cell::RefCell<Mobile> = std::cell::RefCell::new(Mobile::default());
+}
+
+pub fn publish_mobile(list: Vec<Option<(f32, f32)>>) {
+    let list: Mobile = Arc::new(list);
+    #[cfg(not(test))]
+    {
+        *MOBILE.write().unwrap_or_else(|e| e.into_inner()) = list;
+    }
+    #[cfg(test)]
+    MOBILE.with(|c| *c.borrow_mut() = list);
+}
+
+fn current_mobile() -> Mobile {
+    #[cfg(not(test))]
+    {
+        Arc::clone(&MOBILE.read().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(test)]
+    MOBILE.with(|c| Arc::clone(&c.borrow()))
+}
+
+#[cfg(test)]
+pub fn current_mobile_for_tests() -> Vec<Option<(f32, f32)>> {
+    current_mobile().to_vec()
+}
+
 fn current() -> Points {
     #[cfg(not(test))]
     {
@@ -369,23 +412,44 @@ pub fn generate(name: &str, p: &GenParams, ctx: &GenCtx) -> Option<Geometry> {
     if name != GENERATOR {
         return None;
     }
-    Some(geometry(&current(), p, ctx))
+    // The fixed targets, then the mobile ones (a dark one is a dark dot at
+    // the centre, so a chase keeps its timing).
+    let fixed = current();
+    let mobile = current_mobile();
+    let mut points: Vec<(f32, f32)> = fixed.to_vec();
+    let mut dark = vec![false; points.len()];
+    for m in mobile.iter() {
+        points.push(m.unwrap_or((0.0, 0.0)));
+        dark.push(m.is_none());
+    }
+    Some(geometry_with(&points, &dark, p, ctx))
 }
 
+#[cfg(test)]
 fn geometry(points: &[(f32, f32)], p: &GenParams, ctx: &GenCtx) -> Geometry {
+    geometry_with(points, &[], p, ctx)
+}
+
+/// `dark[i]`: point i is never lit (a mobile target the tracking darkens).
+fn geometry_with(points: &[(f32, f32)], dark: &[bool], p: &GenParams, ctx: &GenCtx) -> Geometry {
     let chosen = mask_indices(p.a, points.len());
     if chosen.is_empty() {
         return Geometry::dots(vec![(0.0, 0.0)]).with_styles(vec![BeamStyle { intensity: 0.0, ..Default::default() }]);
     }
     let dots: Vec<(f32, f32)> = chosen.iter().map(|&i| points[i]).collect();
+    let is_dark = |k: usize| dark.get(chosen[k]).copied().unwrap_or(false);
     let chase = p.b.is_finite() && p.b >= 0.5;
-    if !chase {
+    let lit_one = chase.then(|| {
+        let n = chosen.len() as u64;
+        let k = chase_step(p, ctx) % n;
+        (if p.direction < 0 { (n - k) % n } else { k }) as usize
+    });
+    if lit_one.is_none() && !(0..chosen.len()).any(is_dark) {
         return Geometry::dots(dots);
     }
-    let n = chosen.len() as u64;
-    let k = chase_step(p, ctx) % n;
-    let lit = if p.direction < 0 { (n - k) % n } else { k } as usize;
-    let styles = (0..chosen.len()).map(|i| BeamStyle { intensity: if i == lit { 1.0 } else { 0.0 }, ..Default::default() }).collect();
+    let styles = (0..chosen.len())
+        .map(|i| BeamStyle { intensity: if lit_one.is_none_or(|l| l == i) && !is_dark(i) { 1.0 } else { 0.0 }, ..Default::default() })
+        .collect();
     Geometry::dots(dots).with_styles(styles)
 }
 
@@ -573,6 +637,22 @@ mod tests {
         TargetStore::in_memory();
         let geo = crate::generators::generate(GENERATOR, &GenParams { a: 2.0, b: 0.0, ..Default::default() }, &ctx(0.0, 120.0)).unwrap();
         assert!(lit(&geo).is_empty(), "a new store: no targets");
+    }
+
+    /// T-457: the mobile targets come after the fixed ones; a dark one is
+    /// never lit, together or chased.
+    #[test]
+    fn mobile_targets_follow_the_fixed_ones_and_stay_dark_when_told() {
+        TargetStore::in_memory().insert_for_tests(Targets { items: vec![t("A", 0.1, 0.5)] });
+        publish_mobile(vec![Some((0.3, 0.6)), None]);
+        let gen = |a: f32, b: f32, beat: f64| crate::generators::generate(GENERATOR, &GenParams { a, b, steps_per_beat: 1.0, ..Default::default() }, &ctx(beat, 120.0)).unwrap();
+        assert_eq!(lit(&gen(7.0, 0.0, 0.0)), vec![(0.1, 0.5), (0.3, 0.6)]);
+        assert!(lit(&gen(4.0, 0.0, 0.0)).is_empty(), "the dark mobile one alone");
+        // Chased: the dark one's step stays dark.
+        let seq: Vec<Vec<(f32, f32)>> = (0..3).map(|k| lit(&gen(7.0, 1.0, k as f64 + 0.5))).collect();
+        assert_eq!(seq, vec![vec![(0.1, 0.5)], vec![(0.3, 0.6)], vec![]]);
+        publish_mobile(Vec::new());
+        assert_eq!(lit(&gen(7.0, 0.0, 0.0)), vec![(0.1, 0.5)]);
     }
 
     #[test]

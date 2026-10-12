@@ -1850,6 +1850,11 @@
   .mtrow .mtstatus { flex-basis: 100%; }
   .mtrow.aiming { outline: 2px solid var(--warn); outline-offset: 2px; }
   #gTargets { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  /* ---------- Suivi de cible PosiStageNet (T-457) ---------- */
+  #psnTrackers { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  #psnTrackers th, #psnTrackers td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line, #ffffff14); }
+  .psnrow .mtfield select { width: 6em; }
+  .psnrow.calibrating { outline: 2px solid var(--warn); outline-offset: 2px; }
   /* ---------- Mode nuit (T-282), Theme (T-299) tokens ----------
      The neutral and accent tokens are mixed with black down to --nl; the
      state tokens (--danger, --warn, --ok) and the *-full ones are left
@@ -4531,6 +4536,28 @@
         <div class="hint sf-error" id="mtError" role="alert"></div>
         <div class="hint">Jusqu'à 16 cibles, en coordonnées du look (avant la calibration), visées avec le cue sur la zone de projection par défaut. Ajouter ou déplacer une cible demande une confirmation et est refusé laser armé, sous le verrouillage de sécurité et en mode spectacle ; supprimer ou renommer s'applique tout de suite. Une cible sous l'horizon est refusée : un faisceau y est toujours coupé. Une cible dans une zone sans laser ou Public, hors des angles déclarés ou sous le ciel coupé reste noire ; le garde anti-point fixe plafonne la dose d'un faisceau tenu (profil Faisceaux) ou le coupe (profil Strict). Les cues l'allument avec l'effet « Cibles miroir ».</div>
       </details>
+      <details class="slk-guard" id="psnPanel" data-search="Suivi de cible PosiStageNet PSN : traceur, cible mobile, calibrer, tracking">
+        <summary>Suivi de cible (PosiStageNet)</summary>
+        <div class="shownet-help"><b>Cibles mobiles.</b> Le suivi déplace une cible calibrée. Il ne suit jamais une personne du public, et une cible hors des zones autorisées reste éteinte. Les données de suivi n'arment jamais le laser et ne changent aucun réglage. Sans donnée valide pendant le délai d'extinction, le faisceau s'éteint. L'arrêt réel reste matériel (interlock, arrêt d'urgence, clé).</div>
+        <label class="check"><input type="checkbox" id="psnEnabled"> Activer le suivi</label>
+        <div class="row">
+          <div class="mtfield"><label for="psnIface">Interface réseau</label><input type="text" id="psnIface" autocomplete="off" spellcheck="false" placeholder="ce Mac seulement (127.0.0.1)"></div>
+          <div class="mtfield"><label for="psnGroup">Groupe</label><input type="text" id="psnGroup" autocomplete="off" spellcheck="false" placeholder="236.10.10.10"></div>
+          <div class="mtfield"><label for="psnPort">Port</label><input type="number" id="psnPort" min="0" max="65535" step="1"></div>
+          <div class="mtfield"><label for="psnSmooth">Lissage (ms)</label><input type="number" id="psnSmooth" min="0" max="1000" step="10"></div>
+          <div class="mtfield"><label for="psnLost">Extinction après perte (ms)</label><input type="number" id="psnLost" min="100" max="2000" step="50"></div>
+        </div>
+        <div class="hint" id="psnListen" role="status"></div>
+        <table id="psnTrackers" aria-label="Traceurs"><thead><tr><th>N°</th><th>Nom</th><th>Position</th><th>État</th><th></th></tr></thead><tbody id="psnTrackerRows"></tbody></table>
+        <div id="psnLinks"></div>
+        <div class="hint" id="psnCalHint" role="status" hidden><span id="psnCalText"></span> <button id="psnCalDone" disabled>Terminer le calibrage</button> <button id="psnCalCancel">Annuler le calibrage</button></div>
+        <div id="psnLoosen" hidden>
+          <div id="psnLoosenText"></div>
+          <div class="row"><button id="psnLoosenOk">Confirmer l'assouplissement</button><button id="psnLoosenCancel">Annuler</button></div>
+        </div>
+        <div class="hint sf-error" id="psnError" role="alert"></div>
+        <div class="hint">Écoute seulement, sur l'interface choisie (son adresse IPv4) ; vide = ce Mac seulement. Réseau filaire conseillé. Calibrer : placez le traceur en au moins quatre points de la zone parcourue et, pour chacun, visez-le dans l'aperçu 2D. Une cible mobile s'allume avec l'effet « Cibles miroir », après les cibles fixes. Activer, affecter ou recalibrer demande une confirmation et est refusé laser armé, sous le verrouillage de sécurité et en mode spectacle ; désactiver ou supprimer s'applique tout de suite. Les entrées externes doivent être ouvertes (RÉGLAGES › Entrées externes).</div>
+      </details>
     </section>
 
     <section data-help="reglages-calibration">
@@ -6759,6 +6786,7 @@ function draw(points, c = cv) {
   const px = p => [(p[0] + 1) / 2 * W, (1 - (p[1] + 1) / 2) * H];
   if (out) drawSafetyOverlay(W, H, px);
   if (out) drawTargetsOverlay(px);
+  if (out) drawPsnOverlay(px);
   // Boost dim colors so a low-brightness look is still visible on screen.
   // T-280: an overlong frame flickers a little when the galvos are simulated.
   const gain = out ? GALVO.gain : 1;
@@ -10111,11 +10139,13 @@ function showTargets() {
 }
 /** The look's target checkboxes (bit i = target i + 1). */
 function showTargetPicker(a) {
-  const n = mtView ? mtView.items.length : 0, mask = Number.isFinite(+a) && a > 0 ? Math.round(a) : 0;
+  const mask = Number.isFinite(+a) && a > 0 ? Math.round(a) : 0;
   if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#gTargets')) return;
   const el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
-  if (!n) { $('gTargets').replaceChildren(el('div', { className: 'hint', textContent: 'Aucune cible réglée (RÉGLAGES › Cibles miroir).' })); return; }
-  $('gTargets').replaceChildren(...mtView.items.map((t, i) => {
+  // The mobile targets (T-457) come after the fixed ones (16 bits at most).
+  const all = mtView ? [...mtView.items.map(t => ({ name: t.name })), ...(mtView.mobile || []).map(m => ({ name: `${m.name} (mobile)` }))].slice(0, 16) : [];
+  if (!all.length) { $('gTargets').replaceChildren(el('div', { className: 'hint', textContent: 'Aucune cible réglée (RÉGLAGES › Cibles miroir).' })); return; }
+  $('gTargets').replaceChildren(...all.map((t, i) => {
     const label = el('label', { className: 'check' });
     const box = el('input', { type: 'checkbox', checked: !!(mask & (1 << i)) });
     box.dataset.bit = i;
@@ -10206,6 +10236,242 @@ function drawTargetsOverlay(px) {
     g.beginPath(); g.arc(x, y, 14, 0, Math.PI * 2); g.stroke();
     g.beginPath(); g.moveTo(x - 20, y); g.lineTo(x + 20, y); g.moveTo(x, y - 20); g.lineTo(x, y + 20); g.stroke();
     g.fillText(String(i + 1), x + 16, y - 10);
+  });
+  g.restore();
+}
+// ---------- Suivi de cible PosiStageNet (T-457) ----------
+// GET /api/psn: settings, links and their calibration; GET /api/psn/trackers
+// (polled while the panel is open or the look lights targets): the trackers
+// seen and each mobile target's state. Every change posts the whole
+// settings; a loosening asks for the confirmation (409 → « Confirmer »).
+// Calibrating a link: for each reference point the operator places the
+// tracker, then clicks the preview where the laser must go; the tracker's
+// position at that moment and the click make one point.
+let psnView = null, psnStatus = null, psnPending = null, psnCal = null;
+const psnStates = { 'suivi': 'Suivi', 'perdu': 'Perdu', 'hors zone': 'Hors zone', 'non calibré': 'Non calibré', 'saut': 'Saut', 'entrées fermées': 'Entrées fermées', 'non affecté': 'Non affecté', 'invalide': 'Invalide' };
+const psnPct = v => (Math.round(v * 10) / 10).toFixed(1).replace('.', ',');
+async function reloadPsn() {
+  const r = await api('GET', '/api/psn', undefined, { quiet: true });
+  if (!r.ok) return;
+  psnView = await r.json();
+  psnStatus = psnView.status;
+  showPsn();
+}
+async function pollPsn() {
+  const r = await api('GET', '/api/psn/trackers', undefined, { quiet: true });
+  if (!r.ok) return;
+  psnStatus = await r.json();
+  showPsnTrackers();
+  showPsnLinks(false);
+  if (lastPoints && show2d) draw(lastShown);
+}
+let psnLoaded = false;
+setInterval(() => {
+  const lookOn = settings && settings.content && settings.content.generator === 'mirror_targets';
+  if (document.hidden || !($('psnPanel').open || lookOn)) return;
+  // The look lights mobile targets: the settings once, then the states.
+  if (!psnLoaded) { psnLoaded = true; reloadPsn(); return; }
+  if (psnView && psnView.settings.enabled) pollPsn();
+}, 250);
+function psnSettings() { return psnView ? JSON.parse(JSON.stringify(psnView.settings)) : null; }
+/** The settings with the panel's fields; a field that is not a number keeps the stored value. */
+function psnFromControls() {
+  const s = psnSettings();
+  if (!s) return null;
+  const num = (id, old) => { const v = parseInt($(id).value, 10); return Number.isFinite(v) ? v : old; };
+  s.enabled = $('psnEnabled').checked;
+  s.interface = $('psnIface').value.trim() || null;
+  s.group = $('psnGroup').value.trim() || s.group;
+  s.port = num('psnPort', s.port);
+  s.smoothing_ms = num('psnSmooth', s.smoothing_ms);
+  s.lost_after_ms = num('psnLost', s.lost_after_ms);
+  $('psnLinks').querySelectorAll('.psnrow').forEach(row => {
+    const l = s.links[+row.dataset.i];
+    if (!l) return;
+    l.target = row.querySelector('.psnname').value.trim() || l.target;
+    const id = parseInt(row.querySelector('.psnid').value, 10);
+    if (Number.isFinite(id) && id >= 0 && id <= 65535) l.tracker_id = id;
+    l.axes = [row.querySelector('.psnax0').value, row.querySelector('.psnax1').value];
+    const sp = parseFloat(row.querySelector('.psnspeed').value);
+    if (Number.isFinite(sp)) l.max_speed = sp;
+  });
+  return s;
+}
+function showPsn() {
+  const v = psnView;
+  if (!v) return;
+  const s = v.settings, focus = document.activeElement;
+  const put = (id, val) => { if (focus !== $(id)) $(id).value = val; };
+  $('psnEnabled').checked = s.enabled;
+  put('psnIface', s.interface || '');
+  put('psnGroup', s.group);
+  put('psnPort', s.port);
+  put('psnSmooth', s.smoothing_ms);
+  put('psnLost', s.lost_after_ms);
+  showPsnTrackers();
+  showPsnLinks(true);
+}
+function showPsnTrackers() {
+  const st = psnStatus, el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+  if (!st || !psnView) return;
+  const l = st.listen || {};
+  $('psnListen').textContent = !st.enabled ? 'Suivi désactivé : aucune écoute.'
+    : l.error ? `Erreur : ${l.error}`
+    : (l.local ? `Écoute sur ${l.local}` : 'Ouverture de l’écoute…') + ` · ${l.packets || 0} paquet(s), ${l.rejected || 0} rejeté(s)` + (st.gate ? ` · ${st.gate}` : '');
+  const fmt = n => (Math.round(n * 100) / 100).toFixed(2);
+  const rows = (st.trackers || []).map(t => {
+    const tr = el('tr');
+    tr.dataset.id = t.id;
+    const linked = psnView.settings.links.some(k => k.tracker_id === t.id);
+    const btn = el('button', { className: 'psnassign', textContent: 'Affecter à une cible…', disabled: linked || psnView.settings.links.length >= psnView.max_links, ariaLabel: `Affecter le traceur ${t.id} à une cible` });
+    tr.append(el('td', { textContent: String(t.id) }), el('td', { textContent: t.name || '—' }), el('td', { textContent: `${fmt(t.pos[0])} ; ${fmt(t.pos[1])} ; ${fmt(t.pos[2])} m · ${t.age_ms} ms` }),
+      el('td', { textContent: psnStates[t.state] || t.state }), el('td'));
+    tr.lastChild.append(btn);
+    return tr;
+  });
+  if (!rows.length) { const tr = el('tr'); tr.append(el('td', { colSpan: 5, className: 'hint', textContent: st.enabled ? 'Aucun traceur reçu.' : 'Activez le suivi pour recevoir les traceurs.' })); rows.push(tr); }
+  $('psnTrackerRows').replaceChildren(...rows);
+}
+/** The links (mobile targets). `full`: rebuild the inputs too (not while typing). */
+function showPsnLinks(full) {
+  const v = psnView, el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+  if (!v) return;
+  const links = v.settings.links, statuses = (psnStatus && psnStatus.links) || [];
+  const stateText = i => {
+    const st = statuses[i], cal = v.calibration[i] || {};
+    const calText = cal.ok ? `Erreur moyenne : ${psnPct(cal.error_pct)} %` : `Non calibré : ${cal.why || ''}`;
+    if (!st) return [calText, !cal.ok];
+    const state = psnStates[st.state] || st.state;
+    const why = st.reasons && st.reasons.length ? ` (${st.reasons.join(' · ')})` : '';
+    return [`${state}${why} · ${calText}`, !st.lit];
+  };
+  if (!full && $('psnLinks').contains(document.activeElement)) return;
+  if (!full) {
+    $('psnLinks').querySelectorAll('.psnrow').forEach(row => {
+      const [text, dark] = stateText(+row.dataset.i), box = row.querySelector('.psnstate');
+      box.textContent = text; box.className = 'hint psnstate mtstatus' + (dark ? ' sf-error' : '');
+    });
+    return;
+  }
+  const axes = [['x', 'X'], ['y', 'Y'], ['z', 'Z'], ['neg_x', '−X'], ['neg_y', '−Y'], ['neg_z', '−Z']];
+  const sel = (cls, id, val, label) => {
+    const s = el('select', { className: cls, id });
+    axes.forEach(([k, t]) => s.append(el('option', { value: k, textContent: t, selected: k === val })));
+    s.setAttribute('aria-label', label);
+    return s;
+  };
+  if (!links.length) { $('psnLinks').replaceChildren(el('div', { className: 'hint', textContent: 'Aucune cible mobile. « Affecter à une cible… » sur un traceur, puis « Calibrer ».' })); return; }
+  $('psnLinks').replaceChildren(...links.map((l, i) => {
+    const row = el('div', { className: 'mtrow psnrow' + (psnCal && psnCal.i === i ? ' calibrating' : '') });
+    row.dataset.i = i;
+    const field = (label, input) => { const f = el('div', { className: 'mtfield' }); f.append(el('label', { htmlFor: input.id, textContent: label }), input); return f; };
+    const [text, dark] = stateText(i);
+    row.append(
+      el('span', { className: 'mtnum', textContent: `M${i + 1}` }),
+      field('Cible mobile', el('input', { type: 'text', id: `psnName${i}`, className: 'psnname', maxLength: 40, value: l.target, autocomplete: 'off' })),
+      field('Traceur', el('input', { type: 'number', id: `psnId${i}`, className: 'psnid', min: 0, max: 65535, step: 1, value: l.tracker_id })),
+      field('Axe horizontal', sel('psnax0', `psnAx0${i}`, l.axes[0], 'Axe horizontal')),
+      field('Axe vertical', sel('psnax1', `psnAx1${i}`, l.axes[1], 'Axe vertical')),
+      field('Vitesse max (/s)', el('input', { type: 'number', id: `psnSpeed${i}`, className: 'psnspeed', min: 0.1, max: 20, step: 0.1, value: l.max_speed })),
+      el('button', { className: 'psncal', textContent: psnCal && psnCal.i === i ? 'Calibrage…' : 'Calibrer', ariaLabel: `Calibrer la cible mobile ${i + 1}` }),
+      el('button', { className: 'psndel', textContent: 'Supprimer', ariaLabel: `Supprimer la cible mobile ${i + 1}` }),
+      el('div', { className: 'hint psnstate mtstatus' + (dark ? ' sf-error' : ''), textContent: text }),
+    );
+    return row;
+  }));
+  showPsnCal();
+}
+function showPsnCal() {
+  $('psnCalHint').hidden = !psnCal;
+  if (!psnCal) return;
+  const n = psnCal.refs.length;
+  $('psnCalText').textContent = `Placez le traceur au point ${n + 1} puis visez-le dans l’aperçu 2D (${n} point(s) relevé(s), 4 au moins).`;
+  $('psnCalDone').disabled = n < 4;
+}
+async function psnSave(settingsBody, confirm = false) {
+  const body = confirm ? { ...settingsBody, confirm_loosen: true } : settingsBody;
+  const r = await api('POST', '/api/psn', body, { quiet: true, ignore: [409] });
+  if (r.ok) {
+    psnView = await r.json(); psnStatus = psnView.status; psnPending = null;
+    $('psnLoosen').hidden = true; $('psnError').textContent = '';
+    showPsn();
+    reloadTargets();
+    return true;
+  }
+  const text = await r.text();
+  let j = null;
+  try { j = JSON.parse(text); } catch { /* plain text */ }
+  if (r.status === 409 && j && !j.armed) {
+    psnPending = settingsBody;
+    $('psnLoosenText').textContent = 'Assouplir la sécurité ? ' + j.loosen.join(' · ');
+    $('psnLoosen').hidden = false;
+    return false;
+  }
+  await reloadPsn();
+  $('psnError').textContent = (j && j.error) || text;
+  return false;
+}
+$('psnPanel').addEventListener('toggle', () => { if ($('psnPanel').open) reloadPsn(); });
+['psnEnabled', 'psnIface', 'psnGroup', 'psnPort', 'psnSmooth', 'psnLost'].forEach(id => $(id).addEventListener('change', () => { const s = psnFromControls(); if (s) psnSave(s); }));
+$('psnLinks').addEventListener('change', e => { if (e.target.matches('input, select')) { const s = psnFromControls(); if (s) psnSave(s); } });
+$('psnLinks').addEventListener('click', e => {
+  const row = e.target.closest('.psnrow');
+  if (!row) return;
+  const i = +row.dataset.i;
+  if (e.target.matches('.psndel')) {
+    const s = psnFromControls();
+    s.links.splice(i, 1);
+    psnCal = null;
+    psnSave(s);
+  } else if (e.target.matches('.psncal')) {
+    psnCal = psnCal && psnCal.i === i ? null : { i, refs: [] };
+    showPsnLinks(true);
+  }
+});
+$('psnTrackerRows').addEventListener('click', e => {
+  if (!e.target.matches('.psnassign')) return;
+  const id = +e.target.closest('tr').dataset.id, s = psnFromControls();
+  const t = ((psnStatus && psnStatus.trackers) || []).find(k => k.id === id);
+  let name = (t && t.name) || `Cible mobile ${s.links.length + 1}`;
+  while (s.links.some(l => l.target === name)) name += ' bis';
+  s.links.push({ tracker_id: id, target: name, axes: ['x', 'y'], refs: [], max_speed: 4 });
+  psnSave(s);
+});
+$('psnCalCancel').addEventListener('click', () => { psnCal = null; showPsnLinks(true); });
+$('psnCalDone').addEventListener('click', async () => {
+  if (!psnCal || psnCal.refs.length < 4) return;
+  const s = psnFromControls(), i = psnCal.i;
+  if (!s.links[i]) { psnCal = null; return showPsnLinks(true); }
+  s.links[i].refs = psnCal.refs;
+  psnCal = null;
+  psnSave(s);
+});
+$('psnLoosenOk').addEventListener('click', () => { if (psnPending) psnSave(psnPending, true); });
+$('psnLoosenCancel').addEventListener('click', () => { psnPending = null; $('psnLoosen').hidden = true; reloadPsn(); });
+// A calibration point: the tracker's current position and the click.
+$('preview').addEventListener('click', e => {
+  if (!psnCal || mtAiming != null || sfDrawing || sfGradPick || !psnView) return;
+  const link = psnView.settings.links[psnCal.i];
+  const t = link && ((psnStatus && psnStatus.trackers) || []).find(k => k.id === link.tracker_id);
+  if (!t || !t.valid) { $('psnError').textContent = 'Aucune position valide reçue pour ce traceur : placez-le, puis visez.'; return; }
+  const r = $('preview').getBoundingClientRect();
+  const [x, y] = uncalibrate((e.clientX - r.left) / r.width * 2 - 1, 1 - (e.clientY - r.top) / r.height * 2);
+  psnCal.refs.push({ tracker: [...t.pos], output: [x, y] });
+  $('psnError').textContent = '';
+  showPsnCal();
+});
+/** A cross per mobile target on the 2D preview (output coordinates), red
+ * when the tracking or the safety stage keeps it dark. */
+function drawPsnOverlay(px) {
+  const lookOn = settings && settings.content && settings.content.generator === 'mirror_targets';
+  if (!psnStatus || !psnStatus.enabled || !($('psnPanel').open || lookOn)) return;
+  g.save(); g.lineWidth = 2; g.font = '600 20px system-ui, sans-serif'; g.textBaseline = 'bottom';
+  (psnStatus.links || []).forEach((l, i) => {
+    if (!l.out) return;
+    const [x, y] = px(l.out);
+    g.strokeStyle = g.fillStyle = l.lit ? 'rgba(61,220,132,0.95)' : 'rgba(255,77,79,0.95)';
+    g.beginPath(); g.moveTo(x - 14, y - 14); g.lineTo(x + 14, y + 14); g.moveTo(x - 14, y + 14); g.lineTo(x + 14, y - 14); g.stroke();
+    g.fillText(`M${i + 1}`, x + 16, y - 10);
   });
   g.restore();
 }

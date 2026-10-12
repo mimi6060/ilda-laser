@@ -116,6 +116,7 @@ pub fn shared() -> Shared {
         triggers: crate::audio::triggers::TriggerStore::in_memory(),
         autopilot: crate::autopilot::AutopilotStore::in_memory(),
         targets: crate::targets::TargetStore::in_memory(),
+        psn: crate::psn::PsnState::in_memory(),
         mixer: layers::Mixer::default(),
         mixer_dirty: false,
         groups_dirty: false,

@@ -489,6 +489,11 @@ pub fn describe(e: &SafetyEvent) -> String {
             format!("Cibles miroir modifiées (assouplissement confirmé){}", changed())
         }
         "mirror_targets" => format!("Cibles miroir modifiées{}", changed()),
+        // Target tracking (T-457).
+        "psn_settings" if d.get("confirmed_loosen").and_then(Value::as_bool).unwrap_or(false) => {
+            format!("Suivi de cible modifié (assouplissement confirmé){}", changed())
+        }
+        "psn_settings" => format!("Suivi de cible modifié{}", changed()),
         "presence_settings" => format!("Réglages de présence modifiés{}", changed()),
         // Safety profiles per venue (T-260).
         "safety_profile" => match str_of(d, "action") {

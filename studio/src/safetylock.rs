@@ -90,6 +90,8 @@ pub const HANDLER: &[&str] = &[
     "/api/external/gate",
     // Removing or renaming a mirror target (T-109) only tightens.
     "/api/targets",
+    // Switching tracking off or removing a link (T-457) only tightens.
+    "/api/psn",
 ];
 
 /// Whether the route gate lets `path` (a Safety-class POST) through while
