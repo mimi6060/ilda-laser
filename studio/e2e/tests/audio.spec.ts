@@ -25,7 +25,9 @@ test.beforeAll(async () => {
 
 test('--no-audio: no capture, no device, nothing fails', async () => {
   const devices = await studio.get('/api/audio/devices');
-  expect(devices).toEqual({ capture: false, devices: [] });
+  expect(devices).toMatchObject({ capture: false, devices: [] });
+  // « Son du Mac » (T-241): the default build never offers it.
+  expect(devices.system_audio).toMatchObject({ compiled: false, available: false });
   const a = await audio();
   expect(a.capture).toBe(false);
   expect(a.state).toBe('disabled');

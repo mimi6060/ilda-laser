@@ -1,0 +1,28 @@
+<p>Quand la musique est jouée sur le Mac lui-même (Spotify, Musique, un fichier, un logiciel DJ), le studio peut l'écouter sans câble. Deux voies : un périphérique de bouclage comme <b>BlackHole</b>, qui marche sur tous les Mac, ou la source « Son du Mac » quand ce studio la propose.</p>
+
+<h3>Voie 1 : BlackHole (toutes versions de macOS)</h3>
+<p>BlackHole 2ch est un pilote audio gratuit d'Existential Audio (licence GPL-3). C'est <b>vous</b> qui l'installez, depuis le site de son auteur : le studio ne l'installe pas, ne l'embarque pas et ne modifie jamais vos réglages audio. Il crée une entrée virtuelle qui reçoit ce que le Mac joue.</p>
+<ol>
+<li>Installez <b>BlackHole 2ch</b>, puis redémarrez si l'installateur le demande.</li>
+<li>Ouvrez <b>Configuration audio et MIDI</b> (Applications › Utilitaires).</li>
+<li>En bas à gauche, cliquez sur <b>+</b> › <b>Créer un périphérique à sorties multiples</b>.</li>
+<li>Dans ce périphérique, cochez vos haut-parleurs (ou votre casque, ou votre carte son) <b>et</b> BlackHole 2ch. Choisissez vos haut-parleurs comme <b>périphérique principal</b> et cochez <b>Correction de la dérive</b> pour BlackHole 2ch.</li>
+<li>Réglez la même fréquence (48 000 Hz conseillé) sur le périphérique à sorties multiples et sur BlackHole 2ch.</li>
+<li>Dans <b>Réglages Système › Son › Sortie</b>, choisissez le périphérique à sorties multiples : le son continue d'aller aux haut-parleurs, et une copie part dans BlackHole.</li>
+<li>Dans LIVE › Musique : source « Native », « Entrée audio » : BlackHole 2ch, puis « Écouter ». Les vumètres bougent avec la musique du Mac.</li>
+</ol>
+<ul>
+<li>Avec un périphérique à sorties multiples, les touches de volume du Mac n'agissent plus : réglez le volume dans le lecteur ou sur la carte son.</li>
+<li>BlackHole renvoie des zéros exacts quand rien ne joue : le badge de santé peut alors soupçonner une autorisation refusée. Lancez la musique avant de conclure.</li>
+<li>Pour revenir comme avant, choisissez à nouveau vos haut-parleurs dans <b>Réglages Système › Son › Sortie</b>.</li>
+</ul>
+
+<h3>Voie 2 : la source « Son du Mac » (option)</h3>
+<p>Dans un studio compilé avec l'option <b>system-audio</b> et sur macOS 14.6 ou plus récent, la liste « Entrée audio » propose « Son du Mac » : le studio écoute directement la sortie par défaut du Mac, sans pilote à installer. Ailleurs, l'entrée est grisée et la voie BlackHole reste la bonne.</p>
+<ul>
+<li>Au premier « Écouter », macOS demande l'autorisation d'enregistrer l'audio du système. Si les vumètres restent à zéro alors que la musique joue, ouvrez <b>Réglages Système › Confidentialité et sécurité › Enregistrement de l'écran et de l'audio du système</b>, autorisez Laser Studio (ou le terminal qui l'a lancé), puis relancez le studio. Le studio ne change jamais ce réglage lui-même.</li>
+<li>Si la sortie du Mac est une carte son qui a aussi des entrées, le studio refuse « Son du Mac » plutôt que d'écouter ses micros : utilisez BlackHole.</li>
+<li>Le son n'est ni enregistré ni envoyé ailleurs : il sert seulement à l'analyse (niveau, bandes, tempo).</li>
+</ul>
+
+<p>Quelle que soit la voie, l'audio n'arme jamais le laser et le limiteur de flashs audio reste actif.</p>

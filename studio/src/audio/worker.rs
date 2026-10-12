@@ -147,7 +147,7 @@ impl<S: SampleSource> Capture<S> {
             }
         }
 
-        if config.source != AudioInputSource::Native {
+        if !config.source.captures() {
             self.close();
             self.status(CaptureState::Off, None, "Capture native arrêtée".into());
             return;
@@ -155,12 +155,15 @@ impl<S: SampleSource> Capture<S> {
         if self.live.is_some() || now < self.next_open {
             return;
         }
-        self.open(&config.device, config.buffer_frames, now);
+        // *Son du Mac* (T-241) has no device name: the Mac's default output.
+        let system = config.source == AudioInputSource::System;
+        let device = if system { None } else { config.device };
+        self.open(&device, system, config.buffer_frames, now);
     }
 
-    fn open(&mut self, device: &Option<String>, buffer_frames: u32, now: Instant) {
+    fn open(&mut self, device: &Option<String>, system: bool, buffer_frames: u32, now: Instant) {
         let counters = Arc::new(CaptureCounters::default());
-        let req = OpenRequest { device: device.as_deref(), buffer_frames, counters: Arc::clone(&counters) };
+        let req = OpenRequest { device: device.as_deref(), system, buffer_frames, counters: Arc::clone(&counters) };
         let epoch = self.hub.epoch();
         let mut consumer = None;
         let mut ltc = None;
@@ -172,7 +175,7 @@ impl<S: SampleSource> Capture<S> {
             ltc = Some(l);
             sink
         });
-        let wanted = device.clone().unwrap_or_else(|| "entrée par défaut".into());
+        let wanted = if system { capture::SYSTEM_AUDIO_NAME.to_string() } else { device.clone().unwrap_or_else(|| "entrée par défaut".into()) };
         match (result, consumer) {
             (Ok(opened), Some(consumer)) => {
                 let message = format!("Écoute : {} ({} Hz, {} canaux)", opened.device, opened.sample_rate, opened.channels);
@@ -193,6 +196,11 @@ impl<S: SampleSource> Capture<S> {
                 let (state, message) = match e {
                     OpenError::NoDevice => (CaptureState::NoDevice, "Pas d'entrée audio".to_string()),
                     OpenError::NotFound(name) => (CaptureState::DeviceLost, format!("Entrée « {name} » introuvable : nouvel essai toutes les 2 s")),
+                    OpenError::PermissionDenied(_) if system => (
+                        CaptureState::PermissionDenied,
+                        "Autorisation refusée ? Réglages Système › Confidentialité et sécurité › Enregistrement de l'écran et de l'audio du système : autoriser le terminal".to_string(),
+                    ),
+                    OpenError::Unavailable(why) => (CaptureState::Error, format!("Son du Mac indisponible : {why}")),
                     OpenError::PermissionDenied(_) => (
                         CaptureState::PermissionDenied,
                         "Autorisation refusée ? Réglages Système › Confidentialité et sécurité › Microphone : autoriser le terminal".to_string(),
@@ -636,6 +644,56 @@ mod tests {
         assert_eq!(r.state(), CaptureState::DeviceLost);
         r.run(2_100, 0.5);
         assert_eq!((r.state(), r.fake.opens()), (CaptureState::Running, 2));
+    }
+
+    /// *Son du Mac* (T-241) with a fake output: the same chain as an
+    /// input (meter, features, health), the device name ignored.
+    #[test]
+    fn son_du_mac_captures_the_output_through_the_same_chain() {
+        let config = AudioConfig { source: AudioInputSource::System, device: Some("Scarlett 2i2 USB".into()), ..AudioConfig::native() };
+        let mut r = rig(&["Built-in Microphone", "Scarlett 2i2 USB"], config);
+        r.fake.0.lock().unwrap().system_output = Some("Haut-parleurs MacBook Pro".into());
+        r.run(300, 0.5);
+        assert_eq!(r.state(), CaptureState::Running);
+        assert_eq!(r.hub.status().device.as_deref(), Some("Son du Mac (Haut-parleurs MacBook Pro)"));
+        assert!((r.hub.snapshot().expect("published").rms_db + 9.0).abs() < 0.5);
+        let never = Instant::now() - Duration::from_secs(60);
+        let (f, active) = r.hub.effective(AudioFeatures::default(), never, Instant::now());
+        assert_eq!(active, Active::Native, "the studio's own analysis");
+        assert!(f.level > 0.9);
+        assert_eq!(r.health(), "ok");
+        assert!(r.hub.fresh_tempo(Instant::now()).is_some());
+        // An input unplugged meanwhile doesn't concern it.
+        r.fake.unplug("Scarlett 2i2 USB");
+        r.run(1_100, 0.5);
+        assert_eq!((r.state(), r.fake.opens()), (CaptureState::Running, 1));
+        // Exact zeros: nothing plays, or the permission is missing; its own help.
+        r.run(3_000, 0.0);
+        let d = r.diagnostics();
+        assert_eq!(d["health"]["state"], "permission_suspected");
+        assert!(d["health"]["help"].as_str().unwrap().contains("audio du système"), "{d}");
+        // Back to Browser: closed.
+        r.hub.set_config(AudioConfig { source: AudioInputSource::Browser, ..AudioConfig::native() }).unwrap();
+        r.run(20, 0.5);
+        assert!(!r.fake.is_open());
+    }
+
+    #[test]
+    fn son_du_mac_unavailable_says_why_and_never_opens_an_input() {
+        let config = AudioConfig { source: AudioInputSource::System, ..AudioConfig::native() };
+        let mut r = rig(&["Mic"], config);
+        r.run(100, 0.5);
+        let status = r.hub.status();
+        assert_eq!(status.state, CaptureState::Error);
+        assert!(status.message.starts_with("Son du Mac indisponible"), "{}", status.message);
+        assert!(!r.fake.is_open(), "the microphone is not opened instead");
+        assert!(r.hub.snapshot().is_none());
+        let never = Instant::now() - Duration::from_secs(60);
+        assert_eq!(r.hub.effective(AudioFeatures::default(), never, Instant::now()).1, Active::None);
+        // Retried calmly, logged once.
+        r.run(2_100, 0.5);
+        assert_eq!(r.fake.opens(), 2);
+        assert!(!r.hub.set_status(r.hub.status()));
     }
 
     #[test]

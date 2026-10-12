@@ -49,7 +49,7 @@ test.beforeEach(async ({ page }) => {
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   await studio.reset();
   expect(await studio.post('/api/audio/config', { source: 'browser', device: null, analysis: { auto_gain: true, manual_gain_db: 0, silence_db: -60, onsets: { delta: 0.1 } } })).toBe(200);
-  expect(await studio.post('/api/test/native_audio', { state: 'disabled', devices: [] })).toBe(200);
+  expect(await studio.post('/api/test/native_audio', { state: 'disabled', devices: [], system_audio: false })).toBe(200);
 });
 test.afterEach(() => { expect(errors).toEqual([]); });
 
@@ -69,7 +69,7 @@ test('source choice: Navigateur by default, Native explains the macOS prompt and
   expect((await config()).source).toBe('browser');
   // The Mac's inputs, from the studio's list.
   await expect(page.locator('#musDevice')).toBeVisible();
-  await expect(page.locator('#musDevice option')).toHaveText(['Entrée par défaut du Mac', 'Micro test (par défaut)', 'Carte son']);
+  await expect(page.locator('#musDevice option')).toHaveText(['Entrée par défaut du Mac', 'Micro test (par défaut)', 'Carte son', 'Son du Mac (ce que le Mac joue) : indisponible']);
   await page.locator('#musDevice').selectOption('Carte son');
 
   await page.locator('#micBtn').click();
@@ -94,6 +94,50 @@ test('source choice: Navigateur by default, Native explains the macOS prompt and
   // A change made elsewhere is followed.
   await studio.post('/api/audio/config', { source: 'native' });
   await expect(page.locator('#musSrc [data-src="native"]')).toHaveClass(/active/);
+  await expect(page.locator('#micBtn')).toHaveText('Arrêter');
+  expect((await studio.state()).armed).toBe(false);
+});
+
+test('« Son du Mac »: greyed with its reason, a help page on BlackHole, and chosen like an input where it can run (T-241)', async ({ page }) => {
+  await studio.post('/api/test/native_audio', { devices: [{ name: 'Micro test', is_default: true }] });
+  await openMusic(page);
+  // The help button only with the native source.
+  await expect(page.locator('#musSysHelp')).toBeHidden();
+  await page.locator('#musSrc [data-src="native"]').click();
+  const sys = page.locator('#musDevice option[value="@system"]');
+  await expect(sys).toHaveText('Son du Mac (ce que le Mac joue) : indisponible');
+  await expect(sys).toBeDisabled();
+  await expect(page.locator('#musSysNote')).toContainText('Son du Mac indisponible');
+  await expect(page.locator('#musSysNote')).toContainText('BlackHole');
+  // The API refuses it too.
+  expect(await studio.post('/api/audio/config', { source: 'system' })).toBe(400);
+
+  // « Comment écouter le son du Mac ? »: the BlackHole steps.
+  await page.locator('#musSysHelp').click();
+  await expect(page.locator('#helpDrawer')).toBeVisible();
+  await expect(page.locator('#helpTitle')).toHaveText('Écouter le son du Mac');
+  await expect(page.locator('#helpBody')).toContainText('Créer un périphérique à sorties multiples');
+  await expect(page.locator('#helpBody')).toContainText('BlackHole 2ch');
+  await page.locator('#helpClose').click();
+
+  // A build with the feature on a recent macOS: offered, chosen, stopped.
+  await studio.post('/api/test/native_audio', { system_audio: true });
+  await page.locator('#musSrc [data-src="browser"]').click();
+  await page.locator('#musSrc [data-src="native"]').click();
+  await expect(sys).toBeEnabled();
+  await expect(sys).toHaveText('Son du Mac (ce que le Mac joue)');
+  await page.locator('#musDevice').selectOption('@system');
+  await expect(page.locator('#musSysNote')).toContainText("autorisation d'enregistrer l'audio du système");
+  expect((await config()).source).toBe('browser');
+  await page.locator('#micBtn').click();
+  await expect.poll(async () => (await config()).source).toBe('system');
+  await expect(page.locator('#micBtn')).toHaveText('Arrêter');
+  await page.locator('#micBtn').click();
+  await expect.poll(async () => (await config()).source).toBe('browser');
+  // Chosen elsewhere: the panel follows, on Native with « Son du Mac » selected.
+  await studio.post('/api/audio/config', { source: 'system' });
+  await expect(page.locator('#musSrc [data-src="native"]')).toHaveClass(/active/);
+  await expect(page.locator('#musDevice')).toHaveValue('@system');
   await expect(page.locator('#micBtn')).toHaveText('Arrêter');
   expect((await studio.state()).armed).toBe(false);
 });

@@ -45,8 +45,10 @@ test('the panel is read-only and says when the native capture is off', async ({ 
   await expect(page.locator('#micDiagSource')).toHaveText('Navigateur');
   await expect(page.locator('#micDiagSignal')).toHaveText('non');
   await expect(page.locator('#micDiagSteps')).toContainText('Confidentialité et sécurité › Microphone');
-  // No button that would change the privacy settings: only « Actualiser ».
-  await expect(page.locator('#micDiagPanel button')).toHaveCount(1);
+  // No button that would change the privacy settings: only « Actualiser »
+  // and the help on the Mac's own sound (T-241).
+  await expect(page.locator('#micDiagPanel button')).toHaveText(['Actualiser', 'Comment écouter le son du Mac ?']);
+  await expect(page.locator('#micDiagSystem')).toContainText('indisponible');
   await expect(page.locator('#micDiagPanel')).not.toContainText('tccutil');
   // Found by the RÉGLAGES search.
   expect(await page.locator('#micDiagPanel').getAttribute('data-search')).toContain('micro');
