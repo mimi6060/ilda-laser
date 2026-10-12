@@ -1506,7 +1506,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // true` (sent only by the operator's confirmation in the UI), 409
         // `{error, loosen, armed: true}` while armed, 423 under the safety
         // lock; one below the horizon is 400. Removing or renaming always
-        // runs. Never arms.
+        // runs, except that with tracking links (T-457) any change in the
+        // number of fixed targets renumbers the mobile ones: a loosening.
+        // Never arms.
         (Method::Post, "/api/targets") => match body::<TargetsRequest>(request) {
             Ok(req) => {
                 let mut s = shared.lock().unwrap();
@@ -1515,10 +1517,12 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 let (cfg, cal) = (s.effective_safety(), s.calibration);
                 let before = s.targets.get().clone();
                 let new = crate::targets::Targets { items: req.items };
-                match s.targets.set(new, &cfg, &cal, armed || lock_on, req.confirm_loosen && !lock_on) {
+                // Mobile targets (T-457) are numbered after the fixed ones.
+                let mobile = s.psn.settings().links.len();
+                match s.targets.set_tracked(new, &cfg, &cal, armed || lock_on, req.confirm_loosen && !lock_on, mobile) {
                     Ok(stored) => {
                         if let Some(mut change) = crate::safety_log::settings_change(&before, &stored) {
-                            change["confirmed_loosen"] = json!(req.confirm_loosen && !before.loosenings(&stored).is_empty());
+                            change["confirmed_loosen"] = json!(req.confirm_loosen && !before.loosenings_tracked(&stored, mobile).is_empty());
                             s.gate.log().record("mirror_targets", Some("ui"), change);
                         }
                         json_response(targets_view(&s))
@@ -11378,6 +11382,57 @@ mod tests {
         assert_eq!(post(&confirmed).0, 423);
         assert_eq!(post(&json!({ "enabled": false })).0, 200);
         assert!(!t.shared.lock().unwrap().psn.settings().enabled);
+    }
+
+    /// T-457: mobile targets are numbered after the fixed ones, so with a
+    /// tracking link, removing a fixed target (even the last one) moves
+    /// light to another target: confirmation needed, refused armed and in
+    /// show mode. Without links it still always runs.
+    #[test]
+    fn removing_a_fixed_target_with_tracking_links_is_a_loosening() {
+        let t = TestServer::start(false);
+        let post = |b: &serde_json::Value| t.request("POST", "/api/targets", &b.to_string());
+        let two = json!({ "items": [{ "name": "A", "x": 0.2, "y": 0.5 }, { "name": "B", "x": -0.3, "y": 0.6 }], "confirm_loosen": true });
+        assert_eq!(post(&two).0, 200);
+        let one = json!({ "items": [{ "name": "A", "x": 0.2, "y": 0.5 }] });
+        // No link: removing the last one runs armed.
+        t.shared.lock().unwrap().request_arm(crate::interlock::ArmSource::Ui).unwrap();
+        assert_eq!(post(&one).0, 200);
+        t.shared.lock().unwrap().gate.disarm(crate::interlock::DisarmReason::User, crate::interlock::ArmSource::Ui);
+        assert_eq!(post(&two).0, 200);
+        let refs = json!([
+            { "tracker": [0.0, 0.0, 0.0], "output": [-0.5, 0.2] }, { "tracker": [4.0, 0.0, 0.0], "output": [0.5, 0.2] },
+            { "tracker": [4.0, 2.0, 0.0], "output": [0.5, 0.8] }, { "tracker": [0.0, 2.0, 0.0], "output": [-0.5, 0.8] }
+        ]);
+        let link = json!({ "enabled": true, "port": 0, "links": [{ "tracker_id": 7, "target": "Chariot", "refs": refs }], "confirm_loosen": true });
+        assert_eq!(t.request("POST", "/api/psn", &link.to_string()).0, 200);
+        // With a link: unconfirmed → 409 with the reason.
+        let (code, body) = post(&one);
+        assert_eq!(code, 409, "{body}");
+        assert!(js(&body)["loosen"][0].as_str().unwrap().contains("mobile"), "{body}");
+        // Armed: refused, confirmed or not; nothing changed, still armed.
+        t.shared.lock().unwrap().request_arm(crate::interlock::ArmSource::Ui).unwrap();
+        let mut confirmed = one.clone();
+        confirmed["confirm_loosen"] = json!(true);
+        let (code, body) = post(&confirmed);
+        assert_eq!(code, 409, "{body}");
+        assert_eq!(js(&body)["armed"], true);
+        assert_eq!(t.shared.lock().unwrap().targets.get().items.len(), 2);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+        // Adding one shifts them too.
+        let three = json!({ "items": [{ "name": "A", "x": 0.2, "y": 0.5 }, { "name": "B", "x": -0.3, "y": 0.6 }, { "name": "C", "x": 0.0, "y": 0.7 }], "confirm_loosen": true });
+        assert_eq!(post(&three).0, 409);
+        t.shared.lock().unwrap().gate.disarm(crate::interlock::DisarmReason::User, crate::interlock::ArmSource::Ui);
+        // Show mode: refused.
+        assert_eq!(t.request("POST", "/api/lock", &json!({ "show_mode": true }).to_string()).0, 200);
+        assert_eq!(post(&confirmed).0, 423);
+        assert_eq!(t.request("POST", "/api/lock", &json!({ "show_mode": false }).to_string()).0, 200);
+        // Renaming keeps the count: runs without confirmation.
+        assert_eq!(post(&json!({ "items": [{ "name": "A2", "x": 0.2, "y": 0.5 }, { "name": "B", "x": -0.3, "y": 0.6 }] })).0, 200);
+        // Disarmed and confirmed: runs.
+        assert_eq!(post(&confirmed).0, 200);
+        assert_eq!(t.shared.lock().unwrap().targets.get().items.len(), 1);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 
     /// T-109: mirror targets through the API. A new or moved target needs

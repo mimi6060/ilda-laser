@@ -916,12 +916,14 @@ fn random_targets(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
     let (before, armed) = (s.targets.get().clone(), s.gate.is_armed());
     let confirm = rng.chance(0.8);
     let valid = new.validate().is_ok();
-    match s.targets.set(new.clone(), &cfg, &cal, armed, confirm) {
+    // Mobile targets (T-457) are numbered after the fixed ones.
+    let mobile = s.psn.settings().links.len();
+    match s.targets.set_tracked(new.clone(), &cfg, &cal, armed, confirm, mobile) {
         Ok(stored) => {
             if !valid {
                 return Err(format!("targets: an invalid list was stored: {new:?}"));
             }
-            let loosened = before.loosenings(&stored);
+            let loosened = before.loosenings_tracked(&stored, mobile);
             if !loosened.is_empty() && (armed || !confirm) {
                 return Err(format!("targets: loosened without the confirmation or armed: {loosened:?}"));
             }
@@ -7151,8 +7153,12 @@ fn mirror_targets_never_light_a_cut_target_nor_pass_the_guard_dose() {
 /// from the UI. On every frame sent: the checks of `run_mirror_case`;
 /// nothing lit when no mobile target is lit; a lit target's last valid
 /// sample is never older than the loss delay; every lit point is at a lit
-/// mobile target (these last three except while the strobe limiter holds
-/// the last lit frame). Returns the frames that sent light.
+/// mobile target. While the strobe limiter holds (T-101/T-360) it may put
+/// back the last bright frame rendered for at most one flash period:
+/// there, a lit point not at a lit target must be at a place a target was
+/// lit at within that period (plus two frames), on data no older than the
+/// loss delay plus one strobe period (plus one frame of timing).
+/// Returns the frames that sent light.
 fn run_psn_case(seed: u64) -> Result<usize, String> {
     let mut rng = Rng::new(seed);
     let mut s = test_support::shared();
@@ -7195,6 +7201,13 @@ fn run_psn_case(seed: u64) -> Result<usize, String> {
     let bound = guard_bound(&guard);
     // Per tracker: when its last valid sample was sent.
     let mut last_valid: std::collections::HashMap<u16, Instant> = Default::default();
+    // The strobe hold: one flash period (settings are validated, 0.5..4 Hz).
+    let period = Duration::from_secs_f64(1.0 / cfg.strobe_max_hz as f64);
+    let held_stale = lost_after + period + FRAME_INTERVAL;
+    // Per frame: where mobile targets were lit, with their last valid
+    // sample; kept for one period and two frames (the held frame's age).
+    type LitAt = Vec<([f32; 2], Option<Instant>)>;
+    let mut history: std::collections::VecDeque<(Instant, LitAt)> = Default::default();
     let mut lit_frames = 0;
     for frame in 0..240 {
         let at = rig.now + FRAME_INTERVAL;
@@ -7236,23 +7249,45 @@ fn run_psn_case(seed: u64) -> Result<usize, String> {
             return Err(format!("{what}: a cell received {dose:.4} of the window, the guard allows {bound:.4} ({:?})", guard.profile));
         }
         lit_frames += w.last.iter().any(|p| p.is_lit()) as usize;
-        if holding {
-            // The strobe limiter's hold (T-101/T-360) puts back the last
-            // lit frame, zones and horizon re-applied (checked above): a
-            // target gone dark meanwhile is a flash it is there to stop.
-            continue;
-        }
         let lit_targets: Vec<[f32; 2]> = statuses.iter().filter(|l| l.lit).filter_map(|l| l.out).collect();
         for (l, id) in statuses.iter().zip(&ids) {
             if l.lit && last_valid.get(id).is_none_or(|&v| rig.now.saturating_duration_since(v) > lost_after) {
                 return Err(format!("{what}: « {} » lit on data older than {} ms", l.target, lost_after.as_millis()));
             }
         }
+        let near = |o: &[f32; 2], p: &Point| (o[0] - p.x).abs() < 0.02 && (o[1] - p.y).abs() < 0.02;
+        let now = rig.now;
+        history.retain(|(at, _)| now.saturating_duration_since(*at) <= period + 2 * FRAME_INTERVAL);
         for p in w.last.iter().filter(|p| p.is_lit()) {
-            if !lit_targets.iter().any(|o| (o[0] - p.x).abs() < 0.02 && (o[1] - p.y).abs() < 0.02) {
+            if lit_targets.iter().any(|o| near(o, p)) {
+                continue;
+            }
+            if !holding {
                 return Err(format!("{what}: lit at ({}, {}) away from every lit mobile target {lit_targets:?}", p.x, p.y));
             }
+            // The hold puts back the last bright frame rendered (zones,
+            // horizon, guard and caps re-applied, checked above), which
+            // the guard or the output check may have kept dark when it
+            // was first sent: only at a place a mobile target was lit
+            // within one period, on data at most one period older than
+            // the loss delay allows.
+            let fresh = history
+                .iter()
+                .flat_map(|(_, ts)| ts.iter())
+                .any(|(o, v)| near(o, p) && v.is_some_and(|v| now.saturating_duration_since(v) <= held_stale));
+            if !fresh {
+                return Err(format!(
+                    "{what} (strobe hold): lit at ({}, {}), where no mobile target was lit in the last {} ms on data younger than {} ms",
+                    p.x,
+                    p.y,
+                    (period + 2 * FRAME_INTERVAL).as_millis(),
+                    held_stale.as_millis()
+                ));
+            }
         }
+        let lit_now: LitAt =
+            statuses.iter().zip(&ids).filter(|(l, _)| l.lit).filter_map(|(l, id)| l.out.map(|o| (o, last_valid.get(id).copied()))).collect();
+        history.push_back((now, lit_now));
     }
     Ok(lit_frames)
 }

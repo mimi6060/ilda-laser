@@ -952,7 +952,14 @@ struct LinkRun {
     last_valid: Option<Instant>,
     /// After a jump: dark until a next sample confirms the new place.
     settling: bool,
+    /// The jump reference was cleared by an invalid sample, an
+    /// out-of-area one or a loss: the next valid sample has nothing to be
+    /// checked against, so it stays dark until a second one confirms it.
+    reset: bool,
 }
+
+const RECONFIRM_FR: &str = "Position à confirmer après une donnée invalide, hors zone ou perdue";
+const JUMP_FR: &str = "Déplacement plus rapide que la vitesse max";
 
 pub enum SetError {
     Invalid(String),
@@ -1111,7 +1118,7 @@ pub fn frame(s: &mut Shared, now: Instant) {
                 run.last_seq = sm.seq;
                 if !sm.valid {
                     // Fail dark at once: no last good place kept lit.
-                    *run = LinkRun { last_seq: run.last_seq, ..Default::default() };
+                    *run = LinkRun { last_seq: run.last_seq, reset: true, ..Default::default() };
                     return dark(link, bit, "perdu", Some("Donnée de suivi invalide".into()), calib);
                 }
                 {
@@ -1119,30 +1126,37 @@ pub fn frame(s: &mut Shared, now: Instant) {
                     let Some(q) = c.map(Calib::plane(link.axes, sm.pos)) else {
                         run.raw = None;
                         run.smooth = None;
+                        run.reset = true;
                         return dark(link, bit, "hors zone", Some("Hors de la zone calibrée ou du champ".into()), calib);
                     };
-                    let jump = run.raw.is_some_and(|(p, at)| {
-                        let d = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
-                        d / sm.at.saturating_duration_since(at).as_secs_f32().max(MIN_DT) > link.max_speed
-                    });
+                    let jump = match run.raw {
+                        Some((p, at)) => {
+                            let d = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+                            d / sm.at.saturating_duration_since(at).as_secs_f32().max(MIN_DT) > link.max_speed
+                        }
+                        // No reference after a reset: never lit unchecked.
+                        None => run.reset,
+                    };
                     run.raw = Some((q, sm.at));
                     if jump {
                         run.settling = true;
                         run.smooth = Some(q);
-                        return dark(link, bit, "saut", Some("Déplacement plus rapide que la vitesse max".into()), calib);
+                        return dark(link, bit, "saut", Some(if run.reset { RECONFIRM_FR } else { JUMP_FR }.into()), calib);
                     }
                     run.settling = false;
+                    run.reset = false;
                 }
             }
             if run.last_valid.is_none_or(|t| now.saturating_duration_since(t) > lost_after) {
-                *run = LinkRun { last_seq: run.last_seq, ..Default::default() };
+                let reset = run.reset || run.last_valid.is_some();
+                *run = LinkRun { last_seq: run.last_seq, reset, ..Default::default() };
                 return dark(link, bit, "perdu", Some(format!("Aucune donnée valide depuis {} ms", lost_after.as_millis())), calib);
             }
             let Some((q, _)) = run.raw else {
                 return dark(link, bit, "hors zone", Some("Hors de la zone calibrée ou du champ".into()), calib);
             };
             if run.settling {
-                return dark(link, bit, "saut", Some("Déplacement plus rapide que la vitesse max".into()), calib);
+                return dark(link, bit, "saut", Some(if run.reset { RECONFIRM_FR } else { JUMP_FR }.into()), calib);
             }
             let p = match run.smooth {
                 Some(p) => [p[0] + alpha * (q[0] - p[0]), p[1] + alpha * (q[1] - p[1])],
@@ -1486,8 +1500,11 @@ mod tests {
         let st = step(&mut s, last + Duration::from_millis(510), None);
         assert_eq!((st.state.as_str(), st.lit), ("perdu", false));
         assert_eq!(crate::targets::current_mobile_for_tests(), vec![None]);
-        // It comes back at the new place, never armed.
+        // It comes back at the new place once a second sample confirms
+        // it (the loss cleared the jump reference), never armed.
         let st = step(&mut s, last + Duration::from_millis(600), Some([1.0, 1.0, 0.0]));
+        assert_eq!((st.state.as_str(), st.lit), ("saut", false), "{st:?}");
+        let st = step(&mut s, last + Duration::from_millis(616), Some([1.0, 1.0, 0.0]));
         assert!(st.lit && (st.xy.unwrap()[0] + 0.25).abs() < 1e-3, "{st:?}");
         assert!(!s.gate.is_armed());
     }
@@ -1522,6 +1539,53 @@ mod tests {
         assert!(!step(&mut s, t1 + Duration::from_millis(16), None).lit, "no confirmation yet");
         let st = step(&mut s, t1 + Duration::from_millis(32), Some([3.5, 1.0, 0.0]));
         assert!(st.lit && (st.xy.unwrap()[0] - 0.375).abs() < 1e-3, "{st:?}");
+    }
+
+    /// An invalid sample, an out-of-area one or a loss clears the jump
+    /// reference: the next valid sample, wherever it is, stays dark until
+    /// a second consistent one confirms it (A, reset, far B → dark).
+    #[test]
+    fn after_a_reset_the_next_sample_waits_for_a_confirmation() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        type Reset = fn(&mut Shared, Instant);
+        let resets: [(&str, Reset); 4] = [
+            ("validity 0", |s, at| {
+                inject(s, &[(1, [0.5, 1.0, 0.0], Some(0.0))], &[], at).unwrap();
+                frame(s, at);
+            }),
+            ("NaN", |s, at| {
+                step(s, at, Some([f32::NAN, 1.0, 0.0]));
+            }),
+            ("out of the area", |s, at| {
+                step(s, at, Some([40.0, 1.0, 0.0]));
+            }),
+            ("loss", |s, at| {
+                step(s, at + Duration::from_millis(600), None);
+            }),
+        ];
+        for (what, reset) in resets {
+            let mut s = studio(on(vec![link(1)]));
+            assert!(step(&mut s, ms(0), Some([0.5, 1.0, 0.0])).lit, "{what}");
+            reset(&mut s, ms(16));
+            assert!(!s.psn.statuses()[0].lit, "{what}");
+            // Far B (3 m away), 16 ms after the reset (600 ms for the loss).
+            let tb = if what == "loss" { ms(632) } else { ms(32) };
+            let st = step(&mut s, tb, Some([3.5, 1.0, 0.0]));
+            assert_eq!((st.state.as_str(), st.lit), ("saut", false), "{what}: {st:?}");
+            assert_eq!(crate::targets::current_mobile_for_tests(), vec![None], "{what}");
+            assert!(!step(&mut s, tb + Duration::from_millis(8), None).lit, "{what}: not without a second sample");
+            // A second sample far from B again: still dark.
+            let st = step(&mut s, tb + Duration::from_millis(16), Some([0.5, 1.0, 0.0]));
+            assert!(!st.lit, "{what}: {st:?}");
+            // A consistent one confirms it.
+            let st = step(&mut s, tb + Duration::from_millis(32), Some([0.5, 1.0, 0.0]));
+            assert!(st.lit, "{what}: {st:?}");
+            assert!(!s.gate.is_armed());
+        }
+        // The very first sample after switching on still lights at once.
+        let mut s = studio(on(vec![link(1)]));
+        assert!(step(&mut s, ms(0), Some([3.5, 1.0, 0.0])).lit);
     }
 
     #[test]

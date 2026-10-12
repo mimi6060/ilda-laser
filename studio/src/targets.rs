@@ -164,6 +164,22 @@ impl Targets {
             })
             .collect()
     }
+
+    /// `loosenings` with `mobile` tracked targets (T-457) after the fixed
+    /// ones: a mobile target's bit is the number of fixed targets plus
+    /// its index, so any change in that number (removing the last one
+    /// too) sends the cues' light to other targets: a loosening.
+    pub fn loosenings_tracked(&self, new: &Targets, mobile: usize) -> Vec<String> {
+        let mut out = self.loosenings(new);
+        if mobile > 0 && self.items.len() != new.items.len() {
+            out.push(format!(
+                "{} cibles fixes au lieu de {} : les {mobile} cible(s) mobile(s) changent de numéro, leurs faisceaux vont ailleurs",
+                new.items.len(),
+                self.items.len()
+            ));
+        }
+        out
+    }
 }
 
 /// Where a target's beam goes and what the safety stage does to it there.
@@ -268,6 +284,12 @@ impl TargetStore {
     /// horizon is refused). `locked`: armed or under the safety lock (no
     /// loosening at all); `confirm`: the operator confirmed the loosening.
     pub fn set(&mut self, new: Targets, cfg: &SafetySettings, cal: &Calibration, locked: bool, confirm: bool) -> std::result::Result<Targets, SetError> {
+        self.set_tracked(new, cfg, cal, locked, confirm, 0)
+    }
+
+    /// `set` with `mobile` tracked targets numbered after the fixed ones
+    /// (T-457): a change in the number of fixed targets also loosens.
+    pub fn set_tracked(&mut self, new: Targets, cfg: &SafetySettings, cal: &Calibration, locked: bool, confirm: bool, mobile: usize) -> std::result::Result<Targets, SetError> {
         new.validate().map_err(|e| SetError::Invalid(e.to_string()))?;
         let new = Targets { items: new.items.into_iter().map(|t| Target { name: t.name.trim().to_string(), ..t }).collect() };
         for (i, t) in self.targets.changed(&new) {
@@ -282,7 +304,7 @@ impl TargetStore {
                 )));
             }
         }
-        let loosen = self.targets.loosenings(&new);
+        let loosen = self.targets.loosenings_tracked(&new, mobile);
         if !loosen.is_empty() {
             if locked {
                 return Err(SetError::Armed(loosen));
