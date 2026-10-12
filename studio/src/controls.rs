@@ -115,6 +115,7 @@ impl From<crate::external::SourceKind> for ControlSource {
             crate::external::SourceKind::Osc => ControlSource::Osc,
             crate::external::SourceKind::Timecode => ControlSource::Timeline,
             crate::external::SourceKind::Remote => ControlSource::Remote,
+            crate::external::SourceKind::Psn => ControlSource::Network,
         }
     }
 }

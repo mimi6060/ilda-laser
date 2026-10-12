@@ -123,6 +123,7 @@ pub const DATA_FILES: &[DataFile] = &[
     file("audio_triggers.json", false),
     file("autopilot.json", false),
     file("targets.json", false),
+    file("psn.json", false),
     file("shownet_artnet.json", false),
     file("prefs.json", false),
     file("recent.json", false),

@@ -114,6 +114,7 @@ mod remote;
 mod standby;
 mod sdbank;
 mod sheets;
+mod psn;
 mod targets;
 mod tempo;
 mod take;
@@ -490,6 +491,9 @@ pub struct Shared {
     /// Mirror targets (targets.rs, targets.json, T-109): calibrated points
     /// of the room. Machine settings, like the calibration.
     pub targets: targets::TargetStore,
+    /// Target tracking over PosiStageNet (psn.rs, psn.json, T-457): moves
+    /// the mobile targets. Machine settings; off by default.
+    pub psn: psn::PsnState,
     /// The four cue layers and the point budget (layers.rs), saved to
     /// layers.json when changed.
     pub mixer: layers::Mixer,
@@ -1202,6 +1206,7 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let sim = state.midi.sim.clone();
     let (clock_rx, clock_status) = (state.midi.clock.out.take_receiver(), Arc::clone(&state.midi.clock.out.status));
     let (netin_hub, netin_tx) = (Arc::clone(&state.netin.hub), state.netin.sender());
+    let psn_hub = Arc::clone(&state.psn.hub);
     // OSC feedback (T-416): the queue the engine fills and "osc-out" empties.
     let osc_out_rx = state.netin.feedback.take_receiver();
     // Timecode output (T-417): the snapshots the engine queues for "tc-out".
@@ -1311,6 +1316,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let mut netin_threads = netin::listener::spawn(Arc::clone(&netin_hub), netin_tx, Arc::clone(&running));
     // OSC feedback: idle (no socket) until switched on and a destination exists.
     netin_threads.extend(osc_out_rx.and_then(|rx| netin::feedback::spawn(rx, netin_hub, Arc::clone(&running))));
+    // PosiStageNet (T-457): idle (no socket) until switched on.
+    netin_threads.extend(psn::spawn(psn_hub, Arc::clone(&running)));
 
     let audio_threads = if cli.no_audio {
         println!("--no-audio: no audio input opened (the browser source still works), no song played (the timeline runs on the system clock).");
@@ -1632,6 +1639,7 @@ fn startup_state(cli: &Cli) -> Shared {
         triggers: audio::triggers::TriggerStore::load(cli.data_dir.join("audio_triggers.json")),
         autopilot: autopilot::AutopilotStore::load(cli.data_dir.join("autopilot.json")),
         targets: targets::TargetStore::load(cli.data_dir.join("targets.json")),
+        psn: psn::PsnState::load(cli.data_dir.join("psn.json")),
         mixer: {
             let mut m: layers::Mixer = load_json(&cli.data_dir.join("layers.json"));
             m.sanitize();
@@ -2245,6 +2253,8 @@ impl Engine {
             ableton_link::frame(&mut s, now);
             // OSC and Art-Net: what the listeners queued, then signal loss.
             netin::frame(&mut s, now);
+            // Tracking (T-457): the mobile targets move, or go dark.
+            psn::frame(&mut s, now);
             // Native capture, else the browser's features, else silence
             // (falling, not jumping): one snapshot for the whole frame.
             let (audio, active) = s.audio_in.frame(s.audio, s.audio_at, now);

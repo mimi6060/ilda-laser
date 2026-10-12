@@ -148,6 +148,20 @@
 //!     nothing lit in a Blank or Public zone, below the horizon or outside
 //!     the outdoor angles, and the output dose of every cell of the guard's
 //!     grid never above what the guard allows.
+//! 27. target tracking (T-457): random PosiStageNet settings (valid,
+//!     short or degenerate calibrations, any loss delay, smoothing and
+//!     speed limit) and tracker walks injected as packets (moves, jumps,
+//!     silences, values that are not numbers or absurd, invalid status,
+//!     junk bytes), the gate open or not, with the « Cibles miroir » look
+//!     on the mobile targets, run in the sessions (1-26 hold with them:
+//!     no exemption); tracking data never arms nor changes a setting.
+//!     Plus a dedicated property
+//!     (`psn_targets_never_light_a_cut_spot_nor_pass_the_guard_dose`):
+//!     a slow performer followed over random zones, horizons, outdoor
+//!     sectors and calibrations; nothing lit where it is cut, no cell
+//!     above the guard's dose, nothing lit at all when no mobile target
+//!     is lit (fail dark), never lit on data older than the loss delay,
+//!     and every lit point where a lit mobile target is.
 //!
 //! Plus the strobe limiter seen from the output: no fast flashing for
 //! longer than the allowed burst, on random cases and with every
@@ -750,6 +764,124 @@ const FIXED_RATE_GATE: f64 = 0.016;
 /// Half of what the fuzz measures (T-473 rule) at 1000 cases (T-109).
 const TARGETS_GATE: f64 = 0.005;
 
+/// Half of what the fuzz measures (T-473 rule) at 1000 cases (T-457):
+/// 0.0020; the dedicated property covers tracking in depth.
+const PSN_GATE: f64 = 0.001;
+
+/// Reference points (T-457): the tracker plane 0..4 × 0..2 m aimed at a
+/// random quadrilateral of the field, mostly above the horizon; now and
+/// then too few points, aligned ones or an incoherent fifth one.
+fn random_psn_refs(rng: &mut Rng, floor: f32) -> Vec<crate::psn::RefPoint> {
+    use crate::psn::RefPoint;
+    let (x0, x1) = (rng.range(-0.9, 0.0), rng.range(0.1, 0.9));
+    let lo = (floor + 0.05).clamp(-0.9, 0.5);
+    let (y0, y1) = (rng.range(lo, (lo + 0.3).min(0.8)), rng.range((lo + 0.35).min(0.85), 0.95));
+    let mut refs = vec![
+        RefPoint { tracker: [0.0, 0.0, 1.0], output: [x0, y0] },
+        RefPoint { tracker: [4.0, 0.0, 1.0], output: [x1, y0] },
+        RefPoint { tracker: [4.0, 2.0, 1.0], output: [x1, y1] },
+        RefPoint { tracker: [0.0, 2.0, 1.0], output: [x0, y1] },
+    ];
+    for r in &mut refs {
+        r.output = [(r.output[0] + rng.range(-0.03, 0.03)).clamp(-1.0, 1.0), (r.output[1] + rng.range(-0.03, 0.03)).clamp(-1.0, 1.0)];
+    }
+    match rng.below(12) {
+        0 => refs.truncate(3),
+        1 => refs.iter_mut().enumerate().for_each(|(i, r)| r.tracker = [i as f32, 0.0, 1.0]),
+        2 => refs.push(RefPoint { tracker: [2.0, 1.0, 1.0], output: [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)] }),
+        _ => {}
+    }
+    refs
+}
+
+/// Random tracking settings (T-457), switched on, 1 to 3 links.
+fn random_psn_settings(s: &Shared, rng: &mut Rng) -> crate::psn::PsnSettings {
+    use crate::psn::{Axis, PsnSettings, TrackerLink};
+    let floor = s.effective_safety().horizon.y;
+    let links = (0..1 + rng.below(3))
+        .map(|i| TrackerLink {
+            tracker_id: i as u16 + 1,
+            target: format!("Mobile {}", i + 1),
+            axes: if rng.chance(0.8) { [Axis::X, Axis::Y] } else { [Axis::X, Axis::Z] },
+            refs: random_psn_refs(rng, floor),
+            max_speed: rng.range(0.5, 8.0),
+        })
+        .collect();
+    PsnSettings {
+        enabled: true,
+        port: 0,
+        lost_after_ms: 100 + rng.below(1901) as u32,
+        smoothing_ms: *rng.pick(&[0, 20, 50, 200, 1000]),
+        links,
+        ..PsnSettings::default()
+    }
+}
+
+/// One tracker the fuzz walks (T-457).
+#[derive(Clone, Copy)]
+struct PsnWalk {
+    id: u16,
+    pos: [f32; 3],
+    vel: [f32; 2],
+    /// Frames left without any packet (a loss).
+    silent: usize,
+}
+
+impl PsnWalk {
+    fn new(id: u16, rng: &mut Rng) -> Self {
+        PsnWalk { id, pos: [rng.range(0.0, 4.0), rng.range(0.0, 2.0), 1.0], vel: [rng.range(-1.0, 1.0), rng.range(-0.5, 0.5)], silent: 0 }
+    }
+
+    /// One frame: moves (a walk, a stop, now and then a jump or a
+    /// silence) and returns the sample to send, if any.
+    fn step(&mut self, rng: &mut Rng, dt: f32) -> Option<([f32; 3], Option<f32>)> {
+        if self.silent > 0 {
+            self.silent -= 1;
+            return None;
+        }
+        if rng.chance(0.01) {
+            self.silent = rng.below(120);
+        }
+        if rng.chance(0.02) {
+            self.vel = if rng.chance(0.3) { [0.0, 0.0] } else { [rng.range(-1.0, 1.0), rng.range(-0.5, 0.5)] };
+        }
+        if rng.chance(0.005) {
+            self.pos = [rng.range(-2.0, 6.0), rng.range(-1.0, 3.0), 1.0];
+        }
+        self.pos[0] = (self.pos[0] + self.vel[0] * dt).clamp(-2.0, 6.0);
+        self.pos[1] = (self.pos[1] + self.vel[1] * dt).clamp(-1.0, 3.0);
+        let pos = match rng.below(200) {
+            0 => [f32::NAN, self.pos[1], 1.0],
+            1 => [1e7, self.pos[1], 1.0],
+            2 => [f32::INFINITY, 0.0, 0.0],
+            _ => self.pos,
+        };
+        let validity = match rng.below(50) {
+            0 => Some(0.0),
+            1 => Some(f32::NAN),
+            2..=20 => Some(1.0),
+            _ => None,
+        };
+        Some((pos, validity))
+    }
+}
+
+/// One frame of tracking data (T-457) as the listener would hand it over,
+/// with junk now and then: never arms, never changes a setting.
+fn psn_frame(s: &Shared, rng: &mut Rng, walks: &mut [PsnWalk], at: Instant) -> Result<(), String> {
+    let (armed, settings) = (s.gate.is_armed(), s.psn.settings().clone());
+    let list: Vec<(u16, [f32; 3], Option<f32>)> = walks.iter_mut().filter_map(|w| w.step(rng, 1.0 / 60.0).map(|(p, v)| (w.id, p, v))).collect();
+    let _ = crate::psn::inject(s, &list, &[], at);
+    if rng.chance(0.01) {
+        let junk: Vec<u8> = (0..rng.below(64)).map(|_| rng.below(256) as u8).collect();
+        let _ = s.psn.hub.ingest_bytes(&junk, None, at);
+    }
+    if s.gate.is_armed() != armed || s.psn.settings() != &settings {
+        return Err("tracking data changed the arming or a setting".into());
+    }
+    Ok(())
+}
+
 /// A random target list (T-109) as `POST /api/targets` could send it:
 /// mostly valid points (above the horizon, through the calibration, so
 /// most are kept), now and then a target below the horizon, a position
@@ -784,12 +916,14 @@ fn random_targets(s: &mut Shared, rng: &mut Rng) -> Result<(), String> {
     let (before, armed) = (s.targets.get().clone(), s.gate.is_armed());
     let confirm = rng.chance(0.8);
     let valid = new.validate().is_ok();
-    match s.targets.set(new.clone(), &cfg, &cal, armed, confirm) {
+    // Mobile targets (T-457) are numbered after the fixed ones.
+    let mobile = s.psn.settings().links.len();
+    match s.targets.set_tracked(new.clone(), &cfg, &cal, armed, confirm, mobile) {
         Ok(stored) => {
             if !valid {
                 return Err(format!("targets: an invalid list was stored: {new:?}"));
             }
-            let loosened = before.loosenings(&stored);
+            let loosened = before.loosenings_tracked(&stored, mobile);
             if !loosened.is_empty() && (armed || !confirm) {
                 return Err(format!("targets: loosened without the confirmation or armed: {loosened:?}"));
             }
@@ -1699,6 +1833,8 @@ struct Coverage {
     sent_lit_with_fixed_rate: usize,
     /// Frames that sent light while the look was « Cibles miroir » (T-109).
     sent_lit_with_targets: usize,
+    /// Frames that sent light with a mobile target lit (T-457).
+    sent_lit_with_psn: usize,
 }
 
 impl Coverage {
@@ -1734,6 +1870,7 @@ impl Coverage {
             autopilot_changes,
             sent_lit_with_fixed_rate,
             sent_lit_with_targets,
+            sent_lit_with_psn,
         } = o;
         self.frames += frames;
         self.sent_lit += sent_lit;
@@ -1762,6 +1899,7 @@ impl Coverage {
         self.autopilot_changes += autopilot_changes;
         self.sent_lit_with_fixed_rate += sent_lit_with_fixed_rate;
         self.sent_lit_with_targets += sent_lit_with_targets;
+        self.sent_lit_with_psn += sent_lit_with_psn;
     }
 }
 
@@ -2748,6 +2886,28 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
             controls::set_look(&mut s, random_mirror_look(&mut mtrng));
         }
     }
+    // Target tracking (T-457), from its own stream: settings switched on,
+    // trackers walked and injected as packets every frame, the gate opened
+    // now and then, the « Cibles miroir » look on the mobile targets.
+    let mut psn_rng = Rng::new(seed ^ 0x0457_0457);
+    let psn_on = psn_rng.chance(0.3);
+    let mut psn_walks: Vec<PsnWalk> = Vec::new();
+    if psn_on {
+        let mut s = rig.s();
+        let cfg = random_psn_settings(&s, &mut psn_rng);
+        psn_walks = cfg.links.iter().map(|l| PsnWalk::new(l.tracker_id, &mut psn_rng)).collect();
+        s.psn.insert_for_tests(cfg);
+        if psn_rng.chance(0.7) {
+            let _ = crate::external::set_open(&mut s, true, ArmSource::Ui);
+        }
+        if psn_rng.chance(0.7) {
+            let mut look = random_mirror_look(&mut psn_rng);
+            if let Content::Generator { params, .. } = &mut look.content {
+                params.a = 65535.0;
+            }
+            controls::set_look(&mut s, look);
+        }
+    }
     let mut beats = 0;
     for frame in 0..frames {
         // The hang guard sees the session move on (T-486).
@@ -2938,6 +3098,15 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
         }
         if trng.chance(0.05) {
             random_transitions(&mut rig.s(), &mut trng);
+        }
+        if psn_on {
+            let at = rig.now + FRAME_INTERVAL;
+            psn_frame(&rig.s(), &mut psn_rng, &mut psn_walks, at).map_err(|e| format!("frame {frame}: {e}"))?;
+            if psn_rng.chance(0.005) {
+                let mut s = rig.s();
+                let open = !s.external.gate.open;
+                let _ = crate::external::set_open(&mut s, open, ArmSource::Ui);
+            }
         }
         if targets_on && mtrng.chance(0.05) {
             let mut s = rig.s();
@@ -3303,6 +3472,7 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
         }
         cov.sent_lit_with_spread += (lit > 0 && spreading(&s)) as usize;
         cov.sent_lit_with_targets += (lit > 0 && is_mirror_look(&s.settings)) as usize;
+        cov.sent_lit_with_psn += (lit > 0 && is_mirror_look(&s.settings) && s.psn.statuses().iter().any(|l| l.lit)) as usize;
         // A fixed rate (T-463): the frame sent is its size (dark points
         // added after the safety stage), unless the zone mask overflowed it.
         if let Some(fr) = s.fixed_rate {
@@ -3464,6 +3634,8 @@ fn random_sessions_keep_every_output_invariant() {
         assert!(share(cov.sent_lit_with_fixed_rate) > FIXED_RATE_GATE, "only {} of {} frames sent light at a fixed frame rate", cov.sent_lit_with_fixed_rate, cov.frames);
         eprintln!("coverage: sent lit with mirror targets {:.4}", share(cov.sent_lit_with_targets));
         assert!(share(cov.sent_lit_with_targets) > TARGETS_GATE, "only {} of {} frames sent light with the mirror targets look", cov.sent_lit_with_targets, cov.frames);
+        eprintln!("coverage: sent lit with a tracked target {:.4}", share(cov.sent_lit_with_psn));
+        assert!(share(cov.sent_lit_with_psn) > PSN_GATE, "only {} of {} frames sent light with a tracked target", cov.sent_lit_with_psn, cov.frames);
         assert!(cov.trigger_actions > seeds.len() as u64 / 10,"only {} audio trigger actions in {} cases", cov.trigger_actions, seeds.len());
         eprintln!("coverage: autopilot changes {}", cov.autopilot_changes);
         // ~22 at 1000 cases: the fuzz's own presses win over it most of
@@ -7057,6 +7229,181 @@ fn mirror_targets_never_light_a_cut_target_nor_pass_the_guard_dose() {
         eprintln!("coverage: mirror target frames sent lit {share:.3}");
         // ~0.36 at 1000 cases (T-473 rule: gate at about half).
         assert!(share > 0.18, "only {lit} lit frames over {} cases", seeds.len());
+    }
+}
+
+/// One tracking case (T-457): random zones, horizon, calibration, caps,
+/// guard profile, sometimes the outdoor mode and « Ciel coupé »; no fixed
+/// target, so every light comes from a mobile one; random tracking
+/// settings and slow walks (with jumps, silences and junk) injected as
+/// packets every frame; the « Cibles miroir » look on every target, armed
+/// from the UI. On every frame sent: the checks of `run_mirror_case`;
+/// nothing lit when no mobile target is lit; a lit target's last valid
+/// sample is never older than the loss delay; every lit point is at a lit
+/// mobile target. While the strobe limiter holds (T-101/T-360) it may put
+/// back the last bright frame rendered for at most one flash period:
+/// there, a lit point not at a lit target must be at a place a target was
+/// lit at within that period (plus two frames), on data no older than the
+/// loss delay plus one strobe period (plus one frame of timing).
+/// Returns the frames that sent light.
+fn run_psn_case(seed: u64) -> Result<usize, String> {
+    let mut rng = Rng::new(seed);
+    let mut s = test_support::shared();
+    let mut cfg = random_safety(&mut rng);
+    if rng.chance(0.3) {
+        cfg.outdoor = random_outdoor(&mut rng, false);
+        cfg.outdoor.authorization_ref = "DGTA-fuzz".into();
+    }
+    s.safety.set(cfg, true).map_err(|e| format!("setup: safety refused: {e:?}"))?;
+    if rng.chance(0.5) {
+        mark_public(&mut s, &mut rng);
+    }
+    s.sync_audience();
+    if rng.chance(0.4) {
+        s.calibration = random_calibration(&mut rng);
+    }
+    if rng.chance(0.2) {
+        s.set_sky_off(true, ArmSource::Ui);
+    }
+    let caps = random_limits(&mut rng);
+    s.outputs.set(MAIN_OUTPUT, Some(caps), None, false, true).map_err(|e| format!("setup: caps refused: {e:?}"))?;
+    let psn = random_psn_settings(&s, &mut rng);
+    let lost_after = Duration::from_millis(psn.lost_after_ms as u64);
+    let mut walks: Vec<PsnWalk> = psn.links.iter().map(|l| PsnWalk::new(l.tracker_id, &mut rng)).collect();
+    s.psn.insert_for_tests(psn);
+    crate::external::set_open(&mut s, true, ArmSource::Ui).map_err(|e| format!("setup: gate refused: {e:?}"))?;
+    let mut look = random_mirror_look(&mut rng);
+    if let Content::Generator { params, .. } = &mut look.content {
+        // Every target, chased or together.
+        params.a = 65535.0;
+    }
+    s.settings = look;
+    let mut rig = Rig::new(s, "psn", seed);
+    let _ = rig.s().request_arm(ArmSource::Ui);
+    let (cfg, guard) = {
+        let s = rig.s();
+        (s.effective_safety(), s.safety.get().dwell)
+    };
+    let mut meter = DoseMeter::new(&guard);
+    let bound = guard_bound(&guard);
+    // Per tracker: when its last valid sample was sent.
+    let mut last_valid: std::collections::HashMap<u16, Instant> = Default::default();
+    // The strobe hold: one flash period (settings are validated, 0.5..4 Hz).
+    let period = Duration::from_secs_f64(1.0 / cfg.strobe_max_hz as f64);
+    let held_stale = lost_after + period + FRAME_INTERVAL;
+    // Per frame: where mobile targets were lit, with their last valid
+    // sample; kept for one period and two frames (the held frame's age).
+    type LitAt = Vec<([f32; 2], Option<Instant>)>;
+    let mut history: std::collections::VecDeque<(Instant, LitAt)> = Default::default();
+    let mut lit_frames = 0;
+    for frame in 0..240 {
+        let at = rig.now + FRAME_INTERVAL;
+        let mut sent = Vec::new();
+        for w in walks.iter_mut() {
+            if let Some((p, v)) = w.step(&mut rng, 1.0 / 60.0) {
+                if p.iter().all(|c| c.is_finite() && c.abs() <= crate::psn::MAX_COORD_M) && v.is_none_or(|v| v.is_finite() && v > 0.0) {
+                    last_valid.insert(w.id, at);
+                } else {
+                    last_valid.remove(&w.id);
+                }
+                sent.push((w.id, p, v));
+            }
+        }
+        {
+            let s = rig.s();
+            let _ = crate::psn::inject(&s, &sent, &[], at);
+            if rng.chance(0.01) {
+                let junk: Vec<u8> = (0..rng.below(64)).map(|_| rng.below(256) as u8).collect();
+                let _ = s.psn.hub.ingest_bytes(&junk, None, at);
+            }
+        }
+        rig.tick();
+        let t = rig.t();
+        let (statuses, ids, holding) = {
+            let s = rig.s();
+            let ids: Vec<u16> = s.psn.settings().links.iter().map(|l| l.tracker_id).collect();
+            (s.psn.statuses().to_vec(), ids, s.strobe.active)
+        };
+        let w = rig.wire.lock().unwrap();
+        let what = format!("frame {frame}, sent");
+        check_points(&w.last, &caps, &cfg, &what)?;
+        check_public(&w.last, &caps, &cfg, false, &what)?;
+        if let Some(p) = w.last.iter().find(|p| p.is_lit() && p.y <= cfg.horizon.y) {
+            return Err(format!("{what}: a tracked beam lit at ({}, {}), below the horizon at {}", p.x, p.y, cfg.horizon.y));
+        }
+        let dose = meter.feed(&w.last, t);
+        if dose > bound {
+            return Err(format!("{what}: a cell received {dose:.4} of the window, the guard allows {bound:.4} ({:?})", guard.profile));
+        }
+        lit_frames += w.last.iter().any(|p| p.is_lit()) as usize;
+        let lit_targets: Vec<[f32; 2]> = statuses.iter().filter(|l| l.lit).filter_map(|l| l.out).collect();
+        for (l, id) in statuses.iter().zip(&ids) {
+            if l.lit && last_valid.get(id).is_none_or(|&v| rig.now.saturating_duration_since(v) > lost_after) {
+                return Err(format!("{what}: « {} » lit on data older than {} ms", l.target, lost_after.as_millis()));
+            }
+        }
+        let near = |o: &[f32; 2], p: &Point| (o[0] - p.x).abs() < 0.02 && (o[1] - p.y).abs() < 0.02;
+        let now = rig.now;
+        history.retain(|(at, _)| now.saturating_duration_since(*at) <= period + 2 * FRAME_INTERVAL);
+        for p in w.last.iter().filter(|p| p.is_lit()) {
+            if lit_targets.iter().any(|o| near(o, p)) {
+                continue;
+            }
+            if !holding {
+                return Err(format!("{what}: lit at ({}, {}) away from every lit mobile target {lit_targets:?}", p.x, p.y));
+            }
+            // The hold puts back the last bright frame rendered (zones,
+            // horizon, guard and caps re-applied, checked above), which
+            // the guard or the output check may have kept dark when it
+            // was first sent: only at a place a mobile target was lit
+            // within one period, on data at most one period older than
+            // the loss delay allows.
+            let fresh = history
+                .iter()
+                .flat_map(|(_, ts)| ts.iter())
+                .any(|(o, v)| near(o, p) && v.is_some_and(|v| now.saturating_duration_since(v) <= held_stale));
+            if !fresh {
+                return Err(format!(
+                    "{what} (strobe hold): lit at ({}, {}), where no mobile target was lit in the last {} ms on data younger than {} ms",
+                    p.x,
+                    p.y,
+                    (period + 2 * FRAME_INTERVAL).as_millis(),
+                    held_stale.as_millis()
+                ));
+            }
+        }
+        let lit_now: LitAt =
+            statuses.iter().zip(&ids).filter(|(l, _)| l.lit).filter_map(|(l, id)| l.out.map(|o| (o, last_valid.get(id).copied()))).collect();
+        history.push_back((now, lit_now));
+    }
+    Ok(lit_frames)
+}
+
+/// T-457: tracked mobile targets never get past the safety stage, never
+/// light on stale data and never light anywhere else (see
+/// `run_psn_case`), and enough of them lit that the checks are not vacuous.
+#[test]
+fn psn_targets_never_light_a_cut_spot_nor_pass_the_guard_dose() {
+    let name = "psn_targets_never_light_a_cut_spot_nor_pass_the_guard_dose";
+    let seeds = seeds(457, 200);
+    let threads = sweep_threads(seeds.len());
+    let guard = test_support::progress_guard(name, threads, CASE_STALL);
+    let (lit, result) = sweep_seeds(
+        &seeds,
+        threads,
+        &guard,
+        |seed, lit: &mut usize, _| run_psn_case(seed).map(|n| *lit += n),
+        |total: &mut usize, part| *total += part,
+    );
+    drop(guard);
+    if let Err((seed, e)) = result {
+        panic!("{name}: {e} (replay: SAFETY_SEED={seed} cargo test -p laser-studio {name})");
+    }
+    if seeds.len() > 50 {
+        let share = lit as f64 / (seeds.len() * 240) as f64;
+        eprintln!("coverage: tracked target frames sent lit {share:.3}");
+        // ~0.27 at 200 cases (T-473 rule: gate at about half).
+        assert!(share > 0.13, "only {lit} lit frames over {} cases", seeds.len());
     }
 }
 
