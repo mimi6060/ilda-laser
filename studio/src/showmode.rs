@@ -129,6 +129,12 @@ pub fn allowed(path: &str) -> bool {
         "/api/macros/run",
         "/api/macros/stop",
         "/api/macros/go",
+        // Scripts (T-458): running and stopping are playback, checking a
+        // source reads only; saving the list and approving a project's
+        // scripts are edits.
+        "/api/scripts/run",
+        "/api/scripts/stop",
+        "/api/scripts/check",
         // The show player (T-444): its transport and loop are playback;
         // saving the list is an edit.
         "/api/showlist/play",

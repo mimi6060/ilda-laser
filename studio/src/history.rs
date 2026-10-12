@@ -87,11 +87,14 @@ pub enum Section {
     /// The autopilot's pages and public content (T-148). Not its switch,
     /// rhythm and order: those are live controls.
     Autopilot,
+    /// The script list (T-458). Not what runs, nor the trust: playback
+    /// and machine state.
+    Scripts,
 }
 
 use Section::*;
 
-const ALL: [Section; 21] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Objects, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda, Autopilot];
+const ALL: [Section; 22] = [Scenes, CueProps, Pages, UserCues, Palettes, ScanPresets, Lfos, AudioRoutes, CueLists, Figures, Objects, Venue, Projection, Fx, Executors, Desks, Macros, ShowList, Pools, Agenda, Autopilot, Scripts];
 
 impl Section {
     pub fn key(self) -> &'static str {
@@ -117,6 +120,7 @@ impl Section {
             Pools => "pools",
             Agenda => "agenda",
             Autopilot => "autopilot",
+            Scripts => "scripts",
         }
     }
 
@@ -151,6 +155,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/agenda" => &[Agenda],
         "/api/pools" | "/api/pools/delete" | "/api/pools/capture" => &[Pools],
         "/api/autopilot" => &[Autopilot],
+        "/api/scripts" => &[Scripts],
         _ => return None,
     })
 }
@@ -183,6 +188,7 @@ pub fn capture(s: &Shared, sec: Section) -> Value {
         Pools => json!(s.pools.list()),
         Agenda => json!(s.agenda.agenda()),
         Autopilot => crate::autopilot::capture(s),
+        Scripts => json!(s.scripts.list()),
     }
 }
 
@@ -294,6 +300,9 @@ fn restore(s: &mut Shared, sec: Section, v: &Value) -> Result<(), Refusal> {
         Agenda => crate::agenda::set(s, from(v)?).map_err(|e| (400, e))?,
         // Checked again (a page it names may be gone since).
         Autopilot => crate::autopilot::set_config(s, from(v)?).map_err(|e| (400, e))?,
+        // Checked again (a refused line never comes back).
+        // Restored with the trust as it is: an undo never approves a list.
+        Scripts => crate::script::restore(s, from(v)?).map_err(|e| (400, e.message_fr))?,
     }
     Ok(())
 }
@@ -547,6 +556,7 @@ fn label_for(s: &Shared, path: &str, before: &Map<String, Value>, after: &Map<St
         (_, UserCues) => named(list_change(old, new, "id", "name"), "Cue", "Cues", true, "créé"),
         (_, Palettes) => named(list_change(old, new, "name", "name"), "Palette", "Palettes", true, "ajouté"),
         (_, Autopilot) => "Pilote automatique modifié".into(),
+        (_, Scripts) => named(list_change(old, new, "id", "name"), "Script", "Scripts", false, "créé"),
         (_, Pools) => named(list_change(old, new, "id", "name"), "Préréglage", "Préréglages", false, "ajouté"),
         (_, ScanPresets) => named(list_change(old, new, "id", "name"), "Préréglage de balayage", "Préréglages de balayage", false, "ajouté"),
         (_, CueLists) => named(list_change(old, new, "name", "name"), "Liste de cues", "Listes de cues", true, "créé"),
@@ -902,5 +912,55 @@ mod tests {
         assert_eq!(page_label(&grid(json!([p("Un"), p("Intro")])), &grid(json!([p("Un")]))), "Page « Intro » supprimée");
         let user = |name: &str| json!([{ "id": "u-1", "name": name }]);
         assert_eq!(named(list_change(&user("Éventail"), &json!([{ "id": "u-1", "name": "Éventail", "color": [1, 2, 3] }]), "id", "name"), "Cue", "Cues", true, "créé"), "Cue « Éventail » modifiée");
+    }
+
+    /// T-458: an undo restores a script list with the trust as it was. A
+    /// project's foreign list, deleted then brought back by undo, is still
+    /// not approved; only « Activer les scripts de ce projet » approves it.
+    #[test]
+    fn undoing_a_delete_never_approves_a_foreign_script_list() {
+        use crate::controls::ControlSource;
+        use crate::script::{Script, ScriptTrigger};
+        let shared = shared();
+        let foreign = vec![Script { id: 1, name: "Ailleurs".into(), source: "commande(\"page 2\")".into(), trigger: ScriptTrigger::EveryBar, enabled: true }];
+        {
+            let mut s = shared.lock().unwrap();
+            s.scripts.set_inline(true);
+            // Opened with a project, never approved here.
+            s.scripts.replace_in_memory(foreign.clone());
+            assert!(!s.scripts.trusted() && s.scripts.ask_trust);
+        }
+        // Delete all (the empty list counts as trusted), then undo.
+        edit(&shared, "/api/scripts", |s| crate::script::set(s, Vec::new()).unwrap());
+        assert!(shared.lock().unwrap().scripts.trusted());
+        step(&shared, false, None).unwrap();
+        {
+            let mut s = shared.lock().unwrap();
+            assert_eq!(s.scripts.list(), foreign.as_slice());
+            assert!(!s.scripts.trusted(), "an undo approved a foreign list");
+            assert!(s.scripts.ask_trust);
+            assert!(crate::script::request_run(&mut s, 1, ControlSource::Ui).unwrap_err().contains("non approuvés"));
+            // The bar trigger stays silent too.
+            let page = s.cue_page;
+            let (t0, audio) = (s.now_s(), s.audio);
+            for i in 0..4 {
+                crate::script::frame(&mut s, t0 + 10.0 * i as f64, &audio);
+            }
+            assert_eq!(s.cue_page, page);
+        }
+        // Redo (empty), undo again: still not approved.
+        step(&shared, true, None).unwrap();
+        step(&shared, false, None).unwrap();
+        assert!(!shared.lock().unwrap().scripts.trusted());
+        // A list approved here comes back approved.
+        let mine = vec![Script { id: 1, name: "Ici".into(), source: "commande(\"page 3\")".into(), trigger: ScriptTrigger::Manual, enabled: false }];
+        crate::script::approve(&mut shared.lock().unwrap(), false);
+        edit(&shared, "/api/scripts", |s| crate::script::set(s, Vec::new()).unwrap());
+        edit(&shared, "/api/scripts", |s| crate::script::set(s, mine.clone()).unwrap());
+        edit(&shared, "/api/scripts", |s| crate::script::set(s, Vec::new()).unwrap());
+        step(&shared, false, None).unwrap();
+        let s = shared.lock().unwrap();
+        assert_eq!(s.scripts.list(), mine.as_slice());
+        assert!(s.scripts.trusted());
     }
 }

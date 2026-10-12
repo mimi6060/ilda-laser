@@ -672,6 +672,19 @@
   .mac-step .row button { flex: none; padding: 3px 8px; min-width: 32px; }
   .mac-err { grid-column: 2; color: var(--danger); font-size: 12px; }
   #macErr { color: var(--danger); font-weight: 600; }
+  /* Scripts (T-458): CRÉATION editor, trust banner. */
+  #scrTrustBanner { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; padding: 6px 16px; background: var(--panel-2); color: var(--warn); border-bottom: 2px solid var(--warn); font-weight: 700; }
+  #scrTrustBanner[hidden] { display: none; }
+  #scrTrustBanner button { border-color: var(--warn); color: var(--warn); min-height: 44px; }
+  .scr-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+  .scr-item { display: flex; gap: 8px; align-items: center; text-align: left; }
+  .scr-item .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scr-item .d { color: var(--muted); font-size: 11px; }
+  .scr-item.sel { border-color: var(--accent); color: var(--accent); }
+  .scr-item.bad .d { color: var(--danger); }
+  #scrSource { width: 100%; min-height: 220px; resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px; tab-size: 2; }
+  #scrConsole { max-height: 160px; overflow: auto; margin: 4px 0; padding: 6px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; white-space: pre-wrap; }
+  #scrErr { color: var(--danger); font-weight: 600; }
   #runPanel h3 button, #runPanel .run-row button { flex: none; padding: 3px 8px; font-size: 11px; }
   #runAll { border-color: var(--danger); color: var(--danger); font-weight: 700; }
   .run-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); font-size: 12px; min-width: 0; }
@@ -2208,6 +2221,9 @@
 <div id="spaceWarn" role="alert" hidden><div class="dw"><span id="spaceWarnText"></span><button id="spaceWarnClose" data-t-title="bandeau.disque.fermer.info" data-t="commun.fermer"></button></div></div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
   <button id="learnYes" hidden data-t="commun.oui"></button><button id="learnNo" hidden data-t="commun.non"></button><button id="learnCancel" hidden data-t="commun.annuler"></button></div>
+<!-- Scripts (T-458) : ceux d'un projet ouvert restent désactivés jusqu'à l'approbation. -->
+<div id="scrTrustBanner" role="alert" hidden><span id="scrTrustText"></span>
+  <button id="scrTrustYes" data-t="scripts.confiance.oui"></button><button id="scrTrustNo" data-t="scripts.confiance.non"></button></div>
 <!-- Espaces de travail (T-295) : changer d'onglet ne change que l'affichage. -->
 <nav id="wsTabs" data-t-aria-label="espaces.libelle">
   <div class="ws-tablist" role="tablist" data-t-aria-label="espaces.libelle">
@@ -3087,6 +3103,8 @@
       <div id="runTimeline"></div>
       <h3>Macros <button data-run-stop="macros" title="Toutes les macros en cours">Arrêter les macros</button></h3>
       <div id="runMacros"></div>
+      <h3>Scripts <button data-run-stop="scripts" title="Arrête les scripts en cours et suspend leurs déclencheurs jusqu'à « Reprendre les scripts »">Arrêter les scripts</button></h3>
+      <div id="runScripts"></div>
       <h3>Modulateurs <button data-run-stop="lfos" title="Désactive les LFO, sans en supprimer aucun">Couper les modulateurs</button></h3>
       <div id="runLfos"></div>
       <h3>Liens audio <button data-run-stop="audio" title="Désactive les liens audio, sans en supprimer aucun">Couper les liens audio</button></h3>
@@ -3550,6 +3568,7 @@
       <button role="tab" data-ctab="figures">Figures</button>
       <button role="tab" data-ctab="objects">Objets 3D</button>
       <button role="tab" data-ctab="macros">Macros</button>
+      <button role="tab" data-ctab="scripts">Scripts</button>
       <button role="tab" data-ctab="media">Médiathèque</button>
       <button role="tab" data-ctab="program">Cue évolutif</button>
     </div>
@@ -3850,6 +3869,46 @@
       <div class="hint" id="macErr" role="alert" hidden></div>
       <div class="hint" id="macState" role="status"></div>
       <div class="hint">Une étape = une ligne de la ligne de commande (master.size 80, cue 2.14 go, page 3, tempo 128, macro "Nom" go…) puis une attente. Les attentes en temps tombent sur le temps. Une macro n'arme jamais le laser et s'arrête avec l'arrêt d'urgence.</div>
+    </section>
+
+    <!-- Scripts (T-458) : un peu de logique, en bac à sable -->
+    <section data-cpanel="scripts" id="scrEdit" data-help="creation-scripts" hidden>
+      <h2>Scripts</h2>
+      <div class="hint">Un script lit l'état et envoie des commandes. Il ne peut ni armer le laser, ni toucher à la sécurité, ni lire de fichier, ni accéder au réseau.</div>
+      <div id="scrList" class="scr-list"></div>
+      <div class="row">
+        <button id="scrAdd" title="Nouveau script vide">+ Script</button>
+        <select id="scrExample" aria-label="Ajouter un exemple" title="Ajouter un de nos scripts d'exemple"><option value="">Exemple…</option></select>
+        <button id="scrDel" title="Supprimer le script choisi (Enregistrer pour confirmer)">Supprimer</button>
+      </div>
+      <div id="scrFields">
+        <label for="scrName">Nom</label>
+        <input type="text" id="scrName" maxlength="32" autocomplete="off" placeholder="Page selon le tempo">
+        <label for="scrTrigger">Déclencheur</label>
+        <select id="scrTrigger">
+          <option value="manual">À la demande</option>
+          <option value="every_beat">À chaque temps</option>
+          <option value="every_bar">À chaque mesure</option>
+        </select>
+        <label class="check"><input type="checkbox" id="scrOn"><span>Actif</span></label>
+        <label for="scrSource">Source</label>
+        <textarea id="scrSource" spellcheck="false" autocomplete="off" rows="12" placeholder="let e = etat()&#10;if e.tempo.bpm > 140 { commande(&quot;page 3&quot;) }"></textarea>
+        <div class="row">
+          <button id="scrCheck" title="Vérifie la syntaxe et chaque commande écrite, sans rien lancer">Vérifier</button>
+          <button id="scrRun" class="primary" title="Enregistre puis lance le script une fois (Cmd+Entrée dans l'éditeur)">Lancer</button>
+          <button id="scrStop" title="Arrête ce script ; son déclencheur attend une action de votre part">Arrêter</button>
+          <button id="scrSave" title="Chaque script est vérifié ; une commande refusée (armement, sécurité) empêche d'enregistrer">Enregistrer</button>
+        </div>
+      </div>
+      <div class="row">
+        <button id="scrTrust" hidden>Activer les scripts de ce projet</button>
+        <button id="scrResume" hidden title="Les déclencheurs automatiques reprennent (après un arrêt, Tout arrêter ou l'arrêt d'urgence)">Reprendre les scripts</button>
+      </div>
+      <div class="hint" id="scrErr" role="alert" hidden></div>
+      <div class="hint" id="scrState" role="status"></div>
+      <h3>Console</h3>
+      <pre id="scrConsole" aria-live="polite"></pre>
+      <div class="hint">Fonctions : etat(), commande("…"), hasard(), journal("…"), et quelques calculs (arrondi, min, max…). Au plus 32 commandes par exécution, 5 ms et 100 000 opérations : un script qui boucle est arrêté. Échap arrête tout, scripts compris.</div>
     </section>
 
     <!-- Figures (T-296) : propriétés, bibliothèque, animation -->
@@ -6224,8 +6283,10 @@ $('estopReset').addEventListener('click', async () => { if (await post('/api/est
 // 'ask': the « Modifications non enregistrées » question is open (T-433).
 // 'grid': LIVE with the focus in the cue grid (T-436): the arrows and
 // Début / Fin move between cells, `0` plays the focused one.
-const SHORTCUT_ZONES = ['live', 'grid', 'timeline', 'tl-canvas', 'creation', 'figures', 'settings', 'desk', 'ask'];
-const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas' && z !== 'ask');
+// 'script': CRÉATION with the focus in the script editor (T-458): always
+// typing, so nothing but Cmd+Entrée (and the « typing » entries) fires.
+const SHORTCUT_ZONES = ['live', 'grid', 'timeline', 'tl-canvas', 'creation', 'figures', 'settings', 'desk', 'ask', 'script'];
+const NOT_TL_CANVAS = SHORTCUT_ZONES.filter(z => z !== 'tl-canvas' && z !== 'ask' && z !== 'script');
 const NOT_LIVE = SHORTCUT_ZONES.filter(z => z !== 'live' && z !== 'grid');
 const LIVE_ZONES = ['live', 'grid'];
 // Macros (T-425): Alt + letter, read by position (e.code). Alt+B (the
@@ -6435,6 +6496,9 @@ function buildShortcuts() {
     { id: 'command', group: 'Recherche', keys: ['k'], meta: true, shift: true, zones: '*', typing: true, show: true,
       label: 'Ligne de commande : régler un contrôle, lancer un cue, page, tempo, noir (ouvrir / fermer ; n\'arme jamais)',
       down: e => { if (!e.repeat) toggleCommand(); } },
+    // Scripts (T-458): Cmd+Entrée in the editor = « Lancer » (only there).
+    { id: 'script.run', group: 'Édition', codes: ['Enter', 'NumpadEnter'], meta: true, zones: ['script'], typing: true, show: true,
+      label: 'Lancer le script (dans l\'éditeur de CRÉATION › Scripts ; n\'arme jamais)', down: e => { if (!e.repeat) scrRun(); } },
     { id: 'help', group: 'Aide', keys: ['?'], shift: '*', zones: '*', show: true,
       label: 'Afficher / masquer cette aide',
       down: e => { if (!e.repeat) toggleKeysHelp(); } },
@@ -6502,7 +6566,10 @@ function shortcutZone() {
   if (!$('projAsk').hidden) return 'ask';
   if (activeWs === 'live') return document.activeElement?.closest?.('#cues') ? 'grid' : 'live';
   if (activeWs === 'timeline') return TL.show && document.activeElement === tlCv ? 'tl-canvas' : 'timeline';
-  if (activeWs === 'creation') return !$('figEditor').hidden && !$('figImportDlg').open ? 'figures' : 'creation';
+  if (activeWs === 'creation') {
+    if (document.activeElement === $('scrSource')) return 'script';
+    return !$('figEditor').hidden && !$('figImportDlg').open ? 'figures' : 'creation';
+  }
   if (activeWs === 'desk') return 'desk';
   return 'settings';
 }
@@ -6580,7 +6647,7 @@ function shortcutConflicts(list = allShortcuts()) {
 // « ? » : the table, grouped. Keys shown as on this keyboard when the
 // browser can tell (navigator.keyboard.getLayoutMap), else as on an AZERTY Mac.
 const SHORTCUT_GROUPS = ['Sécurité', 'Cues et pages', 'Liste de cues', 'Exécuteurs', 'Pupitre', 'Tempo', 'Direct', 'Vue 3D', 'Projet', 'Édition', 'Espaces de travail', 'Vues', 'Recherche', 'Timeline', 'Figures', 'Aide'];
-const ZONE_FR = { live: 'LIVE', grid: 'LIVE (grille active)', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES', desk: 'PUPITRE' };
+const ZONE_FR = { script: 'CRÉATION › Scripts (éditeur)', live: 'LIVE', grid: 'LIVE (grille active)', timeline: 'TIMELINE', 'tl-canvas': 'TIMELINE active', creation: 'CRÉATION', figures: 'CRÉATION › Figures', settings: 'RÉGLAGES', desk: 'PUPITRE' };
 const KEY_CAPS = { Digit0: '0', Numpad0: '0 (pavé)', Escape: 'Échap', Space: 'Espace', Enter: 'Entrée', NumpadEnter: 'Entrée', PageDown: 'Page suivante', PageUp: 'Page précédente', Home: 'Début', Backspace: '⌫', Delete: 'Suppr', '<': '<', '?': '?' };
 const IS_MAC = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent);
 let keyLayout = null;
@@ -7241,6 +7308,7 @@ function applyState(f, at, pushed) {
   if (f.tempo && f.tempo.bpm > 0) $('cues').style.setProperty('--beat', (60 / f.tempo.bpm).toFixed(3) + 's');
   showRunCount(f);
   showMacros(f.macros);
+  showScripts(f.scripts);
   // Follow a look changed elsewhere (playlist, cue from MIDI/API, look
   // control); our own requests update settingsRev themselves.
   if (f.settings_rev !== settingsRev && !lookBusy) refreshLook();
@@ -12540,7 +12608,8 @@ const LOCK_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke
 function showRunCount(f) {
   const n = ((f.cues && f.cues.active) || []).length + (f.timeline && (f.timeline.playing || f.timeline.paused) ? 1 : 0)
     + (f.cuelist && (f.cuelist.index != null || f.cuelist.waiting != null) ? 1 : 0)
-    + ((f.macros && f.macros.running) || []).length;
+    + ((f.macros && f.macros.running) || []).length
+    + ((f.scripts && f.scripts.running) || []).length;
   const b = $('runCount');
   b.hidden = !n;
   b.textContent = n;
@@ -12600,6 +12669,10 @@ function showRunning(r) {
   fillRun('runMacros', (r.macros || []).map(m => runRow(m.name,
     [`étape ${Math.min(m.step, m.steps)}/${m.steps}`, macWaitText(m.waiting), m.error ? '⚠ ' + m.error : ''].filter(Boolean).join(' · '),
     { source: m.source_label, warn: !!m.error, stop: () => runStop({ kind: 'macro', id: m.id }) })));
+  // Scripts (T-458): runs in flight and automatic triggers armed.
+  const TRIG_FR = { manual: 'à la demande', every_beat: 'à chaque temps', every_bar: 'à chaque mesure' };
+  fillRun('runScripts', (r.scripts || []).map(x => runRow(x.name, [x.running ? 'en cours' : '', TRIG_FR[x.trigger] || ''].filter(Boolean).join(' · '),
+    { stop: () => runStop({ kind: 'script', id: String(x.id) }) })));
   fillRun('runLfos', r.lfos.map(m => runRow(m.target_label, `${m.wave_label} · ${m.rate}`, { stop: () => runStop({ kind: 'lfo', index: m.index }), stopLabel: 'Couper' })));
   fillRun('runAudio', r.audio_links.map(a => runRow(a.target_label, a.source_label, { stop: () => runStop({ kind: 'audio_link', index: a.index }), stopLabel: 'Couper' })));
   const fmt = v => typeof v === 'boolean' ? (v ? 'oui' : 'non') : typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : v;
@@ -12840,6 +12913,153 @@ $('macSave').onclick = async () => {
   }
   renderMacButtons();
   renderMacEdit();
+};
+// ---------- scripts (T-458) ----------
+// CRÉATION › Scripts: the list edited as a draft, « Enregistrer » sends it
+// whole (POST /api/scripts; a refused line is never saved). « Lancer »
+// saves first, then asks for one run; the studio runs it in its own thread
+// and applies its commands at a later frame. The frame carries the list's
+// revision, what runs and the trust banner (`f.scripts`).
+const SCR = { list: [], draft: [], status: [], sel: 0, dirty: false, rev: -1, trusted: true, halted: false, examples: [], err: null, note: '', polled: 0 };
+const SCR_TRIG = { manual: 'À la demande', every_beat: 'À chaque temps', every_bar: 'À chaque mesure' };
+const scrCur = () => SCR.draft[SCR.sel] || null;
+const scrStatus = id => SCR.status.find(s => s.id === id) || null;
+async function loadScripts(force) {
+  SCR.polled = Date.now();
+  const j = await apiJson('GET', '/api/scripts', undefined, { cache: 'no-store', quiet: true }).catch(() => null);
+  if (!j) return;
+  SCR.list = j.scripts; SCR.rev = j.rev; SCR.status = j.status; SCR.trusted = j.trusted; SCR.halted = j.halted;
+  if (!SCR.examples.length && j.examples) {
+    SCR.examples = j.examples;
+    $('scrExample').replaceChildren(...[['', 'Exemple…'], ...j.examples.map((x, i) => [String(i), x.name])].map(([v, n]) => { const o = document.createElement('option'); o.value = v; o.textContent = n; return o; }));
+  }
+  if (!SCR.dirty || force === true && !SCR.draft.length) { SCR.draft = JSON.parse(JSON.stringify(j.scripts)); SCR.dirty = false; }
+  SCR.sel = Math.min(SCR.sel, Math.max(0, SCR.draft.length - 1));
+  if (j.warnings && j.warnings.length) SCR.note = j.warnings.join(' · ');
+  renderScripts();
+}
+function showScripts(f) {
+  if (!f) return;
+  $('scrTrustBanner').hidden = !f.ask_trust;
+  if (f.ask_trust) $('scrTrustText').textContent = `Ce projet contient ${f.count} script${f.count > 1 ? 's' : ''}. Ils sont désactivés.`;
+  const shown = activeWs === 'creation' && !$('scrEdit').hidden;
+  if (f.rev !== SCR.rev || (shown && Date.now() - SCR.polled > 700) || f.halted !== SCR.halted) loadScripts();
+}
+function renderScripts() {
+  const rows = SCR.draft.map((sc, i) => {
+    const b = document.createElement('button');
+    const st = sc.id ? scrStatus(sc.id) : null;
+    const bad = st && (st.kind === 'error' || st.kind === 'budget');
+    b.className = 'scr-item' + (i === SCR.sel ? ' sel' : '') + (bad ? ' bad' : '');
+    b.dataset.scriptId = sc.id;
+    const n = document.createElement('span'); n.className = 'n'; n.textContent = sc.name || 'Sans nom';
+    const d = document.createElement('span'); d.className = 'd';
+    d.textContent = [SCR_TRIG[sc.trigger] || '', sc.trigger !== 'manual' && !sc.enabled ? 'inactif' : '', st ? st.state : 'non enregistré'].filter(Boolean).join(' · ');
+    b.append(n, d);
+    b.onclick = () => { SCR.sel = i; SCR.err = null; renderScripts(); };
+    return b;
+  });
+  if (!rows.length) { const e = document.createElement('div'); e.className = 'mac-empty'; e.textContent = 'Aucun script : « + Script » ou un exemple'; rows.push(e); }
+  $('scrList').replaceChildren(...rows);
+  const sc = scrCur();
+  $('scrFields').hidden = !sc;
+  if (sc) {
+    const put = (id, v, prop = 'value') => { const el = $(id); if (document.activeElement !== el && el[prop] !== v) el[prop] = v; };
+    put('scrName', sc.name); put('scrTrigger', sc.trigger); put('scrOn', !!sc.enabled, 'checked'); put('scrSource', sc.source);
+  }
+  const st = sc && sc.id ? scrStatus(sc.id) : null;
+  const lines = st ? st.console.slice() : [];
+  $('scrConsole').textContent = lines.join('\n') || (st ? `${st.state}${st.runs ? ` · ${st.runs} exécution${st.runs > 1 ? 's' : ''}, ${st.last_ms.toFixed(1).replace('.', ',')} ms` : ''}` : '');
+  $('scrConsole').scrollTop = $('scrConsole').scrollHeight;
+  const err = SCR.err || (st && st.last_error ? st.last_error : '');
+  $('scrErr').hidden = !err;
+  $('scrErr').textContent = err;
+  $('scrTrust').hidden = SCR.trusted || !SCR.list.length;
+  $('scrResume').hidden = !SCR.halted;
+  $('scrState').textContent = [SCR.dirty ? 'Modifications non enregistrées' : SCR.note, !SCR.trusted && SCR.list.length ? 'Scripts de ce projet désactivés' : '', SCR.halted ? 'Déclencheurs suspendus' : ''].filter(Boolean).join(' · ');
+}
+function scrTouched() { SCR.dirty = true; SCR.note = ''; markDirtyScripts(); }
+function markDirtyScripts() { $('scrState').textContent = 'Modifications non enregistrées'; }
+function scrFreeName(base) {
+  const taken = new Set(SCR.draft.map(s => s.name.toLowerCase()));
+  for (let n = 1; ; n++) { const name = (n === 1 ? base : `${base} ${n}`).slice(0, 32); if (!taken.has(name.toLowerCase())) return name; }
+}
+function scrAdd(sc) {
+  if (SCR.draft.length >= 32) { SCR.err = '32 scripts au plus'; renderScripts(); return; }
+  SCR.draft.push(sc); SCR.sel = SCR.draft.length - 1; SCR.err = null; scrTouched(); renderScripts();
+}
+$('scrAdd').onclick = () => { scrAdd({ id: 0, name: scrFreeName('Script'), source: '', trigger: 'manual', enabled: false }); $('scrName').focus(); };
+$('scrExample').onchange = () => {
+  const x = SCR.examples[+$('scrExample').value];
+  $('scrExample').value = '';
+  if (x) scrAdd({ id: 0, name: scrFreeName(x.name), source: x.source, trigger: x.trigger, enabled: false });
+};
+$('scrDel').onclick = () => {
+  if (!scrCur()) return;
+  SCR.draft.splice(SCR.sel, 1);
+  SCR.sel = Math.max(0, Math.min(SCR.sel, SCR.draft.length - 1)); SCR.err = null; scrTouched(); renderScripts();
+};
+$('scrName').oninput = () => { const sc = scrCur(); if (sc) { sc.name = $('scrName').value; scrTouched(); } };
+$('scrName').onchange = renderScripts;
+$('scrTrigger').onchange = () => { const sc = scrCur(); if (sc) { sc.trigger = $('scrTrigger').value; scrTouched(); renderScripts(); } };
+$('scrOn').onchange = () => { const sc = scrCur(); if (sc) { sc.enabled = $('scrOn').checked; scrTouched(); renderScripts(); } };
+$('scrSource').oninput = () => { const sc = scrCur(); if (sc) { sc.source = $('scrSource').value; scrTouched(); } };
+async function scrSave() {
+  const r = await api('POST', '/api/scripts', { scripts: SCR.draft }, { quiet: true });
+  if (r.ok) {
+    const j = await r.json();
+    SCR.dirty = false; SCR.err = null; SCR.draft = JSON.parse(JSON.stringify(j.scripts)); SCR.note = 'Scripts enregistrés';
+    SCR.list = j.scripts; SCR.rev = j.rev; SCR.status = j.status; SCR.trusted = j.trusted; SCR.halted = j.halted;
+    renderScripts();
+    return true;
+  }
+  const text = await r.text();
+  let e; try { e = JSON.parse(text); } catch { e = { message_fr: r.status === 423 ? LOCKED_FR : text }; }
+  const at = e.id ? SCR.draft.findIndex(s => s.id === e.id) : -1;
+  if (at >= 0) SCR.sel = at;
+  SCR.err = e.message_fr || 'Non enregistré';
+  renderScripts();
+  $('scrState').textContent = 'Non enregistré';
+  return false;
+}
+$('scrSave').onclick = scrSave;
+async function scrRun() {
+  if (SCR.dirty && !await scrSave()) return;
+  const sc = scrCur();
+  if (!sc || !sc.id) return;
+  SCR.err = null;
+  const r = await api('POST', '/api/scripts/run', { id: sc.id, source: 'ui' }, { quiet: true });
+  if (!r.ok) { SCR.err = await r.text(); renderScripts(); return; }
+  for (const ms of [120, 400, 1000]) setTimeout(loadScripts, ms);
+}
+$('scrRun').onclick = scrRun;
+$('scrStop').onclick = async () => {
+  const sc = scrCur();
+  if (!sc || !sc.id) return;
+  await api('POST', '/api/scripts/stop', { id: sc.id }, { quiet: true });
+  loadScripts();
+};
+$('scrCheck').onclick = async () => {
+  const sc = scrCur();
+  if (!sc) return;
+  const j = await apiJson('POST', '/api/scripts/check', { source: sc.source }, { quiet: true }).catch(() => null);
+  if (!j) return;
+  SCR.err = j.ok ? null : j.error.message_fr;
+  renderScripts();
+  if (j.ok) $('scrState').textContent = 'Aucune erreur';
+};
+async function scrApprove(yes) {
+  await api('POST', '/api/scripts/trust', { approve: yes }, { quiet: true });
+  $('scrTrustBanner').hidden = true;
+  loadScripts();
+}
+$('scrTrustYes').onclick = () => scrApprove(true);
+$('scrTrustNo').onclick = () => scrApprove(false);
+$('scrTrust').onclick = () => scrApprove(true);
+$('scrResume').onclick = async () => {
+  const r = await api('POST', '/api/scripts/run', {}, { quiet: true });
+  if (!r.ok) SCR.err = await r.text();
+  loadScripts();
 };
 $('cueMenuClose').onclick = () => { $('cueMenu').hidden = true; menuCue = null; };
 $('cueMenuRemove').onclick = async () => {
@@ -20477,7 +20697,7 @@ const figFrame = () => fe.fig.frames[fe.frame];
 const figStrokes = () => figFrame().strokes;
 
 function setCreationTab(name) {
-  if (name !== 'figures' && name !== 'media' && name !== 'program' && name !== 'macros' && name !== 'abstract' && name !== 'objects') name = 'look';
+  if (name !== 'figures' && name !== 'media' && name !== 'program' && name !== 'macros' && name !== 'scripts' && name !== 'abstract' && name !== 'objects') name = 'look';
   document.querySelectorAll('#creationTabs [data-ctab]').forEach(b => {
     b.classList.toggle('active', b.dataset.ctab === name);
     b.setAttribute('aria-selected', String(b.dataset.ctab === name));
@@ -20487,6 +20707,7 @@ function setCreationTab(name) {
   remember(CTAB_KEY, name);
   syncFigView();
   if (name === 'macros') setTimeout(() => { loadMacros(true); macLoadCommands(); }, 0);
+  if (name === 'scripts') setTimeout(() => loadScripts(true), 0);
 }
 function syncFigView() {
   const on = activeWs === 'creation' && $('workspace').dataset.ctab === 'figures';

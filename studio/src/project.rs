@@ -226,6 +226,10 @@ pub struct Project {
     /// Referenced presets (`pools.json`, T-422). Missing in projects saved
     /// before T-422: they open with none (and cues without references).
     pub pools: Vec<crate::pools::PoolPreset>,
+    /// Sandboxed scripts (`scripts.json`, T-458). Missing in projects saved
+    /// before T-458: they open with none. A project's scripts run nothing
+    /// until approved on this machine (`scripts_trust.json`).
+    pub scripts: Vec<crate::script::Script>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -261,6 +265,7 @@ impl Default for Project {
             macros: Vec::new(),
             show_list: Default::default(),
             pools: Vec::new(),
+            scripts: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -430,7 +435,7 @@ impl ProjectState {
 
 /// Files of the working copy: if any exists on a first start (no
 /// `recent.json` yet), they are imported into a *Sans titre* project.
-const WORKING_FILES: [&str; 18] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "objects", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json", "showlist.json", "pools.json"];
+const WORKING_FILES: [&str; 19] = ["scenes.json", "grid.json", "pages.json", "live.json", "layers.json", "lfos.json", "audio_routes.json", "palettes.json", "shows", "figures", "objects", "user_cues.json", "cuelists.json", "executors.json", "desks.json", "macros.json", "showlist.json", "pools.json", "scripts.json"];
 
 /// Called once at startup, before the engine runs. First start with data
 /// from before projects existed: it is copied into `projects/Sans
@@ -695,6 +700,7 @@ fn check(p: &mut Project) -> Result<()> {
     p.executors.sanitize();
     crate::desk::sanitize(&mut p.desks);
     crate::macros::sanitize(&mut p.macros);
+    crate::script::sanitize(&mut p.scripts);
     // A name that can't be a show's is dropped, not refused (T-444).
     p.show_list.items.retain(|i| valid_show_name(i.show.trim()));
     p.show_list.sanitize();
@@ -799,6 +805,7 @@ pub fn snapshot(s: &Shared) -> Project {
         macros: s.macros.list().to_vec(),
         show_list: s.showlist.list().clone(),
         pools: s.pools.list().to_vec(),
+        scripts: s.scripts.list().to_vec(),
         ..Project::default()
     }
 }
@@ -875,6 +882,9 @@ fn apply(s: &mut Shared, p: &mut Project, prep: Prepared) {
         None => s.cue_list.unload(),
     }
     s.macros.replace_in_memory(take(&mut p.macros));
+    // Scripts (T-458): every run ends; a list never approved here runs
+    // nothing until *Activer les scripts de ce projet*.
+    s.scripts.replace_in_memory(take(&mut p.scripts));
     s.showlist.replace_in_memory(take(&mut p.show_list));
     s.pools.replace_in_memory(p.pools.clone());
     crate::usercues::sync_presets_with(s, prep.user_cue_presets);
@@ -884,6 +894,7 @@ fn apply(s: &mut Shared, p: &mut Project, prep: Prepared) {
     // Lines checked on the registry just rebuilt (macros included): a bad
     // one disables its macro, with a warning the open report carries.
     crate::macros::revalidate(s);
+    crate::script::revalidate(s);
     // Saved below, not by the engine thread.
     s.live_dirty = false;
     s.mixer_dirty = false;
@@ -909,6 +920,7 @@ struct WorkingPaths {
     executors: Option<PathBuf>,
     desks: Option<PathBuf>,
     macros: Option<PathBuf>,
+    scripts: Option<PathBuf>,
     show_list: Option<PathBuf>,
     pools: Option<PathBuf>,
     live: PathBuf,
@@ -933,6 +945,7 @@ fn working_paths(s: &Shared, data_dir: &Path) -> WorkingPaths {
         executors: s.executors.path().map(Path::to_path_buf),
         desks: s.desks.path().map(Path::to_path_buf),
         macros: s.macros.path().map(Path::to_path_buf),
+        scripts: s.scripts.path().map(Path::to_path_buf),
         show_list: s.showlist.path().map(Path::to_path_buf),
         pools: s.pools.path().map(Path::to_path_buf),
         live: data_dir.join("live.json"),
@@ -971,6 +984,9 @@ fn persist(w: &WorkingPaths, p: &Project) -> Vec<String> {
     }
     if let Some(path) = &w.macros {
         put(path, serde_json::to_vec_pretty(&p.macros));
+    }
+    if let Some(path) = &w.scripts {
+        put(path, serde_json::to_vec_pretty(&p.scripts));
     }
     if let Some(path) = &w.show_list {
         put(path, serde_json::to_vec_pretty(&p.show_list));
@@ -1278,11 +1294,18 @@ fn swap_in(shared: &Mutex<Shared>, mut p: Project, want_state: bool, then: impl 
         let data_dir = s.project.data_dir.clone();
         let w = working_paths(&s, &data_dir);
         let mut notes = s.macros.warnings.clone();
+        notes.extend(s.scripts.warnings.iter().cloned());
+        // A project's scripts are off until approved here (T-458).
+        if s.scripts.ask_trust {
+            let n = s.scripts.list().len();
+            notes.push(format!("Ce projet contient {n} script{}. Ils sont désactivés jusqu'à « Activer les scripts de ce projet ».", if n > 1 { "s" } else { "" }));
+        }
         // References to presets the project doesn't hold (T-422): ignored
         // when rendering (the cues' own values), said once here.
         notes.extend(crate::pools::dangling(&p.grid, &p.timelines, &p.pools, &|cue| crate::pools::cue_label(&s, cue)));
         // The macros as revalidated (some may be disabled) go to the working copy.
         keep.macros = s.macros.list().to_vec();
+        keep.scripts = s.scripts.list().to_vec();
         let state = want_state.then(|| snapshot(&s));
         then(&mut s, &mut p);
         (w, notes, state)
@@ -2003,6 +2026,7 @@ mod tests {
         s.user_cues = crate::usercues::UserCueStore::load_or_create(dir.join("user_cues.json"));
         s.cue_lists = crate::cuelist::CueListStore::load_or_create(dir.join("cuelists.json"));
         s.macros = crate::macros::Macros::load(dir.join("macros.json"));
+        s.scripts = crate::script::Scripts::load(dir);
         s.showlist = crate::showlist::ShowListRunner::load_inline(dir.join("showlist.json"));
         s.pools = crate::pools::PoolStore::load_or_create(dir.join("pools.json"));
         s.project = ProjectState::load(dir);
@@ -2284,6 +2308,50 @@ mod tests {
         assert!(!m.enabled);
         assert_eq!(m.steps[0].command, "cue \"Plus là\" go");
         assert!(m.steps[1].command.is_empty() && !m.steps[1].enabled);
+        assert!(!s.gate.is_armed());
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T-458: scripts are saved in the project and come back; a project
+    /// without `scripts` opens with none; a list that was never approved on
+    /// this machine opens disabled, with the banner, until approved.
+    #[test]
+    fn scripts_are_saved_in_the_project_and_a_foreign_list_opens_disabled() {
+        use crate::script::{Script, ScriptTrigger};
+        let dir = temp_dir("scripts");
+        let shared = studio(&dir);
+        let sc = Script { id: 1, name: "Page".into(), source: "commande(\"page 2\")".into(), trigger: ScriptTrigger::EveryBar, enabled: true };
+        crate::script::set(&mut shared.lock().unwrap(), vec![sc.clone()]).unwrap();
+        assert!(modified(&shared), "a script is a change");
+        post(&shared, &dir, "save-as", json!({ "path": "Scripts" })).unwrap();
+        let path = dir.join("projects/Scripts.lsproj");
+        let saved = parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.scripts, vec![sc.clone()]);
+        crate::script::set(&mut shared.lock().unwrap(), Vec::new()).unwrap();
+        post(&shared, &dir, "open", json!({ "path": "Scripts.lsproj" })).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.scripts.list(), std::slice::from_ref(&sc));
+            assert!(s.controls.get("script.1.run").is_some());
+            // Written on this machine: approved.
+            assert!(s.scripts.trusted() && !s.scripts.ask_trust);
+        }
+        // Older project: no scripts.
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert!(old.scripts.is_empty());
+        // A list from elsewhere: disabled until approved.
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["scripts"][0]["source"] = json!("commande(\"page 3\")");
+        std::fs::write(&path, v.to_string()).unwrap();
+        let r = post(&shared, &dir, "open", json!({ "path": "Scripts.lsproj" })).unwrap();
+        let warnings = r["warnings"].as_array().cloned().unwrap_or_default();
+        assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("Ils sont désactivés")), "{r}");
+        let mut s = shared.lock().unwrap();
+        assert!(!s.scripts.trusted() && s.scripts.ask_trust);
+        assert!(crate::script::request_run(&mut s, 1, crate::controls::ControlSource::Ui).is_err());
+        crate::script::approve(&mut s, true);
+        assert!(s.scripts.trusted());
         assert!(!s.gate.is_armed());
         drop(s);
         let _ = std::fs::remove_dir_all(dir);

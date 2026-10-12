@@ -244,6 +244,27 @@ fn done(toks: &[Tok], used: usize) -> Result<(), CommandError> {
     toks.get(used).map_or(Ok(()), |t| Err(extra(t)))
 }
 
+/// What `parse` refuses whatever the registry holds: the arming and reset
+/// words, `transport.arm` and the safety settings (`safety.*` but
+/// `safety.estop`). The scripts (T-458) check it in their own thread
+/// before a line is even queued; the engine parses it again on the
+/// registry. `None` when the line may go on (it may still not parse).
+pub fn refusal(line: &str) -> Option<String> {
+    let toks = tokenize(line).ok()?;
+    if let Some(e) = toks.iter().find_map(refused_word) {
+        return Some(e.message_fr);
+    }
+    let first = toks.first().filter(|t| !t.quoted)?;
+    let id = fold(&first.text);
+    if id == "transport.arm" {
+        return Some(ARM_FR.to_string());
+    }
+    if id.starts_with("safety.") && id != "safety.estop" {
+        return Some(SAFETY_FR.to_string());
+    }
+    None
+}
+
 /// Reads one line. Nothing runs here: the result goes to `execute`.
 pub fn parse(line: &str, reg: &ControlRegistry, presets: &[Preset]) -> Result<Command, CommandError> {
     let len = line.chars().count();

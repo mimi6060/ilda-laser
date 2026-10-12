@@ -232,6 +232,10 @@ pub struct TempoClock {
     /// *Décalage de sortie* (s, T-246): only `effect_beat_at` reads it.
     output_offset_s: f64,
     downbeat: DownbeatFollow,
+    /// Beats the phase was moved by in total (nudges, resyncs, taps, the
+    /// followers' corrections): what changed `beat_at` other than time and
+    /// the BPM. The scripts' beat triggers ignore a crossing it explains.
+    phase_shift: f64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -278,6 +282,7 @@ impl Default for TempoClock {
             follow: Follow::default(),
             output_offset_s: 0.0,
             downbeat: DownbeatFollow::default(),
+            phase_shift: 0.0,
         }
     }
 }
@@ -437,17 +442,30 @@ impl TempoClock {
     pub fn resync(&mut self, t: f64) {
         let bpb = self.beats_per_bar as f64;
         let target = (self.beat_at(t) / bpb).round() * bpb;
-        self.origin_s = t - target * 60.0 / self.bpm;
+        self.move_origin(t - target * 60.0 / self.bpm);
     }
 
     /// Shift the phase by `beats` (positive = later beats arrive sooner).
     pub fn nudge(&mut self, beats: f64) {
-        self.origin_s -= beats * 60.0 / self.bpm;
+        self.move_origin(self.origin_s - beats * 60.0 / self.bpm);
     }
 
     fn align_to_whole_beat(&mut self, t: f64) {
         let beat = self.beat_at(t);
-        self.origin_s += (beat - beat.round()) * 60.0 / self.bpm;
+        self.move_origin(self.origin_s + (beat - beat.round()) * 60.0 / self.bpm);
+    }
+
+    /// Moves the phase (not the BPM), counted in `phase_shift`.
+    fn move_origin(&mut self, origin_s: f64) {
+        self.phase_shift += (self.origin_s - origin_s) * self.bpm / 60.0;
+        self.origin_s = origin_s;
+    }
+
+    /// Beats the phase was moved by since the clock started (a nudge of
+    /// +1/32 adds 1/32): `beat_at` minus this is what time and the BPM
+    /// alone made of it.
+    pub fn phase_shift(&self) -> f64 {
+        self.phase_shift
     }
 
     /// *Tempo auto* on: follow the detection (from `Waiting`); off: back to
@@ -522,7 +540,7 @@ impl TempoClock {
         let Some(d) = self.usable_downbeat() else { return false };
         let bpb = self.beats_per_bar as f64;
         let target = (self.beat_at(d.downbeat_t) / bpb).round() * bpb;
-        self.origin_s = d.downbeat_t - target * 60.0 / self.bpm;
+        self.move_origin(d.downbeat_t - target * 60.0 / self.bpm);
         true
     }
 
@@ -784,6 +802,24 @@ mod tests {
         let mut c = TempoClock::default();
         c.set_bpm_manual(128.0, 0.0);
         assert!((c.beat_at(3600.0) - 7680.0).abs() < 1e-6);
+    }
+
+    /// `phase_shift` counts the phase moves, not time or a BPM change: what
+    /// the scripts' beat triggers read to tell a jump from a passing beat.
+    #[test]
+    fn phase_shift_counts_nudges_and_resyncs_not_time_or_bpm() {
+        let mut c = TempoClock::default();
+        c.set_bpm_manual(120.0, 0.0);
+        c.set_bpm_manual(97.0, 3.3);
+        assert_eq!(c.phase_shift(), 0.0);
+        for _ in 0..32 {
+            c.nudge(-1.0 / 32.0);
+        }
+        assert!((c.phase_shift() + 1.0).abs() < 1e-9, "{}", c.phase_shift());
+        let (t, before) = (12.34, c.beat_at(12.34));
+        let shift = c.phase_shift();
+        c.resync(t);
+        assert!((c.phase_shift() - shift - (c.beat_at(t) - before)).abs() < 1e-9);
     }
 
     #[test]

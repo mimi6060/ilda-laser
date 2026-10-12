@@ -216,6 +216,8 @@ const LABELS = Object.freeze({
   'commun.oui': 'Oui',
   'commun.non': 'Non',
   'commun.annuler': 'Annuler',
+  'scripts.confiance.oui': 'Activer les scripts de ce projet',
+  'scripts.confiance.non': 'Laisser désactivés',
 });
 
 // The text of `key`, with its {parameters} filled in (see the head of the file).

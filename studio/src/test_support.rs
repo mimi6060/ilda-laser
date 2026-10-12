@@ -180,6 +180,7 @@ pub fn shared() -> Shared {
         executors: crate::executors::Executors::in_memory(),
         desks: crate::desk::Desks::in_memory(),
         macros: crate::macros::Macros::in_memory(),
+        scripts: crate::script::Scripts::in_memory(),
         showlist: crate::showlist::ShowListRunner::in_memory(),
         agenda: crate::agenda::AgendaRunner::in_memory(),
         remote: crate::remote::Remote::in_memory(),

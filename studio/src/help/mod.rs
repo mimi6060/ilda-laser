@@ -56,6 +56,7 @@ pub const PAGES: &[HelpPage] = &[
     HelpPage { slug: "creation-objets", title_fr: "Objets 3D", group_fr: "CRÉATION", body_html: include_str!("creation-objets.html") },
     HelpPage { slug: "creation-import",title_fr: "Importer un SVG ou une image", group_fr: "CRÉATION", body_html: include_str!("creation-import.html") },
     HelpPage { slug: "creation-macros", title_fr: "Macros", group_fr: "CRÉATION", body_html: include_str!("creation-macros.html") },
+    HelpPage { slug: "creation-scripts", title_fr: "Scripts", group_fr: "CRÉATION", body_html: include_str!("creation-scripts.html") },
     HelpPage { slug: "creation-mediatheque", title_fr: "Médiathèque ILDA", group_fr: "CRÉATION", body_html: include_str!("creation-mediatheque.html") },
     HelpPage { slug: "creation-evolutif", title_fr: "Cue évolutif", group_fr: "CRÉATION", body_html: include_str!("creation-evolutif.html") },
     HelpPage { slug: "reglages-avant-show", title_fr: "Avant le show", group_fr: "RÉGLAGES", body_html: include_str!("reglages-avant-show.html") },
