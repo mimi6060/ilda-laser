@@ -124,8 +124,13 @@ test('adding or moving is refused armed and in show mode; removing always runs',
   expect((await targets())[0].x).toBeCloseTo(0.2, 5);
   expect(await studio.post('/api/arm', { on: false })).toBe(200);
   expect(await studio.post('/api/lock', { show_mode: true })).toBe(200);
+  // Show mode (T-283) keeps only what plays on screen: RÉGLAGES is left for LIVE.
+  await expect(page.locator('body')).toHaveClass(/show-mode/);
+  await expect(page.locator('#mtAdd')).toBeHidden();
   expect(await studio.post('/api/targets', { items: [] })).toBe(423);
   expect(await studio.post('/api/lock', { show_mode: false })).toBe(200);
+  await expect(page.locator('body')).not.toHaveClass(/show-mode/);
+  await openTargets(page);
   await page.getByRole('button', { name: 'Supprimer la cible 1' }).click();
   await expect.poll(targets).toEqual([]);
   expect((await studio.state()).armed).toBe(false);
