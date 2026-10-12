@@ -22,7 +22,8 @@
 //!   only on a non-loopback interface (TTL 1); nothing joins a group.
 //! - Bounded: 8 consoles, 64 KiB per received message, 256 KiB of input
 //!   and 1 MiB of output per console (past it, its requests wait: TCP
-//!   back-pressure), 512 cached pictures.
+//!   back-pressure; no LSta / ELUp is queued and picture lists stop), 512
+//!   cached pictures. A console that stops reading for 5 s is closed.
 //! - Pictures are drawn on the "citp" thread, never the engine's.
 
 pub mod server;
@@ -120,6 +121,9 @@ pub struct CitpHub {
     announce_to: Mutex<Option<SocketAddr>>,
     /// Where the settings live: the seed of this studio's CITP UUID.
     seed: String,
+    /// Tests only: the longest the "citp" thread held the `Shared` lock (µs).
+    #[cfg(test)]
+    pub lock_held_us: std::sync::atomic::AtomicU64,
 }
 
 impl CitpHub {
@@ -147,6 +151,12 @@ impl CitpHub {
     pub fn announce_to(&self, to: SocketAddr) {
         assert!(to.ip().is_loopback(), "tests announce on the loopback only");
         *self.announce_to.lock().unwrap() = Some(to);
+    }
+
+    /// How long the "citp" thread just held the `Shared` lock.
+    fn held_lock(&self, _d: std::time::Duration) {
+        #[cfg(test)]
+        self.lock_held_us.fetch_max(_d.as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn announce_override(&self) -> Option<SocketAddr> {

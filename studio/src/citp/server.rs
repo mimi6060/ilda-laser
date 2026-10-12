@@ -22,8 +22,15 @@ pub const MAX_PEERS: usize = 8;
 pub const MAX_MESSAGE: usize = 64 * 1024;
 /// Bytes read and not yet parsed, per console.
 pub const MAX_INPUT: usize = 256 * 1024;
-/// Bytes waiting to go out, per console: past it its requests wait.
+/// Bytes waiting to go out, per console: past it its requests wait, no
+/// LSta / ELUp is queued and a picture list stops (the console asks
+/// again). One message may cross it, so the queue stays under
+/// `MAX_OUTPUT + MAX_MESSAGE`; a console past `HARD_OUTPUT` is closed.
 pub const MAX_OUTPUT: usize = 1024 * 1024;
+pub const HARD_OUTPUT: usize = 2 * MAX_OUTPUT;
+/// A console whose pending output has not moved for this long (hung,
+/// paused, half-open TCP) is closed, which frees its slot.
+pub const STALL: Duration = Duration::from_secs(5);
 /// Pictures kept.
 pub const CACHE_LEN: usize = 512;
 /// No CInf this long after the connection: a MSEX 1.0/1.1 console.
@@ -63,6 +70,11 @@ struct Conn {
     last: Version,
     sinf_sent: bool,
     last_lsta: Option<Instant>,
+    /// Last time its output was empty or a write took bytes.
+    drained: Instant,
+    /// An ELUp was dropped while over the cap: re-announce everything
+    /// once it drains.
+    missed_update: bool,
     closed: bool,
 }
 
@@ -74,6 +86,11 @@ impl Conn {
 
     fn send(&mut self, msg: Message, index: u16) {
         self.output.extend_from_slice(&wire::encode(&msg, index));
+    }
+
+    /// Room for more answers (or unsolicited messages).
+    fn has_room(&self) -> bool {
+        self.output.len() < MAX_OUTPUT
     }
 
     fn msex(&mut self, version: Version, body: Msex, index: u16) {
@@ -271,6 +288,8 @@ impl Server {
                 last: Version::V1_0,
                 sinf_sent: false,
                 last_lsta: None,
+                drained: now,
+                missed_update: false,
                 closed: false,
             };
             // §1.4: PNam right after the connection.
@@ -296,23 +315,47 @@ impl Server {
         let stale = self.indexed.is_none_or(|t| now.duration_since(t) >= REINDEX_EVERY);
         let raw = {
             let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            let held = Instant::now();
             let rev = s.grid.rev;
-            if self.index.is_some() && self.grid_rev == Some(rev) && !stale {
-                return;
+            let raw = if self.index.is_some() && self.grid_rev == Some(rev) && !stale {
+                None
+            } else {
+                self.grid_rev = Some(rev);
+                Some(MediaIndex::collect(&s))
+            };
+            drop(s);
+            self.hub.held_lock(held.elapsed());
+            match raw {
+                Some(r) => r,
+                None => return,
             }
-            self.grid_rev = Some(rev);
-            MediaIndex::collect(&s)
         };
         self.indexed = Some(now);
         let new = Arc::new(MediaIndex::from_raw(raw));
         if let Some(old) = self.index.replace(Arc::clone(&new)) {
             let ups = updates(&old, &new);
-            for c in self.conns.iter_mut().filter(|c| c.sinf_sent) {
+            for c in self.conns.iter_mut().filter(|c| c.sinf_sent && !ups.is_empty()) {
+                if !c.has_room() {
+                    // Not drained: what changed is told once it is.
+                    c.missed_update = true;
+                    continue;
+                }
                 let v = c.version();
-                for u in ups.iter().filter(|u| v != Version::V1_0 || u.library != wire::ROOT) {
+                for u in ups.iter().filter(|u| u.for_version(v)) {
                     c.msex(v, u.clone().into_msex(), 0);
                 }
             }
+        }
+    }
+
+    /// For a console that missed ELUps: everything may have changed.
+    fn resend_all(&mut self, i: usize) {
+        let Some(idx) = self.index.clone() else { return };
+        let c = &mut self.conns[i];
+        c.missed_update = false;
+        let v = c.version();
+        for u in everything(&idx).into_iter().filter(|u| u.for_version(v)) {
+            c.msex(v, u.into_msex(), 0);
         }
     }
 
@@ -402,8 +445,14 @@ impl Server {
             c.msex(Version::V1_0, Msex::SInf(info), 0);
             c.sinf_sent = true;
         }
+        let c = &self.conns[i];
+        if c.missed_update && c.has_room() && !c.closed {
+            self.resend_all(i);
+        }
         let c = &mut self.conns[i];
-        if c.sinf_sent && c.last_lsta.is_none_or(|t| now.duration_since(t) >= LSTA_EVERY) {
+        // LSta only once the previous answers are out: a console that
+        // does not read gets nothing more queued.
+        if c.sinf_sent && c.output.is_empty() && c.last_lsta.is_none_or(|t| now.duration_since(t) >= LSTA_EVERY) {
             c.last_lsta = Some(now);
             let v = c.version();
             c.msex(v, Msex::LSta, 0);
@@ -414,12 +463,19 @@ impl Server {
                 Ok(0) => c.closed = true,
                 Ok(n) => {
                     busy = true;
+                    c.drained = now;
                     c.output.drain(..n);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(_) => c.closed = true,
             }
+        }
+        if c.output.is_empty() {
+            c.drained = now;
+        } else if !c.closed && (c.output.len() > HARD_OUTPUT || now.duration_since(c.drained) >= STALL) {
+            log::info!("CITP : {} ne lit plus ({} octets en attente), connexion fermée", c.label(), c.output.len());
+            c.closed = true;
         }
         if c.closed {
             log::info!("CITP : console déconnectée : {}", c.label());
@@ -435,7 +491,8 @@ impl Server {
             versions: VERSIONS.iter().map(|v| v.word()).collect(),
             library_types: if v >= Version::V1_2 { 1 << (MEDIA - 1) } else { 0 },
             thumb_formats: vec![wire::FMT_PNG, wire::FMT_JPEG, wire::FMT_RGB8],
-            stream_formats: vec![wire::FMT_RGB8],
+            // Streams (GVSr / RqSt) are not served: none advertised.
+            stream_formats: Vec::new(),
             layers: Vec::new(),
         }
     }
@@ -529,6 +586,9 @@ impl Server {
                     .map(|(n, c)| (n as u8, c.clone()))
                     .collect();
                 for (n, cue) in cues {
+                    if !self.conns[i].has_room() {
+                        break; // the console asks again for the rest
+                    }
                     if let Some(t) = self.picture(&cue, &req, version) {
                         let (w, h, data) = (t.0, t.1, t.2.clone());
                         self.conns[i].msex(version, Msex::Ethn { library_type: MEDIA, library, element: n, format: req.format, width: w, height: h, data }, index);
@@ -541,8 +601,13 @@ impl Server {
                     return nack(self, *b"GELT");
                 }
                 let idx = self.index();
-                let ids: Vec<LibraryId> = libraries.unwrap_or_else(|| (0..idx.pages.len()).map(|n| wire::library_id(n as u8)).collect());
+                let mut ids: Vec<LibraryId> = libraries.unwrap_or_else(|| (0..idx.pages.len()).map(|n| wire::library_id(n as u8)).collect());
+                let mut seen = std::collections::HashSet::new();
+                ids.retain(|id| seen.insert(*id));
                 for library in ids {
+                    if !self.conns[i].has_room() {
+                        break; // the console asks again for the rest
+                    }
                     let Some(p) = page_of(&idx, library) else { continue };
                     let t = match idx.pages[p].cues.first() {
                         Some(cue) => self.picture(&cue.clone(), &req, version),
@@ -628,6 +693,17 @@ pub(crate) struct Update {
 }
 
 impl Update {
+    /// The per-page "all elements" ELUp of an added or removed page is for
+    /// MSEX 1.0 only (no root there); 1.1+ get the root ELUp instead,
+    /// never a message naming a page that is gone.
+    fn for_version(&self, v: Version) -> bool {
+        if v == Version::V1_0 {
+            self.library != wire::ROOT
+        } else {
+            self.library == wire::ROOT || self.flags & wire::UP_ALL_ELEMENTS == 0
+        }
+    }
+
     fn into_msex(self) -> Msex {
         Msex::Elup { library_type: MEDIA, library: self.library, flags: self.flags, elements: self.elements, libraries: self.libraries }
     }
@@ -675,6 +751,19 @@ pub(crate) fn updates(old: &MediaIndex, new: &MediaIndex) -> Vec<Update> {
     if root.flags != 0 {
         out.insert(0, root);
     }
+    out
+}
+
+/// "Everything may have changed": every page added/removed on the root
+/// (1.1+), every page's elements (1.0).
+fn everything(idx: &MediaIndex) -> Vec<Update> {
+    let mut root = Update { library: wire::ROOT, flags: wire::UP_LIBRARIES_ADDED_REMOVED, elements: [0; 32], libraries: [0; 32] };
+    let mut out = Vec::new();
+    for p in 0..idx.pages.len() {
+        wire::set_bit(&mut root.libraries, p as u8);
+        out.push(Update { library: wire::library_id(p as u8), flags: wire::UP_ELEMENTS_ADDED_REMOVED | wire::UP_ALL_ELEMENTS, elements: [0; 32], libraries: [0; 32] });
+    }
+    out.insert(0, root);
     out
 }
 
@@ -801,6 +890,7 @@ pub(crate) mod tests {
         let info = c.hello("Console test");
         assert_eq!((info.product.as_str(), info.library_types, info.uuid.len()), ("Laser Studio", 1, 36));
         assert!(info.thumb_formats.contains(&wire::FMT_RGB8) && info.versions.contains(&Version::V1_2.word()));
+        assert!(info.stream_formats.is_empty(), "no stream is served");
         // Listed under « Consoles connectées » with its PINF name.
         let deadline = Instant::now() + Duration::from_secs(20);
         while !hub.status().peers.iter().any(|p| p.starts_with("Console test (127.0.0.1:")) {
@@ -999,28 +1089,18 @@ pub(crate) mod tests {
             want += MediaIndex::build(&shared.lock().unwrap()).pages[p].cues.len();
             c.msex(Msex::Geth { req: req.clone(), library: wire::library_id(p as u8), elements: None });
         }
-        // Meanwhile the lock stays free: the engine's frame would not wait.
-        let mut worst = Duration::ZERO;
-        let probe = {
-            let shared = Arc::clone(&shared);
-            std::thread::spawn(move || {
-                for _ in 0..200 {
-                    let at = Instant::now();
-                    drop(shared.lock().unwrap());
-                    worst = worst.max(at.elapsed());
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                worst
-            })
-        };
+        let hub = Arc::clone(&shared.lock().unwrap().citp.hub);
         let mut got = 0;
         while got < want {
             if let (_, Message::Msex { body: Msex::Ethn { width: 128, height: 128, .. }, .. }) = c.read() {
                 got += 1;
             }
         }
-        let worst = probe.join().unwrap();
-        assert!(worst < Duration::from_millis(16), "lock held {worst:?}: a frame late");
+        // The citp thread's own hold time (not another thread's wait,
+        // which includes the scheduler): pictures are drawn off the lock,
+        // only the index copy happens under it.
+        let held = Duration::from_micros(hub.lock_held_us.load(Ordering::Relaxed));
+        assert!(held < Duration::from_millis(16), "lock held {held:?}: a frame late");
         running.store(false, Ordering::SeqCst);
         t.join().unwrap();
     }
@@ -1037,13 +1117,29 @@ pub(crate) mod tests {
             _ => None,
         });
         assert_eq!(libs.len(), 1);
+        // The same pictures (every cue of page 1) in 1.0 (BGR) and 1.1
+        // (RGB): channels swapped.
+        let cues = MediaIndex::build(&shared.lock().unwrap()).pages[0].cues.len() as u8;
         let req = ThumbRequest { format: wire::FMT_RGB8, width: 16, height: 16, flags: 0, library_type: MEDIA };
-        c.send(Message::Msex { version: Version::V1_1, body: Msex::Geth { req, library: wire::library_id(0), elements: Some(vec![0]) } });
-        let data = c.wait(|_, m| match m {
-            Message::Msex { version: Version::V1_1, body: Msex::Ethn { data, .. } } => Some(data),
-            _ => None,
-        });
-        assert_eq!(data.len(), 16 * 16 * 3);
+        let mut pictures = |v: Version| {
+            let mut all = Vec::new();
+            for n in 0..cues {
+                let i = c.send(Message::Msex { version: v, body: Msex::Geth { req: req.clone(), library: wire::library_id(0), elements: Some(vec![n]) } });
+                let data = c.wait(|h, m| match m {
+                    Message::Msex { version, body: Msex::Ethn { data, .. } } if version == v && h.index == i => Some(data),
+                    _ => None,
+                });
+                assert_eq!(data.len(), 16 * 16 * 3);
+                all.extend(data);
+            }
+            all
+        };
+        let bgr = pictures(Version::V1_0);
+        let rgb = pictures(Version::V1_1);
+        assert!(rgb.chunks(3).any(|p| p[0] != p[2]), "a coloured pixel to tell them apart");
+        for (b, r) in bgr.chunks(3).zip(rgb.chunks(3)) {
+            assert_eq!([b[2], b[1], b[0]], [r[0], r[1], r[2]]);
+        }
         running.store(false, Ordering::SeqCst);
         t.join().unwrap();
     }
@@ -1077,10 +1173,79 @@ pub(crate) mod tests {
         }
         let mut extra = Client::connect(&addr);
         let mut b = [0u8; 64];
-        assert!(matches!(extra.stream.read(&mut b), Ok(0) | Err(_)), "refused");
+        // Closed by the server: end of stream or a reset, not a timeout.
+        match extra.stream.read(&mut b) {
+            Ok(0) => {}
+            Err(e) => assert!(!matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut), "not refused: {e}"),
+            Ok(n) => panic!("accepted: {n} bytes"),
+        }
         assert_eq!(hub.status().peers.len(), MAX_PEERS);
         running.store(false, Ordering::SeqCst);
         t.join().unwrap();
+    }
+
+    #[test]
+    fn a_console_that_never_reads_stays_bounded_and_is_closed() {
+        let shared = Arc::new(Mutex::new(shared()));
+        let hub = Arc::clone(&shared.lock().unwrap().citp.hub);
+        super::super::update(&mut shared.lock().unwrap(), &json!({ "enabled": true, "interface": "127.0.0.1", "thumb_max_px": 256 })).unwrap();
+        // The server driven by hand, on a clock of our own.
+        let mut server = Server::new(Arc::clone(&shared), Arc::clone(&hub));
+        let mut now = Instant::now();
+        server.step(now);
+        let addr = hub.status().local.expect("listening");
+        let mut c = Client::connect(&addr);
+        // Asks for big pictures again and again, reads nothing.
+        c.msex(Msex::CInf { versions: vec![Version::V1_2.word()] });
+        let req = ThumbRequest { format: wire::FMT_RGB8, width: 256, height: 256, flags: 0, library_type: MEDIA };
+        for _ in 0..100 {
+            c.msex(Msex::Geth { req: req.clone(), library: wire::library_id(0), elements: None });
+            // One GELT naming the same page 256 times: answered once.
+            c.msex(Msex::Gelt { req: req.clone(), libraries: Some(vec![wire::library_id(0); 256]) });
+        }
+        let mut worst = 0;
+        for _ in 0..400 {
+            now += Duration::from_millis(5);
+            server.step(now);
+            worst = worst.max(server.conns.first().map_or(0, |c| c.output.len()));
+        }
+        assert_eq!(server.conns.len(), 1, "still connected before the stall delay");
+        assert!(worst >= MAX_OUTPUT / 2, "the queue filled ({worst} bytes): the test proves something");
+        assert!(worst <= MAX_OUTPUT + MAX_MESSAGE + 1024, "bounded output: {worst} bytes");
+        // Nothing drains for STALL: closed, its slot freed.
+        now += STALL;
+        server.step(now);
+        assert!(server.conns.is_empty() && hub.status().peers.is_empty(), "closed");
+        // And the slot is usable again.
+        let mut d = Client::connect(&addr);
+        for _ in 0..1000 {
+            now += Duration::from_millis(5);
+            server.step(now);
+            if !server.conns.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(server.conns.len(), 1);
+        server.step(now);
+        assert_eq!(d.read().1, Message::PNam { name: "Laser Studio".into() });
+        drop(c);
+    }
+
+    #[test]
+    fn removed_pages_are_named_to_msex_1_0_only() {
+        let s = shared();
+        let a = MediaIndex::build(&s);
+        let mut b = a.clone();
+        b.pages.pop();
+        let gone = wire::library_id(b.pages.len() as u8);
+        let u = updates(&a, &b);
+        assert!(u.iter().any(|u| u.library == gone && u.for_version(Version::V1_0)));
+        for v in [Version::V1_1, Version::V1_2] {
+            let sent: Vec<_> = u.iter().filter(|u| u.for_version(v)).collect();
+            assert!(sent.iter().all(|u| u.library != gone), "{v:?} names a gone page");
+            assert!(sent.iter().any(|u| u.library == wire::ROOT));
+        }
     }
 
     #[test]
