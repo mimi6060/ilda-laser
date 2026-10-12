@@ -145,6 +145,8 @@ export class Studio {
     // T-428: a tablet remote turned on in a test listens on loopback only,
     // never on this Mac's network interfaces.
     args.push('--remote-bind', '127.0.0.1');
+    // T-456: a main machine's sync listener, too, on loopback only.
+    args.push('--standby-bind', '127.0.0.1');
     if (this.opts.midiTest) args.push('--midi-test');
     // The fake output (T-401), unless PONK is the output or the spec wants none.
     const fakeOutput = this.opts.ponkPort === undefined && this.opts.output !== 'none';
@@ -158,7 +160,7 @@ export class Studio {
       if (!ponkPort || ponkPort === 5583) throw new Error(`refusing PONK port ${ponkPort}`);
       args.push('--ponk', `127.0.0.1:${ponkPort}`);
     }
-    if (args.includes('--device') || args[args.indexOf('--remote-bind') + 1] !== '127.0.0.1' || !args.includes('--test-devices') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
+    if (args.includes('--device') || args[args.indexOf('--remote-bind') + 1] !== '127.0.0.1' || args[args.indexOf('--standby-bind') + 1] !== '127.0.0.1' || !args.includes('--test-devices') || !args.includes('--no-midi') || !args.includes('--no-audio') || this.port === USER_PORT) throw new Error('refusing to start an unsafe studio');
     this.proc = spawn(STUDIO_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     recordStudio(this.proc.pid);
     this.proc.stdout!.on('data', d => { this.log += d; });

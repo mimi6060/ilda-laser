@@ -75,6 +75,8 @@ pub fn allowed(path: &str) -> bool {
         // opening and applying one are edits.
         "/api/zones/align/reject",
         "/api/zones/align/close",
+        // Taking over on a backup (T-456): the emergency path, never arms.
+        "/api/standby/takeover",
         // The external inputs gate (T-408) is a live switch, like arming,
         // and so is TC-IN (T-168); the timecode settings are an edit.
         "/api/external/gate",

@@ -382,6 +382,20 @@ impl TempoClock {
         self.origin_s = t - beat * 60.0 / self.bpm;
     }
 
+    /// T-456: a backup machine in standby follows the main machine's
+    /// clock: `bpm` and the meter, with beat `beat` at `t` (this machine's
+    /// clock). Manual source: nothing on this machine drives it meanwhile.
+    /// Values that are not numbers are ignored.
+    pub fn mirror(&mut self, bpm: f64, beats_per_bar: u8, beat: f64, t: f64) {
+        if !bpm.is_finite() || !beat.is_finite() || !t.is_finite() {
+            return;
+        }
+        self.bpm = bpm.clamp(MIN_BPM, MAX_BPM);
+        self.beats_per_bar = beats_per_bar.clamp(1, 16);
+        self.origin_s = t - beat * 60.0 / self.bpm;
+        self.set_source(TempoSource::Manual);
+    }
+
     /// Sets the source; leaving `Audio` stops following at once.
     fn set_source(&mut self, source: TempoSource) {
         if source != TempoSource::Audio {

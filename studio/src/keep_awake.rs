@@ -4,7 +4,9 @@
 //! the laser freeze, then go dark. While the laser is armed or a timeline
 //! plays, the studio holds a system power assertion that keeps the machine
 //! and the display awake; it lets go 5 s after both have stopped, so a
-//! short pause doesn't flip it on and off. Never held otherwise.
+//! short pause doesn't flip it on and off. A backup machine in standby
+//! (T-456) holds it too: if it sleeps, its main machine stops getting
+//! polls and disarms itself 3 s later. Never held otherwise.
 //!
 //! The system call is behind `SleepBlocker`: on macOS an IOKit power
 //! assertion (public API, `IOPMAssertionCreateWithName`), which the system
@@ -157,9 +159,10 @@ pub fn set_enabled(shared: &Mutex<Shared>, enabled: bool) -> Result<()> {
     crate::project::write_atomic(&path, &serde_json::to_vec_pretty(&prefs)?)
 }
 
-/// What the show wants right now: (setting on, armed or playing).
+/// What the show wants right now: (setting on, armed, playing or a
+/// backup in standby).
 fn wanted(s: &Shared) -> (bool, bool) {
-    (s.keep_awake.enabled, s.gate.is_armed() || s.timeline.is_playing())
+    (s.keep_awake.enabled, s.gate.is_armed() || s.timeline.is_playing() || s.standby.is_standby())
 }
 
 /// One pass of the thread: read under the lock, call the system without
@@ -420,6 +423,20 @@ mod tests {
         k.update(true, Instant::now());
         drop(k);
         assert_eq!(calls(&b), ["hold", "release"]);
+    }
+
+    #[test]
+    fn a_backup_in_standby_stays_awake() {
+        let shared = Mutex::new(test_support::shared());
+        let (mut k, _b) = fake();
+        let t0 = Instant::now();
+        shared.lock().unwrap().standby.settings.role = crate::standby::Role::Standby;
+        pass(&shared, &mut k, t0);
+        assert!(shared.lock().unwrap().keep_awake.held, "a sleeping backup would darken its main machine");
+        shared.lock().unwrap().standby.settings.role = crate::standby::Role::Standalone;
+        pass(&shared, &mut k, t0 + s(250));
+        pass(&shared, &mut k, t0 + s(5_500));
+        assert!(!shared.lock().unwrap().keep_awake.held);
     }
 
     #[test]

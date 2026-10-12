@@ -885,6 +885,13 @@
   #agendaPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); font-variant-numeric: tabular-nums; cursor: help; }
   #agendaPill.warn { color: var(--warn); border-color: var(--warn); }
   #agendaPill[hidden] { display: none; }
+  /* T-456: the backup machine: PRINCIPALE pill, SECOURS banner, takeover. */
+  #standbyPill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); font-variant-numeric: tabular-nums; cursor: pointer; }
+  #standbyPill.standby { color: #000; background: var(--warn); border-color: var(--warn); }
+  #standbyPill.warn { color: var(--warn); border-color: var(--warn); }
+  #standbyPill[hidden], #takeoverBtn[hidden] { display: none; }
+  #takeoverBtn { font-size: 11px; font-weight: 700; padding: 2px 10px; }
+  #sbCode { font-size: 40px; font-weight: 800; letter-spacing: .25em; font-variant-numeric: tabular-nums; margin: 6px 0; }
   .tl-bar { position: relative; height: 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; overflow: hidden; }
   .tl-bar .region { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .18; }
   #tlHead { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--accent); }
@@ -2152,6 +2159,9 @@
     <span id="sdPill" role="alert" hidden data-t="barre.sd_noir" data-t-fallback>SD : NOIR</span>
     <!-- Agenda (T-455): while it is on; it never arms. -->
     <span id="agendaPill" role="status" hidden data-t-title="barre.agenda.info" data-t="barre.agenda"></span>
+    <!-- Machine de secours (T-456): PRINCIPALE, or SECOURS — en veille and its takeover. -->
+    <button id="standbyPill" role="status" hidden data-t-title="barre.secours.info" data-t="barre.secours"></button>
+    <button id="takeoverBtn" hidden data-t-title="barre.relais.info" data-t="barre.relais"></button>
     <span id="audPill" role="status" hidden data-t-title="securite.public.info" data-t="securite.public" data-t-fallback>BALAYAGE PUBLIC</span>
     <div class="arm-line"><span id="armInfo" data-t="securite.desarme" data-t-fallback>Désarmé</span><span id="profilePill" role="status" data-t-title="securite.profil.info" hidden></span></div>
     <div class="leds">
@@ -4683,7 +4693,7 @@
         <summary>Général</summary>
         <label class="check"><input type="checkbox" id="kaEnabled"> Empêcher la mise en veille pendant un show</label>
         <div class="hint" id="kaStatus" role="status"></div>
-        <div class="hint">Tant que le laser est armé ou qu'une timeline joue, le Mac et son écran ne se mettent pas en veille ; la veille redevient possible 5 s après. Réglage de cette machine (pas du projet).</div>
+        <div class="hint">Tant que le laser est armé, qu'une timeline joue ou que cette machine est en Secours, le Mac et son écran ne se mettent pas en veille ; la veille redevient possible 5 s après. Réglage de cette machine (pas du projet).</div>
         <label for="thumbMode">Vignettes</label>
         <select id="thumbMode">
           <option value="animated">Animées</option>
@@ -4820,6 +4830,44 @@
         </div>
         <div id="remoteError" class="merr" role="alert"></div>
         <div class="hint">Désactivée à chaque démarrage. Le trafic n'est pas chiffré : n'utilisez ce port que sur le réseau local de la régie, jamais sur Internet. Un pad maintenu depuis une tablette qui se tait est relâché. Ce n'est pas un arrêt matériel : gardez l'arrêt d'urgence physique et la clé du projecteur à portée de main.</div>
+      </details>
+    </section>
+
+    <section data-help="reglages-entrees">
+      <details id="standbyPanel" data-search="Machine de secours principale reprise relais synchronisée">
+        <summary>Machine de secours</summary>
+        <div class="hint"><b>Une machine de secours en veille suit la principale mais ne peut ni armer ni connecter de sortie.</b> La reprise est manuelle (bouton <b>Prendre le relais</b>) et laisse le laser désarmé : l'opérateur l'arme ensuite lui-même. Rien de la synchronisation ne peut armer, réinitialiser un arrêt d'urgence ni changer la sécurité, la calibration ou les sorties : chaque machine garde les siens.</div>
+        <label for="sbRole">Rôle</label>
+        <select id="sbRole">
+          <option value="standalone">Autonome</option>
+          <option value="primary">Principale</option>
+          <option value="standby">Secours</option>
+        </select>
+        <label for="sbPeer">Adresse de l'autre machine</label>
+        <input type="text" id="sbPeer" placeholder="192.168.1.20:8093" spellcheck="false" autocomplete="off">
+        <label for="sbInterface">Interface réseau (machine principale)</label>
+        <select id="sbInterface"></select>
+        <label for="sbPort">Port de synchronisation</label>
+        <input type="number" id="sbPort" min="1024" max="65535" step="1" inputmode="numeric">
+        <label for="sbGrace">Délai avant reprise si la principale ne répond plus (s)</label>
+        <input type="number" id="sbGrace" min="1" max="60" step="1" inputmode="numeric">
+        <div id="sbPrimary" hidden>
+          <div class="hint">Code d'appairage à saisir sur la machine de secours</div>
+          <div id="sbCode" role="status" aria-live="polite">––––––</div>
+          <div class="hint" id="sbPaired"></div>
+        </div>
+        <div id="sbBackup" hidden>
+          <label for="sbPairCode">Code d'appairage (affiché sur la machine principale)</label>
+          <input type="text" id="sbPairCode" inputmode="numeric" maxlength="6" autocomplete="off">
+          <button id="sbPairBtn">Appairer</button>
+          <div id="sbMismatch" hidden>
+            <div class="hint sf-error" role="alert">Projet différent de la machine principale</div>
+            <button id="sbReceiveBtn">Recevoir le projet</button>
+          </div>
+        </div>
+        <div class="hint" id="sbLink" role="status"></div>
+        <div id="sbError" class="merr" role="alert"></div>
+        <div class="hint">Une principale appairée qui ne reçoit plus rien de sa machine de secours pendant 3 s se <b>désarme d'elle-même</b> (sortie gardée, images noires, avertissement) ; la reprise n'est permise qu'après ce délai plus une marge, jamais avant le délai réglé ici. Seul l'opérateur réarme. Les deux machines doivent connaître l'adresse de l'autre : une principale qui revient après une reprise voit l'autre machine principale et passe en <b>Autonome</b>, désarmée, sans sortie. Pas de bascule automatique. Une principale qui redémarre oublie l'appairage : tant que la machine de secours n'est pas appairée à nouveau, la principale ne se désarme pas d'elle-même. <b>Quitter, mettre en veille ou redémarrer la machine de secours désarme la principale 3 s plus tard</b> : gardez-la allumée et éveillée (en Secours, le studio empêche déjà la veille du Mac si « Empêcher la mise en veille pendant un show » (Général) est coché ; fermer le capot l'endort quand même). Pour jouer sans secours, passez la principale en <b>Autonome</b>, puis réarmez. Réarmer une principale dont la machine de secours est injoignable demande une confirmation : elle a peut-être pris le relais. Le trafic n'est pas chiffré : réseau de la régie uniquement, en filaire. Ce n'est pas un arrêt matériel : gardez l'arrêt d'urgence physique et la clé du projecteur à portée de main sur chaque machine.</div>
       </details>
     </section>
 
@@ -6061,7 +6109,14 @@ async function sendArm(body) {
   LINK.armSeqMin = +(r.headers.get('X-Frame-Seq') || 0);
   if (r.ok) { armed = (await r.json()).armed; $('armRefused').hidden = true; showArmed(); return; }
   if (r.status === 409) {
-    const { blocking } = await r.json();
+    const { blocking, confirm_backup_lost } = await r.json();
+    // Main machine whose backup is unreachable (T-456): the operator
+    // confirms the risk, then the request goes again, explicitly on.
+    if (confirm_backup_lost && !body.confirm_backup_lost) {
+      armed = false; showArmed();
+      if (confirm(confirm_backup_lost)) return sendArm({ on: true, source: body.source, confirm_backup_lost: true });
+      return;
+    }
     armed = false; showArmed();
     const box = $('armRefused');
     box.innerHTML = '<b>Armement impossible :</b><ul></ul>';
@@ -7200,6 +7255,7 @@ function applyState(f, at, pushed) {
   showTcOut(f.timeline && f.timeline.timecode_out);
   showShowList(f.showlist);
   showAgenda(f.agenda);
+  if (f.standby) showStandbyBar(f.standby);
   showSong(f.timeline, f.timeline_audio);
   tlOnState(f.timeline, f.tempo, at);
 }
@@ -19390,6 +19446,104 @@ $('dmxPill').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspa
 $('extPanel').addEventListener('toggle', () => { if ($('extPanel').open) { extKey = ''; loadExt(); } });
 setInterval(() => { if (!document.hidden) loadExt(); }, 1000);
 loadExt();
+// Machine de secours (T-456): the top bar from every frame (`f.standby`),
+// the panel from GET /api/standby. Taking over never arms the laser.
+let standby = null;
+let standbyBar = null;
+const BACKUP_LOST_FR = 'Machine de secours injoignable : laser désarmé — elle peut prendre le relais. Arrêt réel : matériel';
+function standbyLinkText(v) {
+  if (v.role === 'standby') {
+    if (!v.paired) return 'Non appairée : saisissez le code de la machine principale';
+    return v.link ? `Lien : établi — retard ${Math.round(v.lag_ms)} ms` : `Lien perdu depuis ${v.lost_s ?? 0} s`;
+  }
+  if (v.role === 'primary') {
+    if (v.conflict) return 'Une autre machine est principale : choisissez laquelle reste principale';
+    if (v.backup_lost) return BACKUP_LOST_FR;
+    return v.link ? 'Lien : établi' : 'Lien : aucune réponse de la machine de secours';
+  }
+  return v.demoted || 'Autonome : aucune synchronisation, aucun port ouvert';
+}
+function showStandbyBar(v) {
+  standbyBar = v;
+  const pill = $('standbyPill');
+  pill.hidden = v.role === 'standalone' && !v.demoted;
+  pill.classList.toggle('standby', v.role === 'standby');
+  pill.classList.toggle('warn', v.role !== 'standby' && (!!v.conflict || !!v.demoted || !!v.backup_lost));
+  pill.textContent = v.role === 'standby'
+    ? 'SECOURS — en veille' + (v.paired && !v.link ? ` · Lien perdu depuis ${v.lost_s ?? 0} s` : '') + (v.project_mismatch ? ' · Projet différent' : '')
+    : v.role === 'primary' ? 'PRINCIPALE' + (v.conflict ? ' · conflit' : '') + (v.backup_lost ? ' · Secours injoignable : désarmé' : '') : 'Autonome (relais pris ailleurs)';
+  pill.title = standbyLinkText(v) + ' — clic = RÉGLAGES › Machine de secours';
+  $('takeoverBtn').hidden = v.role !== 'standby';
+  document.body.classList.toggle('standby-mode', v.role === 'standby');
+}
+function showStandby(v) {
+  standby = v;
+  showStandbyBar(v);
+  if (document.activeElement !== $('sbRole')) $('sbRole').value = v.role;
+  if (document.activeElement !== $('sbPeer')) $('sbPeer').value = v.peer || '';
+  if (document.activeElement !== $('sbPort')) $('sbPort').value = v.bound_port || v.port;
+  if (document.activeElement !== $('sbGrace')) $('sbGrace').value = v.takeover_grace_s;
+  const ifs = ['', ...v.interfaces];
+  if (v.interface && !ifs.includes(v.interface)) ifs.push(v.interface);
+  const key = ifs.join(',');
+  if ($('sbInterface').dataset.key !== key && document.activeElement !== $('sbInterface')) {
+    $('sbInterface').dataset.key = key;
+    $('sbInterface').innerHTML = ifs.map(i => `<option value="${esc(i)}">${i ? esc(i) : 'Toutes les interfaces'}</option>`).join('');
+  }
+  if (document.activeElement !== $('sbInterface')) $('sbInterface').value = v.interface || '';
+  $('sbPrimary').hidden = v.role !== 'primary';
+  $('sbCode').textContent = v.code || '––––––';
+  $('sbPaired').textContent = v.standby_paired ? `Machine de secours appairée : ${v.paired_addr || ''}` : 'Aucune machine de secours appairée';
+  $('sbBackup').hidden = v.role !== 'standby';
+  $('sbMismatch').hidden = !v.project_mismatch;
+  $('sbLink').textContent = standbyLinkText(v) + (v.role === 'standby' && v.last_error ? ` (${v.last_error})` : '');
+}
+async function loadStandby() {
+  try { const r = await api('GET', '/api/standby', undefined, { quiet: true }); if (r.ok) showStandby(await r.json()); } catch { /* studio restarting */ }
+}
+async function standbyPost(path, body) {
+  try {
+    const r = await api('POST', path, body, { quiet: true });
+    const text = r.ok ? '' : await r.text();
+    $('sbError').textContent = text;
+    if (r.ok) showStandby(await r.json());
+    else loadStandby();
+    return r.ok ? null : text;
+  } catch { return 'studio injoignable'; }
+}
+$('sbRole').addEventListener('change', () => standbyPost('/api/standby', { role: $('sbRole').value }));
+$('sbPeer').addEventListener('change', () => standbyPost('/api/standby', { peer: $('sbPeer').value.trim() }));
+$('sbInterface').addEventListener('change', () => standbyPost('/api/standby', { interface: $('sbInterface').value }));
+$('sbPort').addEventListener('change', () => {
+  const port = Number($('sbPort').value);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) { $('sbError').textContent = 'Port : 1024 à 65535'; return; }
+  standbyPost('/api/standby', { port });
+});
+$('sbGrace').addEventListener('change', () => {
+  const g = Number($('sbGrace').value);
+  if (!Number.isInteger(g) || g < 1 || g > 60) { $('sbError').textContent = 'Délai de reprise : 1 à 60 s'; return; }
+  standbyPost('/api/standby', { takeover_grace_s: g });
+});
+$('sbPairBtn').onclick = () => standbyPost('/api/standby/pair', { code: $('sbPairCode').value.trim() }).then(e => { if (!e) $('sbPairCode').value = ''; });
+$('sbReceiveBtn').onclick = () => standbyPost('/api/standby/receive');
+// No shortcut: a voluntary action, always confirmed.
+$('takeoverBtn').onclick = async () => {
+  const v = standbyBar || {};
+  const held = v.peer_held_s == null ? 'La machine principale n\'a pas été vue tenant une sortie depuis l\'appairage.'
+    : `La machine principale tenait une sortie il y a ${v.peer_held_s} s${v.peer_holds_output ? ' (dernière réponse)' : ''}.`;
+  // Unpaired (a main machine restarted after a crash forgets the pairing)
+  // or no state since pairing: no lease, it never disarms by itself.
+  const unfenced = v.main_fenced ? '' : '\n\nAttention : cette machine de secours n\'est pas appairée avec la principale actuelle (non appairée : la principale ne se désarme pas d\'elle-même). Elle peut encore être armée : coupez sa sortie avant de continuer.';
+  if (!confirm('Prendre le relais ? Le laser restera désarmé : vous devrez l\'armer vous-même.\n\n'
+    + 'Vérifiez d\'abord que la machine principale est arrêtée ou que sa sortie est coupée (arrêt matériel).\n\n' + held + unfenced)) return;
+  const err = await standbyPost('/api/standby/takeover');
+  flash(err ? err : 'Cette machine est maintenant la principale. Laser désarmé.');
+};
+$('standbyPill').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('standbyPanel').open = true; $('standbyPanel').scrollIntoView({ block: 'nearest' }); loadStandby(); };
+setInterval(() => { if (!document.hidden && $('standbyPanel').open) loadStandby(); }, 1000);
+$('standbyPanel').addEventListener('toggle', () => { if ($('standbyPanel').open) loadStandby(); });
+loadStandby();
+
 // Télécommande (T-428): RÉGLAGES › Télécommande and the top-bar pill.
 // Off at every start; the code and the remotes are shown here only.
 let remote = null;

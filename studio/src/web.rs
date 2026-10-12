@@ -387,6 +387,13 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/remote", RouteClass::Read),
     ("POST", "/api/remote", RouteClass::Safety),
     ("POST", "/api/remote/kick", RouteClass::Safety),
+    // The backup machine (T-456): enabling sync, pairing, taking over and
+    // receiving the project are machine settings (local only).
+    ("GET", "/api/standby", RouteClass::Read),
+    ("POST", "/api/standby", RouteClass::Safety),
+    ("POST", "/api/standby/pair", RouteClass::Safety),
+    ("POST", "/api/standby/takeover", RouteClass::Safety),
+    ("POST", "/api/standby/receive", RouteClass::Safety),
 ];
 
 /// Whether `method path` is a route of the main UI (`ROUTES`).
@@ -868,6 +875,11 @@ fn route(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path: &
     if method == Method::Post && !crate::showmode::allowed(&path) && shared.lock().unwrap().show_mode.on {
         return locked();
     }
+    // A backup machine in standby (T-456): read only, but for the stops,
+    // arming (refused with its reason) and the machine's own settings.
+    if method == Method::Post && crate::standby::refused_in_standby(method.as_str(), &path) && shared.lock().unwrap().standby.is_standby() {
+        return text(423, crate::standby::STANDBY_BANNER_FR);
+    }
     // Safety lock (T-261): a Safety-class change other than a stop is
     // refused while locked; the `HANDLER` routes refuse only loosening.
     // While unlocked, it restarts the relock countdown.
@@ -1103,6 +1115,12 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             json_response(mgr.view(Instant::now()))
         }
         (Method::Post, "/api/outputs/select") => match body::<serde_json::Value>(request) {
+            // A backup in standby (T-456) connects nothing; going back to
+            // preview is always allowed.
+            Ok(req) if !req["id"].is_null() && shared.lock().unwrap().output_mgr.hold().is_some() => {
+                let reason = shared.lock().unwrap().output_mgr.hold().unwrap_or_default();
+                text(409, &reason)
+            }
             Ok(req) => select_output(&req, shared),
             Err(e) => e,
         },
@@ -1414,7 +1432,15 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     (None, Some(true)) => !s.gate.is_armed(),
                     _ => return text(400, "expected \"on\" or \"toggle\""),
                 };
-                let response = if want {
+                // A main machine whose backup is unreachable (T-456): 409
+                // `{armed, blocking, confirm_backup_lost}` without
+                // `"confirm_backup_lost": true`, sent only by the
+                // operator's confirmation in the page.
+                let confirm = req.get("confirm_backup_lost").and_then(|c| c.as_bool()).unwrap_or(false);
+                let backup_lost = if want { crate::standby::arm_check(&mut s, confirm, source).err() } else { None };
+                let response = if let Some(why) = backup_lost {
+                    with_status(json_response(json!({ "armed": false, "blocking": [why], "confirm_backup_lost": crate::standby::BACKUP_LOST_CONFIRM_FR })), 409)
+                } else if want {
                     match s.request_arm(source) {
                         Ok(()) => json_response(json!({ "armed": s.gate.is_armed() })),
                         Err(blocking) => with_status(json_response(json!({ "armed": false, "blocking": blocking })), 409),
@@ -3549,6 +3575,8 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        (Method::Get, "/api/standby") => json_response(crate::standby::view(&shared.lock().unwrap(), Instant::now())),
+        (Method::Post, "/api/standby") | (Method::Post, "/api/standby/pair") | (Method::Post, "/api/standby/takeover") | (Method::Post, "/api/standby/receive") => standby_route(request, shared, &path),
         // The copy to a second location (T-450): settings, and « Copier maintenant ».
         (Method::Get, "/api/backup") => json_response(shared.lock().unwrap().project.backup.view()),
         (Method::Post, "/api/backup") => match body::<crate::backup::SettingsRequest>(request) {
@@ -4830,6 +4858,36 @@ fn desks_view(s: &Shared) -> serde_json::Value {
     json!({ "tabs": s.desks.tabs, "rev": s.desks.rev, "max_tabs": crate::desk::MAX_TABS, "max_items": crate::desk::MAX_ITEMS })
 }
 
+/// `POST /api/standby[/pair|/takeover|/receive]` (T-456): from this Mac's
+/// interface only. Nothing here arms: a takeover leaves the laser disarmed.
+fn standby_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, path: &str) -> HttpResponse {
+    if !request.remote_addr().is_some_and(|a| a.ip().is_loopback()) {
+        return text(403, "la machine de secours ne se règle que depuis l'interface de ce Mac");
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PairBody {
+        code: String,
+    }
+    let done = match path {
+        "/api/standby" => match body::<crate::standby::SettingsRequest>(request) {
+            Ok(req) => crate::standby::set_settings(shared, req),
+            Err(e) => return e,
+        },
+        "/api/standby/pair" => match body::<PairBody>(request) {
+            Ok(req) => crate::standby::pair(shared, &req.code),
+            Err(e) => return e,
+        },
+        "/api/standby/takeover" => crate::standby::takeover(shared),
+        "/api/standby/receive" => crate::standby::receive_project(shared).map(|_| ()),
+        _ => return text(404, "not found"),
+    };
+    match done {
+        Ok(()) => json_response(crate::standby::view(&shared.lock().unwrap(), Instant::now())),
+        Err((code, msg)) => text(code, &msg),
+    }
+}
+
 /// `POST /api/remote` (T-428).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -5947,6 +6005,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     });
     // The show player (T-444).
     v["showlist"] = json!(crate::showlist::summary(s));
+    // The backup machine (T-456).
+    v["standby"] = crate::standby::summary(s, Instant::now());
     // The agenda (T-455): the next slot and the last runs.
     v["agenda"] = crate::agenda::state(s);
     // The DMX output (T-453): values by channel, haze panel, sending.
@@ -6184,6 +6244,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     });
     // The show player (T-444): the header's times, every frame.
     v["showlist"] = json!(crate::showlist::summary(s));
+    // The backup machine (T-456): the top bar's pill or banner.
+    v["standby"] = crate::standby::summary(s, Instant::now());
     // The agenda (T-455): the top bar's « Agenda actif — prochain 20:30 ».
     v["agenda"] = crate::agenda::summary(s);
     // The DMX output (T-453): values, haze panel, sending.
@@ -10519,6 +10581,34 @@ mod tests {
         save_calibration(&path, &Calibration::default());
         assert!(path.exists());
         crate::datafile::tests::check_kept(&dir, "calibration.json", true);
+    }
+
+    #[test]
+    fn arming_with_the_backup_unreachable_needs_the_confirmation_over_http() {
+        let t = TestServer::start(false);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.standby.settings.role = crate::standby::Role::Primary;
+            s.standby.state.lease_lost_at = Some(Instant::now());
+        }
+        for body in [r#"{"on":true}"#, r#"{"toggle":true,"source":"keyboard"}"#, r#"{"on":true,"confirm_backup_lost":false}"#] {
+            let (status, reply) = t.request("POST", "/api/arm", body);
+            assert_eq!(status, 409, "{body}: {reply}");
+            let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+            assert_eq!(v["armed"], false);
+            assert_eq!(v["blocking"][0], crate::standby::BACKUP_LOST_ARM_FR);
+            assert_eq!(v["confirm_backup_lost"], crate::standby::BACKUP_LOST_CONFIRM_FR);
+            assert!(!t.shared.lock().unwrap().gate.is_armed());
+        }
+        // Disarming never asks.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"confirm_backup_lost":true}"#).0, 200);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        // The backup polls again: no confirmation.
+        t.shared.lock().unwrap().standby.state.lease_lost_at = None;
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
     }
 
     /// T-264, invariant 6 for the HTTP API: random sequences of requests
