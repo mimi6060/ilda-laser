@@ -1057,7 +1057,7 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (Method::Get, "/api/audio/devices") => {
             let hub = Arc::clone(&shared.lock().unwrap().audio_in);
             // The capture thread's last scan: this handler never calls CoreAudio.
-            json_response(json!({ "capture": hub.capture_enabled(), "devices": hub.devices() }))
+            json_response(json!({ "capture": hub.capture_enabled(), "devices": hub.devices(), "system_audio": hub.system_support() }))
         }
         (Method::Get, "/api/audio/diagnostics") => {
             // T-242: read-only, from what the audio threads published (no
@@ -6690,6 +6690,9 @@ struct SimNative {
     devices: Option<Vec<crate::audio::capture::InputDevice>>,
     /// One analysis snapshot.
     snapshot: Option<SimSnapshot>,
+    /// *Son du Mac* (T-241) offered (`true`: a build with the feature on
+    /// a recent macOS) or not, for the e2e of the source list.
+    system_audio: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -6758,6 +6761,9 @@ impl SimNative {
         }
         if let Some(devices) = self.devices {
             hub.set_devices(devices);
+        }
+        if let Some(on) = self.system_audio {
+            hub.set_system_support(crate::audio::capture::SystemAudioSupport::from_parts(on, Some("15.0")));
         }
         if let Some(snapshot) = snapshot {
             hub.publish(snapshot);
@@ -8969,6 +8975,30 @@ mod tests {
         assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"state":"loud"}"#).0, 400);
         assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"snapshot":{"features":{"section":"chorus"}}}"#).0, 400);
         // Never arms anything.
+        assert_eq!(arm_status(&t)["armed"], false);
+    }
+
+    /// T-241: *Son du Mac* is listed with why it can't be chosen, refused
+    /// then, and accepted where it can run; never arms.
+    #[test]
+    fn son_du_mac_is_offered_only_where_it_can_run() {
+        let t = TestServer::start(false);
+        let read = |path: &str| -> serde_json::Value { serde_json::from_str(&t.request("GET", path, "").1).unwrap() };
+        let sys = &read("/api/audio/devices")["system_audio"];
+        assert_eq!(sys["compiled"].as_bool(), Some(cfg!(all(feature = "system-audio", target_os = "macos"))), "{sys}");
+        t.shared.lock().unwrap().test_hooks = true;
+        assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"system_audio":false}"#).0, 200);
+        let sys = read("/api/audio/devices")["system_audio"].clone();
+        assert_eq!(sys["available"], false);
+        assert!(sys["reason"].as_str().unwrap().contains("BlackHole"), "{sys}");
+        let (code, body) = t.request("POST", "/api/audio/config", r#"{"source":"system"}"#);
+        assert_eq!(code, 400, "{body}");
+        assert!(body.contains("Son du Mac indisponible"), "{body}");
+        assert_ne!(read("/api/audio/config")["source"], "system", "nothing changed");
+        assert_eq!(t.request("POST", "/api/test/native_audio", r#"{"system_audio":true}"#).0, 200);
+        assert_eq!(read("/api/audio/diagnostics")["system_audio"]["available"], true);
+        assert_eq!(t.request("POST", "/api/audio/config", r#"{"source":"system"}"#).0, 200);
+        assert_eq!(read("/api/audio/state")["source"], "system");
         assert_eq!(arm_status(&t)["armed"], false);
     }
 

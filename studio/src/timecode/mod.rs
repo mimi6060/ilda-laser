@@ -902,7 +902,7 @@ pub fn view(s: &mut Shared) -> Value {
     sync(s);
     let mut v = summary(s);
     let audio = s.audio_in.status();
-    let native = s.audio_in.config().0.source == crate::audio::AudioInputSource::Native;
+    let native = s.audio_in.config().0.source.captures();
     let net = s.netin.hub.effective();
     v["config"] = json!(s.timecode.config);
     v["show"] = json!(s.timecode.show);

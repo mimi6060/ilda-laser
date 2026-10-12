@@ -207,6 +207,9 @@ pub struct InputDevice {
 pub struct OpenRequest<'a> {
     /// `None` = the system default input.
     pub device: Option<&'a str>,
+    /// *Son du Mac* (T-241): what the Mac plays on its default output,
+    /// instead of an input (`device` is then ignored).
+    pub system: bool,
     pub buffer_frames: u32,
     pub counters: Arc<CaptureCounters>,
 }
@@ -231,7 +234,77 @@ pub enum OpenError {
     /// macOS refused the microphone (TCC). Often it doesn't say so and
     /// delivers silence instead (T-242).
     PermissionDenied(String),
+    /// *Son du Mac* asked of a build or a macOS that can't do it.
+    Unavailable(String),
     Failed(String),
+}
+
+/// What *Son du Mac* is called in the device line and the status.
+pub const SYSTEM_AUDIO_NAME: &str = "Son du Mac";
+/// Core Audio process taps record the output from macOS 14.2; `cpal`
+/// needs 14.6 for its loopback stream.
+pub const SYSTEM_AUDIO_MIN_MACOS: (u32, u32) = (14, 6);
+
+/// Whether *Son du Mac* (T-241) can be offered here: compiled in (Cargo
+/// feature `system-audio`, off by default) and a recent enough macOS.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SystemAudioSupport {
+    pub compiled: bool,
+    /// `ProductVersion` of the running macOS, if read.
+    pub macos: Option<String>,
+    pub available: bool,
+    /// Why not, in French (`None` when available).
+    pub reason: Option<String>,
+}
+
+impl SystemAudioSupport {
+    /// From what is known; pure, for the tests.
+    pub fn from_parts(compiled: bool, macos: Option<&str>) -> Self {
+        let (major, minor) = SYSTEM_AUDIO_MIN_MACOS;
+        let reason = if !compiled {
+            Some("non compilé dans ce studio (option system-audio) : passez par BlackHole".to_string())
+        } else {
+            match macos {
+                None => Some("version de macOS inconnue : passez par BlackHole".to_string()),
+                Some(v) if !version_at_least(v, (major, minor)) => Some(format!("macOS {v} : il faut macOS {major}.{minor} ou plus récent, sinon passez par BlackHole")),
+                Some(_) => None,
+            }
+        };
+        Self { compiled, macos: macos.map(str::to_string), available: reason.is_none(), reason }
+    }
+
+    /// This build on this Mac. Reads one small system file; called once
+    /// at start-up, never from the audio callback.
+    pub fn detect() -> Self {
+        Self::from_parts(cfg!(all(feature = "system-audio", target_os = "macos")), macos_version().as_deref())
+    }
+}
+
+/// `"14.6.1"` ≥ (14, 6)? Missing parts count as 0; garbage is too old.
+pub fn version_at_least(version: &str, (major, minor): (u32, u32)) -> bool {
+    let mut parts = version.trim().split('.').map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next()) {
+        (Some(Ok(a)), None) => (a, 0) >= (major, minor),
+        (Some(Ok(a)), Some(Ok(b))) => (a, b) >= (major, minor),
+        _ => false,
+    }
+}
+
+/// The `ProductVersion` string of a `SystemVersion.plist`.
+pub fn plist_product_version(plist: &str) -> Option<String> {
+    let after = &plist[plist.find("<key>ProductVersion</key>")? + "<key>ProductVersion</key>".len()..];
+    let start = after.find("<string>")? + "<string>".len();
+    let end = after[start..].find("</string>")?;
+    Some(after[start..start + end].trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// The running macOS version (`None` elsewhere or if unreadable).
+fn macos_version() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let text = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").ok()?;
+    plist_product_version(&text)
 }
 
 /// Where samples come from: the Mac's inputs (`CpalSource`) or, in tests,
@@ -312,6 +385,9 @@ impl SampleSource for CpalSource {
     }
 
     fn open(&mut self, req: &OpenRequest, make_sink: &mut dyn FnMut(u32, u16) -> Sink) -> Result<Opened, OpenError> {
+        if req.system {
+            return self.open_system(req, make_sink);
+        }
         let device = match req.device {
             None => self.host.default_input_device().ok_or(OpenError::NoDevice)?,
             Some(want) => self
@@ -354,6 +430,51 @@ impl SampleSource for CpalSource {
     }
 }
 
+impl CpalSource {
+    /// *Son du Mac* (T-241): `cpal` records an output device by creating a
+    /// private Core Audio process tap and a private aggregate device
+    /// around it (public Apple API, macOS 14.6+), both destroyed when the
+    /// stream is dropped. Nothing is changed in the Mac's audio settings:
+    /// the stream uses the output's own format, the tap leaves the sound
+    /// going to the speakers, and nothing is recorded to disk.
+    #[cfg(all(feature = "system-audio", target_os = "macos"))]
+    fn open_system(&mut self, req: &OpenRequest, make_sink: &mut dyn FnMut(u32, u16) -> Sink) -> Result<Opened, OpenError> {
+        let support = SystemAudioSupport::detect();
+        if let Some(reason) = support.reason {
+            return Err(OpenError::Unavailable(reason));
+        }
+        let device = self.host.default_output_device().ok_or(OpenError::NoDevice)?;
+        let output = device_name(&device).unwrap_or_else(|| "?".into());
+        // `cpal` opens a device's own inputs when it has some (an audio
+        // interface used as the output): that would be its microphones,
+        // not what the Mac plays. Say so instead of capturing the wrong thing.
+        if device.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false) {
+            return Err(OpenError::Unavailable(format!("la sortie « {output} » a aussi des entrées : le studio ne peut pas en isoler le son du Mac ; passez par BlackHole")));
+        }
+        let supported = device.default_output_config().map_err(|e| open_error(e, &output))?;
+        let mut config = supported.config();
+        config.buffer_size = cpal::BufferSize::Default;
+        let sink = make_sink(config.sample_rate, config.channels);
+        let counters = Arc::clone(&req.counters);
+        let built = match supported.sample_format() {
+            cpal::SampleFormat::F32 => build::<f32>(&device, config, sink, counters),
+            cpal::SampleFormat::I16 => build::<i16>(&device, config, sink, counters),
+            cpal::SampleFormat::I32 => build::<i32>(&device, config, sink, counters),
+            cpal::SampleFormat::U16 => build::<u16>(&device, config, sink, counters),
+            other => return Err(OpenError::Failed(format!("format d'échantillon non géré : {other}"))),
+        };
+        let stream = built.map_err(|e| open_error(e, SYSTEM_AUDIO_NAME))?;
+        stream.play().map_err(|e| open_error(e, SYSTEM_AUDIO_NAME))?;
+        Ok(Opened { stream: Box::new(stream), device: format!("{SYSTEM_AUDIO_NAME} ({output})"), sample_rate: config.sample_rate, channels: config.channels })
+    }
+
+    /// Without the `system-audio` feature (the default build), or off macOS.
+    #[cfg(not(all(feature = "system-audio", target_os = "macos")))]
+    fn open_system(&mut self, _req: &OpenRequest, _make_sink: &mut dyn FnMut(u32, u16) -> Sink) -> Result<Opened, OpenError> {
+        Err(OpenError::Unavailable(SystemAudioSupport::detect().reason.unwrap_or_default()))
+    }
+}
+
 #[cfg(test)]
 pub mod testing {
     //! A fake `SampleSource` for tests: no audio device is ever touched.
@@ -370,6 +491,9 @@ pub mod testing {
         /// Next `open` is refused with this.
         pub refuse: Option<OpenError>,
         pub opens: u32,
+        /// *Son du Mac*: the default output's name; `None` refuses it as
+        /// unavailable (a build without the feature).
+        pub system_output: Option<String>,
         /// The open stream's sink and counters, and which device it is.
         pub live: Option<(Sink, Arc<CaptureCounters>, String)>,
     }
@@ -457,6 +581,10 @@ pub mod testing {
                 return Err(e);
             }
             let name = match req.device {
+                _ if req.system => match &s.system_output {
+                    Some(out) => format!("{SYSTEM_AUDIO_NAME} ({out})"),
+                    None => return Err(OpenError::Unavailable("non compilé".into())),
+                },
                 None => s.default.clone().ok_or(OpenError::NoDevice)?,
                 Some(want) if s.devices.iter().any(|d| d == want) => want.to_string(),
                 Some(want) => return Err(OpenError::NotFound(want.to_string())),
@@ -645,6 +773,79 @@ pub(crate) mod tests {
         assert_eq!(fault_of(cpal::ErrorKind::Xrun), StreamFault::Xrun);
     }
 
+    #[test]
+    fn macos_versions_compare_by_major_then_minor() {
+        for (v, ok) in [("14.6", true), ("14.6.1", true), ("15", true), ("26.0", true), ("14.5", false), ("14.2.1", false), ("13.7", false), ("14", false), ("", false), ("abc", false), ("14.x", false)] {
+            assert_eq!(version_at_least(v, SYSTEM_AUDIO_MIN_MACOS), ok, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn the_product_version_is_read_from_the_system_plist() {
+        let plist = "<dict>\n\t<key>BuildID</key>\n\t<string>X</string>\n\t<key>ProductVersion</key>\n\t<string>15.3.1</string>\n</dict>";
+        assert_eq!(plist_product_version(plist).as_deref(), Some("15.3.1"));
+        assert_eq!(plist_product_version("<dict></dict>"), None);
+        assert_eq!(plist_product_version("<key>ProductVersion</key><string> </string>"), None);
+    }
+
+    #[test]
+    fn son_du_mac_needs_the_feature_and_a_recent_macos() {
+        let off = SystemAudioSupport::from_parts(false, Some("15.0"));
+        assert!(!off.available && off.reason.as_deref().unwrap().contains("BlackHole"), "{off:?}");
+        let old = SystemAudioSupport::from_parts(true, Some("14.5"));
+        assert!(!old.available && old.reason.as_deref().unwrap().contains("14.6"), "{old:?}");
+        assert!(!SystemAudioSupport::from_parts(true, None).available);
+        let ok = SystemAudioSupport::from_parts(true, Some("14.6"));
+        assert!(ok.available && ok.reason.is_none(), "{ok:?}");
+        // This build: the default one never offers it.
+        let here = SystemAudioSupport::detect();
+        assert_eq!(here.compiled, cfg!(all(feature = "system-audio", target_os = "macos")));
+        if !here.compiled {
+            assert!(!here.available);
+        }
+    }
+
+    #[test]
+    fn without_the_feature_opening_son_du_mac_is_refused_before_any_device() {
+        if cfg!(all(feature = "system-audio", target_os = "macos")) {
+            return; // would open the real output
+        }
+        let counters = Arc::new(CaptureCounters::default());
+        let req = OpenRequest { device: None, system: true, buffer_frames: 256, counters };
+        let mut sinks = 0;
+        let r = CpalSource::new().open(&req, &mut |rate, ch| {
+            sinks += 1;
+            ring(rate, ch, Arc::new(CaptureCounters::default()), Instant::now()).0
+        });
+        assert!(matches!(r, Err(OpenError::Unavailable(ref m)) if m.contains("BlackHole")), "{:?}", r.err());
+        assert_eq!(sinks, 0, "no stream was built");
+    }
+
+    /// Real hardware (T-241): half a second of what the Mac plays. Play
+    /// music first; macOS may ask for the system audio permission.
+    /// `cargo test -p laser-studio --features system-audio real_system -- --ignored --nocapture`
+    #[cfg(all(feature = "system-audio", target_os = "macos"))]
+    #[test]
+    #[ignore]
+    fn real_system_audio() {
+        let counters = Arc::new(CaptureCounters::default());
+        let mut consumer = None;
+        let req = OpenRequest { device: None, system: true, buffer_frames: 256, counters: Arc::clone(&counters) };
+        let opened = CpalSource::new()
+            .open(&req, &mut |rate, ch| {
+                let (sink, c) = ring(rate, ch, Arc::clone(&counters), Instant::now());
+                consumer = Some(c);
+                sink
+            })
+            .expect("open the Mac's sound");
+        println!("opened {} at {} Hz, {} ch", opened.device, opened.sample_rate, opened.channels);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let samples = drain(consumer.as_mut().unwrap());
+        let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("{} samples, peak {peak}", samples.len());
+        assert!(!samples.is_empty());
+    }
+
     /// Real hardware: lists the Mac's inputs and records half a second
     /// from the default one. May trigger the microphone permission prompt.
     /// `cargo test -p laser-studio real_input -- --ignored --nocapture`
@@ -655,7 +856,7 @@ pub(crate) mod tests {
         println!("inputs: {:?}", src.devices().unwrap());
         let counters = Arc::new(CaptureCounters::default());
         let mut consumer = None;
-        let req = OpenRequest { device: None, buffer_frames: 256, counters: Arc::clone(&counters) };
+        let req = OpenRequest { device: None, system: false, buffer_frames: 256, counters: Arc::clone(&counters) };
         let opened = src
             .open(&req, &mut |rate, ch| {
                 let (sink, c) = ring(rate, ch, Arc::clone(&counters), Instant::now());

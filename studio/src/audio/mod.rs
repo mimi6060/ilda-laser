@@ -148,8 +148,20 @@ pub enum AudioInputSource {
     /// operator chooses the native source.
     #[default]
     Browser,
+    /// *Son du Mac* (T-241): the studio's own capture of what the Mac
+    /// plays (a Core Audio process tap on the default output). Only in a
+    /// build with the `system-audio` feature on macOS 14.6+; otherwise it
+    /// is refused, and a saved one reports itself unavailable.
+    System,
     /// No audio: the looks don't react.
     None,
+}
+
+impl AudioInputSource {
+    /// The studio's own capture runs (an input, or the Mac's sound).
+    pub fn captures(self) -> bool {
+        matches!(self, AudioInputSource::Native | AudioInputSource::System)
+    }
 }
 
 /// Saved in `<data-dir>/audio.json`. Machine settings, not part of a
@@ -220,7 +232,7 @@ impl AudioConfig {
         let mut c = self.clone();
         let obj = patch.as_object().context("objet JSON attendu")?;
         if let Some(v) = obj.get("source") {
-            c.source = serde_json::from_value(v.clone()).context("source : native, browser ou none")?;
+            c.source = serde_json::from_value(v.clone()).context("source : native, system, browser ou none")?;
         }
         if let Some(v) = obj.get("device") {
             c.device = match v {
@@ -381,6 +393,8 @@ pub struct AudioHub {
     /// The newest LTC frame the analysis thread decoded, its studio time,
     /// and a count bumped on each one.
     ltc: Mutex<(u64, Option<(crate::timecode::ltc::LtcFrame, f64)>)>,
+    /// Whether *Son du Mac* can be chosen (T-241): read once at start-up.
+    system: Mutex<capture::SystemAudioSupport>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -397,7 +411,7 @@ impl AudioHub {
         } else {
             CaptureStatus { state: CaptureState::Disabled, message: "Capture audio désactivée (--no-audio)".into(), ..Default::default() }
         };
-        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new(), last_error: None }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }), guide: Mutex::new((None, 0)), ltc_tap: Arc::new(AtomicI32::new(-1)), ltc: Mutex::new((0, None)) }
+        Self { epoch, capture_enabled, path, config: Mutex::new((config.sanitized(), 0)), info: Mutex::new(Info { status, devices: Vec::new(), last_error: None }), snapshot: Mutex::new(None), new_tracks: AtomicU64::new(0), release: Mutex::new(Release { out: AudioFeatures::default(), active: Active::None, at: None }), guide: Mutex::new((None, 0)), ltc_tap: Arc::new(AtomicI32::new(-1)), ltc: Mutex::new((0, None)), system: Mutex::new(capture::SystemAudioSupport::detect()) }
     }
 
     /// From `<data_dir>/audio.json`, then `--audio-device` (for this run).
@@ -429,11 +443,28 @@ impl AudioHub {
         lock(&self.config).clone()
     }
 
+    /// Whether *Son du Mac* can be chosen here, and why not.
+    pub fn system_support(&self) -> capture::SystemAudioSupport {
+        lock(&self.system).clone()
+    }
+
+    /// Tests and `POST /api/test/native_audio` (`--test-hooks`) only.
+    pub fn set_system_support(&self, support: capture::SystemAudioSupport) {
+        *lock(&self.system) = support;
+    }
+
     /// Saves and applies a new config; the capture thread picks it up
     /// within 50 ms (the generation only moves when the input must be
     /// reopened), the analysis thread at its next hop.
+    /// Choosing *Son du Mac* where it can't run is refused (one already
+    /// saved stays, and says it is unavailable).
     pub fn set_config(&self, config: AudioConfig) -> Result<AudioConfig> {
         let config = config.sanitized();
+        if config.source == AudioInputSource::System && lock(&self.config).0.source != AudioInputSource::System {
+            if let Some(why) = self.system_support().reason {
+                anyhow::bail!("Son du Mac indisponible : {why}");
+            }
+        }
         if let Some(path) = &self.path {
             let text = serde_json::to_string_pretty(&config)?;
             crate::datafile::replace(path, text.as_bytes()).with_context(|| format!("failed to write {}", path.display()))?;
@@ -523,7 +554,7 @@ impl AudioHub {
     /// The latest native tempo estimate, if fresh and the native input is
     /// the audio source (what *Tempo auto* follows).
     pub fn fresh_tempo(&self, now: Instant) -> Option<TempoEstimate> {
-        if lock(&self.config).0.source != AudioInputSource::Native {
+        if !lock(&self.config).0.source.captures() {
             return None;
         }
         self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE).map(|n| n.tempo)
@@ -531,7 +562,7 @@ impl AudioHub {
 
     /// The latest native downbeat detection, fresh like `fresh_tempo` (T-235).
     pub fn fresh_downbeat(&self, now: Instant) -> Option<downbeat::DownbeatDetection> {
-        if lock(&self.config).0.source != AudioInputSource::Native {
+        if !lock(&self.config).0.source.captures() {
             return None;
         }
         self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE).map(|n| n.downbeat)
@@ -582,7 +613,7 @@ impl AudioHub {
         let source = lock(&self.config).0.source;
         let browser_ok = fresh(browser_at);
         match source {
-            AudioInputSource::Native => match native {
+            AudioInputSource::Native | AudioInputSource::System => match native {
                 Some(n) if fresh(n.at) => (n.features, Active::Native),
                 _ if browser_ok => (browser, Active::Browser),
                 Some(n) => (n.features.neutral(), Active::None),
@@ -629,7 +660,7 @@ impl AudioHub {
     /// when nothing fresh is captured (the *Navigateur* source has none).
     pub fn spectrum_view(&self, now: Instant) -> Value {
         let source = lock(&self.config).0.source;
-        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && source == AudioInputSource::Native);
+        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && source.captures());
         json!({
             "bands": SPECTRUM_BANDS,
             "lo_hz": 20.0,
@@ -644,15 +675,15 @@ impl AudioHub {
     /// first, then the fresh analysis' verdict. `None` for another source,
     /// or with nothing to judge yet.
     fn health(&self, source: AudioInputSource, status: &CaptureStatus, native: Option<&NativeSnapshot>) -> Option<health::InputHealth> {
-        if source != AudioInputSource::Native {
+        if !source.captures() {
             return None;
         }
         health::combine(status.state, native.map(|n| n.health))
     }
 
-    fn health_view(h: Option<health::InputHealth>) -> Value {
+    fn health_view(h: Option<health::InputHealth>, source: AudioInputSource) -> Value {
         match h {
-            Some(h) => json!({ "state": h, "label": h.label(), "tone": h.tone(), "help": h.help() }),
+            Some(h) => json!({ "state": h, "label": h.label(), "tone": h.tone(), "help": h.help_for(source) }),
             None => Value::Null,
         }
     }
@@ -662,7 +693,7 @@ impl AudioHub {
     pub fn diagnostics(&self, now: Instant) -> Value {
         let (config, _) = self.config();
         let status = self.status();
-        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && config.source == AudioInputSource::Native);
+        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && config.source.captures());
         let health = self.health(config.source, &status, native.as_ref());
         let running = status.state == CaptureState::Running;
         json!({
@@ -680,7 +711,8 @@ impl AudioHub {
             "level_db": native.map(|n| n.rms_db),
             "peak_db": native.map(|n| n.peak_db),
             "signal_present": running && health.is_some_and(|h| h.signal_present()),
-            "health": Self::health_view(health),
+            "health": Self::health_view(health, config.source),
+            "system_audio": self.system_support(),
             "last_error": self.last_error(now).map(|(message, ago)| json!({ "message": message, "ago_s": ago.as_secs_f64() })),
         })
     }
@@ -690,7 +722,7 @@ impl AudioHub {
         let (features, active) = self.features_view(browser, browser_at, now);
         let (config, _) = self.config();
         let status = self.status();
-        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && config.source == AudioInputSource::Native);
+        let native = self.snapshot().filter(|n| now.saturating_duration_since(n.at) < STALE && config.source.captures());
         let stats = CaptureStats {
             sample_rate: status.sample_rate,
             channels: status.channels,
@@ -729,7 +761,7 @@ impl AudioHub {
             "stats": stats,
             // Input health (T-242): state, French label and help, colour;
             // null for another source or with nothing to judge yet.
-            "health": Self::health_view(self.health(config.source, &status, native.as_ref())),
+            "health": Self::health_view(self.health(config.source, &status, native.as_ref()), config.source),
             // What the engine uses (T-237), whichever the source: the legacy
             // three, then the whole snapshot. `bands` always present, 0..1.
             "level": features.level,
@@ -763,6 +795,33 @@ mod tests {
         let tempo = TempoEstimate { bpm: 128.0, confidence: 0.8, beat_time: 0.9, next_beat: 1.37, state: bpm::DetectState::Locked };
         let sections = SectionState { section: Section::Buildup, buildup: 0.4, drop: 2, ..Default::default() };
         NativeSnapshot { features: feat(level, beat), rms_db: -20.0, peak_db: -10.0, spectral: SpectralFrame::default(), onsets, tempo, spectrum: [-30.0; SPECTRUM_BANDS], sections, downbeat: Default::default(), health: Default::default(), t: 1.0, at }
+    }
+
+    #[test]
+    fn son_du_mac_is_refused_where_it_cannot_run_and_kept_once_saved() {
+        use capture::SystemAudioSupport;
+        let hub = AudioHub::new(Instant::now(), true, None, AudioConfig::default());
+        hub.set_system_support(SystemAudioSupport::from_parts(false, Some("15.0")));
+        let patch = hub.config().0.patched(&json!({ "source": "system" })).unwrap();
+        assert_eq!(patch.source, AudioInputSource::System);
+        let err = hub.set_config(patch.clone()).unwrap_err().to_string();
+        assert!(err.contains("Son du Mac indisponible") && err.contains("BlackHole"), "{err}");
+        assert_eq!(hub.config().0.source, AudioInputSource::Browser, "nothing changed");
+        assert_eq!(hub.diagnostics(Instant::now())["system_audio"]["available"], false);
+        // Where it can run: accepted, and it is a capture source.
+        hub.set_system_support(SystemAudioSupport::from_parts(true, Some("14.6")));
+        let g0 = hub.config().1;
+        hub.set_config(patch.clone()).unwrap();
+        let (now, g1) = hub.config();
+        assert_eq!((now.source, g1), (AudioInputSource::System, g0 + 1), "the input reopens");
+        assert!(now.source.captures() && AudioInputSource::Native.captures());
+        assert!(!AudioInputSource::Browser.captures() && !AudioInputSource::None.captures());
+        // Saved, then the feature gone: other settings still save.
+        hub.set_system_support(SystemAudioSupport::from_parts(false, Some("15.0")));
+        hub.set_config(AudioConfig { buffer_frames: 512, ..patch }).unwrap();
+        // The audio safety still applies to it (flash cap, silence action).
+        assert!(hub.reaction_config().0, "a chosen source: the limiter runs");
+        assert!(hub.config().0.patched(&json!({ "source": "mac" })).unwrap_err().to_string().contains("system"));
     }
 
     fn set_source(hub: &AudioHub, source: AudioInputSource) {

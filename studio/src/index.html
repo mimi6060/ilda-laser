@@ -723,7 +723,7 @@
   #micDiagGrid dd { margin: 0; font-variant-numeric: tabular-nums; }
   #micDiagDevices { margin: 4px 0 8px; padding-left: 18px; font-size: 13px; }
   .mus-warn { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: #3a2a00; color: var(--warn); font-size: 12px; border: 1px solid var(--warn); }
-  .mus-warn[hidden], .mus-info[hidden], #musDevRow [hidden], #musNativeSettings[hidden], #musBrowserSettings[hidden] { display: none; }
+  .mus-warn[hidden], .mus-info[hidden], #musDevRow [hidden], #musSysNote[hidden], #musSysRow[hidden], #musNativeSettings[hidden], #musBrowserSettings[hidden] { display: none; }
   #musStatus.err { color: var(--danger); }
   #musStatus.ok { color: var(--accent); }
   #musAnalysis, #musSettings { margin-top: 12px; }
@@ -2959,7 +2959,11 @@
       <div id="musDevRow">
         <label for="micSelect" id="musDevLabel">Entrée audio</label>
         <select id="micSelect" title="Entrées vues par le navigateur"><option value="">Par défaut</option></select>
-        <select id="musDevice" aria-label="Entrée audio" title="Entrées du Mac (liste du studio)" hidden><option value="">Entrée par défaut du Mac</option></select>
+        <select id="musDevice" aria-label="Entrée audio" title="Entrées du Mac (liste du studio), et « Son du Mac » : ce que le Mac joue" hidden><option value="">Entrée par défaut du Mac</option></select>
+      </div>
+      <div class="hint" id="musSysNote" hidden></div>
+      <div class="row" id="musSysRow" hidden>
+        <button type="button" class="btn btn--small" id="musSysHelp" title="Écouter la musique jouée par le Mac (Spotify, lecteur, logiciel DJ) : BlackHole ou « Son du Mac »">Comment écouter le son du Mac ?</button>
       </div>
       <div class="row">
         <button id="micBtn" class="primary">Écouter</button>
@@ -4451,7 +4455,7 @@
     </section>
 
     <section data-help="depannage">
-      <details id="micDiagPanel" data-search="Entrée audio : diagnostic du micro, autorisation macOS, niveau, signal">
+      <details id="micDiagPanel" data-search="Entrée audio : diagnostic du micro, autorisation macOS, niveau, signal, son du Mac, BlackHole">
         <summary>Entrée audio (diagnostic)</summary>
         <div class="hint">Lecture seule : ce que la capture native du studio voit de l'entrée audio. Le son n'est ni enregistré ni envoyé ailleurs.</div>
         <div><span class="in-health" id="micDiagHealth" role="status">Capture native arrêtée</span></div>
@@ -4466,6 +4470,7 @@
           <dt>Signal présent ?</dt><dd id="micDiagSignal">–</dd>
           <dt>Pertes (débordements)</dt><dd id="micDiagOverruns">–</dd>
           <dt>Dernière erreur</dt><dd id="micDiagError">aucune</dd>
+          <dt>Son du Mac</dt><dd id="micDiagSystem">–</dd>
         </dl>
         <div class="hint">Entrées vues par le studio :</div>
         <ul id="micDiagDevices"></ul>
@@ -4475,7 +4480,7 @@
           <li>Activez Laser Studio, ou l'application qui a lancé le studio (Terminal, iTerm…).</li>
           <li>Quittez puis relancez le studio : macOS n'applique l'autorisation qu'au lancement.</li>
         </ol>
-        <button id="micDiagRefresh">Actualiser</button>
+        <div class="row"><button id="micDiagRefresh">Actualiser</button><button type="button" id="micDiagSysHelp">Comment écouter le son du Mac ?</button></div>
       </details>
     </section>
 
@@ -8318,6 +8323,12 @@ const BANDS = ['sub', 'bass', 'low_mid', 'mid', 'high'];
 // light flashes when its counter moves) and since when a running native
 // capture has been exactly silent.
 let mus = null, musPick = null, musServerSrc = null, musCounters = null, musError = '', musConfig = null, musSentAt = 0;
+// T-241: « Son du Mac » is the studio's own capture too (source `system`),
+// chosen in the Native device list; `musSys` says whether this build and
+// this macOS can run it (from /api/audio/devices).
+const MUS_SYSTEM = '@system';
+const musNat = src => src === 'native' || src === 'system';
+let musSys = null;
 const musSens = delta => Math.round(100 * Math.log10(0.3 / delta));      // delta 0.3 … 0.03 ↔ 0 … 100 %
 const musDelta = sens => +(0.3 * 10 ** (-sens / 100)).toFixed(4);
 const fmtDb = v => (v <= -119.5 ? '−∞' : (v < 0 ? '−' : '') + Math.abs(v).toFixed(1)) + ' dBFS';
@@ -8354,7 +8365,8 @@ async function listenClick() {
   } else if (src === 'native') {
     const device = $('musDevice').value || null;
     // Arrêter: back to the default source, nothing listening.
-    if (musServerSrc === 'native') await setMusSource('browser');
+    if (musNat(musServerSrc)) await setMusSource('browser');
+    else if (device === MUS_SYSTEM) await setMusSource('system');
     else await setMusSource('native', { device });
   }
   showMusic();
@@ -8411,14 +8423,18 @@ function showAudioGuard(g) {
 
 async function loadDevices() {
   let r; try { r = await apiJson('GET', '/api/audio/devices'); } catch { return; }
-  const sel = $('musDevice'), cur = musConfig?.device ?? sel.value;
+  musSys = r.system_audio || null;
+  const sel = $('musDevice');
+  const cur = musConfig?.source === 'system' ? MUS_SYSTEM : (musConfig?.device ?? (sel.value === MUS_SYSTEM ? '' : sel.value));
   const names = r.devices.map(d => d.name);
-  if (cur && !names.includes(cur)) names.push(cur); // the saved one, even unplugged
+  if (cur && cur !== MUS_SYSTEM && !names.includes(cur)) names.push(cur); // the saved one, even unplugged
+  const sysOk = !!musSys?.available;
   sel.innerHTML = '<option value="">Entrée par défaut du Mac</option>' + names.map(n => {
     const d = r.devices.find(x => x.name === n);
     return `<option value="${esc(n)}">${esc(n)}${d?.is_default ? ' (par défaut)' : d ? '' : ' (absente)'}</option>`;
-  }).join('');
+  }).join('') + `<option value="${MUS_SYSTEM}"${sysOk ? '' : ' disabled'}>Son du Mac (ce que le Mac joue)${sysOk ? '' : ' : indisponible'}</option>`;
   sel.value = cur || '';
+  showMusic();
 }
 
 function showMusic() {
@@ -8428,13 +8444,20 @@ function showMusic() {
     b.setAttribute('aria-checked', String(b.dataset.src === pick));
   });
   // The permission note, until the native capture is on.
-  $('musNativeInfo').hidden = pick !== 'native' || musServerSrc === 'native';
+  $('musNativeInfo').hidden = pick !== 'native' || musNat(musServerSrc);
   $('musDevRow').hidden = pick === 'none';
   $('micSelect').hidden = pick !== 'browser';
   $('musDevice').hidden = pick !== 'native';
+  // T-241: the way to the Mac's own sound, and why « Son du Mac » is greyed.
+  $('musSysRow').hidden = pick !== 'native';
+  const sysPicked = $('musDevice').value === MUS_SYSTEM;
+  $('musSysNote').hidden = pick !== 'native' || !(sysPicked || (musSys && !musSys.available));
+  $('musSysNote').textContent = sysPicked
+    ? 'Son du Mac : le studio écoute ce que le Mac joue. macOS demande l\'autorisation d\'enregistrer l\'audio du système au premier « Écouter ».'
+    : musSys && !musSys.available ? `Son du Mac indisponible : ${musSys.reason}.` : '';
   $('musNativeSettings').hidden = pick === 'browser';
   $('musBrowserSettings').hidden = pick !== 'browser';
-  const listening = pick === 'browser' ? !!audio : pick === 'native' && musServerSrc === 'native';
+  const listening = pick === 'browser' ? !!audio : pick === 'native' && musNat(musServerSrc);
   $('micBtn').hidden = pick === 'none';
   $('micBtn').textContent = listening ? 'Arrêter' : 'Écouter';
   $('micBtn').classList.toggle('primary', !listening);
@@ -8446,7 +8469,7 @@ function showMusic() {
   if (musError) { text = musError; cls = 'err'; }
   else if (pick === 'none') text = 'Aucune source : le laser ne réagit plus à la musique.';
   else if (pick === 'browser') text = audio ? 'Le micro de cette page est analysé par le navigateur.' : 'Micro de la page coupé. « Écouter » pour que le laser suive la musique.';
-  else if (musServerSrc !== 'native') text = 'Choisissez l\'entrée puis « Écouter ».';
+  else if (!musNat(musServerSrc)) text = 'Choisissez l\'entrée puis « Écouter ».';
   else if (a && a.state === 'disabled') { text = 'Capture native indisponible : studio lancé avec --no-audio.'; cls = 'err'; }
   else if (a && a.state === 'running') {
     const st = a.stats || {};
@@ -8457,7 +8480,7 @@ function showMusic() {
 
   // Input health (T-242), judged by the studio on the samples: the badge
   // next to the meter, and the help for a refusal or a missing input.
-  const nativeOn = a && musServerSrc === 'native' && a.source === 'native';
+  const nativeOn = a && musNat(musServerSrc) && musNat(a.source);
   const h = nativeOn ? a.health : null;
   showHealth($('musHealth'), h);
   const denied = nativeOn && a.state === 'permission_denied';
@@ -8495,7 +8518,8 @@ function flashLight(el) {
 function followSource(src) {
   if (src === musServerSrc && musPick) return;
   musServerSrc = src;
-  musPick = src;
+  musPick = src === 'system' ? 'native' : src;
+  if (src === 'system') $('musDevice').value = MUS_SYSTEM;
   if (src !== 'browser') stopMic();
 }
 
@@ -8568,7 +8592,7 @@ async function musicLoop() {
     try {
       const jobs = [];
       const analysisOpen = $('musAnalysis').open;
-      const spectrum = analysisOpen && mus && mus.source === 'native' && musServerSrc === 'native';
+      const spectrum = analysisOpen && mus && musNat(mus.source) && musNat(musServerSrc);
       const asked = performance.now();
       if (musTick % (spectrum ? 3 : 2) === 0) jobs.push(apiJson('GET', '/api/audio/state').then(a => showAudioState(a, asked)));
       if (spectrum) {
@@ -8586,7 +8610,12 @@ async function musicLoop() {
 document.querySelectorAll('#musSrc button').forEach(b => b.addEventListener('click', () => pickSource(b.dataset.src)));
 $('micBtn').addEventListener('click', listenClick);
 $('micSelect').addEventListener('change', () => { if (audio) startMic().catch(e => { musError = 'Micro refusé par le navigateur : ' + e.name; showMusic(); }); });
-$('musDevice').addEventListener('change', () => { if (musServerSrc === 'native') setMusSource('native', { device: $('musDevice').value || null }); });
+$('musDevice').addEventListener('change', () => {
+  const v = $('musDevice').value;
+  if (musNat(musServerSrc)) { if (v === MUS_SYSTEM) setMusSource('system'); else setMusSource('native', { device: v || null }); }
+  showMusic();
+});
+$('musSysHelp').addEventListener('click', () => openHelp('son-du-mac'));
 $('gain').addEventListener('input', showMusic);
 const musAnalysisPatch = patch => post('/api/audio/config', { analysis: patch }).then(loadMusConfig);
 $('musAutoGain').addEventListener('change', () => { showMusic(); musAnalysisPatch({ auto_gain: $('musAutoGain').checked }); });
@@ -9695,11 +9724,11 @@ $('diagPanel').addEventListener('toggle', () => { if ($('diagPanel').open) loadD
 
 // RÉGLAGES › Entrée audio (T-242): read-only diagnostics of the native input.
 const MIC_STATE_FR = { off: 'arrêtée', disabled: 'désactivée (--no-audio)', running: 'en cours', no_device: 'aucune entrée', device_lost: 'entrée perdue', permission_denied: 'accès refusé par macOS', error: 'erreur' };
-const MIC_SOURCE_FR = { native: 'Native (le studio écoute)', browser: 'Navigateur', none: 'Aucune' };
+const MIC_SOURCE_FR = { native: 'Native (le studio écoute)', system: 'Son du Mac (le studio écoute la sortie)', browser: 'Navigateur', none: 'Aucune' };
 async function loadMicDiag() {
   let d;
   try { d = await apiJson('GET', '/api/audio/diagnostics', undefined, { quiet: true }); } catch { return; }
-  const native = d.source === 'native';
+  const native = musNat(d.source);
   showHealth($('micDiagHealth'), d.health, native ? 'En attente du signal' : 'Capture native arrêtée');
   $('micDiagHelp').textContent = d.health ? d.health.help : native ? '' : 'Choisissez la source « Native » dans LIVE › Musique pour que le studio écoute une entrée du Mac.';
   $('micDiagSource').textContent = MIC_SOURCE_FR[d.source] ?? d.source;
@@ -9711,6 +9740,8 @@ async function loadMicDiag() {
   $('micDiagSignal').textContent = d.signal_present ? 'oui' : 'non';
   $('micDiagSignal').dataset.present = String(!!d.signal_present);
   $('micDiagOverruns').textContent = String(d.overruns ?? 0);
+  const sys = d.system_audio;
+  $('micDiagSystem').textContent = !sys ? '–' : sys.available ? `disponible (macOS ${sys.macos})` : `indisponible : ${sys.reason}`;
   $('micDiagError').textContent = d.last_error ? `${d.last_error.message} (il y a ${Math.round(d.last_error.ago_s)} s)` : 'aucune';
   const list = $('micDiagDevices');
   list.replaceChildren(...(d.devices.length ? d.devices : [null]).map(dev => {
@@ -9721,6 +9752,7 @@ async function loadMicDiag() {
 }
 $('micDiagPanel').addEventListener('toggle', () => { if ($('micDiagPanel').open) loadMicDiag(); });
 $('micDiagRefresh').onclick = loadMicDiag;
+$('micDiagSysHelp').onclick = () => openHelp('son-du-mac');
 setInterval(() => { if (activeWs === 'settings' && $('micDiagPanel').open && !document.hidden) loadMicDiag(); }, 1000);
 
 // RÉGLAGES › Performance (T-448): the engine's stage timings over 10 s,

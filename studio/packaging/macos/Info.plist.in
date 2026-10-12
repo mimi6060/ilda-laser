@@ -37,6 +37,10 @@
 	<!-- Native audio capture (T-242): macOS asks once, with this text. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Laser Studio écoute l'entrée audio (micro ou carte son) pour synchroniser le show laser sur la musique : tempo, battements et niveaux. Le son n'est ni enregistré ni envoyé ailleurs.</string>
+	<!-- « Son du Mac » (T-241, Cargo feature system-audio): the Core Audio
+	     process tap asks once, with this text. Unused otherwise. -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Laser Studio écoute le son joué par ce Mac pour synchroniser le show laser sur la musique. Le son n'est ni enregistré ni envoyé ailleurs.</string>
 	<!-- Laser controllers on the local network (Ether Dream, IDN). -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Laser Studio recherche et pilote les contrôleurs laser de votre réseau local.</string>

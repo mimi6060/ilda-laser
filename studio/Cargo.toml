@@ -41,6 +41,12 @@ sha2 = "0.10"  # MIT OR Apache-2.0 (RustCrypto): media fingerprints in the `.lsp
 # Laserworld SDK binding (private, never in the repository: see
 # `src/shownet.rs`) it only adds the code and its tests with a fake box.
 shownet = []
+# *Son du Mac* (T-241), off by default: capture what the Mac plays through
+# a Core Audio process tap (public Apple API, macOS 14.6+), using the
+# loopback stream `cpal` already has. No extra dependency; it needs the
+# operator's "Enregistrement audio du système" permission. Without it the
+# studio offers the BlackHole route (help page `son-du-mac`).
+system-audio = []
 # The menu-bar item of the macOS application (T-413), off by default so
 # `cargo build`, `cargo test` and the e2e runs pull in no GUI code. Built
 # by `studio/packaging/macos/build_app.sh`. objc2 family: MIT.

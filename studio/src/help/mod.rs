@@ -30,6 +30,7 @@ pub const PAGES: &[HelpPage] = &[
     HelpPage { slug: "premier-show", title_fr: "Premier show avec MadMapper et le ShowNET", group_fr: GENERAL, body_html: include_str!("premier-show.html") },
     HelpPage { slug: "securite-laser", title_fr: "Sécurité laser : armer, arrêter, réinitialiser", group_fr: GENERAL, body_html: include_str!("securite-laser.html") },
     HelpPage { slug: "depannage", title_fr: "Dépannage", group_fr: GENERAL, body_html: include_str!("depannage.html") },
+    HelpPage { slug: "son-du-mac", title_fr: "Écouter le son du Mac", group_fr: GENERAL, body_html: include_str!("son-du-mac.html") },
     HelpPage { slug: "tempo", title_fr: "Tempo", group_fr: GENERAL, body_html: include_str!("tempo.html") },
     HelpPage { slug: "projet", title_fr: "Projet et fichiers", group_fr: GENERAL, body_html: include_str!("projet.html") },
     HelpPage { slug: "raccourcis", title_fr: "Raccourcis clavier", group_fr: GENERAL, body_html: include_str!("raccourcis.html") },

@@ -7,6 +7,9 @@
 #   studio/packaging/macos/build_app.sh [OUT_DIR]   # default: target/macos
 #   studio/packaging/macos/build_app.sh --plist FILE  # Info.plist only (tests)
 #
+# Extra Cargo features, e.g. « Son du Mac » (T-241, off by default):
+#   EXTRA_FEATURES=system-audio studio/packaging/macos/build_app.sh
+#
 # The bundle is ad-hoc signed only (`codesign -s -`, no identity): no
 # Developer ID signature, no notarisation. A copy downloaded from elsewhere
 # is quarantined and macOS refuses it the first time: right-click › Ouvrir,
@@ -38,7 +41,7 @@ fi
 OUT=${1:-"$ROOT/target/macos"}
 APP="$OUT/Laser Studio.app"
 
-cargo build --release -p laser-studio --features macos-app --manifest-path "$ROOT/Cargo.toml"
+cargo build --release -p laser-studio --features "macos-app${EXTRA_FEATURES:+,$EXTRA_FEATURES}" --manifest-path "$ROOT/Cargo.toml"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

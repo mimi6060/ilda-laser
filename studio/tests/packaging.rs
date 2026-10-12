@@ -30,6 +30,9 @@ fn the_bundle_plist_has_the_identifier_version_and_microphone_text() {
     assert_eq!(extract(&plist, "LSUIElement"), "true", "a menu-bar app");
     let mic = extract(&plist, "NSMicrophoneUsageDescription");
     assert!(mic.starts_with("Laser Studio écoute l'entrée audio"), "{mic}");
+    // « Son du Mac » (T-241): the process tap's own permission text.
+    let tap = extract(&plist, "NSAudioCaptureUsageDescription");
+    assert!(tap.contains("ni enregistré ni envoyé"), "{tap}");
     let _ = std::fs::remove_file(plist);
 }
 

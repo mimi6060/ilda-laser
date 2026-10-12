@@ -86,6 +86,22 @@ impl InputHealth {
         }
     }
 
+    /// `help` for the chosen source: *Son du Mac* (T-241) has its own
+    /// permission, and gives exact zeros whenever nothing plays.
+    pub fn help_for(self, source: super::AudioInputSource) -> &'static str {
+        match (self, source) {
+            (InputHealth::PermissionSuspected, super::AudioInputSource::System) => {
+                "Le son du Mac ne renvoie que des zéros exacts : rien ne joue, ou macOS a refusé l'accès. \
+                 Lancez la musique ; si rien ne bouge, ouvrez Réglages Système › Confidentialité et sécurité › \
+                 Enregistrement de l'écran et de l'audio du système, autorisez Laser Studio (ou le terminal qui l'a lancé), \
+                 puis relancez le studio. Le studio ne modifie jamais ce réglage lui-même."
+            }
+            (InputHealth::NoDevice, super::AudioInputSource::System) => "Aucune sortie audio sur ce Mac : vérifiez Réglages Système › Son › Sortie.",
+            (InputHealth::Silent, super::AudioInputSource::System) => "Bruit de fond seulement : le Mac ne joue pas de musique, ou son volume est au minimum.",
+            _ => self.help(),
+        }
+    }
+
     /// Music is coming in (perhaps too quiet or too loud).
     pub fn signal_present(self) -> bool {
         matches!(self, InputHealth::Ok | InputHealth::TooQuiet | InputHealth::Clipping)
