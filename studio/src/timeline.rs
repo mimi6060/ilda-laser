@@ -628,7 +628,7 @@ pub struct Clock {
     pub beats_per_bar: u8,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     #[default]
@@ -958,6 +958,62 @@ impl Player {
             return;
         }
         self.position = pos;
+    }
+
+    /// T-456: a backup machine in standby follows the main machine's
+    /// playhead: `transport`, and `position` (show units) as it is at `c`.
+    /// A gap over `jump_s` seconds seeks there; a smaller one is taken up
+    /// by half each time. Without a show, or with a position that is not a
+    /// number, nothing changes.
+    pub fn mirror(&mut self, transport: Transport, position: f64, loop_on: bool, c: &Clock, jump_s: f64) {
+        if self.show.is_none() || !position.is_finite() {
+            return;
+        }
+        self.loop_on = loop_on;
+        let position = position.max(0.0);
+        let jump = match self.base() {
+            TimeBase::Seconds => jump_s,
+            TimeBase::Beats => jump_s * c.bpm.max(1.0) / 60.0,
+        };
+        match transport {
+            Transport::Playing if self.is_playing() => {
+                let now = self.position_at(c);
+                let err = position - now;
+                if err.abs() > jump {
+                    self.seek(position, c);
+                } else {
+                    self.anchor = now + 0.5 * err;
+                    self.anchor_clock = self.clock_value(c);
+                }
+            }
+            Transport::Playing => {
+                // At once, where the main machine is: never a wait for the bar.
+                self.position = position;
+                self.anchor = position;
+                self.anchor_clock = self.clock_value(c);
+                self.transport = Transport::Playing;
+                self.instances.clear();
+                self.jumps += 1;
+                self.plays += 1;
+            }
+            Transport::Paused => {
+                if self.transport != Transport::Paused || (self.position - position).abs() > EPS {
+                    self.position = position;
+                    self.transport = Transport::Paused;
+                    self.jumps += 1;
+                }
+            }
+            Transport::Stopped => {
+                if self.transport != Transport::Stopped {
+                    self.stop();
+                }
+            }
+        }
+    }
+
+    /// Changes since the show was loaded (`rev`), for the backup machine.
+    pub fn rev(&self) -> u64 {
+        self.rev
     }
 
     /// Emergency stop: nothing plays any more (not even a frozen frame),

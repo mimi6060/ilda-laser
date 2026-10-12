@@ -182,6 +182,7 @@ pub fn shared() -> Shared {
         showlist: crate::showlist::ShowListRunner::in_memory(),
         agenda: crate::agenda::AgendaRunner::in_memory(),
         remote: crate::remote::Remote::in_memory(),
+        standby: crate::standby::Standby::in_memory(),
         dmx_out: crate::dmx_out::DmxOutState::in_memory(),
     }
 }

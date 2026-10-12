@@ -108,6 +108,7 @@ mod scan;
 mod scenes;
 mod record;
 mod remote;
+mod standby;
 mod sdbank;
 mod sheets;
 mod targets;
@@ -185,6 +186,17 @@ struct Cli {
     /// UI itself always stays on 127.0.0.1.
     #[arg(long, value_name = "IP", default_value = "0.0.0.0")]
     remote_bind: std::net::IpAddr,
+    /// Address the backup machine's sync listener (T-456) binds when this
+    /// studio is the main machine: every interface by default (or the one
+    /// chosen in RÉGLAGES); any other value always wins (tests: 127.0.0.1).
+    #[arg(long, value_name = "IP", default_value = "0.0.0.0")]
+    standby_bind: std::net::IpAddr,
+    /// Testing only (T-456): the folder of the outputs' exclusive claims,
+    /// shared by two test studios that must never drive the same output.
+    /// Default: the system's temporary folder (real outputs), or the data
+    /// folder (test outputs).
+    #[arg(long, hide = true, value_name = "DIR")]
+    dac_lock_dir: Option<PathBuf>,
     /// Where scenes and calibration are saved.
     #[arg(long, default_value = "studio-data")]
     data_dir: PathBuf,
@@ -645,6 +657,10 @@ pub struct Shared {
     /// The tablet remote (remote.rs, T-428): off at every start; only
     /// its port is saved (`remote.json`).
     pub remote: remote::Remote,
+    /// The synchronised backup machine (standby.rs, T-456, `standby.json`):
+    /// Autonome by default, no listener; a backup in standby never arms
+    /// and holds no output.
+    pub standby: standby::Standby,
     /// The show player (showlist.rs, T-444, `showlist.json`): the list is
     /// content (projects, history); what plays is memory only.
     pub showlist: showlist::ShowListRunner,
@@ -1115,7 +1131,19 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     // The output named on the command line opens now, as before (a failure
     // stops the studio); otherwise the remembered one is connected by the
     // output manager once it runs (T-401). Either way: disarmed.
-    let output: Option<Box<dyn Output>> = match startup_output_id(&cli) {
+    // A backup machine in standby (T-456) opens no output at all.
+    let in_standby = state.standby.is_standby();
+    if in_standby {
+        println!("Machine de secours en veille : aucune sortie ouverte, armement refusé.");
+        standby::sync_gate(&mut state);
+    }
+    // A main machine whose backup took over while it was away opens
+    // nothing and steps down (T-456): it never takes anything back.
+    let hold_outputs = in_standby || standby::startup_check(&mut state);
+    if hold_outputs && !in_standby {
+        println!("Une autre machine est principale : aucune sortie ouverte au démarrage.");
+    }
+    let output: Option<Box<dyn Output>> = match startup_output_id(&cli).filter(|_| !hold_outputs) {
         Some(id) => {
             let out = state.output_mgr.open_at_start(&id).inspect_err(|e| log::error!("sortie laser : {e:#}"))?;
             match out.kind() {
@@ -1165,7 +1193,7 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     }
     let output_mgr = Arc::clone(&state.output_mgr);
     let wifi_watch = Arc::clone(&state.wifi);
-    let remembered = state.outputs.connection().selected.filter(|_| output.is_none());
+    let remembered = state.outputs.connection().selected.filter(|_| output.is_none() && !hold_outputs);
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
     let url = format!("http://127.0.0.1:{}/", cli.port);
@@ -1188,7 +1216,13 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
         output_mgr.select(Some(id), interlock::ArmSource::System);
     }
     // The venue's other projectors (T-277): their outputs too, disarmed.
-    shared.lock().unwrap().connect_projectors(interlock::ArmSource::System);
+    if !hold_outputs {
+        shared.lock().unwrap().connect_projectors(interlock::ArmSource::System);
+    }
+    // The backup machine (T-456): its listener or its worker, per role.
+    if let Err(e) = standby::apply_role(&shared) {
+        log::error!("Machine de secours : {e}");
+    }
 
     // A panic anywhere: cut the output first (the DAC kill switch, no lock),
     // then let the default report run and every loop wind down. The engine's
@@ -1294,9 +1328,12 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let keep_awake_thread = keep_awake::spawn(Arc::clone(&shared), Arc::clone(&running), blocker);
     // The agenda (T-455): starts playbacks at their slots, never arms.
     let agenda_thread = agenda::spawn(Arc::clone(&shared), Arc::clone(&running));
+    let standby_shared = Arc::clone(&shared);
     let served = web::run(&addr, shared, estop, cli.data_dir.join("calibration.json"), Arc::clone(&running));
 
     running.store(false, Ordering::SeqCst);
+    // The sync listener closes, the backup stops following (T-456).
+    standby::stop(&standby_shared);
     // No audio decoder child left behind (T-359).
     audio::isolate::stop_children();
     // The engine closes the output; don't wait forever if it is stuck (the
@@ -1636,6 +1673,7 @@ fn startup_state(cli: &Cli) -> Shared {
         showlist: showlist::ShowListRunner::load(cli.data_dir.join("showlist.json")),
         agenda: agenda::AgendaRunner::load(cli.data_dir.join("agenda.json")),
         remote: remote::Remote::load(cli.data_dir.join("remote.json"), cli.remote_bind),
+        standby: standby::Standby::load(cli.data_dir.join("standby.json"), cli.standby_bind),
         dmx_out: dmx_out::DmxOutState::load(cli.data_dir.join("dmx_out.json")),
     };
     usercues::sync_presets(&mut state);
@@ -1686,7 +1724,8 @@ fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32, show
         backend.artnet = Arc::clone(shownet_dmx);
         let dropped = Arc::clone(&backend.dropped);
         let list = Arc::new(devices::DeviceList::fixed(fake));
-        return OutputManager::new(Arc::new(backend), list, prefs, pps).with_test_drop(dropped);
+        let locks = cli.dac_lock_dir.clone().unwrap_or_else(|| cli.data_dir.join("output-locks"));
+        return OutputManager::new(Arc::new(backend), list, prefs, pps).with_test_drop(dropped).with_lock_dir(locks);
     }
     let backend = Arc::new(RealBackend {
         ponk: cli.ponk.unwrap_or_else(|| ponk::DEFAULT_TARGET.parse().expect("valid default PONK target")),
@@ -1698,7 +1737,9 @@ fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32, show
         Arc::new(move |scope| output_manager::OutputBackend::scan(&*backend, scope))
     };
     let list = Arc::new(devices::DeviceList::new(scanner, devices::Scope { usb: true }));
-    OutputManager::new(backend, list, prefs, pps)
+    // Two studios on this Mac never drive the same output (T-456).
+    let locks = cli.dac_lock_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("laser-studio-output-locks"));
+    OutputManager::new(backend, list, prefs, pps).with_lock_dir(locks)
 }
 
 /// The output the command line names, as an output manager id.

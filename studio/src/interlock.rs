@@ -196,6 +196,11 @@ pub const PROJECTORS: &str = "projectors";
 pub const OUTDOOR_AUTH: &str = "outdoor_auth";
 /// Its label, also the refusal message.
 pub const OUTDOOR_AUTH_LABEL: &str = "Mode extérieur : référence d'autorisation DGTA manquante";
+/// Id of the interlock held open while this machine is a backup in
+/// standby (T-456, standby.rs): it follows the main machine and never arms.
+pub const STANDBY: &str = "standby";
+/// Its label, also the refusal message.
+pub const STANDBY_LABEL: &str = "Machine de secours en veille";
 
 pub struct ArmGate {
     armed: bool,

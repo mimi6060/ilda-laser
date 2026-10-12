@@ -144,6 +144,8 @@ struct Slot {
     failed: u32,
     gen: u64,
     handed: bool,
+    /// The exclusive claim on this output (T-456), while selected.
+    lock: Option<DacLock>,
 }
 
 /// One venue projector's link, for the UI and the `projectors` interlock.
@@ -181,6 +183,54 @@ struct Status {
     saved_pps: u32,
     /// The venue's other projectors (T-277), by projector id.
     projectors: std::collections::BTreeMap<String, Slot>,
+    /// Why no output may be connected now (T-456: a backup machine in
+    /// standby). Every open is refused with it while set.
+    hold: Option<String>,
+    /// The main output's exclusive claim (T-456), while selected.
+    lock: Option<DacLock>,
+}
+
+/// The refusal when another studio holds the output (T-456).
+pub const IN_USE_FR: &str = "Sortie déjà utilisée par une autre instance du studio";
+
+/// An exclusive claim on one output (T-456): an advisory `flock` on a
+/// file named after the output id in the lock folder, taken before the
+/// output is opened. A second studio on this Mac (or a second claim in
+/// this one) asking for the same output is refused; the system lets go
+/// when the file closes, a crash included. Between two Macs the backup
+/// role does the same job (standby.rs): a backup in standby opens nothing.
+#[derive(Debug)]
+pub struct DacLock {
+    id: String,
+    _file: std::fs::File,
+}
+
+impl DacLock {
+    /// Claims `id` in `dir`, or fails at once (never waits).
+    pub fn acquire(dir: &std::path::Path, id: &str) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("dossier des verrous de sortie {} : {e}", dir.display()))?;
+        // The id in hex: any id is a safe file name; a long one is hashed.
+        let hex: String = id.bytes().map(|b| format!("{b:02x}")).collect();
+        let name = if hex.len() <= 128 {
+            hex
+        } else {
+            use sha2::Digest;
+            sha2::Sha256::digest(id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+        };
+        let path = dir.join(format!("{name}.lock"));
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| anyhow::anyhow!("verrou de sortie {} : {e}", path.display()))?;
+        // SAFETY: a valid descriptor owned by `file` for the call.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            bail!("{IN_USE_FR} ({id})");
+        }
+        Ok(DacLock { id: id.to_string(), _file: file })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 pub struct OutputManager {
@@ -193,6 +243,8 @@ pub struct OutputManager {
     stage_rx: Mutex<Receiver<StageChange>>,
     /// `FakeBackend` only: unplugs / plugs back the fake outputs.
     test_drop: Option<Arc<AtomicBool>>,
+    /// Where the exclusive claims live (T-456); None: no claim (unit tests).
+    lock_dir: Option<PathBuf>,
 }
 
 impl OutputManager {
@@ -209,7 +261,89 @@ impl OutputManager {
             stage_tx: Mutex::new(stage_tx),
             stage_rx: Mutex::new(stage_rx),
             test_drop: None,
+            lock_dir: None,
         }
+    }
+
+    /// Claims every output in `dir` before opening it (T-456): two studios
+    /// sharing `dir` never drive the same output at once.
+    pub fn with_lock_dir(mut self, dir: PathBuf) -> Self {
+        self.lock_dir = Some(dir);
+        self
+    }
+
+    /// Claims `id`: `have` when it is already that one, else a new claim
+    /// (`have` let go first). Always succeeds without a lock folder.
+    fn claim(&self, id: &str, have: Option<DacLock>) -> Result<Option<DacLock>> {
+        if let Some(l) = have.filter(|l| l.id() == id) {
+            return Ok(Some(l));
+        }
+        match &self.lock_dir {
+            Some(dir) => DacLock::acquire(dir, id).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Opens `id` after the hold and the claim: (the claim, the output).
+    fn open_claimed(&self, id: &str, pps: u32, have: Option<DacLock>) -> (Option<DacLock>, Result<Box<dyn Output>>) {
+        if let Some(reason) = self.status.lock().unwrap().hold.clone() {
+            return (None, Err(anyhow::anyhow!(reason)));
+        }
+        match self.claim(id, have) {
+            Ok(lock) => (lock, self.backend.open(id, pps)),
+            Err(e) => (None, Err(e)),
+        }
+    }
+
+    /// T-456: `Some(reason)` refuses every output (a backup machine in
+    /// standby) and lets go of the connected ones, without forgetting the
+    /// remembered choice; `None` allows them again (nothing reconnects by
+    /// itself: the operator connects).
+    pub fn set_hold(&self, reason: Option<String>) {
+        let (drop_main, drop_projectors) = {
+            let mut st = self.status.lock().unwrap();
+            let was = st.hold.is_some();
+            st.hold = reason.clone();
+            if reason.is_none() || was {
+                return;
+            }
+            let main = st.selected.is_some() || st.handed;
+            st.selected = None;
+            st.state = LinkState::Available;
+            st.name = None;
+            st.kind = None;
+            st.error = None;
+            st.retry_at = None;
+            st.failed = 0;
+            let projectors: Vec<String> = st.projectors.iter().filter(|(_, p)| p.selected.is_some() || p.handed).map(|(id, _)| id.clone()).collect();
+            for pid in &projectors {
+                if let Some(slot) = st.projectors.get_mut(pid) {
+                    slot.selected = None;
+                    slot.state = LinkState::Available;
+                    slot.retry_at = None;
+                }
+            }
+            (main, projectors)
+        };
+        log::info!("Sorties retenues : {}", reason.as_deref().unwrap_or_default());
+        if drop_main {
+            let _ = self.cmd_tx.lock().unwrap().send(Cmd::Select(None, ArmSource::System));
+        }
+        for pid in drop_projectors {
+            let _ = self.cmd_tx.lock().unwrap().send(Cmd::SelectProjector(pid, None, ArmSource::System));
+        }
+    }
+
+    /// Why outputs are refused now (T-456), if they are.
+    pub fn hold(&self) -> Option<String> {
+        self.status.lock().unwrap().hold.clone()
+    }
+
+    /// Whether this studio drives (or is about to drive) any output: the
+    /// main one or a venue projector's (T-456, `holds_output`).
+    pub fn holds_any(&self) -> bool {
+        let st = self.status.lock().unwrap();
+        st.selected.is_some() || st.handed || st.projectors.values().any(|p| p.selected.is_some() || p.handed)
     }
 
     /// With the switch that simulates unplugging the fake outputs.
@@ -228,8 +362,10 @@ impl OutputManager {
     /// It is the selection for this run only (never saved).
     pub fn open_at_start(&self, id: &str) -> Result<Box<dyn Output>> {
         let pps = self.status.lock().unwrap().pps;
-        let out = self.backend.open(id, pps)?;
+        let (lock, out) = self.open_claimed(id, pps, None);
+        let out = out?;
         let mut st = self.status.lock().unwrap();
+        st.lock = lock;
         st.selected = Some(id.to_string());
         st.name = Some(out.name().to_string());
         st.kind = Some(out.kind());
@@ -486,6 +622,9 @@ impl OutputManager {
     fn on_select_projector(&self, pid: &str, id: Option<String>, src: ArmSource, now: Instant) {
         let handed = {
             let mut st = self.status.lock().unwrap();
+            if let Some(p) = st.projectors.get_mut(pid).filter(|p| p.lock.as_ref().is_some_and(|l| Some(l.id()) != id.as_deref())) {
+                p.lock = None;
+            }
             st.projectors.get_mut(pid).is_some_and(|p| std::mem::take(&mut p.handed))
         };
         if handed {
@@ -538,12 +677,17 @@ impl OutputManager {
 
     /// `attempt` for a venue projector's output.
     fn attempt_projector(&self, pid: &str, id: &str, kind: ChangeKind, src: ArmSource, now: Instant) {
-        let pps = self.status.lock().unwrap().pps;
-        let opened = self.backend.open(id, pps);
+        let (pps, have) = {
+            let mut st = self.status.lock().unwrap();
+            let have = st.projectors.get_mut(pid).and_then(|p| p.lock.take());
+            (st.pps, have)
+        };
+        let (lock, opened) = self.open_claimed(id, pps, have);
         let mut st = self.status.lock().unwrap();
         let auto = st.auto_reconnect;
         let Some(slot) = st.projectors.get_mut(pid).filter(|p| p.selected.as_deref() == Some(id)) else {
             drop(st);
+            drop(lock);
             if let Ok(mut out) = opened {
                 let _ = out.blank_now();
             }
@@ -559,6 +703,7 @@ impl OutputManager {
                 slot.retry_at = None;
                 slot.failed = 0;
                 slot.handed = true;
+                slot.lock = lock;
                 drop(st);
                 self.hand_over_projector(pid, Some(out), kind, src, Some(id.to_string()));
             }
@@ -573,6 +718,7 @@ impl OutputManager {
                 slot.state = LinkState::Lost;
                 slot.error = Some(error);
                 slot.retry_at = auto.then(|| now + backoff(slot.failed));
+                slot.lock = lock;
             }
         }
     }
@@ -593,6 +739,14 @@ impl OutputManager {
         let handed = std::mem::take(&mut self.status.lock().unwrap().handed);
         if handed {
             self.hand_over(None, ChangeKind::Disconnected, src, None);
+        }
+        {
+            // The old output is let go: so is its claim (T-456), unless it
+            // is chosen again.
+            let mut st = self.status.lock().unwrap();
+            if st.lock.as_ref().is_some_and(|l| Some(l.id()) != id.as_deref()) {
+                st.lock = None;
+            }
         }
         let Some(id) = id else { return };
         if self.status.lock().unwrap().selected.as_deref() != Some(id.as_str()) {
@@ -629,12 +783,16 @@ impl OutputManager {
     /// Opens `id` and hands it to the engine, or records the failure and
     /// when to try again.
     fn attempt(&self, id: &str, kind: ChangeKind, src: ArmSource, now: Instant) {
-        let pps = self.status.lock().unwrap().pps;
-        let opened = self.backend.open(id, pps);
+        let (pps, have) = {
+            let mut st = self.status.lock().unwrap();
+            (st.pps, st.lock.take())
+        };
+        let (lock, opened) = self.open_claimed(id, pps, have);
         let mut st = self.status.lock().unwrap();
         if st.selected.as_deref() != Some(id) {
             // The operator chose something else meanwhile: close it unused.
             drop(st);
+            drop(lock);
             if let Ok(mut out) = opened {
                 let _ = out.blank_now();
             }
@@ -654,6 +812,7 @@ impl OutputManager {
                 st.retry_at = None;
                 st.failed = 0;
                 st.handed = true;
+                st.lock = lock;
                 drop(st);
                 self.hand_over(Some(out), kind, src, Some(id.to_string()));
             }
@@ -668,6 +827,8 @@ impl OutputManager {
                 st.state = LinkState::Lost;
                 st.error = Some(error);
                 st.retry_at = st.auto_reconnect.then(|| now + backoff(st.failed));
+                // Still chosen: the claim is kept for the next attempt.
+                st.lock = lock;
             }
         }
     }
@@ -955,6 +1116,63 @@ mod tests {
         let list = mgr.list();
         assert_eq!(list.iter().map(|o| (o.id.as_str(), o.state)).collect::<Vec<_>>(), [("a", LinkState::Connected), ("b", LinkState::Available)]);
         assert!(mgr.is_current(mgr.current_gen()));
+    }
+
+    #[test]
+    fn two_claims_on_one_output_only_one_wins() {
+        let dir = crate::test_support::scratch_dir().join("locks");
+        let first = DacLock::acquire(&dir, "etherdream:a").unwrap();
+        let second = DacLock::acquire(&dir, "etherdream:a").unwrap_err();
+        assert!(format!("{second:#}").contains(IN_USE_FR), "{second:#}");
+        assert!(DacLock::acquire(&dir, "etherdream:b").is_ok(), "another output is free");
+        drop(first);
+        assert!(DacLock::acquire(&dir, "etherdream:a").is_ok(), "let go with the claim");
+        let long = "x".repeat(300);
+        assert!(DacLock::acquire(&dir, &long).is_ok());
+    }
+
+    #[test]
+    fn two_studios_sharing_a_lock_folder_never_drive_the_same_output() {
+        let dir = crate::test_support::scratch_dir().join("locks");
+        let (a, _, _) = manager(false);
+        let (b, _, _) = manager(false);
+        let (a, b) = (a.with_lock_dir(dir.clone()), b.with_lock_dir(dir));
+        let now = Instant::now();
+        a.select(Some("a".into()), ArmSource::Ui);
+        drain(&a, now);
+        b.select(Some("a".into()), ArmSource::Ui);
+        drain(&b, now);
+        assert_eq!(a.state(), LinkState::Connected);
+        assert_eq!(b.state(), LinkState::Lost);
+        assert!(b.view(now)["error"].as_str().unwrap().contains(IN_USE_FR));
+        assert!(changes(&b).is_empty(), "nothing handed to the second engine");
+        // The first lets go: the second may connect.
+        a.select(None, ArmSource::Ui);
+        drain(&a, now);
+        b.select(Some("a".into()), ArmSource::Ui);
+        drain(&b, now);
+        assert_eq!(b.state(), LinkState::Connected);
+    }
+
+    #[test]
+    fn a_hold_drops_the_outputs_and_refuses_new_ones_without_forgetting_the_choice() {
+        let (mgr, _, _) = manager(false);
+        let now = Instant::now();
+        mgr.select(Some("a".into()), ArmSource::Ui);
+        drain(&mgr, now);
+        let _ = changes(&mgr);
+        mgr.set_hold(Some("Machine de secours en veille".into()));
+        drain(&mgr, now);
+        assert_eq!(changes(&mgr), [(ChangeKind::Disconnected, None, false)]);
+        assert!(!mgr.holds_any());
+        assert_eq!(mgr.prefs().selected.as_deref(), Some("a"), "the remembered choice stays");
+        mgr.select(Some("b".into()), ArmSource::Ui);
+        drain(&mgr, now);
+        assert_eq!(mgr.state(), LinkState::Lost);
+        assert_eq!(mgr.view(now)["error"], "Machine de secours en veille");
+        assert!(changes(&mgr).is_empty());
+        mgr.set_hold(None);
+        assert!(mgr.hold().is_none());
     }
 
     #[test]

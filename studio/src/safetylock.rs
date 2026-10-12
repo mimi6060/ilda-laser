@@ -65,6 +65,8 @@ pub const ALWAYS: &[&str] = &[
     "/api/devices/scan",
     "/api/outputs/scan",
     "/api/remote/kick",
+    // Taking over on a backup (T-456) leaves the laser disarmed.
+    "/api/standby/takeover",
     // TC-IN follows the timecode like arming follows the button.
     "/api/timecode/arm",
     // Ticking the pre-show checklist is operating, not editing it.

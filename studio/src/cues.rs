@@ -857,6 +857,68 @@ impl CueDeck {
         self.next_id
     }
 
+    /// T-456: a backup machine in standby plays exactly the cues of the
+    /// main machine (`cues`, oldest first, on this machine's clock). The
+    /// ones gone stop at once, the new ones start at their own start time
+    /// without a transition, the others keep their instance (their
+    /// animation runs on). Nothing waits and nothing fades: the main
+    /// machine decides. Returns whether anything changed.
+    pub fn mirror(&mut self, cues: &[MirroredCue]) -> bool {
+        let same = |a: &ActiveCue, c: &MirroredCue| a.cue == c.cue && a.held == c.held && a.layer == c.layer;
+        let before = self.active.len();
+        self.active.retain(|a| cues.iter().any(|c| same(a, c)));
+        let mut changed = self.active.len() != before || !self.pending.is_empty() || !self.ending.is_empty();
+        self.pending.clear();
+        self.ending.clear();
+        for c in cues {
+            if self.active.iter().any(|a| same(a, c)) {
+                continue;
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            self.active.push(ActiveCue {
+                id,
+                cue: c.cue.clone(),
+                group: c.group,
+                layer: c.layer.clamp(1, LAYER_COUNT as u8),
+                started_s: c.started_s,
+                started_beat: c.started_beat,
+                held: c.held,
+                solo: c.solo,
+                settings: c.settings.clone(),
+                fade: None,
+                source: ControlSource::Network,
+                exec_level: 1.0,
+            });
+            changed = true;
+        }
+        // The main machine's order: the newest is the primary cue.
+        let order: Vec<usize> = self.active.iter().map(|a| cues.iter().position(|c| same(a, c)).unwrap_or(usize::MAX)).collect();
+        if order.windows(2).any(|w| w[0] > w[1]) {
+            let mut paired: Vec<(usize, ActiveCue)> = order.into_iter().zip(self.active.drain(..)).collect();
+            paired.sort_by_key(|(i, _)| *i);
+            self.active = paired.into_iter().map(|(_, a)| a).collect();
+            changed = true;
+        }
+        changed
+    }
+}
+
+/// One cue the main machine plays, for `CueDeck::mirror` (T-456).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MirroredCue {
+    pub cue: String,
+    pub layer: u8,
+    pub group: Option<u8>,
+    pub held: bool,
+    pub solo: bool,
+    /// On this machine's clock.
+    pub started_s: f64,
+    pub started_beat: f64,
+    pub settings: Settings,
+}
+
+impl CueDeck {
     pub fn primary(&self) -> Option<&ActiveCue> {
         self.active.last()
     }
