@@ -142,7 +142,7 @@ pub fn sections_for(path: &str) -> Option<&'static [Section]> {
         "/api/figures" | "/api/figures/delete" => &[Figures],
         "/api/objects" | "/api/objects/import" | "/api/objects/delete" => &[Objects],
         "/api/venue" | "/api/venue/preset" => &[Venue],
-        "/api/projection" => &[Projection],
+        "/api/projection" | "/api/zones/align/apply" => &[Projection],
         "/api/fx" => &[Fx],
         "/api/executors" => &[Executors],
         "/api/desks" => &[Desks],

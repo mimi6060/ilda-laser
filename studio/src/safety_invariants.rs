@@ -1442,6 +1442,73 @@ fn random_action(rig: &mut Rig, rng: &mut Rng, beats: &mut u64) -> bool {
 
 // ---------- the checks ----------
 
+/// One step of a phone's zone alignment (T-460): pairing (once, the
+/// cookie kept in `phone`), opening from the main screen, nudges through
+/// the remote's own router, reset, apply or reject. The saved zones
+/// change only through apply; the draft stays in the field, convex and
+/// close to the saved corners.
+fn phone_align_action(s: &mut Shared, rng: &mut Rng, phone: &mut Option<String>, now: Instant) -> Result<(), String> {
+    use crate::remote;
+    const NAME: &str = "Fuzz";
+    if !s.remote.state.enabled {
+        s.remote.state = remote::RemoteState { enabled: true, code: "123456".into(), ..Default::default() };
+        *phone = None;
+    }
+    if !s.remote.state.sessions.iter().any(|x| x.name == NAME) {
+        *phone = None;
+    }
+    let cookie = match phone {
+        Some(c) => c.clone(),
+        None => {
+            let r = remote::handle(s, "POST", "/pair", None, "10.0.0.9", br#"{"code":"123456","name":"Fuzz"}"#, now);
+            let c = r.set_cookie.ok_or_else(|| format!("pairing refused: {} {}", r.status, r.body))?.split(';').next().unwrap_or_default().to_string();
+            *phone = Some(c.clone());
+            c
+        }
+    };
+    // Every request renews the remote's heartbeat.
+    remote::handle(s, "GET", "/api/remote/align", Some(&cookie), "10.0.0.9", b"", now);
+    let before = s.projection.get().clone();
+    if s.remote.align.is_none() || rng.chance(0.05) {
+        let ids: Vec<u8> = before.zones.iter().map(|z| z.id).collect();
+        let opened = remote::align_open(s, *rng.pick(&ids), NAME, now);
+        if opened.is_ok() == s.estop.is_latched() {
+            return Err(format!("alignment open {opened:?} with the e-stop latched = {}", s.estop.is_latched()));
+        }
+    }
+    for _ in 0..rng.below(20) {
+        let corner = rng.below(5);
+        let dx = rng.below(13) as i32 - 6;
+        let dy = rng.below(13) as i32 - 6;
+        let body = format!(r#"{{"corner":{corner},"dx":{dx},"dy":{dy}}}"#);
+        remote::handle(s, "POST", "/api/remote/align/nudge", Some(&cookie), "10.0.0.9", body.as_bytes(), now);
+        if s.projection.get() != &before {
+            return Err("a nudge wrote the saved zone".into());
+        }
+        if let Some(a) = &s.remote.align {
+            crate::projection::check_quad(&a.draft).map_err(|e| format!("draft {:?}: {e}", a.draft))?;
+            for (d, b) in a.draft.iter().zip(&a.base) {
+                if d.iter().any(|v| !v.is_finite() || v.abs() > 1.0) || (d[0] - b[0]).hypot(d[1] - b[1]) > remote::MAX_DRAFT_OFFSET + 1e-3 {
+                    return Err(format!("draft corner {d:?} from {b:?}"));
+                }
+            }
+        }
+    }
+    match rng.below(12) {
+        0 => {
+            remote::handle(s, "POST", "/api/remote/align/reset", Some(&cookie), "10.0.0.9", b"{}", now);
+        }
+        1 => {
+            let _ = remote::align_apply(s);
+        }
+        2 => {
+            remote::align_end(s, "rejected");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// A Blank zone covering everything below the horizon, for the « full
 /// horizon at level 0 » check.
 fn below_horizon(h: &Horizon) -> Zone {
@@ -2629,6 +2696,12 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
     // or let run out. It replaces the looks, so only some sessions.
     let mut yrng = Rng::new(seed ^ 0x0447_0447);
     let trace_from = yrng.chance(0.15).then(|| yrng.below(frames));
+    // A phone's zone alignment (T-460), from its own stream: a paired
+    // remote, a session opened from the main screen at a random frame,
+    // random nudges (bounds and bad steps included), reset, apply, reject.
+    let mut phrng = Rng::new(seed ^ 0x0460_0460);
+    let align_from = phrng.chance(0.15).then(|| phrng.below(frames));
+    let mut phone: Option<String> = None;
     // Referenced presets (T-422), from their own stream.
     let mut grng = Rng::new(seed ^ 0x0422_0422);
     let pools_on = grng.chance(0.35);
@@ -3044,6 +3117,15 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
                 return Err(format!("frame {frame}: the zone trace changed the arming"));
             }
         }
+        if align_from.is_some_and(|f| frame >= f) && (frame == align_from.unwrap() || phrng.chance(0.3)) {
+            let now = rig.now;
+            let mut s = rig.s();
+            let was = s.gate.is_armed();
+            phone_align_action(&mut s, &mut phrng, &mut phone, now).map_err(|e| format!("frame {frame}: {e}"))?;
+            if !was && s.gate.is_armed() {
+                return Err(format!("frame {frame}: the phone alignment armed"));
+            }
+        }
         for _ in 0..rng.below(3) {
             let (was, was_scanning) = {
                 let s = rig.s();
@@ -3208,6 +3290,11 @@ fn run_case(seed: u64, frames: usize, cov: &mut Coverage, beat: &dyn Fn()) -> Re
             return Err(format!("frame {frame}: the zone trace survived the e-stop"));
         }
         cov.sent_lit_with_trace += (lit > 0 && s.zone_trace.is_on()) as usize;
+        // A phone's alignment draft (T-460) never outlives an e-stop; its
+        // frames went through the same checks (above).
+        if s.estop.is_latched() && s.remote.align.is_some() {
+            return Err(format!("frame {frame}: the alignment draft survived the e-stop"));
+        }
         cov.sent_lit_with_zone_chase += (lit > 0 && s.zone_chase.steps.iter().any(Option::is_some)) as usize;
         // A stop never leaves a delayed frame behind (T-421).
         let held = rig.engine.as_ref().map_or(0, |e| e.spread.held_frames());

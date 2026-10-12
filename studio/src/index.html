@@ -1222,6 +1222,11 @@
   #pzCanvas.off { opacity: .45; }
   .pz-state { font-size: 12px; color: var(--muted); }
   .pz-state.on { color: var(--ws-settings); font-weight: 700; }
+  /* T-460: a zone alignment proposed from a phone, confirmed here. */
+  #paStart label { margin: 0; }
+  #paStart select, #paActive button, #paOpen { min-height: 32px; }
+  .pa-banner { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--warn); color: var(--warn); font-weight: 700; font-size: 12px; }
+  #paCanvas { display: block; width: 240px; height: 240px; max-width: 100%; margin: 6px 0; border-radius: 8px; background: #0b0d15; border: 1px solid var(--line); }
   .pz-checks { display: flex; flex-wrap: wrap; gap: 2px 10px; }
   .pz-checks label { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 12px; }
   /* RÉGLAGES › Lieu et projecteurs (T-277), Theme (T-299) tokens. */
@@ -4568,6 +4573,26 @@
             <button id="pzAlign" title="Affiche la mire Grille à travers cette zone">Aligner avec la mire</button>
             <span class="pz-state" id="pzAlignState"></span>
           </div>
+          <div id="paBlock" data-search="Aligner depuis la télécommande téléphone">
+            <div class="tp-sub">Alignement depuis la télécommande</div>
+            <div class="hint">Le téléphone appairé (RÉGLAGES › Télécommande) pousse les 4 coins de cette zone par petits pas en regardant le mur ; rien n'est enregistré sans « Appliquer » ici. Les zones de sécurité, l'horizon, les plafonds et la calibration ne se règlent jamais depuis le téléphone. Refusé en mode spectacle et sous le verrouillage de sécurité.</div>
+            <div class="row" id="paStart">
+              <label for="paRemote">Télécommande</label>
+              <select id="paRemote"></select>
+              <button id="paOpen">Aligner depuis la télécommande…</button>
+            </div>
+            <div id="paActive" hidden>
+              <div class="pa-banner" id="paTitle" role="status" aria-live="polite"></div>
+              <canvas id="paCanvas" width="240" height="240" aria-label="Zone enregistrée (trait plein) et proposition du téléphone (pointillé)"></canvas>
+              <div class="hint" id="paCorners"></div>
+              <div class="row">
+                <button id="paApply">Appliquer</button>
+                <button id="paReject">Rejeter</button>
+                <button id="paClose">Fermer l'alignement</button>
+              </div>
+            </div>
+            <div class="hint sf-error" id="paError" role="alert"></div>
+          </div>
         </div>
         <div id="pzGroupsBlock" data-search="Groupes de zones (maîtres de groupe)">
         <div class="tp-sub">Groupes de zones</div>
@@ -7069,6 +7094,7 @@ function applyState(f, at, pushed) {
   showDwell(f.dwell);
   showTestPattern(f.test_pattern);
   showZoneTrace(f.zone_trace, f.armed);
+  if (f.align !== undefined) showPhoneAlign(f.align);
   showShowMode(f.lock);
   // Follow page changes made elsewhere (MIDI controller, API) - only
   // when the server's value changes, so a tab click that the server
@@ -19280,6 +19306,66 @@ $('remoteKickAll').onclick = () => kickRemote({});
 $('remotePill').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('remotePanel').open = true; $('remotePanel').scrollIntoView({ block: 'nearest' }); };
 setInterval(() => { if (!document.hidden) loadRemote(); }, 1000);
 loadRemote();
+// Alignement depuis la télécommande (T-460): RÉGLAGES › Zones de
+// projection. The phone moves a draft; only « Appliquer » here writes the
+// zone. The session comes with the state (`f.align`, T-411).
+let phoneAlign = null;
+function paRemotes() {
+  const names = remote && remote.enabled ? remote.sessions.map(r => r.name) : [];
+  const sel = $('paRemote'), key = JSON.stringify(names);
+  if (sel.dataset.key !== key) {
+    sel.dataset.key = key;
+    const keep = sel.value;
+    sel.replaceChildren(...names.map(n => new Option(n, n)));
+    if (names.includes(keep)) sel.value = keep;
+  }
+  $('paOpen').disabled = !names.length;
+  $('paOpen').title = names.length ? 'Ouvre l\'alignement de cette zone pour la télécommande choisie' : 'Appairez d\'abord un téléphone (RÉGLAGES › Télécommande)';
+}
+function paDraw(a) {
+  const cv = $('paCanvas'), ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const css = getComputedStyle(document.documentElement), color = n => css.getPropertyValue(n).trim();
+  ctx.strokeStyle = color('--line'); ctx.lineWidth = 1;
+  const [p, q] = [pzToPx(cv, [-1, 1]), pzToPx(cv, [1, -1])];
+  ctx.strokeRect(p[0], p[1], q[0] - p[0], q[1] - p[1]);
+  const quad = (c, dash, col) => {
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash(dash);
+    ctx.beginPath();
+    c.forEach((pt, i) => { const [x, y] = pzToPx(cv, pt); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+  };
+  quad(a.base, [], color('--accent'));
+  quad(a.draft, [5, 4], color('--warn'));
+}
+function showPhoneAlign(a) {
+  phoneAlign = a;
+  paRemotes();
+  $('paActive').hidden = !a;
+  $('paStart').hidden = !!a;
+  if (!a) return;
+  $('paTitle').textContent = `Alignement en cours — zone « ${a.zone_name} » — télécommande « ${a.remote} » : ${a.changed ? 'modification proposée par la télécommande « ' + a.remote + ' »' : 'aucun déplacement pour l\'instant'}`;
+  $('paCorners').textContent = a.corners.map((n, i) => `${n} ${a.draft[i].map(v => v.toFixed(3)).join(' ; ')}`).join('   ');
+  $('paApply').disabled = !a.changed;
+  paDraw(a);
+}
+async function paPost(path, body) {
+  try {
+    const r = await api('POST', path, body, { quiet: true });
+    const t = r.ok ? null : await r.text();
+    if (r.status === 423) flash(t); else $('paError').textContent = t || '';
+    if (r.ok) {
+      const j = await r.json();
+      showPhoneAlign(j.align);
+      if (j.projection) takeProjection(j.projection);
+    }
+  } catch {}
+}
+$('paOpen').onclick = () => { const z = pzZone(); if (z && $('paRemote').value) paPost('/api/zones/align/open', { zone: z.id, remote: $('paRemote').value }); };
+$('paApply').onclick = () => paPost('/api/zones/align/apply');
+$('paReject').onclick = () => paPost('/api/zones/align/reject');
+$('paClose').onclick = () => paPost('/api/zones/align/close');
+setInterval(paRemotes, 1000);
 // Apprendre DMX (right-click menu): the first channel that moves is mapped.
 let dmxLearnTimer = null;
 async function dmxLearnWatch() {
