@@ -237,16 +237,26 @@ fn packet(s: &mut Shared, f: &DmxFixture, window: Vec<Option<u8>>, now: Instant)
 
 /// The cue channel: a cell of the instance's page.
 fn play(s: &mut Shared, d: &Decoded) {
-    let cells = controls::GRID_ROWS * controls::GRID_COLS;
     let page = if d.page == 0 { s.cue_page } else { d.page as usize - 1 };
-    if page >= s.grid.page_count() || !(1..=cells).contains(&(d.cue as usize)) {
-        return;
-    }
-    let i = d.cue as usize - 1;
-    let cell = format!("{}.{}.{}", page + 1, i / controls::GRID_COLS + 1, i % controls::GRID_COLS + 1);
-    if let Some(id) = controls::grid_cell_preset(&s.grid, &cell) {
+    if let Some(id) = cue_at(&s.grid, page, d.cue) {
         let _ = external::instance_play_cue(s, true, &id);
     }
+}
+
+/// The *Cue* channel's values: 1 to this.
+pub const CUE_VALUES: u8 = (controls::GRID_ROWS * controls::GRID_COLS) as u8;
+
+/// The cue that *Cue* value `cue` (1..=40) plays on page `page`
+/// (0-based): cell `cue - 1`, row-major over 8 columns. The one table
+/// between DMX values and cues: the receiver plays through it and the
+/// CITP index (T-454) announces through it.
+pub fn cue_at(grid: &crate::grid::CueGrid, page: usize, cue: u8) -> Option<String> {
+    if page >= grid.page_count() || !(1..=CUE_VALUES).contains(&cue) {
+        return None;
+    }
+    let i = cue as usize - 1;
+    let cell = format!("{}.{}.{}", page + 1, i / controls::GRID_COLS + 1, i % controls::GRID_COLS + 1);
+    controls::grid_cell_preset(grid, &cell)
 }
 
 /// Once per engine frame, after the packets: each instance's remote at
@@ -618,6 +628,35 @@ mod tests {
         external::set_open(&mut s, false, ArmSource::Ui).unwrap();
         crate::netin::frame(&mut s, t0);
         assert!(s.netin.fixtures.remotes.is_empty());
+    }
+
+    /// T-454: the pages and cues the CITP index announces are the ones the
+    /// *Page* and *Cue* channels play (one table, checked from both ends).
+    #[test]
+    fn the_citp_index_and_the_dmx_channels_agree() {
+        let mut s = studio();
+        let idx = crate::citp::MediaIndex::build(&s);
+        let t0 = Instant::now();
+        let mut data = universe_data();
+        let mut checked = 0;
+        for (p, page) in idx.pages.iter().enumerate().take(4) {
+            for cue in &page.cues {
+                data[10] = p as u8 + 1;
+                data[11] = cue.dmx;
+                send(&mut s, &data, t0);
+                assert_eq!(s.active_cue.as_deref(), Some(cue.id.as_str()), "page {} cue {}", p + 1, cue.dmx);
+                assert_eq!(idx.cue_id(p as u8 + 1, cue.dmx), Some(cue.id.as_str()));
+                checked += 1;
+            }
+            // Values with no element: nothing in the index, nothing played.
+            for v in 1..=CUE_VALUES {
+                if page.cues.iter().all(|c| c.dmx != v) {
+                    assert_eq!(cue_at(&s.grid, p, v), None);
+                }
+            }
+        }
+        assert!(checked > 10);
+        assert!(!s.gate.is_armed());
     }
 
     #[test]

@@ -4945,6 +4945,25 @@
         </div>
         <div class="hint sf-error" id="oscFbError" role="alert"></div>
       </details>
+      <details id="citpPanel" data-search="Vignettes pour la console CITP MSEX pupitre lumière navigateur de médias noms images cues pages">
+        <summary>Vignettes pour la console (CITP)</summary>
+        <div class="hint">La console reçoit les noms et les images des pages et des cues. Elle ne peut rien déclencher par ce canal : le pilotage passe par l'entrée DMX. Les numéros annoncés sont ceux des canaux <i>Page</i> et <i>Cue</i> de la personnalité DMX. Désactivé par défaut ; aucune connexion n'est ouverte tant que la case n'est pas cochée. Réglage de cette machine (pas du projet).</div>
+        <label class="check"><input type="checkbox" id="citpEnabled"> Annoncer les cues à la console</label>
+        <div class="do-grid">
+          <label for="citpInterface">Interface réseau</label>
+          <select id="citpInterface" title="L'adresse de ce Mac sur laquelle la console se connecte"></select>
+          <label for="citpName">Nom affiché sur la console</label>
+          <input type="text" id="citpName" maxlength="64" autocomplete="off" spellcheck="false">
+          <label for="citpThumb">Taille des vignettes (px)</label>
+          <input type="number" id="citpThumb" min="32" max="256" step="1" inputmode="numeric">
+        </div>
+        <div class="row"><button id="citpSave">Enregistrer</button></div>
+        <div class="hint" id="citpMsg" role="status"></div>
+        <div class="ni-state" id="citpState" role="status">Arrêté</div>
+        <div class="n">Consoles connectées</div>
+        <ul id="citpPeers" aria-label="Consoles connectées"></ul>
+        <div class="hint">Vignettes envoyées : <b id="citpServed">0</b> · Messages ignorés : <b id="citpIgnored">0</b></div>
+      </details>
     </section>
 
     <section id="outputsPanel" data-help="reglages-sorties" data-search="Sorties et projecteurs">
@@ -7122,6 +7141,7 @@ function applyState(f, at, pushed) {
   showOutputKind(f);
   showArtnetStatus(f.output_status);
   showDmxOutLive(f.dmx_out);
+  showCitpLive(f.citp);
   highlightPlaylist(f.playlist);
   showTempo(pushed ? tempoNow() : f.tempo);
   // A live change of ours in flight, or just answered: an older state must
@@ -17644,6 +17664,62 @@ async function saveDmxOut() {
 $('doSave').addEventListener('click', saveDmxOut);
 $('doEnabled').addEventListener('change', saveDmxOut);
 $('dmxOutPanel').addEventListener('toggle', () => { if ($('dmxOutPanel').open) loadDmxOut(); });
+// CITP (T-454): names and pictures of the cue grid for a lighting
+// console's media browser. Read-only for the console; the state comes
+// with every frame (`f.citp`).
+let citpCfg = null;
+async function loadCitp() {
+  try { showCitp(await apiJson('GET', '/api/citp', undefined, { cache: 'no-store' })); } catch { /* next time */ }
+}
+function showCitp(j) {
+  citpCfg = j.config;
+  $('citpEnabled').checked = j.config.enabled;
+  const ifs = [['', '127.0.0.1 (ce Mac seulement)'], ...j.interfaces.filter(i => i.ip !== '127.0.0.1').map(i => [i.ip, `${i.ip} (${i.name})`])];
+  const cur = j.config.interface === '127.0.0.1' ? '' : j.config.interface || '';
+  if (cur && !ifs.some(([ip]) => ip === cur)) ifs.push([cur, cur + ' (absente)']);
+  doOptions($('citpInterface'), ifs, cur);
+  $('citpName').value = j.config.server_name;
+  $('citpThumb').value = j.config.thumb_max_px;
+  showCitpLive({ enabled: j.config.enabled, ...j.status });
+}
+function showCitpLive(c) {
+  if (!c) return;
+  const st = $('citpState');
+  st.textContent = c.error ? '⚠ ' + c.error
+    : c.listening ? `À l'écoute sur ${c.local || '?'}${c.announcing ? ' · annoncé sur le réseau' : ''}`
+    : c.enabled ? 'Démarrage…' : 'Arrêté';
+  st.className = 'ni-state' + (c.error ? ' warn' : c.listening ? ' ok' : '');
+  const peers = c.peers || [];
+  const key = peers.join('\n');
+  if ($('citpPeers').dataset.key !== key) {
+    $('citpPeers').dataset.key = key;
+    $('citpPeers').replaceChildren(...(peers.length ? peers : ['Aucune']).map(p => { const li = document.createElement('li'); li.textContent = p; return li; }));
+  }
+  $('citpServed').textContent = c.served_thumbs ?? 0;
+  $('citpIgnored').textContent = c.ignored_messages ?? 0;
+}
+async function saveCitp() {
+  const n = Math.round(+$('citpThumb').value);
+  const body = {
+    enabled: $('citpEnabled').checked,
+    interface: $('citpInterface').value || null,
+    server_name: $('citpName').value,
+    thumb_max_px: Number.isFinite(n) && $('citpThumb').value !== '' ? n : 128,
+  };
+  const r = await api('POST', '/api/citp', body, { quiet: true });
+  if (r.ok) {
+    showCitp(await r.json());
+    $('citpMsg').textContent = citpCfg.enabled ? 'Enregistré : cues annoncés à la console.' : 'Enregistré (annonce désactivée).';
+    $('citpMsg').classList.remove('sf-error');
+  } else {
+    $('citpMsg').textContent = await r.text();
+    $('citpMsg').classList.add('sf-error');
+    if (citpCfg) $('citpEnabled').checked = citpCfg.enabled;
+  }
+}
+$('citpSave').addEventListener('click', saveCitp);
+$('citpEnabled').addEventListener('change', saveCitp);
+$('citpPanel').addEventListener('toggle', () => { if ($('citpPanel').open) loadCitp(); });
 // Every frame: the witness in RÉGLAGES and the haze box in LIVE.
 function showDmxOutLive(d) {
   if (!d) return;

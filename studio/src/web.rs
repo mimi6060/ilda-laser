@@ -378,6 +378,10 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/dmx-out", RouteClass::Read),
     ("POST", "/api/dmx-out", RouteClass::Safety),
     ("POST", "/api/dmx-out/haze", RouteClass::Play),
+    // CITP (T-454): names and pictures for a console; switching it on
+    // opens a socket, so Safety (never from the tablet remote).
+    ("GET", "/api/citp", RouteClass::Read),
+    ("POST", "/api/citp", RouteClass::Safety),
     ("*", "/api/project", RouteClass::Edit),
     ("*", "/api/project/*", RouteClass::Edit),
     ("GET", "/api/remote", RouteClass::Read),
@@ -3506,6 +3510,8 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (method, p) if p == "/api/timecode" || p == "/api/timecode/arm" || p == "/api/timecode/out" => timecode_route(request, shared, method, p),
         (Method::Get, "/api/dmx-out") => json_response(crate::dmx_out::view(&shared.lock().unwrap())),
         (Method::Post, p) if p == "/api/dmx-out" || p == "/api/dmx-out/haze" => dmx_out_route(request, shared, p),
+        (Method::Get, "/api/citp") => json_response(crate::citp::view(&shared.lock().unwrap())),
+        (Method::Post, "/api/citp") => citp_route(request, shared),
         (method, p) if p == "/api/project" || p.starts_with("/api/project/") => project_route(request, shared, method == Method::Post, p),
         // The tablet remote (T-428): turned on, watched and cut from here
         // only (this server listens on 127.0.0.1); the remote's own
@@ -3606,7 +3612,7 @@ fn cue_thumbnails(presets: &[(String, Settings)]) -> serde_json::Map<String, ser
 
 /// What a cue picture is drawn from: the look, and for an ILDA cue its
 /// file's load stamp (drawn again once the file is (re)loaded).
-fn look_key(settings: &Settings) -> String {
+pub(crate) fn look_key(settings: &Settings) -> String {
     let mut key = serde_json::to_string(settings).unwrap_or_default();
     if let crate::engine::Content::Ilda { file, .. } = &settings.content {
         key += &crate::ilda_library::clip(file).map_or(0, |c| c.stamp).to_string();
@@ -5684,6 +5690,31 @@ fn netin_refusal(e: &str) -> u16 {
     }
 }
 
+/// `POST /api/citp` `{ "enabled": true, "interface": "…", "server_name":
+/// "…", "thumb_max_px": 128 }` (T-454): the fields given; 400 when
+/// invalid. Saved to `citp.json` outside the lock.
+fn citp_route(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    match body::<serde_json::Value>(request) {
+        Ok(patch) => {
+            let (result, job) = {
+                let mut s = shared.lock().unwrap();
+                let r = crate::citp::update(&mut s, &patch);
+                (r, s.citp.save_job())
+            };
+            match result {
+                Ok(changed) => {
+                    if let (true, Some((path, cfg))) = (changed, job) {
+                        crate::save_json(&path, &cfg);
+                    }
+                    json_response(crate::citp::view(&shared.lock().unwrap()))
+                }
+                Err(e) => text(400, &e),
+            }
+        }
+        Err(e) => e,
+    }
+}
+
 /// The DMX output (T-453):
 /// - `GET /api/dmx-out` (in `dispatch`): settings, status, values, interfaces.
 /// - `POST /api/dmx-out` `{ "enabled": true, "channels": [...], … }`: the
@@ -5920,6 +5951,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     v["agenda"] = crate::agenda::state(s);
     // The DMX output (T-453): values by channel, haze panel, sending.
     v["dmx_out"] = crate::dmx_out::summary(s);
+    // CITP (T-454): listening, consoles connected, counters.
+    v["citp"] = crate::citp::summary(s);
     // Pilote automatique (T-148): the switch, its pick, why it waits.
     v["autopilot"] = crate::autopilot::status(s);
     // The live take (T-169).
@@ -6155,6 +6188,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["agenda"] = crate::agenda::summary(s);
     // The DMX output (T-453): values, haze panel, sending.
     v["dmx_out"] = crate::dmx_out::summary(s);
+    // CITP (T-454): listening, consoles connected, counters (RÉGLAGES).
+    v["citp"] = crate::citp::summary(s);
     // Pilote automatique (T-148): the switch, its pick, why it waits.
     v["autopilot"] = crate::autopilot::status(s);
     // T-448: 0 normal, 1 loaded, 2 late frames (the points indicator).

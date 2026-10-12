@@ -30,6 +30,7 @@ mod cues;
 mod cuelist;
 mod devices;
 mod dmx;
+mod citp;
 mod dmx_out;
 mod datafile;
 mod formats;
@@ -658,6 +659,9 @@ pub struct Shared {
     /// The DMX output (T-453, dmx_out.rs): haze and simple lights, settings
     /// in `dmx_out.json`, never in a project; off by default.
     pub dmx_out: dmx_out::DmxOutState,
+    /// Cue names and pictures for a lighting console (T-454, citp/):
+    /// settings in `citp.json`, never in a project; off by default.
+    pub citp: citp::CitpState,
 }
 
 impl Shared {
@@ -1243,6 +1247,9 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let tc_out_thread = tc_out_rx.and_then(|rx| timecode::out::spawn(rx, tc_out_status, midi_opener.clone(), Arc::clone(&running)));
     // Idle (no socket) until switched on; reads the e-stop latch itself.
     let dmx_out_thread = dmx_out_rx.and_then(|rx| dmx_out::spawn(rx, dmx_out_status, Arc::clone(&estop), Arc::clone(&running)));
+    // CITP (T-454): no socket until switched on; only reads the grid.
+    let citp_hub = Arc::clone(&shared.lock().unwrap().citp.hub);
+    let citp_thread = citp::server::spawn(Arc::clone(&shared), citp_hub, Arc::clone(&running));
     let clock_thread = clock_rx.and_then(|rx| midi::clock::spawn(rx, clock_status, midi_opener, Arc::clone(&running)));
     let midi_thread = if let Some(sim) = sim {
         println!("--midi-test: simulated APC40 mkII only, MIDI injection enabled (tests only).");
@@ -1352,6 +1359,9 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     }
     if let Some(t) = dmx_out_thread {
         t.join().ok(); // within one poll (10 ms), after its frames of zeros
+    }
+    if let Some(t) = citp_thread {
+        t.join().ok(); // within one poll (50 ms); its sockets close
     }
     // The audio threads close the input within ~50 ms; a device stuck in
     // CoreAudio must not hold the exit.
@@ -1644,6 +1654,7 @@ fn startup_state(cli: &Cli) -> Shared {
         agenda: agenda::AgendaRunner::load(cli.data_dir.join("agenda.json")),
         remote: remote::Remote::load(cli.data_dir.join("remote.json"), cli.remote_bind),
         dmx_out: dmx_out::DmxOutState::load(cli.data_dir.join("dmx_out.json")),
+        citp: citp::CitpState::load(cli.data_dir.join("citp.json")),
     };
     usercues::sync_presets(&mut state);
     let objects = state.objects.list().iter().map(wire::preset_of).collect();
