@@ -21,6 +21,15 @@ async function openSafety(page: Page) {
   await expect(page.locator('#slkStatus')).not.toBeEmpty();
 }
 
+/** « OK » in the code dialog, then the studio's answer to `route`. The code
+ *  is checked with PBKDF2 (100 000 rounds, debug build): seconds under
+ *  load, so wait for the answer itself, not for a fixed expect timeout. */
+async function submitCode(page: Page, route: '/api/safety/lock' | '/api/safety/unlock') {
+  const answer = page.waitForResponse(r => new URL(r.url()).pathname === route && r.request().method() === 'POST', { timeout: 0 });
+  await page.locator('#slkOk').click();
+  await answer;
+}
+
 test.beforeEach(async ({ page }) => {
   // The documented recovery: studio stopped, file deleted, restarted.
   if ((await lockState()).set) {
@@ -48,7 +57,7 @@ test('lock with a code: loosening refused, stopping and tightening allowed, unlo
   await expect(page.locator('#slkError')).toHaveText('Les deux codes diffèrent.');
   await page.locator('#slkCode').fill(CODE);
   await page.locator('#slkCode2').fill(CODE);
-  await page.locator('#slkOk').click();
+  await submitCode(page, '/api/safety/lock');
   await expect(page.locator('#slkDialog')).toBeHidden();
   await expect.poll(async () => (await lockState()).locked).toBe(true);
   await expect(page.locator('body')).toHaveClass(/safety-locked/);
@@ -82,7 +91,7 @@ test('lock with a code: loosening refused, stopping and tightening allowed, unlo
   await openSafety(page);
   await page.locator('#slkUnlockBtn').click();
   await page.locator('#slkCode').fill(CODE);
-  await page.locator('#slkOk').click();
+  await submitCode(page, '/api/safety/unlock');
   await expect(page.locator('#slkDialog')).toBeHidden();
   await expect.poll(async () => (await lockState()).locked).toBe(false);
   await expect(page.locator('body')).not.toHaveClass(/safety-locked/);
@@ -105,16 +114,17 @@ test('five wrong codes make it wait; Escape stays the e-stop in the dialog', asy
   await page.locator('#slkUnlockBtn').click();
   for (let i = 0; i < 4; i++) {
     await page.locator('#slkCode').fill('1111');
-    await page.locator('#slkOk').click();
-    await expect(page.locator('#slkError')).toContainText('Code incorrect');
+    await submitCode(page, '/api/safety/unlock');
+    // Each answer has its own count: never the previous attempt's message.
+    await expect(page.locator('#slkError')).toHaveText(`Code incorrect (${4 - i} essai${i < 3 ? 's' : ''} avant une attente de 60 s)`);
     await expect(page.locator('#slkCode')).toHaveValue('');
   }
   await page.locator('#slkCode').fill('1111');
-  await page.locator('#slkOk').click();
+  await submitCode(page, '/api/safety/unlock');
   await expect(page.locator('#slkError')).toHaveText('Code incorrect : attendez 60 s');
   // Even the right code waits now.
   await page.locator('#slkCode').fill(CODE);
-  await page.locator('#slkOk').click();
+  await submitCode(page, '/api/safety/unlock');
   await expect(page.locator('#slkError')).toContainText('Trop d\'essais');
   expect((await lockState()).locked).toBe(true);
   expect((await lockState()).wait_s).toBeGreaterThan(50);

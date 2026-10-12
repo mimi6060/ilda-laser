@@ -33,6 +33,10 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('the « ? » of every panel opens its own page', async ({ page }) => {
+  // Every « ? » of every workspace opened and closed in turn, each waiting for its
+  // drawer: ~15 s alone, past the 60 s budget with four busy workers.
+  // Three times the budget; every step still waits on what it shows.
+  test.slow();
   const pages = await helpPages();
   const titles = new Map(pages.map(p => [p.slug, p.title_fr]));
   const seen = new Set<string>();

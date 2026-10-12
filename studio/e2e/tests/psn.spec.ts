@@ -13,15 +13,22 @@ const studio = useStudio({ testHooks: true });
 const safety = async () => (await studio.get('/api/safety')).settings;
 const lit = async () => (await studio.frame()).points.filter(isLit);
 
-/** Sends tracker 5 (« Chariot ») at `pos` every 100 ms until `stop()`. */
+/** Sends tracker 5 (« Chariot ») at `pos` every 100 ms until `stop()`.
+ *  One packet in flight at most: under load, posts never pile up, and
+ *  `pause()` resolves once the last one has reached the studio, so the
+ *  data has really stopped from then on. */
 function feeder() {
   let pos: number[] | null = null;
+  let inFlight: Promise<void> | null = null;
   const timer = setInterval(() => {
-    if (pos) studio.post('/api/test/psn', { trackers: [{ id: 5, pos, name: 'Chariot' }] }).catch(() => {});
+    if (!pos || inFlight) return;
+    inFlight = studio.post('/api/test/psn', { trackers: [{ id: 5, pos, name: 'Chariot' }] })
+      .then(() => {}, () => {})
+      .finally(() => { inFlight = null; });
   }, 100);
   return {
     at(p: number[]) { pos = p; },
-    pause() { pos = null; },
+    async pause() { pos = null; await inFlight; },
     stop() { clearInterval(timer); },
   };
 }
@@ -59,7 +66,8 @@ test('assign and calibrate a tracker; the beam follows it, goes dark when the da
     await openPsn(page);
 
     // Switching on waits for the confirmation; then it listens on this Mac only.
-    await page.locator('#psnEnabled').check();
+    // A click, not `.check()`: the box shows the stored state until confirmed.
+    await page.locator('#psnEnabled').click();
     await expect(page.locator('#psnLoosenText')).toContainText('Suivi activé');
     expect((await studio.get('/api/psn')).settings.enabled).toBe(false);
     await page.locator('#psnLoosenOk').click();
@@ -104,8 +112,12 @@ test('assign and calibrate a tracker; the beam follows it, goes dark when the da
     await expect(page.locator('.psnstate')).toContainText('Suivi');
 
     // The data stops: dark after the loss delay, and back when it resumes.
-    feed.pause();
-    await expect.poll(async () => (await lit()).length, { timeout: 3000 }).toBe(0);
+    // Once the last packet has landed, the studio says « perdu » and the
+    // frame is dark (the loss delay is 500 ms; the default expect timeout
+    // leaves room for a loaded machine).
+    await feed.pause();
+    await expect.poll(async () => (await studio.get('/api/psn')).status.links[0].state).toBe('perdu');
+    await expect.poll(async () => (await lit()).length).toBe(0);
     await expect(page.locator('.psnstate')).toContainText('Perdu');
     feed.at([3, 1.5, 0]);
     await expect.poll(async () => (await lit()).length).toBeGreaterThan(0);
@@ -126,8 +138,10 @@ test('switching on is refused armed; switching off always runs; tracking never a
   await openUi(page, studio);
   await openPsn(page);
   expect(await studio.post('/api/arm', { on: true })).toBe(200);
-  await page.locator('#psnEnabled').check();
+  // A click, not `.check()`: the refusal puts the box back, which is the point.
+  await page.locator('#psnEnabled').click();
   await expect(page.locator('#psnError')).toContainText('Désarmez le laser');
+  await expect(page.locator('#psnEnabled')).not.toBeChecked();
   expect((await studio.get('/api/psn')).settings.enabled).toBe(false);
   expect(await studio.post('/api/arm', { on: false })).toBe(200);
 
