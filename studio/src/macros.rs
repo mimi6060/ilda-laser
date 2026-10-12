@@ -542,7 +542,8 @@ pub fn start(s: &mut Shared, id: &str, source: ControlSource) -> Result<(), &'st
         return Err("macro désactivée");
     }
     let depth = s.macros.player.current.map_or(1, |(_, d, _)| d + 1);
-    let from_script = source == ControlSource::Script || s.macros.player.in_script_run();
+    // A script, a macro it started or a cue list it moved: see `script_origin`.
+    let from_script = crate::script::script_origin(s, source);
     if depth > MAX_DEPTH {
         return Err("trop de macros imbriquées");
     }

@@ -51,6 +51,14 @@ pub const MAX_SOURCE: usize = lang::MAX_SOURCE;
 pub const MAX_NAME: usize = 32;
 /// Console lines kept per script.
 const MAX_CONSOLE: usize = 100;
+/// The shortest gap between two starts of one script when the run is not
+/// the operator's own (`operator_source`): a quarter of a second, longer
+/// than any frame and shorter than a fast beat at 200 BPM (0.3 s). A
+/// backstop under the origin checks: whatever path loops back to
+/// `script.N.run` (a MIDI or OSC feedback, a list or a macro we didn't
+/// think of), a script starts at most four times a second.
+pub const MIN_RUN_INTERVAL_S: f64 = 0.25;
+pub const TOO_SOON_FR: &str = "relancé trop vite (moins de 250 ms après le lancement précédent) : lancement refusé";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -124,6 +132,11 @@ struct Status {
     last_ms: f32,
     blocked: bool,
     console: VecDeque<String>,
+    /// When it last started (`Shared::now_s`), for `MIN_RUN_INTERVAL_S`.
+    last_start_s: Option<f64>,
+    /// A launch refusal is already in the console since that start (a
+    /// feedback loop knocks every frame: one line is enough).
+    refusal_logged: bool,
 }
 
 impl Status {
@@ -271,6 +284,10 @@ pub struct Scripts {
     pub warnings: Vec<String>,
     /// The banner: the list came with a project and isn't approved here.
     pub ask_trust: bool,
+    /// Not zero while the studio applies something a script is at the
+    /// origin of, other than a macro step (`MacroPlayer::in_script_run`):
+    /// the controls fired by the steps of a cue list a script drove.
+    origin: u32,
 }
 
 fn fingerprint(list: &[Script]) -> String {
@@ -619,9 +636,53 @@ fn snapshot(s: &Shared) -> Value {
     })
 }
 
+/// Whether what is being applied now comes from a script: its own
+/// commands, a macro it started (or a macro that macro started), or the
+/// controls fired by a cue list it moved (on that frame or on a later one:
+/// *À la suite*, *Après n s*, *Sur le temps*). Nothing with that origin
+/// launches a script.
+pub fn script_origin(s: &Shared, source: ControlSource) -> bool {
+    source == ControlSource::Script || s.scripts.origin > 0 || s.macros.player.in_script_run()
+}
+
+/// Runs `f` with a script at the origin of what it applies.
+pub fn with_script_origin<R>(s: &mut Shared, f: impl FnOnce(&mut Shared) -> R) -> R {
+    s.scripts.origin += 1;
+    let r = f(s);
+    s.scripts.origin -= 1;
+    r
+}
+
+/// The operator's own hand on the main screen: a button, a key, the
+/// command line. Everything else (macros, cue lists, timeline, agenda,
+/// MIDI, OSC, DMX, remotes, the API, the system) is held to
+/// `MIN_RUN_INTERVAL_S`.
+fn operator_source(source: ControlSource) -> bool {
+    matches!(source, ControlSource::Ui | ControlSource::Keyboard | ControlSource::Command)
+}
+
+/// A launch refused for a reason the operator should see in the script's
+/// console (once per start of the script, a loop would knock every frame).
+fn refuse(s: &mut Shared, id: u32, source: ControlSource, why: &'static str) -> Result<(), &'static str> {
+    if s.scripts.get(id).is_some() {
+        let st = s.scripts.status_mut(id);
+        if !st.refusal_logged {
+            st.refusal_logged = true;
+            st.log(format!("lancement par « {} » refusé : {why}", source.label_fr()));
+        }
+    }
+    Err(why)
+}
+
 /// Posts a run of `id` (already checked). Never waits.
 fn enqueue(s: &mut Shared, id: u32, state: &Value) {
     let Some(source) = s.scripts.get(id).map(|sc| sc.source.clone()) else { return };
+    let now = s.now_s();
+    {
+        let st = s.scripts.status_mut(id);
+        st.last_start_s = Some(now);
+        st.refusal_logged = false;
+    }
     let sc = &mut s.scripts;
     sc.next_serial += 1;
     let serial = sc.next_serial;
@@ -659,13 +720,23 @@ fn runnable(s: &mut Shared, id: u32) -> bool {
 
 /// A run on demand (button, `script.<id>.run`, a macro, a cue list).
 /// Lifts the script's block: it is the operator's action.
+///
+/// Two layers keep a script from relaunching itself every frame: nothing a
+/// script is at the origin of launches a script (`script_origin`), and a
+/// run that is not the operator's own waits `MIN_RUN_INTERVAL_S` after the
+/// script's last start, whatever the path (the backstop).
 pub fn request_run(s: &mut Shared, id: u32, source: ControlSource) -> Result<(), &'static str> {
     if source == ControlSource::Script {
-        return Err("un script ne lance pas de script");
+        return refuse(s, id, source, "un script ne lance pas de script");
     }
     // Nor through a macro it started (or a macro that macro started).
     if s.macros.player.in_script_run() {
-        return Err("une macro lancée par un script ne lance pas de script");
+        return refuse(s, id, source, "une macro lancée par un script ne lance pas de script");
+    }
+    // Nor through a cue list it moved (the step's control, or a macro the
+    // step started: `in_script_run` above).
+    if s.scripts.origin > 0 {
+        return refuse(s, id, source, "une liste de cues pilotée par un script ne lance pas de script");
     }
     s.gate.sync_estop(&s.estop);
     if s.estop.is_latched() {
@@ -679,6 +750,12 @@ pub fn request_run(s: &mut Shared, id: u32, source: ControlSource) -> Result<(),
     }
     if s.scripts.is_running(id) {
         return Err("ce script tourne déjà");
+    }
+    if !operator_source(source) {
+        let now = s.now_s();
+        if s.scripts.status.get(&id).and_then(|st| st.last_start_s).is_some_and(|last| now - last < MIN_RUN_INTERVAL_S) {
+            return refuse(s, id, source, TOO_SOON_FR);
+        }
     }
     if !runnable(s, id) {
         return Err("script en erreur : voir sa console");
@@ -1166,6 +1243,153 @@ mod tests {
         assert!(s.macros.player.runs.iter().any(|r| r.macro_id == "m1" && r.from_script));
         crate::macros::frame(&mut s, t + 1.0, beat + 2.0);
         assert_eq!(s.scripts.next_serial, 2, "launched once by the operator, once by « Lancer »");
+    }
+
+    /// One engine frame `dt` seconds after the last, on the simulated
+    /// clock: the scripts, the cue list, the macros.
+    fn frame_after(s: &mut Shared, dt: f64) {
+        let now = s.now_s() + dt;
+        s.sim_now = Some(s.epoch + std::time::Duration::from_secs_f64(now));
+        tick(s);
+        let (beat, audio) = (s.tempo.beat_at(now), s.audio);
+        crate::cuelist::frame(s, dt, beat, &audio);
+        crate::macros::frame(s, now, beat);
+    }
+
+    fn fire(control: &str) -> Option<crate::cuelist::StepAction> {
+        Some(crate::cuelist::StepAction { control: control.into(), value: 1.0 })
+    }
+
+    /// A loaded, looping list of `steps`.
+    fn load_list(s: &mut Shared, steps: Vec<crate::cuelist::Step>) {
+        crate::cuelist::save(s, crate::cuelist::CueList { name: "L".into(), wrap: true, steps, ..Default::default() }).unwrap();
+        crate::cuelist::load(s, "L").unwrap();
+    }
+
+    fn console_has(s: &Shared, id: u32, needle: &str) -> usize {
+        status(s, id).console.iter().filter(|l| l.contains(needle)).count()
+    }
+
+    /// Script → cue list → script (review 2): a list a script moves fires
+    /// its steps' controls with the script's origin, so `script.N.run`, or
+    /// a macro launching it, is refused. One second per frame: the
+    /// backstop interval can't be what stops it here.
+    #[test]
+    fn a_script_cannot_launch_a_script_through_a_cue_list() {
+        use crate::cuelist::{Step, StepTrigger};
+        use crate::macros::{Macro, MacroStep, Wait};
+        let go_step = |control: &str| Step { trigger: StepTrigger::Go, fire: fire(control), ..Step::default() };
+        for action in ["script.1.run", "macro.m1.go"] {
+            let mut s = with(vec![sc(1, "Boucle", "commande(\"list.go\")", ScriptTrigger::Manual)]);
+            crate::macros::set(&mut s, vec![Macro { id: "m1".into(), name: "m1".into(), steps: vec![MacroStep { command: "script.1.run".into(), wait: Wait::None, enabled: true }], ..Default::default() }]).unwrap();
+            load_list(&mut s, vec![go_step(action), go_step(action)]);
+            request_run(&mut s, 1, ControlSource::Ui).unwrap();
+            for _ in 0..30 {
+                frame_after(&mut s, 1.0);
+            }
+            assert_eq!(s.scripts.next_serial, 1, "{action}: the script ran {} times", s.scripts.next_serial);
+            assert!(s.cue_list.index.is_some(), "{action}: the script's Go moved the list");
+            assert!(s.cue_list.from_script);
+            assert_eq!(console_has(&s, 1, "ne lance pas de script"), 1, "{action}: refused, said once: {:?}", status(&s, 1).console);
+        }
+    }
+
+    /// The steps that start by themselves after a script's Go (À la
+    /// suite, Après n s, Sur le temps) keep its origin on later frames; an
+    /// executor's Go from a script too. The operator's Go clears it.
+    #[test]
+    fn steps_that_follow_a_scripts_go_keep_its_origin() {
+        use crate::cuelist::{Step, StepTrigger};
+        use crate::executors::{ButtonFn, ExecTarget, Executor, ExecutorBank};
+        for (via, trigger) in [("list.go", StepTrigger::Follow), ("list.go", StepTrigger::After { s: 2.0 }), ("list.go", StepTrigger::Beats { n: 4 }), ("exec.1.1.button on", StepTrigger::Follow)] {
+            let mut s = with(vec![sc(1, "Go", &format!("commande(\"{via}\")"), ScriptTrigger::Manual), sc(2, "Cible", "commande(\"master.size 30\")", ScriptTrigger::Manual)]);
+            let mut bank = ExecutorBank::default();
+            bank.pages[0].handles[0] = Executor { target: ExecTarget::CueList, buttons: [ButtonFn::Go, ButtonFn::None], ..Default::default() };
+            s.executors.set_bank(bank);
+            // The script's Go lands on step 1 (no action); step 2 comes by
+            // itself, on a later frame, and fires `script.2.run`.
+            load_list(&mut s, vec![Step { fade_in_s: 1.0, ..Step::default() }, Step { trigger: trigger.clone(), fire: fire("script.2.run"), ..Step::default() }]);
+            request_run(&mut s, 1, ControlSource::Ui).unwrap_or_else(|e| panic!("{via}: {e}: {:?}", status(&s, 1).console));
+            for _ in 0..40 {
+                frame_after(&mut s, 0.25);
+            }
+            assert_eq!(s.cue_list.index, Some(1), "{via} {trigger:?}: step 2 started by itself");
+            assert_eq!(status(&s, 2).runs, 0, "{via} {trigger:?}: script 2 ran");
+            assert_eq!(console_has(&s, 2, "liste de cues pilotée par un script"), 1, "{via} {trigger:?}: {:?}", status(&s, 2).console);
+            // The operator's Go on the same list: the step's action runs.
+            crate::cuelist::top(&mut s, ControlSource::Ui).unwrap();
+            crate::cuelist::go(&mut s, ControlSource::Ui).unwrap();
+            assert!(!s.cue_list.from_script);
+            for _ in 0..40 {
+                frame_after(&mut s, 0.25);
+            }
+            assert_eq!(status(&s, 2).runs, 1, "{via} {trigger:?}: the operator's list launches script 2");
+            assert!((size(&s) - 30.0).abs() < 1e-4);
+        }
+    }
+
+    /// The backstop: a list the operator started, looping on its own and
+    /// firing `script.1.run` on every step, starts the script at most once
+    /// per `MIN_RUN_INTERVAL_S`; the refusal is in the console, once per
+    /// start.
+    #[test]
+    fn a_looping_list_starts_a_script_at_most_once_per_interval() {
+        use crate::cuelist::{Step, StepTrigger};
+        let mut s = with(vec![sc(1, "Cible", "commande(\"master.size 30\")", ScriptTrigger::Manual)]);
+        let step = || Step { trigger: StepTrigger::Follow, fire: fire("script.1.run"), ..Step::default() };
+        load_list(&mut s, vec![step(), step(), step()]);
+        let t0 = s.now_s();
+        let mut starts = Vec::new();
+        crate::cuelist::go(&mut s, ControlSource::Ui).unwrap();
+        if s.scripts.next_serial == 1 {
+            starts.push(t0);
+        }
+        for _ in 0..120 {
+            let before = s.scripts.next_serial;
+            frame_after(&mut s, 1.0 / 60.0);
+            if s.scripts.next_serial != before {
+                starts.push(s.now_s());
+            }
+        }
+        assert_eq!(starts.len() as u64, s.scripts.next_serial);
+        // 2 s of frames: at most one start per quarter second.
+        let runs = s.scripts.next_serial;
+        assert!((2..=9).contains(&runs), "{runs} runs");
+        for w in starts.windows(2) {
+            assert!(w[1] - w[0] >= MIN_RUN_INTERVAL_S - 1e-6, "{starts:?}");
+        }
+        let refused = console_has(&s, 1, "trop vite");
+        assert!(refused >= 1 && refused as u64 <= runs, "{refused} refusals logged for {runs} runs");
+    }
+
+    /// A MIDI (or OSC) feedback loop: the script's change echoes back as a
+    /// note mapped to `script.1.run` on every frame. At most one start per
+    /// interval; the operator's own button is never held back.
+    #[test]
+    fn a_midi_feedback_loop_starts_a_script_at_most_once_per_interval() {
+        let mut s = with(vec![sc(1, "Écho", "commande(\"master.size 30\")", ScriptTrigger::Manual)]);
+        let mut refused = 0;
+        for _ in 0..120 {
+            match controls::apply_as(&mut s, "script.1.run", ControlInput::Value(1.0), ArmSource::Midi) {
+                Ok(()) => {}
+                Err(controls::ControlError::Refused(why)) => {
+                    assert!(why == TOO_SOON_FR || why == "ce script tourne déjà", "{why}");
+                    refused += 1;
+                }
+                Err(e) => panic!("{e:?}"),
+            }
+            frame_after(&mut s, 1.0 / 60.0);
+        }
+        let runs = status(&s, 1).runs;
+        assert!((4..=9).contains(&runs), "{runs} runs in 2 s");
+        assert!(refused > 100, "{refused}");
+        assert!(console_has(&s, 1, "lancement par « MIDI » refusé") >= 1);
+        // Right after a run, the operator's button still starts it.
+        request_run(&mut s, 1, ControlSource::Ui).unwrap();
+        frame_after(&mut s, 0.01);
+        assert_eq!(request_run(&mut s, 1, ControlSource::Midi).unwrap_err(), TOO_SOON_FR);
+        assert_eq!(request_run(&mut s, 1, ControlSource::Osc).unwrap_err(), TOO_SOON_FR);
+        request_run(&mut s, 1, ControlSource::Keyboard).unwrap();
     }
 
     #[test]

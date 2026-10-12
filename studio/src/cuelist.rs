@@ -390,6 +390,11 @@ pub struct ListPlayer {
     pub paused: bool,
     /// Who drove it last (« En cours »).
     pub source: ControlSource,
+    /// A script drove it last (`script::script_origin`, T-458): the steps
+    /// it starts, then and on later frames by themselves (*À la suite*,
+    /// *Après n s*, *Sur le temps*…), fire their controls with the
+    /// script's origin, so they can't launch a script.
+    pub from_script: bool,
     /// *Cadence* (T-419): a step's fades last `length / rate`, taken when
     /// the step begins. 0 (the default) = 100 %.
     pub rate: f64,
@@ -790,9 +795,14 @@ pub fn resolve(s: &Shared, src: &StepSource) -> Option<Settings> {
 /// Runs `f` on the player with the studio's look-up, then applies what
 /// the steps started: their controls (as a controller would, never
 /// arming), the manual look and playlist giving way like for a cue, and
-/// the safety log while armed.
-fn with_player(s: &mut Shared, source: ControlSource, f: impl FnOnce(&mut ListPlayer, Resolve)) {
+/// the safety log while armed. `origin`: whether a script is behind this
+/// move (`None` for the frame's own advance: the last driver's origin
+/// stays).
+fn with_player(s: &mut Shared, source: ControlSource, origin: Option<bool>, f: impl FnOnce(&mut ListPlayer, Resolve)) {
     let mut p = std::mem::take(&mut s.cue_list);
+    if let Some(o) = origin {
+        p.from_script = o;
+    }
     let before = p.index;
     {
         let shared: &Shared = s;
@@ -813,11 +823,14 @@ fn with_player(s: &mut Shared, source: ControlSource, f: impl FnOnce(&mut ListPl
             }
         }
     }
+    let from_script = p.from_script;
     s.cue_list = p;
     for a in fired {
         // Checked when the list was saved; checked again, as a controller.
         if check_action(&a, &s.controls).is_ok() {
-            if let Err(e) = crate::controls::apply_as(s, &a.control, crate::controls::ControlInput::Value(a.value), crate::interlock::ArmSource::System) {
+            let apply = |s: &mut Shared| crate::controls::apply_as(s, &a.control, crate::controls::ControlInput::Value(a.value), crate::interlock::ArmSource::System);
+            let r = if from_script { crate::script::with_script_origin(s, apply) } else { apply(s) };
+            if let Err(e) = r {
                 log::warn!("liste de cues : {} : {e:?}", a.control);
             }
         }
@@ -854,13 +867,15 @@ fn ready(s: &Shared) -> Result<(), &'static str> {
 /// `list.go` / *GO*. Refused with the e-stop latched: the list waits.
 pub fn go(s: &mut Shared, source: ControlSource) -> Result<(), &'static str> {
     ready(s)?;
-    with_player(s, source, |p, r| p.go(r));
+    let origin = crate::script::script_origin(s, source);
+    with_player(s, source, Some(origin), |p, r| p.go(r));
     Ok(())
 }
 
 pub fn back(s: &mut Shared, source: ControlSource) -> Result<(), &'static str> {
     ready(s)?;
-    with_player(s, source, |p, r| p.back(r));
+    let origin = crate::script::script_origin(s, source);
+    with_player(s, source, Some(origin), |p, r| p.back(r));
     Ok(())
 }
 
@@ -868,7 +883,8 @@ pub fn back(s: &mut Shared, source: ControlSource) -> Result<(), &'static str> {
 pub fn goto(s: &mut Shared, step: usize, source: ControlSource) -> Result<(), &'static str> {
     ready(s)?;
     let mut ok = true;
-    with_player(s, source, |p, r| ok = p.goto(step, r));
+    let origin = crate::script::script_origin(s, source);
+    with_player(s, source, Some(origin), |p, r| ok = p.goto(step, r));
     if ok { Ok(()) } else { Err("pas inconnu") }
 }
 
@@ -882,6 +898,8 @@ pub fn pause(s: &mut Shared, source: ControlSource) -> Result<(), &'static str> 
     }
     s.cue_list.pause();
     s.cue_list.source = source;
+    // Resuming is a move too: what follows carries who resumed it.
+    s.cue_list.from_script = crate::script::script_origin(s, source);
     Ok(())
 }
 
@@ -892,6 +910,7 @@ pub fn top(s: &mut Shared, source: ControlSource) -> Result<(), &'static str> {
     }
     s.cue_list.top();
     s.cue_list.source = source;
+    s.cue_list.from_script = crate::script::script_origin(s, source);
     Ok(())
 }
 
@@ -900,6 +919,7 @@ pub fn load(s: &mut Shared, name: &str) -> Result<(), &'static str> {
     let list = s.cue_lists.get(name).cloned().ok_or("liste de cues inconnue")?;
     s.cue_list.load(list);
     s.cue_list.source = ControlSource::Ui;
+    s.cue_list.from_script = false;
     Ok(())
 }
 
@@ -913,7 +933,7 @@ pub fn frame(s: &mut Shared, dt: f64, beat: f64, audio: &AudioFeatures) {
         s.cue_list.halt();
     }
     s.cue_list.rate = s.speed.rate();
-    with_player(s, ControlSource::System, |p, r| p.tick(dt, beat, audio, r));
+    with_player(s, ControlSource::System, None, |p, r| p.tick(dt, beat, audio, r));
 }
 
 /// `GET /api/cuelists`.
