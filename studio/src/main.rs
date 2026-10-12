@@ -691,6 +691,8 @@ impl Shared {
         if !self.midi.store.devices.safety.allow_arm {
             return Err(vec!["L'armement depuis le MIDI est désactivé".into()]);
         }
+        // A backup unreachable needs a confirmation MIDI cannot give.
+        standby::arm_check(self, false, interlock::ArmSource::Midi).map_err(|e| vec![e])?;
         self.sync_data_warnings();
         self.sync_safety(Instant::now());
         self.sync_audience();

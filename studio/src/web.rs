@@ -1391,7 +1391,15 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                     (None, Some(true)) => !s.gate.is_armed(),
                     _ => return text(400, "expected \"on\" or \"toggle\""),
                 };
-                let response = if want {
+                // A main machine whose backup is unreachable (T-456): 409
+                // `{armed, blocking, confirm_backup_lost}` without
+                // `"confirm_backup_lost": true`, sent only by the
+                // operator's confirmation in the page.
+                let confirm = req.get("confirm_backup_lost").and_then(|c| c.as_bool()).unwrap_or(false);
+                let backup_lost = if want { crate::standby::arm_check(&mut s, confirm, source).err() } else { None };
+                let response = if let Some(why) = backup_lost {
+                    with_status(json_response(json!({ "armed": false, "blocking": [why], "confirm_backup_lost": crate::standby::BACKUP_LOST_CONFIRM_FR })), 409)
+                } else if want {
                     match s.request_arm(source) {
                         Ok(()) => json_response(json!({ "armed": s.gate.is_armed() })),
                         Err(blocking) => with_status(json_response(json!({ "armed": false, "blocking": blocking })), 409),
@@ -10186,6 +10194,34 @@ mod tests {
     /// (their tests are elsewhere); the only arming route, `POST /api/arm`
     /// from the UI, keyboard or API, is sent only with sources that must
     /// be refused.
+    #[test]
+    fn arming_with_the_backup_unreachable_needs_the_confirmation_over_http() {
+        let t = TestServer::start(false);
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.standby.settings.role = crate::standby::Role::Primary;
+            s.standby.state.lease_lost_at = Some(Instant::now());
+        }
+        for body in [r#"{"on":true}"#, r#"{"toggle":true,"source":"keyboard"}"#, r#"{"on":true,"confirm_backup_lost":false}"#] {
+            let (status, reply) = t.request("POST", "/api/arm", body);
+            assert_eq!(status, 409, "{body}: {reply}");
+            let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+            assert_eq!(v["armed"], false);
+            assert_eq!(v["blocking"][0], crate::standby::BACKUP_LOST_ARM_FR);
+            assert_eq!(v["confirm_backup_lost"], crate::standby::BACKUP_LOST_CONFIRM_FR);
+            assert!(!t.shared.lock().unwrap().gate.is_armed());
+        }
+        // Disarming never asks.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"confirm_backup_lost":true}"#).0, 200);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+        // The backup polls again: no confirmation.
+        t.shared.lock().unwrap().standby.state.lease_lost_at = None;
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+    }
+
     #[test]
     fn no_api_request_arms_except_an_explicit_arm_request() {
         use crate::safety_invariants::{mutated, seeds, Rng};

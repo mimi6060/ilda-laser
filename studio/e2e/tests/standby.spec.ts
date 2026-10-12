@@ -91,10 +91,10 @@ test('the backup follows the main machine, never arms, and takes over disarmed',
   await page.waitForTimeout(1200);
   expect((await backup.get<State>('/api/state')).timeline.playing).toBe(true);
 
-  // Too early: the main machine's lease (3 s) plus the margin has not run
-  // out, whatever the 1 s grace says. Refused, still in standby.
+  // Too early: the main machine's lease (3 s) plus the margin (1.5 s) has
+  // not run out, whatever the 1 s grace says. Refused, still in standby.
   const lost = await backup.get<Standby>('/api/standby');
-  expect(lost.takeover_after_s).toBeGreaterThanOrEqual(4);
+  expect(lost.takeover_after_s).toBeGreaterThanOrEqual(5);
   expect(lost.lost_s ?? 0).toBeLessThan(lost.takeover_after_s);
   page.once('dialog', d => { d.accept().catch(() => {}); });
   const early = page.waitForResponse(r => r.url().endsWith('/api/standby/takeover'));
@@ -138,6 +138,9 @@ test('Autonome by default: no sync port, the panel says so', async ({ page }) =>
   await page.locator('#standbyPanel > summary').click();
   await expect(page.locator('#sbRole')).toHaveValue('standalone');
   await expect(page.locator('#sbLink')).toContainText('aucun port ouvert');
+  // What darkens the main machine, and the way out.
+  await expect(page.locator('#standbyPanel')).toContainText('Quitter, mettre en veille ou redémarrer la machine de secours désarme la principale 3 s plus tard');
+  await expect(page.locator('#standbyPanel')).toContainText('passez la principale en Autonome, puis réarmez');
 });
 
 test('a main machine whose backup goes silent disarms itself and says so', async ({ page }) => {
@@ -164,4 +167,26 @@ test('a main machine whose backup goes silent disarms itself and says so', async
   expect(after.standby.role).toBe('primary');
   expect(after.standby.backup_lost).toBe(true);
   expect(after.armed).toBe(false);
+
+  // Re-arming while the backup is still unreachable: refused without the
+  // operator's confirmation of the risk.
+  const refused = await fetch(main.url + '/api/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: true }) });
+  expect(refused.status).toBe(409);
+  const why = await refused.json();
+  expect(why.blocking[0]).toContain('confirmation requise');
+  expect(why.confirm_backup_lost).toContain('elle a peut-être pris le relais');
+  expect((await main.state()).armed).toBe(false);
+  // Declined: still disarmed. Accepted: armed.
+  page.once('dialog', d => { d.dismiss().catch(() => {}); });
+  await page.locator('#armBtn').click();
+  await page.waitForTimeout(500);
+  expect((await main.state()).armed).toBe(false);
+  let asked = '';
+  page.once('dialog', d => { asked = d.message(); d.accept().catch(() => {}); });
+  await page.locator('#armBtn').click();
+  await expect(page.locator('#armBtn')).toHaveAttribute('aria-pressed', 'true');
+  expect(asked).toContain('Tant qu\'elle reste injoignable, cette machine ne se désarmera plus d\'elle-même.');
+  expect((await main.state()).armed).toBe(true);
+  expect(await main.post('/api/arm', { on: false })).toBe(200);
+  expect((await main.state()).armed).toBe(false);
 });

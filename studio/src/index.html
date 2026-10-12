@@ -4572,7 +4572,7 @@
         <summary>Général</summary>
         <label class="check"><input type="checkbox" id="kaEnabled"> Empêcher la mise en veille pendant un show</label>
         <div class="hint" id="kaStatus" role="status"></div>
-        <div class="hint">Tant que le laser est armé ou qu'une timeline joue, le Mac et son écran ne se mettent pas en veille ; la veille redevient possible 5 s après. Réglage de cette machine (pas du projet).</div>
+        <div class="hint">Tant que le laser est armé, qu'une timeline joue ou que cette machine est en Secours, le Mac et son écran ne se mettent pas en veille ; la veille redevient possible 5 s après. Réglage de cette machine (pas du projet).</div>
         <label for="thumbMode">Vignettes</label>
         <select id="thumbMode">
           <option value="animated">Animées</option>
@@ -4746,7 +4746,7 @@
         </div>
         <div class="hint" id="sbLink" role="status"></div>
         <div id="sbError" class="merr" role="alert"></div>
-        <div class="hint">Une principale appairée qui ne reçoit plus rien de sa machine de secours pendant 3 s se <b>désarme d'elle-même</b> (sortie gardée, images noires, avertissement) ; la reprise n'est permise qu'après ce délai plus une marge, jamais avant le délai réglé ici. Seul l'opérateur réarme. Les deux machines doivent connaître l'adresse de l'autre : une principale qui revient après une reprise voit l'autre machine principale et passe en <b>Autonome</b>, désarmée, sans sortie. Pas de bascule automatique. Le trafic n'est pas chiffré : réseau de la régie uniquement, en filaire. Ce n'est pas un arrêt matériel : gardez l'arrêt d'urgence physique et la clé du projecteur à portée de main sur chaque machine.</div>
+        <div class="hint">Une principale appairée qui ne reçoit plus rien de sa machine de secours pendant 3 s se <b>désarme d'elle-même</b> (sortie gardée, images noires, avertissement) ; la reprise n'est permise qu'après ce délai plus une marge, jamais avant le délai réglé ici. Seul l'opérateur réarme. Les deux machines doivent connaître l'adresse de l'autre : une principale qui revient après une reprise voit l'autre machine principale et passe en <b>Autonome</b>, désarmée, sans sortie. Pas de bascule automatique. Une principale qui redémarre oublie l'appairage : tant que la machine de secours n'est pas appairée à nouveau, la principale ne se désarme pas d'elle-même. <b>Quitter, mettre en veille ou redémarrer la machine de secours désarme la principale 3 s plus tard</b> : gardez-la allumée et éveillée (en Secours, le studio empêche déjà la veille du Mac si « Empêcher la mise en veille pendant un show » (Général) est coché ; fermer le capot l'endort quand même). Pour jouer sans secours, passez la principale en <b>Autonome</b>, puis réarmez. Réarmer une principale dont la machine de secours est injoignable demande une confirmation : elle a peut-être pris le relais. Le trafic n'est pas chiffré : réseau de la régie uniquement, en filaire. Ce n'est pas un arrêt matériel : gardez l'arrêt d'urgence physique et la clé du projecteur à portée de main sur chaque machine.</div>
       </details>
     </section>
 
@@ -5914,7 +5914,14 @@ async function sendArm(body) {
   LINK.armSeqMin = +(r.headers.get('X-Frame-Seq') || 0);
   if (r.ok) { armed = (await r.json()).armed; $('armRefused').hidden = true; showArmed(); return; }
   if (r.status === 409) {
-    const { blocking } = await r.json();
+    const { blocking, confirm_backup_lost } = await r.json();
+    // Main machine whose backup is unreachable (T-456): the operator
+    // confirms the risk, then the request goes again, explicitly on.
+    if (confirm_backup_lost && !body.confirm_backup_lost) {
+      armed = false; showArmed();
+      if (confirm(confirm_backup_lost)) return sendArm({ on: true, source: body.source, confirm_backup_lost: true });
+      return;
+    }
     armed = false; showArmed();
     const box = $('armRefused');
     box.innerHTML = '<b>Armement impossible :</b><ul></ul>';
@@ -19243,8 +19250,11 @@ $('takeoverBtn').onclick = async () => {
   const v = standbyBar || {};
   const held = v.peer_held_s == null ? 'La machine principale n\'a pas été vue tenant une sortie depuis l\'appairage.'
     : `La machine principale tenait une sortie il y a ${v.peer_held_s} s${v.peer_holds_output ? ' (dernière réponse)' : ''}.`;
+  // Unpaired (a main machine restarted after a crash forgets the pairing)
+  // or no state since pairing: no lease, it never disarms by itself.
+  const unfenced = v.main_fenced ? '' : '\n\nAttention : cette machine de secours n\'est pas appairée avec la principale actuelle (non appairée : la principale ne se désarme pas d\'elle-même). Elle peut encore être armée : coupez sa sortie avant de continuer.';
   if (!confirm('Prendre le relais ? Le laser restera désarmé : vous devrez l\'armer vous-même.\n\n'
-    + 'Vérifiez d\'abord que la machine principale est arrêtée ou que sa sortie est coupée (arrêt matériel).\n\n' + held)) return;
+    + 'Vérifiez d\'abord que la machine principale est arrêtée ou que sa sortie est coupée (arrêt matériel).\n\n' + held + unfenced)) return;
   const err = await standbyPost('/api/standby/takeover');
   flash(err ? err : 'Cette machine est maintenant la principale. Laser désarmé.');
 };

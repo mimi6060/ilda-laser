@@ -27,16 +27,28 @@
 //!   authenticated poll from its backup for `LEASE` disarms itself
 //!   (« Machine de secours injoignable »). Its output stays connected and
 //!   keeps getting dark frames, a warning stays up until the backup polls
-//!   again, and only the operator arms again (a poll never re-arms). The
-//!   main machine advertises its lease (`lease_ms`); the backup allows a
-//!   takeover only after max(`takeover_grace_s`, lease + `LEASE_MARGIN`)
-//!   without an answer. So a broken link between the two Macs (cable,
+//!   again, and only the operator arms again (a poll never re-arms).
+//!   Arming while the backup is still unreachable needs the operator's
+//!   confirmation of the risk (`arm_check`, 409 otherwise; MIDI never):
+//!   the backup may have taken over, and the lease only runs again once a
+//!   poll has come back. The main machine advertises its lease
+//!   (`lease_ms`); the backup allows a takeover only after
+//!   max(`takeover_grace_s`, lease + `LEASE_MARGIN`) without an answer
+//!   (1.5 s: covers a late poll handled by a stalled main machine). So a broken link between the two Macs (cable,
 //!   switch port) cannot leave two machines armed on one projector: the
 //!   main one is disarmed before the backup may take over. The same holds
 //!   for a main machine with no peer address: once the backup takes over
 //!   it stops polling, and the old main machine's lease runs out. A main
 //!   machine frozen while still emitting cannot disarm itself: that is a
 //!   hardware stop's job.
+//! - A main machine restarted after a crash has forgotten the token: it
+//!   is unpaired and has **no lease** for the backup. Its 401s still count
+//!   as an answer for the takeover delay (an unpaired backup keeps asking,
+//!   `listen_unpaired`), and the takeover dialog warns that it does not
+//!   disarm by itself (`main_fenced` false) until the backup pairs again.
+//! - If the backup quits, sleeps or reboots, the main machine darkens 3 s
+//!   later: a backup in standby keeps the Mac awake (`keep_awake`), and
+//!   setting the main machine to *Autonome* ends the lease (then re-arm).
 //! - Taking over is a manual action on the backup (`takeover`): it is
 //!   refused while the main machine answers and holds an output, or
 //!   answered less than the delay above ago; it leaves the laser
@@ -83,8 +95,12 @@ const FINGERPRINT_EVERY: Duration = Duration::from_secs(2);
 /// from its backup (`check_lease`). Shorter than any takeover delay.
 pub const LEASE: Duration = Duration::from_secs(3);
 /// What the backup adds to the main machine's lease before a takeover:
-/// the main machine's check runs every frame, this covers the rest.
-pub const LEASE_MARGIN: Duration = Duration::from_secs(1);
+/// the main machine's check runs every frame; this covers the rest,
+/// including a late poll on a stalled main machine (the backup's next
+/// poll leaves `POLL` after the last answer and may be handled up to
+/// three request timeouts later, renewing a lease the backup never saw
+/// renewed): at least `POLL + 3 × REQUEST_TIMEOUT`.
+pub const LEASE_MARGIN: Duration = Duration::from_millis(1500);
 /// One request's limit (connect, write, each read).
 pub const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
 /// The link counts as up while the last answer is this recent.
@@ -114,6 +130,11 @@ pub const BACKUP_LOST_FR: &str = "Machine de secours injoignable";
 /// The warning's notice key: it holds until the backup polls again.
 const LEASE_NOTICE: &str = "standby_lease";
 pub const BACKUP_LOST_WARN_FR: &str = "Machine de secours injoignable : laser désarmé — elle peut prendre le relais. Arrêt réel : matériel";
+/// Arming a main machine whose backup is unreachable: refused (409)
+/// without the operator's confirmation (`arm_check`).
+pub const BACKUP_LOST_ARM_FR: &str = "Machine de secours injoignable : confirmation requise pour armer";
+/// The confirmation's question: the risk, word for word.
+pub const BACKUP_LOST_CONFIRM_FR: &str = "La machine de secours est injoignable : elle a peut-être pris le relais et peut émettre sur le même projecteur. Tant qu'elle reste injoignable, cette machine ne se désarmera plus d'elle-même. Vérifiez d'abord que la machine de secours n'émet pas (sortie coupée, arrêt matériel). Armer quand même ?";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -288,6 +309,10 @@ pub struct StandbyState {
     // The backup's side (and a main machine's probe).
     peer_token: Option<String>,
     pub last_ok: Option<Instant>,
+    /// The last 401 from the main machine's sync address (a restarted main
+    /// machine that forgot the token). Counts like `last_ok` for the
+    /// takeover delay (`release_check`), never for the link.
+    pub last_heard: Option<Instant>,
     /// When following started (for « Lien perdu depuis » before any answer).
     pub since: Option<Instant>,
     samples: VecDeque<(f64, f64)>,
@@ -454,6 +479,7 @@ pub fn apply_role(shared: &Arc<Mutex<Shared>>) -> Result<(), String> {
     st.blocked_until = None;
     st.samples.clear();
     st.last_ok = None;
+    st.last_heard = None;
     st.peer_role = None;
     st.conflict = false;
     st.since = (role == Role::Standby).then(Instant::now);
@@ -537,8 +563,10 @@ fn worker(shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>) {
         };
         match (role, peer) {
             (Role::Standby, Some(peer)) => {
-                if let Some(token) = token {
-                    poll_once(&shared, peer, &token);
+                match token {
+                    Some(token) => poll_once(&shared, peer, &token),
+                    // Unpaired: a 401 still says the main machine is up.
+                    None => listen_unpaired(&shared, peer),
                 }
             }
             (Role::Primary, Some(peer)) if now >= next_probe => {
@@ -658,6 +686,23 @@ fn note_poll(s: &mut Shared, now: Instant) {
     }
 }
 
+/// Arming a main machine whose backup is unreachable (`lease_lost_at`):
+/// the backup may have taken over, and while it stays unreachable this
+/// machine's lease does not disarm it again (only a poll restarts it). So
+/// arming then needs the operator's explicit confirmation of that risk
+/// (`confirmed`, sent only by the page's confirmation): `Err` otherwise.
+/// Logged when confirmed. Anything else: nothing to confirm.
+pub fn arm_check(s: &mut Shared, confirmed: bool, src: ArmSource) -> Result<(), String> {
+    if s.standby.settings.role != Role::Primary || s.standby.state.lease_lost_at.is_none() || s.gate.is_armed() {
+        return Ok(());
+    }
+    if !confirmed {
+        return Err(BACKUP_LOST_ARM_FR.into());
+    }
+    s.gate.log().record("standby_arm_backup_lost", Some(src.id()), json!({ "confirmed": true }));
+    Ok(())
+}
+
 /// Parses a message refusing every key its types do not know, nested ones
 /// included: `Settings` and `LiveModifiers` ignore unknown keys (old saved
 /// files must load), so the message is checked against its own
@@ -723,6 +768,10 @@ fn poll_once(shared: &Arc<Mutex<Shared>>, peer: SocketAddr, token: &str) {
                 Err(e) => s.standby.state.last_error = Some(format!("message ignoré : {e}")),
             },
             Ok((401, _)) => {
+                // A restarted main machine forgot the token: it is up, and
+                // it has no lease for this backup (it never disarms by
+                // itself). Heard, not followed.
+                heard_unpaired(&mut s, Instant::now());
                 s.standby.state.peer_token = None;
                 s.standby.state.last_error = Some("Appairage refusé : saisissez le code affiché sur la machine principale".into());
             }
@@ -747,6 +796,24 @@ fn poll_once(shared: &Arc<Mutex<Shared>>, peer: SocketAddr, token: &str) {
             Err(e) => shared.lock().unwrap().standby.state.last_error = Some(e),
         }
     }
+}
+
+/// An unpaired backup still asks for the state, without a token: a 401
+/// means a main machine answers at that address (restarted after a crash,
+/// say), so the takeover waits as if it had been followed. Nothing else is
+/// read.
+fn listen_unpaired(shared: &Arc<Mutex<Shared>>, peer: SocketAddr) {
+    if let Ok((401, _)) = http(peer, "GET", "/sync/state", None, None, REQUEST_TIMEOUT, 1024) {
+        heard_unpaired(&mut shared.lock().unwrap(), Instant::now());
+    }
+}
+
+/// A 401 from the main machine: it is up, without a lease for this
+/// backup (it never disarms by itself).
+fn heard_unpaired(s: &mut Shared, now: Instant) {
+    let st = &mut s.standby.state;
+    st.last_heard = Some(now);
+    st.peer_lease_ms = None;
 }
 
 /// Applies one answer of the main machine (`t0`, `t1`: this machine's
@@ -1114,8 +1181,8 @@ pub fn takeover_delay(grace_s: u32, peer_lease_ms: Option<u64>) -> Duration {
 }
 
 /// Whether this backup may let go of standby now: refused while the main
-/// machine answers and holds an output, or answered less than
-/// `takeover_delay` ago. `probe`: its answer to `GET /sync/role` just now,
+/// machine answers and holds an output, or answered (a state, or a 401
+/// from a restarted main machine) less than `takeover_delay` ago. `probe`: its answer to `GET /sync/role` just now,
 /// if any.
 pub fn release_check(st: &StandbyState, grace_s: u32, probe: Option<RoleReply>, now: Instant) -> Result<(), String> {
     match probe {
@@ -1123,7 +1190,7 @@ pub fn release_check(st: &StandbyState, grace_s: u32, probe: Option<RoleReply>, 
         Some(_) => Ok(()),
         None => {
             let wait = takeover_delay(grace_s, st.peer_lease_ms);
-            match st.last_ok {
+            match st.last_ok.max(st.last_heard) {
                 Some(t) if now.saturating_duration_since(t) < wait => {
                     let ago = now.saturating_duration_since(t).as_secs();
                     let wait_s = wait.as_secs_f64().ceil() as u64;
@@ -1270,6 +1337,7 @@ pub fn pair(shared: &Arc<Mutex<Shared>>, code: &str) -> Result<(), (u16, String)
     let token = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["token"].as_str().map(str::to_string)).filter(|t| t.len() == 64).ok_or((502, "réponse d'appairage invalide".to_string()))?;
     let mut s = shared.lock().unwrap();
     s.standby.state.peer_token = Some(token);
+    s.standby.state.peer_lease_ms = None;
     s.standby.state.samples.clear();
     s.standby.state.last_error = None;
     s.standby.state.since = Some(Instant::now());
@@ -1327,6 +1395,10 @@ pub fn summary(s: &Shared, now: Instant) -> Value {
         "lag_ms": sb.state.lag_ms,
         "lost_s": lost_s,
         "paired": sb.state.peer_token.is_some(),
+        // The main machine followed now has a lease for this backup, so it
+        // disarms itself before a takeover. False: unpaired, or no state
+        // received since pairing (the takeover dialog warns).
+        "main_fenced": sb.state.peer_token.is_some() && sb.state.peer_lease_ms.is_some(),
         "peer_holds_output": sb.state.peer_holds_output,
         "peer_held_s": sb.state.peer_held_at.map(|t| now.saturating_duration_since(t).as_secs()),
         "backup_lost": sb.state.lease_lost_at.is_some(),
@@ -1703,9 +1775,9 @@ mod tests {
         backup.lock().unwrap().standby.settings.takeover_grace_s = 1;
         let err = takeover(&backup);
         assert!(err.is_err(), "within the grace");
-        // max(1 s grace, 0.3 s lease + 1 s margin) = 1.3 s.
+        // max(1 s grace, 0.3 s lease + 1.5 s margin) = 1.8 s.
         assert_eq!(backup.lock().unwrap().standby.state.peer_lease_ms, Some(300));
-        std::thread::sleep(Duration::from_millis(1400));
+        std::thread::sleep(Duration::from_millis(1900));
         takeover(&backup).unwrap();
         let g = backup.lock().unwrap();
         assert_eq!(g.standby.settings.role, Role::Primary);
@@ -1791,14 +1863,165 @@ mod tests {
     fn the_backup_waits_for_the_main_lease_plus_a_margin() {
         let now = Instant::now();
         assert_eq!(takeover_delay(1, None), LEASE + LEASE_MARGIN, "an unknown lease counts as the default");
-        assert_eq!(takeover_delay(1, Some(3000)), Duration::from_secs(4));
+        assert_eq!(takeover_delay(1, Some(3000)), Duration::from_millis(4500));
         assert_eq!(takeover_delay(10, Some(3000)), Duration::from_secs(10));
+        assert!(LEASE_MARGIN >= POLL + 3 * REQUEST_TIMEOUT, "a late poll on a stalled main machine stays inside the margin");
         assert_eq!(takeover_delay(1, Some(u64::MAX)), Duration::from_secs(MAX_GRACE_S as u64) + LEASE_MARGIN, "capped");
         let heard = |ago_ms: u64| StandbyState { last_ok: Some(now - Duration::from_millis(ago_ms)), peer_lease_ms: Some(3000), ..Default::default() };
-        // Grace 1 s, but the main machine's lease is 3 s: refused until 4 s.
-        assert!(release_check(&heard(1500), 1, None, now).unwrap_err().contains("après 4 s"));
+        // Grace 1 s, but the main machine's lease is 3 s: refused until 4.5 s.
+        assert!(release_check(&heard(1500), 1, None, now).unwrap_err().contains("après 5 s"));
         assert!(release_check(&heard(3900), 1, None, now).is_err());
-        assert!(release_check(&heard(4000), 1, None, now).is_ok());
+        assert!(release_check(&heard(4400), 1, None, now).is_err());
+        assert!(release_check(&heard(4500), 1, None, now).is_ok());
+    }
+
+    /// Review 2, window 1: the backup's next poll leaves `POLL` after the
+    /// last answer it saw, the link breaks, and the stalled main machine
+    /// only handles that poll three request timeouts later: it renews its
+    /// lease from a poll the backup never saw answered. Still disarmed
+    /// before a takeover is allowed.
+    #[test]
+    fn a_late_poll_on_a_stalled_main_machine_still_disarms_it_before_a_takeover() {
+        for (lease_ms, grace_s) in [(3000, 1), (500, 1), (3000, 4)] {
+            let t0 = Instant::now();
+            let (mut main, auth) = paired_main(t0);
+            main.standby.lease = Duration::from_millis(lease_ms);
+            arm_on_output(&mut main);
+            let r = handle(&mut main, "GET", "/sync/state", Some(&auth), "10.0.0.2", b"", t0);
+            let reply = parse_strict::<StateReply>(&r.body).unwrap();
+            let mut backup = shared();
+            backup.standby.settings.role = Role::Standby;
+            let t = backup.now_s();
+            apply(&mut backup, reply, t, t, t0);
+            // The late one: handled, its answer never arrives.
+            let late = t0 + POLL + 3 * REQUEST_TIMEOUT;
+            let mut renewed = false;
+            let mut taken = false;
+            for step in 0..=(MAX_GRACE_S as u64 * 100 + 200) {
+                let now = t0 + Duration::from_millis(step * 10);
+                if !renewed && now >= late {
+                    assert_eq!(handle(&mut main, "GET", "/sync/state", Some(&auth), "10.0.0.2", b"", late).status, 200);
+                    renewed = true;
+                }
+                check_lease(&mut main, now);
+                if release_check(&backup.standby.state, grace_s, None, now).is_ok() {
+                    assert!(!main.gate.is_armed(), "lease {lease_ms} ms, grace {grace_s} s: the backup may take over at {} ms while the main one is armed", step * 10);
+                    taken = true;
+                    break;
+                }
+            }
+            assert!(renewed && taken);
+        }
+    }
+
+    #[test]
+    fn arming_a_main_machine_whose_backup_is_unreachable_needs_a_confirmation() {
+        let t0 = Instant::now();
+        let (mut s, auth) = paired_main(t0);
+        arm_on_output(&mut s);
+        assert_eq!(arm_check(&mut s, false, ArmSource::Ui), Ok(()), "armed: nothing to confirm");
+        let lost = t0 + s.standby.lease;
+        check_lease(&mut s, lost);
+        assert!(!s.gate.is_armed());
+        assert_eq!(arm_check(&mut s, false, ArmSource::Ui).unwrap_err(), BACKUP_LOST_ARM_FR);
+        assert_eq!(arm_check(&mut s, false, ArmSource::Keyboard).unwrap_err(), BACKUP_LOST_ARM_FR);
+        // MIDI cannot confirm: refused even with its opt-in.
+        s.midi.store.devices.safety.allow_arm = true;
+        assert!(s.request_arm_midi_opt_in().unwrap_err().contains(&BACKUP_LOST_ARM_FR.to_string()));
+        assert!(!s.gate.is_armed());
+        // Confirmed: allowed (and logged); the lease stays lost, so this
+        // machine no longer disarms by itself until a poll comes back.
+        assert_eq!(arm_check(&mut s, true, ArmSource::Ui), Ok(()));
+        s.request_arm(ArmSource::Ui).unwrap();
+        check_lease(&mut s, lost + Duration::from_secs(60));
+        assert!(s.gate.is_armed(), "the risk the confirmation states");
+        // Once the backup polls again: nothing to confirm, and a new
+        // silence disarms again.
+        s.gate.disarm(DisarmReason::User, ArmSource::Ui);
+        let back = lost + Duration::from_secs(61);
+        assert_eq!(handle(&mut s, "GET", "/sync/state", Some(&auth), "10.0.0.2", b"", back).status, 200);
+        assert_eq!(arm_check(&mut s, false, ArmSource::Ui), Ok(()));
+        s.request_arm(ArmSource::Ui).unwrap();
+        let lease = s.standby.lease;
+        check_lease(&mut s, back + lease);
+        assert!(!s.gate.is_armed());
+        // Unpaired, Autonome or Secours: nothing to confirm.
+        let mut other = shared();
+        assert_eq!(arm_check(&mut other, false, ArmSource::Ui), Ok(()));
+    }
+
+    #[test]
+    fn a_401_from_a_restarted_main_machine_counts_as_heard() {
+        let now = Instant::now();
+        let mut s = shared();
+        s.standby.settings.role = Role::Standby;
+        s.standby.state.last_ok = Some(now - Duration::from_secs(30));
+        s.standby.state.peer_lease_ms = Some(3000);
+        s.standby.state.peer_token = Some("x".repeat(64));
+        assert!(release_check(&s.standby.state, 1, None, now).is_ok(), "followed long ago, nothing since");
+        assert_eq!(summary(&s, now)["main_fenced"], json!(true));
+        heard_unpaired(&mut s, now - Duration::from_secs(1));
+        s.standby.state.peer_token = None;
+        let err = release_check(&s.standby.state, 1, None, now).unwrap_err();
+        assert!(err.contains("il y a 1 s"), "{err}");
+        assert!(release_check(&s.standby.state, 1, None, now + LEASE + LEASE_MARGIN).is_ok());
+        let v = summary(&s, now);
+        assert_eq!(v["main_fenced"], json!(false), "unpaired: the main machine has no lease for this backup");
+        assert_eq!(v["paired"], json!(false));
+        assert_eq!(v["link"], json!(false), "heard is not followed");
+    }
+
+    /// Two studios on loopback: the main machine restarts (a new listener
+    /// forgets the token). The backup keeps hearing its 401s, so a takeover
+    /// still waits; once the link also fails it is refused within the delay,
+    /// and the backup says it is not fenced.
+    #[test]
+    fn two_studios_on_loopback_a_restarted_main_machine_is_still_heard() {
+        let _guard = crate::test_support::time_guard("restarted main on loopback", Duration::from_secs(60));
+        let main = arc(shared());
+        {
+            let mut g = main.lock().unwrap();
+            g.standby.settings.role = Role::Primary;
+            g.standby.settings.port = 0;
+        }
+        apply_role(&main).unwrap();
+        let port = main.lock().unwrap().standby.bound_port().unwrap();
+        main.lock().unwrap().standby.settings.port = port;
+        let code = main.lock().unwrap().standby.state.code.clone();
+        let backup = arc(shared());
+        set_settings(&backup, SettingsRequest { role: Some(Role::Standby), peer: Some(format!("127.0.0.1:{port}")), ..Default::default() }).unwrap();
+        backup.lock().unwrap().standby.settings.takeover_grace_s = 1;
+        pair(&backup, &code).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while summary(&backup.lock().unwrap(), Instant::now())["main_fenced"] != json!(true) {
+            assert!(Instant::now() < deadline, "the backup never followed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The main machine restarts: same port, a new code, no token.
+        apply_role(&main).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backup.lock().unwrap().standby.state.peer_token.is_some() {
+            assert!(Instant::now() < deadline, "the backup never got a 401");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Heard again and again while unpaired.
+        let first = backup.lock().unwrap().standby.state.last_heard.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backup.lock().unwrap().standby.state.last_heard.unwrap() == first {
+            assert!(Instant::now() < deadline, "an unpaired backup stopped listening");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(summary(&backup.lock().unwrap(), Instant::now())["main_fenced"], json!(false));
+        // The link fails too (the main one stops answering): within the
+        // delay from the last 401, refused.
+        let heard = backup.lock().unwrap().standby.state.last_heard.unwrap();
+        stop(&main);
+        let err = takeover(&backup).unwrap_err();
+        assert_eq!(err.0, 409);
+        assert!(err.1.contains("reprise possible après"), "{}", err.1);
+        assert!(heard.elapsed() < takeover_delay(1, None));
+        assert_eq!(backup.lock().unwrap().standby.settings.role, Role::Standby);
+        stop(&backup);
     }
 
     #[test]
