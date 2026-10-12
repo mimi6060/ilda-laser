@@ -2,21 +2,25 @@
 //
 // Every visible French text of the migrated parts of index.html comes from
 // LABELS: the markup carries a key, never the text, and the scripts call
-// t(). One place to fix a word, one vocabulary, and a table ready for
+// libelle(). One place to fix a word, one vocabulary, and a table ready for
 // another language (none is added here).
 //
 // - Keys: lower case, by domain, dot-separated, describing the role, not
 //   the text (`securite.arret`, `projet.menu.ouvrir`). `[a-z0-9_]` only.
 // - Parameters: `{nom}` in a value is replaced by params.nom
-//   (t('x', { nom: 'A' })). A parameter missing from the call stays as is.
-// - Plural: two keys `….un` and `….autre`; t('k', { n }) picks `k.un` for
+//   (libelle('x', { nom: 'A' })). A parameter missing from the call stays as is.
+// - Plural: two keys `….un` and `….autre`; libelle('k', { n }) picks `k.un` for
 //   n = 0 or 1 (French usage) and `k.autre` otherwise.
 // - An unknown key gives `⟦key⟧` and a console warning: it shows at once.
 // - Markup: data-t (content), data-t-title, data-t-placeholder,
 //   data-t-aria-label; applyLabels() fills them in one pass at start-up.
 //   An element with data-t-fallback keeps its text in the markup too (the
-//   safety buttons and the e-stop banner, shown even if this file does not
-//   load); the tests check that text equals the table's.
+//   safety buttons, the e-stop banner, the alerts: shown even if this file
+//   does not load); the tests check that text equals the table's.
+// - If this file does not load, index.html's LABELS_FALLBACK (the safety
+//   and alert texts, equal to this table: tests/ui_labels.rs) stands in.
+// - The function is `libelle`, not `t`: a global `t` would be shadowed by
+//   the page's many local `t` variables, or clash with a top-level one.
 //
 // A classic script, not an ES module: the page's main script is not a
 // module yet (T-435) and needs the table before its first line. The
@@ -211,7 +215,7 @@ const LABELS = Object.freeze({
 });
 
 // The text of `key`, with its {parameters} filled in (see the head of the file).
-function t(key, params) {
+function libelle(key, params) {
   let k = key;
   if (params && typeof params.n === 'number' && !(k in LABELS) && (k + '.un') in LABELS) {
     k += Math.abs(params.n) < 2 ? '.un' : '.autre';
@@ -233,12 +237,10 @@ const LABEL_ATTRS = [['t-title', 'title'], ['t-placeholder', 'placeholder'], ['t
 function applyLabels(root = document) {
   for (const el of root.querySelectorAll('[data-t], [data-t-title], [data-t-placeholder], [data-t-aria-label]')) {
     const d = el.dataset;
-    // A data-t without a dot is not a key: the audio triggers' rows use
-    // data-t for their field names (T-240).
-    if (d.t && d.t.includes('.')) el.textContent = t(d.t);
+    if (d.t) el.textContent = libelle(d.t);
     for (const [attr, target] of LABEL_ATTRS) {
       const k = el.getAttribute('data-' + attr);
-      if (k) el.setAttribute(target, t(k));
+      if (k) el.setAttribute(target, libelle(k));
     }
   }
 }

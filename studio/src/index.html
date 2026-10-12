@@ -2143,17 +2143,17 @@
   <!-- État (T-271): sortie, état du laser, voyants, MIDI. -->
   <div class="tb-status">
     <div id="output">…</div>
-    <span id="wifiPill" role="alert" hidden data-t="barre.wifi"></span>
-    <span id="sdPill" role="alert" hidden data-t="barre.sd_noir"></span>
+    <span id="wifiPill" role="alert" hidden data-t="barre.wifi" data-t-fallback>Wi-Fi</span>
+    <span id="sdPill" role="alert" hidden data-t="barre.sd_noir" data-t-fallback>SD : NOIR</span>
     <!-- Agenda (T-455): while it is on; it never arms. -->
     <span id="agendaPill" role="status" hidden data-t-title="barre.agenda.info" data-t="barre.agenda"></span>
-    <span id="audPill" role="status" hidden data-t-title="securite.public.info" data-t="securite.public"></span>
-    <div class="arm-line"><span id="armInfo" data-t="securite.desarme"></span><span id="profilePill" role="status" data-t-title="securite.profil.info" hidden></span></div>
+    <span id="audPill" role="status" hidden data-t-title="securite.public.info" data-t="securite.public" data-t-fallback>BALAYAGE PUBLIC</span>
+    <div class="arm-line"><span id="armInfo" data-t="securite.desarme" data-t-fallback>Désarmé</span><span id="profilePill" role="status" data-t-title="securite.profil.info" hidden></span></div>
     <div class="leds">
       <!-- Entrées externes (T-408): closed at start and after an e-stop. -->
       <button id="extGate" aria-pressed="false" data-t-title="entrees.portail.info"><span class="long" data-t="entrees.portail"></span><span class="short" data-t="entrees.portail.court"></span></button>
-      <span id="presenceLed" class="led" role="status" data-t-title="barre.presence.info" data-t="barre.presence.absent"></span>
-      <span id="engineLed" class="led ok" role="status" data-t-title="barre.moteur.info" data-t="barre.moteur"></span>
+      <span id="presenceLed" class="led" role="status" data-t-title="barre.presence.info" data-t="barre.presence.absent" data-t-fallback>Opérateur absent</span>
+      <span id="engineLed" class="led ok" role="status" data-t-title="barre.moteur.info" data-t="barre.moteur" data-t-fallback>Moteur</span>
       <div id="midiStatus" data-t-title="barre.midi.info" data-t="barre.midi.attente"></div>
       <span id="dmxPill" data-t-title="barre.dmx.info" hidden data-t="barre.dmx"></span>
       <!-- Télécommande (T-428): only while the access is on. -->
@@ -2164,10 +2164,11 @@
   <button id="noticeBtn" aria-haspopup="true" aria-expanded="false" data-t-aria-label="notifications.libelle" data-t-title="notifications.libelle">
     <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg>
     <span id="noticeBadge" hidden></span></button>
-  <div id="linkLost" role="alert" hidden data-t="barre.liaison_perdue"></div>
+  <div id="linkLost" role="alert" hidden data-t="barre.liaison_perdue" data-t-fallback>Connexion au moteur perdue</div>
   <!-- Safety on the right edge, far from the grid: Noir and ARRÊT, then
-       (at least 24 px away) the laser button. Their text stays in the
-       markup (data-t-fallback): shown even if labels.js does not load. -->
+       (at least 24 px away) the laser button. Safety and alert texts stay
+       in the markup (data-t-fallback): shown even if labels.js does not
+       load. -->
   <div class="tb-safety">
     <button id="blackoutBtn" data-t-title="securite.noir.info" data-t="securite.noir" data-t-fallback>Noir</button>
     <button id="estopBtn" data-control="safety.estop" data-t-title="securite.arret.info" data-t="securite.arret" data-t-fallback>ARRÊT</button>
@@ -2186,8 +2187,8 @@
 <div id="ztBanner" role="status" hidden><span id="ztBannerText" data-t="bandeau.zones"></span>
   <button id="ztBannerExit" data-t="bandeau.zones.quitter"></button></div>
 <div id="lockToast" role="status" hidden></div>
-<div id="midiLost" role="alert" data-t="bandeau.midi_perdu"></div>
-<div id="dmxLost" role="alert" data-t="bandeau.dmx_perdu"></div>
+<div id="midiLost" role="alert" data-t="bandeau.midi_perdu" data-t-fallback>Contrôleur MIDI déconnecté</div>
+<div id="dmxLost" role="alert" data-t="bandeau.dmx_perdu" data-t-fallback>Signal DMX perdu</div>
 <div id="dataWarn" role="alert" hidden></div>
 <div id="spaceWarn" role="alert" hidden><div class="dw"><span id="spaceWarnText"></span><button id="spaceWarnClose" data-t-title="bandeau.disque.fermer.info" data-t="commun.fermer"></button></div></div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
@@ -2230,7 +2231,7 @@
 <div id="vueBar" hidden>
   <span id="vueName"></span>
   <span id="vueArm" role="status" aria-live="polite" data-state="off" data-t="securite.laser.off" data-t-fallback>LASER OFF</span>
-  <span class="hint" id="vueHint" data-t="fenetres.echap"></span>
+  <span class="hint" id="vueHint" data-t="fenetres.echap" data-t-fallback>Échap = arrêt d'urgence</span>
   <button id="vueFull" aria-pressed="false" data-t-title="fenetres.plein_ecran.info" data-t="fenetres.plein_ecran"></button>
 </div>
 </div>
@@ -5250,17 +5251,55 @@
   <div class="row"><button id="cueMenuRemove" title="Vide la case (le cue reste dans sa catégorie)">Retirer de la page</button><button id="cueMenuClose">Fermer</button></div>
 </div>
 
-<!-- Libellés (T-461): the text table, before the main script, which uses t(). -->
+<!-- Libellés (T-461): the text table, before the main script, which uses libelle(). -->
 <script src="/labels.js"></script>
 <script>
-// Labels first (T-461): everything below reads the filled-in markup. If
-// labels.js did not load, t() gives the safety texts kept in the markup
-// (data-t-fallback: LASER OFF, ARRÊT, Noir, the e-stop banner) and shows
-// the other keys as they are.
-if (typeof t !== 'function') {
-  const kept = {};
-  for (const el of document.querySelectorAll('[data-t-fallback]')) kept[el.dataset.t] = el.textContent.trim();
-  window.t = key => kept[key] ?? '⟦' + key + '⟧';
+// Labels first (T-461): everything below reads the filled-in markup.
+// If labels.js did not load, libelle() still gives every safety and alert
+// text from LABELS_FALLBACK, with the same {parameter} filling; other keys
+// show as ⟦key⟧. A missing safety text must never give an empty or
+// unreadable banner. Each value equals the table's (tests/ui_labels.rs);
+// the markup keeps the same texts (data-t-fallback) for its own elements.
+const LABELS_FALLBACK = Object.freeze({
+  'securite.estop': 'ARRÊT D\'URGENCE',
+  'securite.estop.banniere': 'ARRÊT D\'URGENCE — réinitialiser pour réarmer',
+  'securite.estop.reinitialiser': 'Réinitialiser l\'arrêt d\'urgence',
+  'securite.arret': 'ARRÊT',
+  'securite.noir': 'Noir',
+  'securite.ciel': 'CIEL COUPÉ',
+  'securite.laser.off': 'LASER OFF',
+  'securite.laser.on': 'LASER ON',
+  'securite.laser.arme': 'LASER ARMÉ',
+  'securite.laser.moteur_inconnu': 'MOTEUR ?',
+  'securite.laser.arret_materiel': 'Arrêt matériel à vérifier',
+  'securite.laser.liste': 'Liste de contrôle à faire',
+  'securite.desarme': 'Désarmé',
+  'securite.desarme.raison': 'Désarmé — raison : {raison} ({source}), {heure}',
+  'securite.arme.depuis': 'Armé depuis {duree} ({source})',
+  'securite.maintien.actif': 'ÉMISSION — maintien actif',
+  'securite.maintien.demande': 'MAINTENIR « {touche} » POUR ÉMETTRE',
+  'securite.public': 'BALAYAGE PUBLIC',
+  'barre.presence.present': 'Opérateur présent',
+  'barre.presence.absent': 'Opérateur absent',
+  'barre.moteur': 'Moteur',
+  'barre.moteur.bloque': 'Moteur bloqué — laser coupé',
+  'barre.liaison_perdue': 'Connexion au moteur perdue',
+  'barre.sd_noir': 'SD : NOIR',
+  'barre.wifi': 'Wi-Fi',
+  'bandeau.midi_perdu': 'Contrôleur MIDI déconnecté',
+  'bandeau.dmx_perdu': 'Signal DMX perdu',
+  'fenetres.echap': 'Échap = arrêt d\'urgence',
+});
+if (typeof libelle !== 'function') {
+  window.libelle = (key, params) => {
+    const v = LABELS_FALLBACK[key];
+    if (typeof v !== 'string') return '⟦' + key + '⟧';
+    if (!params) return v;
+    return v.replace(/\{([a-z_]+)\}/g, (m, name) => (name in params ? String(params[name]) : m));
+  };
+  for (const el of document.querySelectorAll('[data-t]')) {
+    if (el.dataset.t in LABELS_FALLBACK) el.textContent = LABELS_FALLBACK[el.dataset.t];
+  }
 }
 if (typeof applyLabels === 'function') applyLabels();
 const $ = id => document.getElementById(id);
@@ -6015,13 +6054,13 @@ function showArmed() {
   document.body.classList.toggle('emitting', armed);
   const todo = !armed && checklistPending();
   $('armBtn').classList.toggle('todo', todo);
-  $('armBtn').textContent = t(armed ? 'securite.laser.on' : !todo ? 'securite.laser.off' : hwStopPending() ? 'securite.laser.arret_materiel' : 'securite.laser.liste');
+  $('armBtn').textContent = libelle(armed ? 'securite.laser.on' : !todo ? 'securite.laser.off' : hwStopPending() ? 'securite.laser.arret_materiel' : 'securite.laser.liste');
   $('offBadge').classList.toggle('hidden', armed);
   if (!arm) return showVueArm();
   $('estopBanner').hidden = !arm.estop;
   const d = arm.last_disarm;
-  $('armInfo').textContent = arm.armed ? t('securite.arme.depuis', { duree: since(arm.since), source: arm.source_fr })
-    : d ? t('securite.desarme.raison', { raison: d.reason_fr, source: d.source_fr, heure: clock(d.at) }) : t('securite.desarme');
+  $('armInfo').textContent = arm.armed ? libelle('securite.arme.depuis', { duree: since(arm.since), source: arm.source_fr })
+    : d ? libelle('securite.desarme.raison', { raison: d.reason_fr, source: d.source_fr, heure: clock(d.at) }) : libelle('securite.desarme');
   showVueArm();
 }
 // ShowNET output (T-472): the hardware-stop reminder and the Wi-Fi pill,
@@ -6614,15 +6653,15 @@ function showPresence(f) {
   if (!p.hold_to_run) holdDown = false;
   const led = $('presenceLed');
   led.classList.toggle('ok', p.ui_alive);
-  led.textContent = t(p.ui_alive ? 'barre.presence.present' : 'barre.presence.absent');
+  led.textContent = libelle(p.ui_alive ? 'barre.presence.present' : 'barre.presence.absent');
   const stalled = !f.engine_ok || (!f.armed && f.arm?.last_disarm?.reason === 'engine_stall');
   $('engineLed').classList.toggle('ok', !stalled);
   $('engineLed').classList.toggle('bad', stalled);
-  $('engineLed').textContent = t(stalled ? 'barre.moteur.bloque' : 'barre.moteur');
+  $('engineLed').textContent = libelle(stalled ? 'barre.moteur.bloque' : 'barre.moteur');
   const banner = $('holdBanner');
   banner.hidden = !p.hold_to_run;
   banner.classList.toggle('emitting', p.hold_ok);
-  banner.textContent = p.hold_ok ? t('securite.maintien.actif') : t('securite.maintien.demande', { touche: keyName(p.hold_key) });
+  banner.textContent = p.hold_ok ? libelle('securite.maintien.actif') : libelle('securite.maintien.demande', { touche: keyName(p.hold_key) });
   if (!pickingHoldKey) $('holdKeyLabel').textContent = keyName(p.hold_key);
 }
 // RÉGLAGES › Général: keep the Mac awake during a show (T-412).
@@ -6814,7 +6853,7 @@ function showOutputKind(f) {
 let lastFrameAt = performance.now();
 setInterval(() => {
   $('linkLost').hidden = performance.now() - lastFrameAt <= 1000;
-  noticeCondition('engine', !$('linkLost').hidden, { level: 'warning', source: 'Studio', text: t('barre.liaison_perdue'), toast: false });
+  noticeCondition('engine', !$('linkLost').hidden, { level: 'warning', source: 'Studio', text: libelle('barre.liaison_perdue'), toast: false });
 }, 250);
 
 // ---------- pushed state and binary frames (T-411) ----------
@@ -7559,8 +7598,8 @@ function showShowMode(lock) {
   document.body.classList.toggle('show-mode', on);
   $('lockBtn').classList.toggle('on', on);
   $('lockBtn').setAttribute('aria-pressed', String(on));
-  $('lockLabel').textContent = t(on ? 'spectacle.verrouille' : 'spectacle.libelle');
-  $('lockBtn').title = t(on ? 'spectacle.verrouille.info' : 'spectacle.info');
+  $('lockLabel').textContent = libelle(on ? 'spectacle.verrouille' : 'spectacle.libelle');
+  $('lockBtn').title = libelle(on ? 'spectacle.verrouille.info' : 'spectacle.info');
   // The cue list's steps: read-only in show mode (GO stays).
   if (!on && $('cqPanel') && !$('cqPanel').hidden) renderCueList();
   if (!on) return;
@@ -8173,9 +8212,9 @@ document.addEventListener('click', e => { if (!$('winMenu').hidden && !e.target.
 function showVueArm() {
   if (!VUE) return;
   const estop = !$('estopBanner').hidden, lost = !$('linkLost').hidden;
-  const unknown = t('securite.laser.moteur_inconnu');
-  const [state, text] = estop ? ['estop', t('securite.estop')] : armed ? ['armed', t('securite.laser.arme')]
-    : lost ? ['lost', t('securite.laser.off') + ' · ' + unknown] : ['off', t('securite.laser.off')];
+  const unknown = libelle('securite.laser.moteur_inconnu');
+  const [state, text] = estop ? ['estop', libelle('securite.estop')] : armed ? ['armed', libelle('securite.laser.arme')]
+    : lost ? ['lost', libelle('securite.laser.off') + ' · ' + unknown] : ['off', libelle('securite.laser.off')];
   const el = $('vueArm');
   const full = armed && lost ? text + ' · ' + unknown : text;
   if (el.dataset.state === state && el.textContent === full) return;
@@ -8192,7 +8231,7 @@ async function vueEnterFull() {
   try { await navigator.keyboard?.lock?.(['Escape']); } catch { /* not available */ }
   VUEFS.full = true; VUEFS.ownExit = false;
   $('vueFull').setAttribute('aria-pressed', 'true');
-  $('vueFull').textContent = t('fenetres.plein_ecran.quitter');
+  $('vueFull').textContent = libelle('fenetres.plein_ecran.quitter');
 }
 function vueExitFull() {
   VUEFS.ownExit = true;
@@ -8203,7 +8242,7 @@ function vueExitFull() {
 function vueFullOff() {
   VUEFS.full = false;
   $('vueFull').setAttribute('aria-pressed', 'false');
-  $('vueFull').textContent = t('fenetres.plein_ecran');
+  $('vueFull').textContent = libelle('fenetres.plein_ecran');
 }
 document.addEventListener('fullscreenchange', () => {
   if (document.fullscreenElement || !VUEFS.full) return;
@@ -16911,19 +16950,19 @@ function renderTriggers() {
   const cues = presets.map(p => [p.id, p.name]);
   $('trgList').innerHTML = triggers.map((t, i) => {
     const ev = trgKind(t.event), act = trgKind(t.action);
-    const evVal = ev === 'buildup_above' ? `<input type="number" data-t="evval" min="5" max="100" step="5" value="${Math.round(t.event.buildup_above * 100)}" title="Seuil de montée (%)">`
-      : ev === 'every_bars' ? `<input type="number" data-t="evval" min="1" max="64" step="1" value="${t.event.every_bars}" title="Nombre de mesures">` : '';
+    const evVal = ev === 'buildup_above' ? `<input type="number" data-trg="evval" min="5" max="100" step="5" value="${Math.round(t.event.buildup_above * 100)}" title="Seuil de montée (%)">`
+      : ev === 'every_bars' ? `<input type="number" data-trg="evval" min="1" max="64" step="1" value="${t.event.every_bars}" title="Nombre de mesures">` : '';
     const cue = act === 'launch_cue' ? t.action.launch_cue : act === 'flash_cue' ? t.action.flash_cue.id : null;
     const beats = act === 'flash_cue' ? t.action.flash_cue.beats : act === 'black_hold' ? t.action.black_hold.beats : null;
     const fired = trgFired[i]?.fired ?? 0;
     return `<div class="trg${t.enabled ? '' : ' off'}" data-i="${i}">
-      <div class="row"><span>Quand</span><select data-t="event" title="Évènement de la musique">${opts(TRG_EVENTS, ev)}</select>${evVal}
+      <div class="row"><span>Quand</span><select data-trg="event" title="Évènement de la musique">${opts(TRG_EVENTS, ev)}</select>${evVal}
         <b class="count" data-count="${i}" title="Actions faites / limitées">${fired}</b>
         <button class="del lock-edit" data-del="${i}" title="Supprimer cette règle">×</button></div>
-      <div class="row"><span>Alors</span><select data-t="action" title="Action">${opts(TRG_ACTIONS, act)}</select>${beats !== null ? `<input type="number" data-t="beats" min="0.25" max="${act === 'black_hold' ? 4 : 16}" step="0.25" value="${beats}" title="Durée en temps">` : ''}</div>
-      ${cue !== null ? `<div class="row"><span>Cue</span><select data-t="cue" title="Cue">${cue ? '' : '<option value="" selected>Choisir un cue…</option>'}${opts(cues, cue)}</select></div>` : ''}
-      <div class="row"><span>Intervalle</span><input type="number" data-t="interval" min="0.25" max="64" step="0.25" value="${t.min_interval_beats}" title="Intervalle min. : au plus une action par ce nombre de temps"><select data-t="quantize" title="Quand agir">${opts(TRG_QUANT, t.quantize)}</select></div>
-      <label class="check u-justify-start"><input type="checkbox" data-t="enabled"${t.enabled ? ' checked' : ''}> Active</label>
+      <div class="row"><span>Alors</span><select data-trg="action" title="Action">${opts(TRG_ACTIONS, act)}</select>${beats !== null ? `<input type="number" data-trg="beats" min="0.25" max="${act === 'black_hold' ? 4 : 16}" step="0.25" value="${beats}" title="Durée en temps">` : ''}</div>
+      ${cue !== null ? `<div class="row"><span>Cue</span><select data-trg="cue" title="Cue">${cue ? '' : '<option value="" selected>Choisir un cue…</option>'}${opts(cues, cue)}</select></div>` : ''}
+      <div class="row"><span>Intervalle</span><input type="number" data-trg="interval" min="0.25" max="64" step="0.25" value="${t.min_interval_beats}" title="Intervalle min. : au plus une action par ce nombre de temps"><select data-trg="quantize" title="Quand agir">${opts(TRG_QUANT, t.quantize)}</select></div>
+      <label class="check u-justify-start"><input type="checkbox" data-trg="enabled"${t.enabled ? ' checked' : ''}> Active</label>
     </div>`;
   }).join('');
   $('trgAdd').disabled = triggers.length >= trgMax;
@@ -16955,7 +16994,7 @@ $('trgList').addEventListener('click', e => {
 $('trgList').addEventListener('change', e => {
   const box = e.target.closest('.trg');
   if (!box) return;
-  const t = triggers[+box.dataset.i], f = e.target.dataset.t, v = e.target.value;
+  const t = triggers[+box.dataset.i], f = e.target.dataset.trg, v = e.target.value;
   if (f === 'event') t.event = trgEvent(v, null);
   else if (f === 'evval') t.event = typeof t.event === 'object' && 'buildup_above' in t.event ? { buildup_above: Math.max(5, Math.min(100, +v || 60)) / 100 } : { every_bars: Math.max(1, Math.min(64, Math.round(+v) || 4)) };
   else if (f === 'action') t.action = trgAction(v, trgCue(t.action), trgBeats(t.action));

@@ -2,15 +2,17 @@
 //!
 //! Static checks, no server, no browser:
 //! - the table: keys well formed and unique, no empty value;
-//! - keys used (markup `data-t*`, script `t('…')`) = keys defined;
-//! - the `{parameters}` of a value = the names passed by its `t()` calls;
-//! - the safety texts exist and are not empty;
+//! - keys used (markup `data-t*`, script `libelle('…')`) = keys defined;
+//! - the `{parameters}` of a value = the names passed by its `libelle()` calls;
+//! - the safety texts exist and are not empty, and the page's inline
+//!   fallback (`LABELS_FALLBACK`, used if labels.js does not load) holds
+//!   each of them, plus the alert texts, with the table's values;
 //! - no visible text written in the markup between `<!-- labels:begin`
 //!   and `<!-- labels:end -->` (the regions migrated so far; the rest of
 //!   the page moves there region by region), except the short, commented
 //!   exception list below and the safety fallbacks (`data-t-fallback`),
 //!   whose text must equal the table's;
-//! - no French text in the ES modules (`beam3d.js`), outside `t()`.
+//! - no French text in the ES modules (`beam3d.js`), outside `libelle()`.
 //!
 //! Negative cases (`*_finds_*`) prove each scanner fails on a hard-coded
 //! text.
@@ -19,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const PAGE: &str = include_str!("../src/index.html");
 const LABELS_JS: &str = include_str!("../src/labels.js");
-/// The page's ES modules (T-435 adds more): no French text outside t().
+/// The page's ES modules (T-435 adds more): no French text outside libelle().
 const MODULES: &[(&str, &str)] = &[("beam3d.js", include_str!("../src/beam3d.js"))];
 
 /// Safety texts: never missing, never empty (an empty e-stop banner or
@@ -78,9 +80,14 @@ fn js_string(s: &str) -> Option<(String, usize)> {
 /// The table, in file order: `'key': 'value',` lines between
 /// `const LABELS = Object.freeze({` and `});`.
 fn table(src: &str) -> Result<Vec<(String, String)>, String> {
-    let start = src.find("const LABELS = Object.freeze({").ok_or("no LABELS")?;
+    frozen_map(src, "LABELS")
+}
+
+/// The `'key': 'value',` lines of `const <name> = Object.freeze({ … });`.
+fn frozen_map(src: &str, name: &str) -> Result<Vec<(String, String)>, String> {
+    let start = src.find(&format!("const {name} = Object.freeze({{")).ok_or(format!("no {name}"))?;
     let body = &src[start..];
-    let end = body.find("\n});").ok_or("LABELS not closed")?;
+    let end = body.find("\n});").ok_or(format!("{name} not closed"))?;
     let mut out = Vec::new();
     for line in body[..end].lines().skip(1) {
         let l = line.trim();
@@ -114,24 +121,21 @@ fn placeholders(v: &str) -> BTreeSet<String> {
     out
 }
 
-/// Every `data-t*="key"` of the markup. A value without a dot is not a
-/// label key: the audio triggers' rows (T-240) name their fields with
-/// `data-t="event"` and the like, and applyLabels() skips them too.
+/// Every `data-t*="key"` of the markup (each one is a key: the audio
+/// triggers' rows name their fields with `data-trg`).
 fn markup_keys(page: &str) -> Vec<String> {
     let mut out = Vec::new();
     for attr in ["data-t=\"", "data-t-title=\"", "data-t-placeholder=\"", "data-t-aria-label=\""] {
         for (i, _) in page.match_indices(attr) {
             let v = &page[i + attr.len()..];
             let v = &v[..v.find('"').unwrap()];
-            if v.contains('.') {
-                out.push(v.to_string());
-            }
+            out.push(v.to_string());
         }
     }
     out
 }
 
-/// One `t(` call of a script: the keys its first argument names (one
+/// One `libelle(` call of a script: the keys its first argument names (one
 /// literal, or several in a ternary) and the names of its `{ … }`
 /// parameters, if any.
 #[derive(Debug)]
@@ -168,15 +172,16 @@ fn balanced(s: &str, open: char, close: char) -> &str {
     s
 }
 
-/// The `t(…)` calls of a script (`t(` not preceded by a name character).
+/// The `libelle(…)` calls of a script (not preceded by a name character).
 fn calls(src: &str) -> Vec<Call> {
+    const F: &str = "libelle(";
     let mut out = Vec::new();
-    for (i, _) in src.match_indices("t(") {
+    for (i, _) in src.match_indices(F) {
         let before = src[..i].chars().next_back().unwrap_or(' ');
         if before.is_alphanumeric() || before == '_' || before == '$' || before == '.' {
             continue;
         }
-        let args = balanced(&src[i + 2..], '(', ')');
+        let args = balanced(&src[i + F.len()..], '(', ')');
         // The first argument ends at the first top-level comma.
         let mut first_end = args.len();
         let mut depth = 0;
@@ -209,7 +214,7 @@ fn calls(src: &str) -> Vec<Call> {
             }
         }
         if keys.is_empty() {
-            continue; // not our t() (a local function or variable)
+            continue; // a call with no literal key
         }
         let single = js_string(first).is_some_and(|(_, n)| n == first.len());
         let params = args.get(first_end + 1..).map(str::trim).filter(|p| p.starts_with('{')).map(|p| {
@@ -419,7 +424,7 @@ fn regions(page: &str) -> Vec<&str> {
 }
 
 /// French texts in a module's string literals (a literal with an accented
-/// letter, or two words with a space), outside comments and `t()` calls.
+/// letter, or two words with a space), outside comments and `libelle()` calls.
 /// GLSL sources (template literals starting with `#version`) are code;
 /// `new Error('…')` messages go to the console, never on screen.
 fn module_texts(src: &str) -> Vec<String> {
@@ -457,8 +462,10 @@ fn module_texts(src: &str) -> Vec<String> {
             }
             i += 1;
             let in_t = {
-                let before: String = b[..start].iter().rev().take(2).collect();
-                before == "(t" && !b.get(start.wrapping_sub(3)).is_some_and(|p| p.is_alphanumeric() || *p == '_' || *p == '.')
+                let f: Vec<char> = "libelle(".chars().collect();
+                start >= f.len()
+                    && b[start - f.len()..start] == f[..]
+                    && !b.get(start.wrapping_sub(f.len() + 1)).is_some_and(|p| p.is_alphanumeric() || *p == '_' || *p == '.')
             };
             let accented = s.chars().any(|ch| ch.is_alphabetic() && !ch.is_ascii());
             let words = s.split(' ').filter(|w| w.chars().any(char::is_alphabetic)).count() >= 2;
@@ -546,8 +553,48 @@ fn ui_labels_safety_texts_exist_and_are_not_empty() {
     let banner = &banner[..banner.find("</div>").unwrap()];
     assert!(banner.contains("data-t-fallback>ARRÊT D'URGENCE — réinitialiser pour réarmer<"), "{banner}");
     // The page runs if labels.js does not load.
-    assert!(PAGE.contains("if (typeof t !== 'function')") && PAGE.contains("if (typeof applyLabels === 'function') applyLabels();"));
+    assert!(PAGE.contains("if (typeof libelle !== 'function')") && PAGE.contains("if (typeof applyLabels === 'function') applyLabels();"));
     assert!(PAGE.find("<script src=\"/labels.js\"></script>").unwrap() < PAGE.find("const $ = id =>").unwrap());
+}
+
+/// Texts the inline fallback must hold besides SAFETY_KEYS: what the top
+/// bar and its banners set from the scripts or show as an alert.
+const FALLBACK_ALSO: &[&str] = &[
+    "securite.laser.moteur_inconnu",
+    "barre.presence.present",
+    "barre.presence.absent",
+    "barre.moteur",
+    "barre.moteur.bloque",
+    "barre.liaison_perdue",
+    "barre.sd_noir",
+    "barre.wifi",
+    "bandeau.midi_perdu",
+    "bandeau.dmx_perdu",
+    "fenetres.echap",
+];
+
+#[test]
+fn ui_labels_fallback_holds_the_safety_and_alert_texts() {
+    let labels = labels();
+    let fallback = frozen_map(PAGE, "LABELS_FALLBACK").unwrap();
+    let keys: BTreeSet<&str> = fallback.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys.len(), fallback.len(), "a key twice in LABELS_FALLBACK");
+    for (k, v) in &fallback {
+        assert_eq!(labels.get(k), Some(v), "LABELS_FALLBACK « {k} » differs from labels.js");
+    }
+    for k in SAFETY_KEYS.iter().chain(FALLBACK_ALSO) {
+        assert!(keys.contains(k), "« {k} » missing from LABELS_FALLBACK");
+    }
+    // Every alert of the migrated regions keeps its text in the markup.
+    for r in regions(PAGE) {
+        for (i, _) in r.match_indices("role=\"alert\"") {
+            let start = r[..i].rfind('<').unwrap();
+            let tag = &r[start..start + r[start..].find('>').unwrap()];
+            if tag.contains("data-t=\"") {
+                assert!(tag.contains("data-t-fallback"), "{tag}: an alert with a key needs data-t-fallback");
+            }
+        }
+    }
 }
 
 #[test]
@@ -592,14 +639,14 @@ fn ui_labels_module_scanner_finds_hardcoded_text() {
     assert_eq!(module_texts("const a = 'Bouton en dur';"), vec!["Bouton en dur"]);
     assert_eq!(module_texts("el.title = `Vitesse : ${v}`;"), vec!["Vitesse : ${v}"]);
     assert_eq!(module_texts("x = \"Arrêt\";"), vec!["Arrêt"]);
-    assert!(module_texts("// un commentaire 'en dur'\n/* « bloc » */ const k = 'tris'; t('a.b');").is_empty());
+    assert!(module_texts("// un commentaire 'en dur'\n/* « bloc » */ const k = 'tris'; libelle('a.b');").is_empty());
     assert!(module_texts("throw new Error('WebGL2 unavailable');").is_empty());
-    assert!(module_texts("const s = `#version 300 es\nin vec3 aPos;`; const q = t('securite.arret');").is_empty());
+    assert!(module_texts("const s = `#version 300 es\nin vec3 aPos;`; const q = libelle('securite.arret');").is_empty());
 }
 
 #[test]
 fn ui_labels_call_scanner_reads_keys_and_parameters() {
-    let c = calls("x = t('a.b', { n, nom: f(1, 2) }); y = t(on ? 'c.d' : 'e.f'); z = at('g.h'); w = o.t('i.j');");
+    let c = calls("x = libelle('a.b', { n, nom: f(1, 2) }); y = libelle(on ? 'c.d' : 'e.f'); z = t('g.h'); w = o.libelle('i.j'); v = xlibelle('k.l');");
     assert_eq!(c.len(), 2, "{c:?}");
     assert_eq!(c[0].keys, vec!["a.b"]);
     assert!(c[0].single);

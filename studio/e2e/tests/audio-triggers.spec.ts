@@ -72,8 +72,8 @@ test('a drop → cue rule, switched on in the panel, launches the cue and never 
   await openUi(page, studio);
   await reveal(page, '#trgOn');
   await expect(page.locator('#trgList .trg')).toHaveCount(1);
-  await expect(page.locator('#trgList [data-t="event"]')).toHaveValue('drop');
-  await expect(page.locator('#trgList [data-t="cue"]')).toHaveValue(cue);
+  await expect(page.locator('#trgList [data-trg="event"]')).toHaveValue('drop');
+  await expect(page.locator('#trgList [data-trg="cue"]')).toHaveValue(cue);
   await expect(page.locator('#trgOn')).not.toBeChecked();
 
   // Off: a drop does nothing.
@@ -116,9 +116,9 @@ test('a rule added in the panel is saved as it is edited', async ({ page }) => {
   await expect(page.locator('#trgList .trg')).toHaveCount(2);
   await expect.poll(async () => (await triggers()).triggers).toHaveLength(2);
   const rule = page.locator('#trgList .trg').nth(1);
-  await rule.locator('[data-t="event"]').selectOption('every_bars');
+  await rule.locator('[data-trg="event"]').selectOption('every_bars');
   await expect.poll(async () => (await triggers()).triggers[1]).toEqual(expect.objectContaining({ event: { every_bars: 4 }, action: 'next_cue' }));
-  await rule.locator('[data-t="action"]').selectOption('black_hold');
+  await rule.locator('[data-trg="action"]').selectOption('black_hold');
   await expect.poll(async () => (await triggers()).triggers[1]).toEqual(expect.objectContaining({ action: { black_hold: { beats: 0.5 } } }));
   await rule.locator('[data-del="1"]').click();
   await expect.poll(async () => (await triggers()).triggers).toHaveLength(1);
