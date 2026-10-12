@@ -709,9 +709,11 @@ pub fn arm_check(s: &Shared, confirmed: bool) -> Result<(), String> {
     Err(BACKUP_LOST_ARM_FR.into())
 }
 
-/// After a successful arm: a main machine armed while its backup is
-/// unreachable logs the operator's confirmation. Nothing when the gate
-/// stayed disarmed or there was nothing to confirm.
+/// After a successful arm that changed the gate from disarmed to armed
+/// (the caller checks; a request while armed is not one): a main machine
+/// armed while its backup is unreachable logs the operator's
+/// confirmation. Nothing when the gate stayed disarmed or there was
+/// nothing to confirm.
 pub fn note_armed(s: &Shared, src: ArmSource) {
     if backup_lost(s) && s.gate.is_armed() {
         s.gate.log().record("standby_arm_backup_lost", Some(src.id()), json!({ "confirmed": true }));

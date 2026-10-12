@@ -1526,9 +1526,15 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 let response = if let Some(why) = backup_lost {
                     with_status(json_response(json!({ "armed": false, "blocking": [why], "confirm_backup_lost": crate::standby::BACKUP_LOST_CONFIRM_FR })), 409)
                 } else if want {
+                    // `request_arm` returns Ok without doing anything when
+                    // already armed: only a real disarmed-to-armed change
+                    // logs the confirmation.
+                    let was_armed = s.gate.is_armed();
                     match s.request_arm(source) {
                         Ok(()) => {
-                            crate::standby::note_armed(&s, source);
+                            if !was_armed {
+                                crate::standby::note_armed(&s, source);
+                            }
                             json_response(json!({ "armed": s.gate.is_armed() }))
                         }
                         Err(blocking) => with_status(json_response(json!({ "armed": false, "blocking": blocking })), 409),
@@ -11037,7 +11043,8 @@ mod tests {
 
     /// The confirmation is logged only once the gate has armed: a
     /// confirmed request that an interlock (here the e-stop) still refuses
-    /// leaves no « confirmed » line.
+    /// leaves no « confirmed » line, and a request while already armed
+    /// adds none.
     #[test]
     fn a_confirmed_arm_with_the_backup_unreachable_is_logged_only_when_it_arms() {
         let t = TestServer::start(false);
@@ -11064,6 +11071,12 @@ mod tests {
         assert!(t.shared.lock().unwrap().gate.is_armed());
         flush();
         assert_eq!(confirmed(&sink), 1);
+        // Already armed: a second request (unconfirmed, nothing to
+        // confirm) changes nothing and logs nothing more.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+        flush();
+        assert_eq!(confirmed(&sink), 1, "a request while armed is not a new confirmation");
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
     }
 
