@@ -162,9 +162,11 @@ mod tests {
     fn controls_named_in_pages_exist_in_the_interface() {
         let items: Vec<String> = crate::checklist::shownet_items().into_iter().map(|i| i.text_fr).collect();
         let labels = LABELS_JS.replace("\\'", "'");
+        // The page's modules (T-435) hold the templates the single script had.
+        let modules = crate::web::UI_ASSETS.iter().map(|a| a.1).collect::<Vec<_>>().join("\n");
         for p in PAGES {
             for label in quoted(p.body_html) {
-                assert!(INDEX_HTML.contains(&label) || labels.contains(&label) || items.contains(&label), "{}: « {label} » is not in the interface", p.slug);
+                assert!(INDEX_HTML.contains(&label) || modules.contains(&label) || labels.contains(&label) || items.contains(&label), "{}: « {label} » is not in the interface", p.slug);
             }
         }
     }

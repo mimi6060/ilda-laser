@@ -64,6 +64,8 @@ fn route_table() -> Vec<(String, String, String)> {
 /// The sub-routes behind each prefix of `ROUTES` (`…*`). A new prefix
 /// without a line here fails `every_route_is_fuzzed`.
 const PREFIXES: &[(&str, &[&str])] = &[
+    // The page's modules and stylesheet (T-435), compiled in: a wrong name is a 404.
+    ("/ui/", &["app.js", "core.js", "styles.css", "nope.js", "..%2F..%2Fetc", "../../../etc/passwd"]),
     ("/api/help/", &["safety", "nope", "..%2F..%2Fetc", "../../../etc/passwd", "%C3%A9%F0%9F%94%A5"]),
     ("/api/checklist/", &["complete", "operator", "check", "config", "restart", "nope"]),
     ("/api/cuelist/", &["go", "back", "pause", "top", "goto", "nope"]),

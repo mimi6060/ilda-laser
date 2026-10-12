@@ -22,10 +22,12 @@
 // - The function is `libelle`, not `t`: a global `t` would be shadowed by
 //   the page's many local `t` variables, or clash with a top-level one.
 //
-// A classic script, not an ES module: the page's main script is not a
-// module yet (T-435) and needs the table before its first line. The
-// studio serves it itself (web.rs): no network. Tests: web.rs
-// `ui_labels_*`, e2e labels.spec.ts.
+// A classic script, not an ES module, on purpose: the page's modules
+// (ui/*.js, T-435) read libelle() as a global, so the page still arms and
+// stops with its fallback texts when this file does not load (an import
+// that failed would stop every module: labels.spec.ts). The studio serves
+// it itself (web.rs): no network. Tests: web.rs `ui_labels_*`, e2e
+// labels.spec.ts.
 const LABELS = Object.freeze({
   // Barre du haut
   'barre.produit': 'Laser Studio',
@@ -171,6 +173,7 @@ const LABELS = Object.freeze({
   'bandeau.zones.quitter': 'Quitter',
   'bandeau.midi_perdu': 'Contrôleur MIDI déconnecté',
   'bandeau.dmx_perdu': 'Signal DMX perdu',
+  'page.incomplete': 'Interface incomplète : rechargez la page',
   'bandeau.disque.fermer.info': 'Fermer ce bandeau (l\'avertissement reste dans la ligne d\'état)',
 
   // Espaces de travail et barre des onglets

@@ -44,17 +44,61 @@ use tiny_http::{Header, Method, Request, Response, Server};
 const INDEX_HTML: &str = include_str!("index.html");
 /// The 3D beam view (preview only), an ES module the page loads on demand.
 const BEAM3D_JS: &str = include_str!("beam3d.js");
-/// The page's text table (T-461), loaded before its main script.
+/// The page's text table (T-461), a classic script loaded before the
+/// modules (the page must still arm and stop without it: labels.spec.ts).
 const LABELS_JS: &str = include_str!("labels.js");
+
+const JS: &str = "text/javascript; charset=utf-8";
+/// The page's stylesheet and its ES modules (T-435): (path, body, content
+/// type), the modules in the order they run (`ui/app.js` imports the last
+/// one, each one imports the one before it). Everything is compiled in:
+/// the studio works offline and reads no file at run time.
+pub(crate) const UI_ASSETS: &[(&str, &str, &str)] = &[
+    ("/ui/styles.css", include_str!("ui/styles.css"), "text/css; charset=utf-8"),
+    ("/ui/core.js", include_str!("ui/core.js"), JS),
+    ("/ui/laser.js", include_str!("ui/laser.js"), JS),
+    ("/ui/presence.js", include_str!("ui/presence.js"), JS),
+    ("/ui/state.js", include_str!("ui/state.js"), JS),
+    ("/ui/view3d.js", include_str!("ui/view3d.js"), JS),
+    ("/ui/workspaces.js", include_str!("ui/workspaces.js"), JS),
+    ("/ui/music.js", include_str!("ui/music.js"), JS),
+    ("/ui/cuelist.js", include_str!("ui/cuelist.js"), JS),
+    ("/ui/zones.js", include_str!("ui/zones.js"), JS),
+    ("/ui/safety.js", include_str!("ui/safety.js"), JS),
+    ("/ui/targets.js", include_str!("ui/targets.js"), JS),
+    ("/ui/direct.js", include_str!("ui/direct.js"), JS),
+    ("/ui/tempo.js", include_str!("ui/tempo.js"), JS),
+    ("/ui/cues.js", include_str!("ui/cues.js"), JS),
+    ("/ui/presets.js", include_str!("ui/presets.js"), JS),
+    ("/ui/macros.js", include_str!("ui/macros.js"), JS),
+    ("/ui/shows.js", include_str!("ui/shows.js"), JS),
+    ("/ui/timeline-editor.js", include_str!("ui/timeline-editor.js"), JS),
+    ("/ui/timeline-markers.js", include_str!("ui/timeline-markers.js"), JS),
+    ("/ui/timeline-canvas.js", include_str!("ui/timeline-canvas.js"), JS),
+    ("/ui/layers.js", include_str!("ui/layers.js"), JS),
+    ("/ui/desk.js", include_str!("ui/desk.js"), JS),
+    ("/ui/modulators.js", include_str!("ui/modulators.js"), JS),
+    ("/ui/outputs.js", include_str!("ui/outputs.js"), JS),
+    ("/ui/venue.js", include_str!("ui/venue.js"), JS),
+    ("/ui/midi.js", include_str!("ui/midi.js"), JS),
+    ("/ui/apc40.js", include_str!("ui/apc40.js"), JS),
+    ("/ui/project.js", include_str!("ui/project.js"), JS),
+    ("/ui/figures.js", include_str!("ui/figures.js"), JS),
+    ("/ui/media.js", include_str!("ui/media.js"), JS),
+    ("/ui/program.js", include_str!("ui/program.js"), JS),
+    ("/ui/help.js", include_str!("ui/help.js"), JS),
+    ("/ui/command.js", include_str!("ui/command.js"), JS),
+    ("/ui/app.js", include_str!("ui/app.js"), JS),
+];
 
 /// Files the UI loads besides the page itself: (body, content type).
 /// Everything is compiled in, so the studio works offline.
 fn static_asset(path: &str) -> Option<(&'static str, &'static str)> {
     match path {
         "/" => Some((INDEX_HTML, "text/html; charset=utf-8")),
-        "/beam3d.js" => Some((BEAM3D_JS, "text/javascript; charset=utf-8")),
-        "/labels.js" => Some((LABELS_JS, "text/javascript; charset=utf-8")),
-        _ => None,
+        "/beam3d.js" => Some((BEAM3D_JS, JS)),
+        "/labels.js" => Some((LABELS_JS, JS)),
+        _ => UI_ASSETS.iter().find(|a| a.0 == path).map(|a| (a.1, a.2)),
     }
 }
 
@@ -86,6 +130,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/", RouteClass::Read),
     ("GET", "/beam3d.js", RouteClass::Read),
     ("GET", "/labels.js", RouteClass::Read),
+    ("GET", "/ui/*", RouteClass::Read),
     ("POST", "/api/estop", RouteClass::Safety),
     ("GET", "/api/events", RouteClass::Read),
     ("GET", "/api/frame.bin", RouteClass::Read),
@@ -947,7 +992,10 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         }
         (Method::Get, p) if static_asset(p).is_some() => {
             let (body, content_type) = static_asset(p).expect("checked by the guard");
-            with_type(Response::from_string(body), content_type)
+            // T-435: revalidated on every load, so a new build never runs
+            // with a module the browser kept from the old one.
+            let no_cache = Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).expect("ASCII header");
+            with_type(Response::from_string(body), content_type).with_header(no_cache)
         }
         (Method::Get, "/api/state") => state(shared),
         (Method::Get, "/api/diagnostics/report") => diagnostic_report(request.url(), shared),
@@ -8071,7 +8119,7 @@ mod tests {
             assert!(ROUTES.iter().any(|&(m, p, _)| m == method && p == path), "{method} {path} missing from web::ROUTES");
         }
         for &(m, p, _) in ROUTES {
-            let fast = ["/", "/beam3d.js", "/labels.js", "/api/estop", "/api/events", "/api/frame.bin"].contains(&p);
+            let fast = ["/", "/beam3d.js", "/labels.js", "/ui/*", "/api/estop", "/api/events", "/api/frame.bin"].contains(&p);
             assert!(fast || found.iter().any(|(fm, fp)| fm == m && fp == p), "{m} {p} in ROUTES but not served");
         }
         for (m, p) in [("POST", "/api/arm"), ("POST", "/api/estop/reset"), ("POST", "/api/heartbeat")] {
@@ -8191,20 +8239,163 @@ mod tests {
         assert_eq!(t.request("GET", "/api/project/quit-check", "").0, 200);
     }
 
-    /// T-432: every request of the page goes through `api()`: the page
-    /// holds a single `fetch(`, inside it (the 3D module has none).
+    /// The page's ES modules (T-435), joined: what the former single script
+    /// held. For the tests that scan the interface's code.
+    fn ui_scripts() -> String {
+        UI_ASSETS.iter().filter(|a| a.0.ends_with(".js")).map(|a| a.1).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The page's stylesheet (T-435).
+    fn ui_styles() -> &'static str {
+        UI_ASSETS.iter().find(|a| a.0 == "/ui/styles.css").expect("styles.css").1
+    }
+
+    /// The page and its modules, joined: the whole interface's source.
+    fn ui_source() -> String {
+        format!("{INDEX_HTML}\n{}", ui_scripts())
+    }
+
+    /// T-432: every request of the page goes through `api()`: the modules
+    /// hold a single `fetch(`, inside it (the 3D module has none). The page
+    /// itself has one, in the inline Échap guard that runs before any
+    /// module is loaded (T-435) and so cannot use api().
     #[test]
     fn the_page_fetches_only_through_api() {
         // The heartbeat worker's source runs apart, without the page: its
         // own fetch is the only other one.
-        let start = INDEX_HTML.find("const HB_WORKER = `").expect("heartbeat worker");
-        let end = start + INDEX_HTML[start..].find("`;").expect("end of the worker");
-        let page = format!("{}{}", &INDEX_HTML[..start], &INDEX_HTML[end..]);
-        let body = page.split("async function api(").nth(1).expect("api() in the page");
+        let scripts = ui_scripts();
+        let start = scripts.find("const HB_WORKER = `").expect("heartbeat worker");
+        let end = start + scripts[start..].find("`;").expect("end of the worker");
+        let scripts = format!("{}{}", &scripts[..start], &scripts[end..]);
+        let body = scripts.split("async function api(").nth(1).expect("api() in the modules");
         let api_end = body.find("\n}\n").expect("end of api()");
-        assert_eq!(page.matches("fetch(").count(), 1, "one fetch( in the page");
+        assert_eq!(scripts.matches("fetch(").count(), 1, "one fetch( in the modules");
         assert!(body[..api_end].contains("fetch("), "and it is in api()");
         assert!(!BEAM3D_JS.contains("fetch("));
+        assert_eq!(INDEX_HTML.matches("fetch(").count(), 1, "one fetch( in the page");
+        let guard = escape_guard();
+        assert!(guard.contains("fetch('/api/estop?source=keyboard', { method: 'POST', keepalive: true })"), "and it is the e-stop of the guard");
+    }
+
+    /// The inline script of `<head>` that stops the laser on Échap before
+    /// the modules are loaded (T-435).
+    fn escape_guard() -> &'static str {
+        let head = &INDEX_HTML[..INDEX_HTML.find("<body>").expect("body")];
+        let start = head.find("<script>").expect("a classic script in <head>");
+        &head[start..start + head[start..].find("</script>").expect("closed")]
+    }
+
+    /// T-435: the page's stylesheet and modules are served from the binary,
+    /// with a JavaScript / CSS type (browsers refuse modules otherwise) and
+    /// revalidated on every load; the page loads them, and nothing else;
+    /// every file stays within the size the task sets (one job per module).
+    #[test]
+    fn ui_assets_are_served_from_the_binary_and_fit_their_limits() {
+        let t = TestServer::start(false);
+        for &(path, body, content_type) in UI_ASSETS {
+            assert_eq!(static_asset(path), Some((body, content_type)), "{path}");
+            assert!(ROUTES.iter().any(|r| r.0 == "GET" && r.1 == "/ui/*"), "the /ui/* route");
+            let expected = if path.ends_with(".css") { "text/css; charset=utf-8" } else { "text/javascript; charset=utf-8" };
+            assert_eq!(content_type, expected, "{path}");
+            let lines = body.lines().count();
+            assert!(lines < 1100 || path.ends_with(".css"), "{path}: {lines} lines; split it (one job per module)");
+            // The SVG namespace is a name, never fetched; nothing else may look like an address.
+            let addresses = body.replace("'http://www.w3.org/2000/svg'", "");
+            assert!(!addresses.contains("http://") && !addresses.contains("https://"), "{path}: no external URL");
+            assert!(!body.contains("import(") || path == "/ui/view3d.js", "{path}: a dynamic import is beam3d.js, in view3d.js only");
+        }
+        // Served with the header (a raw request: the helper drops the head).
+        let mut stream = TcpStream::connect(t.addr).unwrap();
+        write!(stream, "GET /ui/app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let head = raw.split("\r\n\r\n").next().unwrap().to_ascii_lowercase();
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(head.contains("content-type: text/javascript; charset=utf-8"), "{head}");
+        assert!(head.contains("cache-control: no-cache"), "{head}");
+        assert_eq!(t.request("GET", "/ui/nothing.js", "").0, 404);
+
+        // The page: markup only, with the stylesheet and the entry module.
+        assert!(!INDEX_HTML.contains("<style"), "the styles are in /ui/styles.css");
+        assert!(INDEX_HTML.contains("<link rel=\"stylesheet\" href=\"/ui/styles.css\">"));
+        assert!(INDEX_HTML.contains("<script type=\"module\" src=\"/ui/app.js\"></script>"));
+        let page_lines = INDEX_HTML.lines().count();
+        assert!(page_lines < 3600, "index.html: {page_lines} lines (markup only; the task's 600 was for a 4 800-line page)");
+        let inline: usize = INDEX_HTML.split("<script>").skip(1).map(|s| s[..s.find("</script>").unwrap()].lines().count()).sum();
+        assert!(inline < 120, "{inline} lines of inline script: the Échap guard and the labels fallback only");
+        for tag in INDEX_HTML.split("<script").skip(1) {
+            let open = &tag[..tag.find('>').unwrap()];
+            if let Some(i) = open.find("src=\"") {
+                let src = &open[i + 5..i + 5 + open[i + 5..].find('"').unwrap()];
+                assert!(static_asset(src).is_some(), "{src} is not served");
+            }
+        }
+    }
+
+    /// T-435: every `import … from '…'` and `import('…')` of the modules
+    /// names a file the studio serves itself (no CDN, no path outside
+    /// `/ui/` but the 3D view), and the chain keeps the page order: each
+    /// module imports the one before it first, app.js the last one.
+    #[test]
+    fn module_imports_resolve_to_served_assets_in_page_order() {
+        let modules: Vec<&str> = UI_ASSETS.iter().map(|a| a.0).filter(|p| p.ends_with(".js")).collect();
+        let mut imports_seen = 0;
+        for &(path, body, _) in UI_ASSETS.iter().filter(|a| a.0.ends_with(".js")) {
+            let mut first: Option<String> = None;
+            // An import statement may wrap over several lines, up to its `;`.
+            let mut statement = String::new();
+            for line in body.lines() {
+                if !statement.is_empty() || line.starts_with("import ") {
+                    statement.push_str(line);
+                    if !line.ends_with(';') {
+                        continue;
+                    }
+                }
+                let target = if let Some(stmt) = statement.strip_prefix("import ") {
+                    let from = stmt.rfind(" from '").map(|i| &stmt[i + 7..]).or_else(|| stmt.strip_prefix('\'')).expect("import … from '…' or import '…'");
+                    Some(from[..from.find('\'').unwrap()].to_string())
+                } else {
+                    line.find("import('").map(|i| line[i + 8..i + 8 + line[i + 8..].find('\'').unwrap()].to_string())
+                };
+                let is_static = !statement.is_empty();
+                statement.clear();
+                let Some(target) = target else { continue };
+                let resolved = if let Some(rel) = target.strip_prefix("./") { format!("/ui/{rel}") } else { target.clone() };
+                assert!(static_asset(&resolved).is_some(), "{path} imports {target}: not served");
+                assert!(!target.contains("//"), "{path} imports {target}");
+                imports_seen += 1;
+                if first.is_none() && is_static {
+                    first = Some(resolved);
+                }
+            }
+            let i = modules.iter().position(|m| *m == path).unwrap();
+            let want = if path == "/ui/app.js" { modules[modules.len() - 2] } else if i > 0 { modules[i - 1] } else { continue };
+            assert_eq!(first.as_deref(), Some(want), "{path} must import {want} first (page order)");
+        }
+        assert!(imports_seen > 100, "{imports_seen} imports found");
+        // The modules may not be imported by beam3d.js nor labels.js (they stay apart).
+        assert!(!BEAM3D_JS.contains("/ui/") && !LABELS_JS.contains("/ui/"));
+    }
+
+    /// T-435: Échap stops the laser as soon as the page shows, before any
+    /// module is loaded and even if one fails: a classic script in `<head>`
+    /// posts the e-stop and shows the banner until laser.js has taken over
+    /// (`data-ui-ready`, set at the end of app.js). A module that fails to
+    /// load shows « Interface incomplète » (text kept in the markup).
+    #[test]
+    fn escape_stops_the_laser_before_the_modules_load() {
+        let guard = escape_guard();
+        assert!(guard.contains("'Escape'") && guard.contains("/api/estop?source=keyboard") && guard.contains("getElementById('estopBanner')"));
+        assert!(guard.contains("'uiReady' in document.documentElement.dataset"));
+        assert!(!guard.contains("import"), "the guard depends on no module");
+        let app = static_asset("/ui/app.js").unwrap().0;
+        assert!(app.trim_end().ends_with("document.documentElement.dataset.uiReady = '';"), "app.js hands Échap over last");
+        assert!(INDEX_HTML.find("<script>").unwrap() < INDEX_HTML.find("<body>").unwrap(), "the guard is in <head>");
+        assert!(INDEX_HTML.find("<body>").unwrap() < INDEX_HTML.find("type=\"module\"").unwrap());
+        assert!(guard.contains("getElementById('uiIncomplete')"));
+        assert!(INDEX_HTML.contains("<div id=\"uiIncomplete\" role=\"alert\" hidden data-t=\"page.incomplete\" data-t-fallback>Interface incomplète : rechargez la page</div>"));
+        assert!(LABELS_JS.contains("'page.incomplete': 'Interface incomplète : rechargez la page',"));
+        assert!(ui_styles().contains("#uiIncomplete[hidden] { display: none; }"));
     }
 
     /// T-431: every slider of the page (static, or in a template) has a
@@ -8213,7 +8404,8 @@ mod tests {
     #[test]
     fn every_slider_of_the_page_has_a_default() {
         let mut n = 0;
-        for tag in INDEX_HTML.split('<').filter(|t| t.starts_with("input ") && t.contains(r#"type="range""#)) {
+        let source = ui_source();
+        for tag in source.split('<').filter(|t| t.starts_with("input ") && t.contains(r#"type="range""#)) {
             let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
             assert!(tag.contains("data-control=") || tag.contains("data-default="), "no default: <{tag}>");
             n += 1;
@@ -8320,7 +8512,7 @@ mod tests {
         }
         let settings = INDEX_HTML.split("id=\"settingsPanel\"").nth(1).expect("RÉGLAGES").split("</main>").next().unwrap();
         assert!(settings.split("<details").skip(1).all(|d| d.split('>').next().unwrap().contains("data-search=")), "every RÉGLAGES section is indexed");
-        assert!(INDEX_HTML.contains("{ id: 'search', group: 'Recherche', keys: ['k', 'f'], meta: true"));
+        assert!(ui_scripts().contains("{ id: 'search', group: 'Recherche', keys: ['k', 'f'], meta: true"));
     }
 
     /// T-282: the night mode dims the neutral and accent tokens only; the
@@ -8329,14 +8521,16 @@ mod tests {
     /// button and ARRÊT out of the long press.
     #[test]
     fn night_mode_never_dims_the_safety_colours() {
-        let start = INDEX_HTML.find("---------- Mode nuit (T-282)").expect("night mode CSS");
-        let end = start + INDEX_HTML[start..].find("---------- Mode tactile (T-282)").expect("touch mode CSS");
-        let night = &INDEX_HTML[start..end];
+        let css = ui_styles();
+        let start = css.find("---------- Mode nuit (T-282)").expect("night mode CSS");
+        let end = start + css[start..].find("---------- Mode tactile (T-282)").expect("touch mode CSS");
+        let night = &css[start..end];
         assert!(night.contains("--text:"), "night mode redefines the text token");
         for token in ["--danger:", "--warn:", "--ok:", "--text-full:", "--accent-full:"] {
             assert!(!night.contains(token), "night mode must not redefine {token}");
         }
-        let skip = INDEX_HTML.lines().find(|l| l.starts_with("const LONG_PRESS_SKIP")).expect("long press skip list");
+        let scripts = ui_scripts();
+        let skip = scripts.lines().find(|l| l.starts_with("const LONG_PRESS_SKIP")).expect("long press skip list");
         for id in ["#armBtn", "#estopBtn", "#blackoutBtn", "#estopReset"] {
             assert!(skip.contains(id), "{id} is out of the long press");
         }
@@ -9612,7 +9806,8 @@ mod tests {
     fn serves_the_page_and_the_beam_view_module() {
         let (page, page_type) = static_asset("/").unwrap();
         assert!(page_type.starts_with("text/html"));
-        assert!(page.contains("/beam3d.js"), "the page loads the 3D view from our own server");
+        assert!(page.contains("/ui/app.js") && page.contains("/ui/styles.css"), "the page loads its modules and styles from our own server");
+        assert!(static_asset("/ui/view3d.js").unwrap().0.contains("import('/beam3d.js')"), "the 3D view comes from our own server");
 
         // Browsers refuse ES modules served with a non-JavaScript type.
         let (module, module_type) = static_asset("/beam3d.js").unwrap();
@@ -9646,6 +9841,8 @@ mod tests {
             rest = &rest[close..];
         }
         markup.push_str(rest);
+        // The modules (T-435) hold the templates the single script had.
+        scripts.push_str(&ui_scripts());
         assert!(!scripts.is_empty() && markup.contains("<header"));
 
         let static_styles: Vec<&str> = markup.match_indices("style=").map(|(i, _)| &markup[i..(i + 60).min(markup.len())]).collect();

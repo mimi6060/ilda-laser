@@ -3,7 +3,7 @@
 // pinned while it lasts; the safety banners keep their place. The studio
 // runs with --test-interlock (arming is always refused) and preview only;
 // the forced errors are answered by Playwright, the studio never sees them.
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
 import { test, expect, useStudio, openUi, focusPage } from '../studio';
@@ -15,7 +15,10 @@ declare function api(method: string, path: string, body?: unknown): Promise<Resp
 
 /** Every POST route the page calls with a literal path. */
 function postRoutes(): string[] {
-  const html = readFileSync(path.join(__dirname, '..', '..', 'src', 'index.html'), 'utf8');
+  // The page's code lives in its ES modules (T-435).
+  const src = path.join(__dirname, '..', '..', 'src');
+  const ui = path.join(src, 'ui');
+  const html = [readFileSync(path.join(src, 'index.html'), 'utf8'), ...readdirSync(ui).filter(f => f.endsWith('.js')).map(f => readFileSync(path.join(ui, f), 'utf8'))].join('\n');
   const found = new Set<string>();
   for (const re of [/api\('POST', '(\/api\/[^'?]+)'/g, /\bpost\('(\/api\/[^'?]+)'/g]) {
     for (const m of html.matchAll(re)) found.add(m[1]);

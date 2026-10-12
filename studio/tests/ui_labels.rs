@@ -2,7 +2,8 @@
 //!
 //! Static checks, no server, no browser:
 //! - the table: keys well formed and unique, no empty value;
-//! - keys used (markup `data-t*`, script `libelle('…')`) = keys defined;
+//! - keys used (markup `data-t*`, `libelle('…')` in the page's inline
+//!   scripts and in its ES modules `src/ui/*.js`, T-435) = keys defined;
 //! - the `{parameters}` of a value = the names passed by its `libelle()` calls;
 //! - the safety texts exist and are not empty, and the page's inline
 //!   fallback (`LABELS_FALLBACK`, used if labels.js does not load) holds
@@ -12,7 +13,9 @@
 //!   the page moves there region by region), except the short, commented
 //!   exception list below and the safety fallbacks (`data-t-fallback`),
 //!   whose text must equal the table's;
-//! - no French text in the ES modules (`beam3d.js`), outside `libelle()`.
+//! - no French text in the ES modules already free of it (`beam3d.js`),
+//!   outside `libelle()`. The page's own modules (`src/ui/*.js`) still hold
+//!   the templates' texts: they join `MODULES` as their text migrates.
 //!
 //! Negative cases (`*_finds_*`) prove each scanner fails on a hard-coded
 //! text.
@@ -21,8 +24,57 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const PAGE: &str = include_str!("../src/index.html");
 const LABELS_JS: &str = include_str!("../src/labels.js");
-/// The page's ES modules (T-435 adds more): no French text outside libelle().
+/// The ES modules with no French text outside libelle(): beam3d.js today;
+/// each `SCRIPTS` entry moves here once its texts are in the table.
 const MODULES: &[(&str, &str)] = &[("beam3d.js", include_str!("../src/beam3d.js"))];
+/// The page's ES modules (`src/ui/*.js`, T-435): scanned for `libelle()`
+/// calls. A test checks the list covers the folder.
+const SCRIPTS: &[(&str, &str)] = &[
+    ("core.js", include_str!("../src/ui/core.js")),
+    ("laser.js", include_str!("../src/ui/laser.js")),
+    ("presence.js", include_str!("../src/ui/presence.js")),
+    ("state.js", include_str!("../src/ui/state.js")),
+    ("view3d.js", include_str!("../src/ui/view3d.js")),
+    ("workspaces.js", include_str!("../src/ui/workspaces.js")),
+    ("music.js", include_str!("../src/ui/music.js")),
+    ("cuelist.js", include_str!("../src/ui/cuelist.js")),
+    ("zones.js", include_str!("../src/ui/zones.js")),
+    ("safety.js", include_str!("../src/ui/safety.js")),
+    ("targets.js", include_str!("../src/ui/targets.js")),
+    ("direct.js", include_str!("../src/ui/direct.js")),
+    ("tempo.js", include_str!("../src/ui/tempo.js")),
+    ("cues.js", include_str!("../src/ui/cues.js")),
+    ("presets.js", include_str!("../src/ui/presets.js")),
+    ("macros.js", include_str!("../src/ui/macros.js")),
+    ("shows.js", include_str!("../src/ui/shows.js")),
+    ("timeline-editor.js", include_str!("../src/ui/timeline-editor.js")),
+    ("timeline-markers.js", include_str!("../src/ui/timeline-markers.js")),
+    ("timeline-canvas.js", include_str!("../src/ui/timeline-canvas.js")),
+    ("layers.js", include_str!("../src/ui/layers.js")),
+    ("desk.js", include_str!("../src/ui/desk.js")),
+    ("modulators.js", include_str!("../src/ui/modulators.js")),
+    ("outputs.js", include_str!("../src/ui/outputs.js")),
+    ("venue.js", include_str!("../src/ui/venue.js")),
+    ("midi.js", include_str!("../src/ui/midi.js")),
+    ("apc40.js", include_str!("../src/ui/apc40.js")),
+    ("project.js", include_str!("../src/ui/project.js")),
+    ("figures.js", include_str!("../src/ui/figures.js")),
+    ("media.js", include_str!("../src/ui/media.js")),
+    ("program.js", include_str!("../src/ui/program.js")),
+    ("help.js", include_str!("../src/ui/help.js")),
+    ("command.js", include_str!("../src/ui/command.js")),
+    ("app.js", include_str!("../src/ui/app.js")),
+];
+
+/// The page's inline scripts and its modules, joined: every `libelle()` call.
+fn all_scripts() -> String {
+    let mut out = page_scripts(PAGE);
+    for (_, m) in SCRIPTS {
+        out.push_str(m);
+        out.push('\n');
+    }
+    out
+}
 
 /// Safety texts: never missing, never empty (an empty e-stop banner or
 /// arm button must not be possible).
@@ -500,7 +552,7 @@ fn ui_labels_table_is_well_formed() {
 #[test]
 fn ui_labels_used_keys_are_the_defined_keys() {
     let labels = labels();
-    let scripts = page_scripts(PAGE);
+    let scripts = all_scripts();
     let mut used: BTreeSet<String> = markup_keys(PAGE).into_iter().collect();
     for c in calls(&scripts) {
         used.extend(c.keys);
@@ -520,7 +572,7 @@ fn ui_labels_used_keys_are_the_defined_keys() {
 #[test]
 fn ui_labels_parameters_match_the_calls() {
     let labels = labels();
-    let scripts = page_scripts(PAGE);
+    let scripts = all_scripts();
     let all: Vec<Call> = calls(&scripts).into_iter().chain(MODULES.iter().flat_map(|(_, m)| calls(m))).collect();
     assert!(all.len() >= 10, "{all:?}");
     for c in &all {
@@ -552,9 +604,29 @@ fn ui_labels_safety_texts_exist_and_are_not_empty() {
     let banner = &PAGE[PAGE.find("<div id=\"estopBanner\"").unwrap()..];
     let banner = &banner[..banner.find("</div>").unwrap()];
     assert!(banner.contains("data-t-fallback>ARRÊT D'URGENCE — réinitialiser pour réarmer<"), "{banner}");
-    // The page runs if labels.js does not load.
+    // The page runs if labels.js does not load: the table, then its inline
+    // fallback, come before the modules (T-435), which read libelle() as a
+    // global (an import that failed would stop every module).
     assert!(PAGE.contains("if (typeof libelle !== 'function')") && PAGE.contains("if (typeof applyLabels === 'function') applyLabels();"));
-    assert!(PAGE.find("<script src=\"/labels.js\"></script>").unwrap() < PAGE.find("const $ = id =>").unwrap());
+    let labels_at = PAGE.find("<script src=\"/labels.js\"></script>").unwrap();
+    assert!(labels_at < PAGE.find("if (typeof libelle !== 'function')").unwrap());
+    assert!(labels_at < PAGE.find("<script type=\"module\" src=\"/ui/app.js\"></script>").unwrap());
+    assert!(!LABELS_JS.contains("\nexport ") && !LABELS_JS.contains("\nimport "), "labels.js stays a classic script");
+    for (name, m) in SCRIPTS {
+        assert!(!m.contains("from './labels.js'") && !m.contains("from '/labels.js'"), "{name} must read libelle() as a global");
+    }
+}
+
+/// Every module of `src/ui/` is in `SCRIPTS`: its `libelle()` calls are
+/// counted, and its texts will be scanned once migrated.
+#[test]
+fn ui_labels_scripts_list_covers_the_ui_folder() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui");
+    let mut files: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).filter(|f| f.ends_with(".js")).collect();
+    files.sort();
+    let mut listed: Vec<String> = SCRIPTS.iter().map(|(n, _)| n.to_string()).collect();
+    listed.sort();
+    assert_eq!(files, listed, "SCRIPTS (tests/ui_labels.rs) must list every src/ui/*.js");
 }
 
 /// Texts the inline fallback must hold besides SAFETY_KEYS: what the top
