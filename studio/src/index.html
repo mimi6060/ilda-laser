@@ -2054,189 +2054,193 @@
 </style>
 </head>
 <body>
+<!-- labels:begin (T-461): no visible text written here; data-t* keys of labels.js. -->
 <div id="top">
 <header>
   <h1><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lsLogo" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#22e3ff"/><stop offset=".55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#ff3dc8"/></linearGradient></defs>
-  <g stroke="url(#lsLogo)" stroke-width="2.2" stroke-linecap="round" fill="none"><path d="M5 27 L13 4"/><path d="M5 27 L21 6"/><path d="M5 27 L27 13"/><path d="M5 27 L29 22"/></g><circle cx="5" cy="27" r="3.2" fill="#fff"/></svg><span class="name">Laser Studio</span></h1>
+  <g stroke="url(#lsLogo)" stroke-width="2.2" stroke-linecap="round" fill="none"><path d="M5 27 L13 4"/><path d="M5 27 L21 6"/><path d="M5 27 L27 13"/><path d="M5 27 L29 22"/></g><circle cx="5" cy="27" r="3.2" fill="#fff"/></svg><span class="name" data-t="barre.produit"></span></h1>
   <div class="proj">
-    <button id="projBtn" aria-haspopup="true" aria-controls="projMenu" title="Projet : Cmd+S enregistrer, Cmd+O ouvrir">Projet ▾</button>
-    <span id="projName" title="Projet ouvert (• = modifications non enregistrées)">Sans titre</span>
+    <button id="projBtn" aria-haspopup="true" aria-controls="projMenu" data-t-title="projet.bouton.info" data-t="projet.bouton"></button>
+    <span id="projName" data-t-title="projet.nom.info" data-t="projet.nom.sans_titre"></span>
     <span id="autosaveStatus" role="status" hidden></span>
     <span id="backupStatus" role="status" hidden></span>
     <div id="projMenu" hidden>
-      <button data-proj="new">Nouveau projet…</button>
-      <button data-proj="new-template" aria-haspopup="true" aria-expanded="false" aria-controls="projTemplates">Nouveau depuis un modèle ▸</button>
+      <button data-proj="new" data-t="projet.menu.nouveau"></button>
+      <button data-proj="new-template" aria-haspopup="true" aria-expanded="false" aria-controls="projTemplates" data-t="projet.menu.nouveau_modele"></button>
       <div id="projTemplates" hidden></div>
-      <button data-proj="save-template">Enregistrer comme modèle…</button>
-      <button data-proj="open">Ouvrir…</button>
-      <div class="sub">Récents</div>
+      <button data-proj="save-template" data-t="projet.menu.enregistrer_modele"></button>
+      <button data-proj="open" data-t="projet.menu.ouvrir"></button>
+      <div class="sub" data-t="projet.menu.recents"></div>
       <div id="projRecent"></div>
-      <button data-proj="save">Enregistrer</button>
-      <button data-proj="save-as">Enregistrer sous…</button>
-      <button data-proj="version-save">Enregistrer une version…</button>
-      <button data-proj="versions">Versions…</button>
-      <button data-proj="pack-export">Exporter un paquet…</button>
-      <button data-proj="pack-import">Importer un paquet…</button>
-      <button data-proj="partial">Importer depuis un projet…</button>
-      <button data-proj="about">À propos de Laser Studio…</button>
+      <button data-proj="save" data-t="projet.menu.enregistrer"></button>
+      <button data-proj="save-as" data-t="projet.menu.enregistrer_sous"></button>
+      <button data-proj="version-save" data-t="projet.menu.enregistrer_version"></button>
+      <button data-proj="versions" data-t="projet.menu.versions"></button>
+      <button data-proj="pack-export" data-t="projet.menu.paquet_exporter"></button>
+      <button data-proj="pack-import" data-t="projet.menu.paquet_importer"></button>
+      <button data-proj="partial" data-t="projet.menu.import_partiel"></button>
+      <button data-proj="about" data-t="projet.menu.a_propos"></button>
     </div>
   </div>
-  <div class="tempo" title="Tempo : Entrée = tap, ⌫ = recaler sur le 1">
-    <input type="number" id="bpm" aria-label="Tempo (BPM)" min="40" max="250" step="0.1" value="120" data-control="tempo.bpm" title="tempo.bpm">
+  <div class="tempo" data-t-title="tempo.barre.info">
+    <input type="number" id="bpm" data-t-aria-label="tempo.bpm.libelle" min="40" max="250" step="0.1" value="120" data-control="tempo.bpm" title="tempo.bpm">
     <span class="hint tb-bpm hint--inline">BPM</span>
     <div class="beats" id="beats"><span class="one"></span><span></span><span></span><span></span></div>
-    <button data-ctl="tempo.tap" data-control="tempo.tap" title="tempo.tap (Entrée)">Tap</button>
-    <button data-ctl="tempo.resync" data-control="tempo.resync" title="tempo.resync (⌫)">Sync 1</button>
-    <button class="tb-extra" data-ctl="tempo.half" aria-label="Tempo divisé par deux" data-control="tempo.half" title="tempo.half">÷2</button>
-    <button class="tb-extra" data-ctl="tempo.double" aria-label="Tempo doublé" data-control="tempo.double" title="tempo.double">×2</button>
-    <button class="tb-extra" data-ctl="tempo.nudge_down" aria-label="Retarder la phase" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
-    <button class="tb-extra" data-ctl="tempo.nudge_up" aria-label="Avancer la phase" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
-    <button id="tempoAuto" data-control="tempo.auto" title="tempo.auto : le tempo suit la musique détectée (un tap reprend la main)">Auto</button>
-    <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" title="tempo.guide : tapez le tempo pour guider la détection, sans l'imposer" hidden>Guider</button>
-    <span class="hint hint--inline" id="tempoSrc" title="Tempo auto : état du suivi et confiance de la détection" hidden></span>
+    <button data-ctl="tempo.tap" data-control="tempo.tap" data-t-title="tempo.tap.info" data-t="tempo.tap.bouton"></button>
+    <button data-ctl="tempo.resync" data-control="tempo.resync" data-t-title="tempo.resync.info" data-t="tempo.resync.bouton"></button>
+    <button class="tb-extra" data-ctl="tempo.half" data-t-aria-label="tempo.moitie.libelle" data-control="tempo.half" title="tempo.half">÷2</button>
+    <button class="tb-extra" data-ctl="tempo.double" data-t-aria-label="tempo.double.libelle" data-control="tempo.double" title="tempo.double">×2</button>
+    <button class="tb-extra" data-ctl="tempo.nudge_down" data-t-aria-label="tempo.retarder.libelle" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
+    <button class="tb-extra" data-ctl="tempo.nudge_up" data-t-aria-label="tempo.avancer.libelle" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
+    <button id="tempoAuto" data-control="tempo.auto" data-t-title="tempo.auto.info" data-t="tempo.auto.bouton"></button>
+    <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" data-t-title="tempo.guide.info" hidden data-t="tempo.guide.bouton"></button>
+    <span class="hint hint--inline" id="tempoSrc" data-t-title="tempo.source.info" hidden></span>
     <!-- Horloge MIDI (T-207): the followed clock's tempo; Tap and Nudge are ignored meanwhile. -->
-    <span class="hint hint--inline" id="midiClockHint" role="status" title="Le tempo suit l'horloge MIDI : Tap, Nudge et BPM sont ignorés (RÉGLAGES › Horloge MIDI)" hidden></span>
+    <span class="hint hint--inline" id="midiClockHint" role="status" data-t-title="tempo.horloge_midi.info" hidden></span>
     <!-- Groupes de vitesse (T-419): the groups not at ×1, and the Cadence if not 100 %. -->
-    <span class="hint hint--inline" id="speedHint" role="status" title="Groupes de vitesse qui ne suivent pas le tempo à ×1, et la cadence des fondus (LIVE › Direct › Vitesses)" hidden></span>
+    <span class="hint hint--inline" id="speedHint" role="status" data-t-title="tempo.vitesses.info" hidden></span>
     <!-- Compensation de latence (T-246): the effects read the beat ahead; never a frame held back. -->
     <span class="lat-wrap">
-      <button id="latBtn" class="tb-extra" aria-expanded="false" title="Latence : décalage de sortie, latence estimée, calage à l'oreille">Lat.</button>
+      <button id="latBtn" class="tb-extra" aria-expanded="false" data-t-title="latence.bouton.info" data-t="latence.bouton"></button>
       <div id="latMenu" hidden>
-        <div class="row"><label for="latOffset">Décalage de sortie (ms)</label><span class="v" id="latOffsetV">0 ms</span></div>
-        <input type="range" id="latOffset" min="-100" max="100" step="1" value="0" data-default="0" title="tempo.output_offset : les effets cadencés lisent le temps en avance d'autant (+40 = 40 ms plus tôt)">
-        <div class="hint" id="latEst">Latence estimée : …</div>
+        <div class="row"><label for="latOffset" data-t="latence.decalage.libelle"></label><span class="v" id="latOffsetV">0 ms</span></div>
+        <input type="range" id="latOffset" min="-100" max="100" step="1" value="0" data-default="0" data-t-title="latence.decalage.info">
+        <div class="hint" id="latEst" data-t="latence.estimee.attente"></div>
         <div class="hint" id="latAnalysis"></div>
-        <div class="row"><button id="latEar" aria-pressed="false">Caler à l'oreille</button><span id="latFlash" title="Éclair : le temps que le studio envoie au laser (aperçu)"></span></div>
-        <div class="hint" id="latEarHint" hidden>Un clic sonne sur chaque temps. Lancez un effet au temps (strobe cadencé) et réglez le décalage jusqu'à ce que l'éclair du laser tombe sur le clic. Le point montre ce que le studio envoie.</div>
-        <div class="hint">Ne retarde jamais l'arrêt : Échap, noir et désarmement agissent sur l'image suivante.</div>
+        <div class="row"><button id="latEar" aria-pressed="false" data-t="latence.oreille.bouton"></button><span id="latFlash" data-t-title="latence.eclair.info"></span></div>
+        <div class="hint" id="latEarHint" hidden data-t="latence.oreille.aide"></div>
+        <div class="hint" data-t="latence.securite"></div>
       </div>
     </span>
     <!-- Pilote automatique (T-148): a cue of the page every N bars. It only
          launches cues: never arms; an e-stop or a disarm switches it off.
          Also in LIVE › Cues (the top bar hides it under 1360 px). -->
-    <button id="vljBtn" class="tb-extra vlj-open" aria-haspopup="true" aria-expanded="false" aria-controls="vljMenu" title="Pilote automatique : change de cue toutes les N mesures (coupé)">Pilote</button>
+    <button id="vljBtn" class="tb-extra vlj-open" aria-haspopup="true" aria-expanded="false" aria-controls="vljMenu" data-t-title="pilote.bouton.info" data-t="pilote.bouton"></button>
     <!-- Temps 1 (T-235): the detected "1", dotted on its beat dot. -->
-    <span class="hint hint--inline" id="downbeatHint" title="Temps 1 suggéré par l'analyse audio (voyant en pointillé). En Tempo auto, la mesure ne se recale seule que sur un drop ou quand la détection devient sûre." hidden>Temps 1 suggéré</span>
-    <button id="downbeatAccept" data-ctl="tempo.downbeat_accept" data-control="tempo.downbeat_accept" title="tempo.downbeat_accept : recaler la mesure sur le temps 1 suggéré" hidden>Accepter</button>
-    <span class="hint tb-extra hint--inline" id="phraseHint" title="Mesure dans la phrase (8 ou 16 mesures), comptée depuis le dernier drop ou la dernière fin de break" hidden></span>
+    <span class="hint hint--inline" id="downbeatHint" data-t-title="tempo.temps1.info" hidden data-t="tempo.temps1.suggere"></span>
+    <button id="downbeatAccept" data-ctl="tempo.downbeat_accept" data-control="tempo.downbeat_accept" data-t-title="tempo.temps1.accepter.info" hidden data-t="tempo.temps1.accepter"></button>
+    <span class="hint tb-extra hint--inline" id="phraseHint" data-t-title="tempo.phrase.info" hidden></span>
   </div>
   <!-- The autopilot's menu (T-148), opened from the top bar or LIVE › Cues. -->
-  <div id="vljMenu" role="group" aria-label="Pilote automatique" hidden>
-    <div class="row"><span class="vlj-title">Pilote automatique</span><button id="vljToggle" aria-pressed="false" data-control="vlj.enabled" title="vlj.enabled : n'arme jamais le laser ; l'arrêt d'urgence ou un désarmement le coupe">Activer</button></div>
-    <label for="vljEvery">Changement</label>
+  <div id="vljMenu" role="group" data-t-aria-label="pilote.titre" hidden>
+    <div class="row"><span class="vlj-title" data-t="pilote.titre"></span><button id="vljToggle" aria-pressed="false" data-control="vlj.enabled" data-t-title="pilote.activer.info" data-t="pilote.activer"></button></div>
+    <label for="vljEvery" data-t="pilote.changement"></label>
     <select id="vljEvery" data-control="vlj.every" title="vlj.every">
-      <option value="0">Toutes les mesures</option><option value="1">Toutes les 2 mesures</option><option value="2">Toutes les 4 mesures</option><option value="3">Toutes les 8 mesures</option>
+      <option value="0" data-t="pilote.chaque.1"></option><option value="1" data-t="pilote.chaque.2"></option><option value="2" data-t="pilote.chaque.4"></option><option value="3" data-t="pilote.chaque.8"></option>
     </select>
-    <label for="vljOrder">Ordre</label>
-    <select id="vljOrder" data-control="vlj.order" title="vlj.order"><option value="0">Dans l'ordre</option><option value="1">Aléatoire</option></select>
-    <div class="vlj-sub" id="vljPagesLabel">Pages (aucune cochée = page affichée)</div>
+    <label for="vljOrder" data-t="pilote.ordre"></label>
+    <select id="vljOrder" data-control="vlj.order" title="vlj.order"><option value="0" data-t="pilote.ordre.suite"></option><option value="1" data-t="pilote.ordre.aleatoire"></option></select>
+    <div class="vlj-sub" id="vljPagesLabel" data-t="pilote.pages"></div>
     <div id="vljPages" class="vlj-pages" role="group" aria-labelledby="vljPagesLabel"></div>
-    <div class="row"><label for="vljAudience" title="Cues dont la case porte l'étiquette « public » : jamais choisis sans cette case">Autoriser le contenu « public »</label><input type="checkbox" id="vljAudience"></div>
+    <div class="row"><label for="vljAudience" data-t-title="pilote.public.info" data-t="pilote.public"></label><input type="checkbox" id="vljAudience"></div>
     <div class="hint" id="vljStatus" role="status"></div>
-    <div class="hint">Il ne fait que lancer des cues : n'arme jamais, la sécurité s'applique ensuite. Un cue lancé à la main reprend la main ; l'arrêt d'urgence ou un désarmement le coupe.</div>
+    <div class="hint" data-t="pilote.securite"></div>
   </div>
   <!-- Maître (T-271): the same control as LIVE › Direct › Luminosité maître. -->
-  <div class="tb-master" title="Luminosité maître : 100 % au plus, la limite de sécurité s'applique après">
-    <div class="row"><label for="topMaster">Maître</label><span class="v" id="topMasterV"></span></div>
+  <div class="tb-master" data-t-title="barre.maitre.info">
+    <div class="row"><label for="topMaster" data-t="barre.maitre"></label><span class="v" id="topMasterV"></span></div>
     <input type="range" id="topMaster" min="0" max="100" data-live="brightness" data-k="100" data-control="master.brightness" title="master.brightness">
   </div>
-  <button id="lockBtn" aria-pressed="false" aria-label="Mode spectacle" title="Mode spectacle : verrouiller l'édition (cues, maîtres, tempo, noir et laser restent actifs)">
+  <button id="lockBtn" aria-pressed="false" data-t-aria-label="spectacle.libelle" data-t-title="spectacle.info">
     <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7" rx="1.5"/>
       <path class="shackle-closed" d="M5 7V5a3 3 0 0 1 6 0v2"/><path class="shackle-open" d="M5 7V5a3 3 0 0 1 5.8-1"/></svg>
-    <span id="lockLabel">Mode spectacle</span><span class="ring"></span></button>
+    <span id="lockLabel" data-t="spectacle.libelle"></span><span class="ring"></span></button>
   <!-- État (T-271): sortie, état du laser, voyants, MIDI. -->
   <div class="tb-status">
     <div id="output">…</div>
-    <span id="wifiPill" role="alert" hidden>Wi-Fi</span>
-    <span id="sdPill" role="alert" hidden>SD : NOIR</span>
+    <span id="wifiPill" role="alert" hidden data-t="barre.wifi" data-t-fallback>Wi-Fi</span>
+    <span id="sdPill" role="alert" hidden data-t="barre.sd_noir" data-t-fallback>SD : NOIR</span>
     <!-- Agenda (T-455): while it is on; it never arms. -->
-    <span id="agendaPill" role="status" hidden title="Agenda actif : il lance des lectures à heure fixe (TIMELINE › Agenda). Il n'arme jamais le laser.">Agenda actif</span>
-    <span id="audPill" role="status" hidden title="Balayage public déverrouillé : les zones Public reçoivent de la lumière atténuée. Le logiciel ne rend pas cela sûr ; il ne détecte pas une panne des galvos.">BALAYAGE PUBLIC</span>
-    <div class="arm-line"><span id="armInfo">Désarmé</span><span id="profilePill" role="status" title="Profil de sécurité actif (RÉGLAGES › Sécurité)" hidden></span></div>
+    <span id="agendaPill" role="status" hidden data-t-title="barre.agenda.info" data-t="barre.agenda"></span>
+    <span id="audPill" role="status" hidden data-t-title="securite.public.info" data-t="securite.public" data-t-fallback>BALAYAGE PUBLIC</span>
+    <div class="arm-line"><span id="armInfo" data-t="securite.desarme" data-t-fallback>Désarmé</span><span id="profilePill" role="status" data-t-title="securite.profil.info" hidden></span></div>
     <div class="leds">
       <!-- Entrées externes (T-408): closed at start and after an e-stop. -->
-      <button id="extGate" aria-pressed="false" title="Entrées externes fermées : DMX, OSC et timecode ne changent rien (sauf le noir et l'arrêt d'urgence) · Alt+X"><span class="long">Entrées externes</span><span class="short">Ext.</span></button>
-      <span id="presenceLed" class="led" role="status" title="Battement de l'interface : sans aucune page ouverte, le laser se désarme">Opérateur absent</span>
-      <span id="engineLed" class="led ok" role="status" title="Chien de garde du moteur">Moteur</span>
-      <div id="midiStatus" title="Contrôleurs MIDI : clic = RÉGLAGES › Contrôleur">MIDI : …</div>
-      <span id="dmxPill" title="Entrée DMX (Art-Net / sACN) : clic = RÉGLAGES › Entrées réseau" hidden>DMX</span>
+      <button id="extGate" aria-pressed="false" data-t-title="entrees.portail.info"><span class="long" data-t="entrees.portail"></span><span class="short" data-t="entrees.portail.court"></span></button>
+      <span id="presenceLed" class="led" role="status" data-t-title="barre.presence.info" data-t="barre.presence.absent" data-t-fallback>Opérateur absent</span>
+      <span id="engineLed" class="led ok" role="status" data-t-title="barre.moteur.info" data-t="barre.moteur" data-t-fallback>Moteur</span>
+      <div id="midiStatus" data-t-title="barre.midi.info" data-t="barre.midi.attente"></div>
+      <span id="dmxPill" data-t-title="barre.dmx.info" hidden data-t="barre.dmx"></span>
       <!-- Télécommande (T-428): only while the access is on. -->
-      <button id="remotePill" title="Télécommande autorisée sur le réseau local : clic = RÉGLAGES › Télécommande" hidden>Télécommande : 0</button>
+      <button id="remotePill" data-t-title="barre.telecommande.info" hidden data-t="barre.telecommande.aucune"></button>
     </div>
   </div>
   <!-- Notifications (T-432): the list behind the bell, no shortcut. -->
-  <button id="noticeBtn" aria-haspopup="true" aria-expanded="false" aria-label="Notifications" title="Notifications">
+  <button id="noticeBtn" aria-haspopup="true" aria-expanded="false" data-t-aria-label="notifications.libelle" data-t-title="notifications.libelle">
     <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg>
     <span id="noticeBadge" hidden></span></button>
-  <div id="linkLost" role="alert" hidden>Connexion au moteur perdue</div>
+  <div id="linkLost" role="alert" hidden data-t="barre.liaison_perdue" data-t-fallback>Connexion au moteur perdue</div>
   <!-- Safety on the right edge, far from the grid: Noir and ARRÊT, then
-       (at least 24 px away) the laser button. -->
+       (at least 24 px away) the laser button. Safety and alert texts stay
+       in the markup (data-t-fallback): shown even if labels.js does not
+       load. -->
   <div class="tb-safety">
-    <button id="blackoutBtn" title="Noir : coupe le laser tout de suite (comme Maj+Échap), toujours actif · Échap = ARRÊT (verrouillé)">Noir</button>
-    <button id="estopBtn" data-control="safety.estop" title="Arrêt d'urgence (Échap) · safety.estop">ARRÊT</button>
-    <button id="skyBtn" hidden aria-pressed="false" title="Ciel coupé (Alt+C) : éteint tout au-dessus de l'horizon sans désarmer · safety.sky_off">CIEL COUPÉ</button>
+    <button id="blackoutBtn" data-t-title="securite.noir.info" data-t="securite.noir" data-t-fallback>Noir</button>
+    <button id="estopBtn" data-control="safety.estop" data-t-title="securite.arret.info" data-t="securite.arret" data-t-fallback>ARRÊT</button>
+    <button id="skyBtn" hidden aria-pressed="false" data-t-title="securite.ciel.info" data-t="securite.ciel" data-t-fallback>CIEL COUPÉ</button>
   </div>
   <div class="arm">
-    <button id="armBtn" data-control="transport.arm" aria-pressed="false" title="Espace : armer/désarmer · Maj+Échap : désarmer">LASER OFF</button>
+    <button id="armBtn" data-control="transport.arm" aria-pressed="false" data-t-title="securite.laser.info" data-t="securite.laser.off" data-t-fallback>LASER OFF</button>
     <div id="armRefused" role="alert" hidden></div>
   </div>
 </header>
-<div id="estopBanner" role="alert" hidden>ARRÊT D'URGENCE — réinitialiser pour réarmer
-  <button id="estopReset">Réinitialiser l'arrêt d'urgence</button></div>
+<div id="estopBanner" role="alert" hidden><span data-t="securite.estop.banniere" data-t-fallback>ARRÊT D'URGENCE — réinitialiser pour réarmer</span>
+  <button id="estopReset" data-t="securite.estop.reinitialiser" data-t-fallback>Réinitialiser l'arrêt d'urgence</button></div>
 <div id="holdBanner" hidden></div>
-<div id="tpBanner" role="status" hidden>Mire affichée — cues et timeline en pause
-  <button id="tpBannerExit">Quitter la mire</button></div>
-<div id="ztBanner" role="status" hidden><span id="ztBannerText">Vérification des zones</span>
-  <button id="ztBannerExit">Quitter</button></div>
+<div id="tpBanner" role="status" hidden><span data-t="bandeau.mire"></span>
+  <button id="tpBannerExit" data-t="bandeau.mire.quitter"></button></div>
+<div id="ztBanner" role="status" hidden><span id="ztBannerText" data-t="bandeau.zones"></span>
+  <button id="ztBannerExit" data-t="bandeau.zones.quitter"></button></div>
 <div id="lockToast" role="status" hidden></div>
-<div id="midiLost" role="alert">Contrôleur MIDI déconnecté</div>
-<div id="dmxLost" role="alert">Signal DMX perdu</div>
+<div id="midiLost" role="alert" data-t="bandeau.midi_perdu" data-t-fallback>Contrôleur MIDI déconnecté</div>
+<div id="dmxLost" role="alert" data-t="bandeau.dmx_perdu" data-t-fallback>Signal DMX perdu</div>
 <div id="dataWarn" role="alert" hidden></div>
-<div id="spaceWarn" role="alert" hidden><div class="dw"><span id="spaceWarnText"></span><button id="spaceWarnClose" title="Fermer ce bandeau (l'avertissement reste dans la ligne d'état)">Fermer</button></div></div>
+<div id="spaceWarn" role="alert" hidden><div class="dw"><span id="spaceWarnText"></span><button id="spaceWarnClose" data-t-title="bandeau.disque.fermer.info" data-t="commun.fermer"></button></div></div>
 <div id="learnBanner" role="status" hidden><span id="learnText"></span>
-  <button id="learnYes" hidden>Oui</button><button id="learnNo" hidden>Non</button><button id="learnCancel" hidden>Annuler</button></div>
+  <button id="learnYes" hidden data-t="commun.oui"></button><button id="learnNo" hidden data-t="commun.non"></button><button id="learnCancel" hidden data-t="commun.annuler"></button></div>
 <!-- Espaces de travail (T-295) : changer d'onglet ne change que l'affichage. -->
-<nav id="wsTabs" aria-label="Espaces de travail">
-  <div class="ws-tablist" role="tablist" aria-label="Espaces de travail">
-  <button role="tab" data-ws-tab="live" title="Jouer en direct (F1)">LIVE <kbd>F1</kbd></button>
-  <button role="tab" data-ws-tab="timeline" title="Shows et timeline (F2)">TIMELINE <kbd>F2</kbd></button>
-  <button role="tab" data-ws-tab="creation" title="Créer du contenu (F3)">CRÉATION <kbd>F3</kbd></button>
-  <button role="tab" data-ws-tab="settings" title="Calibration, sécurité, MIDI, OSC/Art-Net (F4)">RÉGLAGES <kbd>F4</kbd></button>
-  <button role="tab" data-ws-tab="desk" title="Pupitre personnalisé : vos boutons, curseurs et pavés XY (Alt+F5)">PUPITRE</button>
+<nav id="wsTabs" data-t-aria-label="espaces.libelle">
+  <div class="ws-tablist" role="tablist" data-t-aria-label="espaces.libelle">
+  <button role="tab" data-ws-tab="live" data-t-title="espaces.live.info"><span data-t="espaces.live"></span> <kbd>F1</kbd></button>
+  <button role="tab" data-ws-tab="timeline" data-t-title="espaces.timeline.info"><span data-t="espaces.timeline"></span> <kbd>F2</kbd></button>
+  <button role="tab" data-ws-tab="creation" data-t-title="espaces.creation.info"><span data-t="espaces.creation"></span> <kbd>F3</kbd></button>
+  <button role="tab" data-ws-tab="settings" data-t-title="espaces.reglages.info"><span data-t="espaces.reglages"></span> <kbd>F4</kbd></button>
+  <button role="tab" data-ws-tab="desk" data-t-title="espaces.pupitre.info" data-t="espaces.pupitre"></button>
   </div>
-  <span class="hint" id="wsHint"><kbd>Espace</kbd> laser · <kbd>Échap</kbd> arrêt, dans tous les onglets · lettres = cues (LIVE)</span>
+  <span class="hint" id="wsHint"><kbd>Espace</kbd> <span data-t="espaces.aide.laser"></span> <kbd>Échap</kbd> <span data-t="espaces.aide.reste"></span></span>
   <!-- Annuler / Rétablir / Historique (T-285): edits only, hidden in show mode. -->
-  <div class="hist lock-edit" role="group" aria-label="Historique des modifications">
-    <button id="undoBtn" disabled aria-label="Annuler" title="Rien à annuler"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 2.5 6.5 6 10"/><path d="M2.5 6.5H10a3.5 3.5 0 0 1 0 7H7"/></svg></button>
-    <button id="redoBtn" disabled aria-label="Rétablir" title="Rien à rétablir"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3l3.5 3.5L10 10"/><path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3"/></svg></button>
-    <button id="historyBtn" aria-haspopup="true" aria-expanded="false" aria-label="Historique" title="Historique des modifications (cliquer une ligne annule jusqu'à elle)"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.6"/></svg></button>
+  <div class="hist lock-edit" role="group" data-t-aria-label="historique.libelle">
+    <button id="undoBtn" disabled data-t-aria-label="historique.annuler" data-t-title="historique.annuler.vide"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 2.5 6.5 6 10"/><path d="M2.5 6.5H10a3.5 3.5 0 0 1 0 7H7"/></svg></button>
+    <button id="redoBtn" disabled data-t-aria-label="historique.retablir" data-t-title="historique.retablir.vide"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3l3.5 3.5L10 10"/><path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3"/></svg></button>
+    <button id="historyBtn" aria-haspopup="true" aria-expanded="false" data-t-aria-label="historique.bouton" data-t-title="historique.bouton.info"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.6"/></svg></button>
   </div>
   <!-- Vues enregistrées (T-426): the screen's layout, recalled with Alt+F1…; never the output. -->
   <!-- Fenêtres supplémentaires (T-281): the same interface, cut down, for a second screen or a touch screen. -->
-  <button id="winBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="winMenu" aria-label="Ouvrir une fenêtre"
-    title="Ouvrir une fenêtre : Sortie, Grille, Direct ou 3D, pour un deuxième écran ou un écran tactile. Chaque fenêtre montre l'état du laser et Échap y reste l'arrêt d'urgence."><span class="long">Ouvrir une fenêtre</span><svg class="short" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="1.5" y="4.5" width="9" height="8" rx="1"/><path d="M5.5 4.5V2.5h9v8h-4"/></svg> ▾</button>
-  <button id="viewsBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewsMenu" title="Vues enregistrées : rappeler l'arrangement de l'écran (Alt+F1 … F4, F6 … F9). La sortie ne change pas.">Vues ▾</button>
+  <button id="winBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="winMenu" data-t-aria-label="fenetres.ouvrir"
+    data-t-title="fenetres.ouvrir.info"><span class="long" data-t="fenetres.ouvrir"></span><svg class="short" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="1.5" y="4.5" width="9" height="8" rx="1"/><path d="M5.5 4.5V2.5h9v8h-4"/></svg> ▾</button>
+  <button id="viewsBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewsMenu" data-t-title="vues.bouton.info" data-t="vues.bouton"></button>
   <!-- Recherche globale (T-429): Cmd+K or Cmd+F, from every workspace; in the tab bar, the top bar is full. -->
-  <button id="searchBtn" aria-haspopup="dialog" aria-expanded="false" title="Rechercher un cue, une page, une scène, un show, un contrôle, un réglage ou une page d'aide (Cmd+K ou Cmd+F)">
+  <button id="searchBtn" aria-haspopup="dialog" aria-expanded="false" data-t-title="recherche.bouton.info">
     <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
-    <span class="long">Rechercher…</span><kbd>⌘K</kbd></button>
+    <span class="long" data-t="recherche.bouton"></span><kbd>⌘K</kbd></button>
   <!-- Ligne de commande (T-424): the search box in « commande » mode. Never arms. -->
-  <button id="cmdBtn" aria-haspopup="dialog" aria-expanded="false" aria-label="Commandes"
-    title="Ligne de commande : régler un contrôle, lancer un cue, page, tempo, noir (Cmd+Maj+K). N'arme jamais le laser.">
-    <span aria-hidden="true">›_</span><span class="long">Commandes</span><kbd>⇧⌘K</kbd></button>
-  <button id="keysBtn" aria-haspopup="dialog" title="Tous les raccourcis clavier (?)">Raccourcis <kbd>?</kbd></button>
-  <button id="helpBtn" aria-haspopup="menu" aria-expanded="false" title="Aide intégrée, raccourcis et visite guidée">? Aide</button>
+  <button id="cmdBtn" aria-haspopup="dialog" aria-expanded="false" data-t-aria-label="commandes.bouton"
+    data-t-title="commandes.bouton.info">
+    <span aria-hidden="true">›_</span><span class="long" data-t="commandes.bouton"></span><kbd>⇧⌘K</kbd></button>
+  <button id="keysBtn" aria-haspopup="dialog" data-t-title="raccourcis.bouton.info"><span data-t="raccourcis.bouton"></span> <kbd>?</kbd></button>
+  <button id="helpBtn" aria-haspopup="menu" aria-expanded="false" data-t-title="aide.bouton.info" data-t="aide.bouton"></button>
 </nav>
 <!-- Fenêtre supplémentaire (T-281, ?vue=…): its name, the laser state and
      « Plein écran ». A strip under the top bar in Grille and Direct; over
      the picture in Sortie and 3D, where the top bar is not shown. -->
 <div id="vueBar" hidden>
   <span id="vueName"></span>
-  <span id="vueArm" role="status" aria-live="polite" data-state="off">LASER OFF</span>
-  <span class="hint" id="vueHint">Échap = arrêt d'urgence</span>
-  <button id="vueFull" aria-pressed="false" title="Plein écran. Échap reste l'arrêt d'urgence : quitter le plein écran autrement que par ce bouton arrête aussi le laser.">Plein écran</button>
+  <span id="vueArm" role="status" aria-live="polite" data-state="off" data-t="securite.laser.off" data-t-fallback>LASER OFF</span>
+  <span class="hint" id="vueHint" data-t="fenetres.echap" data-t-fallback>Échap = arrêt d'urgence</span>
+  <button id="vueFull" aria-pressed="false" data-t-title="fenetres.plein_ecran.info" data-t="fenetres.plein_ecran"></button>
 </div>
 </div>
+<!-- labels:end -->
 <!-- Recherche globale (T-429): results lead to a place; only « Jouer »
      plays a cue, through the same press as the grid. -->
 <div id="searchBox" role="dialog" aria-label="Recherche globale" hidden>
@@ -5277,7 +5281,57 @@
   <div class="row"><button id="cueMenuRemove" title="Vide la case (le cue reste dans sa catégorie)">Retirer de la page</button><button id="cueMenuClose">Fermer</button></div>
 </div>
 
+<!-- Libellés (T-461): the text table, before the main script, which uses libelle(). -->
+<script src="/labels.js"></script>
 <script>
+// Labels first (T-461): everything below reads the filled-in markup.
+// If labels.js did not load, libelle() still gives every safety and alert
+// text from LABELS_FALLBACK, with the same {parameter} filling; other keys
+// show as ⟦key⟧. A missing safety text must never give an empty or
+// unreadable banner. Each value equals the table's (tests/ui_labels.rs);
+// the markup keeps the same texts (data-t-fallback) for its own elements.
+const LABELS_FALLBACK = Object.freeze({
+  'securite.estop': 'ARRÊT D\'URGENCE',
+  'securite.estop.banniere': 'ARRÊT D\'URGENCE — réinitialiser pour réarmer',
+  'securite.estop.reinitialiser': 'Réinitialiser l\'arrêt d\'urgence',
+  'securite.arret': 'ARRÊT',
+  'securite.noir': 'Noir',
+  'securite.ciel': 'CIEL COUPÉ',
+  'securite.laser.off': 'LASER OFF',
+  'securite.laser.on': 'LASER ON',
+  'securite.laser.arme': 'LASER ARMÉ',
+  'securite.laser.moteur_inconnu': 'MOTEUR ?',
+  'securite.laser.arret_materiel': 'Arrêt matériel à vérifier',
+  'securite.laser.liste': 'Liste de contrôle à faire',
+  'securite.desarme': 'Désarmé',
+  'securite.desarme.raison': 'Désarmé — raison : {raison} ({source}), {heure}',
+  'securite.arme.depuis': 'Armé depuis {duree} ({source})',
+  'securite.maintien.actif': 'ÉMISSION — maintien actif',
+  'securite.maintien.demande': 'MAINTENIR « {touche} » POUR ÉMETTRE',
+  'securite.public': 'BALAYAGE PUBLIC',
+  'barre.presence.present': 'Opérateur présent',
+  'barre.presence.absent': 'Opérateur absent',
+  'barre.moteur': 'Moteur',
+  'barre.moteur.bloque': 'Moteur bloqué — laser coupé',
+  'barre.liaison_perdue': 'Connexion au moteur perdue',
+  'barre.sd_noir': 'SD : NOIR',
+  'barre.wifi': 'Wi-Fi',
+  'bandeau.midi_perdu': 'Contrôleur MIDI déconnecté',
+  'bandeau.dmx_perdu': 'Signal DMX perdu',
+  'fenetres.echap': 'Échap = arrêt d\'urgence',
+});
+if (typeof libelle !== 'function') {
+  window.libelle = (key, params) => {
+    const v = LABELS_FALLBACK[key];
+    if (typeof v !== 'string') return '⟦' + key + '⟧';
+    if (!params) return v;
+    return v.replace(/\{([a-z_]+)\}/g, (m, name) => (name in params ? String(params[name]) : m));
+  };
+  for (const el of document.querySelectorAll('[data-t]')) {
+    if (el.dataset.t in LABELS_FALLBACK) el.textContent = LABELS_FALLBACK[el.dataset.t];
+  }
+}
+if (typeof applyLabels === 'function') applyLabels();
 const $ = id => document.getElementById(id);
 let settings = null, calibration = null, armed = false, pps = 30000;
 // Generators whose Forme A is a rotation speed in turns per beat, and the
@@ -6030,13 +6084,13 @@ function showArmed() {
   document.body.classList.toggle('emitting', armed);
   const todo = !armed && checklistPending();
   $('armBtn').classList.toggle('todo', todo);
-  $('armBtn').textContent = armed ? 'LASER ON' : !todo ? 'LASER OFF' : hwStopPending() ? 'Arrêt matériel à vérifier' : 'Liste de contrôle à faire';
+  $('armBtn').textContent = libelle(armed ? 'securite.laser.on' : !todo ? 'securite.laser.off' : hwStopPending() ? 'securite.laser.arret_materiel' : 'securite.laser.liste');
   $('offBadge').classList.toggle('hidden', armed);
   if (!arm) return showVueArm();
   $('estopBanner').hidden = !arm.estop;
   const d = arm.last_disarm;
-  $('armInfo').textContent = arm.armed ? `Armé depuis ${since(arm.since)} (${arm.source_fr})`
-    : d ? `Désarmé — raison : ${d.reason_fr} (${d.source_fr}), ${clock(d.at)}` : 'Désarmé';
+  $('armInfo').textContent = arm.armed ? libelle('securite.arme.depuis', { duree: since(arm.since), source: arm.source_fr })
+    : d ? libelle('securite.desarme.raison', { raison: d.reason_fr, source: d.source_fr, heure: clock(d.at) }) : libelle('securite.desarme');
   showVueArm();
 }
 // ShowNET output (T-472): the hardware-stop reminder and the Wi-Fi pill,
@@ -6629,15 +6683,15 @@ function showPresence(f) {
   if (!p.hold_to_run) holdDown = false;
   const led = $('presenceLed');
   led.classList.toggle('ok', p.ui_alive);
-  led.textContent = p.ui_alive ? 'Opérateur présent' : 'Opérateur absent';
+  led.textContent = libelle(p.ui_alive ? 'barre.presence.present' : 'barre.presence.absent');
   const stalled = !f.engine_ok || (!f.armed && f.arm?.last_disarm?.reason === 'engine_stall');
   $('engineLed').classList.toggle('ok', !stalled);
   $('engineLed').classList.toggle('bad', stalled);
-  $('engineLed').textContent = stalled ? 'Moteur bloqué — laser coupé' : 'Moteur';
+  $('engineLed').textContent = libelle(stalled ? 'barre.moteur.bloque' : 'barre.moteur');
   const banner = $('holdBanner');
   banner.hidden = !p.hold_to_run;
   banner.classList.toggle('emitting', p.hold_ok);
-  banner.textContent = p.hold_ok ? 'ÉMISSION — maintien actif' : `MAINTENIR « ${keyName(p.hold_key)} » POUR ÉMETTRE`;
+  banner.textContent = p.hold_ok ? libelle('securite.maintien.actif') : libelle('securite.maintien.demande', { touche: keyName(p.hold_key) });
   if (!pickingHoldKey) $('holdKeyLabel').textContent = keyName(p.hold_key);
 }
 // RÉGLAGES › Général: keep the Mac awake during a show (T-412).
@@ -6829,7 +6883,7 @@ function showOutputKind(f) {
 let lastFrameAt = performance.now();
 setInterval(() => {
   $('linkLost').hidden = performance.now() - lastFrameAt <= 1000;
-  noticeCondition('engine', !$('linkLost').hidden, { level: 'warning', source: 'Studio', text: 'Connexion au moteur perdue', toast: false });
+  noticeCondition('engine', !$('linkLost').hidden, { level: 'warning', source: 'Studio', text: libelle('barre.liaison_perdue'), toast: false });
 }, 250);
 
 // ---------- pushed state and binary frames (T-411) ----------
@@ -7575,9 +7629,8 @@ function showShowMode(lock) {
   document.body.classList.toggle('show-mode', on);
   $('lockBtn').classList.toggle('on', on);
   $('lockBtn').setAttribute('aria-pressed', String(on));
-  $('lockLabel').textContent = on ? 'Verrouillé' : 'Mode spectacle';
-  $('lockBtn').title = on ? 'Mode spectacle actif : maintenir pour déverrouiller (1 s)'
-    : "Mode spectacle : verrouiller l'édition (cues, maîtres, tempo, noir et laser restent actifs)";
+  $('lockLabel').textContent = libelle(on ? 'spectacle.verrouille' : 'spectacle.libelle');
+  $('lockBtn').title = libelle(on ? 'spectacle.verrouille.info' : 'spectacle.info');
   // The cue list's steps: read-only in show mode (GO stays).
   if (!on && $('cqPanel') && !$('cqPanel').hidden) renderCueList();
   if (!on) return;
@@ -8190,9 +8243,11 @@ document.addEventListener('click', e => { if (!$('winMenu').hidden && !e.target.
 function showVueArm() {
   if (!VUE) return;
   const estop = !$('estopBanner').hidden, lost = !$('linkLost').hidden;
-  const [state, text] = estop ? ['estop', 'ARRÊT D\'URGENCE'] : armed ? ['armed', 'LASER ARMÉ'] : lost ? ['lost', 'LASER OFF · MOTEUR ?'] : ['off', 'LASER OFF'];
+  const unknown = libelle('securite.laser.moteur_inconnu');
+  const [state, text] = estop ? ['estop', libelle('securite.estop')] : armed ? ['armed', libelle('securite.laser.arme')]
+    : lost ? ['lost', libelle('securite.laser.off') + ' · ' + unknown] : ['off', libelle('securite.laser.off')];
   const el = $('vueArm');
-  const full = armed && lost ? text + ' · MOTEUR ?' : text;
+  const full = armed && lost ? text + ' · ' + unknown : text;
   if (el.dataset.state === state && el.textContent === full) return;
   el.dataset.state = state;
   el.textContent = full;
@@ -8207,7 +8262,7 @@ async function vueEnterFull() {
   try { await navigator.keyboard?.lock?.(['Escape']); } catch { /* not available */ }
   VUEFS.full = true; VUEFS.ownExit = false;
   $('vueFull').setAttribute('aria-pressed', 'true');
-  $('vueFull').textContent = 'Quitter le plein écran';
+  $('vueFull').textContent = libelle('fenetres.plein_ecran.quitter');
 }
 function vueExitFull() {
   VUEFS.ownExit = true;
@@ -8218,7 +8273,7 @@ function vueExitFull() {
 function vueFullOff() {
   VUEFS.full = false;
   $('vueFull').setAttribute('aria-pressed', 'false');
-  $('vueFull').textContent = 'Plein écran';
+  $('vueFull').textContent = libelle('fenetres.plein_ecran');
 }
 document.addEventListener('fullscreenchange', () => {
   if (document.fullscreenElement || !VUEFS.full) return;
@@ -16953,19 +17008,19 @@ function renderTriggers() {
   const cues = presets.map(p => [p.id, p.name]);
   $('trgList').innerHTML = triggers.map((t, i) => {
     const ev = trgKind(t.event), act = trgKind(t.action);
-    const evVal = ev === 'buildup_above' ? `<input type="number" data-t="evval" min="5" max="100" step="5" value="${Math.round(t.event.buildup_above * 100)}" title="Seuil de montée (%)">`
-      : ev === 'every_bars' ? `<input type="number" data-t="evval" min="1" max="64" step="1" value="${t.event.every_bars}" title="Nombre de mesures">` : '';
+    const evVal = ev === 'buildup_above' ? `<input type="number" data-trg="evval" min="5" max="100" step="5" value="${Math.round(t.event.buildup_above * 100)}" title="Seuil de montée (%)">`
+      : ev === 'every_bars' ? `<input type="number" data-trg="evval" min="1" max="64" step="1" value="${t.event.every_bars}" title="Nombre de mesures">` : '';
     const cue = act === 'launch_cue' ? t.action.launch_cue : act === 'flash_cue' ? t.action.flash_cue.id : null;
     const beats = act === 'flash_cue' ? t.action.flash_cue.beats : act === 'black_hold' ? t.action.black_hold.beats : null;
     const fired = trgFired[i]?.fired ?? 0;
     return `<div class="trg${t.enabled ? '' : ' off'}" data-i="${i}">
-      <div class="row"><span>Quand</span><select data-t="event" title="Évènement de la musique">${opts(TRG_EVENTS, ev)}</select>${evVal}
+      <div class="row"><span>Quand</span><select data-trg="event" title="Évènement de la musique">${opts(TRG_EVENTS, ev)}</select>${evVal}
         <b class="count" data-count="${i}" title="Actions faites / limitées">${fired}</b>
         <button class="del lock-edit" data-del="${i}" title="Supprimer cette règle">×</button></div>
-      <div class="row"><span>Alors</span><select data-t="action" title="Action">${opts(TRG_ACTIONS, act)}</select>${beats !== null ? `<input type="number" data-t="beats" min="0.25" max="${act === 'black_hold' ? 4 : 16}" step="0.25" value="${beats}" title="Durée en temps">` : ''}</div>
-      ${cue !== null ? `<div class="row"><span>Cue</span><select data-t="cue" title="Cue">${cue ? '' : '<option value="" selected>Choisir un cue…</option>'}${opts(cues, cue)}</select></div>` : ''}
-      <div class="row"><span>Intervalle</span><input type="number" data-t="interval" min="0.25" max="64" step="0.25" value="${t.min_interval_beats}" title="Intervalle min. : au plus une action par ce nombre de temps"><select data-t="quantize" title="Quand agir">${opts(TRG_QUANT, t.quantize)}</select></div>
-      <label class="check u-justify-start"><input type="checkbox" data-t="enabled"${t.enabled ? ' checked' : ''}> Active</label>
+      <div class="row"><span>Alors</span><select data-trg="action" title="Action">${opts(TRG_ACTIONS, act)}</select>${beats !== null ? `<input type="number" data-trg="beats" min="0.25" max="${act === 'black_hold' ? 4 : 16}" step="0.25" value="${beats}" title="Durée en temps">` : ''}</div>
+      ${cue !== null ? `<div class="row"><span>Cue</span><select data-trg="cue" title="Cue">${cue ? '' : '<option value="" selected>Choisir un cue…</option>'}${opts(cues, cue)}</select></div>` : ''}
+      <div class="row"><span>Intervalle</span><input type="number" data-trg="interval" min="0.25" max="64" step="0.25" value="${t.min_interval_beats}" title="Intervalle min. : au plus une action par ce nombre de temps"><select data-trg="quantize" title="Quand agir">${opts(TRG_QUANT, t.quantize)}</select></div>
+      <label class="check u-justify-start"><input type="checkbox" data-trg="enabled"${t.enabled ? ' checked' : ''}> Active</label>
     </div>`;
   }).join('');
   $('trgAdd').disabled = triggers.length >= trgMax;
@@ -16997,7 +17052,7 @@ $('trgList').addEventListener('click', e => {
 $('trgList').addEventListener('change', e => {
   const box = e.target.closest('.trg');
   if (!box) return;
-  const t = triggers[+box.dataset.i], f = e.target.dataset.t, v = e.target.value;
+  const t = triggers[+box.dataset.i], f = e.target.dataset.trg, v = e.target.value;
   if (f === 'event') t.event = trgEvent(v, null);
   else if (f === 'evval') t.event = typeof t.event === 'object' && 'buildup_above' in t.event ? { buildup_above: Math.max(5, Math.min(100, +v || 60)) / 100 } : { every_bars: Math.max(1, Math.min(64, Math.round(+v) || 4)) };
   else if (f === 'action') t.action = trgAction(v, trgCue(t.action), trgBeats(t.action));

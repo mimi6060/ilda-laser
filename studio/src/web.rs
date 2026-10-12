@@ -44,6 +44,8 @@ use tiny_http::{Header, Method, Request, Response, Server};
 const INDEX_HTML: &str = include_str!("index.html");
 /// The 3D beam view (preview only), an ES module the page loads on demand.
 const BEAM3D_JS: &str = include_str!("beam3d.js");
+/// The page's text table (T-461), loaded before its main script.
+const LABELS_JS: &str = include_str!("labels.js");
 
 /// Files the UI loads besides the page itself: (body, content type).
 /// Everything is compiled in, so the studio works offline.
@@ -51,6 +53,7 @@ fn static_asset(path: &str) -> Option<(&'static str, &'static str)> {
     match path {
         "/" => Some((INDEX_HTML, "text/html; charset=utf-8")),
         "/beam3d.js" => Some((BEAM3D_JS, "text/javascript; charset=utf-8")),
+        "/labels.js" => Some((LABELS_JS, "text/javascript; charset=utf-8")),
         _ => None,
     }
 }
@@ -82,6 +85,7 @@ pub enum RouteClass {
 pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/", RouteClass::Read),
     ("GET", "/beam3d.js", RouteClass::Read),
+    ("GET", "/labels.js", RouteClass::Read),
     ("POST", "/api/estop", RouteClass::Safety),
     ("GET", "/api/events", RouteClass::Read),
     ("GET", "/api/frame.bin", RouteClass::Read),
@@ -7748,7 +7752,7 @@ mod tests {
             assert!(ROUTES.iter().any(|&(m, p, _)| m == method && p == path), "{method} {path} missing from web::ROUTES");
         }
         for &(m, p, _) in ROUTES {
-            let fast = ["/", "/beam3d.js", "/api/estop", "/api/events", "/api/frame.bin"].contains(&p);
+            let fast = ["/", "/beam3d.js", "/labels.js", "/api/estop", "/api/events", "/api/frame.bin"].contains(&p);
             assert!(fast || found.iter().any(|(fm, fp)| fm == m && fp == p), "{m} {p} in ROUTES but not served");
         }
         for (m, p) in [("POST", "/api/arm"), ("POST", "/api/estop/reset"), ("POST", "/api/heartbeat")] {
@@ -7940,13 +7944,21 @@ mod tests {
             let open = &part[..part.find('>').expect("button tag")];
             let body = &part[open.len() + 1..part.find("</button>").expect("closed button")];
             let text = markup_text(body);
-            let readable = text.split(|c: char| !c.is_alphanumeric()).any(|w| w.chars().count() >= 2);
+            // A data-t text (T-461) comes from labels.js, never empty (tests/ui_labels.rs).
+            let readable = text.split(|c: char| !c.is_alphanumeric()).any(|w| w.chars().count() >= 2) || part[..part.find("</button>").unwrap()].contains("data-t=\"");
             assert!(readable || open.contains("aria-label"), "<button{open}> {:?} needs an aria-label", text.trim());
             n += 1;
         }
         assert!(n > 300, "{n} buttons found");
-        for (sel, label) in [("tempo.half\"", "Tempo divisé par deux"), ("tempo.double\"", "Tempo doublé"), ("tempo.nudge_up\"", "Avancer la phase"), ("tempo.nudge_down\"", "Retarder la phase")] {
-            assert!(page.contains(&format!("data-ctl=\"{sel} aria-label=\"{label}\"")), "{label}");
+        // Through the text table (T-461): the attribute names the key, labels.js holds the text.
+        for (sel, key, label) in [
+            ("tempo.half\"", "tempo.moitie.libelle", "Tempo divisé par deux"),
+            ("tempo.double\"", "tempo.double.libelle", "Tempo doublé"),
+            ("tempo.nudge_up\"", "tempo.avancer.libelle", "Avancer la phase"),
+            ("tempo.nudge_down\"", "tempo.retarder.libelle", "Retarder la phase"),
+        ] {
+            assert!(page.contains(&format!("data-ctl=\"{sel} data-t-aria-label=\"{key}\"")), "{label}");
+            assert!(LABELS_JS.contains(&format!("'{key}': '{label}',")), "{label}");
         }
     }
 
@@ -9288,6 +9300,12 @@ mod tests {
         assert!(module_type.starts_with("text/javascript"));
         assert!(module.contains("export class BeamView"));
         assert!(static_asset("/vendor/nothing.js").is_none());
+
+        // T-461: the text table, served by the studio itself, before the main script.
+        let (labels, labels_type) = static_asset("/labels.js").unwrap();
+        assert!(labels_type.starts_with("text/javascript"));
+        assert!(labels.contains("const LABELS = Object.freeze(") && labels.contains("function applyLabels("));
+        assert!(page.contains("<script src=\"/labels.js\"></script>"));
     }
 
     /// T-434: the page is styled by classes (common components and

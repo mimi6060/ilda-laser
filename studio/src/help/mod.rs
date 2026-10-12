@@ -85,6 +85,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     const INDEX_HTML: &str = include_str!("../index.html");
+    /// The page's text table (T-461): labels of the top bar live there.
+    const LABELS_JS: &str = include_str!("../labels.js");
 
     /// Every value of `attr="…"` in `html`.
     fn attr_values(html: &str, attr: &str) -> Vec<String> {
@@ -158,9 +160,10 @@ mod tests {
     #[test]
     fn controls_named_in_pages_exist_in_the_interface() {
         let items: Vec<String> = crate::checklist::shownet_items().into_iter().map(|i| i.text_fr).collect();
+        let labels = LABELS_JS.replace("\\'", "'");
         for p in PAGES {
             for label in quoted(p.body_html) {
-                assert!(INDEX_HTML.contains(&label) || items.contains(&label), "{}: « {label} » is not in the interface", p.slug);
+                assert!(INDEX_HTML.contains(&label) || labels.contains(&label) || items.contains(&label), "{}: « {label} » is not in the interface", p.slug);
             }
         }
     }
