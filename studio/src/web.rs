@@ -197,6 +197,13 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/zone-chase", RouteClass::Read),
     ("POST", "/api/projection", RouteClass::Safety),
     ("POST", "/api/projection/align", RouteClass::Safety),
+    // Zone alignment from a phone (T-460): main screen only. Opening and
+    // applying are safety edits (show mode, safety lock); rejecting and
+    // closing only go back to the saved zone (never locked).
+    ("POST", "/api/zones/align/open", RouteClass::Safety),
+    ("POST", "/api/zones/align/apply", RouteClass::Safety),
+    ("POST", "/api/zones/align/reject", RouteClass::Safety),
+    ("POST", "/api/zones/align/close", RouteClass::Safety),
     ("POST", "/api/scenes/save", RouteClass::Edit),
     ("POST", "/api/scenes/delete", RouteClass::Edit),
     ("POST", "/api/scenes/play", RouteClass::Play),
@@ -2072,6 +2079,39 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             }
             Err(e) => e,
         },
+        // Zone alignment from a phone (T-460): the session is opened, and
+        // the draft applied, from this server only (127.0.0.1); the
+        // remote's own server only moves the draft.
+        (Method::Post, "/api/zones/align/open") => {
+            let local = request.remote_addr().is_some_and(|a| a.ip().is_loopback());
+            let req = match body::<AlignOpen>(request) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            if !local {
+                return text(403, "l'alignement ne s'ouvre que depuis l'interface de ce Mac");
+            }
+            let mut s = shared.lock().unwrap();
+            match crate::remote::align_open(&mut s, req.zone, &req.remote, Instant::now()) {
+                Ok(()) => json_response(json!({ "align": crate::remote::align_view(&s) })),
+                Err((code, t)) => text(code, &t),
+            }
+        }
+        (Method::Post, "/api/zones/align/apply") => {
+            if !request.remote_addr().is_some_and(|a| a.ip().is_loopback()) {
+                return text(403, "« Appliquer » ne vaut que depuis l'interface de ce Mac");
+            }
+            let mut s = shared.lock().unwrap();
+            match crate::remote::align_apply(&mut s) {
+                Ok(()) => json_response(json!({ "align": null, "projection": projection_view(&s) })),
+                Err((code, t)) => text(code, &t),
+            }
+        }
+        (Method::Post, "/api/zones/align/reject") | (Method::Post, "/api/zones/align/close") => {
+            let mut s = shared.lock().unwrap();
+            crate::remote::align_end(&mut s, if path.ends_with("reject") { "rejected" } else { "closed" });
+            json_response(json!({ "align": null }))
+        }
         (Method::Post, "/api/scenes/save") => match body::<SaveScene>(request) {
             Ok(req) if !req.name.trim().is_empty() => {
                 let mut s = shared.lock().unwrap();
@@ -4371,6 +4411,15 @@ struct AlignRequest {
     zone: Option<u8>,
 }
 
+/// `POST /api/zones/align/open` (T-460): a projection zone and a paired
+/// remote's name.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlignOpen {
+    zone: u8,
+    remote: String,
+}
+
 /// `GET /api/groups`: each zone group with its master and control id.
 fn groups_view(s: &Shared) -> serde_json::Value {
     let groups: Vec<_> = s
@@ -5787,6 +5836,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     v["storage"] = json!(s.project.backup.status());
     // T-447: the zone trace, its seconds left and its zone.
     v["zone_trace"] = crate::zonetrace::view(s, Instant::now());
+    // T-460: the zone alignment proposed from a phone, or null.
+    v["align"] = crate::remote::align_view(s);
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
     // T-262: the outdoor mode and « Ciel coupé ».
@@ -6022,6 +6073,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["history"] = s.history.summary();
     // T-447: the zone trace, its seconds left and its zone.
     v["zone_trace"] = crate::zonetrace::view(s, Instant::now());
+    // T-460: the zone alignment proposed from a phone, or null.
+    v["align"] = crate::remote::align_view(s);
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
     // T-262: the outdoor mode and « Ciel coupé ».
@@ -10281,6 +10334,69 @@ mod tests {
         assert_eq!(t.request("POST", "/api/projection", &faster.to_string()).0, 423);
         assert_eq!(t.request("POST", "/api/control", r#"{"id":"chaser.1.enabled","value":0}"#).0, 200);
         assert_eq!(t.shared.lock().unwrap().projection.chaser_enabled(1), Some(false));
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+    }
+
+    /// T-460: a phone's alignment is opened and applied from the main
+    /// screen only; both are refused in show mode and under the safety
+    /// lock, rejecting never is; applying makes one undo entry.
+    #[test]
+    fn phone_alignment_is_confirmed_on_the_main_screen_only() {
+        let t = TestServer::start(false);
+        let cookie = {
+            let mut s = t.shared.lock().unwrap();
+            s.remote.state = crate::remote::RemoteState { enabled: true, code: "123456".into(), ..Default::default() };
+            let r = crate::remote::handle(&mut s, "POST", "/pair", None, "10.0.0.9", r#"{"code":"123456","name":"Téléphone"}"#.as_bytes(), Instant::now());
+            r.set_cookie.unwrap().split(';').next().unwrap().to_string()
+        };
+        let nudge = |n: usize| {
+            let mut s = t.shared.lock().unwrap();
+            for _ in 0..n {
+                let r = crate::remote::handle(&mut s, "POST", "/api/remote/align/nudge", Some(&cookie), "10.0.0.9", br#"{"corner":2,"dx":-1,"dy":-1}"#, Instant::now());
+                assert_eq!(r.status, 200, "{}", r.body);
+            }
+        };
+        let saved = t.shared.lock().unwrap().projection.get().clone();
+        assert_eq!(t.request("POST", "/api/zones/align/apply", "{}").0, 409, "no session");
+        assert_eq!(t.request("POST", "/api/zones/align/open", r#"{"zone":1,"remote":"Téléphone","x":1}"#).0, 400);
+        assert_eq!(t.request("POST", "/api/zones/align/open", r#"{"zone":7,"remote":"Téléphone"}"#).0, 404);
+        let (code, body) = t.request("POST", "/api/zones/align/open", r#"{"zone":1,"remote":"Téléphone"}"#);
+        assert_eq!(code, 200, "{body}");
+        nudge(3);
+        let st = js(&t.request("GET", "/api/state", "").1);
+        assert_eq!(st["align"]["remote"], "Téléphone");
+        assert_eq!(st["align"]["changed"], true);
+        assert_eq!(t.shared.lock().unwrap().projection.get(), &saved);
+        // Rejected: nothing written, the session gone.
+        assert_eq!(t.request("POST", "/api/zones/align/reject", "").0, 200);
+        assert!(js(&t.request("GET", "/api/state", "").1)["align"].is_null());
+        assert_eq!(t.shared.lock().unwrap().projection.get(), &saved);
+        // Show mode: no opening, no applying; closing always.
+        assert_eq!(t.request("POST", "/api/zones/align/open", r#"{"zone":1,"remote":"Téléphone"}"#).0, 200);
+        nudge(2);
+        t.shared.lock().unwrap().show_mode.on = true;
+        assert_eq!(t.request("POST", "/api/zones/align/apply", "").0, 423);
+        assert_eq!(t.request("POST", "/api/zones/align/open", r#"{"zone":1,"remote":"Téléphone"}"#).0, 423);
+        assert_eq!(t.request("POST", "/api/zones/align/close", "").0, 200);
+        t.shared.lock().unwrap().show_mode.on = false;
+        // The safety lock: same.
+        assert_eq!(t.request("POST", "/api/zones/align/open", r#"{"zone":1,"remote":"Téléphone"}"#).0, 200);
+        nudge(2);
+        t.shared.lock().unwrap().safety_lock.set_code(crate::safetylock::new_file("5555", 10).unwrap(), Instant::now()).unwrap();
+        assert_eq!(t.request("POST", "/api/zones/align/apply", "").0, 423);
+        assert_eq!(t.request("POST", "/api/zones/align/open", r#"{"zone":1,"remote":"Téléphone"}"#).0, 423);
+        assert_eq!(t.shared.lock().unwrap().projection.get(), &saved);
+        assert_eq!(t.request("POST", "/api/zones/align/reject", "").0, 200);
+        // No code any more (as after a reset on the Mac itself).
+        t.shared.lock().unwrap().safety_lock = crate::safetylock::SafetyLock::in_memory();
+        // Applied from the main screen: written, one undo entry.
+        assert_eq!(t.request("POST", "/api/zones/align/open", r#"{"zone":1,"remote":"Téléphone"}"#).0, 200);
+        nudge(3);
+        let (code, body) = t.request("POST", "/api/zones/align/apply", "");
+        assert_eq!(code, 200, "{body}");
+        let z = t.shared.lock().unwrap().projection.get().zone(1).unwrap().clone();
+        assert!(z.geometry.warp.enabled && (z.geometry.warp.corners[2][0] - (1.0 - 3.0 * crate::remote::NUDGE_STEP)).abs() < 1e-5);
+        assert_eq!(js(&t.request("GET", "/api/history", "").1)["undo"][0]["label"], "Zones de projection modifiées");
         assert!(!t.shared.lock().unwrap().gate.is_armed());
     }
 

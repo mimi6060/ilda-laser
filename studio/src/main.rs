@@ -958,6 +958,8 @@ impl Shared {
         self.showlist.halt();
         // The zone trace ends at once (T-447); starting it again takes a click.
         zonetrace::stop(self, "estop");
+        // A phone's alignment draft (T-460) is dropped: the saved zone.
+        remote::align_end(self, "estop");
         // Fades end and waiting cues are dropped at once (T-158 / T-159).
         self.deck.cut_transitions();
         // A live take ends here, keeping what it captured (T-169).
@@ -2139,6 +2141,9 @@ impl Engine {
             // The zone trace (T-447) ends on its time, an e-stop, a disarm
             // or its page gone, before this frame's output is chosen.
             zonetrace::sync(&mut s, now);
+            // A phone's alignment draft (T-460) ends with the e-stop, its
+            // remote lost or quiet, show mode, or the zone edited.
+            remote::align_sync(&mut s, now);
             s.health.tick(s.gate.is_armed());
             if s.test_stall_ms > 0 {
                 // `--test-hooks` only: a stall while holding the lock.
@@ -2941,7 +2946,8 @@ impl Routing {
             show_spreads,
             config: s.projection.get().clone(),
             output: s.output_mgr.prefs().selected,
-            align: s.projection.align_geometry(),
+            // A phone's alignment draft (T-460) wins over « Aligner ».
+            align: remote::align_geometry(s).or_else(|| s.projection.align_geometry()),
             remotes: s.netin.fixtures.remotes.clone(),
         }
     }

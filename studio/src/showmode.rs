@@ -71,6 +71,10 @@ pub fn allowed(path: &str) -> bool {
         // allowed; the handler refuses opening it in show mode.
         "/api/remote",
         "/api/remote/kick",
+        // Dropping a phone's alignment draft (T-460) is always allowed;
+        // opening and applying one are edits.
+        "/api/zones/align/reject",
+        "/api/zones/align/close",
         // The external inputs gate (T-408) is a live switch, like arming,
         // and so is TC-IN (T-168); the timecode settings are an edit.
         "/api/external/gate",

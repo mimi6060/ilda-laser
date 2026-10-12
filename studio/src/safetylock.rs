@@ -65,6 +65,9 @@ pub const ALWAYS: &[&str] = &[
     "/api/devices/scan",
     "/api/outputs/scan",
     "/api/remote/kick",
+    // Dropping a phone's alignment draft (T-460): back to the saved zone.
+    "/api/zones/align/reject",
+    "/api/zones/align/close",
     // TC-IN follows the timecode like arming follows the button.
     "/api/timecode/arm",
     // Ticking the pre-show checklist is operating, not editing it.

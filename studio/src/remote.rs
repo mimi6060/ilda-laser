@@ -30,12 +30,37 @@
 //! - No heartbeat here: a tablet never counts as an operator in front of
 //!   the main screen (presence.rs).
 //!
+//! Zone alignment from a phone (T-460): a paired remote may *propose* a
+//! projection zone's 4 corners, never write them.
+//! - A session is opened from the main screen only
+//!   (`POST /api/zones/align/open`, refused in show mode and under the
+//!   safety lock), for one zone and one paired remote. Without it every
+//!   nudge is refused.
+//! - The remote's three routes (`GET /api/remote/align`,
+//!   `POST /api/remote/align/nudge`, `POST /api/remote/align/reset`) move
+//!   a draft held here in memory. Steps of `NUDGE_STEP` (×5 at most);
+//!   each corner stays in -1..1 and within `MAX_DRAFT_OFFSET` of the
+//!   saved one, the quad convex and not flat, else the step is refused.
+//! - While open, the output shows a test pattern through the zone's
+//!   geometry with the draft corners (`align_geometry`), followed by the
+//!   calibration and the whole safety stage, as any test pattern.
+//! - Only « Appliquer » on the main screen (`POST /api/zones/align/apply`,
+//!   loopback only, refused in show mode and under the safety lock)
+//!   writes the zone, and it is logged. « Rejeter », closing, the remote
+//!   lost (kicked, access off, quiet for `ALIGN_TIMEOUT`), the zone edited
+//!   or deleted, show mode and the e-stop drop the draft: the next frame
+//!   is back on the saved zone.
+//! - Safety zones, the horizon, the caps, the calibration and arming are
+//!   never reachable from the remote (`WHITELIST`).
+//!
 //! Plain HTTP on the local network, no TLS: acceptable only because the
 //! remote can neither arm nor change anything; never expose this port to
 //! the Internet.
 
 use crate::controls::{ControlInput, ControlKind};
 use crate::external::{self, Refusal, SourceKind};
+use crate::projection::{check_quad, Geometry, Warp, SQUARE};
+use crate::web::RouteClass;
 use crate::Shared;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -77,6 +102,22 @@ const REMOTE_HTML: &str = include_str!("remote.html");
 /// the source's scope, T-408). Entries ending in `.` are prefixes; for
 /// the layers, only `layer.<n>.dimmer`.
 pub const SCOPE: &[&str] = &["grid.", "page.", "cue.stop_all", "master.", "layer.", "tempo.tap", "tempo.bpm", "tempo.resync", "transport.blackout", "safety.estop"];
+
+/// Every route the remote's server answers (`handle`), with its class.
+/// None writes anything but the memory-only alignment draft (`Play`):
+/// no zone, safety setting, calibration, output or arming is reachable.
+pub const WHITELIST: &[(&str, &str, RouteClass)] = &[
+    ("GET", "/", RouteClass::Read),
+    ("POST", "/pair", RouteClass::Play),
+    ("GET", "/api/remote/state", RouteClass::Read),
+    ("POST", "/api/remote/control", RouteClass::Play),
+    ("GET", ALIGN_PATH, RouteClass::Read),
+    ("POST", NUDGE_PATH, RouteClass::Play),
+    ("POST", RESET_PATH, RouteClass::Play),
+];
+const ALIGN_PATH: &str = "/api/remote/align";
+const NUDGE_PATH: &str = "/api/remote/align/nudge";
+const RESET_PATH: &str = "/api/remote/align/reset";
 
 pub fn in_scope(id: &str) -> bool {
     if id.len() > MAX_ID {
@@ -155,17 +196,19 @@ pub struct Remote {
     /// (`--remote-bind`; the tests and e2e runs use 127.0.0.1).
     bind: IpAddr,
     server: Option<ServerHandle>,
+    /// The zone alignment session (T-460), memory only.
+    pub align: Option<AlignSession>,
 }
 
 impl Remote {
     pub fn load(path: PathBuf, bind: IpAddr) -> Self {
         let settings: RemoteSettings = crate::load_json(&path);
-        Remote { settings, state: RemoteState::default(), path: Some(path), bind, server: None }
+        Remote { settings, state: RemoteState::default(), path: Some(path), bind, server: None, align: None }
     }
 
     /// For the tests: loopback only, nothing saved.
     pub fn in_memory() -> Self {
-        Remote { settings: RemoteSettings::default(), state: RemoteState::default(), path: None, bind: IpAddr::V4(Ipv4Addr::LOCALHOST), server: None }
+        Remote { settings: RemoteSettings::default(), state: RemoteState::default(), path: None, bind: IpAddr::V4(Ipv4Addr::LOCALHOST), server: None, align: None }
     }
 
     /// The port the remote really listens on, if it does.
@@ -292,6 +335,7 @@ fn start(s: &mut Shared, shared: Arc<Mutex<Shared>>) -> Result<(), String> {
 /// Off: every session revoked (and its pads released), the code dropped.
 /// The caller stops the listener out of the lock.
 fn disable(s: &mut Shared, reason: &str) {
+    align_end(s, "remote_off");
     kick(s, None);
     s.remote.state = RemoteState::default();
     log::info!("Télécommande désactivée");
@@ -304,6 +348,9 @@ pub fn kick(s: &mut Shared, name: Option<&str>) -> usize {
     let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut s.remote.state.sessions).into_iter().partition(|sess| name.is_none_or(|n| n == sess.name));
     s.remote.state.sessions = kept;
     let now = Instant::now();
+    if s.remote.align.as_ref().is_some_and(|a| gone.iter().any(|g| g.name == a.remote)) {
+        align_end(s, "remote_lost");
+    }
     for sess in &gone {
         for id in &sess.held {
             external::release(s, SourceKind::Remote, id);
@@ -478,12 +525,17 @@ pub fn handle(s: &mut Shared, method: &str, path: &str, cookie: Option<&str>, pe
     if !s.remote.state.enabled {
         return Reply::text(503, "télécommande désactivée sur l'écran principal");
     }
+    // Whitelist, never a blacklist: any route of the main UI is refused,
+    // a route added there tomorrow included.
+    if !WHITELIST.iter().any(|&(m, p, _)| m == method && p == path) {
+        return if crate::web::is_known_route(method, path) { Reply::text(403, "interdit depuis la télécommande") } else { Reply::text(404, "introuvable") };
+    }
     let session = cookie.and_then(token_from_cookie).and_then(|t| find_session(&s.remote.state.sessions, t));
     match (method, path) {
         // The page holds no data: unpaired, it only shows the pairing form.
         ("GET", "/") => Reply { status: 200, body: REMOTE_HTML.to_string(), content_type: "text/html; charset=utf-8", set_cookie: None },
         ("POST", "/pair") => pair(s, body, peer, now),
-        ("GET", "/api/remote/state") | ("POST", "/api/remote/control") => {
+        ("GET", "/api/remote/state") | ("POST", "/api/remote/control") | ("GET", ALIGN_PATH) | ("POST", NUDGE_PATH) | ("POST", RESET_PATH) => {
             let Some(i) = session else {
                 return Reply::text(401, "non appairé");
             };
@@ -492,15 +544,18 @@ pub fn handle(s: &mut Shared, method: &str, path: &str, cookie: Option<&str>, pe
             sess.seen = Some(now);
             sess.last_seen_s = t;
             sess.addr = peer.to_string();
-            if method == "GET" {
-                Reply::json(200, state_view(s, i))
-            } else {
-                control(s, i, body, now)
+            match (method, path) {
+                ("GET", "/api/remote/state") => Reply::json(200, state_view(s, i)),
+                ("POST", "/api/remote/control") => control(s, i, body, now),
+                ("GET", _) => {
+                    align_sync(s, now);
+                    Reply::json(200, align_remote_view(s, i))
+                }
+                (_, NUDGE_PATH) => nudge(s, i, body, now),
+                _ => reset_draft(s, i, now),
             }
         }
-        // Whitelist, never a blacklist: any route of the main UI is
-        // refused, a route added there tomorrow included.
-        _ if crate::web::is_known_route(method, path) => Reply::text(403, "interdit depuis la télécommande"),
+        // A `WHITELIST` line without its arm here.
         _ => Reply::text(404, "introuvable"),
     }
 }
@@ -671,7 +726,289 @@ fn state_view(s: &Shared, i: usize) -> Value {
         "masters": masters,
         "bpm": bpm,
         "active": active,
+        // An alignment session open for this remote (T-460).
+        "align": s.remote.align.as_ref().is_some_and(|a| a.remote == s.remote.state.sessions[i].name),
     })
+}
+
+// ---------------------------------------------------------------------
+// Zone alignment from a phone (T-460).
+
+/// One step, in output units.
+pub const NUDGE_STEP: f32 = 0.002;
+/// How far a draft corner may go from the saved one (beyond: the main
+/// screen).
+pub const MAX_DRAFT_OFFSET: f32 = 0.2;
+/// The session ends after this long without a request from its remote
+/// (the page polls twice a second).
+pub const ALIGN_TIMEOUT: Duration = Duration::from_secs(10);
+/// « Pas ×5 »: the largest step multiple a nudge may carry.
+pub const MAX_NUDGE: u8 = 5;
+/// Rounding slack on the bounds.
+const ALIGN_EPS: f32 = 1e-4;
+/// The corners in warp order (`projection::SQUARE`), as the phone names
+/// them.
+pub const CORNERS_FR: [&str; 4] = ["Bas gauche", "Bas droit", "Haut droit", "Haut gauche"];
+/// What a remote reads while no session is open for it.
+pub const ASK_FR: &str = "Demandez l'ouverture de l'alignement sur l'écran principal";
+
+/// A zone alignment session opened from the main screen (T-460). Never
+/// saved.
+#[derive(Clone, Debug)]
+pub struct AlignSession {
+    pub zone: u8,
+    /// The remote's name (unique among the paired remotes).
+    pub remote: String,
+    /// The proposed corners, in warp order.
+    pub draft: [[f32; 2]; 4],
+    /// The saved zone's effective corners when the session opened.
+    pub base: [[f32; 2]; 4],
+    pub opened_at: Instant,
+    pub opened_s: f64,
+    pub nudges: u32,
+    /// The zone's whole geometry when the session opened: an edit of the
+    /// zone on the main screen ends the session.
+    geometry: Geometry,
+    /// The session showed the Grid pattern itself (none was on): it
+    /// leaves it at the end.
+    own_pattern: bool,
+}
+
+/// The corners a geometry's warp really draws: its own when on, else the
+/// field's.
+pub fn effective_corners(g: &Geometry) -> [[f32; 2]; 4] {
+    if g.warp.enabled {
+        g.warp.corners
+    } else {
+        SQUARE
+    }
+}
+
+/// One nudge of `corner` by (dx, dy) steps, or why it is refused
+/// (French): out of -1..1, farther than `MAX_DRAFT_OFFSET` from `base`, or
+/// a quad that isn't convex.
+pub fn step_draft(draft: &[[f32; 2]; 4], base: &[[f32; 2]; 4], corner: usize, dx: i8, dy: i8) -> Result<[[f32; 2]; 4], String> {
+    if corner > 3 || dx.unsigned_abs() > MAX_NUDGE || dy.unsigned_abs() > MAX_NUDGE {
+        return Err("pas invalide".into());
+    }
+    let p = [draft[corner][0] + NUDGE_STEP * dx as f32, draft[corner][1] + NUDGE_STEP * dy as f32];
+    if !p.iter().all(|v| v.is_finite() && v.abs() <= 1.0 + ALIGN_EPS) {
+        return Err("le coin sortirait du champ (-1..1)".into());
+    }
+    let p = p.map(|v| v.clamp(-1.0, 1.0));
+    let off = (p[0] - base[corner][0]).hypot(p[1] - base[corner][1]);
+    if off > MAX_DRAFT_OFFSET + ALIGN_EPS {
+        return Err("0,2 au plus depuis la zone enregistrée : continuez sur l'écran principal".into());
+    }
+    let mut d = *draft;
+    d[corner] = p;
+    check_quad(&d).map_err(|e| e.to_string())?;
+    Ok(d)
+}
+
+/// `POST /api/zones/align/open` (main screen only): a session for `zone`
+/// and the paired remote `remote`. Replaces a session already open. The
+/// Grid pattern is shown if no pattern is. Never arms. Returns the HTTP
+/// status and the message to show when refused.
+pub fn align_open(s: &mut Shared, zone: u8, remote: &str, now: Instant) -> Result<(), (u16, String)> {
+    if !s.remote.state.enabled {
+        return Err((409, "Autorisez d'abord la télécommande (RÉGLAGES › Télécommande)".into()));
+    }
+    if !s.remote.state.sessions.iter().any(|x| x.name == remote) {
+        return Err((404, format!("télécommande inconnue : {remote}")));
+    }
+    if s.estop.is_latched() {
+        return Err((409, "Arrêt d'urgence en cours : réinitialisez-le d'abord".into()));
+    }
+    let Some(z) = s.projection.get().zone(zone) else {
+        return Err((404, "zone inconnue".into()));
+    };
+    let (geometry, name) = (z.geometry, z.name.clone());
+    let base = effective_corners(&geometry);
+    align_end(s, "replaced");
+    let own_pattern = s.test_pattern.active.is_none();
+    if own_pattern {
+        crate::testpattern::select(s, Some(crate::testpattern::TestPattern::Grid));
+    }
+    let opened_s = s.now_s();
+    s.remote.align = Some(AlignSession { zone, remote: remote.to_string(), draft: base, base, opened_at: now, opened_s, nudges: 0, geometry, own_pattern });
+    log::info!("Alignement de la zone {zone} ({name}) ouvert pour la télécommande {remote}");
+    s.gate.log().record("remote_align", Some(crate::interlock::ArmSource::Ui.id()), json!({ "event": "open", "zone": zone, "name": name, "remote": remote }));
+    Ok(())
+}
+
+/// Ends the session, if any: the draft is dropped, the output goes back
+/// to the saved zone (and leaves the pattern the session showed).
+/// Returns whether one was open.
+pub fn align_end(s: &mut Shared, reason: &str) -> bool {
+    let Some(a) = s.remote.align.take() else { return false };
+    if a.own_pattern && s.test_pattern.active == Some(crate::testpattern::TestPattern::Grid) {
+        crate::testpattern::select(s, None);
+    }
+    log::info!("Alignement de la zone {} terminé ({reason})", a.zone);
+    s.gate.log().record("remote_align", Some(crate::interlock::ArmSource::Ui.id()), json!({ "event": "end", "reason": reason, "zone": a.zone, "remote": a.remote, "nudges": a.nudges }));
+    true
+}
+
+/// `POST /api/zones/align/apply` (main screen, loopback only): writes the
+/// draft as the zone's 4-corner warp, logs it, ends the session.
+pub fn align_apply(s: &mut Shared) -> Result<(), (u16, String)> {
+    let Some(a) = s.remote.align.clone() else {
+        return Err((409, "aucun alignement en cours".into()));
+    };
+    let mut cfg = s.projection.get().clone();
+    let Some(z) = cfg.zones.iter_mut().find(|z| z.id == a.zone) else {
+        align_end(s, "zone_gone");
+        return Err((404, "zone inconnue".into()));
+    };
+    if z.geometry != a.geometry {
+        return Err((409, "la zone a changé entre-temps : rejetez et recommencez".into()));
+    }
+    if a.draft != a.base {
+        z.geometry.warp = Warp { enabled: true, corners: a.draft };
+        s.projection.set(cfg).map_err(|e| (400, e.to_string()))?;
+    }
+    log::warn!("Zone {} alignée depuis la télécommande {} : {:?} → {:?}", a.zone, a.remote, a.base, a.draft);
+    s.gate.log().record("remote_align", Some(crate::interlock::ArmSource::Ui.id()), json!({ "event": "applied", "zone": a.zone, "remote": a.remote, "before": a.base, "after": a.draft }));
+    align_end(s, "applied");
+    Ok(())
+}
+
+/// Ends the session when its conditions go: the e-stop, the remote
+/// access off, show mode, the remote gone or quiet for `ALIGN_TIMEOUT`,
+/// the zone deleted or edited. The engine calls it every frame.
+pub fn align_sync(s: &mut Shared, now: Instant) {
+    let Some(a) = &s.remote.align else { return };
+    let zone = s.projection.get().zone(a.zone);
+    let reason = if s.estop.is_latched() {
+        "estop"
+    } else if !s.remote.state.enabled {
+        "remote_off"
+    } else if s.show_mode.on {
+        "show_mode"
+    } else if zone.is_none() {
+        "zone_gone"
+    } else if zone.is_some_and(|z| z.geometry != a.geometry) {
+        "zone_changed"
+    } else {
+        match s.remote.state.sessions.iter().find(|x| x.name == a.remote) {
+            None => "remote_lost",
+            Some(x) if x.seen.is_none_or(|t| now.saturating_duration_since(t) > ALIGN_TIMEOUT) => "heartbeat",
+            Some(_) => return,
+        }
+    };
+    align_end(s, reason);
+}
+
+/// The geometry the test pattern goes through while a session is open:
+/// the zone's, with the draft as its 4-corner warp.
+pub fn align_geometry(s: &Shared) -> Option<Geometry> {
+    let a = s.remote.align.as_ref()?;
+    let mut g = s.projection.get().zone(a.zone)?.geometry;
+    g.warp = Warp { enabled: true, corners: a.draft };
+    Some(g)
+}
+
+/// `/api/state.align` (main screen): the session, or null.
+pub fn align_view(s: &Shared) -> Value {
+    let Some(a) = &s.remote.align else { return Value::Null };
+    let name = s.projection.get().zone(a.zone).map(|z| z.name.clone()).unwrap_or_default();
+    json!({
+        "zone": a.zone,
+        "zone_name": name,
+        "remote": a.remote,
+        "draft": a.draft,
+        "base": a.base,
+        "changed": a.draft != a.base,
+        "nudges": a.nudges,
+        "opened_s": a.opened_s,
+        "corners": CORNERS_FR,
+    })
+}
+
+/// `GET /api/remote/align`: this remote's session, read only.
+fn align_remote_view(s: &Shared, i: usize) -> Value {
+    let me = &s.remote.state.sessions[i].name;
+    let mine = s.remote.align.as_ref().filter(|a| a.remote == *me);
+    let zone = mine.and_then(|a| s.projection.get().zone(a.zone)).map(|z| json!({ "id": z.id, "name": z.name }));
+    json!({
+        "open": mine.is_some(),
+        "other": s.remote.align.is_some() && mine.is_none(),
+        "message": if mine.is_some() { "En attente de confirmation sur l'écran principal" } else { ASK_FR },
+        "estop": s.estop.is_latched(),
+        "zone": zone,
+        "draft": mine.map(|a| a.draft),
+        "base": mine.map(|a| a.base),
+        "changed": mine.is_some_and(|a| a.draft != a.base),
+        "corners": CORNERS_FR,
+        "step": NUDGE_STEP,
+        "max_nudge": MAX_NUDGE,
+        "max_offset": MAX_DRAFT_OFFSET,
+    })
+}
+
+/// The session open for remote `i`, or the refusal to send it.
+fn my_session(s: &mut Shared, i: usize, now: Instant) -> Result<(), Reply> {
+    align_sync(s, now);
+    let me = &s.remote.state.sessions[i].name;
+    match &s.remote.align {
+        Some(a) if a.remote == *me => {}
+        Some(_) => return Err(Reply::text(409, "L'alignement est ouvert pour une autre télécommande")),
+        None => return Err(Reply::text(409, ASK_FR)),
+    }
+    // Moving the output's geometry is a safety edit: never in show mode
+    // nor under the safety lock (T-261), whatever the session.
+    if s.show_mode.on {
+        return Err(Reply::text(423, crate::showmode::LOCKED_FR));
+    }
+    if crate::safetylock::check(s, now) {
+        return Err(Reply::text(423, crate::safetylock::LOCKED_FR));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NudgeBody {
+    corner: u8,
+    dx: i8,
+    dy: i8,
+}
+
+/// `POST /api/remote/align/nudge {corner, dx, dy}`: moves the draft only.
+fn nudge(s: &mut Shared, i: usize, body: &[u8], now: Instant) -> Reply {
+    let req: NudgeBody = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return Reply::text(400, "requête invalide"),
+    };
+    if req.corner > 3 || req.dx.unsigned_abs() > MAX_NUDGE || req.dy.unsigned_abs() > MAX_NUDGE || (req.dx == 0 && req.dy == 0) {
+        return Reply::text(400, "pas invalide");
+    }
+    if let Err(r) = my_session(s, i, now) {
+        return r;
+    }
+    let Some(a) = s.remote.align.as_mut() else { return Reply::text(409, ASK_FR) };
+    match step_draft(&a.draft, &a.base, req.corner as usize, req.dx, req.dy) {
+        Ok(d) => {
+            a.draft = d;
+            a.nudges = a.nudges.saturating_add(1);
+            Reply::json(200, align_remote_view(s, i))
+        }
+        Err(e) => Reply::text(409, &format!("Limite atteinte : {e}")),
+    }
+}
+
+/// `POST /api/remote/align/reset`: « Annuler mes déplacements ». Never
+/// locked: it only goes back to the saved zone.
+fn reset_draft(s: &mut Shared, i: usize, now: Instant) -> Reply {
+    if let Err(r) = my_session(s, i, now) {
+        if r.status != 423 {
+            return r;
+        }
+    }
+    let Some(a) = s.remote.align.as_mut() else { return Reply::text(409, ASK_FR) };
+    a.draft = a.base;
+    Reply::json(200, align_remote_view(s, i))
 }
 
 #[cfg(test)]
@@ -976,5 +1313,191 @@ mod tests {
         assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
         set_enabled(&shared, false, None).unwrap();
         assert!(!shared.lock().unwrap().gate.is_armed());
+    }
+
+    // ----- Zone alignment from a phone (T-460) -----
+
+    fn nudge_req(s: &mut Shared, c: &str, corner: u8, dx: i8, dy: i8, now: Instant) -> Reply {
+        post(s, NUDGE_PATH, Some(c), json!({ "corner": corner, "dx": dx, "dy": dy }), now)
+    }
+
+    /// Paired, a session opened from the main screen on zone 1.
+    fn aligning(s: &mut Shared, name: &str) -> (String, Instant) {
+        on(s);
+        let c = paired(s, name);
+        let now = Instant::now();
+        align_open(s, 1, name, now).unwrap();
+        (c, now)
+    }
+
+    #[test]
+    fn steps_stay_in_the_field_close_to_the_saved_zone_and_convex() {
+        let base = SQUARE;
+        // A step moves by NUDGE_STEP; ×5 by five.
+        let d = step_draft(&base, &base, 2, -1, -5, ).unwrap();
+        assert!((d[2][0] - (1.0 - NUDGE_STEP)).abs() < 1e-6 && (d[2][1] - (1.0 - 5.0 * NUDGE_STEP)).abs() < 1e-6);
+        // Out of -1..1: refused (never clamped into place).
+        assert!(step_draft(&base, &base, 2, 1, 0).is_err());
+        assert!(step_draft(&base, &base, 0, -1, 0).is_err());
+        // At most MAX_DRAFT_OFFSET from the saved corner.
+        let mut d = base;
+        let mut n = 0;
+        while let Ok(next) = step_draft(&d, &base, 3, 5, 0) {
+            d = next;
+            n += 1;
+            assert!(n < 100);
+        }
+        assert!((d[3][0] - base[3][0]).abs() <= MAX_DRAFT_OFFSET + 1e-4);
+        assert!(step_draft(&d, &base, 3, 5, 0).unwrap_err().contains("0,2"));
+        // A quad that would cross itself: refused.
+        let near = [[-1.0, -1.0], [1.0, -1.0], [-0.95, -0.85], [-1.0, 1.0]];
+        assert!(step_draft(&near, &near, 2, -5, 0).is_err(), "concave");
+        // Bad steps.
+        assert!(step_draft(&base, &base, 4, 1, 0).is_err());
+        assert!(step_draft(&base, &base, 1, -128, 0).is_err());
+        assert!(step_draft(&base, &base, 1, 6, 0).is_err());
+    }
+
+    /// The phone only moves a draft: the saved zone changes only with
+    /// « Appliquer » on the main screen, which the phone can't reach.
+    #[test]
+    fn the_phone_cannot_write_a_zone_without_the_main_screen() {
+        let mut s = shared();
+        let (c, now) = aligning(&mut s, "Téléphone");
+        let saved = s.projection.get().clone();
+        assert_eq!(s.test_pattern.active, Some(crate::testpattern::TestPattern::Grid), "the pattern shows the draft");
+        for _ in 0..3 {
+            assert_eq!(nudge_req(&mut s, &c, 3, 1, -1, now).status, 200);
+        }
+        let draft = s.remote.align.as_ref().unwrap().draft;
+        assert!((draft[3][0] - (-1.0 + 3.0 * NUDGE_STEP)).abs() < 1e-5);
+        assert_eq!(s.projection.get(), &saved, "the saved zone is untouched");
+        // The preview goes through the draft.
+        let g = align_geometry(&s).unwrap();
+        assert!(g.warp.enabled && g.warp.corners == draft);
+        let st: Value = serde_json::from_str(&handle(&mut s, "GET", ALIGN_PATH, Some(&c), "x", b"", now).body).unwrap();
+        assert_eq!(st["open"], true);
+        assert_eq!(st["changed"], true);
+        assert_eq!(st["zone"]["name"], "Principale");
+        // Every writing route of the main screen is 403 from the phone.
+        for path in ["/api/zones/align/apply", "/api/zones/align/open", "/api/projection", "/api/projection/align", "/api/safety", "/api/calibration", "/api/arm", "/api/estop/reset", "/api/outputs/limits", "/api/safety/trace"] {
+            assert_eq!(post(&mut s, path, Some(&c), json!({ "zone": 1, "remote": "Téléphone", "on": true }), now).status, 403, "{path}");
+        }
+        assert_eq!(s.projection.get(), &saved);
+        assert!(s.remote.align.is_some());
+        // Reset: back to the saved corners.
+        assert_eq!(post(&mut s, RESET_PATH, Some(&c), json!({}), now).status, 200);
+        assert_eq!(s.remote.align.as_ref().unwrap().draft, SQUARE);
+        assert_eq!(nudge_req(&mut s, &c, 1, -2, 2, now).status, 200);
+        let draft = s.remote.align.as_ref().unwrap().draft;
+        // The main screen applies.
+        align_apply(&mut s).unwrap();
+        let z = s.projection.get().zone(1).unwrap();
+        assert!(z.geometry.warp.enabled && z.geometry.warp.corners == draft);
+        assert!(s.remote.align.is_none() && s.test_pattern.active.is_none());
+        assert!(!s.gate.is_armed());
+    }
+
+    #[test]
+    fn a_nudge_without_a_session_is_refused() {
+        let mut s = shared();
+        on(&mut s);
+        let c = paired(&mut s, "A");
+        let other = paired(&mut s, "B");
+        let now = Instant::now();
+        let r = nudge_req(&mut s, &c, 0, 1, 1, now);
+        assert_eq!((r.status, r.body.as_str()), (409, ASK_FR));
+        assert_eq!(post(&mut s, RESET_PATH, Some(&c), json!({}), now).status, 409);
+        // Open for B: A still can't.
+        align_open(&mut s, 1, "B", now).unwrap();
+        assert_eq!(nudge_req(&mut s, &c, 0, 1, 1, now).status, 409);
+        assert_eq!(nudge_req(&mut s, &other, 0, 1, 1, now).status, 200);
+        // Unpaired, bad bodies.
+        assert_eq!(nudge_req(&mut s, "ls_remote=forged", 0, 1, 1, now).status, 401);
+        for bad in [json!({ "corner": 4, "dx": 1, "dy": 0 }), json!({ "corner": 0, "dx": 0, "dy": 0 }), json!({ "corner": 0, "dx": 6, "dy": 0 }), json!({ "corner": 0, "dx": 0.5, "dy": 0 }), json!({ "corner": 0, "dx": 300, "dy": 0 }), json!({ "corner": 0, "dx": 1, "dy": 0, "zone": 2 }), json!({ "corner": 0, "dx": "NaN", "dy": 0 })] {
+            assert_eq!(post(&mut s, NUDGE_PATH, Some(&other), bad.clone(), now).status, 400, "{bad}");
+        }
+        // Opening: unknown zone or remote, the access off.
+        assert_eq!(align_open(&mut s, 9, "B", now).unwrap_err().0, 404);
+        assert_eq!(align_open(&mut s, 1, "Z", now).unwrap_err().0, 404);
+    }
+
+    #[test]
+    fn locked_or_in_show_mode_the_phone_cannot_move_the_zone() {
+        let mut s = shared();
+        let (c, now) = aligning(&mut s, "T");
+        s.safety_lock.set_code(crate::safetylock::new_file("5555", 10).unwrap(), now).unwrap();
+        assert!(crate::safetylock::check(&mut s, now));
+        assert_eq!(nudge_req(&mut s, &c, 3, 1, 0, now).status, 423);
+        assert_eq!(s.remote.align.as_ref().unwrap().draft, SQUARE);
+        // Undoing the draft is never locked.
+        assert_eq!(post(&mut s, RESET_PATH, Some(&c), json!({}), now).status, 200);
+        // Show mode ends the session.
+        let mut s = shared();
+        let (c, now) = aligning(&mut s, "T");
+        s.show_mode.on = true;
+        assert_ne!(nudge_req(&mut s, &c, 3, 1, 0, now).status, 200);
+        assert!(s.remote.align.is_none());
+        assert!(!s.gate.is_armed());
+    }
+
+    #[test]
+    fn the_draft_is_dropped_on_estop_silence_kick_reject_and_zone_edit() {
+        for how in ["estop", "silence", "kick", "off", "reject", "edit", "remote_estop"] {
+            let mut s = shared();
+            let (c, t0) = aligning(&mut s, "T");
+            assert_eq!(nudge_req(&mut s, &c, 2, -5, -5, t0).status, 200);
+            let saved = s.projection.get().clone();
+            match how {
+                "estop" => s.emergency_stop(crate::interlock::ArmSource::Ui),
+                "silence" => {
+                    align_sync(&mut s, t0 + Duration::from_secs(9));
+                    assert!(s.remote.align.is_some(), "still within the timeout");
+                    align_sync(&mut s, t0 + ALIGN_TIMEOUT + Duration::from_secs(1));
+                }
+                "kick" => {
+                    kick(&mut s, Some("T"));
+                }
+                "off" => disable(&mut s, "test"),
+                "reject" => {
+                    align_end(&mut s, "rejected");
+                }
+                "edit" => {
+                    let mut cfg = saved.clone();
+                    cfg.zones[0].geometry.size_x = 0.5;
+                    s.projection.set(cfg).unwrap();
+                    align_sync(&mut s, t0);
+                }
+                _ => {
+                    open_gate(&mut s);
+                    assert_eq!(post(&mut s, "/api/remote/control", Some(&c), json!({ "id": "safety.estop" }), t0).status, 200);
+                    align_sync(&mut s, t0);
+                }
+            }
+            assert!(s.remote.align.is_none(), "{how}");
+            assert!(align_geometry(&s).is_none(), "{how}: the next frame uses the saved zone");
+            if how != "edit" {
+                assert_eq!(s.projection.get(), &saved, "{how}: nothing written");
+            }
+            assert!(s.test_pattern.active.is_none(), "{how}: the session's pattern is left");
+            assert!(!s.gate.is_armed());
+        }
+    }
+
+    /// The remote's own table: nothing but reads, plays and the draft;
+    /// none of its paths belongs to the main UI.
+    #[test]
+    fn the_whitelist_has_no_writing_route() {
+        for &(m, p, class) in WHITELIST {
+            assert!(matches!(class, RouteClass::Read | RouteClass::Play), "{m} {p}");
+            assert!(p == "/" || !crate::web::is_known_route(m, p), "{m} {p} is a main UI route");
+            assert!(!p.contains("zones/align/") && !p.contains("safety") && !p.contains("calibration") && !p.contains("arm"), "{p}");
+        }
+        let mut s = shared();
+        on(&mut s);
+        let c = paired(&mut s, "T");
+        // A method not listed: refused.
+        assert_eq!(handle(&mut s, "POST", ALIGN_PATH, Some(&c), "x", b"{}", Instant::now()).status, 404);
+        assert_eq!(handle(&mut s, "GET", NUDGE_PATH, Some(&c), "x", b"", Instant::now()).status, 404);
     }
 }

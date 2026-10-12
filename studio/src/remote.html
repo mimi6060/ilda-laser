@@ -14,7 +14,7 @@
     color-scheme: dark;
   }
   @media (prefers-color-scheme: light) {
-    :root { --bg: #f4f5f7; --panel: #ffffff; --line: #d6d9df; --text: #15181d; --muted: #5b6370; --accent: #0b66d0; --on: #bfe8cf; color-scheme: light; }
+    :root { --bg: #f4f5f7; --panel: #ffffff; --line: #d6d9df; --text: #15181d; --muted: #5b6370; --accent: #0b66d0; --warn: #8a5a00; --danger: #c22a2f; --on: #bfe8cf; color-scheme: light; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.35 -apple-system, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
@@ -44,6 +44,20 @@
   #gate { border-color: var(--warn); color: var(--warn); }
   #stopBtn { width: 100%; min-height: 96px; font-size: 26px; font-weight: 800; letter-spacing: .05em; background: var(--danger); color: #fff; border-color: var(--danger); }
   #error { color: var(--danger); min-height: 1.3em; }
+  /* T-460: zone alignment. Only a draft: the main screen applies it. */
+  .gap { margin-top: 14px; }
+  .corners { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .corners button[aria-pressed=true], #x5[aria-pressed=true] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; justify-content: center; margin: 12px 0; }
+  .pad button { font-size: 26px; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .pad .up { grid-column: 2; grid-row: 1; }
+  .pad .left { grid-column: 1; grid-row: 2; }
+  .pad .right { grid-column: 3; grid-row: 2; }
+  .pad .down { grid-column: 2; grid-row: 3; }
+  #alignWait { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--warn); color: var(--warn); font-weight: 600; }
+  #alignMsg { color: var(--danger); min-height: 1.3em; }
+  /* The stop stays on screen, alignment included. */
+  .stopbar { position: sticky; bottom: 0; z-index: 2; }
   .hint { color: var(--muted); font-size: 14px; }
   [hidden] { display: none !important; }
 </style>
@@ -96,7 +110,34 @@
       </div>
     </section>
 
-    <section style="margin-top:14px">
+    <section aria-labelledby="alignTitle" class="gap" id="alignSection">
+      <h2 id="alignTitle">Alignement</h2>
+      <p class="hint" id="alignAsk">Demandez l'ouverture de l'alignement sur l'écran principal</p>
+      <div id="alignOn" hidden>
+        <div id="alignWait" role="status" aria-live="polite">En attente de confirmation sur l'écran principal</div>
+        <p>Zone : <b id="alignZone"></b></p>
+        <div class="corners" role="group" aria-label="Coin à déplacer">
+          <button data-corner="3" aria-pressed="false">Haut gauche</button>
+          <button data-corner="2" aria-pressed="false">Haut droit</button>
+          <button data-corner="0" aria-pressed="false">Bas gauche</button>
+          <button data-corner="1" aria-pressed="false">Bas droit</button>
+        </div>
+        <div class="pad" role="group" aria-label="Déplacer le coin choisi">
+          <button class="up" data-dx="0" data-dy="1" aria-label="Haut">↑</button>
+          <button class="left" data-dx="-1" data-dy="0" aria-label="Gauche">←</button>
+          <button class="right" data-dx="1" data-dy="0" aria-label="Droite">→</button>
+          <button class="down" data-dx="0" data-dy="-1" aria-label="Bas">↓</button>
+        </div>
+        <div class="row">
+          <button id="x5" aria-pressed="false">Pas ×5</button>
+          <button id="alignReset">Annuler mes déplacements</button>
+        </div>
+        <p class="hint" id="alignCorner"></p>
+        <div id="alignMsg" role="alert"></div>
+      </div>
+    </section>
+
+    <section class="gap stopbar">
       <button id="stopBtn" aria-label="Noir et arrêt d'urgence">NOIR / ARRÊT</button>
       <p class="hint">Plus de pilotage depuis cette tablette après un arrêt : il se réinitialise sur l'écran principal.</p>
     </section>
@@ -227,6 +268,61 @@ $('tap').onclick = () => send('tempo.tap');
 $('sync').onclick = () => send('tempo.resync');
 $('bpm').addEventListener('change', () => { const v = Number($('bpm').value); if (Number.isFinite(v) && v > 0) send('tempo.bpm', { value: v }); });
 $('stopBtn').onclick = () => send('safety.estop');
+
+// Alignement (T-460): the corners move a draft held by the studio; only
+// « Appliquer » on the main screen writes the zone.
+let corner = 3, x5 = false, repeat = null, align = null;
+function showAlign(a) {
+  align = a;
+  $('alignAsk').hidden = a.open;
+  $('alignAsk').textContent = a.message;
+  $('alignOn').hidden = !a.open;
+  if (!a.open) return;
+  $('alignZone').textContent = a.zone ? `${a.zone.id} · ${a.zone.name}` : '';
+  $('alignWait').textContent = a.changed ? 'En attente de confirmation sur l\'écran principal' : 'Aucun déplacement proposé';
+  document.querySelectorAll('[data-corner]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.corner === corner)));
+  const p = a.draft[corner];
+  $('alignCorner').textContent = `${a.corners[corner]} : ${p[0].toFixed(3)} ; ${p[1].toFixed(3)} (pas ${x5 ? 5 * a.step : a.step})`;
+}
+async function alignCall(path, body) {
+  try {
+    const r = await call(body === undefined ? 'GET' : 'POST', path, body);
+    if (r.status === 401) { stopRepeat(); return showPairing(); }
+    if (r.ok) { if (body !== undefined) $('alignMsg').textContent = ''; showAlign(await r.json()); return true; }
+    $('alignMsg').textContent = await r.text();
+    if (r.status === 409 && navigator.vibrate) navigator.vibrate(60);
+  } catch { $('alignMsg').textContent = 'Studio injoignable'; }
+  stopRepeat();
+  return false;
+}
+function stopRepeat() { clearTimeout(repeat); repeat = null; }
+function nudge(dx, dy) {
+  const m = x5 ? 5 : 1;
+  return alignCall('/api/remote/align/nudge', { corner, dx: dx * m, dy: dy * m });
+}
+document.querySelectorAll('[data-corner]').forEach(b => { b.onclick = () => { corner = +b.dataset.corner; if (align) showAlign(align); }; });
+document.querySelectorAll('[data-dx]').forEach(b => {
+  const dx = +b.dataset.dx, dy = +b.dataset.dy;
+  // A long press repeats the step until released or refused.
+  b.addEventListener('pointerdown', ev => {
+    ev.preventDefault();
+    b.setPointerCapture?.(ev.pointerId);
+    stopRepeat();
+    nudge(dx, dy);
+    const again = delay => { repeat = setTimeout(async () => { if (await nudge(dx, dy) && repeat) again(80); }, delay); };
+    again(400);
+  });
+  for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(t, stopRepeat);
+  b.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); nudge(dx, dy); } });
+});
+$('x5').onclick = () => { x5 = !x5; $('x5').setAttribute('aria-pressed', String(x5)); if (align) showAlign(align); };
+$('alignReset').onclick = () => alignCall('/api/remote/align/reset', {});
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopRepeat(); });
+async function pollAlign() {
+  if (st) await alignCall('/api/remote/align');
+  setTimeout(pollAlign, 500);
+}
+pollAlign();
 
 poll();
 </script>
