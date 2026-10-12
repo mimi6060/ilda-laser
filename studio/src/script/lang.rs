@@ -13,7 +13,9 @@
 //! time and the cancel flag are read every 256 operations; the memory a
 //! run creates (texts, lists) is counted cumulatively, never given back,
 //! so the peak is bounded; nesting is bounded when parsing, so neither the
-//! parser nor the evaluator can overflow the stack.
+//! parser nor the evaluator can overflow the stack; and values nest at most
+//! `MAX_VALUE_DEPTH` deep (stored in each list and table when it is built),
+//! so dropping, comparing or printing one cannot overflow it either.
 //!
 //! The two doors to the studio are the host's: `etat()` returns the
 //! snapshot the host gave (`Host::state`), `commande("…")` only queues a
@@ -31,6 +33,12 @@ pub const MAX_SOURCE: usize = 16 * 1024;
 /// brackets and unary operators while parsing.
 pub const MAX_DEPTH: u16 = 64;
 const MAX_NESTING: usize = 32;
+/// The deepest a value can nest at run time (a list in a list in …).
+/// Dropping, comparing and printing a value walk it recursively, so this
+/// bound is what keeps them far from the end of the worker's 4 MB stack,
+/// even in a debug build: `let l = []\nwhile true { l = [l] }` stops here
+/// with an error instead of aborting the studio.
+pub const MAX_VALUE_DEPTH: u8 = 64;
 /// Variables alive at once.
 pub const MAX_VARS: usize = 256;
 /// `journal` lines kept per run, and their length in characters.
@@ -62,8 +70,10 @@ pub enum Value {
     Bool(bool),
     Num(f64),
     Str(Rc<str>),
-    List(Rc<Vec<Value>>),
-    Map(Rc<BTreeMap<String, Value>>),
+    /// The items and how deep the list nests (`Value::depth`).
+    List(Rc<Vec<Value>>, u8),
+    /// The fields and how deep the table nests.
+    Map(Rc<BTreeMap<String, Value>>, u8),
 }
 
 impl Value {
@@ -73,20 +83,46 @@ impl Value {
             Value::Bool(_) => "un booléen",
             Value::Num(_) => "un nombre",
             Value::Str(_) => "un texte",
-            Value::List(_) => "une liste",
-            Value::Map(_) => "une table",
+            Value::List(..) => "une liste",
+            Value::Map(..) => "une table",
+        }
+    }
+
+    /// How deep a value nests: 0 for a plain value, 1 + its deepest
+    /// item for a list or a table. Stored when the value is built, so
+    /// reading it costs nothing.
+    pub fn depth(&self) -> u8 {
+        match self {
+            Value::List(_, d) | Value::Map(_, d) => *d,
+            _ => 0,
         }
     }
 
     /// From the host's snapshot (JSON, built in the engine thread).
+    /// Anything deeper than `MAX_VALUE_DEPTH` becomes `rien`, so every
+    /// value a script sees keeps the bound.
     pub fn from_json(v: &serde_json::Value) -> Value {
+        Self::from_json_at(v, 0)
+    }
+
+    fn from_json_at(v: &serde_json::Value, level: u8) -> Value {
+        let deeper = |v: &serde_json::Value| if level >= MAX_VALUE_DEPTH { Value::Nil } else { Value::from_json_at(v, level + 1) };
         match v {
             serde_json::Value::Null => Value::Nil,
             serde_json::Value::Bool(b) => Value::Bool(*b),
             serde_json::Value::Number(n) => Value::Num(n.as_f64().filter(|x| x.is_finite()).unwrap_or(0.0)),
             serde_json::Value::String(s) => Value::Str(Rc::from(s.as_str())),
-            serde_json::Value::Array(a) => Value::List(Rc::new(a.iter().map(Value::from_json).collect())),
-            serde_json::Value::Object(o) => Value::Map(Rc::new(o.iter().map(|(k, v)| (k.clone(), Value::from_json(v))).collect())),
+            serde_json::Value::Array(a) if level < MAX_VALUE_DEPTH => {
+                let items: Vec<Value> = a.iter().map(deeper).collect();
+                let d = items.iter().map(Value::depth).max().unwrap_or(0) + 1;
+                Value::List(Rc::new(items), d)
+            }
+            serde_json::Value::Object(o) if level < MAX_VALUE_DEPTH => {
+                let fields: BTreeMap<String, Value> = o.iter().map(|(k, v)| (k.clone(), deeper(v))).collect();
+                let d = fields.values().map(Value::depth).max().unwrap_or(0) + 1;
+                Value::Map(Rc::new(fields), d)
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => Value::Nil,
         }
     }
 }
@@ -107,8 +143,8 @@ fn text_of(v: &Value) -> String {
         Value::Bool(b) => if *b { "vrai" } else { "faux" }.into(),
         Value::Num(x) => num_text(*x),
         Value::Str(s) => s.to_string(),
-        Value::List(l) => format!("[liste de {}]", l.len()),
-        Value::Map(m) => format!("[table de {}]", m.len()),
+        Value::List(l, _) => format!("[liste de {}]", l.len()),
+        Value::Map(m, _) => format!("[table de {}]", m.len()),
     }
 }
 
@@ -1017,7 +1053,7 @@ impl Interp<'_> {
             }
             Stmt::ForEach(name, e, body, line) => {
                 let items = match self.eval(e)? {
-                    Value::List(l) => l,
+                    Value::List(l, _) => l,
                     v => return Err(ScriptError::runtime(*line, format!("« for … in » attend une liste ou a..b, pas {}", v.type_fr()))),
                 };
                 for item in items.iter() {
@@ -1050,6 +1086,15 @@ impl Interp<'_> {
         }
     }
 
+    /// The depth of a new list whose deepest item nests `items` deep,
+    /// refused past `MAX_VALUE_DEPTH`.
+    fn nest(line: u32, items: u8) -> Result<u8, ScriptError> {
+        if items >= MAX_VALUE_DEPTH {
+            return Err(ScriptError::runtime(line, format!("liste trop imbriquée : {MAX_VALUE_DEPTH} niveaux au plus")));
+        }
+        Ok(items + 1)
+    }
+
     fn finite(line: u32, x: f64) -> Result<Value, ScriptError> {
         if x.is_finite() {
             Ok(Value::Num(x))
@@ -1066,7 +1111,7 @@ impl Interp<'_> {
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Num(x), Value::Num(y)) => x == y,
             (Value::Str(x), Value::Str(y)) => x == y,
-            (Value::List(x), Value::List(y)) => {
+            (Value::List(x, _), Value::List(y, _)) => {
                 if x.len() != y.len() {
                     return Ok(false);
                 }
@@ -1077,7 +1122,7 @@ impl Interp<'_> {
                 }
                 true
             }
-            (Value::Map(x), Value::Map(y)) => Rc::ptr_eq(x, y),
+            (Value::Map(x, _), Value::Map(y, _)) => Rc::ptr_eq(x, y),
             _ => false,
         })
     }
@@ -1097,7 +1142,8 @@ impl Interp<'_> {
                 for it in items {
                     out.push(self.eval(it)?);
                 }
-                Ok(Value::List(Rc::new(out)))
+                let d = out.iter().map(Value::depth).max().unwrap_or(0);
+                Ok(Value::List(Rc::new(out), Self::nest(line, d)?))
             }
             ExprKind::Neg(a) => {
                 let x = self.number(a)?;
@@ -1111,21 +1157,21 @@ impl Interp<'_> {
                 self.binary(*op, x, y, line)
             }
             ExprKind::Field(a, name) => match self.eval(a)? {
-                Value::Map(m) => m.get(name).cloned().ok_or_else(|| ScriptError::runtime(line, format!("champ inconnu « {name} »"))),
+                Value::Map(m, _) => m.get(name).cloned().ok_or_else(|| ScriptError::runtime(line, format!("champ inconnu « {name} »"))),
                 v => Err(ScriptError::runtime(line, format!("« .{name} » : une table attendue, pas {}", v.type_fr()))),
             },
             ExprKind::Index(a, i) => {
                 let target = self.eval(a)?;
                 let key = self.eval(i)?;
                 match (target, key) {
-                    (Value::List(l), Value::Num(n)) => {
+                    (Value::List(l, _), Value::Num(n)) => {
                         // 1-based, like `hasard(n)` and the pages.
                         if n.fract() != 0.0 || n < 1.0 || n > l.len() as f64 {
                             return Err(ScriptError::runtime(line, format!("indice {} hors de la liste (1 à {})", num_text(n), l.len())));
                         }
                         Ok(l[n as usize - 1].clone())
                     }
-                    (Value::Map(m), Value::Str(k)) => m.get(&*k).cloned().ok_or_else(|| ScriptError::runtime(line, format!("champ inconnu « {k} »"))),
+                    (Value::Map(m, _), Value::Str(k)) => m.get(&*k).cloned().ok_or_else(|| ScriptError::runtime(line, format!("champ inconnu « {k} »"))),
                     (Value::Str(s), Value::Num(n)) => {
                         let count = s.chars().count();
                         if n.fract() != 0.0 || n < 1.0 || n > count as f64 {
@@ -1156,12 +1202,13 @@ impl Interp<'_> {
                 self.alloc(line, a.len() + b.len())?;
                 self.new_str(line, a + &b)
             }
-            (BinOp::Add, List(a), List(b)) => {
+            (BinOp::Add, List(a, da), List(b, db)) => {
                 self.alloc(line, 16 * (a.len() + b.len()) + 16)?;
                 let mut v = Vec::with_capacity(a.len() + b.len());
                 v.extend(a.iter().cloned());
                 v.extend(b.iter().cloned());
-                Ok(List(Rc::new(v)))
+                // Joining never nests deeper than the deeper of the two.
+                Ok(List(Rc::new(v), (*da).max(*db).max(1)))
             }
             (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, Num(a), Num(b)) => Ok(Bool(cmp(op, a.partial_cmp(b)))),
             (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, Str(a), Str(b)) => Ok(Bool(cmp(op, a.partial_cmp(b)))),
@@ -1232,8 +1279,8 @@ impl Interp<'_> {
             }
             Builtin::Longueur => match &vals[0] {
                 Value::Str(s) => Ok(Value::Num(s.chars().count() as f64)),
-                Value::List(l) => Ok(Value::Num(l.len() as f64)),
-                Value::Map(m) => Ok(Value::Num(m.len() as f64)),
+                Value::List(l, _) => Ok(Value::Num(l.len() as f64)),
+                Value::Map(m, _) => Ok(Value::Num(m.len() as f64)),
                 v => Err(ScriptError::runtime(line, format!("« longueur » d'{} ?", v.type_fr()))),
             },
             Builtin::Entier => Ok(Value::Num(num(&vals[0], "entier")?.floor())),
@@ -1424,6 +1471,61 @@ mod tests {
         let neg = format!("let a = {}1", "-".repeat(3_000));
         assert!(parse(&neg).is_err());
         assert!(parse(&"x".repeat(MAX_SOURCE + 1)).is_err());
+    }
+
+    /// Runs `f` on a 4 MB thread, the worker's stack size: in a debug
+    /// build, an unbounded nesting would abort the whole test binary here.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new().stack_size(4 * 1024 * 1024).spawn(f).unwrap().join().unwrap()
+    }
+
+    fn deep_limits() -> ScriptLimits {
+        ScriptLimits { max_ms: 5_000, max_ops: u64::MAX, ..ScriptLimits::default() }
+    }
+
+    #[test]
+    fn deeply_nested_values_stop_with_an_error_not_a_crash() {
+        on_small_stack(|| {
+            for src in [
+                // Dropped at the end of the run.
+                "let l = []\nwhile true { l = [l] }",
+                // Compared, printed, joined, walked.
+                "let l = []\nwhile true { l = [l]\nlet b = l == l\njournal(l, texte(l), longueur(l)) }",
+                "let l = [1]\nwhile true { l = [l, l] + [l] }",
+                "let l = []\nwhile true { l = [[[l]]]\nfor x in l { let y = x } }",
+                // Built inside a table read from the state.
+                "let m = etat()\nlet l = [m]\nwhile true { l = [l, m] }",
+            ] {
+                let (r, _) = go_with(src, deep_limits());
+                let e = r.expect_err(src);
+                assert_eq!(e.kind, ErrorKind::Runtime, "{src}: {e}");
+                assert!(e.message_fr.contains("trop imbriquée"), "{src}: {e}");
+            }
+            // Exactly at the bound: built, compared, printed and dropped.
+            let src = format!("let l = []\nfor i in 0..{} {{ l = [l] }}\nlet b = l == l\njournal(b, l)", MAX_VALUE_DEPTH - 1);
+            let (r, out) = go_with(&src, deep_limits());
+            r.unwrap();
+            assert_eq!(out.journal, vec!["vrai [liste de 1]".to_string()]);
+            let src = format!("let l = []\nfor i in 0..{} {{ l = [l] }}", MAX_VALUE_DEPTH);
+            assert!(go_with(&src, deep_limits()).0.unwrap_err().message_fr.contains("64 niveaux"));
+        });
+    }
+
+    #[test]
+    fn a_deep_state_snapshot_is_cut_at_the_bound() {
+        on_small_stack(|| {
+            let mut deep = serde_json::json!(1);
+            for i in 0..500 {
+                deep = if i % 2 == 0 { serde_json::json!([deep]) } else { serde_json::json!({ "a": deep }) };
+            }
+            let v = Value::from_json(&deep);
+            assert!(v.depth() <= MAX_VALUE_DEPTH, "{}", v.depth());
+            let host = Host { state: &deep, seed: 1, cancel: None, refusal: &no_refusal };
+            let (r, _) = run("let e = etat()\nlet b = e == e\nlet l = [e]", deep_limits(), &host);
+            assert!(r.unwrap_err().message_fr.contains("trop imbriquée"));
+            let (r, _) = run("let e = etat()\nlet b = e == e\njournal(e)", deep_limits(), &host);
+            r.unwrap();
+        });
     }
 
     #[test]

@@ -505,12 +505,25 @@ pub fn check_source(s: &Shared, source: &str) -> Option<ScriptSaveError> {
     check_one(&sc, &reg, &s.presets).err().map(|e| ScriptSaveError { id: None, line: e.line, message_fr: e.to_string(), refused: e.kind == lang::ErrorKind::Refused })
 }
 
-/// `POST /api/scripts` (and an undo): checked, swapped in, saved, the
-/// registry rebuilt. A list approved before stays approved once edited
-/// here; saving lifts the budget blocks.
-pub fn set(s: &mut Shared, mut list: Vec<Script>) -> Result<(), ScriptSaveError> {
+/// `POST /api/scripts`: checked, swapped in, saved, the registry rebuilt.
+/// A list approved before stays approved once edited here; saving lifts
+/// the budget blocks.
+pub fn set(s: &mut Shared, list: Vec<Script>) -> Result<(), ScriptSaveError> {
+    store(s, list, true)
+}
+
+/// An undo or a redo: like `set`, but the trust stays exactly as it is.
+/// A restored list runs only if it was approved on this machine before;
+/// otherwise the banner asks again. (Approving here would let « delete
+/// all, then undo » approve a project's foreign list without the operator
+/// ever pressing « Activer les scripts de ce projet ».)
+pub fn restore(s: &mut Shared, list: Vec<Script>) -> Result<(), ScriptSaveError> {
+    store(s, list, false)
+}
+
+fn store(s: &mut Shared, mut list: Vec<Script>, keep_approval: bool) -> Result<(), ScriptSaveError> {
     validate(s, &mut list)?;
-    let trusted = s.scripts.trusted();
+    let trusted = keep_approval && s.scripts.trusted();
     let sc = &mut s.scripts;
     // Runs of scripts whose source changed or that are gone end.
     for p in &sc.pending {
@@ -649,6 +662,10 @@ fn runnable(s: &mut Shared, id: u32) -> bool {
 pub fn request_run(s: &mut Shared, id: u32, source: ControlSource) -> Result<(), &'static str> {
     if source == ControlSource::Script {
         return Err("un script ne lance pas de script");
+    }
+    // Nor through a macro it started (or a macro that macro started).
+    if s.macros.player.in_script_run() {
+        return Err("une macro lancée par un script ne lance pas de script");
     }
     s.gate.sync_estop(&s.estop);
     if s.estop.is_latched() {
@@ -1107,6 +1124,48 @@ mod tests {
         tick(&mut s);
         assert!((size(&s) - 20.0).abs() < 1e-4);
         assert_eq!(request_run(&mut s, 1, ControlSource::Script).unwrap_err(), "un script ne lance pas de script");
+    }
+
+    /// Script → macro → script: the macro a script starts (and any macro
+    /// that macro starts) can't launch a script, so no script runs every
+    /// frame through a macro. A macro launched by the operator still can.
+    #[test]
+    fn a_script_cannot_launch_a_script_through_a_macro() {
+        use crate::macros::{Macro, MacroStep, Wait};
+        let mac = |id: &str, command: &str| Macro { id: id.into(), name: id.into(), steps: vec![MacroStep { command: command.into(), wait: Wait::None, enabled: true }], ..Default::default() };
+        for (via, macros) in [
+            ("m1", vec![mac("m1", "script.1.run")]),
+            // Nested: the script's origin is carried down.
+            ("m1", vec![mac("m1", "macro.m2.go"), mac("m2", "script.1.run")]),
+        ] {
+            let mut s = with(vec![sc(1, "Boucle", "commande(\"master.size 40\")", ScriptTrigger::Manual)]);
+            crate::macros::set(&mut s, macros).unwrap();
+            set(&mut s, vec![sc(1, "Boucle", &format!("commande(\"macro.{via}.go\")"), ScriptTrigger::Manual)]).unwrap();
+            request_run(&mut s, 1, ControlSource::Ui).unwrap();
+            for _ in 0..30 {
+                tick(&mut s);
+                let (t, beat) = (s.now_s(), s.tempo.beat_at(s.now_s()));
+                crate::macros::frame(&mut s, t, beat);
+            }
+            assert_eq!(s.scripts.next_serial, 1, "the script ran {} times", s.scripts.next_serial);
+            assert!(s.macros.player.runs.is_empty());
+        }
+        // The operator's macro launches the script.
+        let mut s = with(vec![sc(1, "A", "commande(\"master.size 30\")", ScriptTrigger::Manual)]);
+        crate::macros::set(&mut s, vec![mac("m1", "script.1.run")]).unwrap();
+        crate::macros::start(&mut s, "m1", ControlSource::Ui).unwrap();
+        let (t, beat) = (s.now_s(), s.tempo.beat_at(s.now_s()));
+        crate::macros::frame(&mut s, t, beat);
+        tick(&mut s);
+        assert_eq!(s.scripts.next_serial, 1);
+        assert!((size(&s) - 30.0).abs() < 1e-4);
+        // A macro the script starts carries its origin.
+        set(&mut s, vec![sc(1, "A", "commande(\"macro.m1.go\")", ScriptTrigger::Manual)]).unwrap();
+        request_run(&mut s, 1, ControlSource::Ui).unwrap();
+        tick(&mut s);
+        assert!(s.macros.player.runs.iter().any(|r| r.macro_id == "m1" && r.from_script));
+        crate::macros::frame(&mut s, t + 1.0, beat + 2.0);
+        assert_eq!(s.scripts.next_serial, 2, "launched once by the operator, once by « Lancer »");
     }
 
     #[test]

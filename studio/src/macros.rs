@@ -116,6 +116,11 @@ pub struct MacroRun {
     /// 1 for a macro launched from outside, +1 per macro launching it.
     pub depth: usize,
     pub source: ControlSource,
+    /// Started by a script, or by a macro a script started: its steps may
+    /// not launch a script (T-458: no script → macro → script loop, which
+    /// would be an every-frame trigger).
+    #[serde(skip)]
+    pub from_script: bool,
     /// The last step that failed (a cue deleted since…), in French.
     pub last_error: Option<String>,
 }
@@ -127,11 +132,18 @@ pub struct MacroPlayer {
     next_serial: u64,
     was_armed: bool,
     /// The run whose step is executing (a macro launched from it is one
-    /// level deeper; « Tout arrêter » from it keeps it).
-    current: Option<(u64, usize)>,
+    /// level deeper; « Tout arrêter » from it keeps it), its depth and
+    /// whether a script is at its origin.
+    current: Option<(u64, usize, bool)>,
 }
 
 impl MacroPlayer {
+    /// A step is executing in a run a script started (directly or through
+    /// other macros): `script::request_run` refuses to launch from it.
+    pub fn in_script_run(&self) -> bool {
+        self.current.is_some_and(|(_, _, from_script)| from_script)
+    }
+
     /// Every run ends.
     pub fn stop_all(&mut self) {
         self.runs.clear();
@@ -529,14 +541,15 @@ pub fn start(s: &mut Shared, id: &str, source: ControlSource) -> Result<(), &'st
     if !m.enabled {
         return Err("macro désactivée");
     }
-    let depth = s.macros.player.current.map_or(1, |(_, d)| d + 1);
+    let depth = s.macros.player.current.map_or(1, |(_, d, _)| d + 1);
+    let from_script = source == ControlSource::Script || s.macros.player.in_script_run();
     if depth > MAX_DEPTH {
         return Err("trop de macros imbriquées");
     }
     let now = s.now_s();
     let p = &mut s.macros.player;
     p.next_serial += 1;
-    let run = MacroRun { macro_id: id.to_string(), step: 0, due: Due::Now, started_s: now, serial: p.next_serial, depth, source, last_error: None };
+    let run = MacroRun { macro_id: id.to_string(), step: 0, due: Due::Now, started_s: now, serial: p.next_serial, depth, source, from_script, last_error: None };
     let full = p.runs.len() >= MAX_RUNNING;
     match p.runs.iter_mut().find(|r| r.macro_id == id) {
         // Launched again: back to its first step.
@@ -560,7 +573,7 @@ pub fn stop(s: &mut Shared, id: &str) -> bool {
 pub fn stop_all(s: &mut Shared) {
     let p = &mut s.macros.player;
     match p.current {
-        Some((serial, _)) => p.runs.retain(|r| r.serial == serial),
+        Some((serial, _, _)) => p.runs.retain(|r| r.serial == serial),
         None => p.runs.clear(),
     }
 }
@@ -628,7 +641,7 @@ pub fn frame(s: &mut Shared, now_s: f64, beat: f64) {
                 s.macros.player.runs.remove(idx);
                 break;
             };
-            let depth = run.depth;
+            let (depth, from_script) = (run.depth, run.from_script);
             let run = &mut s.macros.player.runs[idx];
             run.step += 1;
             if !step.enabled {
@@ -640,7 +653,7 @@ pub fn frame(s: &mut Shared, now_s: f64, beat: f64) {
                 continue;
             }
             budget -= 1;
-            s.macros.player.current = Some((serial, depth));
+            s.macros.player.current = Some((serial, depth, from_script));
             let r = run_line(s, &step.command);
             s.macros.player.current = None;
             if s.estop.is_latched() || (armed && !s.gate.is_armed()) {
