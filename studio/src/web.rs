@@ -10185,15 +10185,6 @@ mod tests {
         crate::datafile::tests::check_kept(&dir, "calibration.json", true);
     }
 
-    /// T-264, invariant 6 for the HTTP API: random sequences of requests
-    /// to every route that changes state in memory (controls, cues, looks,
-    /// live, audio, heartbeats, presence, e-stop and its reset, layers,
-    /// caps, safety, playlist, scenes, presets, test patterns, timeline,
-    /// warnings, arm requests claiming a controller or the system) never
-    /// arm the laser. Routes that write files or decode media are left out
-    /// (their tests are elsewhere); the only arming route, `POST /api/arm`
-    /// from the UI, keyboard or API, is sent only with sources that must
-    /// be refused.
     #[test]
     fn arming_with_the_backup_unreachable_needs_the_confirmation_over_http() {
         let t = TestServer::start(false);
@@ -10222,6 +10213,15 @@ mod tests {
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
     }
 
+    /// T-264, invariant 6 for the HTTP API: random sequences of requests
+    /// to every route that changes state in memory (controls, cues, looks,
+    /// live, audio, heartbeats, presence, e-stop and its reset, layers,
+    /// caps, safety, playlist, scenes, presets, test patterns, timeline,
+    /// warnings, arm requests claiming a controller or the system) never
+    /// arm the laser. Routes that write files or decode media are left out
+    /// (their tests are elsewhere); the only arming route, `POST /api/arm`
+    /// from the UI, keyboard or API, is sent only with sources that must
+    /// be refused.
     #[test]
     fn no_api_request_arms_except_an_explicit_arm_request() {
         use crate::safety_invariants::{mutated, seeds, Rng};
