@@ -196,15 +196,9 @@ impl<S: SampleSource> Capture<S> {
                 let (state, message) = match e {
                     OpenError::NoDevice => (CaptureState::NoDevice, "Pas d'entrée audio".to_string()),
                     OpenError::NotFound(name) => (CaptureState::DeviceLost, format!("Entrée « {name} » introuvable : nouvel essai toutes les 2 s")),
-                    OpenError::PermissionDenied(_) if system => (
-                        CaptureState::PermissionDenied,
-                        "Autorisation refusée ? Réglages Système › Confidentialité et sécurité › Enregistrement de l'écran et de l'audio du système : autoriser le terminal".to_string(),
-                    ),
+                    OpenError::PermissionDenied(_) if system => (CaptureState::PermissionDenied, permission_denied(true, bundled())),
                     OpenError::Unavailable(why) => (CaptureState::Error, format!("Son du Mac indisponible : {why}")),
-                    OpenError::PermissionDenied(_) => (
-                        CaptureState::PermissionDenied,
-                        "Autorisation refusée ? Réglages Système › Confidentialité et sécurité › Microphone : autoriser le terminal".to_string(),
-                    ),
+                    OpenError::PermissionDenied(_) => (CaptureState::PermissionDenied, permission_denied(false, bundled())),
                     OpenError::Failed(msg) => (CaptureState::Error, format!("Erreur : {msg}")),
                 };
                 self.status(state, Some(wanted), message);
@@ -395,6 +389,22 @@ pub fn spawn_with<S: SampleSource + 'static>(make: impl FnOnce() -> S + Send + '
         .collect()
 }
 
+/// Whether the studio runs as the `.app` (macOS then asks permission for
+/// « Laser Studio ») rather than from a terminal.
+fn bundled() -> bool {
+    std::env::current_exe().is_ok_and(|exe| crate::in_app_bundle(&exe))
+}
+
+/// What to allow when macOS refused the capture: the screen-and-system-
+/// audio permission for *Son du Mac*, the microphone otherwise; for
+/// « Laser Studio » when it runs as the application, for the terminal
+/// that started it otherwise.
+fn permission_denied(system: bool, bundled: bool) -> String {
+    let setting = if system { "Enregistrement de l'écran et de l'audio du système" } else { "Microphone" };
+    let who = if bundled { "autoriser Laser Studio" } else { "autoriser le terminal qui a lancé le studio" };
+    format!("Autorisation refusée ? Réglages Système › Confidentialité et sécurité › {setting} : {who}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::analysis::testsig::sine;
@@ -403,6 +413,21 @@ mod tests {
     use super::capture::testing::FakeSource;
     use super::*;
     use crate::engine::AudioFeatures;
+
+    /// T-241 follow-up: the refusal names what macOS lists, Laser Studio
+    /// from the bundle, the terminal otherwise.
+    #[test]
+    fn a_refused_permission_names_the_app_or_the_terminal() {
+        let sys_app = permission_denied(true, true);
+        assert!(sys_app.contains("Enregistrement de l'écran et de l'audio du système : autoriser Laser Studio"), "{sys_app}");
+        assert!(!sys_app.contains("terminal"), "{sys_app}");
+        let mic_app = permission_denied(false, true);
+        assert!(mic_app.contains("Microphone : autoriser Laser Studio"), "{mic_app}");
+        assert!(permission_denied(true, false).ends_with("Enregistrement de l'écran et de l'audio du système : autoriser le terminal qui a lancé le studio"));
+        assert!(permission_denied(false, false).ends_with("Microphone : autoriser le terminal qui a lancé le studio"));
+        assert!(!bundled(), "the test binary is not in a .app");
+        assert!(crate::in_app_bundle(std::path::Path::new("/Applications/Laser Studio.app/Contents/MacOS/laser-studio")));
+    }
 
     struct Rig {
         fake: FakeSource,

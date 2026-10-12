@@ -1522,12 +1522,21 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                 // `"confirm_backup_lost": true`, sent only by the
                 // operator's confirmation in the page.
                 let confirm = req.get("confirm_backup_lost").and_then(|c| c.as_bool()).unwrap_or(false);
-                let backup_lost = if want { crate::standby::arm_check(&mut s, confirm, source).err() } else { None };
+                let backup_lost = if want { crate::standby::arm_check(&s, confirm).err() } else { None };
                 let response = if let Some(why) = backup_lost {
                     with_status(json_response(json!({ "armed": false, "blocking": [why], "confirm_backup_lost": crate::standby::BACKUP_LOST_CONFIRM_FR })), 409)
                 } else if want {
+                    // `request_arm` returns Ok without doing anything when
+                    // already armed: only a real disarmed-to-armed change
+                    // logs the confirmation.
+                    let was_armed = s.gate.is_armed();
                     match s.request_arm(source) {
-                        Ok(()) => json_response(json!({ "armed": s.gate.is_armed() })),
+                        Ok(()) => {
+                            if !was_armed {
+                                crate::standby::note_armed(&s, source);
+                            }
+                            json_response(json!({ "armed": s.gate.is_armed() }))
+                        }
                         Err(blocking) => with_status(json_response(json!({ "armed": false, "blocking": blocking })), 409),
                     }
                 } else {
@@ -6264,6 +6273,7 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
     v["zone_trace"] = crate::zonetrace::view(s, Instant::now());
     // T-460: the zone alignment proposed from a phone, or null.
     v["align"] = crate::remote::align_view(s);
+    v["align_note"] = crate::remote::align_note(s);
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
     // T-262: the outdoor mode and « Ciel coupé ».
@@ -6532,6 +6542,7 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
     v["zone_trace"] = crate::zonetrace::view(s, Instant::now());
     // T-460: the zone alignment proposed from a phone, or null.
     v["align"] = crate::remote::align_view(s);
+    v["align_note"] = crate::remote::align_note(s);
     // T-260: the active safety profile, for the status bar.
     v["safety_profile"] = crate::profiles::summary(s);
     // T-262: the outdoor mode and « Ciel coupé ».
@@ -11030,6 +11041,45 @@ mod tests {
         assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
     }
 
+    /// The confirmation is logged only once the gate has armed: a
+    /// confirmed request that an interlock (here the e-stop) still refuses
+    /// leaves no « confirmed » line, and a request while already armed
+    /// adds none.
+    #[test]
+    fn a_confirmed_arm_with_the_backup_unreachable_is_logged_only_when_it_arms() {
+        let t = TestServer::start(false);
+        let (log, sink) = crate::safety_log::testing::memory_log();
+        {
+            let mut s = t.shared.lock().unwrap();
+            s.gate.set_log(log);
+            s.standby.settings.role = crate::standby::Role::Primary;
+            s.standby.state.lease_lost_at = Some(Instant::now());
+            s.estop.trip(ArmSource::Ui);
+        }
+        let flush = || t.shared.lock().unwrap().gate.log().flush(std::time::Duration::from_secs(2));
+        let confirmed = |sink: &crate::safety_log::testing::MemorySink| sink.kinds().iter().filter(|k| *k == "standby_arm_backup_lost").count();
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"confirm_backup_lost":true}"#).0, 409);
+        assert!(!t.shared.lock().unwrap().gate.is_armed());
+        flush();
+        assert_eq!(confirmed(&sink), 0, "refused by the e-stop: nothing confirmed");
+        {
+            let mut s = t.shared.lock().unwrap();
+            let s = &mut *s;
+            s.gate.reset_estop(&s.estop);
+        }
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true,"confirm_backup_lost":true}"#).0, 200);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+        flush();
+        assert_eq!(confirmed(&sink), 1);
+        // Already armed: a second request (unconfirmed, nothing to
+        // confirm) changes nothing and logs nothing more.
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":true}"#).0, 200);
+        assert!(t.shared.lock().unwrap().gate.is_armed());
+        flush();
+        assert_eq!(confirmed(&sink), 1, "a request while armed is not a new confirmation");
+        assert_eq!(t.request("POST", "/api/arm", r#"{"on":false}"#).0, 200);
+    }
+
     /// T-264, invariant 6 for the HTTP API: random sequences of requests
     /// to every route that changes state in memory (controls, cues, looks,
     /// live, audio, heartbeats, presence, e-stop and its reset, layers,
@@ -11956,8 +12006,13 @@ mod tests {
         let v = js(&t.request("GET", "/api/psn/trackers", "").1);
         assert_eq!(v["trackers"][0]["name"], "Chariot");
         assert_eq!(v["links"][0]["state"], "entrées fermées");
-        // Gate open: lit, and the mirror targets list it after the fixed ones.
+        // Gate open: the first sample waits for a confirmation (T-492),
+        // then lit, and the mirror targets list it after the fixed ones.
         crate::external::set_open(&mut t.shared.lock().unwrap(), true, crate::interlock::ArmSource::Ui).unwrap();
+        assert_eq!(t.request("POST", "/api/test/psn", &pos.to_string()).0, 200);
+        crate::psn::frame(&mut t.shared.lock().unwrap(), Instant::now());
+        let v = js(&t.request("GET", "/api/psn/trackers", "").1);
+        assert_eq!((v["links"][0]["state"].as_str(), v["links"][0]["lit"].as_bool()), (Some("saut"), Some(false)), "{v}");
         assert_eq!(t.request("POST", "/api/test/psn", &pos.to_string()).0, 200);
         crate::psn::frame(&mut t.shared.lock().unwrap(), Instant::now());
         let v = js(&t.request("GET", "/api/psn/trackers", "").1);

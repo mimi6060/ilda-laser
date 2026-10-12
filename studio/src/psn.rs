@@ -958,7 +958,7 @@ struct LinkRun {
     reset: bool,
 }
 
-const RECONFIRM_FR: &str = "Position à confirmer après une donnée invalide, hors zone ou perdue";
+const RECONFIRM_FR: &str = "Position à confirmer après une donnée invalide, hors zone ou perdue, ou à la réouverture des entrées externes";
 const JUMP_FR: &str = "Déplacement plus rapide que la vitesse max";
 
 pub enum SetError {
@@ -1107,7 +1107,9 @@ pub fn frame(s: &mut Shared, now: Instant) {
         let sample = samples.get(&link.tracker_id).copied();
         let status = (|| {
             if let Err(why) = allowed {
-                *run = LinkRun { last_seq: sample.map_or(run.last_seq, |s| s.seq), ..Default::default() };
+                // Reopening the gate is like a loss: the first sample after
+                // it waits for a second consistent one before it lights.
+                *run = LinkRun { last_seq: sample.map_or(run.last_seq, |s| s.seq), reset: true, ..Default::default() };
                 return dark(link, bit, "entrées fermées", Some(why.label_fr().to_string()), calib);
             }
             let c = match calib {
@@ -1627,6 +1629,27 @@ mod tests {
         assert!(st.state == "saut" || st.lit, "{st:?}");
         let st = step(&mut s, t0 + Duration::from_millis(800), Some([3.0, 1.0, 0.0]));
         assert!(st.lit, "{st:?}");
+    }
+
+    /// T-492: reopening the external-input gate is like a loss: the first
+    /// sample after it stays dark until a second consistent one confirms it.
+    #[test]
+    fn after_the_gate_reopens_the_first_sample_waits_for_a_confirmation() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut s = studio(on(vec![link(1)]));
+        assert!(step(&mut s, ms(0), Some([0.5, 1.0, 0.0])).lit);
+        crate::external::set_open(&mut s, false, crate::interlock::ArmSource::Ui).unwrap();
+        let st = step(&mut s, ms(16), Some([0.5, 1.0, 0.0]));
+        assert_eq!((st.state.as_str(), st.lit), ("entrées fermées", false));
+        crate::external::set_open(&mut s, true, crate::interlock::ArmSource::Ui).unwrap();
+        let st = step(&mut s, ms(32), Some([3.5, 1.0, 0.0]));
+        assert_eq!((st.state.as_str(), st.lit), ("saut", false), "{st:?}");
+        assert!(st.reasons.iter().any(|r| r == RECONFIRM_FR), "{st:?}");
+        assert_eq!(crate::targets::current_mobile_for_tests(), vec![None]);
+        let st = step(&mut s, ms(48), Some([3.5, 1.0, 0.0]));
+        assert!(st.lit, "{st:?}");
+        assert!(!s.gate.is_armed());
     }
 
     #[test]

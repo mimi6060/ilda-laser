@@ -201,17 +201,20 @@ pub struct Remote {
     server: Option<ServerHandle>,
     /// The zone alignment session (T-460), memory only.
     pub align: Option<AlignSession>,
+    /// Why the last session ended by itself because its phone went quiet
+    /// (French, for the main screen), until another one opens.
+    pub align_note: Option<String>,
 }
 
 impl Remote {
     pub fn load(path: PathBuf, bind: IpAddr) -> Self {
         let settings: RemoteSettings = crate::load_json(&path);
-        Remote { settings, state: RemoteState::default(), path: Some(path), bind, server: None, align: None }
+        Remote { settings, state: RemoteState::default(), path: Some(path), bind, server: None, align: None, align_note: None }
     }
 
     /// For the tests: loopback only, nothing saved.
     pub fn in_memory() -> Self {
-        Remote { settings: RemoteSettings::default(), state: RemoteState::default(), path: None, bind: IpAddr::V4(Ipv4Addr::LOCALHOST), server: None, align: None }
+        Remote { settings: RemoteSettings::default(), state: RemoteState::default(), path: None, bind: IpAddr::V4(Ipv4Addr::LOCALHOST), server: None, align: None, align_note: None }
     }
 
     /// The port the remote really listens on, if it does.
@@ -755,6 +758,10 @@ const ALIGN_EPS: f32 = 1e-4;
 pub const CORNERS_FR: [&str; 4] = ["Bas gauche", "Bas droit", "Haut droit", "Haut gauche"];
 /// What a remote reads while no session is open for it.
 pub const ASK_FR: &str = "Demandez l'ouverture de l'alignement sur l'écran principal";
+/// The session is open but no test pattern is on: the laser no longer
+/// draws the draft (main screen, then phone).
+pub const PATTERN_OFF_FR: &str = "Mire coupée : le laser ne montre plus la proposition du téléphone. Choisissez une mire (RÉGLAGES › Calibration › Mire) pour la voir.";
+pub const PATTERN_OFF_PHONE_FR: &str = "Mire coupée sur l'écran principal : le laser ne montre plus vos déplacements";
 
 /// A zone alignment session opened from the main screen (T-460). Never
 /// saved.
@@ -835,6 +842,7 @@ pub fn align_open(s: &mut Shared, zone: u8, remote: &str, now: Instant) -> Resul
         crate::testpattern::select(s, Some(crate::testpattern::TestPattern::Grid));
     }
     let opened_s = s.now_s();
+    s.remote.align_note = None;
     s.remote.align = Some(AlignSession { zone, remote: remote.to_string(), draft: base, base, opened_at: now, opened_s, nudges: 0, geometry, own_pattern });
     log::info!("Alignement de la zone {zone} ({name}) ouvert pour la télécommande {remote}");
     s.gate.log().record("remote_align", Some(crate::interlock::ArmSource::Ui.id()), json!({ "event": "open", "zone": zone, "name": name, "remote": remote }));
@@ -848,6 +856,10 @@ pub fn align_end(s: &mut Shared, reason: &str) -> bool {
     let Some(a) = s.remote.align.take() else { return false };
     if a.own_pattern && s.test_pattern.active == Some(crate::testpattern::TestPattern::Grid) {
         crate::testpattern::select(s, None);
+    }
+    if reason == "heartbeat" {
+        let secs = ALIGN_TIMEOUT.as_secs();
+        s.remote.align_note = Some(format!("Alignement fermé : la télécommande « {} » ne répond plus depuis {secs} s (page fermée ou téléphone en veille). Rien n'a été enregistré.", a.remote));
     }
     log::info!("Alignement de la zone {} terminé ({reason})", a.zone);
     s.gate.log().record("remote_align", Some(crate::interlock::ArmSource::Ui.id()), json!({ "event": "end", "reason": reason, "zone": a.zone, "remote": a.remote, "nudges": a.nudges }));
@@ -927,7 +939,15 @@ pub fn align_view(s: &Shared) -> Value {
         "nudges": a.nudges,
         "opened_s": a.opened_s,
         "corners": CORNERS_FR,
+        "pattern_off": s.test_pattern.active.is_none(),
+        "pattern_note": s.test_pattern.active.is_none().then_some(PATTERN_OFF_FR),
     })
+}
+
+/// `/api/state.align_note` (main screen): why the last session closed by
+/// itself (its phone went quiet), or null.
+pub fn align_note(s: &Shared) -> Value {
+    json!(s.remote.align_note)
 }
 
 /// `GET /api/remote/align`: this remote's session, read only.
@@ -944,6 +964,7 @@ fn align_remote_view(s: &Shared, i: usize) -> Value {
         "draft": mine.map(|a| a.draft),
         "base": mine.map(|a| a.base),
         "changed": mine.is_some_and(|a| a.draft != a.base),
+        "pattern_note": (mine.is_some() && s.test_pattern.active.is_none()).then_some(PATTERN_OFF_PHONE_FR),
         "corners": CORNERS_FR,
         "step": NUDGE_STEP,
         "max_nudge": MAX_NUDGE,
@@ -1442,6 +1463,53 @@ mod tests {
         s.show_mode.on = true;
         assert_ne!(nudge_req(&mut s, &c, 3, 1, 0, now).status, 200);
         assert!(s.remote.align.is_none());
+        assert!(!s.gate.is_armed());
+    }
+
+    /// T-492: the test pattern turned off during a session is said on the
+    /// main screen and on the phone; the session stays open.
+    #[test]
+    fn a_pattern_turned_off_during_a_session_is_said_on_both_screens() {
+        let mut s = shared();
+        let (c, now) = aligning(&mut s, "T");
+        let phone = |s: &mut Shared| serde_json::from_str::<Value>(&handle(s, "GET", ALIGN_PATH, Some(&c), "x", b"", now).body).unwrap();
+        assert_eq!(align_view(&s)["pattern_off"], false, "the session shows the Grid");
+        assert!(align_view(&s)["pattern_note"].is_null());
+        assert!(phone(&mut s)["pattern_note"].is_null());
+        crate::testpattern::select(&mut s, None);
+        assert_eq!(align_view(&s)["pattern_off"], true);
+        assert_eq!(align_view(&s)["pattern_note"], PATTERN_OFF_FR);
+        assert_eq!(phone(&mut s)["pattern_note"], PATTERN_OFF_PHONE_FR);
+        assert!(s.remote.align.is_some(), "the session stays open");
+        // Another remote, no session of its own: nothing to say.
+        let other = paired(&mut s, "U");
+        let v: Value = serde_json::from_str(&handle(&mut s, "GET", ALIGN_PATH, Some(&other), "x", b"", now).body).unwrap();
+        assert!(v["pattern_note"].is_null());
+        crate::testpattern::select(&mut s, Some(crate::testpattern::TestPattern::Grid));
+        assert!(align_view(&s)["pattern_note"].is_null());
+        assert!(phone(&mut s)["pattern_note"].is_null());
+        assert!(!s.gate.is_armed());
+    }
+
+    /// T-492: a session closed because its phone went quiet leaves a note
+    /// for the main screen, until another session opens; the operator's own
+    /// endings leave none.
+    #[test]
+    fn a_session_closed_for_a_quiet_phone_leaves_a_note_on_the_main_screen() {
+        let mut s = shared();
+        let (_c, t0) = aligning(&mut s, "T");
+        assert!(align_note(&s).is_null());
+        align_sync(&mut s, t0 + ALIGN_TIMEOUT + Duration::from_secs(1));
+        assert!(s.remote.align.is_none());
+        let note = align_note(&s);
+        let text = note.as_str().unwrap();
+        assert!(text.contains("« T » ne répond plus depuis 10 s"), "{text}");
+        assert!(text.contains("Rien n'a été enregistré"), "{text}");
+        // A new session clears it; a rejection leaves none.
+        align_open(&mut s, 1, "T", Instant::now()).unwrap();
+        assert!(align_note(&s).is_null());
+        align_end(&mut s, "rejected");
+        assert!(align_note(&s).is_null());
         assert!(!s.gate.is_armed());
     }
 

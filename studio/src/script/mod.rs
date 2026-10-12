@@ -62,14 +62,15 @@ pub const TOO_SOON_FR: &str = "relancé trop vite (moins de 250 ms après le lan
 /// One engine frame (60 fps): the tolerance of the beat triggers' gap.
 const FRAME_S: f64 = 1.0 / 60.0;
 /// The shortest gap between two *À chaque temps* starts of one script: a
-/// beat at `tempo::MAX_BPM`, less a frame (a beat is seen on the frame
-/// after it), so the fastest tempo still fires every beat. *À chaque
+/// beat at `tempo::MAX_BPM`, less two frames (a beat is seen on the frame
+/// after it, and frames are not regular), so the fastest tempo still
+/// fires every beat; a loop still starts at most ~5 times a second. *À chaque
 /// mesure* waits that many times the beats of a bar. `MIN_RUN_INTERVAL_S`
 /// is longer than a beat at 250 BPM, so the triggers have this gate
 /// instead; a script moving the tempo's phase meets it (as well as the
 /// jump being ignored, `PHASE_JUMP_BEATS`).
 pub fn min_trigger_gap_s(trigger: ScriptTrigger, beats_per_bar: u8) -> f64 {
-    let beat = 60.0 / crate::tempo::MAX_BPM - FRAME_S;
+    let beat = 60.0 / crate::tempo::MAX_BPM - 2.0 * FRAME_S;
     match trigger {
         ScriptTrigger::EveryBar => beat * beats_per_bar.max(1) as f64,
         _ => beat,
@@ -1660,6 +1661,39 @@ mod tests {
         assert_eq!(starts[0].len() as f64, beats, "{:?}", starts[0]);
         let bars = (s.tempo.beat_at(t1) / 4.0).floor() - (s.tempo.beat_at(t0) / 4.0).floor();
         assert_eq!(starts[1].len() as f64, bars, "{:?}", starts[1]);
+        assert_eq!(console_has(&s, 1, "trop proche"), 0);
+    }
+
+    /// T-492: irregular frames (10 to 30 ms) at `MAX_BPM` still fire every
+    /// beat and every bar: the gap leaves two frames of slack.
+    #[test]
+    fn every_beat_fires_at_the_fastest_tempo_with_irregular_frames() {
+        let mut s = with(vec![sc(1, "Temps", "journal(1)", ScriptTrigger::EveryBeat), sc(2, "Mesure", "journal(1)", ScriptTrigger::EveryBar)]);
+        s.tempo.set_bpm_manual(crate::tempo::MAX_BPM, s.now_s());
+        tick(&mut s);
+        let (t0, mut at) = (s.now_s(), s.sim_now.unwrap_or(s.epoch));
+        let mut seen = [None, None];
+        let mut starts = [0usize, 0];
+        let mut x: u32 = 2024;
+        for _ in 0..3000 {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            at += std::time::Duration::from_micros(10_000 + ((x >> 8) % 20_001) as u64);
+            s.sim_now = Some(at);
+            tick(&mut s);
+            for (i, id) in [1u32, 2].into_iter().enumerate() {
+                let last = s.scripts.status.get(&id).and_then(|st| st.last_start_s);
+                if last != seen[i] {
+                    starts[i] += 1;
+                    seen[i] = last;
+                }
+            }
+        }
+        let t1 = s.now_s();
+        let beats = s.tempo.beat_at(t1).floor() - s.tempo.beat_at(t0).floor();
+        let bars = (s.tempo.beat_at(t1) / 4.0).floor() - (s.tempo.beat_at(t0) / 4.0).floor();
+        assert!(beats > 200.0, "{beats}");
+        assert_eq!(starts[0] as f64, beats);
+        assert_eq!(starts[1] as f64, bars);
         assert_eq!(console_has(&s, 1, "trop proche"), 0);
     }
 

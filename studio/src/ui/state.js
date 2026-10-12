@@ -33,7 +33,7 @@ import { showFxGrid, showLfos, showRoutes, showTriggers } from './modulators.js'
 import { frNumber, scanAlertFps, showArtnetStatus, showAudienceMode, showCitpLive, showDmxOutLive,
   showFixedRateStatus } from './outputs.js';
 import { checklist, reloadChecklist, showProfilePill } from './venue.js';
-import { showPhoneAlign, showStandbyBar } from './apc40.js';
+import { showPhoneAlign, showPhoneAlignNote, showStandbyBar } from './apc40.js';
 import { figFrameInfo } from './figures.js';
 
 // ---------- pushed state and binary frames (T-411) ----------
@@ -300,6 +300,7 @@ function applyState(f, at, pushed) {
   showTestPattern(f.test_pattern);
   showZoneTrace(f.zone_trace, f.armed);
   if (f.align !== undefined) showPhoneAlign(f.align);
+  if (f.align_note !== undefined) showPhoneAlignNote(f.align_note);
   showShowMode(f.lock);
   // Follow page changes made elsewhere (MIDI controller, API) - only
   // when the server's value changes, so a tab click that the server

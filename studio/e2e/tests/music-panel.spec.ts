@@ -109,6 +109,9 @@ test('« Son du Mac »: greyed with its reason, a help page on BlackHole, and ch
   await expect(sys).toBeDisabled();
   await expect(page.locator('#musSysNote')).toContainText('Son du Mac indisponible');
   await expect(page.locator('#musSysNote')).toContainText('BlackHole');
+  // Announced to screen readers (T-492).
+  await expect(page.locator('#musSysNote')).toHaveAttribute('aria-live', 'polite');
+  await expect(page.locator('#musSysNote')).toHaveAttribute('role', 'status');
   // The API refuses it too.
   expect(await studio.post('/api/audio/config', { source: 'system' })).toBe(400);
 

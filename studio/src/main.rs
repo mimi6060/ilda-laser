@@ -351,17 +351,19 @@ fn resolve_app_mode(cli: &mut Cli, explicit_data_dir: bool, explicit_port: bool,
 /// pass a `-psn_…` process serial number: dropped.
 fn launch_args(args: Vec<std::ffi::OsString>, exe: Option<&std::path::Path>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<_> = args.into_iter().enumerate().filter(|(i, a)| *i == 0 || !a.to_string_lossy().starts_with("-psn_")).map(|(_, a)| a).collect();
-    let in_bundle = exe.is_some_and(|exe| {
-        let mut up = exe.ancestors().skip(1);
-        let (macos, contents, bundle) = (up.next(), up.next(), up.next());
-        macos.and_then(|p| p.file_name()) == Some("MacOS".as_ref())
-            && contents.and_then(|p| p.file_name()) == Some("Contents".as_ref())
-            && bundle.and_then(|p| p.extension()) == Some("app".as_ref())
-    });
-    if in_bundle && args.len() <= 1 {
+    if exe.is_some_and(in_app_bundle) && args.len() <= 1 {
         args.push("--app".into());
     }
     args
+}
+
+/// Whether `exe` is the binary of a `.app` bundle (`X.app/Contents/MacOS/x`).
+pub fn in_app_bundle(exe: &std::path::Path) -> bool {
+    let mut up = exe.ancestors().skip(1);
+    let (macos, contents, bundle) = (up.next(), up.next(), up.next());
+    macos.and_then(|p| p.file_name()) == Some("MacOS".as_ref())
+        && contents.and_then(|p| p.file_name()) == Some("Contents".as_ref())
+        && bundle.and_then(|p| p.extension()) == Some("app".as_ref())
 }
 
 /// Parses the command line, then applies `--app` (T-413).
@@ -712,7 +714,7 @@ impl Shared {
             return Err(vec!["L'armement depuis le MIDI est désactivé".into()]);
         }
         // A backup unreachable needs a confirmation MIDI cannot give.
-        standby::arm_check(self, false, interlock::ArmSource::Midi).map_err(|e| vec![e])?;
+        standby::arm_check(self, false).map_err(|e| vec![e])?;
         self.sync_data_warnings();
         self.sync_safety(Instant::now());
         self.sync_audience();

@@ -889,7 +889,17 @@ function showPhoneAlign(a) {
   $('paTitle').textContent = `Alignement en cours — zone « ${a.zone_name} » — télécommande « ${a.remote} » : ${a.changed ? 'modification proposée par la télécommande « ' + a.remote + ' »' : 'aucun déplacement pour l\'instant'}`;
   $('paCorners').textContent = a.corners.map((n, i) => `${n} ${a.draft[i].map(v => v.toFixed(3)).join(' ; ')}`).join('   ');
   $('paApply').disabled = !a.changed;
+  // No test pattern on: the laser no longer draws the draft (T-492).
+  const note = a.pattern_note || '';
+  $('paPattern').hidden = !note;
+  if ($('paPattern').textContent !== note) $('paPattern').textContent = note;
   paDraw(a);
+}
+// Why the last session closed by itself (its phone went quiet), until
+// another one opens (T-492).
+function showPhoneAlignNote(n) {
+  const t = n || '';
+  if ($('paNote').textContent !== t) $('paNote').textContent = t;
 }
 async function paPost(path, body) {
   try {
@@ -1028,4 +1038,4 @@ $('midiMenuOsc').onclick = async () => {
 };
 $('midiBlackoutLost').onchange = e => post('/api/midi/safety', { blackout_on_disconnect: e.target.checked });
 
-export { closeVapcMenu, ext, setGate, showPhoneAlign, showStandbyBar };
+export { closeVapcMenu, ext, setGate, showPhoneAlign, showPhoneAlignNote, showStandbyBar };

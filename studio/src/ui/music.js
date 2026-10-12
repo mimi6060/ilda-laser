@@ -236,9 +236,12 @@ function showMusic() {
   $('musSysRow').hidden = pick !== 'native';
   const sysPicked = $('musDevice').value === MUS_SYSTEM;
   $('musSysNote').hidden = pick !== 'native' || !(sysPicked || (musSys && !musSys.available));
-  $('musSysNote').textContent = sysPicked
+  const sysNote = sysPicked
     ? 'Son du Mac : le studio écoute ce que le Mac joue. macOS demande l\'autorisation d\'enregistrer l\'audio du système au premier « Écouter ».'
     : musSys && !musSys.available ? `Son du Mac indisponible : ${musSys.reason}.` : '';
+  // Announced (aria-live): written only when it changes, so a redraw
+  // does not repeat it to a screen reader.
+  if ($('musSysNote').textContent !== sysNote) $('musSysNote').textContent = sysNote;
   $('musNativeSettings').hidden = pick === 'browser';
   $('musBrowserSettings').hidden = pick !== 'browser';
   const listening = pick === 'browser' ? !!audio : pick === 'native' && musNat(musServerSrc);
