@@ -48,4 +48,9 @@ test('the checklist ticks « Mac sur secteur » by itself on mains power', async
   expect((await item()).done).toBe(false);
   expect(await power('ac', 50, 'nominal')).toBe(200);
   await expect.poll(async () => (await item()).done).toBe(true);
+  // « … et ventilé »: overheating takes the tick back.
+  expect(await power('ac', 50, 'serious')).toBe(200);
+  await expect.poll(async () => (await item()).done).toBe(false);
+  expect(await power('ac', 50, 'nominal')).toBe(200);
+  await expect.poll(async () => (await item()).done).toBe(true);
 });

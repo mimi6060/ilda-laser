@@ -81,8 +81,8 @@ pub fn shownet_items() -> Vec<ChecklistItem> {
     .collect()
 }
 
-/// Id of « Mac sur secteur » (T-495), ticked by itself when the power
-/// source is known to be the mains.
+/// Id of « Mac sur secteur et ventilé » (T-495), ticked by itself when the
+/// Mac is known to be on mains power with a nominal or fair thermal state.
 pub const MAC_AC_ITEM: &str = "mac_ac";
 /// The value an automatic tick carries.
 const AUTO_VALUE: &str = "vérifié automatiquement";
@@ -208,8 +208,9 @@ pub struct Checklist {
     load_error: Option<String>,
     /// The kind of the connected output, for `only_for` (T-472).
     output: Option<OutputKind>,
-    /// This Mac is on mains power (T-495); None: not known.
-    mac_on_ac: Option<bool>,
+    /// This Mac is on mains power and not overheating (T-495), as last
+    /// applied to the run; None: not known (or a new run).
+    mac_ready: Option<bool>,
 }
 
 impl Checklist {
@@ -225,11 +226,11 @@ impl Checklist {
             },
             crate::datafile::Loaded::Quarantined(w) => (ChecklistConfig::default(), Some(format!("{} Liste par défaut.", w.message_fr()))),
         };
-        Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error, output: None, mac_on_ac: None }
+        Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error, output: None, mac_ready: None }
     }
 
     pub fn in_memory(enforced: bool) -> Self {
-        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None, output: None, mac_on_ac: None }
+        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None, output: None, mac_ready: None }
     }
 
     /// A real output is configured: the list gates arming.
@@ -275,19 +276,20 @@ impl Checklist {
         false
     }
 
-    /// What the power watch knows of the mains (T-495). Known on mains:
-    /// « Mac sur secteur » is ticked by itself; known on battery: an
-    /// automatic tick is taken back. Only while the run is open; the
-    /// operator can still tick it by hand. Never arms.
-    pub fn set_mac_on_ac(&mut self, on_ac: Option<bool>) {
-        if self.mac_on_ac == on_ac {
+    /// What the power watch knows (T-495, `PowerStatus::ready_for_show`).
+    /// On mains and not overheating: « Mac sur secteur et ventilé » is
+    /// ticked by itself; on battery or overheating: an automatic tick is
+    /// taken back. Only while the run is open; the operator can still tick
+    /// it by hand. Never arms.
+    pub fn set_mac_ready(&mut self, ready: Option<bool>) {
+        if self.mac_ready == ready {
             return;
         }
-        self.mac_on_ac = on_ac;
+        self.mac_ready = ready;
         if self.is_complete() || !self.visible_items().any(|i| i.id == MAC_AC_ITEM) {
             return;
         }
-        match on_ac {
+        match ready {
             Some(true) if self.done(MAC_AC_ITEM).is_none() => self.run.done.push((MAC_AC_ITEM.into(), SystemTime::now(), Some(AUTO_VALUE.into()))),
             Some(false) => self.run.done.retain(|(id, _, v)| !(id == MAC_AC_ITEM && v.as_deref() == Some(AUTO_VALUE))),
             _ => {}
@@ -405,6 +407,8 @@ impl Checklist {
         let was_complete = self.is_complete();
         let operator = std::mem::take(&mut self.run.operator);
         self.run = ChecklistRun { operator, ..Default::default() };
+        // A new run: the power watch's state is applied to it again.
+        self.mac_ready = None;
         was_complete
     }
 
@@ -452,7 +456,7 @@ impl Checklist {
             "load_error": self.load_error,
             "output": self.output,
             "hw_stop_ok": self.hw_stop_ok(),
-            "mac_on_ac": self.mac_on_ac,
+            "mac_ready": self.mac_ready,
         })
     }
 }
@@ -674,26 +678,60 @@ mod tests {
     #[test]
     fn the_mains_item_ticks_itself_when_known() {
         let mut c = Checklist::in_memory(true);
-        c.set_mac_on_ac(None);
+        c.set_mac_ready(None);
         assert!(!c.is_done(MAC_AC_ITEM), "not known: by hand");
-        c.set_mac_on_ac(Some(true));
+        c.set_mac_ready(Some(true));
         assert!(c.is_done(MAC_AC_ITEM));
-        assert_eq!(c.view()["mac_on_ac"], true);
+        assert_eq!(c.view()["mac_ready"], true);
         let item = c.view()["items"].as_array().unwrap().iter().find(|i| i["id"] == MAC_AC_ITEM).unwrap().clone();
         assert_eq!(item["value"], AUTO_VALUE);
-        c.set_mac_on_ac(Some(false));
+        c.set_mac_ready(Some(false));
         assert!(!c.is_done(MAC_AC_ITEM), "unplugged: taken back");
         c.check(MAC_AC_ITEM, true, None).unwrap();
-        c.set_mac_on_ac(None);
-        c.set_mac_on_ac(Some(false));
+        c.set_mac_ready(None);
+        c.set_mac_ready(Some(false));
         assert!(c.is_done(MAC_AC_ITEM), "the operator's own tick stays");
         // A completed run is never changed.
         let mut c = Checklist::in_memory(true);
         c.set_operator("Op").unwrap();
         tick_all(&mut c);
         c.complete().unwrap();
-        c.set_mac_on_ac(Some(false));
+        c.set_mac_ready(Some(false));
         assert!(c.is_done(MAC_AC_ITEM) && c.is_complete());
+    }
+
+    /// Review of T-495: a new run (« Recommencer », a list change) gets the
+    /// automatic tick again, though the Mac's state did not change.
+    #[test]
+    fn a_new_run_is_ticked_again() {
+        let mut c = Checklist::in_memory(true);
+        c.set_mac_ready(Some(true));
+        assert!(c.is_done(MAC_AC_ITEM));
+        c.restart();
+        assert!(!c.is_done(MAC_AC_ITEM));
+        c.set_mac_ready(Some(true));
+        assert!(c.is_done(MAC_AC_ITEM), "after « Recommencer »");
+        let cfg = c.config().clone();
+        c.set_config(cfg, false).unwrap();
+        assert!(!c.is_done(MAC_AC_ITEM));
+        c.set_mac_ready(Some(true));
+        assert!(c.is_done(MAC_AC_ITEM), "after a list change");
+    }
+
+    /// Review of T-495: « … et ventilé » follows the heat too, both ways.
+    #[test]
+    fn overheating_takes_the_tick_back_and_cooling_gives_it() {
+        use crate::power_watch::{PowerSource, PowerStatus, Thermal};
+        let st = |thermal| PowerStatus { source: PowerSource::Ac, battery_pct: None, thermal };
+        let mut c = Checklist::in_memory(true);
+        c.set_mac_ready(st(Thermal::Serious).ready_for_show());
+        assert!(!c.is_done(MAC_AC_ITEM), "on mains but hot");
+        c.set_mac_ready(st(Thermal::Fair).ready_for_show());
+        assert!(c.is_done(MAC_AC_ITEM), "cooled down");
+        c.set_mac_ready(st(Thermal::Critical).ready_for_show());
+        assert!(!c.is_done(MAC_AC_ITEM), "overheating: taken back");
+        c.set_mac_ready(st(Thermal::Nominal).ready_for_show());
+        assert!(c.is_done(MAC_AC_ITEM));
     }
 
     #[test]

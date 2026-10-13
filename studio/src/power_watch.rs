@@ -99,11 +99,18 @@ impl PowerStatus {
         }
     }
 
-    /// The Mac is known to be on mains power (None: not known).
-    pub fn on_ac(&self) -> Option<bool> {
+    /// « Mac sur secteur et ventilé » (checklist): on mains power with a
+    /// nominal or fair thermal state. Some(false) as soon as one side is
+    /// known to be wrong (battery, serious or critical heat); None while
+    /// it can't be told.
+    pub fn ready_for_show(&self) -> Option<bool> {
+        let hot = matches!(self.thermal, Thermal::Serious | Thermal::Critical);
+        let cool = matches!(self.thermal, Thermal::Nominal | Thermal::Fair);
         match self.source {
-            PowerSource::Unknown => None,
-            s => Some(s == PowerSource::Ac),
+            PowerSource::Battery => Some(false),
+            _ if hot => Some(false),
+            PowerSource::Ac if cool => Some(true),
+            _ => None,
         }
     }
 }
@@ -505,9 +512,15 @@ mod tests {
         assert!(classify(&bat(5), &unknown).is_empty(), "a failed reading is not a change");
         assert!(classify(&heat(Thermal::Critical), &unknown).is_empty());
         assert!(classify(&unknown, &ac()).is_empty(), "on mains: nothing to say");
-        assert_eq!(unknown.on_ac(), None);
-        assert_eq!(ac().on_ac(), Some(true));
-        assert_eq!(bat(50).on_ac(), Some(false));
+        assert_eq!(unknown.ready_for_show(), None);
+        assert_eq!(PowerStatus { thermal: Thermal::Unknown, ..ac() }.ready_for_show(), None, "heat not known");
+        assert_eq!(PowerStatus { source: PowerSource::Unknown, ..ac() }.ready_for_show(), None, "mains not known");
+        assert_eq!(ac().ready_for_show(), Some(true));
+        assert_eq!(heat(Thermal::Fair).ready_for_show(), Some(true));
+        assert_eq!(heat(Thermal::Serious).ready_for_show(), Some(false));
+        assert_eq!(heat(Thermal::Critical).ready_for_show(), Some(false));
+        assert_eq!(bat(50).ready_for_show(), Some(false));
+        assert_eq!(PowerStatus { source: PowerSource::Unknown, thermal: Thermal::Critical, battery_pct: None }.ready_for_show(), Some(false));
         #[cfg(not(target_os = "macos"))]
         assert_eq!(read_system(), unknown);
     }

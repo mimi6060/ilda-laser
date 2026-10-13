@@ -809,7 +809,7 @@ impl Shared {
             self.notices.resolve(n.key);
             self.notices.push(n.level, power_watch::SOURCE, n.text, (!n.resolved).then_some(n.key));
         }
-        self.checklist.set_mac_on_ac(self.power_watch.status().on_ac());
+        self.checklist.set_mac_ready(self.power_watch.status().ready_for_show());
     }
 
     /// The operator has seen the warning of `file` (or of every file).
