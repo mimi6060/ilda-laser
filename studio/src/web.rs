@@ -5346,8 +5346,11 @@ struct AudioOutBody {
 /// connects, never arms.
 fn set_audio_out(b: AudioOutBody, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
     let s = shared.lock().unwrap();
-    if s.output_mgr.selected().is_some_and(|id| id.starts_with(crate::audio_out::ID_PREFIX)) {
-        return text(409, "Déconnectez la sortie interface audio avant de changer ses réglages");
+    // Any slot driving it (the main output or a venue projector): its
+    // values are fixed when it opens, a reconnection would change them.
+    let new_id = crate::audio_out::AudioOutConfig { device: b.config.device.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(String::from), ..Default::default() }.id();
+    if [s.audio_out.get().id(), new_id].into_iter().flatten().any(|id| s.output_mgr.driver_of(&id).is_some()) {
+        return text(409, "Déconnectez la sortie interface audio (sortie principale ou projecteur) avant de changer ses réglages");
     }
     let (input, _) = s.audio_in.config();
     let status = s.audio_in.status();
@@ -9878,6 +9881,12 @@ mod tests {
         assert_eq!(t.request("POST", "/api/outputs/select", &format!(r#"{{"id":"{id}"}}"#)).0, 200);
         assert_eq!(t.request("POST", "/api/outputs/audio", &body("")).0, 409);
         assert_eq!(t.request("POST", "/api/outputs/select", r#"{"id":null}"#).0, 200);
+        // A venue projector driving it locks it too (review fix 5).
+        let mgr = Arc::clone(&t.shared.lock().unwrap().output_mgr);
+        mgr.select_projector("p2", Some(id.clone()), ArmSource::Ui);
+        let (code, msg) = t.request("POST", "/api/outputs/audio", &body(""));
+        assert_eq!(code, 409, "{msg}");
+        mgr.select_projector("p2", None, ArmSource::Ui);
         assert_eq!(t.request("POST", "/api/outputs/audio", &body("")).0, 200, "back to oscilloscope: no confirmation");
         assert_eq!(get()["mode"], "scope");
         // And an output can't take the analysis' input.

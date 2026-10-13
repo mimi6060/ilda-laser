@@ -278,6 +278,26 @@ pub fn to_sample(p: &Point, mode: Mode) -> Sample {
     Sample { x: f(p.x, -1.0), y: f(p.y, -1.0), r: c(p.r), g: c(p.g), b: c(p.b) }
 }
 
+/// Laser mode needs one sample per point at least: below pps the player
+/// would step over points, blanking and dwell points included, and could
+/// light a travel. The oscilloscope may step.
+pub fn check_rate(mode: Mode, rate: u32, pps: u32) -> Result<(), String> {
+    if mode == Mode::Laser && rate < pps {
+        return Err(format!("l'interface ne monte qu'à {rate} Hz : baissez les points/s à {rate} ou moins pour le mode Laser"));
+    }
+    Ok(())
+}
+
+/// While the stream runs (polled every 250 ms): the interface must still
+/// be there and must not have become the Mac's sound output (then music
+/// and alerts would mix into X/Y, and into R, G, B in laser mode).
+pub fn running_fault(want: &str, present: bool, default_output: Option<&str>) -> Option<String> {
+    if !present {
+        return Some(format!("interface audio « {want} » débranchée"));
+    }
+    (default_output == Some(want)).then(|| format!("« {want} » est devenue la sortie son du Mac : sortie coupée (choisissez une autre sortie son dans Réglages système)"))
+}
+
 /// What the engine and the audio callback share.
 #[derive(Default)]
 pub struct Feed {
@@ -295,6 +315,9 @@ pub struct Feed {
 struct Slot {
     frame: Vec<Sample>,
     fresh: bool,
+    /// `Feed::cut` when the engine sent it: a frame from before a cut
+    /// (blank, disarm, kill switch) is never played.
+    gen: u64,
 }
 
 impl Feed {
@@ -381,19 +404,26 @@ impl Player {
 
     /// Swaps in the engine's newest frame, if there is one and the slot
     /// is free right now.
+    /// A frame sent before the last cut is dropped (cleared, kept
+    /// allocated), never played.
     fn take_fresh(&mut self) {
         if let Ok(mut slot) = self.feed.slot.try_lock() {
-            if slot.fresh {
+            if slot.fresh && slot.gen == self.cut {
                 std::mem::swap(&mut slot.frame, &mut self.current);
-                slot.fresh = false;
+            } else if slot.fresh {
+                slot.frame.clear();
             }
+            slot.fresh = false;
         }
     }
 
-    /// Back to the centre, dark: the next frame starts with a travel.
+    /// Back to the centre, dark, with nothing to replay: the frame played
+    /// before is forgotten (cleared, no deallocation), so only a frame the
+    /// engine sends after this can light anything.
     fn reset(&mut self) {
         self.travel = None;
-        self.cursor = self.current.len() as f64;
+        self.current.clear();
+        self.cursor = 0.0;
         self.last = (0.0, 0.0);
     }
 
@@ -401,7 +431,6 @@ impl Player {
         let cut = self.feed.cut.load(Ordering::Acquire);
         if cut != self.cut {
             self.cut = cut;
-            self.take_fresh();
             self.reset();
             return Sample::default();
         }
@@ -445,6 +474,21 @@ impl Player {
         self.cursor += self.step;
         self.last = (s.x, s.y);
         s
+    }
+
+    /// Fills the device's buffer through `buf` (sized once, never grown):
+    /// whole frames of `channels` samples at a time, so a buffer bigger
+    /// than `buf` never shifts X/Y onto other channels.
+    pub fn render_into<T: Copy>(&mut self, data: &mut [T], buf: &mut [f32], convert: impl Fn(f32) -> T) {
+        let per = (buf.len() / self.channels).max(1) * self.channels;
+        debug_assert!(per <= buf.len(), "buffer smaller than one frame");
+        for chunk in data.chunks_mut(per) {
+            let tmp = &mut buf[..chunk.len()];
+            self.render(tmp);
+            for (o, v) in chunk.iter_mut().zip(tmp.iter()) {
+                *o = convert(*v);
+            }
+        }
     }
 
     /// Fills one interleaved buffer; channels not assigned stay at 0.
@@ -510,6 +554,7 @@ impl AudioOutput {
         if map.needed(mode) > channels {
             bail!("« {device} » n'a que {channels} canaux (il en faut {})", map.needed(mode));
         }
+        check_rate(mode, FAKE_RATE, pps).map_err(anyhow::Error::msg)?;
         Ok(Self { name: output_name(device, mode), device: device.into(), feed: Arc::default(), mode, map, pps, rate: FAKE_RATE, channels, stop: Arc::default(), thread: None })
     }
 
@@ -536,10 +581,14 @@ impl Output for AudioOutput {
         Ok(())
     }
     fn send(&mut self, points: &[Point]) {
+        // Read first: a cut that lands while the frame is copied makes
+        // it stale, never the other way round.
+        let gen = self.feed.cut.load(Ordering::SeqCst);
         let mut slot = lock(&self.feed.slot);
         slot.frame.clear();
         slot.frame.extend(points.iter().map(|p| to_sample(p, self.mode)));
         slot.fresh = true;
+        slot.gen = gen;
     }
     fn blank_now(&mut self) -> Result<()> {
         {
@@ -638,14 +687,9 @@ mod real {
         device.build_output_stream::<T, _, _>(
             config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                // Sized once; a bigger buffer than expected goes out in parts.
-                for chunk in data.chunks_mut(buf.len()) {
-                    let tmp = &mut buf[..chunk.len()];
-                    player.render(tmp);
-                    for (o, v) in chunk.iter_mut().zip(tmp.iter()) {
-                        *o = T::from_sample(*v);
-                    }
-                }
+                // Sized once; a bigger buffer than expected goes out in
+                // parts of whole frames.
+                player.render_into(data, &mut buf, T::from_sample);
             },
             move |e: cpal::Error| match e.kind() {
                 cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied => {}
@@ -671,9 +715,13 @@ mod real {
         };
         while !stop.load(Ordering::SeqCst) {
             std::thread::park_timeout(std::time::Duration::from_millis(250));
-            // A device the system removed without an error callback.
-            if !cpal::default_host().output_devices().map(|mut l| l.any(|d| name(&d).as_deref() == Some(want))).unwrap_or(true) {
-                feed.fail(format!("interface audio « {want} » débranchée"));
+            // A device the system removed without an error callback, or
+            // made the Mac's sound output since it was opened.
+            let host = cpal::default_host();
+            let present = host.output_devices().map(|mut l| l.any(|d| name(&d).as_deref() == Some(want))).unwrap_or(true);
+            let default = host.default_output_device().and_then(|d| name(&d));
+            if let Some(why) = super::running_fault(want, present, default.as_deref()) {
+                feed.fail(why);
             }
         }
         drop(stream);
@@ -689,6 +737,7 @@ mod real {
         let mut config = supported.config();
         config.buffer_size = cpal::BufferSize::Default;
         let (rate, channels) = (config.sample_rate, config.channels);
+        super::check_rate(mode, rate, pps)?;
         let player = Player::new(Arc::clone(feed), map, mode, pps, rate, channels);
         let label = want.to_string();
         let built = match supported.sample_format() {
@@ -782,6 +831,8 @@ mod tests {
         (o.kill_switch().unwrap())();
         assert!(silent(&play(&mut p, 2000)), "kill switch");
         o.set_armed(true).unwrap();
+        assert!(silent(&play(&mut p, 500)), "re-armed: the frame from before the kill is gone");
+        o.send(&lit());
         assert!(play(&mut p, 2000).iter().any(|f| f[2] > 0.0));
         o.set_armed(false).unwrap();
         assert!(silent(&play(&mut p, 2000)), "disarm");
@@ -864,6 +915,73 @@ mod tests {
         assert_eq!(store.devices().len(), FAKE_DEVICES.len());
         assert!(store.open("audio:Built-in Output", 30_000).is_err(), "unknown to the fake list");
         assert!(store.open(&format!("audio:{}", FAKE_DEVICES[0].0), 30_000).is_ok());
+    }
+
+    /// Review fix 1: a device buffer bigger than the scratch buffer, with a
+    /// channel count that doesn't divide it, goes out in whole frames.
+    #[test]
+    fn uneven_device_buffers_keep_every_channel_in_place() {
+        let frame: Vec<Point> = (0..300).map(|i| Point::lit(-0.8 + i as f32 * 0.005, 0.3, 0.2, 0.4, 0.6)).collect();
+        let (mut a, mut b) = (AudioOutput::fake("a", ChannelMap::default(), Mode::Laser, 48_000, 6).unwrap(), AudioOutput::fake("b", ChannelMap::default(), Mode::Laser, 48_000, 6).unwrap());
+        let (mut pa, mut pb) = (a.player(), b.player());
+        for o in [&mut a, &mut b] {
+            o.set_armed(true).unwrap();
+            o.send(&frame);
+        }
+        let mut whole = vec![0.0f32; 6 * 700];
+        pa.render(&mut whole);
+        let mut parts = vec![0.0f32; 6 * 700];
+        let mut scratch = vec![0.0f32; 64]; // not a multiple of 6
+        pb.render_into(&mut parts, &mut scratch, |v| v);
+        assert_eq!(whole, parts);
+        assert!(parts.chunks(6).any(|f| f[1] == 0.3 && f[2] == 0.2 && f[3] == 0.4 && f[4] == 0.6 && f[5] == 0.0));
+    }
+
+    /// Review fix 2: after a kill (or blank, disarm) the frame played before
+    /// is never replayed, even when the slot is busy at that moment and a
+    /// frame sent before the cut is still waiting in it.
+    #[test]
+    fn nothing_from_before_a_cut_is_ever_replayed() {
+        let mut o = out(Mode::Laser);
+        let mut p = o.player();
+        o.set_armed(true).unwrap();
+        o.send(&lit());
+        assert!(play(&mut p, 500).iter().any(|f| f[2] > 0.0));
+        o.send(&lit()); // waiting in the slot
+        let guard = o.feed.slot.lock().unwrap();
+        (o.kill_switch().unwrap())();
+        assert!(silent(&play(&mut p, 500)), "slot busy: still dark");
+        drop(guard);
+        o.set_armed(true).unwrap();
+        assert!(silent(&play(&mut p, 3000)), "re-armed without a new frame: nothing old comes back");
+        o.send(&lit());
+        assert!(play(&mut p, 2000).iter().any(|f| f[2] > 0.0), "a frame sent after the cut plays");
+        // Blank with the slot busy at the cut.
+        let guard = o.feed.slot.lock().unwrap();
+        o.feed.cut.fetch_add(1, Ordering::SeqCst);
+        assert!(silent(&play(&mut p, 500)));
+        drop(guard);
+        assert!(silent(&play(&mut p, 3000)), "blanked: dark until the engine sends again");
+    }
+
+    /// Review fix 3: becoming the Mac's sound output while running is a fault.
+    #[test]
+    fn becoming_the_mac_output_or_vanishing_is_a_fault() {
+        assert!(running_fault("MOTU M4", true, Some("Haut-parleurs MacBook Pro")).is_none());
+        assert!(running_fault("MOTU M4", true, None).is_none());
+        assert!(running_fault("MOTU M4", true, Some("MOTU M4")).unwrap().contains("sortie son du Mac"));
+        assert!(running_fault("MOTU M4", false, None).unwrap().contains("débranchée"));
+    }
+
+    /// Review fix 4: laser mode never steps over points.
+    #[test]
+    fn laser_mode_needs_a_rate_of_at_least_pps() {
+        assert!(check_rate(Mode::Laser, 48_000, 30_000).is_ok());
+        assert!(check_rate(Mode::Laser, 48_000, 48_000).is_ok());
+        assert!(check_rate(Mode::Laser, 48_000, 60_000).unwrap_err().contains("48000"));
+        assert!(check_rate(Mode::Scope, 48_000, 96_000).is_ok());
+        assert!(AudioOutput::fake("s", ChannelMap::default(), Mode::Laser, 96_000, 8).is_err());
+        assert!(AudioOutput::fake("s", ChannelMap::default(), Mode::Scope, 96_000, 8).is_ok());
     }
 
     #[test]
