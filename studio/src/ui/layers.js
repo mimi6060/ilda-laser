@@ -33,7 +33,7 @@ function buildLayers() {
       <div class="btns"><button class="mute" data-control="layer.${n}.mute" title="layer.${n}.mute">Muet</button><button class="solo" data-control="layer.${n}.solo" title="layer.${n}.solo">Solo</button></div>
       <button class="clear btn btn--small btn--block" data-control="layer.${n}.clear" title="layer.${n}.clear : arrête les cues du calque">Vider</button>
       <select class="spd u-fs-small" aria-label="Vitesse du calque ${n}" title="Groupe de vitesse du calque ${n} (LIVE › Direct › Vitesses) : ses cues sans groupe propre et ses réglages">
-        <option value="0">Vitesse : tempo</option><option value="1">Vitesse : A</option><option value="2">Vitesse : B</option><option value="3">Vitesse : C</option><option value="4">Vitesse : D</option>
+        <option value="0">Tempo</option><option value="1">Vit. A</option><option value="2">Vit. B</option><option value="3">Vit. C</option><option value="4">Vit. D</option>
       </select>`;
     const range = d.querySelector('input');
     range.addEventListener('input', () => {

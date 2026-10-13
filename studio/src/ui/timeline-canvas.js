@@ -11,7 +11,7 @@
 // evaluation order is the page order the script had.
 import { tlAddMarker, tlDmxRow, tlMarkRow, tlNoteRow, tlRefRow, tlScanRow, tlSelected, tlSpreadRow } from './timeline-markers.js';
 import { $, api, post } from './core.js';
-import { activeWs } from './workspaces.js';
+import { LOCKED_FR, activeWs, flash, showMode } from './workspaces.js';
 import { fmtTime } from './shows.js';
 import { TL, TL_DMX_COLOR, TL_DRAG_PX, TL_EMPTY_TRACKS, TL_ENV, TL_LANE, TL_LAYER_COLORS, TL_MARK,
   TL_MIN_LEN, TL_RULER, TL_TOP, TL_WAVE, tlBarAt, tlBusAdd, tlCanvas, tlChange, tlCommit, tlCurveAt,
@@ -166,7 +166,10 @@ function tlDraw() {
   // Marquee.
   const d = TL.drag;
   if (d && d.kind === 'marquee') { g.strokeStyle = C.text; g.setLineDash([3, 3]); g.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0)); g.setLineDash([]); }
-  // Markers: flags in their lane, a line across the tracks.
+  // Markers: flags in their lane, a line across the tracks. Labels never
+  // overlap (T-509): each is cut to the room before the next flag, the
+  // full name shows on hover (tlMarkerLabelAt).
+  TL.markerLabels = tlMarkerLayout(TL.show.markers.map(m => ({ x: Math.round(tlUToX(m.at)) + 0.5, name: m.name })), W, s => g.measureText(s).width);
   TL.show.markers.forEach((m, i) => {
     const x = Math.round(tlUToX(m.at)) + 0.5;
     if (x < -60 || x > W + 2) return;
@@ -174,7 +177,8 @@ function tlDraw() {
     g.strokeStyle = col; g.globalAlpha = 0.6; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(x, TL_RULER + TL_MARK); g.lineTo(x, H); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
     g.fillStyle = col; g.beginPath(); g.moveTo(x, TL_RULER + 2); g.lineTo(x + 8, TL_RULER + 2); g.lineTo(x + 8, TL_RULER + TL_MARK - 6); g.lineTo(x, TL_RULER + TL_MARK - 2); g.closePath(); g.fill();
     if (i === TL.marker) { g.strokeStyle = '#fff'; g.stroke(); }
-    g.fillStyle = C.text; g.fillText(m.name, x + 11, TL_RULER + TL_MARK / 2);
+    const lab = TL.markerLabels[i];
+    if (lab.text) { g.fillStyle = C.text; g.fillText(lab.text, x + 11, TL_RULER + TL_MARK / 2); }
   });
   // Playhead.
   if (TL.state && TL.state.name) {
@@ -250,6 +254,31 @@ function tlMarkerAt(x) {
   TL.show.markers.forEach((m, i) => { const d = Math.abs(tlUToX(m.at) - x + 4); if (d < dist) { dist = d; best = i; } });
   return best;
 }
+// Marker labels without overlap (T-509). `marks`: [{ x, name }] in time
+// order, `W` the canvas width, `measure(text)` its width in px. Each label
+// starts 11 px after its flag and may run up to 4 px before the next flag
+// (or the right edge); a name that does not fit is cut with « … », and
+// under 3 characters nothing is drawn (the flag stays, the name is on
+// hover). Returns [{ text, x0, x1, cut }] with x0..x1 the drawn span.
+function tlMarkerLayout(marks, W, measure) {
+  const ELLIPSIS = '…', GAP = 11, BEFORE_NEXT = 4;
+  return marks.map((m, i) => {
+    const x0 = m.x + GAP, limit = (i + 1 < marks.length ? Math.max(marks[i + 1].x, m.x) : Math.max(W, m.x)) - BEFORE_NEXT;
+    const room = limit - x0, name = String(m.name || '');
+    if (measure(name) <= room) return { text: name, x0, x1: x0 + measure(name), cut: false };
+    let n = name.length;
+    while (n > 0 && measure(name.slice(0, n) + ELLIPSIS) > room) n--;
+    const text = n >= 2 ? name.slice(0, n) + ELLIPSIS : '';
+    return { text, x0, x1: text ? x0 + measure(text) : x0, cut: true };
+  });
+}
+/** The marker whose flag or label is under x in the markers lane, or -1. */
+function tlMarkerLabelAt(x) {
+  if (!TL.show || !TL.markerLabels) return -1;
+  const i = tlMarkerAt(x);
+  if (i >= 0) return i;
+  return TL.markerLabels.findIndex(l => l.text && x >= l.x0 - 2 && x <= l.x1 + 2);
+}
 function tlSeek(u) { post('/api/timeline/seek', { position: Math.max(0, u) }); }
 // Move an event object to another track.
 function tlMoveTo(e, ti) {
@@ -263,6 +292,14 @@ tlCv.addEventListener('pointerdown', e => {
   const { x, y } = tlLocal(e), u = tlXToU(x);
   const before = JSON.stringify(TL.show);
   tlCv.setPointerCapture(e.pointerId);
+  // Mode spectacle (T-509): the tracks are read only; a press above them
+  // only seeks, a press on them says why nothing moves.
+  if (showMode) {
+    if (y < TL_TOP) TL.drag = { kind: 'seek', x0: x, u0: u };
+    else flash(LOCKED_FR);
+    TL.need = true;
+    return;
+  }
   if (y < TL_RULER) {
     const r = TL.show.loop_region;
     const which = r ? (Math.abs(tlUToX(r[0]) - x) < 6 ? 0 : Math.abs(tlUToX(r[1]) - x) < 6 ? 1 : -1) : -1;
@@ -326,7 +363,10 @@ tlCv.addEventListener('pointermove', e => {
   if (!d) {
     if (hover) { tlCv.style.cursor = tlEnvKeyAt(hover.ti, x, y) ? 'move' : 'crosshair'; return; }
     const hit = TL.show && y >= TL_TOP ? tlEventAt(tlTrackAt(y), x) : null;
-    const tip = hit && (hit.e.notes || hit.e.tags?.length) ? [hit.e.tags?.length ? '# ' + hit.e.tags.join(', ') : '', hit.e.notes || ''].filter(Boolean).join('\n') : '';
+    // In the markers lane: the marker's full name (its label may be cut).
+    const mi = TL.show && y >= TL_RULER && y < TL_RULER + TL_MARK ? tlMarkerLabelAt(x) : -1;
+    const tip = mi >= 0 ? TL.show.markers[mi].name
+      : hit && (hit.e.notes || hit.e.tags?.length) ? [hit.e.tags?.length ? '# ' + hit.e.tags.join(', ') : '', hit.e.notes || ''].filter(Boolean).join('\n') : '';
     tlCv.dataset.baseTitle ??= tlCv.title;
     if (tlCv.title !== (tip || tlCv.dataset.baseTitle)) tlCv.title = tip || tlCv.dataset.baseTitle;
     const r = TL.show && TL.show.loop_region;
@@ -430,6 +470,7 @@ tlCv.addEventListener('pointerup', tlPointerUp);
 tlCv.addEventListener('pointercancel', tlPointerUp);
 tlCv.addEventListener('dblclick', e => {
   if (!TL.show) return;
+  if (showMode) { flash(LOCKED_FR); return; }
   const { x, y } = tlLocal(e);
   if (y < TL_RULER) tlChange(() => { TL.show.loop_region = null; });
   else if (y < TL_RULER + TL_MARK && tlMarkerAt(x) < 0) tlAddMarker(tlSnapU(tlXToU(x)));
@@ -504,4 +545,4 @@ window.tlDebug = {
 };
 requestAnimationFrame(tlLoop);
 
-export { tlCv };
+export { tlCv, tlMarkerLayout };

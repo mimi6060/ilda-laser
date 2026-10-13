@@ -1,6 +1,6 @@
 // T-405: « Enregistrer dans une case », user pages and grid editing.
 // Preview only: nothing here arms the laser.
-import { test, expect, useStudio, openUi, focusPage, type Point } from '../studio';
+import { test, expect, useStudio, openUi, openCueMore, focusPage, type Point } from '../studio';
 
 const studio = useStudio();
 type Grid = { page: number; pages: { name: string; cells: (string | null)[]; user: boolean }[] };
@@ -38,6 +38,7 @@ test('a stored look replays identically, also after a restart', async ({ page })
   await expect.poll(async () => (await studio.frame()).points.some(p => p[2] > 0.3 && p[4] > 0.3 && p[3] === 0)).toBe(true);
   const stored = await frame();
 
+  await openCueMore(page);
   await page.locator('#cueStore').click();
   await expect(page.locator('#cueStore')).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#cues')).toHaveClass(/storing/);
@@ -81,6 +82,7 @@ test('a user cue is dragged to another page, renamed and deleted', async ({ page
   await expect(cell(page, 0).locator('.n')).toHaveText('Mon look');
   const id = (await getGrid()).pages[a].cells[0]!;
 
+  await openCueMore(page);
   await page.locator('#gridMenuBtn').click();
   await page.locator('#gridEdit').click();
   await cell(page, 0).dragTo(tab(page, b));

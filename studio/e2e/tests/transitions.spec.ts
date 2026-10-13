@@ -3,7 +3,7 @@
 // « Mode beat », a cell's own transition in « Propriétés du cue », a cell
 // « en attente » that blinks, and Escape cutting everything at once.
 // Preview only: the laser is never armed here.
-import { test, expect, useStudio, openUi, reveal, focusPage, isLit } from '../studio';
+import { test, expect, useStudio, openUi, openCueMore, reveal, focusPage, isLit } from '../studio';
 
 const studio = useStudio();
 let catalog: Awaited<ReturnType<typeof studio.presets>>;
@@ -33,6 +33,7 @@ test('the grid bar sets the transition, its length and the quantisation', async 
   await page.locator('#cueTransition').selectOption({ label: 'Fondu au noir' });
   await page.locator('#cueTransLen').selectOption({ label: '2 s' });
   await page.locator('#cueQuant button', { hasText: 'Mesure' }).click();
+  await openCueMore(page);
   await page.locator('#cueBeatMode').selectOption({ label: '4 temps' });
   await expect.poll(async () => (await deck()).transition).toEqual({ kind: 'fade_through_black', length: { seconds: 2 }, in_flash: false });
   const d = await deck();

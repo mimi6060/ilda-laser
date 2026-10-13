@@ -375,6 +375,25 @@ export async function openUi(page: Page, studio: Studio) {
   await expect(page.locator('#stPoints')).not.toHaveText('0');
 }
 
+/**
+ * T-503: the 3D settings (viewpoints, exposure, haze, safety overlays)
+ * are a drawer over the view, closed by default; open it like the
+ * operator does, with « Réglages 3D ». The view must already be in 3D.
+ */
+export async function open3dSettings(page: Page) {
+  const btn = page.locator('#render3dBtn');
+  await expect(btn).toBeVisible();
+  if ((await btn.getAttribute('aria-expanded')) !== 'true') await btn.click();
+  await expect(page.locator('#render3d')).toBeVisible();
+}
+
+/** T-506: the cue bar's rare settings sit behind « Plus… »; unfold them. */
+export async function openCueMore(page: Page) {
+  const btn = page.locator('#cueMoreBtn');
+  if ((await btn.getAttribute('aria-expanded')) !== 'true') await btn.click();
+  await expect(page.locator('#cueMore')).toBeVisible();
+}
+
 /** Move keyboard focus off any input, so the page's shortcuts apply. */
 export async function focusPage(page: Page) {
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());

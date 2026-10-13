@@ -16,12 +16,15 @@
 //
 // Preview only: the fake test output; arming is a click on the LASER
 // button, like the operator's, and every test ends disarmed.
-import { test, expect, useStudio, openUi, openWorkspace, focusPage, type Workspace } from '../studio';
+import { test, expect, useStudio, openUi, openWorkspace, open3dSettings, focusPage, type Workspace } from '../studio';
 import type { Locator, Page } from '@playwright/test';
 
 const studio = useStudio();
 const DISPLAY_KEY = 'laserStudio.display';
-const SIZES = [{ width: 1440, height: 900 }, { width: 1280, height: 800 }] as const;
+// T-506: 1024×768 too, the smallest screen the layout is designed for.
+const SIZES = [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1024, height: 768 }] as const;
+/** The sizes of the 3D references (T-503). */
+const SIZES_3D = [SIZES[0], SIZES[1]] as const;
 const WORKSPACES: Workspace[] = ['live', 'timeline', 'creation', 'settings'];
 const SHOT = { maxDiffPixelRatio: 0.001, animations: 'disabled', caret: 'hide', scale: 'css' } as const;
 
@@ -37,7 +40,15 @@ function moving(page: Page): Locator[] {
     page.locator('#armInfo, #presenceLed, #engineLed'), // arm duration, heartbeat
     page.locator('#toasts, #noticeBadge'), // notifications appear on their own schedule
     page.locator('[id*="Clock"], [id*="clock"], [id$="Time"], [id*="Tc"], [id*="Pos"]'), // clocks, timecode, playhead
+    page.locator('#aud3d, #stAudWrap, #r3info, #vidStatus'), // 3D: beams counted in the audience, render cost
   ];
+}
+
+/** The 2D / 3D / 2D+3D buttons of the stage, like the operator. */
+async function setMode(page: Page, mode: '2d' | '3d' | 'both') {
+  await page.locator(`#viewSeg [data-view="${mode}"]`).click();
+  await expect(page.locator(`#viewSeg [data-view="${mode}"]`)).toHaveClass(/active/);
+  if (mode !== '2d') await expect(page.locator('#beams')).toBeVisible();
 }
 
 /** Open the page with these display preferences (night, touch) at this size. */
@@ -97,6 +108,45 @@ for (const size of SIZES) {
     });
   });
 }
+
+// T-503: the 3D view and the two views side by side, which no reference
+// covered (the stage collapsed to 2 px without anyone noticing).
+for (const size of SIZES_3D) {
+  test.describe(`3D at ${size.width}×${size.height}`, () => {
+    test('LIVE in 3D, then with the settings drawer open', async ({ page }) => {
+      await openWith(page, size, { touch: 'off' });
+      await setMode(page, '3d');
+      await settle(page);
+      await expect(page).toHaveScreenshot(`ws-live-3d-${size.width}x${size.height}.png`, { ...SHOT, mask: moving(page) });
+      // The drawer itself (a page shot would mask it with the canvas under it).
+      await open3dSettings(page);
+      await settle(page);
+      await expect(page.locator('#render3d')).toHaveScreenshot(`render3d-settings-${size.width}x${size.height}.png`, { ...SHOT, mask: [page.locator('#r3info')] });
+    });
+
+    test('TIMELINE in 2D+3D', async ({ page }) => {
+      await openWith(page, size, { touch: 'off' });
+      await openWorkspace(page, 'timeline');
+      await setMode(page, 'both');
+      await settle(page);
+      await expect(page).toHaveScreenshot(`ws-timeline-both-${size.width}x${size.height}.png`, { ...SHOT, mask: moving(page) });
+    });
+  });
+}
+
+// T-509: TIMELINE with an example show open (markers, tracks, the panel).
+test('TIMELINE with an example show at 1440×900', async ({ page }) => {
+  await openWith(page, SIZES[0], { touch: 'off' });
+  await openWorkspace(page, 'timeline');
+  await page.locator('#tlExamples').click();
+  await page.locator('#tlExDialog .tl-ex', { hasText: 'Montée 16 mesures' }).click();
+  await expect(page.locator('#tlExDialog')).toBeHidden();
+  await expect.poll(async () => (await studio.get('/api/timeline')).state.name).toBe('Montée 16 mesures vers le drop');
+  await page.locator('#tlFit').click();
+  await settle(page);
+  await expect(page).toHaveScreenshot('ws-timeline-example-1440x900.png', { ...SHOT, mask: [...moving(page), page.locator('#tlModified, #tlTempoHint')] });
+  await studio.post('/api/timeline/stop');
+});
 
 const MODES = {
   day: { touch: 'off' },

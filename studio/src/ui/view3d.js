@@ -66,6 +66,25 @@ function showAud3d() {
   $('aud3dN').textContent = $('stAud').textContent = n;
   $('aud3d').classList.toggle('hot', n > 0); $('stAudWrap').classList.toggle('hot', n > 0);
 }
+// The settings drawer (T-503): closed by default so the view keeps its
+// height, opened by « Réglages 3D » in the bar, the choice remembered in
+// this browser. It floats over the bottom of the view and scrolls inside
+// itself; the badges and the stats underneath never move.
+const R3_OPEN_KEY = 'laserStudio.beam3d.settingsOpen';
+let render3dOpen = remembered(R3_OPEN_KEY) === '1';
+function showRender3dDrawer() {
+  const open = show3d && render3dOpen;
+  $('render3d').hidden = !open;
+  $('render3dBtn').hidden = !show3d;
+  $('render3dBtn').setAttribute('aria-expanded', String(open));
+}
+function setRender3dOpen(on) {
+  render3dOpen = !!on;
+  remember(R3_OPEN_KEY, render3dOpen ? '1' : '0');
+  showRender3dDrawer();
+}
+$('render3dBtn').onclick = () => setRender3dOpen(!render3dOpen);
+$('render3dClose').onclick = () => { setRender3dOpen(false); $('render3dBtn').focus(); };
 function bindRender3d() {
   const set = patch => { view3d.setRender(patch); saveRender3d(); showRender3d(); };
   for (const k of ['exposure', 'haze', 'roomLight']) $('r3' + k).oninput = e => set({ [k]: e.target.value / 100 });
@@ -145,7 +164,8 @@ async function setView(mode) {
   $('preview').hidden = !show2d;
   $('beams').hidden = !show3d;
   $('beamsMsg').hidden = !want3d || !!view3d;
-  for (const id of ['recenter3d', 'hint3d', 'render3d']) $(id).hidden = !show3d;
+  for (const id of ['recenter3d', 'hint3d']) $(id).hidden = !show3d;
+  showRender3dDrawer();
   // Vidéo (T-459): shown with the 3D view (greyed if it cannot record);
   // leaving the 3D view ends a recording and offers its file.
   $('vid3d').hidden = !want3d;
@@ -429,4 +449,4 @@ $('prepColor').oninput = e => prepPost('/api/prepared/adjust', { color: rgb(e.ta
 export { R3_KEY, REC, STAGE_KEY, assignCam3dRestored, assignLastPoints, assignLastShown, beam3d,
   cam3dRestored, lastPoints, lastShown, loadRender3d, outdoorTo3d, prepMode, prepareCue, prepared,
   safetyTo3d, saveRender3d, sendPrepared, setCam3d, setView, show2d, show3d, showCam3d, showPrepared,
-  showRender3d, vidReady, vidStop, vidToggle, view3d };
+  setRender3dOpen, showRender3d, vidReady, vidStop, vidToggle, view3d };

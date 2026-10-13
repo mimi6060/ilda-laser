@@ -347,6 +347,16 @@ function selectPage(i) {
   winSend({ type: 'page', page: i });
   post('/api/control', { id: 'page.' + (i + 1) });
 }
+// Pages beyond the tabs' edge (T-506): the side where more pages hide
+// fades out (CSS .more-left / .more-right), so a page past the edge is
+// never a surprise. Display only.
+function cueTabsEdges() {
+  const tabs = $('cueTabs');
+  tabs.classList.toggle('more-left', tabs.scrollLeft > 1);
+  tabs.classList.toggle('more-right', tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1);
+}
+$('cueTabs').addEventListener('scroll', cueTabsEdges, { passive: true });
+if (globalThis.ResizeObserver) new ResizeObserver(cueTabsEdges).observe($('cueTabs'));
 function renderCues() {
   stopCuePreview(); // its button is about to go
   $('cueTabs').innerHTML = '';
@@ -376,6 +386,7 @@ function renderCues() {
     if (a.left < t.left) tabs.scrollLeft -= t.left - a.left + 8;
     else if (a.right > t.right) tabs.scrollLeft += a.right - t.right + 8;
   }
+  cueTabsEdges();
   const pg = grid.pages[gridPage] || { name: '', cells: [], hidden: 0, auto: false, editable: false };
   const cues = $('cues');
   // Keyboard (T-436): a re-render keeps the focus on the same cell.
@@ -566,10 +577,25 @@ $('cuePageAdd').addEventListener('click', () => gridPost('/api/grid/pages', { op
 // « Enregistrer dans une case » / « Mettre à jour » (T-405): the current
 // look into a user cue. Échap stays the emergency stop: the mode ends by
 // clicking its button again, or once a cell is picked.
+// « Plus… » (T-506): the cue bar's rare settings (cues actifs au plus,
+// mode beat, pilote auto, enregistrement dans une case, pages) folded by
+// default so the grid keeps its rows on a small screen; the choice is
+// remembered in this browser. Nothing is removed: a shortcut that uses a
+// folded control (Cmd+E) unfolds them.
+const CUE_MORE_KEY = 'laserStudio.cueBarMore';
+function setCueMore(on) {
+  $('cueMore').hidden = !on;
+  $('cueMoreBtn').setAttribute('aria-expanded', String(on));
+  $('cueMoreBtn').textContent = on ? 'Moins' : 'Plus…';
+  remember(CUE_MORE_KEY, on ? '1' : '0');
+}
+$('cueMoreBtn').onclick = () => setCueMore($('cueMore').hidden);
+setCueMore(remembered(CUE_MORE_KEY) === '1');
 let storeMode = false, storeCopyFrom = null;
 function setStoreMode(on) {
   if (on && showMode) { flash(LOCKED_FR); on = false; }
   storeMode = on;
+  if (on && $('cueMore').hidden) setCueMore(true);
   $('cueStore').setAttribute('aria-pressed', String(on));
   $('cues').classList.toggle('storing', on);
   if (on) storeMsg('Cliquer la case où enregistrer le look courant (ou recliquer « Enregistrer dans une case » pour annuler).');
@@ -731,5 +757,5 @@ export { CUE_CODES, CUE_KEYS, FILTER_KEY, PAGE_FKEYS, THUMB_MODES, THUMB_MODE_KE
   assignPools, assignServerPage, cueCategories, cueDown, cueFilter, cueUp, deck, drawThumb,
   focusedCell, grid, gridEditing, gridMove, gridPage, gridPost, heldKeys, lengthIndex, loadGrid,
   loadPresets, loadSlots, pageKey, paintCues, pointerCue, poolRev, poolSel, pools, presetById,
-  presets, refreshLook, renderCueFilter, renderCues, selectPage, serverPage, setStoreMode,
+  presets, refreshLook, renderCueFilter, renderCues, selectPage, serverPage, setCueMore, setStoreMode,
   setThumbMode, showCueDeck, slots, storeInto, storeMode, tagKey, thumbMode, updateCue };
