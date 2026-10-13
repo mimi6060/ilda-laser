@@ -81,6 +81,12 @@ pub fn shownet_items() -> Vec<ChecklistItem> {
     .collect()
 }
 
+/// Id of « Mac sur secteur » (T-495), ticked by itself when the power
+/// source is known to be the mains.
+pub const MAC_AC_ITEM: &str = "mac_ac";
+/// The value an automatic tick carries.
+const AUTO_VALUE: &str = "vérifié automatiquement";
+
 /// When an item applies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -155,6 +161,7 @@ pub fn default_items() -> Vec<ChecklistItem> {
             "Protection matérielle contre l'arrêt du balayage (scan-fail) testée ; évaluation des risques faite par une personne qualifiée.",
             AudienceScan,
         ),
+        ChecklistItem::new(MAC_AC_ITEM, "Mac sur secteur (pas sur batterie) et ventilé.", Always),
         ChecklistItem::new("signage", "Signalisation ou annonce au public, si le lieu l'exige.", Always),
     ];
     items.extend(audience_items());
@@ -201,6 +208,8 @@ pub struct Checklist {
     load_error: Option<String>,
     /// The kind of the connected output, for `only_for` (T-472).
     output: Option<OutputKind>,
+    /// This Mac is on mains power (T-495); None: not known.
+    mac_on_ac: Option<bool>,
 }
 
 impl Checklist {
@@ -216,11 +225,11 @@ impl Checklist {
             },
             crate::datafile::Loaded::Quarantined(w) => (ChecklistConfig::default(), Some(format!("{} Liste par défaut.", w.message_fr()))),
         };
-        Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error, output: None }
+        Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error, output: None, mac_on_ac: None }
     }
 
     pub fn in_memory(enforced: bool) -> Self {
-        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None, output: None }
+        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None, output: None, mac_on_ac: None }
     }
 
     /// A real output is configured: the list gates arming.
@@ -264,6 +273,25 @@ impl Checklist {
             return true;
         }
         false
+    }
+
+    /// What the power watch knows of the mains (T-495). Known on mains:
+    /// « Mac sur secteur » is ticked by itself; known on battery: an
+    /// automatic tick is taken back. Only while the run is open; the
+    /// operator can still tick it by hand. Never arms.
+    pub fn set_mac_on_ac(&mut self, on_ac: Option<bool>) {
+        if self.mac_on_ac == on_ac {
+            return;
+        }
+        self.mac_on_ac = on_ac;
+        if self.is_complete() || !self.visible_items().any(|i| i.id == MAC_AC_ITEM) {
+            return;
+        }
+        match on_ac {
+            Some(true) if self.done(MAC_AC_ITEM).is_none() => self.run.done.push((MAC_AC_ITEM.into(), SystemTime::now(), Some(AUTO_VALUE.into()))),
+            Some(false) => self.run.done.retain(|(id, _, v)| !(id == MAC_AC_ITEM && v.as_deref() == Some(AUTO_VALUE))),
+            _ => {}
+        }
     }
 
     /// The `hw_stop` interlock's state: on a ShowNET output, « Arrêt
@@ -424,6 +452,7 @@ impl Checklist {
             "load_error": self.load_error,
             "output": self.output,
             "hw_stop_ok": self.hw_stop_ok(),
+            "mac_on_ac": self.mac_on_ac,
         })
     }
 }
@@ -514,7 +543,7 @@ mod tests {
     fn enforced_needs_operator_and_every_shown_item() {
         let mut c = Checklist::in_memory(true);
         assert!(!c.satisfied());
-        assert_eq!(c.visible_items().count(), 8, "outdoor and audience-scan items hidden by default");
+        assert_eq!(c.visible_items().count(), 9, "outdoor and audience-scan items hidden by default");
         tick_all(&mut c);
         assert_eq!(c.complete().unwrap_err(), vec!["Nom de l'opérateur".to_string()]);
         c.set_operator("  Michel ").unwrap();
@@ -526,7 +555,7 @@ mod tests {
         let detail = c.complete().unwrap();
         assert!(c.satisfied());
         assert_eq!(detail["operator"], "Michel");
-        assert_eq!(detail["items"].as_array().unwrap().len(), 8);
+        assert_eq!(detail["items"].as_array().unwrap().len(), 9);
         assert!(detail["items"][0]["at"].as_u64().unwrap() > 0);
         // Locked once complete.
         assert!(c.check("zones", false, None).is_err());
@@ -540,7 +569,7 @@ mod tests {
         let mut cfg = c.config().clone();
         cfg.outdoor = true;
         c.set_config(cfg, false).unwrap();
-        assert_eq!(c.visible_items().count(), 9);
+        assert_eq!(c.visible_items().count(), 10);
         assert!(c.check("outdoor_permit", true, None).is_err());
         assert!(c.check("outdoor_permit", true, Some("   ")).is_err());
         c.check("outdoor_permit", true, Some(" DGTA-42 ")).unwrap();
@@ -624,9 +653,9 @@ mod tests {
         assert!(c.hw_stop_ok(), "not a ShowNET");
         assert!(!ids(&c).iter().any(|i| i.starts_with("shownet_")));
         c.set_output(OutputKind::of(Some("dac"), ShowNet));
-        assert_eq!(c.visible_items().count(), 8);
+        assert_eq!(c.visible_items().count(), 9);
         c.set_output(Some(OutputKind::ShowNet));
-        assert_eq!(c.visible_items().count(), 11);
+        assert_eq!(c.visible_items().count(), 12);
         assert!(ids(&c).ends_with(&["shownet_hw_stop".into(), "shownet_wired".into(), "shownet_exclusive".into()]));
         assert!(!c.hw_stop_ok());
         c.check("shownet_wired", true, None).unwrap();
@@ -638,6 +667,33 @@ mod tests {
         // The hidden ShowNET items can't be ticked for another output.
         c.set_output(None);
         assert!(c.check(HW_STOP_ITEM, true, None).is_err());
+    }
+
+    /// T-495: « Mac sur secteur » follows the known power source while
+    /// the run is open; a hand tick stays.
+    #[test]
+    fn the_mains_item_ticks_itself_when_known() {
+        let mut c = Checklist::in_memory(true);
+        c.set_mac_on_ac(None);
+        assert!(!c.is_done(MAC_AC_ITEM), "not known: by hand");
+        c.set_mac_on_ac(Some(true));
+        assert!(c.is_done(MAC_AC_ITEM));
+        assert_eq!(c.view()["mac_on_ac"], true);
+        let item = c.view()["items"].as_array().unwrap().iter().find(|i| i["id"] == MAC_AC_ITEM).unwrap().clone();
+        assert_eq!(item["value"], AUTO_VALUE);
+        c.set_mac_on_ac(Some(false));
+        assert!(!c.is_done(MAC_AC_ITEM), "unplugged: taken back");
+        c.check(MAC_AC_ITEM, true, None).unwrap();
+        c.set_mac_on_ac(None);
+        c.set_mac_on_ac(Some(false));
+        assert!(c.is_done(MAC_AC_ITEM), "the operator's own tick stays");
+        // A completed run is never changed.
+        let mut c = Checklist::in_memory(true);
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        c.complete().unwrap();
+        c.set_mac_on_ac(Some(false));
+        assert!(c.is_done(MAC_AC_ITEM) && c.is_complete());
     }
 
     #[test]
@@ -664,7 +720,7 @@ mod tests {
         assert!(!c.is_complete() && !c.satisfied() && !c.hw_stop_ok());
         tick_all(&mut c);
         let detail = c.complete().unwrap();
-        assert_eq!(detail["items"].as_array().unwrap().len(), 11);
+        assert_eq!(detail["items"].as_array().unwrap().len(), 12);
         assert_eq!(detail["output"], "shownet");
         // Leaving the ShowNET hides items: the completed run stays.
         assert!(!c.set_output(None));

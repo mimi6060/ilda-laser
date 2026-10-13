@@ -171,6 +171,7 @@ pub fn shared() -> Shared {
         devices: std::sync::Arc::clone(output_mgr.devices()),
         output_mgr,
         wifi: std::sync::Arc::new(crate::wifi::WifiWatch::new(true)),
+        power_watch: std::sync::Arc::new(crate::power_watch::PowerWatch::new(true)),
         push: Default::default(),
         venue: crate::venue::VenueStore::in_memory(),
         projector_outputs: Default::default(),
