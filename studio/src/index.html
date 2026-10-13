@@ -2072,7 +2072,7 @@
   </dialog>
   <dialog id="figImportDlg" aria-labelledby="impTitle" data-help="creation-import">
     <div class="imp-head">
-      <h2 id="impTitle">Importer un SVG ou une image</h2>
+      <h2 id="impTitle">Importer un SVG, un DXF ou une image</h2>
       <button id="impClose" aria-label="Fermer sans créer" title="Fermer sans créer">×</button>
     </div>
     <p class="hint imp-rights" id="impRights">N'importez que des fichiers dont vous avez les droits : vos propres créations, ou un contenu dont la licence le permet.
@@ -2080,8 +2080,8 @@
     <div class="imp-body">
       <div class="imp-left">
         <div id="impDrop" tabindex="0">
-          <div>Glissez un fichier SVG, PNG ou JPEG ici</div>
-          <label class="imp-pick">ou <input type="file" id="impFile" accept=".svg,image/svg+xml,image/png,image/jpeg,.png,.jpg,.jpeg"></label>
+          <div>Glissez un fichier SVG, DXF, PNG ou JPEG ici</div>
+          <label class="imp-pick">ou <input type="file" id="impFile" accept=".svg,image/svg+xml,.dxf,image/vnd.dxf,application/dxf,image/png,image/jpeg,.png,.jpg,.jpeg"></label>
           <div class="hint" id="impFileName"></div>
         </div>
         <canvas id="impCanvas" width="600" height="600"></canvas>
@@ -2100,6 +2100,9 @@
         <input type="color" id="impColor" value="#ffffff">
         <div id="impSvgOpts">
           <label class="check"><input type="checkbox" id="impFills" checked><span>Contour des formes pleines (sans trait)</span></label>
+        </div>
+        <div id="impDxfOpts" hidden>
+          <label class="check"><input type="checkbox" id="impLayers"><span>Par calque : un calque = une couleur et une partie</span></label>
         </div>
         <div id="impRasterOpts" hidden>
           <label for="impMode">Mode</label>

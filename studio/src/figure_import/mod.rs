@@ -1,9 +1,12 @@
-//! Import (T-297): an SVG drawing or a PNG / JPEG picture of the
+//! Import (T-297): an SVG or DXF drawing or a PNG / JPEG picture of the
 //! operator's own becomes an editable `Figure` (T-296).
 //!
 //! - `svg`: paths, lines, polylines, polygons, rectangles, circles and
 //!   ellipses, with their transforms and stroke (or fill) colours; curves
 //!   are flattened.
+//! - `dxf` (T-497): ASCII DXF drawings (lines, polylines with bulges,
+//!   circles, arcs, ellipses, splines, blocks one level deep), colours by
+//!   entity or by layer; « Par calque » makes each layer a part.
 //! - `raster`: the picture is vectorised: outlines of dark (or light)
 //!   shapes, centre lines of strokes, edges, or outlines per colour.
 //!
@@ -19,6 +22,7 @@
 //! The source file is never stored: only the resulting figure is saved,
 //! by the user, in `studio-data/figures`.
 
+mod dxf;
 pub mod obj;
 mod raster;
 mod svg;
@@ -48,6 +52,7 @@ struct Path {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Svg,
+    Dxf,
     Png,
     Jpeg,
 }
@@ -56,6 +61,7 @@ impl Kind {
     fn label(self) -> &'static str {
         match self {
             Kind::Svg => "svg",
+            Kind::Dxf => "dxf",
             Kind::Png => "png",
             Kind::Jpeg => "jpeg",
         }
@@ -99,6 +105,8 @@ pub struct Options {
     pub color: [u8; 3],
     /// SVG: outline filled shapes that have no stroke.
     pub fills: bool,
+    /// DXF « Par calque »: one part per layer, drawn in the layer's colour.
+    pub by_layer: bool,
     pub mode: Mode,
     /// Picture: brightness threshold, `None` = automatic (Otsu).
     pub threshold: Option<u8>,
@@ -122,6 +130,7 @@ impl Default for Options {
             budget: crate::layers::DEFAULT_POINT_BUDGET,
             color: [255, 255, 255],
             fills: true,
+            by_layer: false,
             mode: Mode::Contours,
             threshold: None,
             invert: false,
@@ -188,12 +197,21 @@ pub fn sniff(bytes: &[u8]) -> Result<Kind> {
     if bytes.starts_with(&[0x1F, 0x8B]) {
         bail!("SVG compressé (.svgz) non pris en charge : enregistrez-le en .svg simple");
     }
+    if bytes.starts_with(b"AutoCAD Binary DXF") {
+        bail!("DXF binaire non pris en charge : enregistrez-le en DXF texte (ASCII) dans votre logiciel de CAO");
+    }
+    if bytes.len() >= 6 && bytes.starts_with(b"AC10") && bytes[4..6].iter().all(u8::is_ascii_digit) {
+        bail!("fichier DWG non pris en charge : exportez-le en DXF texte (ASCII) dans votre logiciel de CAO");
+    }
     let head = &bytes[..bytes.len().min(4096)];
     let text = String::from_utf8_lossy(head);
+    if dxf::looks_like(&text) {
+        return Ok(Kind::Dxf);
+    }
     if text.contains("<svg") {
         return Ok(Kind::Svg);
     }
-    bail!("format non reconnu : un fichier SVG, PNG ou JPEG est attendu")
+    bail!("format non reconnu : un fichier SVG, DXF, PNG ou JPEG est attendu")
 }
 
 /// The whole import: bytes → figure, with warnings and statistics.
@@ -217,6 +235,14 @@ pub fn import(bytes: &[u8], file_name: &str, opts: &Options) -> Result<Imported>
             parts = names;
             paths
         }
+        Kind::Dxf => {
+            // Older DXF are in a Windows code page: anything not UTF-8
+            // only touches names and texts, never numbers.
+            let text = String::from_utf8_lossy(bytes);
+            let (paths, names) = dxf::parse(&text, &opts, &mut warnings)?;
+            parts = names;
+            paths
+        }
         Kind::Png | Kind::Jpeg => {
             let (paths, t) = raster::vectorize(bytes, &opts, &mut warnings)?;
             threshold = t;
@@ -226,11 +252,12 @@ pub fn import(bytes: &[u8], file_name: &str, opts: &Options) -> Result<Imported>
     if paths.is_empty() {
         bail!(match kind {
             Kind::Svg => "aucune forme dessinable dans ce SVG (chemins, lignes, polygones, cercles, rectangles)",
+            Kind::Dxf => "aucune forme dessinable dans ce DXF (lignes, polylignes, cercles, arcs, ellipses, splines, blocs)",
             _ => "aucun contour trouvé dans l'image : essayez un autre mode, un autre seuil ou « Inverser »",
         });
     }
     let (mut figure, mut stats) = finish(paths, &opts, &default_name(file_name), &mut warnings)?;
-    // Named SVG groups (T-441): parts 1, 2… in order of appearance.
+    // Named SVG groups (T-441) or DXF layers: parts 1, 2… in order of appearance.
     figure.parts = parts.into_iter().zip(1..=crate::figures::MAX_PARTS).map(|(name, id)| crate::figures::PartDef { id, name }).collect();
     figure.validate()?;
     stats.kind = kind.label();
@@ -567,6 +594,9 @@ mod tests {
         assert!(sniff(b"").unwrap_err().to_string().contains("vide"));
         assert!(sniff(&[0x1F, 0x8B, 0, 0]).unwrap_err().to_string().contains("svgz"));
         assert!(sniff(b"GIF89a....").unwrap_err().to_string().contains("format non reconnu"));
+        assert_eq!(sniff(b"  0\r\nSECTION\r\n  2\r\nENTITIES\r\n").unwrap(), Kind::Dxf);
+        assert!(sniff(b"AutoCAD Binary DXF\r\n\x1a\0").unwrap_err().to_string().contains("DXF binaire"));
+        assert!(sniff(b"AC1032\0\0\0").unwrap_err().to_string().contains("DWG"));
     }
 
     #[test]
@@ -652,6 +682,23 @@ mod tests {
         image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let pic = import(&png, "carre.png", &Options::default()).unwrap();
         assert!(pic.figure.parts.is_empty() && !pic.figure.has_parts());
+    }
+
+    #[test]
+    fn a_dxf_drawing_becomes_a_figure_with_layers_as_parts() {
+        let dxf = dxf::tests::drawing();
+        let out = import(dxf.as_bytes(), "plan de scène.dxf", &Options::default()).unwrap();
+        assert_eq!(out.stats.kind, "dxf");
+        assert_eq!(out.figure.name, "plan de scène");
+        assert_eq!(out.stats.strokes, 6);
+        assert!(out.figure.parts.is_empty());
+        assert!(out.warnings.iter().any(|w| w.contains("HATCH")), "{:?}", out.warnings);
+        let layered = import(dxf.as_bytes(), "plan.dxf", &Options { by_layer: true, ..Options::default() }).unwrap();
+        let names: Vec<&str> = layered.figure.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Rouge", "Vert"]);
+        // A DXF with nothing drawable says so.
+        let empty = "0\nSECTION\n2\nENTITIES\n0\nHATCH\n0\nENDSEC\n0\nEOF\n";
+        assert!(import(empty.as_bytes(), "x.dxf", &Options::default()).unwrap_err().to_string().contains("aucune forme dessinable dans ce DXF"));
     }
 
     #[test]

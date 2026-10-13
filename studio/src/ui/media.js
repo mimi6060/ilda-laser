@@ -1,6 +1,6 @@
 // Laser Studio — media.js (T-435).
 // Sections (as in the former index.html script):
-//   import (T-297): SVG or picture → figure, previewed before it is created
+//   import (T-297): SVG, DXF (T-497) or picture → figure, previewed before it is created
 //   CRÉATION › Objets 3D: wireframe objects from OBJ files (T-462)
 //   CRÉATION › Médiathèque: ILDA files (T-011)
 //   Enregistrer une animation ILDA (T-442)
@@ -20,12 +20,12 @@ import { loadPresets, refreshLook } from './cues.js';
 import { TL } from './timeline-editor.js';
 import { loadLfos } from './modulators.js';
 
-// ----- import (T-297): SVG or picture → figure, previewed before it is created -----
+// ----- import (T-297): SVG, DXF (T-497) or picture → figure, previewed before it is created -----
 // The file is sent to /api/figures/import (settings in the query), which
 // only answers with a preview; « Créer la figure » saves it like
 // « Enregistrer » and opens it in the editor. The file itself is not kept.
 const IMP_MAX_BYTES = 20 * 1024 * 1024;
-const imp = { bytes: null, name: '', raster: false, result: null, timer: null, seq: 0, dirty: false, inflight: null };
+const imp = { bytes: null, name: '', raster: false, dxf: false, result: null, timer: null, seq: 0, dirty: false, inflight: null };
 const IMP_LABELS = {
   impSimplify: v => v + ' %', impSize: v => v + ' %', impSmooth: v => v, impColors: v => v,
   impRes: v => v + ' px', impMin: v => v + ' px', impThreshold: v => $('impAuto').checked ? 'auto' : v,
@@ -35,7 +35,8 @@ function impMsg(text, err = false) { $('impMsg').textContent = text; $('impMsg')
 function impParams() {
   const p = new URLSearchParams({
     name: imp.name, simplify: $('impSimplify').value, size: $('impSize').value, budget: $('impBudget').value,
-    color: $('impColor').value.slice(1), fills: $('impFills').checked ? '1' : '0', mode: $('impMode').value,
+    color: $('impColor').value.slice(1), fills: $('impFills').checked ? '1' : '0', layers: $('impLayers').checked ? '1' : '0',
+    mode: $('impMode').value,
     invert: $('impInvert').checked ? '1' : '0', smooth: $('impSmooth').value, colors: $('impColors').value,
     resolution: $('impRes').value, min_size: $('impMin').value,
   });
@@ -86,7 +87,7 @@ async function impFetch() {
   $('impCreate').disabled = false;
   impRender();
 }
-// Named SVG groups (T-441): one box per group, « Garder comme partie ».
+// Named SVG groups (T-441) or DXF layers (« Par calque », T-497): one box per group, « Garder comme partie ».
 // An unticked group's strokes go to « Aucune » when the figure is created.
 function impShowParts(fig) {
   const box = $('impParts'), parts = (fig && fig.parts) || [];
@@ -121,8 +122,13 @@ async function impLoad(file) {
   try { buf = await file.arrayBuffer(); } catch { impFail('Fichier illisible.'); return; }
   const b = new Uint8Array(buf.slice(0, 4));
   imp.raster = (b[0] === 0x89 && b[1] === 0x50) || (b[0] === 0xff && b[1] === 0xd8);
+  // The studio sniffs the content; the name only picks the options shown.
+  imp.dxf = !imp.raster && /\.dxf$/i.test(file.name);
   $('impRasterOpts').hidden = !imp.raster;
-  $('impSvgOpts').hidden = imp.raster;
+  $('impSvgOpts').hidden = imp.raster || imp.dxf;
+  $('impDxfOpts').hidden = !imp.dxf;
+  // « Par calque » is a DXF option: another file starts without it.
+  if (!imp.dxf) $('impLayers').checked = false;
   imp.bytes = buf; imp.name = file.name;
   $('impName').dataset.auto = '1';
   await impPreview();
@@ -133,7 +139,7 @@ const drop = $('impDrop');
 drop.addEventListener('dragleave', () => drop.classList.remove('over'));
 drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); impLoad(e.dataTransfer?.files?.[0]); });
 Object.keys(IMP_LABELS).forEach(id => $(id).addEventListener('input', () => { impLabels(); impSoon(); }));
-['impBudget', 'impColor', 'impFills', 'impMode', 'impInvert'].forEach(id => $(id).addEventListener('change', impSoon));
+['impBudget', 'impColor', 'impFills', 'impLayers', 'impMode', 'impInvert'].forEach(id => $(id).addEventListener('change', impSoon));
 // Only the settings of the chosen mode are active.
 function impModeOpts() {
   const m = $('impMode').value;
