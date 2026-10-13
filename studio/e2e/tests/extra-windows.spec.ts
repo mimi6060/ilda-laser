@@ -10,7 +10,14 @@ const studio = useStudio();
 const arm = async () => (await studio.get('/api/arm')) as { armed: boolean };
 const armed = async () => (await arm()).armed;
 
-test.beforeEach(async () => {
+// T-508: no window may throw while it loads or runs (an uncaught error or
+// an unhandled rejection is a `pageerror`), whichever page of the context.
+let pageErrors: string[] = [];
+test.beforeEach(async ({ context, page }) => {
+  pageErrors = [];
+  const watch = (p: Page) => p.on('pageerror', e => pageErrors.push(`${p.url()}: ${e.message}`));
+  watch(page);
+  context.on('page', watch);
   await studio.post('/api/estop/reset', {});
   await studio.post('/api/arm', { on: false });
   await studio.post('/api/control', { id: 'cue.stop_all' });
@@ -19,6 +26,7 @@ test.beforeEach(async () => {
 test.afterEach(async () => {
   await studio.post('/api/arm', { on: false });
   await studio.post('/api/estop/reset', {});
+  expect(pageErrors).toEqual([]);
 });
 
 /** The main window, on LIVE. (Not openUi: a test may leave no cue playing, so no points.) */

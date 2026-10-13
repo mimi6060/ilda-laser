@@ -346,7 +346,10 @@ $('midiStatus').style.cursor = 'pointer';
 $('midiStatus').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('midiPanel').open = true; };
 setWorkspace(remembered(WS_KEY));
 setLivePanel(remembered(PANEL_KEY));
-{ const v = remembered(STAGE_KEY); if (VUE || v === '3d' || v === 'both') setView(v); }
+// The remembered stage (2D/3D) is restored by app.js once every module has
+// run (T-508): setView draws the 2D preview, whose overlays read modules
+// evaluated after this one (safety.js, targets.js).
+function restoreStage() { const v = remembered(STAGE_KEY); if (VUE || v === '3d' || v === 'both') setView(v); }
 
 // ---------- Vues enregistrées et préférences d'opérateur (T-426) ----------
 // A view is the screen's layout (workspace, LIVE panel tab, CRÉATION tab,
@@ -736,5 +739,5 @@ if (globalThis.ResizeObserver) new ResizeObserver(() => {
 }).observe($('top'));
 
 export { CONFIRM_HOLD_MS, LOCKED_FR, LONG_PRESS_MS, VIEW_FKEYS, WORKSPACES, activeWs, closeViewsMenu,
-  flash, holdToRun, opTouched, recallSlot, remember, remembered, setLivePanel, setWorkspace,
+  flash, holdToRun, opTouched, recallSlot, remember, remembered, restoreStage, setLivePanel, setWorkspace,
   showMode, showShowMode, showVueArm, storeSlot, vueAllows, winSend };
