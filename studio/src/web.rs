@@ -187,6 +187,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/help", RouteClass::Read),
     ("POST", "/api/keep_awake", RouteClass::Safety),
     ("POST", "/api/test/wifi", RouteClass::Test),
+    ("POST", "/api/test/power", RouteClass::Test),
     ("GET", "/api/test/menu", RouteClass::Test),
     ("POST", "/api/test/menu", RouteClass::Test),
     ("POST", "/api/test/stall", RouteClass::Test),
@@ -1345,6 +1346,20 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             match body::<crate::wifi::WifiStatus>(request) {
                 Ok(status) => {
                     shared.lock().unwrap().wifi.simulate(Some(status));
+                    ok()
+                }
+                Err(e) => e,
+            }
+        }
+        (Method::Post, "/api/test/power") => {
+            // `--test-hooks` only (e2e of T-495): what the battery and
+            // thermal reading finds, `{ "source", "battery_pct", "thermal" }`.
+            if !shared.lock().unwrap().test_hooks {
+                return text(404, "not found");
+            }
+            match body::<crate::power_watch::PowerStatus>(request) {
+                Ok(status) => {
+                    shared.lock().unwrap().power_watch.simulate(status);
                     ok()
                 }
                 Err(e) => e,
@@ -6253,6 +6268,8 @@ fn state_json(s: &mut Shared) -> serde_json::Value {
         "notices_last": s.notices.last(),
         "history": s.history.summary(),
     });
+    // Battery and thermal state of this Mac (T-495): a snapshot.
+    v["power_watch"] = json!(s.power_watch.status());
     // The show player (T-444).
     v["showlist"] = json!(crate::showlist::summary(s));
     // The backup machine (T-456).
@@ -6520,6 +6537,8 @@ fn live_view(s: &mut Shared) -> serde_json::Value {
         // T-432: the newest notice's id; the page reads /api/notices when it moves.
         "notices_last": s.notices.last(),
     });
+    // Battery and thermal state of this Mac (T-495): a snapshot.
+    v["power_watch"] = json!(s.power_watch.status());
     // The show player (T-444): the header's times, every frame.
     v["showlist"] = json!(crate::showlist::summary(s));
     // The backup machine (T-456): the top bar's pill or banner.

@@ -152,7 +152,7 @@ const SL_GROUPS = {
   limiter: ['limiter'],
   play: ['cue', 'scene', 'show'],
   settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings', 'audience_mode', 'safety_profile'],
-  studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow', 'output_select', 'output'],
+  studio: ['app_start', 'app_stop', 'project_open', 'autosave_recovered', 'log_overflow', 'output_select', 'output', 'mac_power'],
 };
 let slLog = null;
 // Exposure estimator (T-257): read-only figures, never an action on the output.

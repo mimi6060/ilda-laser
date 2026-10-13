@@ -134,6 +134,28 @@ function showShownet(sn) {
         + 'Laserworld le déconseille (performances réduites, fonctionnement non sûr). Branchez un câble réseau.';
   }
 }
+// Battery and heat of this Mac (T-495): a pill each, only when not normal.
+// Information for the operator: nothing is armed, disarmed or dimmed.
+function showPowerWatch(p) {
+  const pct = p && p.battery_pct != null ? ` (${p.battery_pct} %)` : '';
+  const battery = !!(p && p.source === 'battery');
+  const low = battery && p.battery_pct != null && p.battery_pct <= 20, crit = battery && p.battery_pct != null && p.battery_pct <= 10;
+  const pp = $('powerPill');
+  pp.hidden = !battery;
+  if (battery) {
+    pp.textContent = libelle(low ? 'barre.batterie.faible' : 'barre.batterie', { pct });
+    pp.title = libelle('barre.batterie.info');
+    pp.classList.toggle('crit', crit);
+  }
+  const hot = !!(p && (p.thermal === 'serious' || p.thermal === 'critical'));
+  const tp = $('thermalPill');
+  tp.hidden = !hot;
+  if (hot) {
+    tp.textContent = libelle(p.thermal === 'critical' ? 'barre.surchauffe' : 'barre.chauffe');
+    tp.title = libelle('barre.chauffe.info');
+    tp.classList.toggle('crit', p.thermal === 'critical');
+  }
+}
 // While the checklist is to do, the button opens it instead (Space still
 // asks, and shows why arming is refused).
 $('armBtn').addEventListener('click', () => { if (!armed && checklistPending()) openChecklist(); else toggleArmed('ui'); });
@@ -670,4 +692,4 @@ function holdStrobe(on) {
 
 export { IS_MAC, MACRO_LETTERS, afterEscape, arm, armAnsweredAt, assignArm, assignChecklistState,
   assignShownetState, checklistState, clock, closeKeysHelp, emergencyStop, openKeysHelp, showArmed,
-  showShownet, shownetState, syncFill };
+  showPowerWatch, showShownet, shownetState, syncFill };

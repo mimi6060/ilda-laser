@@ -11,7 +11,7 @@
 import { GALVO, assignLastFrameAt, draw, galvoShown, showKeepAwake, showOutputKind, showPresence } from './presence.js';
 import { $, NC, api, assignArmed, assignPps, lookBusy, noticeCondition, notify, pps, pullNotices,
   sendLatest, settingsRev, showHistory, takeProjectModified } from './core.js';
-import { armAnsweredAt, assignArm, assignChecklistState, showArmed, showShownet } from './laser.js';
+import { armAnsweredAt, assignArm, assignChecklistState, showArmed, showPowerWatch, showShownet } from './laser.js';
 import { assignLastPoints, assignLastShown, show2d, show3d, showPrepared, view3d } from './view3d.js';
 import { showShowMode } from './workspaces.js';
 import { showAudioGuard } from './music.js';
@@ -251,6 +251,7 @@ function applyState(f, at, pushed) {
   showHistory(f.history);
   noticeConditions(f);
   showShownet(f.shownet);
+  showPowerWatch(f.power_watch);
   showAudienceMode(f.audience);
   if (f.outdoor) showOutdoor(f.outdoor);
   showProfilePill(f.safety_profile);

@@ -83,6 +83,7 @@ mod perf_budget;
 mod pools;
 mod ponk;
 mod power;
+mod power_watch;
 mod presence;
 mod prepared;
 mod presets;
@@ -635,6 +636,9 @@ pub struct Shared {
     /// Whether a ShowNET output's link is the Wi-Fi (T-472): a warning in
     /// the top bar, nothing else.
     pub wifi: Arc<wifi::WifiWatch>,
+    /// Battery and thermal state of this Mac (T-495): warnings for the
+    /// operator, nothing else. Read by its own thread; a snapshot here.
+    pub power_watch: Arc<power_watch::PowerWatch>,
     /// The newest frame and page state for the pushed routes (push.rs,
     /// T-411): the engine drops each frame there and never waits.
     pub push: Arc<push::Hub>,
@@ -791,6 +795,21 @@ impl Shared {
         };
         let text = if audio.message.is_empty() { "entrée audio indisponible".to_string() } else { audio.message };
         self.notices.condition("audio", "Audio", level.map(|l| (l, text)));
+        self.sync_power_watch();
+    }
+
+    /// The battery and thermal warnings since the last call (T-495) into
+    /// the notification centre, and « Mac sur secteur » in the checklist.
+    /// Information only: never arms, disarms or dims.
+    fn sync_power_watch(&mut self) {
+        for n in self.power_watch.take_notices() {
+            // Every change ends the previous condition: a new state is shown
+            // again (a toast), not a rewording of the pinned line. Back to
+            // normal is a plain line.
+            self.notices.resolve(n.key);
+            self.notices.push(n.level, power_watch::SOURCE, n.text, (!n.resolved).then_some(n.key));
+        }
+        self.checklist.set_mac_ready(self.power_watch.status().ready_for_show());
     }
 
     /// The operator has seen the warning of `file` (or of every file).
@@ -1203,6 +1222,7 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     state.applog = Arc::clone(&app_log);
     log::info!("{}", startup_line(&cli, state.output_name.as_deref()));
     let safety_log = state.gate.log().clone();
+    state.power_watch.set_log(safety_log.clone());
     safety_log.record(
         "app_start",
         Some("system"),
@@ -1231,6 +1251,7 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     }
     let output_mgr = Arc::clone(&state.output_mgr);
     let wifi_watch = Arc::clone(&state.wifi);
+    let power_watch = Arc::clone(&state.power_watch);
     let remembered = state.outputs.connection().selected.filter(|_| output.is_none() && !hold_outputs);
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
@@ -1250,6 +1271,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let output_thread = output_mgr.spawn(Arc::clone(&running));
     // Reads the route to a ShowNET output (T-472); a warning only.
     let _wifi_thread = wifi_watch.spawn(Arc::clone(&running));
+    // Reads the battery and the thermal state (T-495); warnings only.
+    let _power_thread = power_watch.spawn(Arc::clone(&running));
     if let Some(id) = remembered {
         output_mgr.select(Some(id), interlock::ArmSource::System);
     }
@@ -1710,6 +1733,8 @@ fn startup_state(cli: &Cli) -> Shared {
         output_mgr,
         // Simulated (no command run) whenever a test flag is given.
         wifi: Arc::new(wifi::WifiWatch::new(cli.test_hooks || cli.test_devices.is_some() || cli.test_output.is_some())),
+        // Simulated (the real machine never read) whenever a test flag is given.
+        power_watch: Arc::new(power_watch::PowerWatch::new(cli.test_hooks || cli.test_keep_awake || cli.test_devices.is_some() || cli.test_output.is_some())),
         push: Default::default(),
         venue: venue::VenueStore::load_or_create(cli.data_dir.join("venue.json")),
         projector_outputs: Default::default(),

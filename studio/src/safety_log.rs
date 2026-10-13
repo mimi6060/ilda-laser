@@ -439,6 +439,7 @@ pub fn describe(e: &SafetyEvent) -> String {
     match e.kind.as_str() {
         "app_start" => format!("Démarrage du studio ({})", str_of(d, "output")),
         "app_stop" => "Arrêt du studio".into(),
+        "mac_power" => format!("Mac : {}", str_of(d, "text")),
         "arm" => "Armement".into(),
         "arm_refused" => {
             let why: Vec<&str> = d.get("blocking").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();

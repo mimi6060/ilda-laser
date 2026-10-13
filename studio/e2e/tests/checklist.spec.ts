@@ -40,12 +40,12 @@ test.describe('simulated real output', () => {
     await expect(page.locator('#checklistPanel')).toHaveAttribute('open', '');
     await expect(page.locator('#clLed')).toHaveText("À faire avant d'armer");
     const items = page.locator('#clItems li');
-    await expect(items).toHaveCount(8);
+    await expect(items).toHaveCount(9);
     await expect(page.locator('#clItems li[data-item="outdoor_permit"]')).toHaveCount(0);
 
     // Outdoor: the permit item appears and needs its reference.
     await page.locator('#clOutdoor').check();
-    await expect(items).toHaveCount(9);
+    await expect(items).toHaveCount(10);
     const permit = page.locator('#clItems li[data-item="outdoor_permit"]');
     await permit.locator('input[type=checkbox]').click();
     await expect(page.locator('#clError')).toContainText("Référence de l'autorisation");
@@ -60,13 +60,13 @@ test.describe('simulated real output', () => {
 
     await page.locator('#clOperator').fill('Michel');
     const ids = await page.locator('#clItems li:not(.done)').evaluateAll(lis => lis.map(li => (li as HTMLElement).dataset.item!));
-    expect(ids).toHaveLength(8);
+    expect(ids).toHaveLength(9);
     for (const id of ids) {
       const li = page.locator(`#clItems li[data-item="${id}"]`);
       await li.locator('input[type=checkbox]').click();
       await expect(li).toHaveClass(/done/);
     }
-    await expect(page.locator('#clItems li.done')).toHaveCount(9);
+    await expect(page.locator('#clItems li.done')).toHaveCount(10);
     await page.locator('#clComplete').click();
     await expect(page.locator('#clLed')).toHaveText('Terminée');
     await expect(page.locator('#clDone')).toContainText('Liste terminée par Michel');
@@ -77,7 +77,7 @@ test.describe('simulated real output', () => {
     const log = await studio.get('/api/safety/log');
     const done = log.events.find((e: { kind: string }) => e.kind === 'checklist');
     expect(done.detail.operator).toBe('Michel');
-    expect(done.detail.items).toHaveLength(9);
+    expect(done.detail.items).toHaveLength(10);
     expect(done.detail.items.find((i: { id: string }) => i.id === 'outdoor_permit').value).toBe('DGTA-2026-042');
     expect(done.text).toContain('terminée par Michel');
 
