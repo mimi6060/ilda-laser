@@ -21,14 +21,22 @@
     const banner = document.getElementById('estopBanner');
     if (banner) banner.hidden = false;
   });
+  const incomplete = () => {
+    const banner = document.getElementById('uiIncomplete');
+    if (banner) banner.hidden = false;
+  };
   window.addEventListener('error', e => {
     if (ready()) return;
     const moduleScript = e.target instanceof HTMLScriptElement && e.target.type === 'module';
-    if (moduleScript || e instanceof ErrorEvent) {
-      const banner = document.getElementById('uiIncomplete');
-      if (banner) banner.hidden = false;
-    }
+    if (moduleScript || e instanceof ErrorEvent) incomplete();
   }, true);
+  // T-508: an async function that throws while the modules run rejects a
+  // promise nobody awaits. That rejection is reported after the module
+  // graph has finished (so after data-ui-ready), but before the page's
+  // load event: rejections are counted until just after it.
+  let loading = true;
+  window.addEventListener('load', () => setTimeout(() => { loading = false; }));
+  window.addEventListener('unhandledrejection', () => { if (loading) incomplete(); });
 })();
 </script>
 </head>
