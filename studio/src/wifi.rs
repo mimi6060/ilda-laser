@@ -13,6 +13,12 @@
 //! so the default route stands for it. A warning only: it never arms,
 //! never disarms and never blocks arming.
 //!
+//! A LaserCube on the network (T-496) is watched the same way, with its
+//! own address as the target: the route this Mac takes to it. When the
+//! LaserCube is itself the access point, that route is the Mac's Wi-Fi.
+//! What link the cube itself uses (its Wi-Fi client mode behind a wired
+//! Mac) is not exposed by `laser-dac`'s discovery, so it is not known.
+//!
 //! Tests and e2e never run the commands: `simulate` sets the state.
 
 use serde::{Deserialize, Serialize};
@@ -57,6 +63,8 @@ pub struct WifiStatus {
 struct Inner {
     /// None: not a ShowNET output, nothing watched.
     target: Option<Target>,
+    /// What the target is, for the warning text: "shownet" or "lasercube".
+    device: &'static str,
     status: Option<WifiStatus>,
 }
 
@@ -72,9 +80,15 @@ impl WifiWatch {
         Self { simulated, ..Default::default() }
     }
 
-    /// Watches `target` (None: stop; the warning goes away).
+    /// Watches `target` for a ShowNET (None: stop; the warning goes away).
     pub fn set_target(&self, target: Option<Target>) {
+        self.set_target_for(target, "shownet");
+    }
+
+    /// Watches `target` for `device` ("shownet", "lasercube").
+    pub fn set_target_for(&self, target: Option<Target>, device: &'static str) {
         let mut inner = self.inner.lock().unwrap();
+        inner.device = device;
         if inner.target != target {
             inner.target = target;
             if !self.simulated || target.is_none() {
@@ -87,6 +101,12 @@ impl WifiWatch {
     pub fn warning(&self) -> Option<WifiStatus> {
         let inner = self.inner.lock().unwrap();
         inner.target.and(inner.status.clone()).filter(|s| s.wireless)
+    }
+
+    /// The device watched ("shownet", "lasercube"), while watching.
+    pub fn device(&self) -> Option<&'static str> {
+        let inner = self.inner.lock().unwrap();
+        inner.target.map(|_| inner.device)
     }
 
     /// `POST /api/test/wifi` (`--test-hooks`).
@@ -206,5 +226,21 @@ mod tests {
         w.simulate(Some(WifiStatus { wireless: true, interface: None }));
         w.set_target(None);
         assert_eq!(w.warning(), None);
+    }
+
+    #[test]
+    fn a_lasercube_is_watched_by_its_own_address() {
+        let w = WifiWatch::new(true);
+        assert_eq!(w.device(), None);
+        let cube: IpAddr = "192.168.1.50".parse().unwrap();
+        w.set_target_for(Some(Target::Host(cube)), "lasercube");
+        assert_eq!(w.device(), Some("lasercube"));
+        let wifi = WifiStatus { wireless: true, interface: Some("en0".into()) };
+        w.simulate(Some(wifi.clone()));
+        assert_eq!(w.warning(), Some(wifi));
+        w.set_target(Some(Target::Default));
+        assert_eq!(w.device(), Some("shownet"));
+        w.set_target_for(None, "lasercube");
+        assert_eq!((w.warning(), w.device()), (None, None));
     }
 }

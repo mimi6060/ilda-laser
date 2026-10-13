@@ -205,8 +205,8 @@ struct Cli {
     /// Where scenes and calibration are saved.
     #[arg(long, default_value = "studio-data")]
     data_dir: PathBuf,
-    /// Scan for laser DACs (Helios on USB, Ether Dream and IDN on the
-    /// network), print their ids for --device and exit. Opens no output.
+    /// Scan for laser DACs (Helios and LaserCube on USB, Ether Dream, IDN
+    /// and LaserCube on the network), print their ids for --device and exit. Opens no output.
     #[arg(long, conflicts_with_all = ["device", "ponk", "test_output"])]
     list_devices: bool,
     /// Testing only (T-303): the DACs a scan "finds", as a JSON list of
@@ -837,7 +837,16 @@ impl Shared {
             .selected()
             .and_then(|id| id.strip_prefix("ponk:").or_else(|| id.strip_prefix(artnet::ID_PREFIX))?.parse::<std::net::SocketAddr>().ok())
             .map(|a| a.ip());
-        self.wifi.set_target(kind.map(|_| wifi::Target::for_receiver(receiver)));
+        if kind.is_some() {
+            self.wifi.set_target(Some(wifi::Target::for_receiver(receiver)));
+        } else {
+            // A LaserCube on the network (T-496): the route to its address,
+            // from the last scan or from an id in the IP form.
+            let cube = self.output_mgr.selected().filter(|id| id.starts_with(devices::LASERCUBE_NETWORK_PREFIX)).and_then(|id| {
+                self.output_mgr.devices().devices().into_iter().find(|d| d.id == id).and_then(|d| d.ip).or_else(|| devices::lasercube_id_ip(&id))
+            });
+            self.wifi.set_target_for(cube.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()).map(wifi::Target::Host), "lasercube");
+        }
         // The audience mode follows the checklist and the sheet (T-255).
         self.sync_audience();
     }

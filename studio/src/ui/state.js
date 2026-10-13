@@ -347,7 +347,9 @@ function noticeConditions(f) {
   noticeCondition('output', lost || !!f.output_error, { level: 'error', source: 'Sortie',
     text: lost ? 'Sortie perdue : laser désarmé' + (f.output_error ? ' (' + f.output_error + ')' : '') : 'Erreur de sortie : ' + f.output_error });
   const wifi = f.shownet && f.shownet.wifi;
-  noticeCondition('wifi', !!wifi, { level: 'warning', source: 'Sortie', text: 'La sortie ShowNET passe par le Wi-Fi : branchez un câble réseau' });
+  noticeCondition('wifi', !!wifi, { level: 'warning', source: 'Sortie',
+    text: f.shownet && f.shownet.wifi_device === 'lasercube' ? "Wi-Fi : liaison non fiable pour un show, préférez l'Ethernet (LaserCube)"
+      : 'La sortie ShowNET passe par le Wi-Fi : branchez un câble réseau' });
   const scan = !!(f.audience && f.audience.scanning);
   if (NC.audienceScan !== undefined && NC.audienceScan !== scan) {
     notify({ level: scan ? 'warning' : 'info', source: 'Sécurité', toast: false,

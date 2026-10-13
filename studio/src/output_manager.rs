@@ -850,7 +850,7 @@ impl OutputManager {
 }
 
 fn ponk_entry(target: SocketAddr) -> DeviceInfo {
-    DeviceInfo { kind: "ponk".into(), id: format!("ponk:{target}"), name: format!("PONK → MadMapper ({target})") }
+    DeviceInfo::new("ponk".into(), format!("ponk:{target}"), format!("PONK → MadMapper ({target})"))
 }
 
 /// The real outputs: DACs through `laser-dac`, and PONK to MadMapper.
@@ -954,7 +954,7 @@ impl OutputBackend for FakeBackend {
     fn fixed(&self) -> Vec<DeviceInfo> {
         let mut out = Vec::new();
         if self.log_file.is_some() {
-            out.push(DeviceInfo { kind: "test".into(), id: TEST_ID.into(), name: TEST_OUTPUT_NAME.into() });
+            out.push(DeviceInfo::new("test".into(), TEST_ID.into(), TEST_OUTPUT_NAME.into()));
         }
         out.extend(self.ponk.map(ponk_entry));
         out.extend(self.artnet.entry());
@@ -1056,7 +1056,7 @@ mod tests {
     use super::*;
 
     fn dev(id: &str) -> DeviceInfo {
-        DeviceInfo { kind: "etherdream".into(), id: id.into(), name: format!("Ether Dream {id}") }
+        DeviceInfo::new("etherdream".into(), id.into(), format!("Ether Dream {id}"))
     }
 
     /// A manager on a fake backend with two devices, already scanned.

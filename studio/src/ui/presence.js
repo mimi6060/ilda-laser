@@ -252,7 +252,7 @@ function draw(points, c = cv) {
 // Which output the frames go to (T-300), as a coloured pill in the header.
 const OUTPUT_TITLES = {
   ponk: 'Sortie PONK : les tracés partent vers MadMapper/MadLaser, qui pilote le ShowNET. Laser désarmé = trames vides envoyées en continu.',
-  dac: 'Sortie directe vers un DAC laser (Helios USB / IDN / Ether Dream).',
+  dac: 'Sortie directe vers un DAC laser (Helios USB / IDN / Ether Dream / LaserCube).',
   artnet: 'Sortie ShowNET carte SD (Art-Net) : le boîtier joue lui-même les fichiers de sa carte ; le studio envoie le numéro du cue et l\'intensité. Désarmé = intensité 0 et figure 0 en continu. L\'arrêt matériel du projecteur reste la vraie sécurité.',
   test: 'Sortie de test (fichier journal, aucun laser).',
   preview: 'Aperçu seulement : rien ne part vers un laser.',

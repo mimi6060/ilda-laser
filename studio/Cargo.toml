@@ -5,7 +5,7 @@ edition = "2021"
 description = "Live laser show studio for the Mac: shapes, text, animation and music-reactive effects, with a browser UI and live preview."
 
 [dependencies]
-laser-dac = { version = "0.13.1", default-features = false, features = ["ether-dream", "idn", "helios"] }
+laser-dac = { version = "0.13.1", default-features = false, features = ["ether-dream", "idn", "helios", "lasercube-network", "lasercube-usb"] }  # LaserCube (T-496): laser-dac's own MIT code, no libLaserdockCore
 libusb1-sys = { version = "0.7", features = ["vendored"] }  # Helios USB (T-303): libusb built from source and linked in, never a Homebrew dylib
 # tiny_http 0.12.0 with our robustness patches (T-449, MIT OR Apache-2.0):
 # bounded drain of an unread body, bounded header lines and count,

@@ -120,14 +120,18 @@ function showArmed() {
   showVueArm();
 }
 // ShowNET output (T-472): the hardware-stop reminder and the Wi-Fi pill,
-// a permanent warning while the link to the box is the Wi-Fi.
+// a permanent warning while the link to the box is the Wi-Fi. A LaserCube
+// on the network (T-496) gets the same pill.
 function showShownet(sn) {
   shownetState = sn || null;
   const wifi = sn && sn.wifi;
   $('wifiPill').hidden = !wifi;
   if (wifi) {
-    $('wifiPill').title = `La sortie ShowNET passe par le Wi-Fi${wifi.interface ? ' (' + wifi.interface + ')' : ''} : `
-      + 'Laserworld le déconseille (performances réduites, fonctionnement non sûr). Branchez un câble réseau.';
+    const via = wifi.interface ? ' (' + wifi.interface + ')' : '';
+    $('wifiPill').title = sn.wifi_device === 'lasercube'
+      ? `La LaserCube est jointe par le Wi-Fi${via} : liaison non fiable pour un show, préférez l'Ethernet.`
+      : `La sortie ShowNET passe par le Wi-Fi${via} : `
+        + 'Laserworld le déconseille (performances réduites, fonctionnement non sûr). Branchez un câble réseau.';
   }
 }
 // While the checklist is to do, the button opens it instead (Space still

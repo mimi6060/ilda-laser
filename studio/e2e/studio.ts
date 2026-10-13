@@ -97,7 +97,7 @@ export interface StudioOptions {
    */
   testChecklist?: boolean;
   /** T-303: what a DAC scan "finds" (--test-devices; default: nothing). */
-  devices?: { kind: string; id: string; name: string }[];
+  devices?: { kind: string; id: string; name: string; ip?: string }[];
   /**
    * T-401: arming needs a connected output. By default the studio starts
    * with the fake one (--test-output, a log file next to the data dir,

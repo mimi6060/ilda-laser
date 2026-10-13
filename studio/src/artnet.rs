@@ -228,7 +228,7 @@ impl ShowNetDmxStore {
     pub fn entry(&self) -> Option<crate::devices::DeviceInfo> {
         let id = self.get().id()?;
         let target = id_target(&id)?;
-        Some(crate::devices::DeviceInfo { kind: KIND.into(), id, name: output_name(target) })
+        Some(crate::devices::DeviceInfo::new(KIND.into(), id, output_name(target)))
     }
 }
 

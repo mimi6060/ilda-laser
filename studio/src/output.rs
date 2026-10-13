@@ -304,6 +304,12 @@ impl DacOutput {
             device.to_string()
         };
         let dac = open_device(&id).map_err(|e| anyhow::anyhow!("{e}")).context("failed to open device")?;
+        Self::from_dac(dac, &id, pps)
+    }
+
+    /// Drives an opened `laser-dac` device (any kind: Helios, Ether Dream,
+    /// IDN, LaserCube...), disarmed. Tests hand it a fake backend.
+    pub fn from_dac(dac: laser_dac::Dac, id: &str, pps: u32) -> Result<Self> {
         let fixed = Arc::new(AtomicBool::new(false));
         let (session, info) = dac
             .start_frame_session(FrameSessionConfig::new(pps).with_transition_fn(seam_fn(pps, Arc::clone(&fixed))))
@@ -973,5 +979,131 @@ mod tests {
         let short = vec![Point::lit(0.0, 0.0, 1.0, 1.0, 1.0), Point::lit(0.1, 0.0, 1.0, 1.0, 1.0)];
         assert_eq!(fit_frame_limits(short.clone(), lim, Some(100)).len(), content_budget(100));
         assert_eq!(fit_frame_limits(short, lim, None).len(), 200);
+    }
+
+    /// A LaserCube that never leaves the test (T-496): `laser-dac`'s own
+    /// `LaserCubeNetwork` type and capabilities, behind a fake FIFO backend
+    /// that records the points instead of sending them anywhere.
+    struct FakeCube {
+        caps: laser_dac::DacCapabilities,
+        connected: Arc<AtomicBool>,
+        written: Arc<Mutex<Vec<LaserPoint>>>,
+        estimator: laser_dac::buffer_estimate::SoftwareDecayEstimator,
+    }
+
+    impl laser_dac::DacBackend for FakeCube {
+        fn dac_type(&self) -> laser_dac::DacType {
+            laser_dac::DacType::LaserCubeNetwork
+        }
+        fn caps(&self) -> &laser_dac::DacCapabilities {
+            &self.caps
+        }
+        fn connect(&mut self) -> laser_dac::Result<()> {
+            Ok(())
+        }
+        fn disconnect(&mut self) -> laser_dac::Result<()> {
+            Ok(())
+        }
+        fn is_connected(&self) -> bool {
+            self.connected.load(Ordering::SeqCst)
+        }
+        fn stop(&mut self) -> laser_dac::Result<()> {
+            Ok(())
+        }
+        fn set_shutter(&mut self, _open: bool) -> laser_dac::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl laser_dac::FifoBackend for FakeCube {
+        fn try_write_points(&mut self, pps: u32, points: &[LaserPoint]) -> laser_dac::Result<laser_dac::WriteOutcome> {
+            if !self.connected.load(Ordering::SeqCst) {
+                return Err(laser_dac::Error::disconnected("LaserCube débranchée (test)"));
+            }
+            self.written.lock().unwrap().extend_from_slice(points);
+            self.estimator.record_send(std::time::Instant::now(), points.len() as u64, pps);
+            Ok(laser_dac::WriteOutcome::Written)
+        }
+        fn estimator(&self) -> &dyn laser_dac::buffer_estimate::BufferEstimator {
+            &self.estimator
+        }
+    }
+
+    fn cube_lit(p: &LaserPoint) -> bool {
+        p.intensity > 0 && (p.r | p.g | p.b) > 0
+    }
+
+    /// Waits for fresh points written after this call (older ones, maybe
+    /// queued before a state change, are dropped first).
+    fn fresh_points(written: &Mutex<Vec<LaserPoint>>) -> Vec<LaserPoint> {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        written.lock().unwrap().clear();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let w = written.lock().unwrap();
+            if w.len() >= 100 {
+                return w.clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "the session never wrote");
+        }
+    }
+
+    /// A LaserCube goes through `DacOutput` like any other `laser-dac`
+    /// device: disarmed at start, dark on disarm, e-stop, blackout and
+    /// shutdown, and a lost cube is reported as a fault.
+    #[test]
+    fn a_lasercube_follows_the_dac_output_safety_rules() {
+        let kind = laser_dac::DacType::LaserCubeNetwork;
+        let caps = laser_dac::caps_for_dac_type(&kind);
+        let connected = Arc::new(AtomicBool::new(true));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let backend = FakeCube {
+            caps: caps.clone(),
+            connected: Arc::clone(&connected),
+            written: Arc::clone(&written),
+            estimator: laser_dac::buffer_estimate::SoftwareDecayEstimator::new(),
+        };
+        let info = laser_dac::DacInfo::new("lasercube-network:test", "LaserCube test", kind, caps);
+        let dac = laser_dac::Dac::new(info, laser_dac::BackendKind::Fifo(Box::new(backend)));
+        let out = DacOutput::from_dac(dac, "lasercube-network:test", 30_000).unwrap();
+        assert_eq!((out.name(), out.kind()), ("LaserCube test (lasercube-network:test)", "dac"));
+        assert_eq!(out.max_points(), None, "a FIFO DAC, no frame-swap limit");
+        let kill = out.kill_switch().expect("a kill switch for the e-stop");
+        let mut stage = OutputStage::new(Some(Box::new(out)));
+        let estop = EStop::default();
+
+        // Disarmed at start: even a lit frame goes out dark.
+        stage.emit(&lit(), false, true, &estop);
+        assert!(fresh_points(&written).iter().all(|p| !cube_lit(p)), "starts disarmed");
+
+        // Armed: the frame is drawn.
+        stage.emit(&lit(), true, true, &estop);
+        assert!(fresh_points(&written).iter().any(cube_lit), "armed draws");
+
+        // Disarmed by the gate.
+        stage.emit(&lit(), false, true, &estop);
+        assert!(fresh_points(&written).iter().all(|p| !cube_lit(p)), "disarm is dark");
+
+        // The e-stop's kill switch, straight from another thread.
+        stage.emit(&lit(), true, true, &estop);
+        assert!(fresh_points(&written).iter().any(cube_lit));
+        std::thread::spawn(kill).join().unwrap();
+        assert!(fresh_points(&written).iter().all(|p| !cube_lit(p)), "kill switch is dark");
+
+        // Blackout (hold released): dark frame, output still armed.
+        stage.emit(&lit(), true, true, &estop);
+        stage.emit(&lit(), true, false, &estop);
+        assert!(fresh_points(&written).iter().all(|p| !cube_lit(p)), "blackout is dark");
+
+        // Losing the cube is a fault: the output manager disarms.
+        assert_eq!(stage.fault(), None);
+        connected.store(false, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while stage.fault().is_none() {
+            assert!(std::time::Instant::now() < deadline, "a lost LaserCube is never reported");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        stage.shutdown();
     }
 }
