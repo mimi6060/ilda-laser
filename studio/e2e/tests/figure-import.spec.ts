@@ -212,6 +212,14 @@ test('a DXF drawing becomes a figure, its layers as parts on request', async ({ 
   await page.locator('#impLayers').check();
   await expect(page.locator('#impParts')).toBeVisible();
   await expect(page.locator('#impParts')).toContainText('Cadre, Rond');
+  // An SVG next: « Par calque » is a DXF option, unticked and hidden.
+  await give(page, 'logo.svg', 'image/svg+xml', Buffer.from(LOGO_SVG));
+  await expect(page.locator('#impDxfOpts')).toBeHidden();
+  await expect(page.locator('#impLayers')).not.toBeChecked();
+  await give(page, 'plan scene.dxf', 'application/dxf', dxf());
+  await expect(page.locator('#impStats')).toContainText('2 tracé(s)');
+  await page.locator('#impLayers').check();
+  await expect(page.locator('#impParts')).toContainText('Cadre, Rond');
   await page.locator('#impCreate').click();
   await expect(page.locator('#figImportDlg')).toBeHidden();
   const fig = (await load('plan scene'))! as Figure & { parts: { id: number; name: string }[] };

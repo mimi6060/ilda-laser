@@ -127,6 +127,8 @@ async function impLoad(file) {
   $('impRasterOpts').hidden = !imp.raster;
   $('impSvgOpts').hidden = imp.raster || imp.dxf;
   $('impDxfOpts').hidden = !imp.dxf;
+  // « Par calque » is a DXF option: another file starts without it.
+  if (!imp.dxf) $('impLayers').checked = false;
   imp.bytes = buf; imp.name = file.name;
   $('impName').dataset.auto = '1';
   await impPreview();

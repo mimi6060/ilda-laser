@@ -371,7 +371,7 @@ impl Reader {
     }
 
     fn ignore(&mut self, what: &str) {
-        let name: String = what.chars().filter(|c| !c.is_control()).take(24).collect();
+        let name = clean(what, 24);
         *self.ignored.entry(name).or_default() += 1;
     }
 
@@ -653,7 +653,7 @@ impl Reader {
             let (color, part) = if opts.by_layer {
                 let part = *part_of.entry(s.layer).or_insert_with(|| {
                     if parts.len() < crate::figures::MAX_PARTS as usize {
-                        let clean: String = name.trim().chars().filter(|c| !c.is_control()).take(MAX_PART_NAME).collect();
+                        let clean = clean(name, MAX_PART_NAME);
                         parts.push(if clean.is_empty() { "Calque".into() } else { clean });
                         parts.len() as u8
                     } else {
@@ -685,6 +685,14 @@ impl Reader {
         }
         (out, parts)
     }
+}
+
+/// A name from the file as shown in a warning or a part: control and
+/// bidirectional formatting characters removed (they could reorder or
+/// hide the text around them), trimmed, at most `max` characters.
+fn clean(s: &str, max: usize) -> String {
+    let bidi = |c: char| matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    s.chars().filter(|&c| !c.is_control() && !bidi(c)).collect::<String>().trim().chars().take(max).collect()
 }
 
 /// x mirrored for an entity drawn with a -Z extrusion.
@@ -772,10 +780,12 @@ fn bspline(ctrl: &[Pt], knots: &[f64], weights: &[f64], p: usize) -> Vec<Pt> {
     let samples = (n * 16).clamp(32, 4096);
     let mut out = Vec::with_capacity(samples + 1);
     let mut d = vec![[0.0; 3]; p + 1];
+    // Samples go forward, so the knot span only moves forward: the whole
+    // curve costs one pass over the knots, not one per sample.
+    let mut s = p;
     for k in 0..=samples {
         let t = t0 + (t1 - t0) * k as f64 / samples as f64;
         // The knot span: knots[s] <= t < knots[s + 1], p <= s < n.
-        let mut s = p;
         while s + 1 < n && knots[s + 1] <= t {
             s += 1;
         }
@@ -1098,6 +1108,88 @@ pub(super) mod tests {
         assert!(pts(&paths[2]).iter().all(|&p| (dist(p, [-5.0, 0.0]) - 1.0).abs() < 1e-9));
         let all = w.join(" | ");
         assert!(all.contains("3DFACE ×1") && all.contains("données invalides"), "{all}");
+    }
+
+    /// The span search as it was before review: from the start for every
+    /// sample. Same arithmetic, so the points must match exactly.
+    fn bspline_restarting(ctrl: &[Pt], knots: &[f64], p: usize) -> Vec<Pt> {
+        let n = ctrl.len();
+        let samples = (n * 16).clamp(32, 4096);
+        let (t0, t1) = (knots[p], knots[n]);
+        (0..=samples)
+            .map(|k| {
+                let t = t0 + (t1 - t0) * k as f64 / samples as f64;
+                let mut s = p;
+                while s + 1 < n && knots[s + 1] <= t {
+                    s += 1;
+                }
+                let mut d: Vec<[f64; 3]> = (0..=p).map(|j| [ctrl[j + s - p][0], ctrl[j + s - p][1], 1.0]).collect();
+                for r in 1..=p {
+                    for j in (r..=p).rev() {
+                        let (a, b) = (knots[j + s - p], knots[j + 1 + s - r]);
+                        let alpha = if b - a > 1e-15 { (t - a) / (b - a) } else { 0.0 };
+                        let prev = d[j - 1];
+                        for (c, v) in d[j].iter_mut().enumerate() {
+                            *v = (1.0 - alpha) * prev[c] + alpha * *v;
+                        }
+                    }
+                }
+                [d[p][0] / d[p][2], d[p][1] / d[p][2]]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_huge_spline_is_evaluated_in_one_pass_with_the_same_points() {
+        // Non-uniform clamped knots (repeated inner knots too), cubic.
+        let spline = |n: usize| {
+            let ctrl: Vec<Pt> = (0..n).map(|i| [i as f64, ((i * 7919) % 101) as f64]).collect();
+            let mut knots = vec![0.0; 4];
+            let mut k = 0.0;
+            for i in 0..n - 4 {
+                k += if i % 5 == 4 { 0.0 } else { 1.0 + (i % 3) as f64 };
+                knots.push(k);
+            }
+            knots.extend([k + 1.0; 4]);
+            (ctrl, knots)
+        };
+        let (ctrl, knots) = spline(3_000);
+        assert_eq!(bspline(&ctrl, &knots, &[], 3), bspline_restarting(&ctrl, &knots, 3));
+        // 100 000 control points: linear, fast even in a debug build.
+        let (ctrl, knots) = spline(100_000);
+        let start = std::time::Instant::now();
+        let pts = bspline(&ctrl, &knots, &[], 3);
+        assert!(start.elapsed() < std::time::Duration::from_millis(500), "{:?}", start.elapsed());
+        assert_eq!(pts.len(), 4097);
+        assert!(near(pts[0], ctrl[0]) && near(pts[4096], ctrl[99_999]));
+        assert_eq!(pts[2048], bspline_restarting(&ctrl, &knots, 3)[2048]);
+        // And through the reader, from a file.
+        let mut d = Dxf::default();
+        d.section("ENTITIES").pair(0, "SPLINE").pair(71, 3);
+        for k in &knots {
+            d.pair(40, k);
+        }
+        for p in &ctrl {
+            d.pair(10, p[0]).pair(20, p[1]);
+        }
+        d.endsec();
+        let text = d.eof();
+        let start = std::time::Instant::now();
+        let (paths, _, _) = run(&text, &Options::default());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn names_lose_control_and_bidi_characters() {
+        assert_eq!(clean("  Ca\u{202E}lque\u{2066}\n\u{0007} ", 32), "Calque");
+        assert_eq!(clean("\u{200F}abc", 2), "ab");
+        let mut d = Dxf::default();
+        d.section("ENTITIES").line("Sc\u{202E}ène", [0.0, 0.0], [1.0, 0.0]).pair(0, "EVIL\u{202E}TXT").endsec();
+        let (_, parts, w) = run(&d.eof(), &Options { by_layer: true, ..Options::default() });
+        assert_eq!(parts, ["Scène"]);
+        assert!(w.iter().any(|w| w.contains("EVILTXT ×1")), "{w:?}");
+        assert!(w.iter().all(|w| !w.contains('\u{202E}')));
     }
 
     #[test]
