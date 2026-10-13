@@ -44,6 +44,7 @@ pub mod feedback;
 pub mod listener;
 pub mod monitor;
 pub mod osc;
+pub mod oscquery;
 pub mod patch;
 pub mod sacn;
 
@@ -214,6 +215,8 @@ pub struct NetInConfig {
     pub loss: LossConfig,
     /// OSC feedback (T-416).
     pub feedback: feedback::OscFeedback,
+    /// OSCQuery: the read-only address listing (T-499).
+    pub oscquery: oscquery::OscQueryConfig,
 }
 
 /// A local address to listen on: an IP literal, never a name, never a
@@ -359,6 +362,9 @@ struct HubInner {
     sources: Vec<DmxSource>,
     timecode: TimecodeIn,
     feedback: feedback::FeedbackStatus,
+    /// The OSCQuery server (T-499); `packets` counts requests, `rejected`
+    /// the refused methods.
+    oscquery: ListenStatus,
 }
 
 /// ArtTimeCode readings received (`TIMECODE_QUEUE` newest at most).
@@ -409,6 +415,7 @@ impl NetHub {
             sources: Vec::new(),
             timecode: TimecodeIn::default(),
             feedback: feedback::FeedbackStatus::default(),
+            oscquery: ListenStatus::default(),
         };
         NetHub { inner: Mutex::new(inner), estop }
     }
@@ -531,6 +538,15 @@ impl NetHub {
 
     pub fn update_feedback(&self, f: impl FnOnce(&mut feedback::FeedbackStatus)) {
         f(&mut self.lock().feedback);
+    }
+
+    /// The OSCQuery server's state (T-499).
+    pub fn oscquery_status(&self) -> ListenStatus {
+        self.lock().oscquery.clone()
+    }
+
+    pub fn update_oscquery(&self, f: impl FnOnce(&mut ListenStatus)) {
+        f(&mut self.lock().oscquery);
     }
 
     /// Replaces what a listener knows of one universe's sources.
@@ -1019,6 +1035,7 @@ pub fn view(s: &Shared, now: Instant) -> Value {
         "effective": eff,
         "cli": { "osc": cli.osc.is_some(), "artnet": cli.artnet.is_some() },
         "osc": { "status": status_json(&s.netin.hub.status(Proto::Osc), now), "recent": recent },
+        "oscquery": oscquery_view(&s.netin.hub.oscquery_status(), now),
         "artnet": {
             "status": status_json(&s.netin.hub.status(Proto::ArtNet), now),
             "signal": signal(s, eff.artnet.enabled),
@@ -1037,6 +1054,17 @@ pub fn view(s: &Shared, now: Instant) -> Value {
         },
         "policies": LOSS_POLICIES.iter().map(|p| json!({ "id": p, "label": p.label_fr() })).collect::<Vec<_>>(),
     })
+}
+
+/// The OSCQuery server's state and the URL to type in a controller
+/// (0.0.0.0: the user puts this Mac's address in).
+fn oscquery_view(st: &ListenStatus, now: Instant) -> Value {
+    let url = st.local.as_deref().and_then(|l| l.parse::<SocketAddr>().ok()).map(|a| match a.ip() {
+        ip if ip.is_unspecified() => format!("http://<adresse de ce Mac>:{}/", a.port()),
+        IpAddr::V6(ip) => format!("http://[{ip}]:{}/", a.port()),
+        ip => format!("http://{ip}:{}/", a.port()),
+    });
+    json!({ "status": status_json(st, now), "url": url })
 }
 
 /// `POST /api/netin` (and `/api/dmx/config`): a partial update

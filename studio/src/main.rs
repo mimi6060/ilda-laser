@@ -1325,6 +1325,8 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
 
     // OSC / Art-Net listeners: idle (no socket) until switched on.
     let mut netin_threads = netin::listener::spawn(Arc::clone(&netin_hub), netin_tx, Arc::clone(&running));
+    // OSCQuery (T-499): idle (no socket) until switched on with the OSC input.
+    netin_threads.extend(netin::oscquery::spawn(Arc::clone(&shared), Arc::clone(&netin_hub), Arc::clone(&running)));
     // OSC feedback: idle (no socket) until switched on and a destination exists.
     netin_threads.extend(osc_out_rx.and_then(|rx| netin::feedback::spawn(rx, netin_hub, Arc::clone(&running))));
     // PosiStageNet (T-457): idle (no socket) until switched on.

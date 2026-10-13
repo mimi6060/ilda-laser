@@ -54,7 +54,7 @@ async function openPanel(page: Page) {
 test.beforeEach(async () => {
   await studio.post('/api/estop/reset', {});
   await studio.reset();
-  await studio.post('/api/netin', { osc: { enabled: false, port: 0 }, artnet: { enabled: false, port: 0, universe: 0, address: 1 }, loss: { policy: 'neutral', timeout_ms: 2500 } });
+  await studio.post('/api/netin', { osc: { enabled: false, port: 0 }, artnet: { enabled: false, port: 0, universe: 0, address: 1 }, loss: { policy: 'neutral', timeout_ms: 2500 }, oscquery: { enabled: false, port: 0, announce: false } });
   // The external inputs gate (T-408): open, every group, no access needed.
   const groups = ['master', 'look', 'layer', 'grid', 'cue', 'page', 'tempo', 'timeline', 'audio'];
   await studio.post('/api/external/scopes', { scopes: ['dmx', 'osc'].map(source => ({ source, groups, require_access: false })) });
@@ -95,6 +95,30 @@ test('an OSC message plays a cue; arming over OSC is refused', async ({ page }) 
   await page.locator('#oscEnabled').uncheck();
   await expect(page.locator('#oscState')).toHaveText('Coupé');
   await expect.poll(async () => (await netin()).osc.status.local).toBeNull();
+});
+
+// OSCQuery (T-499): off by default; ticked, it shows the URL to type in
+// the controller, answers GET on 127.0.0.1 only and refuses every write.
+test('OSCQuery shows the URL to type and is read-only', async ({ page }) => {
+  expect((await netin() as unknown as { config: { oscquery: { enabled: boolean } } }).config.oscquery.enabled).toBe(false);
+  await openPanel(page);
+  await expect(page.locator('#oscqState')).toHaveText('Coupé');
+  await page.locator('#oscqEnabled').check();
+  await expect(page.locator('#oscqState')).toContainText("allumez l'entrée OSC");
+  await page.locator('#oscEnabled').check();
+  await expect(page.locator('#oscqState')).toContainText('URL à saisir dans le contrôleur : http://127.0.0.1:');
+  const url = (await studio.get<{ oscquery: { url: string } }>('/api/netin')).oscquery.url;
+  expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+  const tree = await (await fetch(url)).json();
+  expect(tree.CONTENTS.ls.CONTENTS.master.CONTENTS.size.TYPE).toBe('f');
+  expect(JSON.stringify(tree)).not.toContain('/ls/arm');
+  const host = await (await fetch(url + '?HOST_INFO')).json();
+  expect(host.OSC_TRANSPORT).toBe('UDP');
+  expect(host.OSC_PORT).toBe(Number((await netin()).osc.status.local?.split(':').pop()));
+  for (const method of ['POST', 'PUT']) expect((await fetch(url + 'ls/master/size', { method, body: '[1]' })).status).toBe(405);
+  expect(await armed()).toBe(false);
+  await page.locator('#oscqEnabled').uncheck();
+  await expect(page.locator('#oscqState')).toHaveText('Coupé');
 });
 
 test('a DMX channel changes the brightness; signal loss goes neutral without arming', async ({ page }) => {
