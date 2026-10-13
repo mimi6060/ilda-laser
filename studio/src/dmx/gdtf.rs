@@ -50,7 +50,7 @@ fn attribute(p: Param) -> (String, &'static str, &'static str, &'static str, &'s
     (name, pretty, group, feature, unit)
 }
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
@@ -178,7 +178,7 @@ pub fn zip_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
         central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
         central.extend_from_slice(&20u16.to_le_bytes()); // made by
         common(&mut central);
-        central.extend_from_slice(&[0; 8]); // comment len, disk, internal attrs
+        central.extend_from_slice(&[0; 6]); // comment len, disk, internal attrs
         central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
         central.extend_from_slice(&offset.to_le_bytes());
         central.extend_from_slice(name.as_bytes());
@@ -249,5 +249,13 @@ mod tests {
         assert_eq!(data, description_xml().as_bytes());
         assert_eq!(u32::from_le_bytes([z[14], z[15], z[16], z[17]]), crc32(data));
         assert_eq!(gdtf(), z, "reproducible");
+        // A zip reader sees exactly that file through the central directory.
+        let mut a = zip::ZipArchive::new(std::io::Cursor::new(&z)).expect("a valid zip");
+        assert_eq!(a.len(), 1);
+        let mut f = a.by_index(0).unwrap();
+        assert_eq!(f.name(), "description.xml");
+        let mut read = String::new();
+        std::io::Read::read_to_string(&mut f, &mut read).unwrap();
+        assert_eq!(read, description_xml());
     }
 }

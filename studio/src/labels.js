@@ -139,6 +139,8 @@ const LABELS = Object.freeze({
   'entrees.portail': 'Entrées externes',
   'entrees.portail.court': 'Ext.',
   'entrees.portail.info': 'Entrées externes fermées : DMX, OSC et timecode ne changent rien (sauf le noir et l\'arrêt d\'urgence) · Alt+X',
+  'entrees.dmx.mvr': 'Exporter MVR…',
+  'entrees.dmx.mvr.info': 'MVR 1.6 : le plan d\'implantation pour la console ou le visualiseur (grandMA3, Capture…) : un appareil par zone activée, à son adresse DMX et à la place de son projecteur dans le lieu, avec la fiche GDTF. Univers 0 : non patché.',
   'entrees.oscquery.activer': 'Publier la liste des adresses (OSCQuery, lecture seule)',
   'entrees.oscquery.port': 'Port OSCQuery (HTTP)',
   'entrees.oscquery.port.auto': 'port OSC + 1',

@@ -4566,7 +4566,8 @@ fn external_view(s: &mut Shared) -> serde_json::Value {
 /// - `GET /api/dmx/interfaces`, `GET|POST /api/dmx/config` (the DMX part
 ///   of `netin.json`), `GET /api/dmx/monitor?universe=N`,
 ///   `POST /api/dmx/learn` `{ "control": id | null }`,
-///   `GET /api/dmx/personality?mode=compact|full&format=json|md|xml|gdtf`.
+///   `GET /api/dmx/personality?mode=compact|full&format=json|md|xml|gdtf`,
+///   `GET /api/dmx/mvr` (the venue file, T-500).
 fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Method, path: &str) -> HttpResponse {
     match (method, path) {
         (Method::Get, "/api/external") => json_response(external_view(&mut shared.lock().unwrap())),
@@ -4642,6 +4643,17 @@ fn external_route(request: &mut Request, shared: &Arc<Mutex<Shared>>, method: Me
             Err(e) => e,
         },
         (Method::Get, "/api/dmx/personality") => personality(request.url()),
+        (Method::Get, "/api/dmx/mvr") => {
+            use crate::dmx::mvr;
+            let data = {
+                let s = shared.lock().unwrap();
+                let selected = s.output_mgr.prefs().selected;
+                mvr::mvr(s.venue.get(), s.projection.get(), &s.netin.hub.file().dmx.fixtures, selected.as_deref())
+            };
+            let disposition = format!("attachment; filename=\"{}\"", mvr::FILE_NAME);
+            let header = Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes()).expect("ASCII file name");
+            with_type(Response::from_data(data), "application/octet-stream").with_header(header)
+        }
         (Method::Get, "/api/dmx/monitor") => {
             let universe = query_u64(request.url(), "universe").unwrap_or(1).min(u16::MAX as u64) as u16;
             json_response(crate::netin::monitor(&shared.lock().unwrap(), universe, Instant::now()))
@@ -9231,6 +9243,11 @@ mod tests {
         let view = js(&t.request("GET", "/api/netin", "").1);
         let list = &view["dmx"]["fixtures"]["list"];
         assert_eq!((list[0]["fixture"]["address"].as_u64(), list[1]["last"].as_u64()), (Some(1), Some(48)));
+        // The venue file (T-500): a zip with the enabled instance only.
+        let (code, mvr) = http_raw(t.addr, "/api/dmx/mvr");
+        assert!(code == 200 && mvr.starts_with(b"PK"));
+        let mvr = String::from_utf8_lossy(&mvr);
+        assert!(mvr.contains("<Address break=\"0\">1.1</Address>") && mvr.matches("<Fixture ").count() == 1, "{mvr}");
         assert_eq!(list[0]["signal"], "off", "DMX inputs are off");
         assert_eq!(arm_status(&t)["armed"], false);
     }

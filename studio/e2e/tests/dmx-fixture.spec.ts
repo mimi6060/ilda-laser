@@ -4,6 +4,7 @@
 // socket. Never multicast, never another host, and the studio never sends
 // anything. Preview only: nothing arms.
 import dgram from 'node:dgram';
+import fs from 'node:fs';
 import { test, expect, useStudio, openUi, openWorkspace, isLit, type Frame } from '../studio';
 import type { Page } from '@playwright/test';
 
@@ -130,6 +131,13 @@ test('the channel chart, the fixture file and the overlap refusal', async ({ pag
 
   const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#dmxFixGdtf').click()]);
   expect(download.suggestedFilename()).toBe('Laser_Studio@Laser_Studio_DMX@v1.gdtf');
+  // The venue file (T-500): a non-empty zip.
+  await expect(page.locator('#dmxFixMvr')).toHaveText('Exporter MVR…');
+  const [mvr] = await Promise.all([page.waitForEvent('download'), page.locator('#dmxFixMvr').click()]);
+  expect(mvr.suggestedFilename()).toBe('Laser_Studio.mvr');
+  const bytes = fs.readFileSync(await mvr.path());
+  expect(bytes.length).toBeGreaterThan(1000);
+  expect(bytes.subarray(0, 2).toString()).toBe('PK');
 
   await page.locator('#dmxFixAdd').click();
   await page.locator('#dmxFixAdd').click();

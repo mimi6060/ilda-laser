@@ -597,12 +597,14 @@ $('dmxFixChart').onclick = async () => {
     m.channels.map(c => `<tr><td>${c.channel}</td><td>${esc(c.label)}${c.smoothed ? ' <span class="hint">(lissé)</span>' : ''}</td><td>${c.default}</td><td>${esc(c.values)}</td></tr>`).join('')}</table>`).join('');
   box.hidden = false; $('dmxFixChart').setAttribute('aria-expanded', 'true');
 };
-$('dmxFixGdtf').onclick = () => {
+function downloadDmxFile(href) {
   const a = document.createElement('a');
-  a.href = '/api/dmx/personality?format=gdtf';
+  a.href = href;
   a.download = '';
   document.body.append(a); a.click(); a.remove();
-};
+}
+$('dmxFixGdtf').onclick = () => downloadDmxFile('/api/dmx/personality?format=gdtf');
+$('dmxFixMvr').onclick = () => downloadDmxFile('/api/dmx/mvr');
 const FIX_COLORS = ['var(--accent-2)', 'var(--violet)', 'var(--warn)', 'var(--ok)', 'var(--ws-timeline)', 'var(--ws-live)', 'var(--accent)', 'var(--danger)'];
 async function loadDmxMonitor() {
   const u = Math.round(+$('dmxMonU').value) || 0;
