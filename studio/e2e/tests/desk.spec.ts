@@ -114,30 +114,47 @@ test('Jouer moves nothing; Modifier moves, resizes and drops from the palette', 
   await openDesk(page);
   await setMode(page, false);
   const pad = '#deskGrid .k-xy_pad';
+  // The drag acts on the look (right edge, bottom: x = 1, y = -1)...
   const up = await press(page, pad, 0.5, 0.5, [2.5, 1.5]);
+  await expect.poll(async () => (await live()).pos_x).toBeGreaterThan(0.5);
+  await expect.poll(async () => (await live()).pos_y).toBeLessThan(-0.5);
   await up();
   await page.waitForTimeout(200);
+  // ...and moves nothing.
   expect((await desks())[0].items[0]).toMatchObject({ x: 0, y: 0, w: 4, h: 4 });
 
   await setMode(page, true);
-  const grid = (await page.locator('#deskGrid').boundingBox())!;
-  const cw = grid.width / 12, ch = grid.height / 8;
+  // The page's own copy of the layout: a gesture started before the page
+  // has the server's answer to the previous one works from the old layout
+  // (and saves it back), so each step waits for the redrawn component.
+  const padAt = (where: string) => expect(page.locator(pad)).toHaveAttribute('aria-label', new RegExp(`, ${where}$`));
+  await padAt('colonne 1, rangée 1, 4 × 4');
+  // The grid is measured right before each gesture (the page may reflow).
+  const cells = async () => {
+    const grid = (await page.locator('#deskGrid').boundingBox())!;
+    return { grid, cw: grid.width / 12, ch: grid.height / 8 };
+  };
   // Move by +3 columns, +1 row.
+  let { grid, cw, ch } = await cells();
   await page.mouse.move(grid.x + cw * 0.5, grid.y + ch * 0.5);
   await page.mouse.down();
   await page.mouse.move(grid.x + cw * 3.5, grid.y + ch * 1.5, { steps: 6 });
   await page.mouse.up();
   await expect.poll(async () => (await desks())[0].items[0]).toMatchObject({ x: 3, y: 1, w: 4, h: 4 });
   // Resize with the handle: one column narrower, one row taller.
-  // The desk is drawn again after the move is saved: wait for its handle.
+  // The desk is drawn again after the move is saved: wait for it.
+  await padAt('colonne 4, rangée 2, 4 × 4');
   await expect(page.locator(`${pad}.sel .desk-resize`)).toBeVisible();
+  ({ cw, ch } = await cells());
   const handle = (await page.locator(`${pad} .desk-resize`).boundingBox())!;
   await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
   await page.mouse.down();
   await page.mouse.move(handle.x + handle.width / 2 - cw, handle.y + handle.height / 2 + ch, { steps: 6 });
   await page.mouse.up();
   await expect.poll(async () => (await desks())[0].items[0]).toMatchObject({ x: 3, y: 1, w: 3, h: 5 });
+  await padAt('colonne 4, rangée 2, 3 × 5');
   // A fader dragged from the palette onto column 10, row 2.
+  ({ grid, cw, ch } = await cells());
   const src = (await page.locator('#deskPalette [data-add="fader"]').boundingBox())!;
   await page.mouse.move(src.x + src.width / 2, src.y + src.height / 2);
   await page.mouse.down();
