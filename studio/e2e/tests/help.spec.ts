@@ -57,7 +57,7 @@ test('the « ? » of every panel opens its own page', async ({ page }) => {
   await page.locator('#figImport').click();
   await expect(page.locator('#figImportDlg')).toBeVisible();
   await page.locator('#figImportDlg .help-q').click();
-  await expect(page.locator('#helpTitle')).toHaveText('Importer un SVG ou une image');
+  await expect(page.locator('#helpTitle')).toHaveText('Importer un SVG, un DXF ou une image');
   seen.add('creation-import');
   await page.locator('#helpClose').click();
   await page.locator('#impClose').click();

@@ -6704,7 +6704,7 @@ fn save_calibration(path: &Path, cal: &Calibration) {
 /// Stack of the import thread.
 const IMPORT_STACK: usize = 64 * 1024 * 1024;
 
-/// `POST /api/figures/import?name=…&simplify=…`: an SVG, PNG or JPEG
+/// `POST /api/figures/import?name=…&simplify=…`: an SVG, DXF, PNG or JPEG
 /// (body, at most `MAX_FILE_BYTES`) → `{figure, warnings, stats}`. Runs
 /// without the lock held; a panic in the importer is caught and reported.
 fn import_figure(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
@@ -6729,6 +6729,7 @@ fn import_figure(request: &mut Request, shared: &Arc<Mutex<Shared>>) -> HttpResp
         budget: num("budget").map_or(budget, |v| v.max(0.0) as usize),
         color: q("color").and_then(|c| parse_hex(&c)).unwrap_or(d.color),
         fills: q("fills").map_or(d.fills, |v| v != "0"),
+        by_layer: q("layers").is_some_and(|v| v == "1"),
         mode: q("mode").and_then(|m| Mode::parse(&m)).unwrap_or(d.mode),
         threshold: num("threshold").map(|v| v.clamp(0.0, 255.0) as u8),
         invert: q("invert").is_some_and(|v| v == "1"),
@@ -8693,6 +8694,13 @@ mod tests {
         let (status, body) = t.request("POST", "/api/figures/import", &deep);
         assert_eq!(status, 400);
         assert!(body.contains("imbriqués"), "{body}");
+        // A DXF (T-497), layers as parts on request.
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nLINE\n8\nContour\n62\n1\n10\n0\n20\n0\n11\n10\n21\n0\n0\nENDSEC\n0\nEOF\n";
+        let (status, body) = t.request("POST", "/api/figures/import?name=plan.dxf&layers=1", dxf);
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["stats"]["kind"], "dxf");
+        assert_eq!(v["figure"]["parts"][0]["name"], "Contour");
         // Still serving.
         assert_eq!(t.request("GET", "/api/arm", "").0, 200);
         assert_eq!(parse_hex("#00ff80"), Some([0, 255, 128]));

@@ -181,6 +181,52 @@ test('a contrasted picture becomes a figure under the point budget', async ({ pa
   expect([...colours].sort()).toEqual(['0,0,255', '255,0,0']);
 });
 
+// Our own DXF (T-497), written here: a red square on layer « Cadre », a
+// blue circle (ACI 5) on layer « Rond », a hatch the reader leaves out.
+function dxf(): Buffer {
+  const pairs: [number, string | number][] = [
+    [0, 'SECTION'], [2, 'TABLES'], [0, 'TABLE'], [2, 'LAYER'],
+    [0, 'LAYER'], [2, 'Cadre'], [70, 0], [62, 1],
+    [0, 'LAYER'], [2, 'Rond'], [70, 0], [62, 3],
+    [0, 'ENDTAB'], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    [0, 'LWPOLYLINE'], [8, 'Cadre'], [90, 4], [70, 1], [10, 0], [20, 0], [10, 100], [20, 0], [10, 100], [20, 100], [10, 0], [20, 100],
+    [0, 'CIRCLE'], [8, 'Rond'], [62, 5], [10, 50], [20, 50], [40, 30],
+    [0, 'HATCH'], [8, 'Cadre'],
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ];
+  return Buffer.from(pairs.map(([c, v]) => `${c}\r\n${v}\r\n`).join(''));
+}
+
+test('a DXF drawing becomes a figure, its layers as parts on request', async ({ page }) => {
+  await openImport(page);
+  await give(page, 'plan scene.dxf', 'application/dxf', dxf());
+  await expect(page.locator('#impStats')).toContainText('2 tracé(s)');
+  await expect(page.locator('#impDxfOpts')).toBeVisible();
+  await expect(page.locator('#impSvgOpts')).toBeHidden();
+  await expect(page.locator('#impRasterOpts')).toBeHidden();
+  await expect(page.locator('#impMsg')).toContainText('HATCH ×1');
+  await expect(page.locator('#impParts')).toBeHidden();
+  await expect(page.locator('#impName')).toHaveValue('plan scene');
+  // « Par calque »: one part per layer, in the layer's colour.
+  await page.locator('#impLayers').check();
+  await expect(page.locator('#impParts')).toBeVisible();
+  await expect(page.locator('#impParts')).toContainText('Cadre, Rond');
+  await page.locator('#impCreate').click();
+  await expect(page.locator('#figImportDlg')).toBeHidden();
+  const fig = (await load('plan scene'))! as Figure & { parts: { id: number; name: string }[] };
+  expect(fig.parts.map(p => p.name)).toEqual(['Cadre', 'Rond']);
+  const colours = fig.frames[0].strokes.map(s => s.color.join()).sort();
+  expect(colours).toEqual(['0,255,0', '255,0,0']);
+  // The square stays square and closed; the drawing fills the frame.
+  const sq = fig.frames[0].strokes.find(s => s.color[0] === 255)!;
+  expect(sq.points.length).toBe(5);
+  expect(sq.points[0]).toEqual(sq.points[4]);
+  const all = fig.frames[0].strokes.flatMap(s => s.points);
+  expect(Math.max(...all.map(p => Math.max(Math.abs(p[0]), Math.abs(p[1]))))).toBeCloseTo(0.9, 2);
+  expect(((await studio.frame()) as unknown as { armed: boolean }).armed).toBe(false);
+});
+
 test('bad files give a clear message, nothing is created, the studio keeps working', async ({ page }) => {
   await openImport(page);
   const cases: [string, string, Buffer, RegExp][] = [
@@ -193,6 +239,9 @@ test('bad files give a clear message, nothing is created, the studio keeps worki
     ['profond.svg', 'image/svg+xml', Buffer.from('<svg>' + '<g>'.repeat(20000) + '</svg>'), /imbriqués/],
     ['tronque.png', 'image/png', png(50, 50, () => [0, 0, 0]).subarray(0, 60), /image illisible/],
     ['blanc.png', 'image/png', png(40, 40, () => [255, 255, 255]), /aucun contour/],
+    ['binaire.dxf', 'application/dxf', Buffer.from('AutoCAD Binary DXF\r\n\x1a\x00\x00\x00', 'latin1'), /DXF binaire/],
+    ['plan.dwg', 'application/acad', Buffer.from('AC1032\x00\x00\x00', 'latin1'), /DWG/],
+    ['casse.dxf', 'application/dxf', Buffer.from('0\nSECTION\n2\nENTITIES\nxx\nLINE\n'), /code de groupe invalide/],
   ];
   for (const [name, mime, buf, re] of cases) {
     await give(page, name, mime, buf);
