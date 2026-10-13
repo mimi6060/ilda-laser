@@ -47,6 +47,7 @@
 
 pub mod artnet;
 pub mod ltc;
+pub mod ltc_out;
 pub mod mtc;
 pub mod out;
 
@@ -955,7 +956,7 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<bool, out::Refused> {
             Some(None) => cfg.source,
             None => s.timecode.show.as_ref().map_or(cfg.source, |sh| sh.source),
         };
-        if let Some(why) = out::conflicts(&cfg.out, &cfg, source) {
+        if let Some(why) = out::conflicts(&cfg.out, &cfg, source, out::ltc_input_device(s).as_deref()) {
             return Err(out::Refused::conflict(why));
         }
     }

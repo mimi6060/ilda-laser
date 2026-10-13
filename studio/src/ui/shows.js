@@ -484,7 +484,8 @@ loadTimecode();
 
 // ---------- Timecode sortant (T-417) ----------
 // TC-OUT sends the timeline's position (MTC on the MIDI port chosen,
-// Art-Net from the interface chosen) while a show in seconds plays.
+// Art-Net from the interface chosen, LTC on the audio output channel
+// chosen, T-501) while a show in seconds plays.
 // Off by default; the summary comes with every frame
 // (`timeline.timecode_out`), the settings from GET /api/timecode/out.
 // Never arms the laser; not an external control (no shortcut).
@@ -520,6 +521,19 @@ function fillTcOut(v) {
     $('tcoIface').value = cur || (ips[0] || '');
   }
   if (!keep('tcoTarget')) $('tcoTarget').value = c.artnet ? c.artnet.target : '';
+  // LTC (T-501): the audio outputs the "tc-out" thread listed.
+  const outs = (v.status && v.status.ltc_devices) || [];
+  $('tcoLtc').checked = !!c.ltc;
+  document.querySelectorAll('#tcoBar .tco-ltc').forEach(el => { el.hidden = !c.ltc; });
+  if (!keep('tcoLtcDevice')) {
+    const cur = c.ltc ? c.ltc.device : '';
+    const names = [...new Set([...outs.map(o => o.name), ...(cur ? [cur] : [])])];
+    $('tcoLtcDevice').innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+    $('tcoLtcDevice').value = cur || (names[0] || '');
+  }
+  if (!keep('tcoLtcChannel')) $('tcoLtcChannel').value = c.ltc ? c.ltc.channel : 1;
+  if (!keep('tcoLtcLevel')) $('tcoLtcLevel').value = c.ltc ? c.ltc.level_db : (v.ltc_levels ? v.ltc_levels.default : -18);
+  $('tcoLtc').parentElement.title = v.status && v.status.ltc_open ? libelle('timeline.tco.ltc.ouverte', { sortie: v.status.ltc_open }) : libelle('timeline.tco.ltc.info');
   if (!keep('tcoFps')) $('tcoFps').value = c.fps;
   if (!keep('tcoOffset')) $('tcoOffset').value = +c.offset_s.toFixed(3);
   showTcOut(v.summary);
@@ -548,6 +562,16 @@ $('tcoArtnet').onchange = e => {
 };
 $('tcoIface').onchange = () => setTcOut({ artnet: tcoNet() });
 $('tcoTarget').onchange = () => setTcOut({ artnet: tcoNet() });
+function tcoLtc() {
+  return { device: $('tcoLtcDevice').value, channel: Math.round(+$('tcoLtcChannel').value) || 1, level_db: +$('tcoLtcLevel').value };
+}
+$('tcoLtc').onchange = e => {
+  if (!e.target.checked) return setTcOut({ ltc: null });
+  const l = tcoLtc();
+  if (!l.device) { e.target.checked = false; $('tcoMsg').textContent = libelle('timeline.tco.ltc.aucune'); return; }
+  setTcOut({ ltc: l });
+};
+['tcoLtcDevice', 'tcoLtcChannel', 'tcoLtcLevel'].forEach(id => { $(id).onchange = () => setTcOut({ ltc: tcoLtc() }); });
 $('tcoFps').onchange = e => setTcOut({ fps: e.target.value });
 $('tcoOffset').onchange = e => { const v = +e.target.value; if (Number.isFinite(v)) setTcOut({ offset_s: v }); };
 loadTcOut();

@@ -1,7 +1,8 @@
 //! Timecode output (T-417): the timeline's position sent as MIDI Time
-//! Code on a MIDI output port and / or as Art-Net timecode on a network
-//! interface, so a console, a video server or a second machine follows
-//! the show the studio plays (with its song).
+//! Code on a MIDI output port, as Art-Net timecode on a network interface
+//! and / or as LTC on one channel of an audio output (ltc_out.rs, T-501),
+//! so a console, a video server or a second machine follows the show the
+//! studio plays (with its song).
 //!
 //! What it does, and what it never does:
 //! - **Off by default** (`enabled`, saved per machine in `timecode.json`,
@@ -11,9 +12,11 @@
 //!   0.0.0.0 or a typed broadcast); an empty target is the broadcast of
 //!   the chosen interface, an explicit choice in the settings.
 //! - It reads the timeline, it never drives it: no arming, no output
-//!   change, no cue. An e-stop halts the timeline, so the stream stops.
+//!   change, no cue. An e-stop halts the timeline, and holds every route
+//!   back while it is latched.
 //! - **No self-drive**: refused (409) while the timecode input listens to
-//!   the same MIDI port, or the same network interface, as the output;
+//!   the same MIDI port, the same network interface, or the same audio
+//!   device and channel as the output;
 //!   the engine also holds the stream back if that happens later (a
 //!   show's own source).
 //! - While the timeline plays (shows in seconds only): MTC quarter frames
@@ -28,8 +31,11 @@
 //!   send error is a warning (status `error`); the timeline plays on.
 //!
 //! Encoders come from mtc.rs and artnet.rs (the input's decoders are the
-//! tests' reference).
+//! tests' reference). LTC (ltc_out.rs) is drawn by the audio callback of
+//! the stream the "tc-out" thread opens; the thread only hands it the
+//! playhead (`ltc_target`).
 
+use super::ltc_out::{self, LtcBackend, LtcDevice, LtcFactory, LtcLink, LtcOut, OpenedLtc, Target};
 use super::{artnet, mtc, Rate, Tc, TcConfig, TcSource, MAX_OFFSET_S};
 use crate::interlock::ArmSource;
 use crate::midi::backend::OutputPort;
@@ -56,6 +62,8 @@ const MAX_DRIFT_QUARTERS: i64 = 8;
 const POLL: Duration = Duration::from_millis(20);
 /// A port or socket that failed is tried again after this.
 const RETRY: Duration = Duration::from_secs(2);
+/// The audio outputs are listed again at most this often.
+const LIST_EVERY: Duration = Duration::from_secs(10);
 
 pub const SELF_DRIVE_MIDI: &str = "Entrée et sortie de timecode sur le même port : le studio se piloterait lui-même.";
 pub const SELF_DRIVE_NET: &str = "Entrée et sortie de timecode sur la même interface réseau : le studio se piloterait lui-même.";
@@ -69,6 +77,8 @@ pub struct TimecodeOut {
     pub mtc_port: Option<String>,
     /// Art-Net timecode; `None`: none.
     pub artnet: Option<ArtNetTcOut>,
+    /// LTC on an audio output channel (T-501); `None`: none.
+    pub ltc: Option<LtcOut>,
     pub fps: Rate,
     /// Timecode = show position + offset (s): 3600 starts the show at
     /// 01:00:00:00.
@@ -77,7 +87,7 @@ pub struct TimecodeOut {
 
 impl Default for TimecodeOut {
     fn default() -> Self {
-        TimecodeOut { enabled: false, mtc_port: None, artnet: None, fps: Rate::F25, offset_s: 0.0 }
+        TimecodeOut { enabled: false, mtc_port: None, artnet: None, ltc: None, fps: Rate::F25, offset_s: 0.0 }
     }
 }
 
@@ -199,12 +209,15 @@ impl TimecodeOut {
         if let Some(a) = &self.artnet {
             a.validate()?;
         }
+        if let Some(l) = &self.ltc {
+            l.validate()?;
+        }
         Ok(())
     }
 
     /// Something to send to.
     pub fn has_destination(&self) -> bool {
-        self.mtc_port.is_some() || self.artnet.is_some()
+        self.mtc_port.is_some() || self.artnet.is_some() || self.ltc.is_some()
     }
 }
 
@@ -219,8 +232,11 @@ fn same_ip(a: &str, b: &str) -> bool {
 /// `source`: the loaded show's own, else the global one) would receive
 /// what `out` sends. MTC: the input listens to the output's port (or to
 /// every port). Art-Net: the input listens on the output's interface (or
-/// on all of them), or the target is the input's address.
-pub fn conflicts(out: &TimecodeOut, input: &TcConfig, source: TcSource) -> Option<String> {
+/// on all of them), or the target is the input's address. LTC: the input
+/// reads the output's audio device (`ltc_device`, the input's device: a
+/// loopback driver carries one into the other) on the output's channel,
+/// or the mix of all of them.
+pub fn conflicts(out: &TimecodeOut, input: &TcConfig, source: TcSource, ltc_device: Option<&str>) -> Option<String> {
     match source {
         TcSource::Mtc => {
             let port = out.mtc_port.as_ref()?;
@@ -236,8 +252,18 @@ pub fn conflicts(out: &TimecodeOut, input: &TcConfig, source: TcSource) -> Optio
             let target = parse_target(&a.target).ok().is_some_and(|t| same_ip(&t.ip().to_string(), listen));
             (all || same_ip(&a.interface, listen) || target).then(|| SELF_DRIVE_NET.to_string())
         }
-        TcSource::Off | TcSource::Ltc => None,
+        TcSource::Ltc => {
+            let l = out.ltc.as_ref()?;
+            let same = ltc_device.is_some_and(|d| d.trim() == l.device.trim()) && (input.ltc_channel == 0 || input.ltc_channel == l.channel);
+            same.then(|| ltc_out::SELF_DRIVE_LTC.to_string())
+        }
+        TcSource::Off => None,
     }
+}
+
+/// The audio device the LTC input reads: the one open, else the one chosen.
+pub fn ltc_input_device(s: &Shared) -> Option<String> {
+    s.audio_in.status().device.or_else(|| s.audio_in.config().0.device)
 }
 
 /// The eight quarter-frame messages (`F1 0nnn dddd`) of `tc`: they are
@@ -290,6 +316,14 @@ impl Snapshot {
             self.at
         }
     }
+}
+
+/// What the LTC callback follows for `snap`: None (silence) unless it is
+/// active, playing and has an LTC route.
+pub fn ltc_target(snap: Option<&Snapshot>, link: &LtcLink) -> Option<Target> {
+    let s = snap.filter(|s| s.active() && s.transport == Transport::Playing)?;
+    let l = s.cfg.ltc.as_ref()?;
+    Some(Target { gen: s.jumps, secs: s.cfg.offset_s + s.position, at_s: link.secs_of(s.at), rate: s.cfg.fps, amp: l.amplitude() })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -413,6 +447,19 @@ pub struct OutStatus {
     pub midi_open: Option<String>,
     /// Where Art-Net timecode goes (`ip:port`).
     pub artnet_to: Option<String>,
+    /// LTC frames drawn by the audio callback.
+    pub ltc_frames: u64,
+    /// The audio output open for LTC (`device · voie n`).
+    pub ltc_open: Option<String>,
+    /// The audio outputs listed (refreshed when the panel asks).
+    pub ltc_devices: Vec<LtcDevice>,
+    /// An audio backend exists (false with --no-audio).
+    pub ltc_available: bool,
+    /// What the simulated output decoded last (--test-ltc-out only).
+    pub ltc_heard: Option<String>,
+    /// The panel asked for a fresh list of outputs.
+    #[serde(skip)]
+    pub ltc_list_wanted: bool,
 }
 
 /// Opens a MIDI output port by name on the thread that calls it (the
@@ -463,6 +510,9 @@ impl OutRuntime {
 
 /// Why the stream is held back (None: it may run).
 fn blocked(s: &Shared) -> Option<String> {
+    if s.estop.is_latched() {
+        return Some("arrêt d'urgence".into());
+    }
     let tc = &s.timecode;
     let cfg = tc.config();
     let mut input = cfg.clone();
@@ -472,7 +522,7 @@ fn blocked(s: &Shared) -> Option<String> {
     if input.interface.trim().is_empty() && net.artnet.enabled {
         input.interface = net.artnet.bind.clone();
     }
-    if let Some(why) = conflicts(&cfg.out, &input, tc.source()) {
+    if let Some(why) = conflicts(&cfg.out, &input, tc.source(), ltc_input_device(s).as_deref()) {
         return Some(why);
     }
     match s.timeline.show.as_ref().map(|sh| sh.time_base) {
@@ -494,13 +544,21 @@ pub fn frame(s: &mut Shared, c: &Clock) {
     out.publish(snap);
 }
 
-/// The two senders the thread owns.
+/// The three senders the thread owns.
 struct Sinks {
     opener: Option<MidiOpener>,
     midi: Option<(String, Box<dyn OutputPort>)>,
     midi_retry: Option<(String, Instant)>,
     udp: Option<(Route, UdpSocket)>,
     udp_retry: Option<(ArtNetTcOut, Instant)>,
+    ltc_backend: Option<Box<dyn LtcBackend>>,
+    /// The open LTC stream, its settings and the link its callback reads.
+    ltc: Option<(LtcOut, OpenedLtc, Arc<LtcLink>)>,
+    ltc_retry: Option<(LtcOut, Instant)>,
+    /// Frames counted on the streams closed before.
+    ltc_frames_before: u64,
+    /// When the audio outputs were last listed.
+    ltc_listed: Option<Instant>,
 }
 
 fn set_error(status: &Mutex<OutStatus>, error: String) {
@@ -572,9 +630,70 @@ impl Sinks {
                 }
             }
         }
+        self.reconcile_ltc(cfg.and_then(|c| c.ltc.clone()), status, now);
         let mut st = status.lock().unwrap_or_else(|e| e.into_inner());
         st.midi_open = self.midi.as_ref().map(|(n, _)| n.clone());
         st.artnet_to = self.udp.as_ref().map(|(r, _)| r.dest.to_string());
+        st.ltc_open = self.ltc.as_ref().map(|(c, o, _)| format!("{} · voie {}", o.device, c.channel));
+        st.ltc_frames = self.ltc_frames_before + self.ltc.as_ref().map_or(0, |(_, _, l)| l.frames.load(Ordering::Relaxed));
+        st.ltc_heard = self.ltc.as_ref().and_then(|(_, _, l)| *l.heard.lock().unwrap_or_else(|e| e.into_inner())).map(|t| t.to_string());
+    }
+
+    fn close_ltc(&mut self) {
+        if let Some((_, _, link)) = self.ltc.take() {
+            link.set_target(None);
+            self.ltc_frames_before += link.frames.load(Ordering::Relaxed);
+        }
+    }
+
+    /// Opens, reopens or closes the LTC stream, and lists the outputs when
+    /// the panel asks.
+    fn reconcile_ltc(&mut self, want: Option<LtcOut>, status: &Mutex<OutStatus>, now: Instant) {
+        let Some(backend) = self.ltc_backend.as_mut() else { return };
+        // Listing Core Audio takes a few ms on this thread (MTC waits):
+        // at most every LIST_EVERY, and only when the panel asks.
+        let due = self.ltc_listed.is_none_or(|at| now.saturating_duration_since(at) >= LIST_EVERY);
+        if due && std::mem::take(&mut status.lock().unwrap_or_else(|e| e.into_inner()).ltc_list_wanted) {
+            self.ltc_listed = Some(now);
+            match backend.outputs() {
+                Ok(list) => status.lock().unwrap_or_else(|e| e.into_inner()).ltc_devices = list,
+                Err(e) => log::warn!("Timecode sortant : sorties audio illisibles : {e}"),
+            }
+        }
+        if let Some((c, _, link)) = &self.ltc {
+            let failed = link.failed.load(Ordering::Relaxed);
+            if failed {
+                set_error(status, format!("sortie audio {} perdue", c.device));
+                self.ltc_retry = Some((c.clone(), now + RETRY));
+            }
+            if failed || want.as_ref() != Some(c) {
+                self.close_ltc();
+            }
+        }
+        let Some(cfg) = want.filter(|_| self.ltc.is_none()) else { return };
+        if self.ltc_retry.as_ref().is_some_and(|(c, at)| *c == cfg && now < *at) {
+            return;
+        }
+        let Some(backend) = self.ltc_backend.as_mut() else { return };
+        let link = Arc::new(LtcLink::new(Instant::now()));
+        match backend.open(&cfg, &link) {
+            Ok(o) => {
+                log::info!("Timecode sortant : LTC sur {} voie {} ({} Hz)", o.device, cfg.channel, o.sample_rate);
+                self.ltc = Some((cfg, o, link));
+                self.ltc_retry = None;
+            }
+            Err(e) => {
+                set_error(status, format!("sortie audio {} indisponible : {e}", cfg.device));
+                self.ltc_retry = Some((cfg, now + RETRY));
+            }
+        }
+    }
+
+    /// Hands the LTC callback the playhead (silence when nothing may run).
+    fn steer_ltc(&self, snap: Option<&Snapshot>) {
+        if let Some((_, _, link)) = &self.ltc {
+            link.set_target(ltc_target(snap, link));
+        }
     }
 
     fn deliver(&mut self, packets: Vec<Packet>, status: &Mutex<OutStatus>, now: Instant) {
@@ -606,18 +725,25 @@ impl Sinks {
 }
 
 /// Starts the "tc-out" thread. None: it could not be created (logged);
-/// the queue then fills and drops, the engine is not affected.
-pub fn spawn(rx: Receiver<Snapshot>, status: Arc<Mutex<OutStatus>>, opener: Option<MidiOpener>, running: Arc<AtomicBool>) -> Option<JoinHandle<()>> {
+/// the queue then fills and drops, the engine is not affected. `ltc`
+/// builds the audio backend on the thread (None: no LTC, --no-audio).
+pub fn spawn(rx: Receiver<Snapshot>, status: Arc<Mutex<OutStatus>>, opener: Option<MidiOpener>, ltc: Option<LtcFactory>, running: Arc<AtomicBool>) -> Option<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("tc-out".into())
-        .spawn(move || run(rx, &status, opener, &running))
+        .spawn(move || run(rx, &status, opener, ltc, &running))
         .map_err(|e| log::warn!("Timecode sortant : impossible de démarrer le thread : {e}"))
         .ok()
 }
 
-fn run(rx: Receiver<Snapshot>, status: &Mutex<OutStatus>, opener: Option<MidiOpener>, running: &AtomicBool) {
+fn run(rx: Receiver<Snapshot>, status: &Mutex<OutStatus>, opener: Option<MidiOpener>, ltc: Option<LtcFactory>, running: &AtomicBool) {
     let mut sched = Scheduler::default();
-    let mut sinks = Sinks { opener, midi: None, midi_retry: None, udp: None, udp_retry: None };
+    let ltc_backend = ltc.map(|make| make());
+    {
+        let mut st = status.lock().unwrap_or_else(|e| e.into_inner());
+        st.ltc_available = ltc_backend.is_some();
+        st.ltc_list_wanted = true;
+    }
+    let mut sinks = Sinks { opener, midi: None, midi_retry: None, udp: None, udp_retry: None, ltc_backend, ltc: None, ltc_retry: None, ltc_frames_before: 0, ltc_listed: None };
     let mut snap: Option<Snapshot> = None;
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
@@ -629,6 +755,7 @@ fn run(rx: Receiver<Snapshot>, status: &Mutex<OutStatus>, opener: Option<MidiOpe
         }
         let now = Instant::now();
         sinks.reconcile(snap.as_ref(), status, now);
+        sinks.steer_ltc(snap.as_ref());
         let packets = sched.tick(snap.as_ref(), now);
         sinks.deliver(packets, status, now);
         let mut st = status.lock().unwrap_or_else(|e| e.into_inner());
@@ -638,6 +765,7 @@ fn run(rx: Receiver<Snapshot>, status: &Mutex<OutStatus>, opener: Option<MidiOpe
             st.error = None;
         }
     }
+    sinks.close_ltc();
 }
 
 /// The MIDI output ports listed now.
@@ -665,6 +793,9 @@ pub fn summary(s: &Shared) -> Value {
 
 /// `GET /api/timecode/out`.
 pub fn view(s: &Shared) -> Value {
+    // The "tc-out" thread lists the audio outputs again (one plugged in
+    // since): the next view has them.
+    s.timecode.out.status.lock().unwrap_or_else(|e| e.into_inner()).ltc_list_wanted = true;
     let cfg = &s.timecode.config().out;
     json!({
         "config": cfg,
@@ -672,6 +803,7 @@ pub fn view(s: &Shared) -> Value {
         "summary": summary(s),
         "midi_enabled": s.midi.enabled,
         "midi_ports": midi_outputs(s),
+        "ltc_levels": { "default": ltc_out::DEFAULT_LEVEL_DB, "min": ltc_out::MIN_LEVEL_DB, "max": ltc_out::MAX_LEVEL_DB },
         "interfaces": crate::netin::interfaces(),
         "rates": Rate::ALL.iter().map(|r| json!({ "id": r, "label": r.label_fr() })).collect::<Vec<_>>(),
     })
@@ -708,13 +840,25 @@ pub fn update(s: &mut Shared, patch: &Value) -> Result<bool, Refused> {
         }
         a.route()?;
     }
+    if let Some(l) = cfg.ltc.as_ref().filter(|l| before.ltc.as_ref() != Some(*l)) {
+        let st = s.timecode.out.status();
+        if !st.ltc_available {
+            return Err("audio désactivé : pas de LTC".into());
+        }
+        let Some(dev) = st.ltc_devices.iter().find(|d| d.name == l.device.trim()) else {
+            return Err(Refused::bad(format!("sortie audio introuvable : {}", l.device.trim())));
+        };
+        if l.channel > dev.channels {
+            return Err(Refused::bad(format!("voie {} absente : « {} » a {} voie(s)", l.channel, dev.name, dev.channels)));
+        }
+    }
     if cfg.enabled {
         let mut input = s.timecode.config().clone();
         let net = s.netin.hub.effective();
         if input.interface.trim().is_empty() && net.artnet.enabled {
             input.interface = net.artnet.bind.clone();
         }
-        if let Some(why) = conflicts(&cfg, &input, s.timecode.source()) {
+        if let Some(why) = conflicts(&cfg, &input, s.timecode.source(), ltc_input_device(s).as_deref()) {
             return Err(Refused::conflict(why));
         }
     }
@@ -743,11 +887,11 @@ mod tests {
     }
 
     fn mtc_cfg(rate: Rate) -> TimecodeOut {
-        TimecodeOut { enabled: true, mtc_port: Some("Sortie".into()), artnet: None, fps: rate, offset_s: 0.0 }
+        TimecodeOut { enabled: true, mtc_port: Some("Sortie".into()), artnet: None, ltc: None, fps: rate, offset_s: 0.0 }
     }
 
     fn loop_cfg(rate: Rate, port: u16) -> TimecodeOut {
-        TimecodeOut { enabled: true, mtc_port: None, artnet: Some(ArtNetTcOut { interface: "127.0.0.1".into(), target: format!("127.0.0.1:{port}") }), fps: rate, offset_s: 0.0 }
+        TimecodeOut { enabled: true, mtc_port: None, artnet: Some(ArtNetTcOut { interface: "127.0.0.1".into(), target: format!("127.0.0.1:{port}") }), ltc: None, fps: rate, offset_s: 0.0 }
     }
 
     fn snap(cfg: &TimecodeOut, transport: Transport, position: f64, jumps: u64, at: Instant) -> Snapshot {
@@ -988,31 +1132,31 @@ mod tests {
     fn the_self_drive_trap_is_refused() {
         let out = mtc_cfg(Rate::F25);
         let mut input = TcConfig { source: TcSource::Mtc, midi_port: Some("Sortie".into()), ..Default::default() };
-        assert_eq!(conflicts(&out, &input, TcSource::Mtc).as_deref(), Some(SELF_DRIVE_MIDI));
+        assert_eq!(conflicts(&out, &input, TcSource::Mtc, None).as_deref(), Some(SELF_DRIVE_MIDI));
         // Any port includes ours.
         input.midi_port = None;
-        assert!(conflicts(&out, &input, TcSource::Mtc).is_some());
+        assert!(conflicts(&out, &input, TcSource::Mtc, None).is_some());
         input.midi_port = Some("Autre".into());
-        assert_eq!(conflicts(&out, &input, TcSource::Mtc), None);
+        assert_eq!(conflicts(&out, &input, TcSource::Mtc, None), None);
         // Another source in use (the show's own): no conflict.
         input.midi_port = Some("Sortie".into());
-        assert_eq!(conflicts(&out, &input, TcSource::Ltc), None);
-        assert_eq!(conflicts(&out, &input, TcSource::Off), None);
+        assert_eq!(conflicts(&out, &input, TcSource::Ltc, None), None);
+        assert_eq!(conflicts(&out, &input, TcSource::Off, None), None);
         // Art-Net: same interface, all interfaces, or our target is the input.
         let net = loop_cfg(Rate::F25, 7000);
         let mut input = TcConfig { source: TcSource::ArtNet, interface: "127.0.0.1".into(), ..Default::default() };
-        assert_eq!(conflicts(&net, &input, TcSource::ArtNet).as_deref(), Some(SELF_DRIVE_NET));
+        assert_eq!(conflicts(&net, &input, TcSource::ArtNet, None).as_deref(), Some(SELF_DRIVE_NET));
         input.interface = "0.0.0.0".into();
-        assert!(conflicts(&net, &input, TcSource::ArtNet).is_some());
+        assert!(conflicts(&net, &input, TcSource::ArtNet, None).is_some());
         input.interface = String::new();
-        assert_eq!(conflicts(&net, &input, TcSource::ArtNet), None);
+        assert_eq!(conflicts(&net, &input, TcSource::ArtNet, None), None);
         input.interface = "10.1.2.3".into();
-        assert_eq!(conflicts(&net, &input, TcSource::ArtNet), None);
+        assert_eq!(conflicts(&net, &input, TcSource::ArtNet, None), None);
         let mut to_input = net.clone();
         to_input.artnet = Some(ArtNetTcOut { interface: "127.0.0.1".into(), target: "10.1.2.3".into() });
-        assert!(conflicts(&to_input, &input, TcSource::ArtNet).is_some());
+        assert!(conflicts(&to_input, &input, TcSource::ArtNet, None).is_some());
         // MTC out, Art-Net in: nothing in common.
-        assert_eq!(conflicts(&out, &input, TcSource::ArtNet), None);
+        assert_eq!(conflicts(&out, &input, TcSource::ArtNet, None), None);
     }
 
     fn studio_with_port(port: &str) -> Shared {
@@ -1101,7 +1245,7 @@ mod tests {
         let (tx, rx) = sync_channel(QUEUE_LEN);
         let status = Arc::new(Mutex::new(OutStatus::default()));
         let running = Arc::new(AtomicBool::new(true));
-        let handle = spawn(rx, Arc::clone(&status), Some(opener), Arc::clone(&running)).unwrap();
+        let handle = spawn(rx, Arc::clone(&status), Some(opener), None, Arc::clone(&running)).unwrap();
         let cfg = TimecodeOut { mtc_port: Some("Sortie MTC".into()), ..mtc_cfg(Rate::F25) };
         let count = || sim.with_device("Sortie MTC", |d| d.received.iter().filter(|m| m[0] == 0xF1).count()).unwrap();
         let t0 = Instant::now();
@@ -1124,6 +1268,149 @@ mod tests {
         tx.send(snap(&cfg, Transport::Playing, 0.0, 3, Instant::now())).unwrap();
         std::thread::sleep(ms(80));
         assert!(status.lock().unwrap().error.is_some());
+        running.store(false, Ordering::SeqCst);
+        handle.join().unwrap();
+    }
+
+    fn ltc(device: &str, channel: u16) -> LtcOut {
+        LtcOut { device: device.into(), channel, ..Default::default() }
+    }
+
+    /// A studio whose "tc-out" thread would list these audio outputs.
+    fn studio_with_outputs(outputs: &[(&str, u16)]) -> Shared {
+        let s = shared();
+        {
+            let mut st = s.timecode.out.status.lock().unwrap();
+            st.ltc_available = true;
+            st.ltc_devices = outputs.iter().map(|(n, c)| LtcDevice { name: n.to_string(), channels: *c }).collect();
+        }
+        s
+    }
+
+    #[test]
+    fn ltc_settings_are_checked_and_off_by_default() {
+        assert_eq!(TimecodeOut::default().ltc, None);
+        // --no-audio: no backend, no LTC.
+        let mut s = shared();
+        assert_eq!(update(&mut s, &json!({ "ltc": { "device": "Carte", "channel": 1 } })).unwrap_err().message, "audio désactivé : pas de LTC");
+        let mut s = studio_with_outputs(&[("Carte", 2)]);
+        assert_eq!(update(&mut s, &json!({ "ltc": { "device": "Autre", "channel": 1 } })).unwrap_err().status, 400);
+        assert!(update(&mut s, &json!({ "ltc": { "device": "Carte", "channel": 3 } })).unwrap_err().message.contains("voie 3 absente"));
+        assert!(update(&mut s, &json!({ "ltc": { "device": "Carte", "channel": 1, "level_db": 6 } })).is_err());
+        assert_eq!(update(&mut s, &json!({ "enabled": true, "ltc": { "device": "Carte", "channel": 2 } })), Ok(true));
+        let cfg = &s.timecode.config().out;
+        assert_eq!(cfg.ltc, Some(LtcOut { device: "Carte".into(), channel: 2, level_db: -18.0 }));
+        assert!(cfg.has_destination());
+        // Saved and read back with the rest of `timecode.json`.
+        let back: TimecodeOut = serde_json::from_value(json!(cfg)).unwrap();
+        assert_eq!(&back, cfg);
+        // An older file without `ltc` still loads.
+        let old: TimecodeOut = serde_json::from_value(json!({ "enabled": true, "mtc_port": "X" })).unwrap();
+        assert_eq!(old.ltc, None);
+        assert_eq!(view(&s)["config"]["ltc"]["channel"], 2);
+        assert!(s.timecode.out.status().ltc_list_wanted, "the view asks for a fresh list");
+    }
+
+    #[test]
+    fn ltc_self_drive_is_refused_both_ways() {
+        let out = TimecodeOut { ltc: Some(ltc("BlackHole 2ch", 1)), ..mtc_cfg(Rate::F25) };
+        let mut input = TcConfig { source: TcSource::Ltc, ltc_channel: 1, ..Default::default() };
+        assert_eq!(conflicts(&out, &input, TcSource::Ltc, Some("BlackHole 2ch")).as_deref(), Some(ltc_out::SELF_DRIVE_LTC));
+        // The mix of all channels includes ours; another channel or device does not.
+        input.ltc_channel = 0;
+        assert!(conflicts(&out, &input, TcSource::Ltc, Some("BlackHole 2ch")).is_some());
+        input.ltc_channel = 2;
+        assert_eq!(conflicts(&out, &input, TcSource::Ltc, Some("BlackHole 2ch")), None);
+        input.ltc_channel = 1;
+        assert_eq!(conflicts(&out, &input, TcSource::Ltc, Some("Micro")), None);
+        assert_eq!(conflicts(&out, &input, TcSource::Ltc, None), None);
+        // Through the API: the input reads « BlackHole 2ch ».
+        let mut s = studio_with_outputs(&[("BlackHole 2ch", 2)]);
+        s.audio_in.set_status(crate::audio::CaptureStatus { device: Some("BlackHole 2ch".into()), ..Default::default() });
+        crate::timecode::update(&mut s, &json!({ "source": "ltc", "ltc_channel": 1 })).unwrap();
+        let err = update(&mut s, &json!({ "enabled": true, "ltc": { "device": "BlackHole 2ch", "channel": 1 } })).unwrap_err();
+        assert_eq!((err.status, err.message.as_str()), (409, ltc_out::SELF_DRIVE_LTC));
+        assert_eq!(update(&mut s, &json!({ "enabled": true, "ltc": { "device": "BlackHole 2ch", "channel": 2 } })), Ok(true));
+        let err = crate::timecode::update(&mut s, &json!({ "ltc_channel": 0 })).unwrap_err();
+        assert_eq!(err.status, 409);
+        assert_eq!(s.timecode.config().ltc_channel, 1);
+    }
+
+    #[test]
+    fn ltc_follows_only_a_playing_active_snapshot() {
+        let link = LtcLink::new(Instant::now());
+        let t0 = Instant::now();
+        let cfg = TimecodeOut { mtc_port: None, ltc: Some(ltc("Carte", 1)), offset_s: 3600.0, ..mtc_cfg(Rate::F30) };
+        let t = ltc_target(Some(&snap(&cfg, Transport::Playing, 12.0, 4, t0)), &link).unwrap();
+        assert_eq!((t.gen, t.secs, t.rate), (4, 3612.0, Rate::F30));
+        assert!((t.at_s - link.secs_of(t0)).abs() < 1e-9);
+        assert!((t.amp - 0.1259).abs() < 1e-3);
+        for s in [snap(&cfg, Transport::Paused, 12.0, 4, t0), snap(&cfg, Transport::Stopped, 0.0, 5, t0)] {
+            assert_eq!(ltc_target(Some(&s), &link), None);
+        }
+        let mut blocked = snap(&cfg, Transport::Playing, 12.0, 4, t0);
+        blocked.blocked = Some("arrêt d'urgence".into());
+        assert_eq!(ltc_target(Some(&blocked), &link), None);
+        let off = TimecodeOut { enabled: false, ..cfg.clone() };
+        assert_eq!(ltc_target(Some(&snap(&off, Transport::Playing, 1.0, 1, t0)), &link), None);
+        let no_ltc = TimecodeOut { ltc: None, ..mtc_cfg(Rate::F30) };
+        assert_eq!(ltc_target(Some(&snap(&no_ltc, Transport::Playing, 1.0, 1, t0)), &link), None);
+        assert_eq!(ltc_target(None, &link), None);
+    }
+
+    #[test]
+    fn an_estop_holds_every_route_back_and_never_arms() {
+        let mut s = studio_with_outputs(&[("Carte", 2)]);
+        let rx = s.timecode.out.take_receiver().unwrap();
+        update(&mut s, &json!({ "enabled": true, "ltc": { "device": "Carte", "channel": 1 } })).unwrap();
+        let c = Clock { t: 1.0, beat: 2.0, bpm: 120.0, beats_per_bar: 4 };
+        let ev = crate::timeline::Event { id: 1, start: 0.0, len: 10.0, source: crate::timeline::EventSource::Cue { id: "x".into() }, ..Default::default() };
+        s.timeline.load(crate::timeline::Show { name: "o".into(), tracks: vec![crate::timeline::Track { events: vec![ev], ..Default::default() }], ..Default::default() });
+        s.timeline.play(&c);
+        frame(&mut s, &c);
+        let p = rx.try_recv().unwrap();
+        assert_eq!((p.blocked, p.transport), (None, Transport::Playing));
+        s.estop.trip(ArmSource::Ui);
+        frame(&mut s, &c);
+        let p = rx.try_recv().unwrap();
+        assert_eq!(p.blocked.as_deref(), Some("arrêt d'urgence"));
+        assert!(!p.active());
+        assert!(!s.gate.is_armed());
+    }
+
+    /// The real thread on the simulated audio output: LTC plays (and is
+    /// decoded) while the timeline plays, and stops with it.
+    #[test]
+    fn the_thread_plays_ltc_on_the_simulated_output_and_stops_with_the_timeline() {
+        let (tx, rx) = sync_channel(QUEUE_LEN);
+        let status = Arc::new(Mutex::new(OutStatus::default()));
+        let running = Arc::new(AtomicBool::new(true));
+        let handle = spawn(rx, Arc::clone(&status), None, Some(ltc_out::SimLtc::factory()), Arc::clone(&running)).unwrap();
+        let cfg = TimecodeOut { mtc_port: None, ltc: Some(ltc(ltc_out::SIM_DEVICE, 2)), offset_s: 3600.0, ..mtc_cfg(Rate::F25) };
+        let t0 = Instant::now();
+        for _ in 0..40 {
+            tx.send(snap(&cfg, Transport::Playing, 0.0, 1, t0)).unwrap();
+            std::thread::sleep(ms(10));
+        }
+        let st = status.lock().unwrap().clone();
+        assert!(st.ltc_available && st.sending, "{st:?}");
+        assert_eq!(st.ltc_devices, vec![LtcDevice { name: ltc_out::SIM_DEVICE.into(), channels: 2 }]);
+        assert_eq!(st.ltc_open.as_deref(), Some("Test LTC · voie 2"));
+        assert!(st.ltc_frames >= 5, "{st:?}");
+        assert!(st.ltc_heard.as_deref().is_some_and(|h| h.starts_with("01:00:00:")), "{st:?}");
+        tx.send(snap(&cfg, Transport::Stopped, 0.0, 2, Instant::now())).unwrap();
+        std::thread::sleep(ms(80));
+        let stopped = status.lock().unwrap().ltc_frames;
+        std::thread::sleep(ms(200));
+        tx.send(snap(&cfg, Transport::Stopped, 0.0, 2, Instant::now())).unwrap();
+        std::thread::sleep(ms(40));
+        assert_eq!(status.lock().unwrap().ltc_frames, stopped, "nothing after Stop");
+        // Another device than the simulated one: an error, the thread carries on.
+        let other = TimecodeOut { ltc: Some(ltc("Absente", 1)), ..cfg.clone() };
+        tx.send(snap(&other, Transport::Playing, 0.0, 3, Instant::now())).unwrap();
+        std::thread::sleep(ms(80));
+        let st = status.lock().unwrap().clone();
+        assert!(st.error.as_deref().is_some_and(|e| e.contains("Absente")) && st.ltc_open.is_none(), "{st:?}");
         running.store(false, Ordering::SeqCst);
         handle.join().unwrap();
     }

@@ -185,7 +185,7 @@ pub fn encode(start: Tc, rate: super::Rate, frames: usize, sample_rate: u32, amp
     let mut k = 0u64;
     for i in 0..frames {
         let tc = Tc::from_frames(first + i as i64, rate);
-        let bits = frame_bits(tc, rate.drop_frame());
+        let bits = frame_bits(tc, rate);
         for (b, one) in bits.iter().enumerate() {
             let start_t = ((i * 80 + b) as f64) * bit_len;
             let mid_t = start_t + bit_len / 2.0;
@@ -206,9 +206,13 @@ pub fn encode(start: Tc, rate: super::Rate, frames: usize, sample_rate: u32, amp
     out
 }
 
-/// The 80 bits of a frame, in the order they are sent.
-#[cfg(test)]
-pub fn frame_bits(tc: Tc, drop_frame: bool) -> [bool; 80] {
+/// The 80 bits of a frame, in the order they are sent (SMPTE 12M): the
+/// time in BCD, the drop-frame flag (bit 10), user bits and the colour
+/// flag left at 0, the sync word, and the polarity correction bit (27, or
+/// 59 at 25 im/s) set so the frame holds an even number of `1`s: every
+/// frame then starts on the same level. Shared by the tests' encoder and
+/// the timecode output (ltc_out.rs).
+pub fn frame_bits(tc: Tc, rate: super::Rate) -> [bool; 80] {
     let mut bits = [false; 80];
     let mut put = |at: usize, n: usize, v: u8| {
         for i in 0..n {
@@ -217,7 +221,7 @@ pub fn frame_bits(tc: Tc, drop_frame: bool) -> [bool; 80] {
     };
     put(0, 4, tc.f % 10);
     put(8, 2, tc.f / 10);
-    put(10, 1, drop_frame as u8);
+    put(10, 1, rate.drop_frame() as u8);
     put(16, 4, tc.s % 10);
     put(24, 3, tc.s / 10);
     put(32, 4, tc.m % 10);
@@ -227,6 +231,8 @@ pub fn frame_bits(tc: Tc, drop_frame: bool) -> [bool; 80] {
     for i in 0..16 {
         bits[64 + i] = (SYNC >> i) & 1 == 1;
     }
+    let polarity = if rate == super::Rate::F25 { 59 } else { 27 };
+    bits[polarity] = bits.iter().filter(|&&b| b).count() % 2 == 1;
     bits
 }
 
@@ -246,7 +252,7 @@ mod tests {
 
     #[test]
     fn the_sync_word_is_where_the_spec_puts_it() {
-        let bits = frame_bits(Tc::default(), false);
+        let bits = frame_bits(Tc::default(), Rate::F30);
         let word: String = bits[64..].iter().map(|&b| if b { '1' } else { '0' }).collect();
         assert_eq!(word, "0011111111111101");
     }
