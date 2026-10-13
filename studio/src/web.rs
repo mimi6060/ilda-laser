@@ -6618,6 +6618,7 @@ fn shownet_view(s: &Shared) -> serde_json::Value {
         "active": s.checklist.output().is_some(),
         "hw_stop_ok": s.checklist.hw_stop_ok(),
         "wifi": s.wifi.warning(),
+        "wifi_device": s.wifi.device(),
     })
 }
 
@@ -9662,7 +9663,7 @@ mod tests {
     #[test]
     fn device_list_scans_only_on_request_and_never_arms() {
         let t = TestServer::start(false);
-        let fake = DeviceInfo { kind: "helios".into(), id: "helios:left".into(), name: "Helios DAC Left (1:2.3)".into() };
+        let fake = DeviceInfo::new("helios".into(), "helios:left".into(), "Helios DAC Left (1:2.3)".into());
         t.shared.lock().unwrap().devices = Arc::new(DeviceList::fixed(vec![fake]));
         let get = || -> serde_json::Value { serde_json::from_str(&t.request("GET", "/api/devices", "").1).unwrap() };
         let v = get();
@@ -9688,7 +9689,7 @@ mod tests {
     /// No manager thread and no engine: a selection stays « connecting ».
     fn with_fake_outputs(t: &TestServer) -> Arc<crate::output_manager::OutputManager> {
         use crate::output_manager::{FakeBackend, OutputManager};
-        let dev = DeviceInfo { kind: "etherdream".into(), id: "etherdream:a".into(), name: "Ether Dream a".into() };
+        let dev = DeviceInfo::new("etherdream".into(), "etherdream:a".into(), "Ether Dream a".into());
         let backend = FakeBackend::new(vec![dev.clone()], None, None, crate::test_support::scratch_dir());
         let list = Arc::new(DeviceList::fixed(vec![dev]));
         let mgr = Arc::new(OutputManager::new(Arc::new(backend), Arc::clone(&list), &Default::default(), 30_000));

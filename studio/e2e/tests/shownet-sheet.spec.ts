@@ -13,7 +13,7 @@ test('the ShowNET model fills its figures and the hardware stop gates arming', a
   // Not a ShowNET yet: no ShowNET items, the laser arms as before.
   let c = await studio.get('/api/checklist');
   expect(c.items.filter((i: { visible: boolean; only_for: string | null }) => i.visible && i.only_for)).toHaveLength(0);
-  expect((await studio.state()).shownet).toEqual({ active: false, hw_stop_ok: true, wifi: null });
+  expect((await studio.state()).shownet).toEqual({ active: false, hw_stop_ok: true, wifi: null, wifi_device: null });
 
   await reveal(page, '#outputsPanel');
   await expect(page.locator('#pjModel option')).toHaveCount(2);

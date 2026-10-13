@@ -325,7 +325,7 @@ reloadScanLimits();
 // « Rechercher » (about 1.5 s, on its own thread). « Connecter » opens the
 // output on the server's own thread; every change disarms the laser and a
 // lost output comes back disarmed. No shortcut and no MIDI/OSC/DMX control.
-const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN', ponk: 'PONK', artnet: 'ShowNET SD', test: 'Test' };
+const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN', lasercube: 'LaserCube', ponk: 'PONK', artnet: 'ShowNET SD', test: 'Test' };
 const LINK_STATES = { connected: 'Connectée', connecting: 'Connexion…', lost: 'Perdue' };
 function outStateText(j) {
   const name = j.name || j.selected;
@@ -350,6 +350,8 @@ function showDevices(j) {
     : j.scan_error ? 'Erreur : ' + j.scan_error
     : !j.scanned ? 'DAC pas encore cherchés.'
     : !j.usb ? 'USB non scanné pendant la sortie sur un DAC.' : '';
+  // T-496: a LaserCube is a whole projector; the studio's stop is never enough.
+  $('lcHelp').hidden = !j.devices.some(d => d.kind === 'lasercube');
   $('devStatus').classList.toggle('sf-error', !!j.scan_error);
   $('devScan').disabled = !!j.scanning;
   $('outState').dataset.state = j.state;

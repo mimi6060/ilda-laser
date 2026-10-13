@@ -2,11 +2,17 @@
 //! `GET /api/devices`, *Réglages › Sortie* and `--list-devices`.
 //!
 //! Scanning never connects, arms or sends a frame: it only lists what
-//! `laser-dac` discovers (Ether Dream broadcasts, IDN scan replies, Helios
-//! USB descriptors). The Helios scan briefly opens the USB device to read
-//! its name, so USB is left out of a rescan while the studio already drives
-//! a DAC: the running output is never touched. Connecting one is the
-//! output manager's job (`output_manager.rs`, T-401).
+//! `laser-dac` discovers (Ether Dream broadcasts, IDN scan replies,
+//! LaserCube network replies, Helios and LaserCube USB descriptors). The
+//! USB scans briefly open the device to read its name or serial, so USB is
+//! left out of a rescan while the studio already drives a DAC: the running
+//! output is never touched. Connecting one is the output manager's job
+//! (`output_manager.rs`, T-401).
+//!
+//! LaserCube (T-496) uses `laser-dac`'s own MIT implementation (features
+//! `lasercube-network` and `lasercube-usb`), never Wicked Lasers' GPL
+//! `libLaserdockCore`. Both its ids (`lasercube-network:...`,
+//! `lasercube-usb:...`) are listed under the kind `lasercube`.
 //!
 //! A scan takes about 1.5 s (the Ether Dream listens for broadcasts), so
 //! it runs on its own thread and only when asked (the *Rafraîchir* button),
@@ -15,8 +21,9 @@
 //! or the USB bus.
 
 use anyhow::Result;
-use laser_dac::{list_devices_filtered, DacType, EnabledDacTypes};
+use laser_dac::{DacDiscovery, DacType, EnabledDacTypes};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -28,12 +35,34 @@ pub struct DeviceInfo {
     /// What `--device` takes, e.g. `helios:left` or `idn:heliospro.local`.
     pub id: String,
     pub name: String,
+    /// The device's address, for network DACs that report one (LaserCube):
+    /// what the Wi-Fi warning checks the route to (T-496). Never resolved,
+    /// never contacted by the studio itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<IpAddr>,
+}
+
+impl DeviceInfo {
+    /// An entry without an address.
+    pub fn new(kind: String, id: String, name: String) -> Self {
+        Self { kind, id, name, ip: None }
+    }
+}
+
+/// Id prefix of the LaserCube network outputs, as `laser-dac` names it.
+pub const LASERCUBE_NETWORK_PREFIX: &str = "lasercube-network:";
+
+/// The address a LaserCube network id holds, when it is the IP form
+/// (`lasercube-network:192.168.1.50`; the serial form holds none).
+pub fn lasercube_id_ip(id: &str) -> Option<IpAddr> {
+    id.strip_prefix(LASERCUBE_NETWORK_PREFIX)?.parse().ok()
 }
 
 /// What a scan may look at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scope {
-    /// Helios on USB (the scan opens the device briefly to read its name).
+    /// Helios and LaserCube on USB (the scan opens the device briefly to
+    /// read its name).
     pub usb: bool,
 }
 
@@ -46,33 +75,52 @@ pub fn kind_name(kind: &DacType) -> String {
         DacType::Helios => "helios".into(),
         DacType::EtherDream => "etherdream".into(),
         DacType::Idn => "idn".into(),
+        DacType::LaserCubeNetwork | DacType::LaserCubeUsb => "lasercube".into(),
         other => format!("{other:?}").to_lowercase(),
     }
 }
 
-/// The real scan through `laser-dac`: Ether Dream and IDN on the network,
-/// plus Helios on USB when `scope.usb`.
-pub fn scan_dacs(scope: Scope) -> Result<Vec<DeviceInfo>> {
+/// The DAC types a scan looks for: Ether Dream, IDN and LaserCube on the
+/// network, plus Helios and LaserCube on USB when `scope.usb`.
+pub fn scan_types(scope: Scope) -> EnabledDacTypes {
     let mut types = EnabledDacTypes::none();
-    types.enable(DacType::EtherDream).enable(DacType::Idn);
+    types.enable(DacType::EtherDream).enable(DacType::Idn).enable(DacType::LaserCubeNetwork);
     if scope.usb {
-        types.enable(DacType::Helios);
+        types.enable(DacType::Helios).enable(DacType::LaserCubeUsb);
     }
-    let found = list_devices_filtered(&types).map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(found.into_iter().map(|d| DeviceInfo { kind: kind_name(&d.kind), id: d.id, name: d.name }).collect())
+    types
+}
+
+/// One entry from what `laser-dac` reports. A LaserCube on USB is named by
+/// its serial only, so the model is added.
+pub fn device_entry(kind: &DacType, id: String, name: String, ip: Option<IpAddr>) -> DeviceInfo {
+    let name = match kind {
+        DacType::LaserCubeUsb => format!("LaserCube USB {name}"),
+        _ => name,
+    };
+    DeviceInfo { kind: kind_name(kind), id, name, ip }
+}
+
+/// The real scan through `laser-dac` (see `scan_types`).
+pub fn scan_dacs(scope: Scope) -> Result<Vec<DeviceInfo>> {
+    let found = DacDiscovery::new(scan_types(scope)).scan();
+    Ok(found.iter().map(|d| device_entry(d.dac_type(), d.info().stable_id().to_string(), d.name().to_string(), d.info().ip_address)).collect())
 }
 
 /// `--list-devices`: one line per DAC (id, kind, name), or a note when
 /// none is found.
 pub fn print_list(devices: &[DeviceInfo]) -> String {
     if devices.is_empty() {
-        return "No DAC found (Helios on USB, Ether Dream or IDN on the network).\n".into();
+        return "No DAC found (Helios or LaserCube on USB, Ether Dream, IDN or LaserCube on the network).\n".into();
     }
     let mut out = String::new();
     for d in devices {
         out.push_str(&format!("{}\t{}\t{}\n", d.id, d.kind, d.name));
     }
     out.push_str("Start the studio with --device <id> to drive one (it starts disarmed).\n");
+    if devices.iter().any(|d| d.kind == "lasercube") {
+        out.push_str("LaserCube: its hardware interlock (key, safety connector) stays the real stop, not the studio.\n");
+    }
     out
 }
 
@@ -192,7 +240,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn helios() -> DeviceInfo {
-        DeviceInfo { kind: "helios".into(), id: "helios:left".into(), name: "Helios DAC Left (1:2.3)".into() }
+        DeviceInfo::new("helios".into(), "helios:left".into(), "Helios DAC Left (1:2.3)".into())
     }
 
     fn wait_scanned(list: &DeviceList) -> serde_json::Value {
@@ -220,6 +268,44 @@ mod tests {
         assert_eq!(kind_name(&DacType::Helios), "helios");
         assert_eq!(kind_name(&DacType::EtherDream), "etherdream");
         assert_eq!(kind_name(&DacType::Idn), "idn");
+        assert_eq!(kind_name(&DacType::LaserCubeNetwork), "lasercube");
+        assert_eq!(kind_name(&DacType::LaserCubeUsb), "lasercube");
+    }
+
+    /// T-496: the scan looks for LaserCubes on the network always, on USB
+    /// only with the USB scope. Building the type list scans nothing.
+    #[test]
+    fn lasercubes_are_in_the_scan_and_usb_follows_the_scope() {
+        let all = scan_types(Scope { usb: true });
+        let net = scan_types(Scope { usb: false });
+        for t in [DacType::EtherDream, DacType::Idn, DacType::LaserCubeNetwork] {
+            assert!(all.is_enabled(t.clone()) && net.is_enabled(t.clone()), "{t:?}");
+        }
+        for t in [DacType::Helios, DacType::LaserCubeUsb] {
+            assert!(all.is_enabled(t.clone()), "{t:?}");
+            assert!(!net.is_enabled(t.clone()), "{t:?} only with USB");
+        }
+    }
+
+    #[test]
+    fn lasercube_entries_are_listed_with_their_kind_and_address() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let net = device_entry(&DacType::LaserCubeNetwork, "lasercube-network:010203040506".into(), "LaserCube 192.168.1.50".into(), Some(ip));
+        assert_eq!((net.kind.as_str(), net.ip), ("lasercube", Some(ip)));
+        let v = serde_json::to_value(&net).unwrap();
+        assert_eq!(v["ip"], "192.168.1.50");
+        assert_eq!(serde_json::from_value::<DeviceInfo>(v).unwrap(), net);
+        let usb = device_entry(&DacType::LaserCubeUsb, "lasercube-usb:LC-1".into(), "LC-1".into(), None);
+        assert_eq!((usb.kind.as_str(), usb.name.as_str()), ("lasercube", "LaserCube USB LC-1"));
+        assert!(serde_json::to_value(&usb).unwrap().get("ip").is_none(), "no address, no field");
+        // Only the IP form of the id holds an address.
+        assert_eq!(lasercube_id_ip("lasercube-network:192.168.1.50"), Some(ip));
+        assert_eq!(lasercube_id_ip("lasercube-network:010203040506"), None);
+        assert_eq!(lasercube_id_ip("etherdream:192.168.1.50"), None);
+        // The printout reminds that the cube's own interlock is the stop.
+        let out = print_list(&[usb]);
+        assert!(out.contains("hardware interlock"), "{out}");
+        assert!(!print_list(&[helios()]).contains("interlock"));
     }
 
     #[test]

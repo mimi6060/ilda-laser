@@ -221,14 +221,14 @@ pub fn installed_backend() -> Option<Arc<dyn ShowNetBackend>> {
 /// What the output manager lists for a backend: the "first box found"
 /// entry, then the boxes it enumerates.
 pub fn fixed_entry() -> DeviceInfo {
-    DeviceInfo { kind: KIND.into(), id: format!("{ID_PREFIX}{AUTO}"), name: "ShowNET (premier trouvé)".into() }
+    DeviceInfo::new(KIND.into(), format!("{ID_PREFIX}{AUTO}"), "ShowNET (premier trouvé)".into())
 }
 
 pub fn scan(backend: &dyn ShowNetBackend) -> Result<Vec<DeviceInfo>> {
     Ok(backend
         .enumerate()?
         .into_iter()
-        .map(|d| DeviceInfo { kind: KIND.into(), id: format!("{ID_PREFIX}{}", d.id), name: format!("ShowNET {}", d.name) })
+        .map(|d| DeviceInfo::new(KIND.into(), format!("{ID_PREFIX}{}", d.id), format!("ShowNET {}", d.name)))
         .collect())
 }
 

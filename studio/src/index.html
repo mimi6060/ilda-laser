@@ -3075,11 +3075,13 @@
       <div class="sf-sub">Sortie laser</div>
       <div id="outState" role="status" data-state="available">Aucune sortie : aperçu seulement</div>
       <div class="row">
-        <button id="devScan" title="Chercher les DAC (Helios USB, Ether Dream, IDN/HeliosPRO). N'ouvre ni n'arme aucun DAC.">Rechercher</button>
+        <button id="devScan" title="Chercher les DAC (Helios USB, Ether Dream, IDN/HeliosPRO, LaserCube réseau et USB). N'ouvre ni n'arme aucun DAC.">Rechercher</button>
         <button id="outDisconnect" title="Envoie des trames noires, ferme la sortie et revient à l'aperçu seul. Désarme le laser." disabled>Déconnecter</button>
         <span class="hint" id="devStatus"></span>
       </div>
       <ul id="devList"></ul>
+      <div class="hint" id="lcHelp" hidden>LaserCube : c'est un projecteur complet. Son interlock matériel (clé, connecteur de sécurité)
+        reste l'arrêt réel ; Échap et le désarmement du studio n'y suffisent pas. Préférez l'Ethernet au Wi-Fi pour un show.</div>
       <label class="check" title="Une sortie perdue est retentée après 1 s, 2 s, 4 s, 8 s puis toutes les 15 s. Elle revient toujours désarmée."><input type="checkbox" id="outAuto" checked> Reconnexion automatique</label>
       <details id="artnetPanel" data-search="ShowNET carte SD Art-Net">
         <summary>ShowNET carte SD (Art-Net)</summary>
