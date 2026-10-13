@@ -11,7 +11,7 @@
 // to it. The first import is the module before this one: every module
 // imports its predecessor and app.js imports the last one, so the ES
 // evaluation order is the page order the script had.
-import { loadArtnet, loadDmxOut, reloadAudience, reloadDevices, reloadOutColor, reloadOutputs,
+import { loadArtnet, loadAudioOut, loadDmxOut, reloadAudience, reloadDevices, reloadOutColor, reloadOutputs,
   showAudienceMode, showDataWarnings } from './outputs.js';
 import { $, api, apiJson, armed, assignArmed, assignCalibration, editLook, showSettings, takeLook } from './core.js';
 import { assignArm, assignChecklistState, assignShownetState, checklistState, clock, showArmed,
@@ -453,6 +453,7 @@ async function loadState() {
   reloadDevices();
   reloadVenue();
   loadArtnet();
+  loadAudioOut();
   loadDmxOut();
   assignCalibration(st.calibration); assignArmed(st.armed); assignArm(st.arm); assignScenes(st.scenes);
   showShowMode(st.lock);

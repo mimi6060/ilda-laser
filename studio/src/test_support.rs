@@ -49,6 +49,8 @@ pub fn shared() -> Shared {
     let shownet_dmx = std::sync::Arc::new(crate::artnet::ShowNetDmxStore::in_memory());
     let mut backend = crate::output_manager::FakeBackend::new(Vec::new(), None, None, data.clone());
     backend.artnet = std::sync::Arc::clone(&shownet_dmx);
+    let audio_out = std::sync::Arc::new(crate::audio_out::AudioOutStore::in_memory());
+    backend.audio = std::sync::Arc::clone(&audio_out);
     let output_mgr = std::sync::Arc::new(crate::output_manager::OutputManager::new(
         std::sync::Arc::new(backend),
         std::sync::Arc::new(crate::devices::DeviceList::fixed(Vec::new())),
@@ -80,6 +82,7 @@ pub fn shared() -> Shared {
         sdbank: crate::sdbank::SdBankStore::in_memory(),
         recorder: crate::record::Recorder::default(),
         shownet_dmx,
+        audio_out,
         output_status: None,
         playlist: None,
         controls,

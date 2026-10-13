@@ -72,7 +72,8 @@ impl Default for OutputPrefs {
 pub struct OutputInfo {
     pub id: String,
     pub name: String,
-    /// "helios", "etherdream", "idn" (from the scan), "ponk", "artnet", "test",
+    /// "helios", "etherdream", "idn" (from the scan), "ponk", "artnet",
+    /// "audio" (an audio interface, T-498), "test",
     /// "shownet" (`shownet` feature with the SDK binding installed).
     pub kind: String,
     pub state: LinkState,
@@ -862,6 +863,8 @@ pub struct RealBackend {
     pub data_dir: PathBuf,
     /// The ShowNET SD card box the operator typed (T-301), listed once set.
     pub artnet: Arc<crate::artnet::ShowNetDmxStore>,
+    /// The audio interface the operator chose (T-498), listed once set.
+    pub audio: Arc<crate::audio_out::AudioOutStore>,
 }
 
 /// Opens the Art-Net output of `id` with the stored profile settings.
@@ -887,6 +890,7 @@ impl OutputBackend for RealBackend {
         #[allow(unused_mut)]
         let mut out = vec![ponk_entry(self.ponk)];
         out.extend(self.artnet.entry());
+        out.extend(self.audio.entry());
         #[cfg(feature = "shownet")]
         if crate::shownet::installed_backend().is_some() {
             out.push(crate::shownet::fixed_entry());
@@ -904,6 +908,9 @@ impl OutputBackend for RealBackend {
         }
         if id.starts_with(crate::artnet::ID_PREFIX) {
             return open_artnet(&self.artnet, id);
+        }
+        if id.starts_with(crate::audio_out::ID_PREFIX) {
+            return Ok(Box::new(self.audio.open(id, pps)?));
         }
         Ok(Box::new(DacOutput::open(id, pps)?))
     }
@@ -923,6 +930,8 @@ pub struct FakeBackend {
     pub opens: Arc<AtomicUsize>,
     /// The Art-Net box (T-301): opened only towards a loopback address.
     pub artnet: Arc<crate::artnet::ShowNetDmxStore>,
+    /// The audio interface (T-498): only the fake interfaces, never Core Audio.
+    pub audio: Arc<crate::audio_out::AudioOutStore>,
     /// A fake ShowNET box (unit tests only): opens `shownet:` ids.
     #[cfg(feature = "shownet")]
     pub shownet: Option<Arc<dyn crate::shownet::ShowNetBackend>>,
@@ -941,6 +950,7 @@ impl FakeBackend {
             dropped: Arc::default(),
             opens: Arc::default(),
             artnet: Arc::new(crate::artnet::ShowNetDmxStore::in_memory()),
+            audio: Arc::new(crate::audio_out::AudioOutStore::in_memory()),
             #[cfg(feature = "shownet")]
             shownet: None,
         }
@@ -958,9 +968,9 @@ impl OutputBackend for FakeBackend {
         }
         out.extend(self.ponk.map(ponk_entry));
         out.extend(self.artnet.entry());
+        out.extend(self.audio.entry());
         out
     }
-    #[cfg_attr(not(feature = "shownet"), allow(unused_variables))]
     fn open(&self, id: &str, pps: u32) -> Result<Box<dyn Output>> {
         self.opens.fetch_add(1, Ordering::SeqCst);
         if self.dropped.load(Ordering::SeqCst) {
@@ -979,6 +989,12 @@ impl OutputBackend for FakeBackend {
                 Some(t) if t.ip().is_loopback() => open_artnet(&self.artnet, id)?,
                 _ => bail!("Art-Net vers « {id} » refusé en test (127.0.0.1 seulement)"),
             }
+        } else if id.starts_with(crate::audio_out::ID_PREFIX) {
+            // Tests and e2e: a stream-less output, never a sound card.
+            if !self.audio.is_fake() {
+                bail!("interface audio refusée en test");
+            }
+            Box::new(self.audio.open(id, pps)?)
         } else if let Some(target) = id.strip_prefix("ponk:").filter(|t| self.ponk.is_some_and(|p| p.to_string() == *t)) {
             Box::new(crate::ponk::PonkOutput::open(target.parse()?, &self.data_dir)?)
         } else if let Some(d) = self.devices.iter().find(|d| d.id == id) {
@@ -1333,7 +1349,7 @@ mod tests {
 
     #[test]
     fn the_real_backend_lists_the_ponk_target_without_scanning() {
-        let backend = RealBackend { ponk: crate::ponk::DEFAULT_TARGET.parse().unwrap(), data_dir: crate::test_support::scratch_dir(), artnet: Arc::new(crate::artnet::ShowNetDmxStore::in_memory()) };
+        let backend = RealBackend { ponk: crate::ponk::DEFAULT_TARGET.parse().unwrap(), data_dir: crate::test_support::scratch_dir(), artnet: Arc::new(crate::artnet::ShowNetDmxStore::in_memory()), audio: Arc::new(crate::audio_out::AudioOutStore::in_memory()) };
         let fixed = backend.fixed();
         assert_eq!(fixed.len(), 1, "the Art-Net box is off by default");
         assert_eq!((fixed[0].kind.as_str(), fixed[0].id.as_str()), ("ponk", "ponk:127.0.0.1:5583"));

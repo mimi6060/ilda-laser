@@ -14,6 +14,7 @@ mod about;
 mod agenda;
 mod applog;
 mod artnet;
+mod audio_out;
 mod audience;
 mod autopilot;
 mod audio;
@@ -630,6 +631,9 @@ pub struct Shared {
     /// The ShowNET SD card box over Art-Net (artnet.rs, T-301,
     /// `shownet_artnet.json`), shared with the output backend.
     pub shownet_dmx: Arc<artnet::ShowNetDmxStore>,
+    /// The audio interface output (audio_out.rs, T-498,
+    /// `audio_output.json`), shared with the output backend.
+    pub audio_out: Arc<audio_out::AudioOutStore>,
     /// The connected output's own report (`Output::status`), last frame.
     pub output_status: Option<serde_json::Value>,
     /// Whether a ShowNET output's link is the Wi-Fi (T-472): a warning in
@@ -1186,6 +1190,7 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
             match out.kind() {
                 "ponk" => println!("Laser output: {} (disarmed: empty PONK frames until armed).", out.name()),
                 artnet::KIND => println!("Laser output: {} (disarmed: intensity 0 and pattern 0 until armed; the box plays its SD card).", out.name()),
+                audio_out::KIND => println!("Laser output: {} (disarmed: every channel at 0 until armed).", out.name()),
                 "test" => println!("--test-output: fake output logged to {} (no laser).", cli.test_output.as_ref().map(|p| p.display().to_string()).unwrap_or_default()),
                 _ => println!("Laser output: {}", out.name()),
             }
@@ -1578,7 +1583,8 @@ fn startup_state(cli: &Cli) -> Shared {
     let prefs = outputs.connection();
     let pps = cli.pps.unwrap_or(prefs.pps);
     let shownet_dmx = Arc::new(artnet::ShowNetDmxStore::load(cli.data_dir.join("shownet_artnet.json")));
-    let output_mgr = Arc::new(output_backend(cli, &prefs, pps, &shownet_dmx));
+    let audio_out = Arc::new(audio_out::AudioOutStore::load(cli.data_dir.join("audio_output.json")));
+    let output_mgr = Arc::new(output_backend(cli, &prefs, pps, &shownet_dmx, &audio_out));
     let epoch = Instant::now();
     let estop = Arc::new(EStop::default());
     let netin_cli = netin::CliOverride { osc: cli.osc, artnet: cli.artnet };
@@ -1603,6 +1609,7 @@ fn startup_state(cli: &Cli) -> Shared {
         sdbank: sdbank::SdBankStore::load(cli.data_dir.join("sdbank.json")),
         recorder: record::Recorder::default(),
         shownet_dmx,
+        audio_out,
         output_status: None,
         playlist: None,
         controls,
@@ -1773,12 +1780,15 @@ fn checklist_enforced(cli: &Cli) -> bool {
 /// The output manager and what it can open: the fake backend whenever a
 /// test flag is given (`--test-devices`, `--test-output`), so a test can
 /// never open a real DAC; the real one (laser-dac, PONK) otherwise.
-fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32, shownet_dmx: &Arc<artnet::ShowNetDmxStore>) -> output_manager::OutputManager {
+fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32, shownet_dmx: &Arc<artnet::ShowNetDmxStore>, audio_out: &Arc<audio_out::AudioOutStore>) -> output_manager::OutputManager {
     use output_manager::{FakeBackend, OutputManager, RealBackend};
     if cli.test_devices.is_some() || cli.test_output.is_some() {
         let fake = cli.test_devices.as_ref().map(|d| d.0.clone()).unwrap_or_default();
         let mut backend = FakeBackend::new(fake.clone(), cli.test_output.clone(), cli.ponk, cli.data_dir.clone());
         backend.artnet = Arc::clone(shownet_dmx);
+        // Never a sound card: the fake interfaces only.
+        audio_out.use_fake_devices();
+        backend.audio = Arc::clone(audio_out);
         let dropped = Arc::clone(&backend.dropped);
         let list = Arc::new(devices::DeviceList::fixed(fake));
         let locks = cli.dac_lock_dir.clone().unwrap_or_else(|| cli.data_dir.join("output-locks"));
@@ -1788,6 +1798,7 @@ fn output_backend(cli: &Cli, prefs: &output_manager::OutputPrefs, pps: u32, show
         ponk: cli.ponk.unwrap_or_else(|| ponk::DEFAULT_TARGET.parse().expect("valid default PONK target")),
         data_dir: cli.data_dir.clone(),
         artnet: Arc::clone(shownet_dmx),
+        audio: Arc::clone(audio_out),
     });
     let scanner: devices::Scanner = {
         let backend = Arc::clone(&backend);
@@ -1859,7 +1870,7 @@ fn apply_output_change(shared: &Mutex<Shared>, stage: &mut OutputStage, estop: &
     // A real output (a DAC, PONK to MadMapper, the ShowNET over Art-Net):
     // the pre-show checklist gates arming from now on, as with --device
     // or --ponk (T-258).
-    if described.as_ref().is_some_and(|d| matches!(d.1, "dac" | "ponk" | artnet::KIND)) && !s.checklist.enforced() {
+    if described.as_ref().is_some_and(|d| matches!(d.1, "dac" | "ponk" | artnet::KIND | audio_out::KIND)) && !s.checklist.enforced() {
         s.checklist.enforce();
     }
     // And the ShowNET items and `hw_stop` follow the new output (T-472).
@@ -1983,7 +1994,7 @@ fn apply_projector_change(shared: &Mutex<Shared>, extras: &mut Vec<ProjectorStag
         }
         // A real output on any projector: the pre-show checklist gates
         // arming from now on (T-258).
-        if matches!(kind, "dac" | "ponk" | artnet::KIND) && !s.checklist.enforced() {
+        if matches!(kind, "dac" | "ponk" | artnet::KIND | audio_out::KIND) && !s.checklist.enforced() {
             s.checklist.enforce();
         }
     }
