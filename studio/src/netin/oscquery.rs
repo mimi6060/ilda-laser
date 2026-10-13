@@ -254,7 +254,8 @@ pub fn answer(method: &str, url: &str, tree: impl FnOnce() -> Value, host: impl 
     }
 }
 
-/// The tree as the studio stands now.
+/// The tree as the studio stands now (tests; the server uses `tree_locked`).
+#[cfg(test)]
 pub fn tree_of(s: &Shared) -> Value {
     tree(&entries(&s.controls, |d| feedback::value_of(s, d)))
 }
@@ -268,38 +269,74 @@ pub fn spawn(shared: Arc<Mutex<Shared>>, hub: Arc<NetHub>, running: Arc<AtomicBo
         .ok()
 }
 
-fn run(shared: &Mutex<Shared>, hub: &NetHub, running: &AtomicBool) {
-    let mut server: Option<(SocketAddr, Server)> = None;
-    let mut failed: Option<(SocketAddr, Instant)> = None;
-    let mut bonjour: Option<(u16, Child)> = None;
-    while running.load(Ordering::SeqCst) {
-        let cfg = hub.effective();
-        let want = cfg.oscquery_listen();
-        if server.as_ref().map(|(a, _)| *a) != want {
-            if server.take().is_some() {
+/// The same, with the `Shared` lock held only to read the entries.
+fn tree_locked(shared: &Mutex<Shared>) -> Value {
+    let list = {
+        let s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        entries(&s.controls, |d| feedback::value_of(&s, d))
+    };
+    tree(&list)
+}
+
+/// The server's socket: bound, rebound or closed to match the settings.
+/// A failed bind keeps its error on show and is retried every `RETRY`;
+/// it is logged once per address (like the listeners).
+#[derive(Default)]
+struct Binder {
+    /// The address the settings ask for, and the server bound to it.
+    want: Option<SocketAddr>,
+    server: Option<Server>,
+    /// Last failed bind of `want`.
+    failed: Option<Instant>,
+    /// Warnings logged (tests).
+    warned: u32,
+}
+
+impl Binder {
+    fn reconcile(&mut self, hub: &NetHub, want: Option<SocketAddr>, now: Instant) {
+        if want != self.want {
+            if self.server.take().is_some() {
                 log::info!("OSCQuery : arrêté");
             }
             hub.update_oscquery(|st| (st.local, st.error) = (None, None));
-            if let Some(addr) = want.filter(|a| failed.is_none_or(|(f, at)| f != *a || at.elapsed() >= RETRY)) {
-                match crate::web::bind_with(addr, 0, 0, MAX_CONNECTIONS, OUTPUT_BUDGET) {
-                    Ok(s) => {
-                        let local = s.server_addr().to_ip().unwrap_or(addr);
-                        log::info!("OSCQuery : en lecture seule sur http://{local}/");
-                        hub.update_oscquery(|st| (st.local, st.error) = (Some(local.to_string()), None));
-                        failed = None;
-                        server = Some((addr, s));
-                    }
-                    Err(e) => {
-                        let error = format!("impossible d'écouter sur {addr} : {e}");
-                        log::warn!("OSCQuery : {error}");
-                        hub.update_oscquery(|st| st.error = Some(error));
-                        failed = Some((addr, Instant::now()));
-                    }
+            (self.want, self.failed) = (want, None);
+        }
+        let Some(addr) = self.want else { return };
+        if self.server.is_some() || self.failed.is_some_and(|at| now.saturating_duration_since(at) < RETRY) {
+            return;
+        }
+        match crate::web::bind_with(addr, 0, 0, MAX_CONNECTIONS, OUTPUT_BUDGET) {
+            Ok(s) => {
+                let local = s.server_addr().to_ip().unwrap_or(addr);
+                log::info!("OSCQuery : en lecture seule sur http://{local}/");
+                hub.update_oscquery(|st| (st.local, st.error) = (Some(local.to_string()), None));
+                self.failed = None;
+                self.server = Some(s);
+            }
+            Err(e) => {
+                let error = format!("impossible d'écouter sur {addr} : {e}");
+                if self.failed.is_none() {
+                    log::warn!("OSCQuery : {error}");
+                    self.warned += 1;
+                } else {
+                    log::debug!("OSCQuery : {error}");
                 }
+                hub.update_oscquery(|st| (st.local, st.error) = (None, Some(error)));
+                self.failed = Some(now);
             }
         }
+    }
+}
+
+fn run(shared: &Mutex<Shared>, hub: &NetHub, running: &AtomicBool) {
+    let mut binder = Binder::default();
+    let mut bonjour: Option<(u16, Child)> = None;
+    while running.load(Ordering::SeqCst) {
+        let cfg = hub.effective();
+        binder.reconcile(hub, cfg.oscquery_listen(), Instant::now());
+        let server = &binder.server;
         // Bonjour: only when asked, never for loopback, never in tests.
-        let local = server.as_ref().and_then(|(_, s)| s.server_addr().to_ip());
+        let local = server.as_ref().and_then(|s| s.server_addr().to_ip());
         let announce = local.filter(|l| cfg.oscquery.announce && !l.ip().is_loopback() && !cfg!(test)).map(|l| l.port());
         if bonjour.as_ref().map(|(p, _)| *p) != announce {
             if let Some((_, mut child)) = bonjour.take() {
@@ -314,7 +351,7 @@ fn run(shared: &Mutex<Shared>, hub: &NetHub, running: &AtomicBool) {
                 }
             });
         }
-        let Some((_, s)) = &server else {
+        let Some(s) = server else {
             std::thread::sleep(POLL);
             continue;
         };
@@ -325,7 +362,7 @@ fn run(shared: &Mutex<Shared>, hub: &NetHub, running: &AtomicBool) {
         };
         let osc = hub.status(Proto::Osc).local.and_then(|l| l.parse().ok()).or_else(|| cfg.listen(Proto::Osc)).unwrap_or_else(|| SocketAddr::new(IpAddr::from([127, 0, 0, 1]), cfg.osc.port));
         let url = request.url().to_string();
-        let (status, body) = answer(method, &url, || tree_of(&shared.lock().unwrap_or_else(|e| e.into_inner())), || host_info(osc));
+        let (status, body) = answer(method, &url, || tree_locked(shared), || host_info(osc));
         hub.update_oscquery(|st| {
             st.packets += 1;
             st.rejected += u64::from(status == 405);
@@ -474,6 +511,32 @@ mod tests {
         // Older files without the section still load, switched off.
         let old: NetInConfig = serde_json::from_str(r#"{"osc":{"enabled":true}}"#).unwrap();
         assert_eq!(old.oscquery, OscQueryConfig::default());
+    }
+
+    /// A port already taken: the error stays on show through the retries
+    /// and is logged once; another address clears it.
+    #[test]
+    fn a_taken_port_keeps_its_error_and_warns_once() {
+        let s = shared();
+        let hub = &s.netin.hub;
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = taken.local_addr().unwrap();
+        let mut b = Binder::default();
+        let t0 = Instant::now();
+        for ms in [0, 100, 200, 1900, 2100, 4300, 6500] {
+            b.reconcile(hub, Some(addr), t0 + Duration::from_millis(ms));
+            let st = hub.oscquery_status();
+            assert!(st.error.as_deref().is_some_and(|e| e.contains("impossible d'écouter")), "{ms} ms: {:?}", st.error);
+            assert!(st.local.is_none());
+        }
+        assert_eq!(b.warned, 1, "logged once for this address");
+        b.reconcile(hub, Some("127.0.0.1:0".parse().unwrap()), t0 + Duration::from_millis(6600));
+        let st = hub.oscquery_status();
+        assert_eq!(st.error, None);
+        assert!(st.local.is_some());
+        b.reconcile(hub, None, t0 + Duration::from_millis(6700));
+        assert_eq!(hub.oscquery_status().local, None);
+        drop(taken);
     }
 
     /// The thread on 127.0.0.1 (port picked by the system): GET answers,
