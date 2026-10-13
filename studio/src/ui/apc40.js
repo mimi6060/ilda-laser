@@ -433,13 +433,27 @@ function showOscQuery(n) {
   else if (q.enabled) [t, cls] = [libelle('entrees.oscquery.ouverture'), 'warn'];
   $('oscqState').textContent = t; $('oscqState').className = 'ni-state ' + cls;
 }
+// The operator's change wins until the server answers it (T-502): a poll
+// sent before the change, or answered while a save is in flight, carries
+// the old settings and would undo the click on screen, so it is dropped.
+let niGen = 0, niSaving = 0;
 async function loadNetin() {
-  try { const r = await api('GET', '/api/netin'); if (r.ok) showNetin(await r.json()); } catch {}
+  const gen = niGen;
+  try {
+    const r = await api('GET', '/api/netin');
+    if (!r.ok) return;
+    const n = await r.json();
+    if (gen === niGen && !niSaving) showNetin(n);
+  } catch {}
 }
 async function saveNetin(patch) {
-  const r = await api('POST', '/api/netin', patch, { quiet: true });
+  const gen = ++niGen;
+  niSaving++;
+  let r;
+  try { r = await api('POST', '/api/netin', patch, { quiet: true }); } finally { niSaving--; }
   $('netinError').textContent = r.ok ? '' : await r.text();
-  if (r.ok) showNetin(await r.json()); else loadNetin();
+  if (!r.ok) loadNetin();
+  else { const n = await r.json(); if (gen === niGen) showNetin(n); }
 }
 $('oscEnabled').onchange = e => saveNetin({ osc: { enabled: e.target.checked } });
 $('oscBind').onchange = e => saveNetin({ osc: { bind: e.target.value.trim() } });
