@@ -399,6 +399,7 @@ function showNetin(n) {
   showDmxInput(n);
   const [ot, oc] = niListen(n.osc.status, e.osc.enabled, n.cli.osc);
   $('oscState').textContent = ot; $('oscState').className = 'ni-state ' + oc;
+  showOscQuery(n);
   let [at, ac] = niListen(n.artnet.status, e.artnet.enabled, n.cli.artnet);
   if (e.artnet.enabled && !n.artnet.status.error) {
     const [sig, cls] = NI_SIGNAL[n.artnet.signal] || NI_SIGNAL.off;
@@ -419,6 +420,19 @@ function showNetin(n) {
     return d;
   }));
 }
+// OSCQuery (T-499): the read-only address listing, on the OSC input's address.
+function showOscQuery(n) {
+  const q = n.config.oscquery, st = n.oscquery.status;
+  $('oscqEnabled').checked = q.enabled;
+  setField('oscqPort', q.port ?? '');
+  $('oscqAnnounce').checked = q.announce; $('oscqAnnounce').disabled = !q.enabled;
+  let t = libelle('entrees.oscquery.coupe'), cls = '';
+  if (q.enabled && !n.effective.osc.enabled) [t, cls] = [libelle('entrees.oscquery.sans_osc'), 'warn'];
+  else if (q.enabled && st.error) [t, cls] = [st.error, 'bad'];
+  else if (q.enabled && n.oscquery.url) [t, cls] = [libelle('entrees.oscquery.url', { url: n.oscquery.url, n: st.packets }), 'ok'];
+  else if (q.enabled) [t, cls] = [libelle('entrees.oscquery.ouverture'), 'warn'];
+  $('oscqState').textContent = t; $('oscqState').className = 'ni-state ' + cls;
+}
 async function loadNetin() {
   try { const r = await api('GET', '/api/netin'); if (r.ok) showNetin(await r.json()); } catch {}
 }
@@ -430,6 +444,9 @@ async function saveNetin(patch) {
 $('oscEnabled').onchange = e => saveNetin({ osc: { enabled: e.target.checked } });
 $('oscBind').onchange = e => saveNetin({ osc: { bind: e.target.value.trim() } });
 $('oscPort').onchange = e => saveNetin({ osc: { port: Math.round(+e.target.value) } });
+$('oscqEnabled').onchange = e => saveNetin({ oscquery: { enabled: e.target.checked } });
+$('oscqPort').onchange = e => saveNetin({ oscquery: { port: e.target.value.trim() === '' ? null : Math.round(+e.target.value) } });
+$('oscqAnnounce').onchange = e => saveNetin({ oscquery: { announce: e.target.checked } });
 $('artnetEnabled').onchange = e => saveNetin({ artnet: { enabled: e.target.checked } });
 $('artnetBind').onchange = e => saveNetin({ artnet: { bind: e.target.value.trim() } });
 $('artnetPort').onchange = e => saveNetin({ artnet: { port: Math.round(+e.target.value) } });

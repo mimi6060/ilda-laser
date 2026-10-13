@@ -139,6 +139,15 @@ const LABELS = Object.freeze({
   'entrees.portail': 'Entrées externes',
   'entrees.portail.court': 'Ext.',
   'entrees.portail.info': 'Entrées externes fermées : DMX, OSC et timecode ne changent rien (sauf le noir et l\'arrêt d\'urgence) · Alt+X',
+  'entrees.oscquery.activer': 'Publier la liste des adresses (OSCQuery, lecture seule)',
+  'entrees.oscquery.port': 'Port OSCQuery (HTTP)',
+  'entrees.oscquery.port.auto': 'port OSC + 1',
+  'entrees.oscquery.annoncer': 'Annoncer sur le réseau (Bonjour _oscjson._tcp)',
+  'entrees.oscquery.aide': 'Le contrôleur (TouchOSC, Chataigne, Open Stage Control…) lit les adresses /ls/…, leurs types et leurs plages à cette URL. Lecture seule : rien ne s\'écrit par là, aucune adresse n\'arme le laser, et les entrées externes décident toujours à la réception. Écoute sur l\'adresse de l\'entrée OSC, seulement quand elle est allumée. Sans l\'annonce, tapez l\'URL dans le contrôleur.',
+  'entrees.oscquery.coupe': 'Coupé',
+  'entrees.oscquery.sans_osc': 'En attente : allumez l\'entrée OSC',
+  'entrees.oscquery.url': 'URL à saisir dans le contrôleur : {url} — {n} requête(s)',
+  'entrees.oscquery.ouverture': 'Ouverture…',
 
   // Sécurité: never empty (a test checks every securite.* key).
   'securite.noir': 'Noir',

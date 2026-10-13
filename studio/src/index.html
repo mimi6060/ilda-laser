@@ -2940,6 +2940,16 @@
           <div class="ni-state" id="oscState" role="status"></div>
           <div class="hint">Adresses : <code>/ls/master/size valeur</code> (voir <b>Liste des adresses</b> ci-dessous), <code>/ls/control/&lt;id&gt; valeur</code>, <code>/ls/norm/&lt;id&gt; 0..1</code>, <code>/ls/cue/play "id du cue"</code>, <code>/ls/cue/stop</code>, <code>/ls/blackout</code>. Les id sont ceux de <code>--list-controls</code>.</div>
           <div id="oscMonitor"><div class="hint">Aucun message reçu.</div></div>
+          <div class="oscq" id="oscqBox">
+            <label class="check"><input type="checkbox" id="oscqEnabled"> <span data-t="entrees.oscquery.activer"></span></label>
+            <div class="oscq-port">
+              <label for="oscqPort" data-t="entrees.oscquery.port"></label>
+              <input type="number" id="oscqPort" min="0" max="65535" data-t-placeholder="entrees.oscquery.port.auto">
+            </div>
+            <label class="check"><input type="checkbox" id="oscqAnnounce"> <span data-t="entrees.oscquery.annoncer"></span></label>
+            <div class="ni-state" id="oscqState" role="status"></div>
+            <div class="hint" data-t="entrees.oscquery.aide"></div>
+          </div>
         </div>
         <div class="mdev">
           <div class="n">Art-Net</div>
