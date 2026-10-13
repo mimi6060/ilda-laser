@@ -254,6 +254,11 @@ struct Cli {
     /// opened) and refuses --device (preview only).
     #[arg(long, hide = true, requires = "no_midi", conflicts_with = "device")]
     midi_test: bool,
+    /// Testing only (e2e, T-501): LTC out goes to a simulated audio output
+    /// (« Test LTC ») that decodes what it plays; no audio device is ever
+    /// opened. Needs --no-audio and refuses --device (preview only).
+    #[arg(long, hide = true, requires = "no_audio", conflicts_with = "device")]
+    test_ltc_out: bool,
     /// Testing only: a fake output that logs its calls to this file (no
     /// laser), for the shutdown subprocess test.
     #[arg(long, hide = true, conflicts_with = "device")]
@@ -1306,7 +1311,16 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     // backend in use (the simulator with --midi-test), each on a port the
     // operator picks; none with --no-midi.
     let midi_opener = midi::clock::opener(sim.clone(), cli.no_midi);
-    let tc_out_thread = tc_out_rx.and_then(|rx| timecode::out::spawn(rx, tc_out_status, midi_opener.clone(), Arc::clone(&running)));
+    // LTC out (T-501) on the audio output the operator picks; none with
+    // --no-audio, the simulated one with --test-ltc-out.
+    let ltc_backend = if cli.test_ltc_out {
+        Some(timecode::ltc_out::SimLtc::factory())
+    } else if cli.no_audio {
+        None
+    } else {
+        Some(timecode::ltc_out::CpalLtc::factory())
+    };
+    let tc_out_thread = tc_out_rx.and_then(|rx| timecode::out::spawn(rx, tc_out_status, midi_opener.clone(), ltc_backend, Arc::clone(&running)));
     // Idle (no socket) until switched on; reads the e-stop latch itself.
     let dmx_out_thread = dmx_out_rx.and_then(|rx| dmx_out::spawn(rx, dmx_out_status, Arc::clone(&estop), Arc::clone(&running)));
     // CITP (T-454): no socket until switched on; only reads the grid.
@@ -1507,6 +1521,7 @@ fn startup_line(cli: &Cli, output: Option<&str>) -> String {
         (cli.no_midi, "--no-midi"),
         (cli.no_audio, "--no-audio"),
         (cli.midi_test, "--midi-test"),
+        (cli.test_ltc_out, "--test-ltc-out"),
         (cli.test_hooks, "--test-hooks"),
         (cli.test_interlock, "--test-interlock"),
         (cli.test_checklist, "--test-checklist"),

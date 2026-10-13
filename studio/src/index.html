@@ -1355,7 +1355,7 @@
       <div class="hint" id="tcMsg"></div>
       <!-- Timecode sortant (T-417) : la position de la timeline en MTC et / ou en Art-Net, désactivé par défaut -->
       <div class="cue-bar lock-edit" id="tcoBar" role="group" aria-label="Timecode sortant">
-        <button id="tcoToggle" aria-pressed="false" title="TC-OUT : émet la position de la timeline (shows en secondes) pendant la lecture, vers le port MIDI et / ou l'adresse choisis. N'arme jamais le laser.">TC-OUT</button>
+        <button id="tcoToggle" aria-pressed="false" title="TC-OUT : émet la position de la timeline (shows en secondes) pendant la lecture, vers le port MIDI, l'adresse et / ou la sortie audio choisis. N'arme jamais le laser.">TC-OUT</button>
         <span id="tcoState" role="status" data-status="off">Émission : désactivée</span>
         <label for="tcoPort">Port MIDI (MTC)</label>
         <select id="tcoPort"><option value="">Aucun</option></select>
@@ -1364,6 +1364,13 @@
         <select id="tcoIface" class="tco-net"></select>
         <label for="tcoTarget" class="tco-net">Adresse cible</label>
         <input type="text" id="tcoTarget" class="tco-net" autocomplete="off" spellcheck="false" placeholder="vide = diffusion" title="Une machine (IP ou IP:port, port 6454 par défaut). Vide : diffusion sur l'interface choisie.">
+        <label class="check" data-t-title="timeline.tco.ltc.info"><input type="checkbox" id="tcoLtc"> <span data-t="timeline.tco.ltc"></span></label>
+        <label for="tcoLtcDevice" class="tco-ltc" data-t="timeline.tco.ltc.sortie"></label>
+        <select id="tcoLtcDevice" class="tco-ltc"></select>
+        <label for="tcoLtcChannel" class="tco-ltc" data-t="timeline.tco.ltc.voie"></label>
+        <input type="number" id="tcoLtcChannel" class="tco-ltc" min="1" max="64" step="1" value="1">
+        <label for="tcoLtcLevel" class="tco-ltc" data-t="timeline.tco.ltc.niveau"></label>
+        <input type="number" id="tcoLtcLevel" class="tco-ltc" min="-40" max="0" step="1" value="-18" data-t-title="timeline.tco.ltc.niveau.info">
         <label for="tcoFps">Images/s</label>
         <select id="tcoFps"><option value="24">24</option><option value="25">25</option><option value="29.97df">29,97 drop</option><option value="30">30</option></select>
         <label for="tcoOffset">Décalage (s)</label>

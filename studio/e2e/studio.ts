@@ -70,6 +70,8 @@ export interface Live { brightness: number; size: number; pos_x: number; pos_y: 
 export interface StudioOptions {
   /** Start with --midi-test: a simulated APC40 mkII and /api/midi/inject. */
   midiTest?: boolean;
+  /** Start with --test-ltc-out: LTC out goes to the simulated audio output « Test LTC » (T-501). */
+  ltcTest?: boolean;
   /** Files written into the fresh data dir before the first start (path → content). */
   files?: Record<string, string>;
   /**
@@ -148,6 +150,7 @@ export class Studio {
     // T-456: a main machine's sync listener, too, on loopback only.
     args.push('--standby-bind', '127.0.0.1');
     if (this.opts.midiTest) args.push('--midi-test');
+    if (this.opts.ltcTest) args.push('--test-ltc-out');
     // The fake output (T-401), unless PONK is the output or the spec wants none.
     const fakeOutput = this.opts.ponkPort === undefined && this.opts.output !== 'none';
     if (fakeOutput) args.push('--test-output', this.outputLog);

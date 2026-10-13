@@ -224,6 +224,16 @@ const LABELS = Object.freeze({
   'aide.bouton.info': 'Aide intégrée, raccourcis et visite guidée',
   'notifications.libelle': 'Notifications',
 
+  // Timecode sortant en LTC (T-501)
+  'timeline.tco.ltc': 'LTC',
+  'timeline.tco.ltc.info': 'Timecode LTC (SMPTE) sur une voie d\'une sortie audio, pour une console, un serveur vidéo ou un enregistreur. N\'arme jamais le laser.',
+  'timeline.tco.ltc.sortie': 'Sortie audio',
+  'timeline.tco.ltc.voie': 'Voie',
+  'timeline.tco.ltc.niveau': 'Niveau (dBFS)',
+  'timeline.tco.ltc.niveau.info': 'Niveau crête du signal LTC : -18 dBFS par défaut, de -40 à 0',
+  'timeline.tco.ltc.aucune': 'Aucune sortie audio disponible (audio désactivé ?).',
+  'timeline.tco.ltc.ouverte': 'LTC : {sortie}',
+
   // Commun
   'commun.fermer': 'Fermer',
   'commun.oui': 'Oui',
