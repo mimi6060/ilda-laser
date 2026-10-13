@@ -3,7 +3,7 @@
 // the pages ticked; « Ignorer par le pilote » keeps a cell out. It only
 // launches cues: it never arms, an e-stop switches it off for good, and
 // its pages are an edit (undone, locked in show mode). Preview only.
-import { test, expect, useStudio, openUi } from '../studio';
+import { test, expect, useStudio, openUi, openTopMore } from '../studio';
 
 const studio = useStudio();
 test.describe.configure({ mode: 'serial' });
@@ -29,6 +29,7 @@ test.afterEach(async () => {
 });
 
 test('the menu switches it on, every bar, and it changes cues without arming', async ({ page }) => {
+  await openTopMore(page);
   await page.locator('#vljBtn').click();
   await expect(page.locator('#vljMenu')).toBeVisible();
   await expect(page.locator('#vljStatus')).toHaveText('Coupé.');
@@ -58,8 +59,8 @@ test('the menu switches it on, every bar, and it changes cues without arming', a
   await page.waitForTimeout(500);
   expect((await autopilot()).enabled).toBe(false);
   await expect(page.locator('#vljBtn')).not.toHaveClass(/active/);
-  // The same menu opens from LIVE › Cues (the top bar hides its button
-  // under 1360 px).
+  // The same menu opens from LIVE › Cues (in the top bar its button waits
+  // behind « ⋯ », closed here).
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.locator('#vljBtn')).toBeHidden();
   await page.locator('#cueVljBtn').click();
@@ -71,6 +72,7 @@ test('the menu switches it on, every bar, and it changes cues without arming', a
 });
 
 test('pages and public content are an edit: undone, and locked in show mode', async ({ page }) => {
+  await openTopMore(page);
   await page.locator('#vljBtn').click();
   await page.locator('#vljPage2').check();
   await expect.poll(async () => (await autopilot()).pages).toEqual([2]);

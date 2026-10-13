@@ -68,10 +68,6 @@
     <div class="beats" id="beats"><span class="one"></span><span></span><span></span><span></span></div>
     <button data-ctl="tempo.tap" data-control="tempo.tap" data-t-title="tempo.tap.info" data-t="tempo.tap.bouton"></button>
     <button data-ctl="tempo.resync" data-control="tempo.resync" data-t-title="tempo.resync.info" data-t="tempo.resync.bouton"></button>
-    <button class="tb-extra" data-ctl="tempo.half" data-t-aria-label="tempo.moitie.libelle" data-control="tempo.half" title="tempo.half">÷2</button>
-    <button class="tb-extra" data-ctl="tempo.double" data-t-aria-label="tempo.double.libelle" data-control="tempo.double" title="tempo.double">×2</button>
-    <button class="tb-extra" data-ctl="tempo.nudge_down" data-t-aria-label="tempo.retarder.libelle" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
-    <button class="tb-extra" data-ctl="tempo.nudge_up" data-t-aria-label="tempo.avancer.libelle" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
     <button id="tempoAuto" data-control="tempo.auto" data-t-title="tempo.auto.info" data-t="tempo.auto.bouton"></button>
     <button id="tempoGuide" data-ctl="tempo.guide" data-control="tempo.guide" data-t-title="tempo.guide.info" hidden data-t="tempo.guide.bouton"></button>
     <span class="hint hint--inline" id="tempoSrc" data-t-title="tempo.source.info" hidden></span>
@@ -81,23 +77,34 @@
     <span class="hint hint--inline" id="linkHint" role="status" data-t-title="tempo.ableton_link.info" hidden></span>
     <!-- Groupes de vitesse (T-419): the groups not at ×1, and the Cadence if not 100 %. -->
     <span class="hint hint--inline" id="speedHint" role="status" data-t-title="tempo.vitesses.info" hidden></span>
-    <!-- Compensation de latence (T-246): the effects read the beat ahead; never a frame held back. -->
-    <span class="lat-wrap">
-      <button id="latBtn" class="tb-extra" aria-expanded="false" data-t-title="latence.bouton.info" data-t="latence.bouton"></button>
-      <div id="latMenu" hidden>
-        <div class="row"><label for="latOffset" data-t="latence.decalage.libelle"></label><span class="v" id="latOffsetV">0 ms</span></div>
-        <input type="range" id="latOffset" min="-100" max="100" step="1" value="0" data-default="0" data-t-title="latence.decalage.info">
-        <div class="hint" id="latEst" data-t="latence.estimee.attente"></div>
-        <div class="hint" id="latAnalysis"></div>
-        <div class="row"><button id="latEar" aria-pressed="false" data-t="latence.oreille.bouton"></button><span id="latFlash" data-t-title="latence.eclair.info"></span></div>
-        <div class="hint" id="latEarHint" hidden data-t="latence.oreille.aide"></div>
-        <div class="hint" data-t="latence.securite"></div>
-      </div>
+    <!-- Secondary tempo controls (T-504): inline on wide screens, behind
+         « ⋯ » below 1900 px so the arm state keeps its room. -->
+    <span class="tb-more-wrap">
+      <button id="tbMoreBtn" aria-haspopup="true" aria-expanded="false" aria-controls="tbMore" data-t-aria-label="barre.plus" data-t-title="barre.plus.info">⋯</button>
+      <span id="tbMore" role="group" data-t-aria-label="barre.plus">
+        <button class="tb-extra" data-ctl="tempo.half" data-t-aria-label="tempo.moitie.libelle" data-control="tempo.half" title="tempo.half">÷2</button>
+        <button class="tb-extra" data-ctl="tempo.double" data-t-aria-label="tempo.double.libelle" data-control="tempo.double" title="tempo.double">×2</button>
+        <button class="tb-extra" data-ctl="tempo.nudge_down" data-t-aria-label="tempo.retarder.libelle" data-control="tempo.nudge_down" title="tempo.nudge_down">◀</button>
+        <button class="tb-extra" data-ctl="tempo.nudge_up" data-t-aria-label="tempo.avancer.libelle" data-control="tempo.nudge_up" title="tempo.nudge_up">▶</button>
+        <!-- Compensation de latence (T-246): the effects read the beat ahead; never a frame held back. -->
+        <span class="lat-wrap">
+          <button id="latBtn" class="tb-extra" aria-expanded="false" data-t-title="latence.bouton.info" data-t="latence.bouton"></button>
+          <div id="latMenu" hidden>
+            <div class="row"><label for="latOffset" data-t="latence.decalage.libelle"></label><span class="v" id="latOffsetV">0 ms</span></div>
+            <input type="range" id="latOffset" min="-100" max="100" step="1" value="0" data-default="0" data-t-title="latence.decalage.info">
+            <div class="hint" id="latEst" data-t="latence.estimee.attente"></div>
+            <div class="hint" id="latAnalysis"></div>
+            <div class="row"><button id="latEar" aria-pressed="false" data-t="latence.oreille.bouton"></button><span id="latFlash" data-t-title="latence.eclair.info"></span></div>
+            <div class="hint" id="latEarHint" hidden data-t="latence.oreille.aide"></div>
+            <div class="hint" data-t="latence.securite"></div>
+          </div>
+        </span>
+        <!-- Pilote automatique (T-148): a cue of the page every N bars. It only
+             launches cues: never arms; an e-stop or a disarm switches it off.
+             Also in LIVE › Cues (in the top bar, behind « ⋯ » under 1900 px). -->
+        <button id="vljBtn" class="tb-extra vlj-open" aria-haspopup="true" aria-expanded="false" aria-controls="vljMenu" data-t-title="pilote.bouton.info" data-t="pilote.bouton"></button>
+      </span>
     </span>
-    <!-- Pilote automatique (T-148): a cue of the page every N bars. It only
-         launches cues: never arms; an e-stop or a disarm switches it off.
-         Also in LIVE › Cues (the top bar hides it under 1360 px). -->
-    <button id="vljBtn" class="tb-extra vlj-open" aria-haspopup="true" aria-expanded="false" aria-controls="vljMenu" data-t-title="pilote.bouton.info" data-t="pilote.bouton"></button>
     <!-- Temps 1 (T-235): the detected "1", dotted on its beat dot. -->
     <span class="hint hint--inline" id="downbeatHint" data-t-title="tempo.temps1.info" hidden data-t="tempo.temps1.suggere"></span>
     <button id="downbeatAccept" data-ctl="tempo.downbeat_accept" data-control="tempo.downbeat_accept" data-t-title="tempo.temps1.accepter.info" hidden data-t="tempo.temps1.accepter"></button>
@@ -129,7 +136,8 @@
     <span id="lockLabel" data-t="spectacle.libelle"></span><span class="ring"></span></button>
   <!-- État (T-271): sortie, état du laser, voyants, MIDI. -->
   <div class="tb-status">
-    <div id="output">…</div>
+    <!-- T-504: the output and the safety profile share a line; the arm state gets the next one to itself. -->
+    <div class="out-line"><div id="output">…</div><span id="profilePill" role="status" data-t-title="securite.profil.info" hidden></span></div>
     <span id="wifiPill" role="alert" hidden data-t="barre.wifi" data-t-fallback>Wi-Fi</span>
     <!-- Batterie et chaleur du Mac (T-495): only when not normal; information, never an action. -->
     <span id="powerPill" class="mac-pill" role="status" hidden></span>
@@ -141,7 +149,7 @@
     <button id="standbyPill" role="status" hidden data-t-title="barre.secours.info" data-t="barre.secours"></button>
     <button id="takeoverBtn" hidden data-t-title="barre.relais.info" data-t="barre.relais"></button>
     <span id="audPill" role="status" hidden data-t-title="securite.public.info" data-t="securite.public" data-t-fallback>BALAYAGE PUBLIC</span>
-    <div class="arm-line"><span id="armInfo" data-t="securite.desarme" data-t-fallback>Désarmé</span><span id="profilePill" role="status" data-t-title="securite.profil.info" hidden></span></div>
+    <div class="arm-line"><span id="armInfo" data-t="securite.desarme" data-t-fallback>Désarmé</span></div>
     <div class="leds">
       <!-- Entrées externes (T-408): closed at start and after an e-stop. -->
       <button id="extGate" aria-pressed="false" data-t-title="entrees.portail.info"><span class="long" data-t="entrees.portail"></span><span class="short" data-t="entrees.portail.court"></span></button>

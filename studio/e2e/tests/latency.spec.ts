@@ -3,7 +3,7 @@
 // estimated latency and the analysis delay, and runs *Caler à l'oreille*.
 // The offset never delays a stop: Escape still darkens the laser at once.
 // Preview only (fake output).
-import { test, expect, useStudio, openUi, focusPage, type Tempo } from '../studio';
+import { test, expect, useStudio, openUi, openTopMore, focusPage, type Tempo } from '../studio';
 
 const studio = useStudio();
 type Latency = { config: { output_offset_ms: number; analysis_delay_ms: number }; min_ms: number; max_ms: number; output: { ms: number | null; detail: string } };
@@ -23,6 +23,7 @@ test.afterEach(async () => {
 });
 
 test('the Lat. menu sets the output offset, clamped, and shows the estimates', async ({ page }) => {
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   await expect(page.locator('#latMenu')).toBeVisible();
   await expect(page.locator('#latEst')).toContainText(/Latence estimée : \d+ ms/);
@@ -57,6 +58,7 @@ test('the offset is kept across a restart', async () => {
 });
 
 test('Caler à l\'oreille: starts and stops the metronome and the flash', async ({ page }) => {
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   const ear = page.locator('#latEar');
   await ear.click();
@@ -69,6 +71,7 @@ test('Caler à l\'oreille: starts and stops the metronome and the flash', async 
   await expect(page.locator('#latFlash.on')).toHaveCount(0);
   // Closing the menu stops it too.
   await ear.click();
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   await expect(page.locator('#latMenu')).toBeHidden();
   await expect(ear).toHaveAttribute('aria-pressed', 'false');
@@ -76,6 +79,7 @@ test('Caler à l\'oreille: starts and stops the metronome and the flash', async 
 
 test('with the largest offset, Escape still darkens the laser at once', async ({ page }) => {
   expect(await studio.post('/api/latency', { output_offset_ms: 100 })).toBe(200);
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   expect((await studio.state()).armed).toBe(false);
   await page.locator('#armBtn').click();
