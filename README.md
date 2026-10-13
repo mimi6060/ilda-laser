@@ -2,7 +2,7 @@
 
 A Rust workspace to control a laser projector like Pangolin's FB3/FB4 does
 internally: stream ILDA points to a network laser DAC, or send DMX-512 over
-Art-Net. Two crates:
+Art-Net. Three crates:
 
 - **`pc-client`** - CLI that runs on your PC/Mac. Plays `.ild` files, streams
   built-in test patterns, or sends DMX over Art-Net.
@@ -10,6 +10,10 @@ Art-Net. Two crates:
   laser DAC: receives the point stream over Ethernet and drives three
   MCP4922 SPI DAC chips to produce the analog X/Y/R/G/B signals the laser's
   ILDA input expects.
+  **Abandoned**: replaced by a Laserworld ShowNET interface; kept for
+  reference only.
+- **`studio`** - Laser Studio, the live show controller for the Mac (see
+  [Laser Studio](#laser-studio-studio)).
 
 ```
 PC (pc-client)  --Ethernet, IDN protocol-->  Raspberry Pi 3 (pi-receiver)
@@ -212,34 +216,81 @@ calibration get saved (defaults to the current directory):
 
 ## Laser Studio (`studio`)
 
-A live show controller for the Mac, meant to replace MadMapper for laser
-work: shapes, laser text and a travelling wave, animated (rotation) and
-optionally driven by music from the microphone (size and rotation follow
-the bass, color steps and flashes on each beat). Looks can be saved as
-scenes and run as a timed playlist. Calibration (offset/scale/rotation)
-applies to everything and is saved.
+A live laser show controller for the Mac: generated shapes, laser text,
+abstracts and effects in a cue grid with four layers, chasers, a timeline,
+live modifiers and LFOs, safety zones and projector calibration. Looks are
+our own procedural content; `.ild` files you have the rights to can be
+imported at runtime. The UI is a local web page (French text).
 
 ```sh
-cargo run --release -p laser-studio                      # preview only
-cargo run --release -p laser-studio -- --device auto     # first Helios/IDN/Ether Dream DAC found
+cargo run --release -p laser-studio                          # preview only
+cargo run --release -p laser-studio -- --help                # every option
+cargo run --release -p laser-studio -- --port 8090 --data-dir /tmp/studio-test
 ```
 
-Then open http://127.0.0.1:8080/ (bound to localhost only, since the UI
-can switch a laser on). The laser always starts **off**: the button at the
-top right, or Space, turns it on; Escape is an instant blackout. The
-preview shows the exact frame being sent, plus its point count and the
-resulting frames per second - keep that above ~15 or the image flickers.
+Then open http://127.0.0.1:8080/ (`--port` to change). The UI is bound to
+localhost only, since it can switch a laser on. Scenes, cues, calibration
+and settings are saved in `studio-data/` (`--data-dir` to change).
+`studio/packaging/macos/build_app.sh` builds a `Laser Studio.app` that
+starts with `--app` (data in `~/Library/Application Support/Laser Studio`,
+a free port from 8080 up, the page opens in the browser).
 
-Music analysis runs in the browser (Web Audio), so "Activer le micro"
-asks for microphone permission. To react to the Mac's own audio instead of
-the room, route it through a loopback device such as BlackHole and pick it
-under "Entrée audio".
+### Arming, emergency stop and the hardware stop
 
-Laserworld ShowNET output is not there yet: the ShowNET's streaming
-protocol is encrypted and needs Laserworld's API (requested under NDA).
-It will plug in as another `Output` in `studio/src/output.rs`.
+- The laser **always starts disarmed**, whatever the output. Only the
+  operator arms it: the button at the top right, or Space. Losing or
+  changing the output disarms it again.
+- **Escape is a latching emergency stop**: the output goes dark at once and
+  the laser cannot be armed again until the operator presses
+  *Réinitialiser l'arrêt d'urgence*. Shift+Escape is a plain disarm.
+- On disarm, emergency stop, blackout and shutdown the studio keeps sending
+  dark (or empty) frames rather than going silent.
+- Nothing received from the network or a controller (OSC, Art-Net, sACN,
+  timecode) can arm the laser; blackout and the emergency stop are always
+  accepted.
 
-### Open DACs instead of the ShowNET (Helios, HeliosPRO, Ether Dream)
+**Hardware stop.** These are software stops. They depend on the Mac, the
+studio, the network and the receiving device all working, and they are
+**never sufficient on their own**. The real stop is hardware: the
+projector's interlock, an emergency-stop button that cuts the laser, and
+its key switch. Wire and test them before any show, keep the E-stop within
+the operator's reach, and never assume a DAC, MadMapper or the ShowNET
+blanks by itself when the network drops or the studio stops sending: what
+these devices do then is not guaranteed.
+
+### Outputs
+
+The output is chosen in *Réglages › Sorties et projecteurs* (remembered
+between runs) or for one run on the command line. Every output honours
+arm / disarm, the emergency stop and blackout, after calibration and the
+safety stage (zones, power caps, strobe limiter, static beam guard).
+
+- **Preview** (default): nothing leaves the Mac. The preview shows the exact
+  frame that would be sent, with its point count and frame rate; keep that
+  above ~15 frames/s or the image flickers.
+- **PONK to MadMapper / MadLaser** (`--ponk`, or `--ponk HOST:PORT`; alone it
+  targets MadMapper on this Mac). MadMapper, with its own Laserworld
+  licence, drives the ShowNET. MadMapper keeps showing the last frame it
+  received, so the studio never stops sending: while disarmed every tick is
+  an empty frame.
+- **Open DACs** (`--device <id>` or `--device auto`): Helios (USB),
+  HeliosPRO (IDN over Ethernet) and Ether Dream (Ethernet), on the
+  projector's ILDA input in place of the ShowNET. Details below.
+- **ShowNET SD card + Art-Net**: *Réglages › Carte SD ShowNET* exports a
+  bank of our cues as `001.ild`–`229.ild` (`000` and `230`–`255` are left
+  alone), with calibration, zones and power caps baked into every file.
+  With `--shownet-artnet IP[:PORT]` the studio then picks the file to play
+  and the intensity over Art-Net; disarmed means intensity 0 and pattern 0.
+  The box plays those files without the studio, so its hardware stop is the
+  only real stop.
+- **Native ShowNET**: not available. Its streaming protocol is encrypted;
+  native output waits for Laserworld's official API, which has been
+  requested. Until then use PONK, an open DAC or the SD card.
+
+Use wired Ethernet for any network output; Wi-Fi is not a safe link for a
+laser.
+
+### Open DACs (Helios, HeliosPRO, Ether Dream)
 
 The ShowNET reaches the lasers through an ILDA DB25 cable; any ILDA DAC can
 take its place on that cable, with nothing changed on the lasers:
@@ -257,19 +308,38 @@ cargo run --release -p laser-studio -- --device helios:<name>    # drive that DA
 cargo run --release -p laser-studio -- --device auto --pps 30000 # first DAC found
 ```
 
-The same list is in *Réglages › Sorties et projecteurs › DAC détectés*
-(*Rafraîchir*). Scanning is read-only: it never connects, arms or sends a
-frame. Choosing a DAC is a restart with `--device <id>`, and the laser
-always starts disarmed whatever the output. While the studio drives a DAC,
-a rescan leaves USB out so the running Helios is never touched.
+The same list is in *Réglages › Sorties et projecteurs* (*Rechercher*),
+where a DAC can be chosen and reconnected without a restart. Scanning only
+happens when asked and is read-only: it never connects, arms or sends a
+frame. While the studio drives a DAC, a rescan leaves USB out so the
+running Helios is never touched.
 
-Points per second: `--pps` (default 30 000; Helios accepts 7 to 65 535).
-A Helios USB frame holds at most 4095 points: a bigger frame (point budget
-above ~4000) is thinned evenly before it is sent, and a thinned point goes
-dark wherever a blanked travel was skipped, so thinning never draws a lit
-jump. Keep the point budget under 4000 for the full detail.
+Points per second: `--pps` (default: the value saved with the output, else
+30 000; Helios accepts 7 to 65 535). A Helios USB frame holds at most 4095
+points: a bigger frame is thinned evenly before it is sent, and a thinned
+point goes dark wherever a blanked travel was skipped, so thinning never
+draws a lit jump. Keep the point budget under 4000 for the full detail.
 
-Scenes and calibration are saved in `studio-data/` (`--data-dir` to change).
+### Audio, controllers and show control
+
+- **Audio**: analysed natively (tempo, beats, onsets, spectrum), from the
+  Mac's microphone or any audio input (`--audio-device <name>`,
+  `--no-audio` for none), from a song played by the studio, or from what
+  the Mac itself plays (*Son du Mac*: Cargo feature `system-audio`,
+  macOS 14.6+; otherwise route it through a loopback device such as
+  BlackHole).
+- **MIDI**: controllers over CoreMIDI, with MIDI learn and LED feedback
+  (`--no-midi` opens no port). `--list-controls` prints every control id.
+- **OSC**: `/ls/…` addresses onto the same control ids (`--osc`, or
+  `--osc IP:PORT`; alone 127.0.0.1:8000).
+- **Art-Net in**: DMX from a lighting console (`--artnet`, or
+  `--artnet IP:PORT`; alone 127.0.0.1:6454).
+- **sACN in** (E1.31): the same DMX control, enabled in *Réglages*.
+- **Timecode in**: MIDI Time Code, LTC on an audio channel or Art-Net
+  timecode drives the timeline only, once the operator arms TC-IN.
+
+All network inputs pass through one gate in *Entrées externes*, and none of
+them can arm the laser.
 
 ### Ableton Link (optional, GPL, off by default)
 
@@ -279,7 +349,7 @@ is licensed GPLv2+, so it is **not** in a default build (no GPL code there:
 check with `cargo tree -p laser-studio`), and *Réglages › Ableton Link*
 stays greyed. A binary built with the feature is a GPL combined work: keep
 it for your own use, do not distribute it. It can't be combined with the
-`shownet` feature (a proprietary SDK): the build refuses.
+`shownet` feature: the build refuses.
 
 ```sh
 # needs CMake (and Xcode's command line tools, for libclang)
@@ -293,6 +363,18 @@ controls from MIDI, OSC or the keyboard) propose a tempo to the session;
 opening a project, a macro or a show list never changes the session's
 tempo. `--all-features` fails to build on purpose (`ableton-link` and
 `shownet` exclude each other).
+
+### Building and testing
+
+```sh
+cargo build -p laser-studio
+cargo test -p laser-studio
+cargo clippy -p laser-studio --all-targets -- -D warnings
+npm --prefix studio/e2e test        # Playwright UI tests, preview only
+```
+
+Tests run in preview only, on a temporary data directory: they never open a
+real output.
 
 ## Usage (`pc-client`)
 
