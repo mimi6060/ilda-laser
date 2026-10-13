@@ -325,7 +325,7 @@ reloadScanLimits();
 // « Rechercher » (about 1.5 s, on its own thread). « Connecter » opens the
 // output on the server's own thread; every change disarms the laser and a
 // lost output comes back disarmed. No shortcut and no MIDI/OSC/DMX control.
-const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN', lasercube: 'LaserCube', ponk: 'PONK', artnet: 'ShowNET SD', test: 'Test' };
+const DEV_KINDS = { helios: 'Helios USB', etherdream: 'Ether Dream', idn: 'IDN', lasercube: 'LaserCube', ponk: 'PONK', artnet: 'ShowNET SD', audio: 'Audio', test: 'Test' };
 const LINK_STATES = { connected: 'Connectée', connecting: 'Connexion…', lost: 'Perdue' };
 function outStateText(j) {
   const name = j.name || j.selected;
@@ -442,6 +442,48 @@ $('anSave').addEventListener('click', async () => {
   } else {
     $('anMsg').textContent = await r.text();
     $('anMsg').classList.add('sf-error');
+  }
+});
+// Audio interface (T-498): an oscilloscope, or a DC-coupled interface.
+// Every launch starts in oscilloscope mode; laser mode asks the operator
+// to confirm the risk first. Saved only while that output is disconnected.
+let audioOut = null;
+async function loadAudioOut() {
+  try { showAudioOut(await apiJson('GET', '/api/outputs/audio', undefined, { cache: 'no-store' })); } catch { /* next time */ }
+}
+function showAudioOut(j) {
+  audioOut = j;
+  const c = j.config;
+  const names = j.devices.map(d => d.name);
+  if (c.device && !names.includes(c.device)) names.push(c.device);
+  $('aoDevice').replaceChildren(new Option('Aucune', ''), ...names.map(n => {
+    const d = j.devices.find(x => x.name === n);
+    return new Option(d ? `${n} (${d.channels} canaux)` : `${n} (absente)`, n);
+  }));
+  $('aoDevice').value = c.device || '';
+  for (const k of ['x', 'y', 'r', 'g', 'b']) $('ao' + k.toUpperCase()).value = c.channels[k];
+  $('aoMode').value = j.mode;
+}
+$('aoSave').addEventListener('click', async () => {
+  const mode = $('aoMode').value;
+  const body = { device: $('aoDevice').value || null, channels: {}, mode };
+  for (const k of ['x', 'y', 'r', 'g', 'b']) body.channels[k] = +$('ao' + k.toUpperCase()).value || 0;
+  if (mode === 'laser' && (!audioOut || audioOut.mode !== 'laser')) {
+    if (!confirm(audioOut ? audioOut.laser_confirm : 'Passer en mode Laser ?')) { $('aoMode').value = audioOut ? audioOut.mode : 'scope'; return; }
+    body.confirm_laser = true;
+  } else if (mode === 'laser') {
+    body.confirm_laser = true;
+  }
+  const r = await api('POST', '/api/outputs/audio', body, { quiet: true });
+  if (r.ok) {
+    const j = await r.json();
+    showAudioOut(j);
+    $('aoMsg').textContent = j.id ? `Enregistré (mode ${j.mode === 'laser' ? 'Laser' : 'Oscilloscope'}) : « Connecter » dans la liste ci-dessus.` : 'Sortie interface audio désactivée.';
+    $('aoMsg').classList.remove('sf-error');
+    reloadDevices();
+  } else {
+    $('aoMsg').textContent = await r.text();
+    $('aoMsg').classList.add('sf-error');
   }
 });
 function showArtnetStatus(st) {
@@ -801,7 +843,7 @@ $('audUnlock').onclick = async () => {
 // While the wizard is open its ticks follow the settings changed elsewhere.
 setInterval(() => { if (audWizardOpen && activeWs === 'settings' && !document.hidden) reloadAudience(); }, 1000);
 
-export { dataWarnLoop, dmxOutChannels, dmxOutNames, frNumber, loadArtnet, loadDmxOut, outputCfg,
+export { dataWarnLoop, dmxOutChannels, dmxOutNames, frNumber, loadArtnet, loadAudioOut, loadDmxOut, outputCfg,
   reloadAudience, reloadDevices, reloadOutColor, reloadOutputs, scanAlertFps, setHazeHeld,
   showArtnetStatus, showAudienceMode, showCitpLive, showDataWarnings, showDmxOutLive,
   showFixedRateStatus };

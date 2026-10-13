@@ -3138,6 +3138,30 @@
         <div id="anLive" role="status" hidden></div>
         <div class="hint">Une fois enregistrée, la sortie apparaît dans la liste ci-dessus : « Connecter ». Les réglages se changent sortie déconnectée.</div>
       </details>
+      <!-- Interface audio (T-498): an oscilloscope in XY mode, or a DC-coupled interface. -->
+      <details id="audioOutPanel" data-search="Interface audio oscilloscope XY couplée en continu DC carte son sortie canaux">
+        <summary>Interface audio (oscilloscope)</summary>
+        <div class="shownet-help" id="aoWarning" role="note"><b>Seules les interfaces couplées en continu conviennent à un laser. Une interface ordinaire déforme le signal : utilisez-la seulement pour un oscilloscope.</b></div>
+        <div class="hint">X et Y (et R, V, B en mode Laser) sortent comme du son sur les canaux choisis, à la cadence de la sortie (points/s ; la fréquence d'échantillonnage la plus proche si l'interface ne l'a pas).
+          Chaque lancement démarre en mode <b>Oscilloscope</b> : X et Y seulement, canaux couleur à 0. Désarmé, Échap, noir, arrêt : tous les canaux à 0 (centre, noir).
+          Ni la sortie son du Mac ni l'entrée de l'analyse audio ne peuvent servir ; si l'interface devient la sortie son du Mac, la sortie se coupe. Tout autre logiciel envoyé vers cette interface se mélange au signal : ne lui routez rien d'autre. L'arrêt matériel du projecteur reste votre vraie sécurité.</div>
+        <label for="aoDevice">Interface (aucune : sortie désactivée)</label>
+        <select id="aoDevice"></select>
+        <div class="row">
+          <label for="aoX">X</label><input type="number" id="aoX" min="1" max="64" step="1">
+          <label for="aoY">Y</label><input type="number" id="aoY" min="1" max="64" step="1">
+          <label for="aoR">R</label><input type="number" id="aoR" min="1" max="64" step="1">
+          <label for="aoG">V</label><input type="number" id="aoG" min="1" max="64" step="1">
+          <label for="aoB">B</label><input type="number" id="aoB" min="1" max="64" step="1">
+        </div>
+        <div class="row">
+          <label for="aoMode">Mode</label>
+          <select id="aoMode"><option value="scope">Oscilloscope (X/Y, sans couleur)</option><option value="laser">Laser (X, Y, R, V, B)</option></select>
+        </div>
+        <div class="row"><button id="aoSave">Enregistrer</button></div>
+        <div class="hint" id="aoMsg" role="status"></div>
+        <div class="hint">Une fois enregistrée, l'interface apparaît dans la liste ci-dessus : « Connecter ». Les réglages et le mode se changent sortie déconnectée.</div>
+      </details>
       <div class="hint">Connecter, changer, déconnecter ou perdre la sortie désarme le laser ; une sortie retrouvée reste désarmée : seul l'opérateur réarme. Ce désarmement est logiciel : l'arrêt d'urgence matériel du projecteur reste votre vraie sécurité. Préférez un réseau filaire. La sortie choisie est retenue pour le prochain lancement ; <code>--device &lt;id&gt;</code> en impose une pour un seul lancement.</div>
       <!-- Sortie DMX (T-453): haze machine and simple lights, never the laser. -->
       <details id="dmxOutPanel" data-search="Sortie DMX brouillard machine à brouillard fumée ventilateur pompe projecteurs simples Art-Net sACN canaux">

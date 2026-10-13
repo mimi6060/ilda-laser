@@ -172,6 +172,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/outputs/config", RouteClass::Safety),
     ("GET", "/api/outputs/artnet", RouteClass::Read),
     ("POST", "/api/outputs/artnet", RouteClass::Safety),
+    ("GET", "/api/outputs/audio", RouteClass::Read),
+    ("POST", "/api/outputs/audio", RouteClass::Safety),
     ("POST", "/api/test/output", RouteClass::Test),
     ("GET", "/api/audio/config", RouteClass::Read),
     ("POST", "/api/audio/config", RouteClass::Edit),
@@ -1210,6 +1212,16 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             Ok(cfg) => set_artnet(cfg, shared),
             Err(e) => e,
         },
+        (Method::Get, "/api/outputs/audio") => {
+            let store = Arc::clone(&shared.lock().unwrap().audio_out);
+            // Core Audio's device list, outside the lock (nothing is opened).
+            let devices = store.devices();
+            json_response(audio_out_view(&store, devices))
+        }
+        (Method::Post, "/api/outputs/audio") => match body::<AudioOutBody>(request) {
+            Ok(b) => set_audio_out(b, shared),
+            Err(e) => e,
+        },
         (Method::Post, "/api/test/output") => {
             // `--test-hooks` only (e2e of T-401): unplugs or plugs back the
             // fake outputs. A real output has no such switch.
@@ -1240,8 +1252,16 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         (Method::Post, "/api/audio/config") => match body::<serde_json::Value>(request) {
             Ok(patch) => {
                 let hub = Arc::clone(&shared.lock().unwrap().audio_in);
+                let out_device = shared.lock().unwrap().audio_out.get().device;
                 // Only the fields sent change; the reply is what was kept.
-                match hub.config().0.patched(&patch).and_then(|c| hub.set_config(c)) {
+                // Never the audio interface the laser output uses (T-498).
+                let checked = hub.config().0.patched(&patch).and_then(|c| {
+                    if c.source.captures() && crate::audio_out::clashes_with_input(out_device.as_deref(), c.device.as_deref()) {
+                        anyhow::bail!("« {} » est l'interface de la sortie laser audio : choisissez une autre entrée", c.device.as_deref().unwrap_or_default());
+                    }
+                    Ok(c)
+                });
+                match checked.and_then(|c| hub.set_config(c)) {
                     Ok(config) => json_response(json!(config)),
                     Err(e) => text(400, &format!("{e:#}")),
                 }
@@ -5320,6 +5340,58 @@ fn set_artnet(cfg: crate::artnet::ShowNetDmxConfig, shared: &Arc<Mutex<Shared>>)
         Ok(cfg) => {
             log::info!("Sortie ShowNET carte SD (Art-Net) : {}", cfg.target.as_deref().unwrap_or("désactivée"));
             json_response(artnet_view(&s))
+        }
+        Err(e) => text(400, &format!("{e:#}")),
+    }
+}
+
+/// `GET /api/outputs/audio` (T-498): the audio interface settings, the
+/// mode (always oscilloscope at launch), the interfaces of this Mac and
+/// the texts the panel shows.
+fn audio_out_view(store: &crate::audio_out::AudioOutStore, devices: Vec<crate::audio_out::AudioDevice>) -> serde_json::Value {
+    use crate::audio_out::{LASER_CONFIRM_FR, MAX_CHANNEL, WARNING_FR};
+    let cfg = store.get();
+    json!({ "config": cfg, "id": cfg.id(), "mode": store.mode(), "devices": devices, "max_channel": MAX_CHANNEL, "warning": WARNING_FR, "laser_confirm": LASER_CONFIRM_FR })
+}
+
+/// `POST /api/outputs/audio`.
+#[derive(Deserialize)]
+struct AudioOutBody {
+    #[serde(flatten)]
+    config: crate::audio_out::AudioOutConfig,
+    #[serde(default)]
+    mode: crate::audio_out::Mode,
+    /// The operator confirmed `LASER_CONFIRM_FR` (laser mode only).
+    #[serde(default)]
+    confirm_laser: bool,
+}
+
+/// `POST /api/outputs/audio` (T-498): the interface (empty: off), its
+/// channels and the mode. Laser mode only with `confirm_laser`. Refused
+/// while that output is selected (the values are fixed when it opens),
+/// and for the interface the audio analysis records from. Never
+/// connects, never arms.
+fn set_audio_out(b: AudioOutBody, shared: &Arc<Mutex<Shared>>) -> HttpResponse {
+    let s = shared.lock().unwrap();
+    // Any slot driving it (the main output or a venue projector): its
+    // values are fixed when it opens, a reconnection would change them.
+    let new_id = crate::audio_out::AudioOutConfig { device: b.config.device.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(String::from), ..Default::default() }.id();
+    if [s.audio_out.get().id(), new_id].into_iter().flatten().any(|id| s.output_mgr.driver_of(&id).is_some()) {
+        return text(409, "Déconnectez la sortie interface audio (sortie principale ou projecteur) avant de changer ses réglages");
+    }
+    let (input, _) = s.audio_in.config();
+    let status = s.audio_in.status();
+    let device = b.config.device.as_deref().map(str::trim);
+    if input.source.captures() && [input.device.as_deref(), status.device.as_deref()].into_iter().any(|i| crate::audio_out::clashes_with_input(device, i)) {
+        return text(400, &format!("« {} » sert déjà d'entrée à l'analyse audio : une interface ne peut pas être à la fois l'entrée analysée et la sortie laser", device.unwrap_or_default()));
+    }
+    let store = Arc::clone(&s.audio_out);
+    match store.set(b.config, b.mode, b.confirm_laser) {
+        Ok(cfg) => {
+            log::info!("Sortie interface audio : {} ({})", cfg.device.as_deref().unwrap_or("désactivée"), store.mode().label_fr());
+            drop(s);
+            let devices = store.devices();
+            json_response(audio_out_view(&store, devices))
         }
         Err(e) => text(400, &format!("{e:#}")),
     }
@@ -9821,6 +9893,51 @@ mod tests {
         assert_eq!((code, serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].clone()), (200, json!(null)), "emptied: off");
         t.shared.lock().unwrap().show_mode.on = true;
         assert_eq!(t.request("POST", "/api/outputs/artnet", r#"{"target":"127.0.0.1"}"#).0, 423);
+    }
+
+    /// T-498: the audio interface output is off until chosen, lists only
+    /// the fake interfaces in tests, starts in oscilloscope mode, needs the
+    /// confirmation for laser mode, never shares the analysis input and is
+    /// locked while selected.
+    #[test]
+    fn the_audio_interface_output_starts_as_an_oscilloscope() {
+        let t = TestServer::start(false);
+        let get = || serde_json::from_str::<serde_json::Value>(&t.request("GET", "/api/outputs/audio", "").1).unwrap();
+        let v = get();
+        assert_eq!((v["id"].clone(), v["mode"].as_str()), (json!(null), Some("scope")));
+        assert_eq!(v["devices"][0]["name"], crate::audio_out::FAKE_DEVICES[0].0, "fake interfaces only");
+        assert!(v["warning"].as_str().unwrap().contains("couplées en continu"));
+        let dev = crate::audio_out::FAKE_DEVICES[0].0;
+        let body = |extra: &str| format!(r#"{{"device":"{dev}","channels":{{"x":1,"y":2,"r":3,"g":4,"b":5}}{extra}}}"#);
+        let (code, msg) = t.request("POST", "/api/outputs/audio", &body(r#","mode":"laser""#));
+        assert_eq!(code, 400);
+        assert!(msg.contains("confirmation"), "{msg}");
+        assert_eq!(get()["mode"], "scope");
+        assert_eq!(t.request("POST", "/api/outputs/audio", r#"{"device":"x","channels":{"x":1,"y":1}}"#).0, 400);
+        let (code, msg) = t.request("POST", "/api/outputs/audio", &body(r#","mode":"laser","confirm_laser":true"#));
+        assert_eq!(code, 200, "{msg}");
+        assert_eq!(get()["mode"], "laser");
+        let id = format!("audio:{dev}");
+        assert!(outputs(&t)["devices"].as_array().unwrap().iter().any(|d| d["id"] == id.as_str() && d["kind"] == "audio"));
+        // The analysis can't record from it.
+        let (code, msg) = t.request("POST", "/api/audio/config", &format!(r#"{{"source":"native","device":"{dev}"}}"#));
+        assert_eq!(code, 400, "{msg}");
+        assert_eq!(t.request("POST", "/api/outputs/select", &format!(r#"{{"id":"{id}"}}"#)).0, 200);
+        assert_eq!(t.request("POST", "/api/outputs/audio", &body("")).0, 409);
+        assert_eq!(t.request("POST", "/api/outputs/select", r#"{"id":null}"#).0, 200);
+        // A venue projector driving it locks it too (review fix 5).
+        let mgr = Arc::clone(&t.shared.lock().unwrap().output_mgr);
+        mgr.select_projector("p2", Some(id.clone()), ArmSource::Ui);
+        let (code, msg) = t.request("POST", "/api/outputs/audio", &body(""));
+        assert_eq!(code, 409, "{msg}");
+        mgr.select_projector("p2", None, ArmSource::Ui);
+        assert_eq!(t.request("POST", "/api/outputs/audio", &body("")).0, 200, "back to oscilloscope: no confirmation");
+        assert_eq!(get()["mode"], "scope");
+        // And an output can't take the analysis' input.
+        assert_eq!(t.request("POST", "/api/outputs/audio", r#"{"device":""}"#).0, 200);
+        assert_eq!(t.request("POST", "/api/audio/config", r#"{"source":"native","device":"Interface de test stéréo"}"#).0, 200);
+        let (code, msg) = t.request("POST", "/api/outputs/audio", r#"{"device":"Interface de test stéréo"}"#);
+        assert_eq!(code, 400, "{msg}");
     }
 
     /// T-401: with the `output` interlock open (nothing connected), arming
