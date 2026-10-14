@@ -469,6 +469,16 @@ let settingsRev = -1, pendingEdits = [], pushTimer = null, lookQueue = Promise.r
 // A control being dragged or typed in keeps its value on screen.
 const setVal = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v; };
 const setCheck = (id, v) => { if (document.activeElement !== $(id)) $(id).checked = v; };
+// A top-bar text with a compact form (T-517): the full text stays the
+// element's text (and title), the narrow bar shows data-short instead.
+function setShortText(el, full, short) {
+  if (el.textContent === full && el.dataset.short === short) return;
+  const long = document.createElement('span');
+  long.className = 'long';
+  long.textContent = full;
+  el.replaceChildren(long);
+  el.dataset.short = short;
+}
 
 function showSettings() {
   const s = settings, kind = s.content.kind;
@@ -726,5 +736,5 @@ export { $, HIST, NC, ROTATING, VUE, VUE_LAYOUT_KEYS, VUE_RENDU, api, apiJson, a
   assignCalibration, assignLinkedCue, assignPageLeaving, assignPps, calibration, controlLatest,
   editLook, genEdit, hex, historyStep, linkedCue, loadLook, lookBusy, lookTask, noticeCondition,
   notify, post, postLatest, pps, projectSaved, pullNotices, rgb, sendLatest, setCheck,
-  setHistoryPanel, setNoticePanel, setVal, settings, settingsRev, showHistory, showSettings,
+  setHistoryPanel, setNoticePanel, setShortText, setVal, settings, settingsRev, showHistory, showSettings,
   takeLook, takeProjectModified, unsavedWork, winChan };
