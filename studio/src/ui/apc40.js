@@ -429,14 +429,20 @@ function showOscQuery(n) {
   let t = libelle('entrees.oscquery.coupe'), cls = '';
   if (q.enabled && !n.effective.osc.enabled) [t, cls] = [libelle('entrees.oscquery.sans_osc'), 'warn'];
   else if (q.enabled && st.error) [t, cls] = [st.error, 'bad'];
-  else if (q.enabled && n.oscquery.url) [t, cls] = [libelle('entrees.oscquery.url', { url: n.oscquery.url, n: st.packets }), 'ok'];
+  // The URL once the OSC input listens too: until then HOST_INFO can't
+  // give the port it really listens on (T-511).
+  else if (q.enabled && n.oscquery.url && (n.osc.status.local || n.osc.status.error)) [t, cls] = [libelle('entrees.oscquery.url', { url: n.oscquery.url, n: st.packets }), 'ok'];
   else if (q.enabled) [t, cls] = [libelle('entrees.oscquery.ouverture'), 'warn'];
   $('oscqState').textContent = t; $('oscqState').className = 'ni-state ' + cls;
 }
 // The operator's change wins until the server answers it (T-502): a poll
 // sent before the change, or answered while a save is in flight, carries
 // the old settings and would undo the click on screen, so it is dropped.
-let niGen = 0, niSaving = 0;
+// Saves go one at a time, in order, so the server applies them as they
+// were made (T-511); one that never answers gives up after
+// NI_SAVE_TIMEOUT_MS and the panel goes back to the server's state.
+const NI_SAVE_TIMEOUT_MS = 5000;
+let niGen = 0, niSaving = 0, niQueue = Promise.resolve();
 async function loadNetin() {
   const gen = niGen;
   try {
@@ -446,14 +452,28 @@ async function loadNetin() {
     if (gen === niGen && !niSaving) showNetin(n);
   } catch {}
 }
-async function saveNetin(patch) {
+function saveNetin(patch) {
   const gen = ++niGen;
   niSaving++;
-  let r;
-  try { r = await api('POST', '/api/netin', patch, { quiet: true }); } finally { niSaving--; }
+  const run = niQueue.then(() => postNetin(patch, gen));
+  niQueue = run.catch(() => {});
+  return run;
+}
+async function postNetin(patch, gen) {
+  let r, lost = '';
+  try { r = await api('POST', '/api/netin', patch, { quiet: true, timeout: NI_SAVE_TIMEOUT_MS }); }
+  catch (e) { lost = libelle(e?.name === 'TimeoutError' ? 'entrees.erreur.delai' : 'entrees.erreur.injoignable'); }
+  finally { niSaving--; }
+  if (!r) { $('netinError').textContent = lost; loadNetin(); return; }
   $('netinError').textContent = r.ok ? '' : await r.text();
   if (!r.ok) loadNetin();
   else { const n = await r.json(); if (gen === niGen) showNetin(n); }
+}
+// A list edit (DMX mappings, fixtures) builds on the previous one even
+// before the server has answered it: the local copy takes the change now.
+function saveDmxList(key, list) {
+  if (netin) netin.config.dmx[key] = JSON.parse(JSON.stringify(list));
+  return saveNetin({ dmx: { [key]: list } });
 }
 $('oscEnabled').onchange = e => saveNetin({ osc: { enabled: e.target.checked } });
 $('oscBind').onchange = e => saveNetin({ osc: { bind: e.target.value.trim() } });
@@ -522,17 +542,17 @@ $('dmxMaps').addEventListener('change', e => {
   else if (k === 'control') m.control = e.target.value;
   else if (k === 'fine') m.fine = +e.target.value > 0 ? Math.round(+e.target.value) : null;
   else m[k] = Math.round(+e.target.value);
-  dmxMapsKey = ''; e.target.blur(); saveNetin({ dmx: { mappings: maps } });
+  dmxMapsKey = ''; e.target.blur(); saveDmxList('mappings', maps);
 });
 $('dmxMaps').addEventListener('click', e => {
   const b = e.target.closest('[data-del]'); if (!b) return;
   const maps = dmxMappings(); maps.splice(+b.dataset.del, 1);
-  dmxMapsKey = ''; b.blur(); saveNetin({ dmx: { mappings: maps } });
+  dmxMapsKey = ''; b.blur(); saveDmxList('mappings', maps);
 });
 $('dmxAdd').onclick = () => {
   const maps = dmxMappings(), last = maps[maps.length - 1];
   maps.push({ universe: last ? last.universe : 1, channel: last ? Math.min(512, last.channel + 1) : 1, fine: null, control: 'master.brightness', invert: false, pickup: true });
-  dmxMapsKey = ''; saveNetin({ dmx: { mappings: maps } });
+  dmxMapsKey = ''; saveDmxList('mappings', maps);
 };
 function saveAccess() {
   const ch = Math.round(+$('dmxAccessC').value);
@@ -587,12 +607,12 @@ $('dmxFixtures').addEventListener('change', e => {
   if (k === 'enabled') f.enabled = e.target.checked;
   else if (k === 'mode') f.mode = e.target.value;
   else f[k] = Math.round(+e.target.value);
-  dmxFixKey = ''; e.target.blur(); saveNetin({ dmx: { fixtures: list } });
+  dmxFixKey = ''; e.target.blur(); saveDmxList('fixtures', list);
 });
 $('dmxFixtures').addEventListener('click', e => {
   const b = e.target.closest('[data-del]'); if (!b) return;
   const list = dmxFixtureList(); list.splice(+b.dataset.del, 1);
-  dmxFixKey = ''; b.blur(); saveNetin({ dmx: { fixtures: list } });
+  dmxFixKey = ''; b.blur(); saveDmxList('fixtures', list);
 });
 $('dmxFixAdd').onclick = () => {
   const list = dmxFixtureList(), zones = netin?.dmx.fixtures.zones || [];
@@ -600,7 +620,7 @@ $('dmxFixAdd').onclick = () => {
   // After the last instance of universe 1 (the server refuses an overlap).
   const next = Math.max(1, ...list.filter(f => f.universe === 1).map(f => f.address + (f.mode === 'full' ? 32 : 16)));
   list.push({ enabled: true, zone: zone.id, mode: 'compact', universe: 1, address: Math.min(next, 497), smoothing_ms: 60 });
-  dmxFixKey = ''; saveNetin({ dmx: { fixtures: list } });
+  dmxFixKey = ''; saveDmxList('fixtures', list);
 };
 $('dmxFixChart').onclick = async () => {
   const box = $('dmxFixChartBox');
