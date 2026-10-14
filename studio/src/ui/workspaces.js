@@ -344,6 +344,20 @@ document.querySelectorAll('#liveTabs [data-panel-tab]').forEach(b => b.onclick =
 // The MIDI status in the top bar leads to the controller settings.
 $('midiStatus').style.cursor = 'pointer';
 $('midiStatus').onclick = () => { if (showMode) return flash(LOCKED_FR); setWorkspace('settings'); $('midiPanel').open = true; };
+// T-519: the shortcut hint after the tabs is whole, or « Espace laser ·
+// Échap arrêt », or not shown: never a cut fragment (« [ », « Espace l… »).
+// Its box takes the room left in the row, whatever it shows, so measuring
+// it never moves anything; measured again when that room or the text changes.
+function fitHint() {
+  const h = $('wsHint');
+  h.classList.remove('short', 'none');
+  if (h.scrollWidth <= h.clientWidth) return;
+  h.classList.add('short');
+  if (h.scrollWidth > h.clientWidth) h.classList.add('none');
+}
+const hintFit = new ResizeObserver(fitHint);
+hintFit.observe($('wsHint'));
+hintFit.observe($('wsHint').firstElementChild);
 setWorkspace(remembered(WS_KEY));
 setLivePanel(remembered(PANEL_KEY));
 // The remembered stage (2D/3D) is restored by app.js once every module has
@@ -408,7 +422,21 @@ function opReplaceLocal(prefs) {
 function opApplyPrefs() {
   try {
     displayPrefs = readDisplayPrefs(); applyDisplay();
-    setWorkspace(remembered(WS_KEY));
+    // T-519: the shortcut hint after the tabs is whole, or « Espace laser ·
+// Échap arrêt », or not shown: never a cut fragment (« [ », « Espace l… »).
+// Its box takes the room left in the row, whatever it shows, so measuring
+// it never moves anything; measured again when that room or the text changes.
+function fitHint() {
+  const h = $('wsHint');
+  h.classList.remove('short', 'none');
+  if (h.scrollWidth <= h.clientWidth) return;
+  h.classList.add('short');
+  if (h.scrollWidth > h.clientWidth) h.classList.add('none');
+}
+const hintFit = new ResizeObserver(fitHint);
+hintFit.observe($('wsHint'));
+hintFit.observe($('wsHint').firstElementChild);
+setWorkspace(remembered(WS_KEY));
     setLivePanel(remembered(PANEL_KEY));
     setCreationTab(remembered(CTAB_KEY));
     if (view3d) { view3d.setRender({ ...beam3d.DEFAULT_RENDER, ...loadRender3d() }); showRender3d(); }

@@ -157,7 +157,13 @@
   #wsTabs button:hover { color: var(--text); }
   #wsTabs button.active { color: var(--text); border-bottom-color: var(--accent); background: var(--panel); }
   #wsTabs button kbd { margin-left: 4px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
-  #wsHint { margin: 0 0 0 auto; align-self: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #wsHint { margin: 0 0 0 auto; align-self: center; white-space: nowrap; overflow: hidden; }
+  /* T-519: the hint is whole, or its first part (« Espace laser · Échap
+     arrêt »), or nothing: workspaces.js measures it (fitHint). Its box
+     keeps its place either way, so the bar never moves. */
+  #wsHint .wh-in { display: inline-block; }
+  #wsHint.short .wh-more { display: none; }
+  #wsHint.none .wh-in { visibility: hidden; }
   /* T-504: never a horizontal scroll; if the buttons don't fit, a second row. */
   #wsTabs { flex-wrap: wrap; }
   #wsTabs #wsHint { flex: 1 1 0; min-width: 0; text-align: right; }
@@ -294,7 +300,7 @@
   #tlCsvDlg h2 { margin: 0 0 8px; font-size: 16px; }
   #tlCsvSkippedList { max-height: 180px; overflow: auto; margin: 4px 0; padding-left: 18px; font-size: 12px; }
   .tl-csv-actions { display: flex; gap: 8px; justify-content: flex-end; }
-  #tlNewRow[hidden], #tlMarkRow[hidden] { display: none; }
+  #tlNewRow[hidden], #tlMarkRow[hidden], #tlRefRow[hidden] { display: none; }
   /* Empty state and examples (T-124 to T-129), Theme (T-299) tokens. */
   #tlTracks { position: relative; }
   /* Over the four empty lanes (TL_TOP = 88 px, 4 × TL_LANE = 136 px). */
@@ -2050,6 +2056,14 @@
     .tb-status [data-short]::after { content: attr(data-short); }
     .tb-status #midiStatus { flex: none; min-width: 0; }
   }
+  /* T-519: wider, the long form is kept while it fits; when it does not
+     (a long controller list, a busy column at 1920) the short form
+     replaces it, never an ellipsis. core.js measures it (fitShort). */
+  .tb-status [data-short].fit-short > .long { display: none; }
+  .tb-status [data-short].fit-short::after { content: attr(data-short); }
+  /* Wide bars show the long forms: 8 px between them gives « MIDI :
+     désactivé » the few pixels it lacked at 1920 (T-519). */
+  @media (min-width: 1440px) { .tb-status .leds { gap: 8px; } }
   #linkLost { padding: 6px 12px; border-radius: 8px; background: var(--warn); color: #241600; font-weight: 800; font-size: 12px; white-space: nowrap; box-shadow: 0 0 16px #ffb02088; }
   #linkLost[hidden] { display: none; }
   .tb-safety { display: flex; align-items: center; gap: 10px; margin-left: auto; }
