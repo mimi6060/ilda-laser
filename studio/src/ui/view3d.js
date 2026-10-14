@@ -78,6 +78,41 @@ function showRender3dDrawer() {
   $('render3dBtn').hidden = !show3d;
   $('render3dBtn').setAttribute('aria-expanded', String(open));
 }
+// T-512: the drawer starts under the badges' row, however many lines it
+// wraps to (--badges-h on the view, at least 48 px), the prepared pane
+// moves down under it (--badges-row) and sizes its picture from its
+// header's real height (--phead: one line, or the name on its own line
+// in a narrow pane), and the drawer says when more settings sit below
+// its edge (.more-below fades its last line).
+function drawerMoreBelow() {
+  const d = $('render3d');
+  d.classList.toggle('more-below', d.scrollTop + d.clientHeight < d.scrollHeight - 1);
+}
+function fitDrawerUnderBadges() {
+  const row = $('viewBadges'), view = row.parentElement, pane = $('prepPane');
+  const vis = [...row.children].filter(b => b.offsetParent);
+  const low = vis.length ? Math.ceil(Math.max(...vis.map(b => b.getBoundingClientRect().bottom)) - view.getBoundingClientRect().top + 6) : 0;
+  view.style.setProperty('--badges-h', Math.max(48, low) + 'px');
+  view.style.setProperty('--badges-row', low + 'px'); // .view.prep #prepPane margin-top
+  const head = Math.ceil(pane.querySelector('.prep-head').getBoundingClientRect().height);
+  view.style.setProperty('--phead', head + 'px');
+  if (!pane.hidden) {
+    // The pane's slider column shows whole or not at all: its full height
+    // (measured shown; no paint in between) against the height left under
+    // the row and the header (18 px of pane chrome). Hiding it narrows the
+    // pane, which can only wrap the header more: the choice is stable.
+    const side = pane.querySelector('.prep-side');
+    side.style.display = 'flex'; const need = side.scrollHeight; side.style.display = '';
+    view.classList.toggle('no-side', view.clientHeight - low - head - 18 < need);
+  }
+  drawerMoreBelow();
+}
+$('render3d').addEventListener('scroll', drawerMoreBelow, { passive: true });
+if (typeof ResizeObserver === 'function') {
+  const ro = new ResizeObserver(fitDrawerUnderBadges);
+  ro.observe($('viewBadges')); ro.observe($('render3d')); ro.observe($('viewBadges').parentElement);
+  ro.observe($('prepPane').querySelector('.prep-head'));
+}
 function setRender3dOpen(on) {
   render3dOpen = !!on;
   remember(R3_OPEN_KEY, render3dOpen ? '1' : '0');
@@ -398,6 +433,7 @@ function showPrepPane() {
   $('prepBtn').setAttribute('aria-pressed', String(prepMode));
   document.body.classList.toggle('prep-mode', prepMode);
   $('prepName').textContent = c ? c.name : 'Cliquez une case pour la préparer';
+  $('prepName').title = c ? c.name : ''; // the full name when a narrow pane cuts it
   for (const id of ['prepSend', 'prepClear', 'prepScale', 'prepBright', 'prepRot', 'prepColor']) $(id).disabled = !c;
   if (c) {
     setVal('prepScale', Math.round(c.scale * 100)); setVal('prepBright', Math.round(c.brightness * 100));

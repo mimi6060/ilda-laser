@@ -246,6 +246,10 @@ const LABELS = Object.freeze({
   'timeline.tco.ltc.aucune': 'Aucune sortie audio disponible (audio désactivé ?).',
   'timeline.tco.ltc.ouverte': 'LTC : {sortie}',
 
+  // Aperçu : badge de sécurité de la vue 3D (T-512). La forme courte,
+  // en vue étroite avec le panneau « Préparé », nomme toujours les faisceaux.
+  'apercu.badge.public': 'Faisceaux dans le public',
+  'apercu.badge.public.court': 'Faisc. public',
   // Commun
   'commun.fermer': 'Fermer',
   'commun.oui': 'Oui',
