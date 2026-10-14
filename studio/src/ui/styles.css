@@ -623,12 +623,13 @@
   #viewBadges { position: absolute; z-index: 5; top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 8px; pointer-events: none; }
   #viewBadges > * { flex: none; max-width: 100%; box-sizing: border-box; pointer-events: auto; }
   #viewBadges > #galvoBadge { pointer-events: none; }
-  /* With « Préparer » the row stays over the output (« Sortie »), off the
-     prepared pane, while the output side holds 300 px; on a narrower
-     stage it runs over the pane's header, and lets clicks through to its
-     buttons. A narrow view gets compact badges. */
-  @media (min-width: 901px) { .view.prep #viewBadges { right: min(calc(var(--ps) + 178px), calc(100% - 300px)); } }
-  .view.prep #viewBadges > [id] { pointer-events: none; }
+  /* With the prepared pane shown the row gets its own strip: the view's
+     content (output and prepared pane) starts under it, so no badge ever
+     covers « Préparé », the cue name, « Envoyer » or a slider. The strip's
+     height is the row's (--badges-row, measured in view3d.js); --ps
+     follows since cqh is the content box. A narrow view gets compact
+     badges. */
+  .view.prep { padding-top: var(--badges-row, 36px); box-sizing: border-box; }
   @container (max-width: 560px) {
     #viewBadges { top: 8px; left: 8px; right: 8px; gap: 4px 6px; }
     #viewBadges > [id] { padding: 2px 8px; font-size: 11px; }
@@ -1133,12 +1134,14 @@
      « Réglages 3D » in the bar, that scrolls inside itself and never
      takes the view's height. The badges' row above it stays free
      (« Laser éteint », « Faisceaux dans le public »): T-512. */
-  .render3d { position: absolute; left: 0; bottom: 0; z-index: 4; width: min(100%, 640px); max-height: min(calc(100% - var(--badges-h, 48px)), 62%); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--muted) transparent; box-sizing: border-box;
+  .render3d { position: absolute; left: 0; bottom: 0; z-index: 4; width: min(100%, 640px); max-height: min(calc(100% - var(--badges-h, 48px)), 62%); overflow-y: auto; box-sizing: border-box;
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; padding: 4px 10px 8px; border: 1px solid var(--line); border-radius: 10px;
     background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 8px 24px #0008; }
   .render3d .check { margin-top: 6px; }
   /* T-512: a scrollbar that shows, and the last line fades out while more
-     settings sit below (.more-below, set in view3d.js). */
+     settings sit below (.more-below, set in view3d.js). No standard
+     scrollbar-width / scrollbar-color here: Chromium 121+ would then
+     ignore these rules and fall back to its thin standard bar. */
   .render3d::-webkit-scrollbar { width: 8px; }
   .render3d::-webkit-scrollbar-track { background: color-mix(in srgb, var(--line) 40%, transparent); border-radius: 4px; }
   .render3d::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 4px; }

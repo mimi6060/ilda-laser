@@ -79,8 +79,9 @@ function showRender3dDrawer() {
   $('render3dBtn').setAttribute('aria-expanded', String(open));
 }
 // T-512: the drawer starts under the badges' row, however many lines it
-// wraps to (--badges-h on the view), and says when more settings sit
-// below its edge (.more-below fades its last line).
+// wraps to (--badges-h on the view), the prepared pane under its strip
+// (--badges-row), and the drawer says when more settings sit below its
+// edge (.more-below fades its last line).
 function drawerMoreBelow() {
   const d = $('render3d');
   d.classList.toggle('more-below', d.scrollTop + d.clientHeight < d.scrollHeight - 1);
@@ -90,6 +91,11 @@ function fitDrawerUnderBadges() {
   const vis = [...row.children].filter(b => b.offsetParent);
   const low = vis.length ? Math.max(...vis.map(b => b.getBoundingClientRect().bottom)) - view.getBoundingClientRect().top + 6 : 0;
   view.style.setProperty('--badges-h', Math.max(48, Math.ceil(low)) + 'px');
+  // The strip the prepared pane leaves free (.view.prep padding-top): the
+  // row's own height, from its top, so it doesn't depend on that padding.
+  const rowTop = parseFloat(getComputedStyle(row).top) || 0;
+  const strip = vis.length ? Math.max(...vis.map(b => b.getBoundingClientRect().bottom)) - row.getBoundingClientRect().top + rowTop + 6 : 0;
+  view.style.setProperty('--badges-row', Math.ceil(strip) + 'px');
   drawerMoreBelow();
 }
 $('render3d').addEventListener('scroll', drawerMoreBelow, { passive: true });

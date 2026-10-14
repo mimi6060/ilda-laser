@@ -2,7 +2,9 @@
 // 1920×1080, in 2D, 3D and 2D+3D, on every workspace, with « Préparer »
 // off and on, every badge shown at once (« Sortie », « Laser éteint »,
 // « Galvos simulés », « Faisceaux dans le public ») sits inside the view
-// and no two of them intersect; the 3D drawer opens under all of them.
+// and no two of them intersect; the 3D drawer opens under all of them;
+// with the prepared pane shown (« Préparer » on, a cue prepared with it
+// on or off) no badge covers the pane or any of its labels and controls.
 // At 1024×768 the drawer scrolls visibly (a scrollbar and a fade while
 // more settings sit below) and its last setting can be reached.
 //
@@ -12,6 +14,11 @@ import { test, expect, useStudio, openUi, openWorkspace, open3dSettings, type Wo
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
+// Headless Chromium hides every scrollbar (--hide-scrollbars, a Playwright
+// default); drop that flag in this file so scrollbars are drawn as in the
+// operator's browser: the layout is measured with them, and the drawer's
+// bar can be measured.
+test.use({ launchOptions: { ignoreDefaultArgs: ['--hide-scrollbars'] } });
 const SIZES = [{ width: 1024, height: 768 }, { width: 1280, height: 800 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }] as const;
 const WORKSPACES: Workspace[] = ['live', 'timeline', 'creation', 'settings', 'desk'];
 const MODES = ['2d', '3d', 'both'] as const;
@@ -29,7 +36,11 @@ async function measure(page: Page) {
     const view = rect(document.querySelector('#stage .view')!, 'view');
     const d = document.getElementById('render3d')!;
     const drawer = d.offsetParent ? rect(d, 'render3d') : null;
-    return { badges, view, drawer };
+    // The prepared pane and every label and control in it, when shown.
+    const pane = [...document.querySelectorAll<HTMLElement>('#prepPane, #prepPane .prep-head > *, #prepPane canvas, #prepPane .prep-side label, #prepPane .prep-side input')]
+      .filter(e => e.offsetParent && e.getBoundingClientRect().width > 0)
+      .map(e => rect(e, e.id || `${e.tagName.toLowerCase()} « ${e.textContent?.trim() || (e as HTMLInputElement).type} »`));
+    return { badges, view, drawer, pane };
   });
 }
 
@@ -45,7 +56,7 @@ async function setMode(page: Page, mode: typeof MODES[number]) {
   await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
 }
 
-async function checkBadges(page: Page, label: string, expected: string[]) {
+async function checkBadges(page: Page, label: string, expected: string[], paneShown: boolean) {
   const m = await measure(page);
   expect(m.badges.map(b => b.id).sort(), `${label} badges shown`).toEqual([...expected].sort());
   for (const b of m.badges) expect(inside(b, m.view), `${label} #${b.id} inside the view`).toBe(true);
@@ -53,6 +64,24 @@ async function checkBadges(page: Page, label: string, expected: string[]) {
     for (let j = i + 1; j < m.badges.length; j++)
       expect(overlap(m.badges[i], m.badges[j]), `${label} #${m.badges[i].id} and #${m.badges[j].id} overlap`).toBe(false);
   if (m.drawer) for (const b of m.badges) expect(overlap(b, m.drawer), `${label} drawer covers #${b.id}`).toBe(false);
+  expect(m.pane.length > 0, `${label} prepared pane shown`).toBe(paneShown);
+  for (const b of m.badges) for (const c of m.pane) expect(overlap(b, c), `${label} #${b.id} covers ${c.id} of the prepared pane`).toBe(false);
+}
+
+/** No prepared pane; « Préparer » on with nothing prepared; on with a cue prepared; a cue prepared, « Préparer » off. */
+const PREP_STATES = ['none', 'mode', 'cue', 'cue-only'] as const;
+
+async function setPrep(page: Page, state: typeof PREP_STATES[number], cueId: string) {
+  expect(await studio.post('/api/prepared/clear')).toBe(200);
+  if (state === 'cue' || state === 'cue-only') expect(await studio.post('/api/prepared', { id: cueId })).toBe(200);
+  const btn = page.locator('#prepBtn');
+  const want = state === 'mode' || state === 'cue';
+  if (want !== /active/.test((await btn.getAttribute('class')) ?? '')) await btn.click();
+  await expect(btn).toHaveAttribute('aria-pressed', String(want));
+  if (state === 'none') await expect(page.locator('#prepPane')).toBeHidden();
+  else await expect(page.locator('#prepPane')).toBeVisible();
+  if (state === 'cue' || state === 'cue-only') await expect(page.locator('#prepSend')).toBeEnabled();
+  else await expect(page.locator('#prepSend')).toBeDisabled();
 }
 
 test.beforeEach(async () => {
@@ -63,36 +92,37 @@ test.beforeEach(async () => {
 });
 
 test.afterEach(async () => {
+  await studio.post('/api/prepared/clear');
   await studio.post('/api/venue/sim', SIM_OFF);
 });
 
 for (const size of SIZES) {
-  test(`${size.width}×${size.height}: no preview badge covers another, on every workspace and in every mode`, async ({ page }) => {
+  test(`${size.width}×${size.height}: no preview badge covers another or the prepared pane, on every workspace and in every mode`, async ({ page }) => {
+    test.setTimeout(240_000);
     await page.setViewportSize(size);
     await openUi(page, studio);
     await expect(page.locator('#galvoBadge')).toBeVisible();
+    const cueId = (await page.locator('#cues .cue[data-id]').first().getAttribute('data-id'))!;
     for (const ws of WORKSPACES) {
       await openWorkspace(page, ws);
-      for (const prep of [false, true]) {
-        const prepBtn = page.locator('#prepBtn');
-        if (prep && !(await prepBtn.isVisible())) continue;
-        if (prep !== /active/.test((await prepBtn.getAttribute('class')) ?? '')) await prepBtn.click();
+      for (const prep of PREP_STATES) {
+        await setPrep(page, prep, cueId);
         for (const mode of MODES) {
-          const label = `${ws} ${mode}${prep ? ' prep' : ''}`;
+          const label = `${ws} ${mode} prep:${prep}`;
           await setMode(page, mode);
           const expected = ['offBadge', 'galvoBadge'];
-          if (prep) expected.push('outTag');
+          if (prep !== 'none') expected.push('outTag');
           if (mode !== '2d') { expected.push('aud3d'); await expect(page.locator('#aud3d'), label).toBeVisible(); }
-          await checkBadges(page, label, expected);
+          await checkBadges(page, label, expected, prep !== 'none');
           if (mode === '2d') continue;
           await open3dSettings(page);
           await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
-          await checkBadges(page, `${label} drawer open`, expected);
+          await checkBadges(page, `${label} drawer open`, expected, prep !== 'none');
           await page.locator('#render3dClose').click();
           await expect(page.locator('#render3d')).toBeHidden();
         }
       }
-      if (await page.locator('#prepBtn').isVisible() && /active/.test((await page.locator('#prepBtn').getAttribute('class')) ?? '')) await page.locator('#prepBtn').click();
+      await setPrep(page, 'none', cueId);
     }
   });
 }
@@ -103,10 +133,10 @@ test('1024×768: the 3D drawer scrolls visibly and its last setting can be reach
   await setMode(page, '3d');
   await open3dSettings(page);
   const drawer = page.locator('#render3d');
-  const m = await drawer.evaluate(d => ({ sh: d.scrollHeight, ch: d.clientHeight, oy: getComputedStyle(d).overflowY, bar: (d as HTMLElement).offsetWidth - d.clientWidth }));
+  const m = await drawer.evaluate(d => { const cs = getComputedStyle(d); return { sh: d.scrollHeight, ch: d.clientHeight, oy: cs.overflowY, bar: (d as HTMLElement).offsetWidth - d.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth) }; });
   expect(m.sh, 'more settings than the drawer shows').toBeGreaterThan(m.ch);
   expect(m.oy).toBe('auto');
-  expect(m.bar, 'a scrollbar takes room: it is drawn').toBeGreaterThan(0);
+  expect(m.bar, 'a drawn scrollbar, not a 2 px overlay').toBeGreaterThanOrEqual(6);
   // The fade says there is more below; it goes once at the bottom.
   await expect(drawer).toHaveClass(/more-below/);
   const last = page.locator('#r3sfOutdoor');
