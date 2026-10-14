@@ -79,9 +79,9 @@ function showRender3dDrawer() {
   $('render3dBtn').setAttribute('aria-expanded', String(open));
 }
 // T-512: the drawer starts under the badges' row, however many lines it
-// wraps to (--badges-h on the view), the prepared pane under its strip
-// (--badges-row), and the drawer says when more settings sit below its
-// edge (.more-below fades its last line).
+// wraps to (--badges-h on the view, at least 48 px), the prepared pane
+// moves down under it (--badges-row), and the drawer says when more
+// settings sit below its edge (.more-below fades its last line).
 function drawerMoreBelow() {
   const d = $('render3d');
   d.classList.toggle('more-below', d.scrollTop + d.clientHeight < d.scrollHeight - 1);
@@ -91,11 +91,7 @@ function fitDrawerUnderBadges() {
   const vis = [...row.children].filter(b => b.offsetParent);
   const low = vis.length ? Math.max(...vis.map(b => b.getBoundingClientRect().bottom)) - view.getBoundingClientRect().top + 6 : 0;
   view.style.setProperty('--badges-h', Math.max(48, Math.ceil(low)) + 'px');
-  // The strip the prepared pane leaves free (.view.prep padding-top): the
-  // row's own height, from its top, so it doesn't depend on that padding.
-  const rowTop = parseFloat(getComputedStyle(row).top) || 0;
-  const strip = vis.length ? Math.max(...vis.map(b => b.getBoundingClientRect().bottom)) - row.getBoundingClientRect().top + rowTop + 6 : 0;
-  view.style.setProperty('--badges-row', Math.ceil(strip) + 'px');
+  view.style.setProperty('--badges-row', Math.ceil(low) + 'px'); // .view.prep #prepPane margin-top
   drawerMoreBelow();
 }
 $('render3d').addEventListener('scroll', drawerMoreBelow, { passive: true });
@@ -423,6 +419,7 @@ function showPrepPane() {
   $('prepBtn').setAttribute('aria-pressed', String(prepMode));
   document.body.classList.toggle('prep-mode', prepMode);
   $('prepName').textContent = c ? c.name : 'Cliquez une case pour la préparer';
+  $('prepName').title = c ? c.name : ''; // the full name when a narrow pane cuts it
   for (const id of ['prepSend', 'prepClear', 'prepScale', 'prepBright', 'prepRot', 'prepColor']) $(id).disabled = !c;
   if (c) {
     setVal('prepScale', Math.round(c.scale * 100)); setVal('prepBright', Math.round(c.brightness * 100));

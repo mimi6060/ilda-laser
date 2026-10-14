@@ -4,7 +4,9 @@
 // « Galvos simulés », « Faisceaux dans le public ») sits inside the view
 // and no two of them intersect; the 3D drawer opens under all of them;
 // with the prepared pane shown (« Préparer » on, a cue prepared with it
-// on or off) no badge covers the pane or any of its labels and controls.
+// on or off) no badge covers the pane or any of its labels and controls,
+// the cue name stays readable, the pane's buttons whole, and the 3D view
+// keeps 160 px.
 // At 1024×768 the drawer scrolls visibly (a scrollbar and a fade while
 // more settings sit below) and its last setting can be reached.
 //
@@ -40,7 +42,16 @@ async function measure(page: Page) {
     const pane = [...document.querySelectorAll<HTMLElement>('#prepPane, #prepPane .prep-head > *, #prepPane canvas, #prepPane .prep-side label, #prepPane .prep-side input')]
       .filter(e => e.offsetParent && e.getBoundingClientRect().width > 0)
       .map(e => rect(e, e.id || `${e.tagName.toLowerCase()} « ${e.textContent?.trim() || (e as HTMLInputElement).type} »`));
-    return { badges, view, drawer, pane };
+    // With a cue prepared: the name's room, the header's items inside the
+    // pane and the window, and the 3D canvas's size.
+    const pp = document.getElementById('prepPane')!, nameEl = document.getElementById('prepName')!;
+    const head = pp.offsetParent ? [...pp.querySelectorAll<HTMLElement>('.prep-head > *')].map(e => rect(e, e.id || e.tagName.toLowerCase())) : [];
+    const paneBox = pp.offsetParent ? rect(pp, 'prepPane') : null;
+    const name = pp.offsetParent ? { width: nameEl.getBoundingClientRect().width, full: nameEl.scrollWidth, text: nameEl.textContent ?? '' } : null;
+    const bm = document.getElementById('beams')!;
+    const beams = bm.offsetParent ? rect(bm, 'beams') : null;
+    const vp = { id: 'window', x: 0, y: 0, width: innerWidth, height: innerHeight };
+    return { badges, view, drawer, pane, head, paneBox, name, beams, vp };
   });
 }
 
@@ -66,6 +77,19 @@ async function checkBadges(page: Page, label: string, expected: string[], paneSh
   if (m.drawer) for (const b of m.badges) expect(overlap(b, m.drawer), `${label} drawer covers #${b.id}`).toBe(false);
   expect(m.pane.length > 0, `${label} prepared pane shown`).toBe(paneShown);
   for (const b of m.badges) for (const c of m.pane) expect(overlap(b, c), `${label} #${b.id} covers ${c.id} of the prepared pane`).toBe(false);
+  // PUPITRE's 300 px stage stacks the pane under the views, past the
+  // window's edge, on develop already: its own task (not a badge issue).
+  if (paneShown && !label.startsWith('desk')) {
+    // Every header item (« Préparé », the name, « Envoyer », « Vider ») whole, inside the pane and the window.
+    for (const h of m.head) {
+      expect(inside(h, m.paneBox!), `${label} ${h.id} inside the prepared pane`).toBe(true);
+      expect(inside(h, m.vp), `${label} ${h.id} inside the window`).toBe(true);
+    }
+    // The prepared cue's name can be read: 40 px at least, or all of it if shorter.
+    expect(m.name!.width, `${label} « ${m.name!.text} » readable (${m.name!.width.toFixed(0)} px)`).toBeGreaterThanOrEqual(Math.min(40, m.name!.full) - 0.5);
+    // The 3D view keeps T-503's 160 px with the pane shown.
+    if (m.beams) expect(m.beams.height, `${label} 3D view height with the pane`).toBeGreaterThanOrEqual(160);
+  }
 }
 
 /** No prepared pane; « Préparer » on with nothing prepared; on with a cue prepared; a cue prepared, « Préparer » off. */
