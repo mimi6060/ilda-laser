@@ -147,9 +147,12 @@ function assignTlRefKey(v) { return (tlRefKey = v); }
 const TL_REFS = ['tlRefPosition', 'tlRefSize', 'tlRefColor', 'tlRefMotion'];
 function tlRefRow() {
   const items = TL.show ? tlSelected().filter(x => x.e.source.kind !== 'dmx') : [];
-  const key = items.map(x => x.e.id + ':' + JSON.stringify(x.e.refs || {})).join(',') + '|' + poolRev;
+  const key = (TL.show ? 'show|' : '') + items.map(x => x.e.id + ':' + JSON.stringify(x.e.refs || {})).join(',') + '|' + poolRev;
   if (key === tlRefKey) return;
   tlRefKey = key;
+  // No show: no row (T-519). A show open: its place is kept, so a click
+  // that selects a clip never moves the canvas under the mouse.
+  $('tlRefRow').hidden = !TL.show;
   $('tlRefRow').style.visibility = items.length ? 'visible' : 'hidden';
   if (!items.length) return;
   for (const id of TL_REFS) {

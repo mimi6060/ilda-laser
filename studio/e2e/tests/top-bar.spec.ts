@@ -283,8 +283,50 @@ for (const [width, height] of SIZES) {
       expect(seen.now.midi.text, where).toMatch(/^MIDI\b/);
       expect(seen.now.midi.text.replace(/^MIDI\s*:?\s*/, '').replace(/…$/, '').length, `${where}: « ${seen.now.midi.text} »`).toBeGreaterThan(0);
       if (width < 1440) expect(seen.now.midi, where).toMatchObject({ text: 'MIDI ✕', cut: false });
+      // T-519: never « MIDI : désacti… »: whole, or the short form (also at 1920).
+      expect(['MIDI : désactivé', 'MIDI ✕'], `${where}: « ${seen.now.midi.text} »`).toContain(seen.now.midi.text);
+      expect(seen.now.midi.cut, where).toBe(false);
       expect(seen.now.midi.title, where).toContain('MIDI : désactivé');
     }
+    // T-519: a long controller list does not fit anywhere: the short form, whole.
+    for (const ws of WORKSPACES) {
+      await openWorkspace(page, ws);
+      const long = await page.evaluate(async () => {
+        const { setShortText } = await import('/ui/core.js' as string);
+        const el = document.querySelector<HTMLElement>('#midiStatus')!;
+        const before = [el.textContent!, el.dataset.short!];
+        setShortText(el, 'MIDI : APC40 mkII, Launchpad X, nanoKONTROL2 connectés', 'MIDI ✓');
+        const long = el.querySelector<HTMLElement>('.long')!;
+        const r = { shortShown: getComputedStyle(long).display === 'none', after: getComputedStyle(el, '::after').content,
+          fits: el.scrollWidth <= el.clientWidth, inRow: el.getBoundingClientRect().right <= el.parentElement!.getBoundingClientRect().right + 0.5 };
+        setShortText(el, before[0], before[1]);
+        return r;
+      });
+      expect(long, `${ws} at ${width}`).toEqual({ shortShown: true, after: '"MIDI ✓"', fits: true, inRow: true });
+    }
+  });
+
+  // T-519: the shortcut hint after the tabs (« Espace laser · Échap arrêt,
+  // dans tous les onglets · lettres = cues ») is whole, its first part, or
+  // not shown: never a fragment of a key (« [ ») or a cut word (« Espace l… »).
+  test(`at ${width}×${height}: the shortcut hint whole, shortened or hidden`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    for (const ws of WORKSPACES) {
+      await openWorkspace(page, ws);
+      const hint = await page.evaluate(() => {
+        const h = document.querySelector<HTMLElement>('#wsHint')!, inner = h.querySelector<HTMLElement>('.wh-in')!;
+        const on = inner.checkVisibility({ visibilityProperty: true });
+        const r = h.getBoundingClientRect(), t = inner.getBoundingClientRect();
+        return { on, text: on ? inner.innerText.replace(/\s+/g, ' ').trim() : '', whole: t.left >= r.left - 0.5 && t.right <= r.right + 0.5, width: Math.round(t.width) };
+      });
+      const where = `${ws} at ${width}: « ${hint.text} »`;
+      if (!hint.on) continue;
+      expect(['Espace laser · Échap arrêt', 'Espace laser · Échap arrêt, dans tous les onglets · lettres = cues (LIVE)'], where).toContain(hint.text);
+      expect(hint.whole, where).toBe(true);
+      expect(hint.width, where).toBeGreaterThanOrEqual(120);
+    }
+    // Where the bar has room (1440 and wider), it is shown.
+    if (width >= 1440) await expect(page.locator('#wsHint .wh-in')).toBeVisible();
   });
 }
 

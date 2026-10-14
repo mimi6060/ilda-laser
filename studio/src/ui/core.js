@@ -472,13 +472,28 @@ const setCheck = (id, v) => { if (document.activeElement !== $(id)) $(id).checke
 // A top-bar text with a compact form (T-517): the full text stays the
 // element's text (and title), the narrow bar shows data-short instead.
 function setShortText(el, full, short) {
-  if (el.textContent === full && el.dataset.short === short) return;
+  if (el.textContent === full && el.dataset.short === short) return fitShort(el); // the room may have changed
   const long = document.createElement('span');
   long.className = 'long';
   long.textContent = full;
   el.replaceChildren(long);
   el.dataset.short = short;
+  fitShort(el);
+  // Measured again whenever it or its row changes width (window, other
+  // pills); the MIDI and presence loops also measure it on every refresh.
+  for (const box of [el, el.parentElement]) if (box && !shortBoxes.has(box)) { shortBoxes.add(box); shortFit.observe(box); }
 }
+// T-519: where the long form would be cut (an ellipsis, « MIDI : désacti… »),
+// the short form is shown instead (.fit-short); the title keeps the whole text.
+function fitShort(el) {
+  el.classList.remove('fit-short');
+  if (el.scrollWidth > el.clientWidth) el.classList.add('fit-short');
+}
+const shortBoxes = new WeakSet();
+const shortFit = new ResizeObserver(entries => entries.forEach(e => (e.target.dataset.short !== undefined ? [e.target]
+  : e.target.querySelectorAll(':scope > [data-short]')).forEach(fitShort)));
+// A font arriving late widens the text, not the box: measure again.
+document.fonts.addEventListener('loadingdone', () => document.querySelectorAll('[data-short]').forEach(fitShort));
 
 function showSettings() {
   const s = settings, kind = s.content.kind;

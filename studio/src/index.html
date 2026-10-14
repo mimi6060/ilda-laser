@@ -214,7 +214,8 @@
   <button role="tab" data-ws-tab="settings" data-t-title="espaces.reglages.info"><span data-t="espaces.reglages"></span> <kbd>F4</kbd></button>
   <button role="tab" data-ws-tab="desk" data-t-title="espaces.pupitre.info" data-t="espaces.pupitre"></button>
   </div>
-  <span class="hint" id="wsHint"><kbd>Espace</kbd> <span data-t="espaces.aide.laser"></span> <kbd>Échap</kbd> <span data-t="espaces.aide.reste"></span></span>
+  <!-- T-519: whole, shortened to its first two keys, or not shown (workspaces.js fits it); never a cut fragment. -->
+  <span class="hint" id="wsHint"><span class="wh-in"><kbd>Espace</kbd> <span data-t="espaces.aide.laser"></span> <kbd>Échap</kbd> <span data-t="espaces.aide.arret"></span><span class="wh-more" data-t="espaces.aide.suite"></span></span></span>
   <!-- Annuler / Rétablir / Historique (T-285): edits only, hidden in show mode. -->
   <div class="hist lock-edit" role="group" data-t-aria-label="historique.libelle">
     <button id="undoBtn" disabled data-t-aria-label="historique.annuler" data-t-title="historique.annuler.vide"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 2.5 6.5 6 10"/><path d="M2.5 6.5H10a3.5 3.5 0 0 1 0 7H7"/></svg></button>
@@ -1520,8 +1521,9 @@
       <span id="tlScanRow" hidden>
         <label class="tl-knob" title="Préréglage de balayage des événements sélectionnés">Balayage <select id="tlScan"></select></label>
       </span>
-      <!-- Always laid out (only hidden from view): selecting an event never reflows the canvas under the mouse. -->
-      <span class="u-invisible" id="tlRefRow">
+      <!-- Laid out while a show is open (only hidden from view): selecting an event never reflows the canvas
+           under the mouse. With no show nothing can be selected: no row at all (T-519). -->
+      <span class="u-invisible" id="tlRefRow" hidden>
         <label class="tl-knob" title="Préréglage de position de l'événement sélectionné (LIVE › Préréglages)">Position <select id="tlRefPosition" data-family="position"></select></label>
         <label class="tl-knob" title="Préréglage de taille de l'événement sélectionné">Taille <select id="tlRefSize" data-family="size"></select></label>
         <label class="tl-knob" title="Préréglage de couleur de l'événement sélectionné">Couleur <select id="tlRefColor" data-family="color"></select></label>

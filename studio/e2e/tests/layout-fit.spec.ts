@@ -72,3 +72,57 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
     }
   });
 }
+
+// T-519: between the usual sizes too (the window dragged), the tab bar's
+// shortcut hint and the MIDI state are never a fragment: the hint is
+// whole, its first part or not shown, MIDI its long or short form, uncut.
+// The window is resized live, so the page measures them again by itself.
+test('the shortcut hint and the MIDI state are never cut while the window is resized', async ({ page }) => {
+  for (const ws of ['live', 'timeline'] as Workspace[]) {
+    await openWorkspace(page, ws);
+    for (const width of [1100, 1366, 1600, 1920, 1180]) {
+      await page.setViewportSize({ width, height: 860 });
+      await expect.poll(() => page.evaluate(() => {
+        const h = document.querySelector<HTMLElement>('#wsHint')!, inner = h.querySelector<HTMLElement>('.wh-in')!;
+        const m = document.querySelector<HTMLElement>('#midiStatus')!;
+        const hint = !inner.checkVisibility({ visibilityProperty: true }) ? 'hidden'
+          : h.scrollWidth > h.clientWidth ? 'cut' : inner.innerText.replace(/\s+/g, ' ').trim();
+        return { hint: hint === 'hidden' || hint.startsWith('Espace laser · Échap arrêt') ? 'ok' : hint,
+          midi: m.scrollWidth <= m.clientWidth ? 'ok' : 'cut' };
+      }), `${ws} at ${width}`).toEqual({ hint: 'ok', midi: 'ok' });
+    }
+  }
+});
+
+// T-519: with no show, the TIMELINE toolbar keeps no empty row: the
+// invisible row of a selected event's presets used to hold ~25 px under
+// the buttons. With a show open that row keeps its place (as before) and
+// shows on a selection. (No spec of this file loads a show.)
+test('TIMELINE: no empty band in the editor toolbar without a show', async ({ page }) => {
+  const band = () => page.evaluate(() => {
+    const tools = document.querySelector('#tlEditor .tl-tools')!;
+    const kids = [...tools.children].filter(c => c.getClientRects().length);
+    const ghosts = kids.filter(c => getComputedStyle(c).visibility === 'hidden').map(c => c.id || c.className);
+    const last = Math.max(...kids.filter(c => getComputedStyle(c).visibility !== 'hidden').map(c => c.getBoundingClientRect().bottom));
+    return { ghosts, gap: Math.round(tools.getBoundingClientRect().bottom - last) };
+  });
+  await openWorkspace(page, 'timeline');
+  for (const [width, height] of [[1024, 768], [1280, 800], [1440, 900], [1920, 1080]]) {
+    await page.setViewportSize({ width, height });
+    expect(await band(), `no show at ${width}`).toEqual({ ghosts: [], gap: 0 });
+  }
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.locator('#tlExamples').click();
+  await page.locator('#tlExDialog .tl-ex', { hasText: 'Montée 16 mesures' }).click();
+  await expect(page.locator('#tlExDialog')).toBeHidden();
+  await expect(page.locator('#tlEdMsg')).toContainText('Exemple');
+  await expect(page.locator('#tlRefRow')).toBeHidden();
+  // A clip selected: its presets row appears, no empty band either.
+  await page.evaluate(async () => {
+    const { TL } = await import('/ui/timeline-editor.js' as string);
+    TL.sel = new Set([TL.show.tracks[0].events[0].id]);
+    TL.need = true;
+  });
+  await expect(page.locator('#tlRefRow')).toBeVisible();
+  expect(await band(), 'a clip selected').toEqual({ ghosts: [], gap: 0 });
+});
