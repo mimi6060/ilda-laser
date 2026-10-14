@@ -240,7 +240,10 @@ for (const [width, height] of SIZES) {
           const tag = document.querySelector<HTMLElement>('#profilePill .tag')!;
           const r = tag.getBoundingClientRect(), pill = tag.parentElement!.getBoundingClientRect();
           const mask = getComputedStyle(tag).maskImage;
-          return { kind: mask.includes('svg') ? 'icon' : tag.innerText, whole: tag.checkVisibility() && r.width >= 10 && r.height >= 10
+          // The shield is painted by its background through the mask: it needs a colour.
+          const painted = !mask.includes('svg') || getComputedStyle(tag).backgroundColor !== 'rgba(0, 0, 0, 0)';
+          return { kind: mask.includes('svg') ? 'icon' : tag.innerText, whole: painted
+            && tag.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && r.width >= 10 && r.height >= 10
             && tag.scrollWidth <= tag.clientWidth && r.left >= pill.left - 0.5 && r.right <= Math.min(pill.right, status.right) + 0.5 };
         };
         const now = { output: shown('#output'), presence: shown('#presenceLed'), midi: shown('#midiStatus'), profile: shown('#profilePill'), marker: marker() };
