@@ -10,7 +10,6 @@ interface Mix { demand: number; points: number; budget: number; decimated: boole
 interface LayerFrame { points: Point[]; cues: { active: { cue: string; layer: number }[]; shown: string[] }; layers: { mix: Mix } }
 const frame = () => studio.get<LayerFrame>('/api/frame');
 const mix = async () => (await frame()).layers.mix;
-const litCount = async () => (await frame()).points.filter(isLit).length;
 const strip = (page: import('@playwright/test').Page, n: number) => page.locator(`#layers .layer[data-layer="${n}"]`);
 
 test.beforeAll(async () => { catalog = await studio.presets(); });
@@ -59,8 +58,12 @@ test('two cues on two layers both reach the frame; dimmer 0, solo, mute and Vide
   await expect.poll(async () => (await studio.controlValues()).values['layer.2.dimmer']).toBe(0);
   await expect(strip(page, 2)).toHaveClass(/off/);
   await expect.poll(async () => { const m = await mix(); return m.demand <= m.per_layer[0]; }).toBe(true);
-  expect(await litCount()).toBeGreaterThan(0);
-  expect(await litCount()).toBeLessThanOrEqual((await mix()).per_layer[0]);
+  // One response: the engine writes the points and the mix report under
+  // one lock, so both come from the same frame of the moving pattern.
+  const one = await frame();
+  const lit = one.points.filter(isLit).length;
+  expect(lit).toBeGreaterThan(0);
+  expect(lit).toBeLessThanOrEqual(one.layers.mix.per_layer[0]);
   await strip(page, 2).locator('input[type=range]').fill('100');
   await expect.poll(async () => (await studio.controlValues()).values['layer.2.dimmer']).toBe(1);
 
