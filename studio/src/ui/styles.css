@@ -180,8 +180,13 @@
        counter stay; the frame rate and the key reminders (in the
        shortcuts sheet anyway) go. */
     main[data-ws-active="live"] .stats > span:nth-child(2), main[data-ws-active="live"] .stats > span:last-child { display: none; }
-    main[data-ws-active="live"] .viewbar { margin-bottom: 4px; }
-    main[data-ws-active="live"] .stats { margin-top: 4px; }
+    /* A 1024×768 screen with the top bar on two rows (T-504) leaves the
+       LIVE stage 241 px: smaller page padding and a tighter view bar
+       (two rows in 3D) give the 160 px view its room back. */
+    main { padding: 6px 12px; gap: 6px; }
+    main[data-ws-active="live"] .viewbar { gap: 2px 8px; margin-bottom: 0; }
+    main[data-ws-active="live"] .viewbar .seg button, main[data-ws-active="live"] .viewbar > button { padding: 3px 10px; }
+    main[data-ws-active="live"] .stats { margin-top: 2px; }
     /* 64 px layer cards: 2 px more for the speed select (« BPM »). */
     main[data-ws-active="live"] .ws-layers .layer { padding: 6px 2px; }
     main[data-ws-active="live"] .ws-layers .layers { gap: 4px; }
