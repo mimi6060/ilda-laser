@@ -2,7 +2,7 @@
 // computed from the venue, reached in 400 ms, on Alt+Maj+1…6, saved in
 // venue.json. Display only: the camera never changes the output, and the
 // test studio has no laser output anyway.
-import { test, expect, useStudio, openUi, focusPage } from '../studio';
+import { test, expect, useStudio, openUi, open3dSettings, focusPage } from '../studio';
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
@@ -20,6 +20,7 @@ const near = (a: number[], b: number[], tol = 0.01) => a.length === b.length && 
 async function open3d(page: Page) {
   await openUi(page, studio);
   await page.locator('#viewSeg [data-view="3d"]').click();
+  await open3dSettings(page);
   await expect(page.locator('#cam3dSeg')).toBeVisible();
   await expect.poll(() => page.evaluate(() => !!(window as any).__viz.camera())).toBe(true);
 }
@@ -84,7 +85,10 @@ test('Libre goes back to the last manual position; the orbit modes', async ({ pa
   await open3d(page);
   await page.locator('#cam3dSeg [data-cam="top"]').click();
   await settled(page);
-  // A drag: the viewpoint becomes « Libre ».
+  // A drag: the viewpoint becomes « Libre ». The settings drawer (T-503)
+  // lies over the bottom of the view: closed first, as the operator would.
+  await page.locator('#render3dClose').click();
+  await expect(page.locator('#render3d')).toBeHidden();
   const box = (await page.locator('#beams').boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
@@ -92,6 +96,7 @@ test('Libre goes back to the last manual position; the orbit modes', async ({ pa
   await page.mouse.up();
   const free = await camera(page);
   expect(free.preset).toBe('free');
+  await open3dSettings(page);
   await expect(page.locator('#cam3dSeg [data-cam="free"]')).toHaveAttribute('aria-pressed', 'true');
   await page.locator('#cam3dSeg [data-cam="side"]').click();
   await settled(page);
@@ -105,6 +110,8 @@ test('Libre goes back to the last manual position; the orbit modes', async ({ pa
   expect(near(pr.target, [0, 3, 11])).toBe(true);
   await page.locator('#cam3dOrbit').selectOption('camera');
   const eye = (await camera(page)).pos;
+  await page.locator('#render3dClose').click(); // the drag again goes to the view, not the drawer
+  await expect(page.locator('#render3d')).toBeHidden();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width / 2 - 60, box.y + box.height / 2, { steps: 4 });
@@ -113,6 +120,7 @@ test('Libre goes back to the last manual position; the orbit modes', async ({ pa
   expect(near(turned.pos, eye)).toBe(true);
   expect(near(turned.target, pr.target)).toBe(false);
   expect(turned.orbit).toBe('camera');
+  await open3dSettings(page);
   await page.locator('#cam3dOrbit').selectOption('room');
 });
 

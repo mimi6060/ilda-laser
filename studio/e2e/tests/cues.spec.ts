@@ -1,7 +1,7 @@
 // Cue grid: page tabs, clicking a cue, AZERTY cue keys, and pages changed
 // from outside the UI (MIDI / API) showing up in it. T-272: a fixed 8×5
 // grid with empty cells, pages on F5–F12 / Alt+1…9, cue keys by e.code.
-import { test, expect, useStudio, openUi, reveal, focusPage } from '../studio';
+import { test, expect, useStudio, openUi, openCueMore, reveal, focusPage } from '../studio';
 
 const studio = useStudio();
 let catalog: Awaited<ReturnType<typeof studio.presets>>;
@@ -165,6 +165,7 @@ test('T-272: the grid stays 8×5 at any width; empty cells keep their place and 
 });
 
 test('T-272: a 6×4 grid keeps the cues in order and is saved', async ({ page }) => {
+  await openCueMore(page);
   await page.locator('#gridMenuBtn').click();
   await page.locator('#gridCols').fill('6');
   await page.locator('#gridCols').press('Tab');
@@ -186,6 +187,7 @@ test('T-272: a 6×4 grid keeps the cues in order and is saved', async ({ page })
 });
 
 test('T-272: a new page is empty, a cue dragged onto it plays from there', async ({ page }) => {
+  await openCueMore(page);
   await page.locator('#gridMenuBtn').click();
   await page.locator('#gridPageName').fill('Final');
   await page.locator('#gridPageNew').click();

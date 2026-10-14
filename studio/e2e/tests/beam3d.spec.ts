@@ -1,7 +1,7 @@
 // 3D beam view (T-275, T-276): the "3D" button next to the 2D preview,
 // the pure geometry of beam3d.js, and its energy-conserving rendering.
 // Preview only: the view just draws what /api/frame already says.
-import { test, expect, useStudio, openUi } from '../studio';
+import { test, expect, useStudio, openUi, open3dSettings } from '../studio';
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
@@ -40,6 +40,9 @@ test('switch to 3D, a WebGL canvas renders, back to 2D', async ({ page }) => {
   await expect(page.locator('#preview')).toBeHidden();
   await expect(page.locator('#viewSeg [data-view="3d"]')).toHaveClass(/active/);
   await expect(page.locator('#recenter3d')).toBeVisible();
+  // The settings are a drawer (T-503): closed until « Réglages 3D ».
+  await expect(page.locator('#render3d')).toBeHidden();
+  await open3dSettings(page);
   await expect(page.locator('#render3d')).toBeVisible();
   await expect(page.locator('#hint3d')).toHaveText('Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer');
   // The canvas holds a WebGL2 context and something lit gets drawn.

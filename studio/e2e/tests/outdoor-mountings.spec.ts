@@ -5,7 +5,7 @@
 // value that is not a number is refused; show mode locks the settings.
 // The 3D view shows each projector's cut (display only). Preview only:
 // the fake output, never a laser.
-import { test, expect, useStudio, openUi, openWorkspace, watchWrites, expectOnlyPrefs } from '../studio';
+import { test, expect, useStudio, openUi, open3dSettings, openWorkspace, watchWrites, expectOnlyPrefs } from '../studio';
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
@@ -97,6 +97,7 @@ test('the 3D view shows each projector\'s outdoor cut, display only', async ({ p
   await openUi(page, studio);
   await page.locator('#viewSeg [data-view="3d"]').click();
   await expect(page.locator('#beams')).toBeVisible();
+  await open3dSettings(page);
   await expect(page.locator('#r3sfOutdoor')).toBeChecked();
   // The main projector (level, sector up to 30°, 45° limit) has its sky
   // cut; p2 has no mounting: its whole field.

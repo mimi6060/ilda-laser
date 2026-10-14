@@ -3,7 +3,7 @@
 // the pages ticked; « Ignorer par le pilote » keeps a cell out. It only
 // launches cues: it never arms, an e-stop switches it off for good, and
 // its pages are an edit (undone, locked in show mode). Preview only.
-import { test, expect, useStudio, openUi, openTopMore } from '../studio';
+import { test, expect, useStudio, openUi, openCueMore, openTopMore } from '../studio';
 
 const studio = useStudio();
 test.describe.configure({ mode: 'serial' });
@@ -63,6 +63,7 @@ test('the menu switches it on, every bar, and it changes cues without arming', a
   // behind « ⋯ », closed here).
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.locator('#vljBtn')).toBeHidden();
+  await openCueMore(page);
   await page.locator('#cueVljBtn').click();
   await expect(page.locator('#vljMenu')).toBeVisible();
   await expect(page.locator('#cueVljBtn')).toHaveAttribute('aria-expanded', 'true');

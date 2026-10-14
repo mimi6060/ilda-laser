@@ -17,7 +17,8 @@ import { $, api, apiJson } from './core.js';
 import { IS_MAC, closeKeysHelp, openKeysHelp } from './laser.js';
 import { LOCKED_FR, activeWs, flash, setLivePanel, setWorkspace, showMode } from './workspaces.js';
 import { scenes } from './cuelist.js';
-import { cueDown, cueUp, grid, gridPage, pageKey, presetById, presets, selectPage, slots } from './cues.js';
+import { cueDown, cueUp, grid, gridPage, pageKey, presetById, presets, selectPage, setCueMore, slots } from './cues.js';
+import { setRender3dOpen, setView, show3d } from './view3d.js';
 import { fmtTime, timeline } from './shows.js';
 import { controlLabels } from './midi.js';
 import { setCreationTab } from './figures.js';
@@ -539,6 +540,9 @@ function searchReveal(el) {
   const cp = el.closest('#creationPanel [data-cpanel]');
   if (cp) setCreationTab(cp.dataset.cpanel);
   for (let d = el.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true;
+  // Behind « Plus… » of the cue bar (T-506), or in the 3D settings drawer (T-503).
+  if (el.closest('#cueMore')) setCueMore(true);
+  if (el.closest('#render3d')) { if (!show3d) setView('3d'); setRender3dOpen(true); }
   // A tempo control behind « ⋯ » (T-504): open it after this click has
   // bubbled (a click elsewhere closes the popover).
   const more = document.getElementById('tbMoreBtn');

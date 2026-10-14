@@ -20,7 +20,7 @@
 // evaluation order is the page order the script had.
 import { lastTimeline, loadShows, shows } from './shows.js';
 import { $, api, apiJson, post } from './core.js';
-import { activeWs, remember, remembered } from './workspaces.js';
+import { LOCKED_FR, activeWs, flash, remember, remembered, showMode } from './workspaces.js';
 import { cueCategories, presets } from './cues.js';
 import { assignTlNoteKey, assignTlRefKey, assignTlScanKey, tlSelected } from './timeline-markers.js';
 import { GEN_NAMES } from './layers.js';
@@ -181,6 +181,8 @@ function tlPushUndo(snapshot) {
 // out (no change, or a locked track touched: undone here, T-445).
 function tlChange(fn) {
   if (!TL.show) return false;
+  // Mode spectacle (T-509): the tracks stay on screen, nothing changes.
+  if (showMode) { flash(LOCKED_FR); return false; }
   const before = JSON.stringify(TL.show);
   fn();
   if (JSON.stringify(TL.show) === before) return false;

@@ -131,12 +131,16 @@
   body.show-mode #wsTabs [data-ws-tab="creation"], body.show-mode #wsTabs [data-ws-tab="settings"],
   body.show-mode #liveTabs [data-panel-tab]:not([data-panel-tab="direct"]):not([data-panel-tab="running"]):not([data-panel-tab="cuelist"]):not([data-panel-tab="fx"]):not([data-panel-tab="macros"]),
   body.show-mode #livePanel [data-panel]:not([data-panel="direct"]):not([data-panel="running"]):not([data-panel="cuelist"]):not([data-panel="fx"]):not([data-panel="macros"]),
-  body.show-mode #tlEditor, body.show-mode .lock-edit, body.show-mode #palettes .del,
+  body.show-mode .tl-tools, body.show-mode .tl-lib, body.show-mode #tlEmpty, body.show-mode .lock-edit, body.show-mode #palettes .del,
   body.show-mode #projMenu [data-proj="new"], body.show-mode #projMenu [data-proj="open"], body.show-mode #projMenu [data-proj="save-as"],
   body.show-mode #projMenu [data-proj="version-save"], body.show-mode #projMenu [data-proj="versions"],
   body.show-mode #projMenu [data-proj="new-template"], body.show-mode #projMenu [data-proj="save-template"], body.show-mode #projTemplates,
   body.show-mode #projMenu .sub, body.show-mode #projRecent { display: none !important; }
-  body.show-mode main[data-ws-active="timeline"] { grid-template-rows: minmax(0, 1fr); grid-template-areas: "stage panel"; }
+  /* Mode spectacle (T-509): the tracks and the playhead stay on screen,
+     read only: no toolbar, no library, the track heads greyed; every
+     edit is refused in the page (tlChange) and by the studio (423). */
+  body.show-mode #tlEditor { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "tracks"; }
+  body.show-mode #tlHeads input, body.show-mode #tlHeads select, body.show-mode #tlHeads button { pointer-events: none; opacity: .55; }
   .tp-sub { margin: 14px 0 2px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
   #output { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -159,10 +163,51 @@
   #wsTabs #wsHint { flex: 1 1 0; min-width: 0; text-align: right; }
   main { display: grid; gap: 12px; padding: 12px 16px; height: max(560px, calc(100vh - var(--top-h, 150px)));
     grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); grid-template-areas: "stage panel"; }
-  main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 350px 400px; grid-template-rows: minmax(0, 1fr) minmax(250px, 36vh);
+  /* Rows (T-503, T-506, T-509): the stage row never goes under what the
+     stage needs (its bar, a 160 px view, its stats: see .view), the cue
+     grid keeps room for at least one row of cues on a 768 px screen and
+     two on 800 px, and the TIMELINE stage is tall enough for a 240 px
+     preview at 1440×900. */
+  main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 350px 400px; grid-template-rows: minmax(0, 1fr) minmax(300px, 36vh);
     grid-template-areas: "stage layers panel" "cues cues cues"; }
-  main[data-ws-active="timeline"] { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); grid-template-rows: minmax(170px, 34%) minmax(0, 1fr);
+  main[data-ws-active="timeline"] { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); grid-template-rows: minmax(300px, 44%) minmax(0, 1fr);
     grid-template-areas: "stage panel" "editor editor"; }
+  /* A 1024 px screen: narrower layers and panel so the stage can still
+     show the 2D and 3D views side by side (2 × 160 px). */
+  @media (max-width: 1100px) {
+    main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 300px 330px; }
+    /* Under a 338 px view, one line of stats: the points and the safety
+       counter stay; the frame rate and the key reminders (in the
+       shortcuts sheet anyway) go. */
+    main[data-ws-active="live"] .stats > span:nth-child(2), main[data-ws-active="live"] .stats > span:last-child { display: none; }
+    /* A 1024×768 screen with the top bar on two rows (T-504) leaves the
+       LIVE stage 241 px: smaller page padding and a tighter view bar
+       (two rows in 3D) give the 160 px view its room back. */
+    main { padding: 6px 12px; gap: 6px; }
+    main[data-ws-active="live"] .viewbar { gap: 2px 8px; margin-bottom: 0; }
+    main[data-ws-active="live"] .viewbar .seg button, main[data-ws-active="live"] .viewbar > button { padding: 3px 10px; }
+    main[data-ws-active="live"] .stats { margin-top: 2px; }
+    /* 64 px layer cards: 2 px more for the speed select (« BPM »). */
+    main[data-ws-active="live"] .ws-layers .layer { padding: 6px 2px; }
+    main[data-ws-active="live"] .ws-layers .layers { gap: 4px; }
+  }
+  /* A short screen (T-506): the cue row takes 40vh so two rows of cues
+     stay whole at 1280×800 (the layers column then scrolls to its
+     executors: the trade-off recorded in T-506), and a tighter cue
+     header so the grid keeps a row. */
+  @media (max-height: 860px) {
+    main[data-ws-active="live"] { grid-template-rows: minmax(0, 1fr) minmax(300px, 40vh); }
+    .ws-cues h2 { margin-bottom: 4px; }
+    .ws-cues .cue-bar, .ws-cues .fest-row, .ws-cues .cue-tabs-row { margin-bottom: 6px; }
+  }
+  /* 768 px tall (after the 860 px rule, which it overrides): the cue row
+     at its floor, the stage gets the rest. */
+  @media (max-height: 780px) {
+    main[data-ws-active="live"] { grid-template-rows: minmax(0, 1fr) 300px; }
+    /* Lower rows in the cue header, so one row of cues stays whole. */
+    .ws-cues .cue-bar .seg button, .ws-cues .cue-bar > button, .ws-cues .fest-row button { padding: 4px 8px; }
+    .ws-cues .cue-bar input, .ws-cues .cue-bar select { padding: 5px; }
+  }
   /* TIMELINE editor (T-162): toolbar, then library | track heads | canvas. */
   #tlEditor { grid-area: editor; display: grid; min-height: 0; min-width: 0; gap: 6px 8px; padding: 8px 10px;
     grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "tools tools" "lib tracks"; }
@@ -321,13 +366,21 @@
   /* CRÉATION › Figures (T-296): the editor takes the big area, the stage
      (preview of the real output) and the properties share the right column. */
   main[data-ws-active="creation"][data-ctab="figures"] { grid-template-columns: minmax(0, 1fr) 380px;
-    grid-template-rows: minmax(220px, 40%) minmax(0, 1fr); grid-template-areas: "editor stage" "editor panel"; }
+    grid-template-rows: minmax(270px, 40%) minmax(0, 1fr); grid-template-areas: "editor stage" "editor panel"; }
   [data-cpanel][hidden], #figEditor[hidden] { display: none !important; }
   #figEditor { grid-area: editor; display: grid; min-height: 0; min-width: 0; gap: 8px; padding: 10px;
     grid-template-columns: 118px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: "tools canvas" "frames frames"; }
   .fig-tools { grid-area: tools; display: flex; flex-direction: column; gap: 4px; overflow: auto; min-height: 0; }
   .fig-tools button { padding: 6px; font-size: 12px; text-align: left; }
   .fig-tools .check { margin-top: 4px; font-size: 12px; }
+  /* A short screen (T-506): the fifteen tools on two columns rather than
+     a column that scrolls under the frames row. */
+  @media (max-height: 860px) {
+    #figEditor { grid-template-columns: 216px minmax(0, 1fr); }
+    .fig-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; }
+    .fig-tools button { padding: 5px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fig-tools .check { margin-top: 0; }
+  }
   .fig-canvas { grid-area: canvas; min-height: 0; min-width: 0; container-type: size; display: flex; justify-content: center; }
   #figCanvas { width: min(100cqw, 100cqh); height: auto; flex: none; cursor: crosshair; touch-action: none; }
   .fig-frames { grid-area: frames; min-width: 0; }
@@ -478,8 +531,16 @@
   #sdWarn:empty { display: none; }
   #sdDir { width: 100%; box-sizing: border-box; }
   .ilda-rights { margin: 6px 0 4px; padding: 8px 10px; border-left: 3px solid var(--warn); border-radius: 6px; background: var(--panel-2); color: var(--warn); font-size: 12px; }
-  .stage { grid-area: stage; position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  /* The stage never spills over its neighbours (T-503): what does not fit
+     is clipped, and the view below keeps a floor of 160 px. */
+  .stage { grid-area: stage; position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: clip; }
   .ws-panel { grid-area: panel; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; padding-right: 2px; }
+  /* TIMELINE panel (T-509): on a wide screen, Timeline | Timecode, then
+     Lecteur de shows | Agenda, so the transport, TC-IN and TC-OUT are on
+     screen without scrolling the panel. */
+  @media (min-width: 1400px) {
+    #timelinePanel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; }
+  }
   .ws-panel > section { flex: none; }
   .ws-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); align-content: start; }
   .ws-cues { grid-area: cues; display: flex; flex-direction: column; min-height: 0; }
@@ -489,6 +550,8 @@
   .ws-layers { grid-area: layers; align-self: start; max-height: 100%; overflow: auto; }
   .ws-layers .layers-head { margin-top: 0; }
   .ws-layers .layer { min-width: 0; padding: 6px 4px; }
+  /* The speed group of a 64–77 px card: short labels (BPM, A…D) and room for the arrow (T-506). */
+  .ws-layers .layer select.spd { padding: 4px 2px 4px 4px; }
   .ptabs { display: flex; gap: 4px; flex: none; position: sticky; top: 0; z-index: 2; background: var(--bg); padding-bottom: 2px; }
   .ptabs button { flex: 1; padding: 6px 8px; font-size: 12px; }
   /* Seven CRÉATION tabs (T-462): they wrap rather than cut a name. */
@@ -496,11 +559,15 @@
   #creationTabs button { flex: 1 1 auto; }
   .soon { padding: 0 4px; }
   /* The preview fits the stage: square in 2D, the whole stage in 3D. */
-  .view { flex: 1 1 auto; min-height: 0; container-type: size; display: flex; gap: 12px; align-items: flex-start; }
+  .view { flex: 1 1 auto; min-height: 160px; container-type: size; display: flex; gap: 12px; align-items: flex-start; }
   .view > canvas#preview, #beamsMsg { width: min(100cqw, 100cqh); height: auto; flex: none; }
   .view > canvas#beams { width: 100cqw; height: 100cqh; aspect-ratio: auto; flex: none; }
   .view.both > canvas#preview { width: min(calc(50cqw - 6px), 100cqh); }
   .view.both > canvas#beams { width: calc(50cqw - 6px); }
+  /* PUPITRE's 300 px stage: 2D over 3D rather than two slivers. */
+  main[data-ws-active="desk"] .view.both { flex-direction: column; }
+  main[data-ws-active="desk"] .view.both > canvas#preview { width: min(100cqw, calc(50cqh - 6px)); }
+  main[data-ws-active="desk"] .view.both > canvas#beams { width: 100cqw; height: calc(50cqh - 6px); }
   /* « Préparer » (T-274), Theme (T-299) tokens: the prepared view is
      framed in blue (--ws-timeline), the output keeps its own look. --ps:
      the side of the « Sortie » and « Préparé » squares; the prepared pane
@@ -550,7 +617,7 @@
   #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
   #offBadge.hidden { display: none; }
   /* T-280: the previews show simulated galvos, not the frame as sent. */
-  #galvoBadge { position: absolute; bottom: 12px; left: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
+  #galvoBadge { position: absolute; z-index: 5; bottom: 12px; left: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
   #galvoBadge[hidden] { display: none; }
   .stats { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .stats b { color: var(--text); font-weight: 600; }
@@ -1037,15 +1104,28 @@
   .pz-group { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
   .pz-group .gz { display: flex; flex-wrap: wrap; gap: 2px 10px; }
   .pz-group .gm-level { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  /* The bar wraps on a narrow stage (T-503) rather than running past it. */
+  .viewbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 8px; }
   .viewbar .seg button { padding: 5px 14px; font-size: 12px; }
-  .viewbar > button { padding: 5px 10px; font-size: 12px; }
-  .viewbar .hint { margin: 0; }
+  .viewbar > button { padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+  .viewbar .hint { margin: 0; flex: 1 1 120px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .view { position: relative; }
   .view [hidden], .render3d[hidden] { display: none !important; }
   #beamsMsg { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
-  .render3d { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
+  /* 3D settings (T-503): a drawer over the bottom of the view, opened by
+     « Réglages 3D » in the bar, that scrolls inside itself and never
+     takes the view's height. The top 48 px stay free for the badges
+     (« Laser éteint », « Faisceaux dans le public »). */
+  .render3d { position: absolute; left: 0; bottom: 0; z-index: 4; width: min(100%, 640px); max-height: min(calc(100% - 48px), 62%); overflow-y: auto; scrollbar-width: thin; box-sizing: border-box;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; padding: 4px 10px 8px; border: 1px solid var(--line); border-radius: 10px;
+    background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 8px 24px #0008; }
   .render3d .check { margin-top: 6px; }
+  .render3d::-webkit-scrollbar { width: 5px; }
+  .render3d::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  .r3head { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+  .r3head b { flex: 1; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .r3head button { padding: 2px 8px; font-size: 12px; }
+  #render3dBtn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
   /* Safety overlays in the 3D view (T-279), Theme (T-299) tokens. */
   .cam3d { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-bottom: 4px; }
   .cam3d .seg { flex-wrap: wrap; }
@@ -1539,6 +1619,22 @@
   .cues { grid-template-columns: repeat(var(--cols, 8), minmax(0, 1fr)); gap: 6px; position: relative; }
   .cue-tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; padding-bottom: 2px; }
   .cue-tabs button { flex: none; white-space: nowrap; }
+  /* Pages beyond the edge (T-506): a thin bar that is always drawn, and
+     the last page fades out on the side where more pages hide. */
+  .cue-tabs::-webkit-scrollbar { height: 5px; }
+  .cue-tabs::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  .cue-tabs.more-right { mask-image: linear-gradient(90deg, #000 calc(100% - 40px), transparent); }
+  .cue-tabs.more-left { mask-image: linear-gradient(90deg, transparent, #000 40px); }
+  .cue-tabs.more-left.more-right { mask-image: linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent); }
+  /* Rare settings of the cue bar behind « Plus… » (T-506). */
+  #cueMore { display: contents; }
+  #cueMore[hidden] { display: none; }
+  #cueMoreBtn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+  /* A short screen: shorter faders so the layers and executors need less. */
+  @media (max-height: 860px) {
+    .layer input[type=range] { height: 64px; }
+    .exec-col input[type=range] { height: 56px; }
+  }
   .cue-tabs button kbd { font-size: 10px; padding: 0 4px; line-height: 1.4; opacity: .8; }
   .cue-tabs button.drop, .cues .drop { outline: 2px dashed var(--accent); outline-offset: 1px; }
   .cue-empty { position: relative; min-height: 56px; border-radius: 10px; border: 1px dashed #22263a; background: #0b0d15; }

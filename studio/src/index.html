@@ -633,6 +633,7 @@
       </div>
       <button id="prepBtn" data-search="Préparer (vue Préparé, sans envoyer au laser)" aria-pressed="false" title="Préparer : un clic sur une case (ou une lettre) charge le cue dans la vue « Préparé » sans l'envoyer au laser. Alt + clic prépare sans activer le mode.">Préparer</button>
       <button id="recenter3d" hidden title="Double-clic sur la vue : même effet">Recentrer</button>
+      <button id="render3dBtn" hidden aria-expanded="false" aria-controls="render3d" title="Point de vue, exposition, brume, qualité et surcouches de sécurité de la vue 3D">Réglages 3D</button>
       <!-- Vidéo de la vue 3D (T-459): recorded in the page, never sent anywhere. -->
       <span class="vid3d" id="vid3d" hidden>
         <button id="vidBtn" aria-pressed="false" data-search="Enregistrer la vue 3D en vidéo" title="Enregistre la vue 3D. La vidéo porte la mention « Simulation » : ce n'est pas une prise de vue du laser. (Alt+R)">● Enregistrer</button>
@@ -664,8 +665,9 @@
       <div id="galvoBadge" hidden title="Aperçu seulement : les galvos sont simulés (approximation). Le laser reçoit l'image telle quelle ; le vrai projecteur peut arrondir ou scintiller davantage. RÉGLAGES › Simulation de l'aperçu">Galvos simulés : approximation</div>
       <div id="outTag" hidden>Sortie</div>
       <div id="aud3d" hidden role="status" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="aud3dN">0</b></div>
-    </div>
-    <div class="render3d" id="render3d" hidden>
+    <!-- 3D settings (T-503): a drawer over the view, opened by « Réglages 3D ». -->
+    <div class="render3d" id="render3d" role="group" aria-label="Réglages de la vue 3D" data-search="Réglages 3D" hidden>
+      <div class="r3head"><b>Réglages 3D</b><button id="render3dClose" title="Refermer (le bouton « Réglages 3D » les rouvre)">Fermer</button></div>
       <div class="cam3d" role="group" aria-labelledby="cam3dLbl">
         <span id="cam3dLbl" class="cam3d-lbl">Point de vue</span>
         <div class="seg" id="cam3dSeg">
@@ -700,6 +702,7 @@
         <label class="check"><input type="checkbox" id="r3sfZones"> Zones de sécurité</label>
         <label class="check" title="Mode extérieur : ce que les angles déclarés et « Ciel coupé » éteignent, depuis chaque projecteur selon son montage (en bleu). Affichage seulement : la coupure est faite par le studio"><input type="checkbox" id="r3sfOutdoor"> Coupure extérieure</label>
       </div>
+    </div>
     </div>
     <div class="stats">
       <span>Points <b id="stPoints">0</b></span>
@@ -1181,8 +1184,6 @@
         <button data-multi="0" title="Un nouveau cue remplace le précédent">Un cue</button>
         <button data-multi="1" title="Les cues s'additionnent">Multi</button>
       </div>
-      <span class="hint hint--inline">Max</span>
-      <input type="number" id="cueMax" aria-label="Cues actifs au plus" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
       <button data-ctl="cue.stop_all" data-control="cue.stop_all" title="cue.stop_all : tous les cues sauf ceux « Protégé de Tout arrêter »">Arrêter les cues</button>
       <span class="sep"></span>
       <label title="cue.transition : comment un cue remplace le précédent (le Flash reste immédiat)">Transition
@@ -1197,6 +1198,11 @@
         <button data-q="1" title="Départ au prochain temps">Temps</button>
         <button data-q="2" title="Départ au début de la prochaine mesure">Mesure</button>
       </div>
+      <button id="cueMoreBtn" aria-expanded="false" aria-controls="cueMore" title="Les réglages moins fréquents : cues actifs au plus, mode beat, pilote auto, enregistrement dans une case, pages">Plus…</button>
+      <!-- Rare settings (T-506): folded by default, the choice remembered in this browser. -->
+      <span id="cueMore" hidden>
+      <span class="hint hint--inline">Max</span>
+      <input type="number" id="cueMax" aria-label="Cues actifs au plus" min="1" max="16" data-control="cue.max_active" title="cue.max_active : au-delà, le plus ancien s'arrête">
       <label title="cue.beat_mode : sur chaque calque, montre tour à tour un des cues actifs (en Multi)">Mode beat
         <select id="cueBeatMode" data-control="cue.beat_mode">
           <option value="0">Off</option><option value="1">1 temps</option><option value="2">2 temps</option><option value="3">4 temps</option><option value="4">8 temps</option><option value="5">16 temps</option>
@@ -1209,6 +1215,7 @@
       </select>
       <label class="lock-edit" title="Enregistre aussi les modificateurs maîtres du moment (taille, position, rotation, couleur) avec le cue"><input type="checkbox" id="cueStoreMaster"> Avec les modificateurs maîtres</label>
       <button id="gridMenuBtn" class="lock-edit" aria-expanded="false" title="Taille de grille, pages, réorganiser les cues">Pages…</button>
+      </span>
     </div>
     <div class="cue-filter" id="cueFilter" aria-label="Filtrer la grille" title="Atténue les cases qui ne correspondent pas ; elles restent à leur place et se déclenchent toujours" hidden>
       <span class="hint hint--inline">Filtrer :</span>

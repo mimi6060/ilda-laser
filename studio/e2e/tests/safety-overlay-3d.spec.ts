@@ -3,7 +3,7 @@
 // audience drawn red and counted. Display only: the overlays are worked out
 // in the page from frames it already has and never change /api/frame or the
 // output. Preview only: the studio has no output and stays disarmed.
-import { test, expect, useStudio, openUi, watchWrites, expectOnlyPrefs } from '../studio';
+import { test, expect, useStudio, openUi, open3dSettings, watchWrites, expectOnlyPrefs } from '../studio';
 import type { Page } from '@playwright/test';
 
 const studio = useStudio();
@@ -81,6 +81,7 @@ test('a look aimed down is red and counted; a Blank zone over the audience bring
   await openUi(page, studio);
   await page.locator('#viewSeg [data-view="3d"]').click();
   await expect(page.locator('#beams')).toBeVisible();
+  await open3dSettings(page);
   // On by default, with the « design aid » wording on the counter.
   await expect(page.locator('#r3safety')).toBeChecked();
   await expect(page.locator('#aud3d')).toBeVisible();
@@ -133,6 +134,7 @@ test('each layer switch rebuilds only its part of the overlay', async ({ page })
   await openUi(page, studio);
   await page.locator('#viewSeg [data-view="3d"]').click();
   await expect(page.locator('#beams')).toBeVisible();
+  await open3dSettings(page);
   await expect.poll(() => page.evaluate('view3d.overlayTris')).toBeGreaterThan(0);
   const size = () => page.evaluate('[view3d.overlayTris, view3d.overlayLines]') as Promise<number[]>;
   const all = await size();
@@ -145,6 +147,7 @@ test('each layer switch rebuilds only its part of the overlay', async ({ page })
   // Remembered in this browser, like the other render settings.
   await page.reload();
   await page.locator('#viewSeg [data-view="3d"]').click();
+  await open3dSettings(page);
   await expect(page.locator('#r3sfHorizon')).not.toBeChecked();
   await expect(page.locator('#r3sfAudience')).not.toBeChecked();
   await expect(page.locator('#r3safety')).toBeChecked();
