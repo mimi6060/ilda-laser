@@ -142,6 +142,31 @@ test('signal loss: banner with the source name, dark output, armed state untouch
   }
 });
 
+// T-511: a second edit made before the first is answered builds on it;
+// both reach the studio, in order.
+test('two quick mapping edits are both saved', async ({ page }) => {
+  await openPanel(page);
+  const row = page.locator('#dmxMaps tr[data-i="0"]');
+  await expect(row.locator('[data-k=channel]')).toHaveValue('1');
+  // Every save answered late: the second edit is made while the first waits.
+  const posted: string[] = [];
+  await page.route('**/api/netin', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    posted.push(route.request().postData() ?? '');
+    await new Promise(r => setTimeout(r, 400));
+    await route.continue();
+  });
+  await row.locator('[data-k=channel]').fill('7');
+  await row.locator('[data-k=channel]').press('Tab');
+  await expect.poll(() => posted.length).toBe(1);
+  await row.locator('[data-k=invert]').check();
+  await expect.poll(async () => (await studio.get('/api/netin')).config.dmx.mappings[0]).toMatchObject({ universe: 1, channel: 7, control: 'master.size', invert: true });
+  expect(posted).toHaveLength(2);
+  await page.unrouteAll({ behavior: 'wait' });
+  await expect(row.locator('[data-k=channel]')).toHaveValue('7');
+  await expect(row.locator('[data-k=invert]')).toBeChecked();
+});
+
 test('Apprendre DMX maps the channel that moves', async ({ page }) => {
   await studio.post('/api/dmx/config', { sacn: { enabled: true }, dmx: { mappings: [] } });
   await openUi(page, studio);

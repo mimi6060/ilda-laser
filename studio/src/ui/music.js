@@ -195,14 +195,26 @@ function showMusSafety() {
   sel.value = scene;
   sel.hidden = act !== 'calm_look';
 }
-const musSafetyPatch = patch => post('/api/audio/config', { safety: patch }).then(loadMusConfig);
+// A refused « Look calme » says why on the guard line; the next state
+// would rewrite that line at once, so the note stays in front of the
+// guard's own text for MUS_NOTE_MS, or until the action is changed (T-511).
+const MUS_NOTE_MS = 8000;
+let musNote = null, musLastGuard = null;
+function musSafetyPatch(patch) {
+  musNote = null;
+  showAudioGuard(musLastGuard);
+  return post('/api/audio/config', { safety: patch }).then(loadMusConfig);
+}
 function showAudioGuard(g) {
-  if (!g) return;
+  if (musNote && performance.now() > musNote.until) musNote = null;
+  if (!g) { if (musNote) $('musGuard').textContent = musNote.text; return; }
+  musLastGuard = g;
   const action = { keep: 'look gardé sans modulation', calm_look: 'look calme', blackout: 'sortie éteinte en fondu' }[g.action] ?? g.action;
   $('musGuard').dataset.silent = String(g.silent);
-  $('musGuard').textContent = g.silent ? `Silence : ${action}.`
+  const text = g.silent ? `Silence : ${action}.`
     : g.flash_limited ? `Flashs audio limités à ${g.max_flash_hz} / s.`
     : g.live ? 'Audio actif.' : 'Pas d\'audio : liens audio au neutre.';
+  $('musGuard').textContent = musNote ? `${musNote.text} ${text}` : text;
 }
 
 async function loadDevices() {
@@ -420,7 +432,8 @@ document.querySelectorAll('#musSilAct button').forEach(b => b.addEventListener('
   const scene = musSilenceAction().scene || scenes[0]?.name;
   if (scene) return musSafetyPatch({ silence_action: { calm_look: scene } });
   $('musCalm').hidden = false;
-  $('musGuard').textContent = 'Sauvez d\'abord une scène (onglet Scènes) pour l\'utiliser comme look calme.';
+  musNote = { text: 'Sauvez d\'abord une scène (onglet Scènes) pour l\'utiliser comme look calme.', until: performance.now() + MUS_NOTE_MS };
+  showAudioGuard(musLastGuard);
 }));
 $('musCalm').addEventListener('change', () => {
   const v = $('musCalm').value;

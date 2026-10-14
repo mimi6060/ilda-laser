@@ -64,6 +64,9 @@ pub struct MapState {
     /// While handling the on-screen controller (T-210): writes are
     /// recorded as « Interface », not MIDI (`apply`).
     from_screen: bool,
+    /// When the controller message being handled arrived (T-511): a Tap
+    /// counts from then, not from when the worker got the lock.
+    pub event_at: Option<Instant>,
     arm_hold: Option<ArmHold>,
     warned: HashSet<String>,
     /// Ignored mappings (unknown ids…), in French, for `/api/midi`.
@@ -109,7 +112,9 @@ pub fn handle_batch(s: &mut Shared, events: &[MidiEvent]) {
         let learned = learn::capture(s, ev);
         learn::observe(s, ev);
         if !learned {
+            s.midi.map.event_at = Some(ev.at);
             handle_event(s, ev);
+            s.midi.map.event_at = None;
         }
     }
 }
@@ -723,6 +728,23 @@ mod tests {
         assert_eq!(taps(&s), before + 1);
         send_msgs(&mut s, &[off(0x62), on(0x5B)]);
         assert_eq!(s.cue_page, 2);
+    }
+
+    /// Taps handled late, all in one batch (the worker waited for the
+    /// lock), still count from when each one arrived (T-511).
+    #[test]
+    fn a_tap_counts_from_its_arrival_not_its_handling() {
+        let mut s = setup(vec![note(0x63, "tempo.tap", MapMode::Trigger)], Instant::now());
+        s.epoch = Instant::now() - Duration::from_secs(5);
+        s.tempo.set_bpm_manual(90.0, s.now_s());
+        let evs: Vec<MidiEvent> = (0..4u32).flat_map(|i| {
+            let at = s.epoch + Duration::from_millis(1000 + 500 * u64::from(i));
+            [ev_at(on(0x63), at), ev_at(off(0x63), at)]
+        }).collect();
+        handle_batch(&mut s, &evs);
+        assert_eq!(s.tempo.source, crate::tempo::TempoSource::Tap);
+        assert!((s.tempo.bpm - 120.0).abs() < 1e-6, "{}", s.tempo.bpm);
+        assert!(s.midi.map.event_at.is_none());
     }
 
     #[test]

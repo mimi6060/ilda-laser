@@ -114,15 +114,29 @@ test('Stop All is a blackout that latches the e-stop, with or without Shift', as
 
 test('Tap tempo: four taps at 120 BPM set the tempo', async () => {
   expect(await studio.post('/api/control', { id: 'tempo.bpm', value: 90 })).toBe(200);
-  // The spacing is the subject: taps scheduled on absolute times, 500 ms apart.
+  // The spacing is the subject: taps scheduled on absolute times, 500 ms
+  // apart. The studio counts a tap from its arrival, which lies between
+  // sending the press and its answer (T-511): under load that window, not
+  // the studio, is what drifts, so the BPM is checked against it.
   const t0 = Date.now();
+  const sent: [number, number][] = [];
   for (let i = 0; i < 4; i++) {
     await sleep(t0 + i * 500 - Date.now());
+    const from = performance.now();
     await apc.button(NOTE_TAP, true);
+    sent.push([from, performance.now()]);
     await apc.button(NOTE_TAP, false);
   }
   await expect.poll(async () => (await state()).tempo.source).toBe('tap');
   const bpm = (await state()).tempo.bpm;
-  expect(Math.abs(bpm - 120)).toBeLessThanOrEqual(1);
+  // The studio's rule: 60 / the median interval. Each interval lies
+  // between the earliest and latest arrivals its two windows allow.
+  const median = (v: number[]) => [...v].sort((a, b) => a - b)[1];
+  const shortest = median([1, 2, 3].map(i => sent[i][0] - sent[i - 1][1]));
+  const longest = median([1, 2, 3].map(i => sent[i][1] - sent[i - 1][0]));
+  expect(bpm).toBeGreaterThanOrEqual(60_000 / longest - 1);
+  expect(bpm).toBeLessThanOrEqual(60_000 / shortest + 1);
+  // Taps that left on time (the usual case) give 120 within 1.
+  if (60_000 / longest > 119 && 60_000 / shortest < 121) expect(Math.abs(bpm - 120)).toBeLessThanOrEqual(1);
 });
 

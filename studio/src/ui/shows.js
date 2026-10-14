@@ -432,24 +432,40 @@ function fillTimecode(v) {
     : v.source !== 'off' && !v.armed ? 'Pour piloter la timeline : armer TC-IN, ouvrir les entrées externes (périmètre « Timeline » du timecode) et charger un show en secondes.' : '';
   showTimecode(v);
 }
+// The operator's change wins until the server answers it (as T-502 does
+// for the network inputs): a poll that left before a change, or comes
+// back while one is in flight, and the answer to an earlier change both
+// carry the old settings and would untick what was just ticked (T-511).
+let tcGen = 0, tcSaving = 0;
 async function loadTimecode() {
-  try { const r = await api('GET', '/api/timecode'); if (r.ok) fillTimecode(await r.json()); } catch { /* studio restarting */ }
+  const gen = tcGen;
+  try {
+    const r = await api('GET', '/api/timecode');
+    if (!r.ok) return;
+    const v = await r.json();
+    if (gen === tcGen && !tcSaving) fillTimecode(v);
+  } catch { /* studio restarting */ }
 }
 async function setTimecode(patch) {
-  const r = await api('POST', '/api/timecode', patch, { quiet: true });
-  if (r.ok) { $('tcMsg').textContent = ''; fillTimecode(await r.json()); return; }
+  const gen = ++tcGen;
+  tcSaving++;
+  let r;
+  try { r = await api('POST', '/api/timecode', patch, { quiet: true }); } finally { tcSaving--; }
+  if (r.ok) { const v = await r.json(); if (gen === tcGen) { $('tcMsg').textContent = ''; fillTimecode(v); } return; }
   const t = await r.text();
   // Reload first (it rewrites the hint), then say why it was refused.
   await loadTimecode();
   if (r.status === 423) flash(t); else $('tcMsg').textContent = t;
 }
 $('tcArm').onclick = async () => {
+  const gen = ++tcGen;
+  tcSaving++;
   try {
     const r = await api('POST', '/api/timecode/arm', { on: !(tcState && tcState.armed), source: 'ui' }, { quiet: true });
     const j = await r.json().catch(() => null);
     if (!r.ok) flash(j?.error || 'Refusé');
-    else fillTimecode(j);
-  } catch {}
+    else if (gen === tcGen) fillTimecode(j);
+  } catch {} finally { tcSaving--; }
 };
 // Source, rate and offset go to the show when it has its own.
 function tcShowFields() {

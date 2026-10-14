@@ -1068,6 +1068,16 @@ impl Shared {
         self.epoch.elapsed().as_secs_f64()
     }
 
+    /// `now_s` of an instant already past (when an input arrived): never
+    /// later than now.
+    pub fn time_of(&self, at: Instant) -> f64 {
+        #[cfg(test)]
+        if self.sim_now.is_some() {
+            return self.now_s();
+        }
+        at.saturating_duration_since(self.epoch).as_secs_f64().min(self.now_s())
+    }
+
     /// Where the speed groups (T-419) are measured from now: the effects'
     /// master beat, the effects' seconds and the bar length.
     pub fn speed_clock(&self) -> (f64, f64, u8) {

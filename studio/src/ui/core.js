@@ -313,7 +313,9 @@ async function pullNotices(last) {
 // « Studio injoignable » until the next answer. Options: `quiet` (true or
 // statuses): the caller shows that refusal itself (under a field), it is
 // only recorded, without a toast; `ignore` (statuses): normal flow for
-// the caller, not recorded; `source`, `cache`, `keepalive`. A body is
+// the caller, not recorded; `source`, `cache`, `keepalive`; `timeout`
+// (ms): give up on an answer that never comes (throws a TimeoutError,
+// left to the caller: one slow request is not a lost studio). A body is
 // sent as JSON, except a file or bytes. Returns the Response; throws, as
 // fetch does, when nothing answered. Nothing is awaited before the
 // request leaves (the emergency stop goes through here).
@@ -331,13 +333,14 @@ async function api(method, path, body, opts = {}) {
   const init = { method };
   if (opts.cache) init.cache = opts.cache;
   if (opts.keepalive || pageLeaving) init.keepalive = true;
+  if (opts.timeout) init.signal = AbortSignal.timeout(opts.timeout);
   if (body !== undefined && method !== 'GET') {
     if (body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body)) init.body = body;
     else { init.body = typeof body === 'string' ? body : JSON.stringify(body); init.headers = { 'Content-Type': 'application/json' }; }
   }
   if (method !== 'GET') noteEdit(path);
   let r;
-  try { r = await fetch(path, init); } catch (e) { apiUnreachable(); throw e; }
+  try { r = await fetch(path, init); } catch (e) { if (e?.name !== 'TimeoutError') apiUnreachable(); throw e; }
   if (NC.active.has('link')) resolveNotice('link');
   if (!r.ok && !(opts.ignore || []).includes(r.status)) apiRefused(method, path, r.clone(), opts);
   return r;

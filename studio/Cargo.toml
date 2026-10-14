@@ -13,7 +13,9 @@ libusb1-sys = { version = "0.7", features = ["vendored"] }  # Helios USB (T-303)
 # marked "Laser Studio patch" in `vendor/tiny_http`.
 tiny_http = { path = "vendor/tiny_http", default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: a float read back is the one written (the standby
+# mirror compares beats and times exactly; T-511).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 libc = "0.2"  # MIT OR Apache-2.0: statvfs for the free disk space (T-450); already in the tree
