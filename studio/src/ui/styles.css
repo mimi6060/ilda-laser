@@ -165,7 +165,7 @@
      grid keeps room for at least one row of cues on a 768 px screen and
      two on 800 px, and the TIMELINE stage is tall enough for a 240 px
      preview at 1440×900. */
-  main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 350px 400px; grid-template-rows: minmax(0, 1fr) minmax(300px, 40vh);
+  main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 350px 400px; grid-template-rows: minmax(0, 1fr) minmax(300px, 36vh);
     grid-template-areas: "stage layers panel" "cues cues cues"; }
   main[data-ws-active="timeline"] { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); grid-template-rows: minmax(300px, 44%) minmax(0, 1fr);
     grid-template-areas: "stage panel" "editor editor"; }
@@ -179,18 +179,26 @@
     main[data-ws-active="live"] .stats > span:nth-child(2), main[data-ws-active="live"] .stats > span:last-child { display: none; }
     main[data-ws-active="live"] .viewbar { margin-bottom: 4px; }
     main[data-ws-active="live"] .stats { margin-top: 4px; }
+    /* 64 px layer cards: 2 px more for the speed select (« BPM »). */
+    main[data-ws-active="live"] .ws-layers .layer { padding: 6px 2px; }
+    main[data-ws-active="live"] .ws-layers .layers { gap: 4px; }
   }
-  /* 768 px tall: the cue row at its floor, the stage gets the rest. */
+  /* A short screen (T-506): the cue row takes 40vh so two rows of cues
+     stay whole at 1280×800 (the layers column then scrolls to its
+     executors: the trade-off recorded in T-506), and a tighter cue
+     header so the grid keeps a row. */
+  @media (max-height: 860px) {
+    main[data-ws-active="live"] { grid-template-rows: minmax(0, 1fr) minmax(300px, 40vh); }
+    .ws-cues h2 { margin-bottom: 4px; }
+    .ws-cues .cue-bar, .ws-cues .fest-row, .ws-cues .cue-tabs-row { margin-bottom: 6px; }
+  }
+  /* 768 px tall (after the 860 px rule, which it overrides): the cue row
+     at its floor, the stage gets the rest. */
   @media (max-height: 780px) {
     main[data-ws-active="live"] { grid-template-rows: minmax(0, 1fr) 300px; }
     /* Lower rows in the cue header, so one row of cues stays whole. */
     .ws-cues .cue-bar .seg button, .ws-cues .cue-bar > button, .ws-cues .fest-row button { padding: 4px 8px; }
     .ws-cues .cue-bar input, .ws-cues .cue-bar select { padding: 5px; }
-  }
-  /* A short screen: tighter cue header so the grid keeps a row (T-506). */
-  @media (max-height: 860px) {
-    .ws-cues h2 { margin-bottom: 4px; }
-    .ws-cues .cue-bar, .ws-cues .fest-row, .ws-cues .cue-tabs-row { margin-bottom: 6px; }
   }
   /* TIMELINE editor (T-162): toolbar, then library | track heads | canvas. */
   #tlEditor { grid-area: editor; display: grid; min-height: 0; min-width: 0; gap: 6px 8px; padding: 8px 10px;
@@ -534,6 +542,8 @@
   .ws-layers { grid-area: layers; align-self: start; max-height: 100%; overflow: auto; }
   .ws-layers .layers-head { margin-top: 0; }
   .ws-layers .layer { min-width: 0; padding: 6px 4px; }
+  /* The speed group of a 64–77 px card: short labels (BPM, A…D) and room for the arrow (T-506). */
+  .ws-layers .layer select.spd { padding: 4px 2px 4px 4px; }
   .ptabs { display: flex; gap: 4px; flex: none; position: sticky; top: 0; z-index: 2; background: var(--bg); padding-bottom: 2px; }
   .ptabs button { flex: 1; padding: 6px 8px; font-size: 12px; }
   /* Seven CRÉATION tabs (T-462): they wrap rather than cut a name. */
@@ -599,7 +609,7 @@
   #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
   #offBadge.hidden { display: none; }
   /* T-280: the previews show simulated galvos, not the frame as sent. */
-  #galvoBadge { position: absolute; bottom: 12px; left: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
+  #galvoBadge { position: absolute; z-index: 5; bottom: 12px; left: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
   #galvoBadge[hidden] { display: none; }
   .stats { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .stats b { color: var(--text); font-weight: 600; }
@@ -1092,10 +1102,12 @@
      « Réglages 3D » in the bar, that scrolls inside itself and never
      takes the view's height. The top 48 px stay free for the badges
      (« Laser éteint », « Faisceaux dans le public »). */
-  .render3d { position: absolute; left: 0; bottom: 0; z-index: 4; width: min(100%, 640px); max-height: calc(100% - 48px); overflow-y: auto; box-sizing: border-box;
+  .render3d { position: absolute; left: 0; bottom: 0; z-index: 4; width: min(100%, 640px); max-height: min(calc(100% - 48px), 62%); overflow-y: auto; scrollbar-width: thin; box-sizing: border-box;
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; padding: 4px 10px 8px; border: 1px solid var(--line); border-radius: 10px;
     background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 8px 24px #0008; }
   .render3d .check { margin-top: 6px; }
+  .render3d::-webkit-scrollbar { width: 5px; }
+  .render3d::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
   .r3head { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
   .r3head b { flex: 1; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   .r3head button { padding: 2px 8px; font-size: 12px; }

@@ -149,14 +149,29 @@ for (const size of SIZES) {
       await expect(page.locator('#cueMax')).toBeVisible();
       await page.locator('#cueMoreBtn').click();
       await expect(page.locator('#cueMax')).toBeHidden();
-      // The layers' speed selects are not cut, the executors are reachable.
+      // The layers' speed selects are not cut: the widest option's text,
+      // measured with the select's font, fits its content box less the arrow.
       for (const sel of await page.locator('#layers .spd').all()) {
-        const b = await box(sel);
-        expect(await sel.evaluate(e => e.scrollWidth <= e.clientWidth + 1), 'speed select not cut').toBe(true);
-        expect(b.width).toBeGreaterThan(40);
+        const m = await sel.evaluate(e => {
+          const s = e as HTMLSelectElement, cs = getComputedStyle(s);
+          const c = document.createElement('canvas').getContext('2d')!;
+          c.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+          const widest = Math.max(...Array.from(s.options, o => c.measureText(o.text).width));
+          const room = s.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 22; // 22 px: the native arrow
+          return { widest, room, shown: s.options[s.selectedIndex].text };
+        });
+        expect(m.widest, `speed select « ${m.shown} » fits (${m.widest.toFixed(1)} px in ${m.room.toFixed(1)} px)`).toBeLessThanOrEqual(m.room);
+      }
+      // The executors: on a tall screen they start on screen (as on develop,
+      // where their last 24 px scroll at 1080); on short screens the layers
+      // column scrolls to them (the 1280×800 trade-off: two rows of cues).
+      const region = await box(page.locator('#layerRegion'));
+      if (size.height >= 1000) {
+        const exec = await box(page.locator('#execRow'));
+        expect(exec.y + 24, 'executors start on screen without scrolling').toBeLessThanOrEqual(bottom(region));
       }
       await page.locator('#execRow').scrollIntoViewIfNeeded();
-      await expect(page.locator('#execRow')).toBeVisible();
+      expect(inside(await box(page.locator('#execRow')), region), 'executors whole after scrolling the layers column').toBe(true);
       // Page tabs past the right edge: the tab row says so and scrolls to them.
       const tabs = page.locator('#cueTabs');
       const overflow = await tabs.evaluate(t => t.scrollWidth > t.clientWidth + 1);

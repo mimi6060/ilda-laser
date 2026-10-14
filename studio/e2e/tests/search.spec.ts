@@ -82,6 +82,25 @@ test('« securite » finds the Sécurité section of RÉGLAGES and unfolds it', 
   await expect(page.locator('#safetyPanel')).toHaveClass(/found/);
 });
 
+test('« brume » finds the 3D settings: the view goes 3D and the drawer opens on it (T-503)', async ({ page }) => {
+  await expect(page.locator('#render3d')).toBeHidden();
+  await openSearch(page);
+  await page.locator('#searchInput').fill('brume');
+  const row = page.locator('#searchResults .sr[data-kind="setting"]').filter({ has: page.locator('.l', { hasText: /^Brume : densité$/ }) });
+  await expect(row).toHaveCount(1);
+  await expect(row.locator('.w')).toHaveText('Aperçu › Réglages 3D');
+  await row.click();
+  await expect(page.locator('#viewSeg [data-view="3d"]')).toHaveClass(/active/);
+  await expect(page.locator('#beams')).toBeVisible();
+  await expect(page.locator('#render3d')).toBeVisible();
+  await expect(page.locator('#render3dBtn')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#render3d label:has(#r3hazeV)')).toHaveClass(/found/);
+  // Display only: the studio is unchanged and still disarmed.
+  expect((await studio.state()).armed).toBe(false);
+  await page.locator('#viewSeg [data-view="2d"]').click();
+  await expect(page.locator('#render3d')).toBeHidden();
+});
+
 test('newer panels: « Copie de sauvegarde », a font, « Préparer »', async ({ page }) => {
   await openSearch(page);
   await page.locator('#searchInput').fill('copie sauvegarde');
