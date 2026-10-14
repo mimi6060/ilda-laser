@@ -54,6 +54,8 @@ const LABELS = Object.freeze({
   'barre.presence.present': 'Opérateur présent',
   'barre.presence.absent.court': 'Absent',
   'barre.presence.present.court': 'Présent',
+  'barre.sortie': 'Sortie',
+  'barre.profil': 'Profil',
   'barre.moteur': 'Moteur',
   'barre.moteur.info': 'Chien de garde du moteur',
   'barre.moteur.bloque': 'Moteur bloqué — laser coupé',

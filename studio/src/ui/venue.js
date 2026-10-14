@@ -338,13 +338,13 @@ function showProfilePill(p) {
   if (p === undefined) return;
   if (!p || !p.name) { el.hidden = true; return; }
   el.hidden = false;
-  // « Profil : » in its own span: a narrow top bar drops it (T-517).
-  const text = 'Profil : ' + p.name + (p.modified ? ' (modifié)' : '');
-  if (el.textContent !== text) {
-    const pfx = document.createElement('span');
-    pfx.className = 'pfx';
-    pfx.textContent = 'Profil : ';
-    el.replaceChildren(pfx, text.slice(pfx.textContent.length));
+  // « Profil » and the name in their own spans (T-517): a narrow top bar
+  // shows « Profil » as a shield icon, always whole, and ellipsises the name.
+  const name = p.name + (p.modified ? ' (modifié)' : '');
+  const tag = libelle('barre.profil');
+  if (el.textContent !== tag + ' : ' + name) {
+    const span = (cls, t) => Object.assign(document.createElement('span'), { className: cls, textContent: t });
+    el.replaceChildren(span('tag', tag), span('sep', ' : '), span('nm', name));
   }
   el.classList.toggle('warn', !!(p.modified || p.stale));
   el.title = el.textContent + ' — profil de sécurité actif' + (p.stale ? ' — vérification sur place à refaire' : '') + ' (RÉGLAGES › Sécurité)';

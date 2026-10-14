@@ -129,17 +129,17 @@ function decodeFrame(buf) {
 // top bar can drop it (the TEST / DAC / PONK badge already says it) and
 // keep the device's name.
 function showOutputName(f) {
-  const el = $('output');
+  const el = $('output'), prefix = libelle('barre.sortie') + ' : ';
   const name = f.output_state === 'lost' || f.output_state === 'connecting' || f.output_error ? '' : f.output || '';
   const text = f.output_state === 'lost' ? 'Sortie perdue'
     : f.output_state === 'connecting' ? 'Connexion de la sortie…'
     : f.output_error ? '⚠ ' + f.output_error
-    : name ? 'Sortie : ' + name : 'Aperçu seulement';
+    : name ? prefix + name : 'Aperçu seulement';
   if (el.textContent === text && !!el.querySelector('.pfx') === !!name) return;
   if (!name) { el.textContent = text; return; }
   const pfx = document.createElement('span');
   pfx.className = 'pfx';
-  pfx.textContent = 'Sortie : ';
+  pfx.textContent = prefix;
   el.replaceChildren(pfx, name);
 }
 function showPoints(points) {

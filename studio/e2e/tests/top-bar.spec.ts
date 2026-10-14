@@ -210,12 +210,21 @@ for (const [width, height] of SIZES) {
             const cut = el.scrollWidth > el.clientWidth + 0.5 || box.right > Math.min(status.right, parent.right) + 0.5;
             return { text: el.dataset.short, cut, full: el.textContent!, title: el.title };
           }
-          const right = Math.min(box.right, status.right, parent.right) - (el.scrollWidth > el.clientWidth ? 12 : 0);
+          // Each text node is clipped by its own boxes up to the element's
+          // parent; an ellipsising box leaves room for its « … ».
+          const limit = (node: Node) => {
+            let right = Math.min(status.right, parent.right);
+            for (let b = node.parentElement; b && b !== el.parentElement; b = b.parentElement) {
+              right = Math.min(right, b.getBoundingClientRect().right - (b.scrollWidth > b.clientWidth ? 12 : 0));
+            }
+            return right;
+          };
           let text = '';
           const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
           const range = document.createRange();
           for (let n = walk.nextNode(); n; n = walk.nextNode()) {
             if (!n.parentElement!.checkVisibility()) continue;
+            const right = limit(n);
             for (let i = 0; i < n.textContent!.length; i++) {
               range.setStart(n, i); range.setEnd(n, i + 1);
               const r = range.getBoundingClientRect();
@@ -225,13 +234,22 @@ for (const [width, height] of SIZES) {
           }
           return { text, cut: text.length < el.textContent!.length, full: el.textContent!, title: el.title };
         };
-        const now = { output: shown('#output'), presence: shown('#presenceLed'), midi: shown('#midiStatus'), profile: shown('#profilePill') };
+        // The profile's marker: the word « Profil », or under 1440 px a shield
+        // icon; shown whole, inside the pill and the column.
+        const marker = () => {
+          const tag = document.querySelector<HTMLElement>('#profilePill .tag')!;
+          const r = tag.getBoundingClientRect(), pill = tag.parentElement!.getBoundingClientRect();
+          const mask = getComputedStyle(tag).maskImage;
+          return { kind: mask.includes('svg') ? 'icon' : tag.innerText, whole: tag.checkVisibility() && r.width >= 10 && r.height >= 10
+            && tag.scrollWidth <= tag.clientWidth && r.left >= pill.left - 0.5 && r.right <= Math.min(pill.right, status.right) + 0.5 };
+        };
+        const now = { output: shown('#output'), presence: shown('#presenceLed'), midi: shown('#midiStatus'), profile: shown('#profilePill'), marker: marker() };
         const out = document.querySelector('#output')!, before = [...out.childNodes];
         const pfx = document.createElement('span');
         pfx.className = 'pfx';
         pfx.textContent = 'Sortie : ';
         out.replaceChildren(pfx, 'Helios 1 · Ether Dream (IDN)');
-        const long = { output: shown('#output'), profile: shown('#profilePill') };
+        const long = { output: shown('#output'), profile: shown('#profilePill'), marker: marker() };
         out.replaceChildren(...before);
         return { now, long };
       });
@@ -239,13 +257,22 @@ for (const [width, height] of SIZES) {
       // Today's test output: its name in full, with the profile next to it.
       expect(seen.now.output.text.replace(/^Sortie : /, ''), where).toBe('Sortie de test');
       expect(seen.now.output.title, where).toContain('Sortie : Sortie de test');
-      expect(seen.now.profile.text.replace(/^Profil : /, ''), where).toBe('Réglages actuels');
+      // Under 1440 px the output's name comes first; the profile keeps at least 6 letters.
+      const profileName = seen.now.profile.text.replace(/^Profil( : )?/, '');
+      if (width >= 1440) expect(profileName, where).toBe('Réglages actuels');
+      else expect('Réglages actuels'.startsWith(profileName) && profileName.length >= 6, `${where}: « ${profileName} »`).toBe(true);
       expect(seen.now.profile.title, where).toContain('Profil : Réglages actuels');
       // A long name: at least its first 15 characters; the profile yields but stays.
       const name = seen.long.output.text.replace(/^Sortie : /, '');
       expect(name.length, `${where}: « ${seen.long.output.text} »`).toBeGreaterThanOrEqual(15);
       expect('Helios 1 · Ether Dream (IDN)'.startsWith(name), where).toBe(true);
-      expect(seen.long.profile.text.length, `${where}: profile « ${seen.long.profile.text} »`).toBeGreaterThanOrEqual(5);
+      // The safety profile stays recognisable: its marker whole (« Profil »,
+      // a shield under 1440 px), and the first letters of its name.
+      for (const v of [seen.now, seen.long]) {
+        expect(v.marker, where).toEqual({ kind: width < 1440 ? 'icon' : 'Profil', whole: true });
+        expect(v.profile.text, where).toMatch(width < 1440 ? /^Régl/ : /^Profil : Régl/);
+      }
+      expect(seen.long.profile.text.replace(/^Profil( : )?/, '').length, `${where}: profile « ${seen.long.profile.text} »`).toBeGreaterThanOrEqual(6);
       // Presence: whole word(s), never cut.
       expect(seen.now.presence.text, where).toMatch(/^(Opérateur présent|Présent)$/);
       expect(seen.now.presence.cut, where).toBe(false);
