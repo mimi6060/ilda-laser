@@ -158,6 +158,8 @@ const LABELS = Object.freeze({
   'entrees.oscquery.sans_osc': 'En attente : allumez l\'entrée OSC',
   'entrees.oscquery.url': 'URL à saisir dans le contrôleur : {url} — {n} requête(s)',
   'entrees.oscquery.ouverture': 'Ouverture…',
+  'entrees.erreur.delai': 'Le studio n\'a pas répondu à temps : réglage non confirmé, l\'affichage reprend l\'état du studio.',
+  'entrees.erreur.injoignable': 'Studio injoignable : réglage non enregistré, l\'affichage reprend l\'état du studio.',
 
   // Sécurité: never empty (a test checks every securite.* key).
   'securite.noir': 'Noir',

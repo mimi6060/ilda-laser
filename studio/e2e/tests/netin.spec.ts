@@ -194,6 +194,29 @@ test("a stale poll never undoes the operator's click", async ({ page }) => {
   expect(await armed()).toBe(false);
 });
 
+// T-511: a save the studio never answers gives up; the panel goes back
+// to the server's state, says so, and the next save works again.
+test('a save that never answers times out and the panel recovers', async ({ page }) => {
+  await openPanel(page);
+  await expect(page.locator('#artnetState')).toHaveText('Coupé');
+  let swallowed = 0;
+  await page.route('**/api/netin', route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    swallowed++; // never forwarded, never answered
+  });
+  await page.locator('#artnetEnabled').click();
+  await expect.poll(() => swallowed).toBe(1);
+  await expect(page.locator('#netinError')).toContainText("Le studio n'a pas répondu à temps", { timeout: 10_000 });
+  await expect(page.locator('#artnetEnabled')).not.toBeChecked();
+  expect((await studio.get('/api/netin')).config.artnet.enabled).toBe(false);
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  await page.locator('#artnetEnabled').click();
+  await expect(page.locator('#artnetState')).toContainText('En attente');
+  await expect(page.locator('#netinError')).toHaveText('');
+  expect((await studio.get('/api/netin')).config.artnet.enabled).toBe(true);
+  expect(await armed()).toBe(false);
+});
+
 test('a bad address is refused with a French message', async ({ page }) => {
   await openPanel(page);
   await page.locator('#oscBind').fill('console.local');
