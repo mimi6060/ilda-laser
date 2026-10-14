@@ -634,6 +634,7 @@
   #viewBadges { position: absolute; z-index: 5; top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 8px; pointer-events: none; }
   #viewBadges > * { flex: none; max-width: 100%; box-sizing: border-box; pointer-events: auto; }
   #viewBadges > #galvoBadge { pointer-events: none; }
+  #viewBadges .bs { display: none; }
   /* With the prepared pane shown, only the pane moves down under the
      badges' row (--badges-row, measured in view3d.js), so no badge covers
      « Préparé », the cue name, « Envoyer » or a slider; the output canvases
@@ -647,11 +648,14 @@
     #viewBadges { top: 8px; left: 8px; right: 8px; gap: 4px 6px; }
     #viewBadges > [id] { padding: 2px 8px; font-size: 11px; }
     /* With the pane shown, the row must stay one line (the pane takes the
-       rest of a 160 px view): short labels, the whole text in the title. */
+       rest of a 160 px view): short labels (.bx hidden, .bs shown: the
+       audience badge still names the beams), the whole text in the title.
+       1024 LIVE: « SORTIE · Laser éteint · Galvos simulés · Faisc. public :
+       120 » in a 342 px row, with 4 px of padding and gap. */
     .view.prep #viewBadges { gap: 4px; }
-    .view.prep #viewBadges > [id] { padding: 2px 6px; }
+    .view.prep #viewBadges > [id] { padding: 2px 4px; }
     .view.prep #viewBadges .bx { display: none; }
-    .view.prep #viewBadges .bl { text-transform: capitalize; }
+    .view.prep #viewBadges .bs { display: inline; }
   }
   /* The slider column shows whole or not at all (.no-side, set in
      view3d.js when the height left under the row and the header is less

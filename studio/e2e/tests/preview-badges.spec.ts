@@ -5,7 +5,9 @@
 // and no two of them intersect; the 3D drawer opens under all of them;
 // with the prepared pane shown (« Préparer » on, a cue prepared with it
 // on or off) no badge covers the pane or any of its labels and controls,
-// the pane sits inside the view and the window (PUPITRE too: T-513), the
+// the audience badge still names the beams (« Faisc. public ») and the
+// row is one line at 1024 even with a three-digit count, the pane sits
+// inside the view and the window (PUPITRE too: T-513), the
 // whole cue name shows (no ellipsis, no clamp), the pane's buttons are
 // whole, its slider column is whole or hidden, its picture is at least
 // 56 px and uses the height left, and the 3D view keeps 160 px.
@@ -58,7 +60,15 @@ async function measure(page: Page) {
     const beams = bm.offsetParent ? rect(bm, 'beams') : null;
     const preview = pv.offsetParent ? rect(pv, 'preview') : null;
     const vp = { id: 'window', x: 0, y: 0, width: innerWidth, height: innerHeight };
-    return { badges, view, drawer, pane, head, paneBox, name, pic, side, beams, preview, vp };
+    // The audience badge's visible text, and the row's lines with a
+    // three-digit count (set and put back in this same pass: the page
+    // refreshes the count between passes).
+    const aud = document.getElementById('aud3d')!, n = document.getElementById('aud3dN')!;
+    const audText = aud.offsetParent ? aud.innerText : null;
+    const was = n.textContent; n.textContent = '120';
+    const rowLines = new Set([...document.querySelectorAll<HTMLElement>('#viewBadges > *')].filter(b => b.offsetParent).map(b => Math.round(b.getBoundingClientRect().top))).size;
+    n.textContent = was;
+    return { badges, view, drawer, pane, head, paneBox, name, pic, side, beams, preview, vp, audText, rowLines };
   });
 }
 
@@ -85,6 +95,12 @@ async function checkBadges(page: Page, label: string, expected: string[], paneSh
   expect(m.pane.length > 0, `${label} prepared pane shown`).toBe(paneShown);
   for (const b of m.badges) for (const c of m.pane) expect(overlap(b, c), `${label} #${b.id} covers ${c.id} of the prepared pane`).toBe(false);
   if (paneShown) {
+    // The audience badge, short or not, says it counts beams (« Faisc. public : N », never a bare « Public : N »).
+    if (m.audText !== null) expect(m.audText, `${label} audience badge names the beams`).toMatch(/Faisc/);
+    // At 1024 the row stays one line with a three-digit count, so the pane
+    // under it keeps its height (PUPITRE's pane is under the views, not
+    // under the row, and its 300 px row wraps).
+    if (page.viewportSize()!.width === 1024 && !label.startsWith('desk')) expect(m.rowLines, `${label} badge row lines with « 120 »`).toBe(1);
     // The pane inside the view and the window (PUPITRE stacks it under the views: T-513).
     expect(inside(m.paneBox!, m.view), `${label} prepared pane inside the view`).toBe(true);
     expect(inside(m.paneBox!, m.vp), `${label} prepared pane inside the window`).toBe(true);
