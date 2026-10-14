@@ -5,8 +5,10 @@
 // and no two of them intersect; the 3D drawer opens under all of them;
 // with the prepared pane shown (« Préparer » on, a cue prepared with it
 // on or off) no badge covers the pane or any of its labels and controls,
-// the cue name stays readable, the pane's buttons whole, and the 3D view
-// keeps 160 px.
+// the pane sits inside the view and the window (PUPITRE too: T-513), the
+// whole cue name shows (no ellipsis, no clamp), the pane's buttons are
+// whole, its slider column is whole or hidden, its picture is at least
+// 56 px and uses the height left, and the 3D view keeps 160 px.
 // At 1024×768 the drawer scrolls visibly (a scrollbar and a fade while
 // more settings sit below) and its last setting can be reached.
 //
@@ -42,16 +44,21 @@ async function measure(page: Page) {
     const pane = [...document.querySelectorAll<HTMLElement>('#prepPane, #prepPane .prep-head > *, #prepPane canvas, #prepPane .prep-side label, #prepPane .prep-side input')]
       .filter(e => e.offsetParent && e.getBoundingClientRect().width > 0)
       .map(e => rect(e, e.id || `${e.tagName.toLowerCase()} « ${e.textContent?.trim() || (e as HTMLInputElement).type} »`));
-    // With a cue prepared: the name's room, the header's items inside the
-    // pane and the window, and the 3D canvas's size.
+    // With the pane shown: the header's items, the name's text whole (no
+    // overflow sideways, no clamped line), the picture, the slider column
+    // (whole or hidden) and the canvases' sizes.
     const pp = document.getElementById('prepPane')!, nameEl = document.getElementById('prepName')!;
     const head = pp.offsetParent ? [...pp.querySelectorAll<HTMLElement>('.prep-head > *')].map(e => rect(e, e.id || e.tagName.toLowerCase())) : [];
     const paneBox = pp.offsetParent ? rect(pp, 'prepPane') : null;
-    const name = pp.offsetParent ? { width: nameEl.getBoundingClientRect().width, full: nameEl.scrollWidth, text: nameEl.textContent ?? '' } : null;
-    const bm = document.getElementById('beams')!;
+    const name = pp.offsetParent ? { width: nameEl.getBoundingClientRect().width, text: nameEl.textContent ?? '', whole: nameEl.scrollWidth <= nameEl.clientWidth + 1 && nameEl.scrollHeight <= nameEl.clientHeight + 1 } : null;
+    const pic = pp.offsetParent ? rect(document.getElementById('prepared')!, 'prepared') : null;
+    const sd = pp.querySelector<HTMLElement>('.prep-side')!;
+    const side = pp.offsetParent && sd.offsetParent ? { shown: sd.clientHeight, needs: sd.scrollHeight } : null;
+    const bm = document.getElementById('beams')!, pv = document.getElementById('preview')!;
     const beams = bm.offsetParent ? rect(bm, 'beams') : null;
+    const preview = pv.offsetParent ? rect(pv, 'preview') : null;
     const vp = { id: 'window', x: 0, y: 0, width: innerWidth, height: innerHeight };
-    return { badges, view, drawer, pane, head, paneBox, name, beams, vp };
+    return { badges, view, drawer, pane, head, paneBox, name, pic, side, beams, preview, vp };
   });
 }
 
@@ -67,7 +74,7 @@ async function setMode(page: Page, mode: typeof MODES[number]) {
   await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
 }
 
-async function checkBadges(page: Page, label: string, expected: string[], paneShown: boolean) {
+async function checkBadges(page: Page, label: string, expected: string[], paneShown: boolean, cuePrepared = false) {
   const m = await measure(page);
   expect(m.badges.map(b => b.id).sort(), `${label} badges shown`).toEqual([...expected].sort());
   for (const b of m.badges) expect(inside(b, m.view), `${label} #${b.id} inside the view`).toBe(true);
@@ -77,18 +84,34 @@ async function checkBadges(page: Page, label: string, expected: string[], paneSh
   if (m.drawer) for (const b of m.badges) expect(overlap(b, m.drawer), `${label} drawer covers #${b.id}`).toBe(false);
   expect(m.pane.length > 0, `${label} prepared pane shown`).toBe(paneShown);
   for (const b of m.badges) for (const c of m.pane) expect(overlap(b, c), `${label} #${b.id} covers ${c.id} of the prepared pane`).toBe(false);
-  // PUPITRE's 300 px stage stacks the pane under the views, past the
-  // window's edge, on develop already: its own task (not a badge issue).
-  if (paneShown && !label.startsWith('desk')) {
+  if (paneShown) {
+    // The pane inside the view and the window (PUPITRE stacks it under the views: T-513).
+    expect(inside(m.paneBox!, m.view), `${label} prepared pane inside the view`).toBe(true);
+    expect(inside(m.paneBox!, m.vp), `${label} prepared pane inside the window`).toBe(true);
     // Every header item (« Préparé », the name, « Envoyer », « Vider ») whole, inside the pane and the window.
     for (const h of m.head) {
       expect(inside(h, m.paneBox!), `${label} ${h.id} inside the prepared pane`).toBe(true);
       expect(inside(h, m.vp), `${label} ${h.id} inside the window`).toBe(true);
     }
-    // The prepared cue's name can be read: 40 px at least, or all of it if shorter.
-    expect(m.name!.width, `${label} « ${m.name!.text} » readable (${m.name!.width.toFixed(0)} px)`).toBeGreaterThanOrEqual(Math.min(40, m.name!.full) - 0.5);
-    // The 3D view keeps T-503's 160 px with the pane shown.
-    if (m.beams) expect(m.beams.height, `${label} 3D view height with the pane`).toBeGreaterThanOrEqual(160);
+    // The whole name shows: no ellipsis, no clamped line, so the operator can tell the cue apart without hovering.
+    expect(m.name!.whole, `${label} « ${m.name!.text} » shown whole (${m.name!.width.toFixed(0)} px)`).toBe(true);
+    // The slider column shows whole or not at all, never a sliver.
+    if (m.side) expect(m.side.needs, `${label} slider column whole (${m.side.shown} px shown)`).toBeLessThanOrEqual(m.side.shown + 1);
+    // The 3D view keeps T-503's 160 px with the pane shown. PUPITRE's
+    // 300 px strip in 2D+3D is the one place the two views and the
+    // picture share the height instead.
+    if (m.beams && !(label.startsWith('desk both'))) expect(m.beams.height, `${label} 3D view height with the pane`).toBeGreaterThanOrEqual(160);
+    if (cuePrepared) {
+      // The prepared picture is at least 56 px, and takes the height left
+      // under the badges and the header (the pane ends within 8 px of the
+      // view's edge) unless it is large anyway or already as wide as the
+      // output view beside it (the two share the width).
+      expect(m.pic!.height, `${label} prepared picture`).toBeGreaterThanOrEqual(56);
+      const slack = m.view.y + m.view.height - (m.paneBox!.y + m.paneBox!.height);
+      const square = m.preview ?? m.beams;
+      const widthBound = square ? m.pic!.width >= square.width - 1 : false;
+      expect(m.pic!.height >= 160 || slack <= 8 || widthBound, `${label} pane uses the height left (${slack.toFixed(0)} px unused, picture ${m.pic!.height.toFixed(0)} px)`).toBe(true);
+    }
   }
 }
 
@@ -108,16 +131,23 @@ async function setPrep(page: Page, state: typeof PREP_STATES[number], cueId: str
   else await expect(page.locator('#prepSend')).toBeDisabled();
 }
 
-test.beforeEach(async () => {
+// The layout is measured in the page (ResizeObserver): a loop that never
+// settles is reported by Chromium on the console; none may show.
+let loops: string[] = [];
+test.beforeEach(async ({ page }) => {
   if ((await studio.state()).estop) await studio.post('/api/estop/reset');
   await studio.reset();
   // The galvo simulation on, so its badge shows with the others.
   expect(await studio.post('/api/venue/sim', { ...SIM_OFF, enabled: true })).toBe(200);
+  loops = [];
+  page.on('console', msg => { if (/ResizeObserver loop/.test(msg.text())) loops.push(msg.text()); });
+  page.on('pageerror', err => { if (/ResizeObserver loop/.test(err.message)) loops.push(err.message); });
 });
 
 test.afterEach(async () => {
   await studio.post('/api/prepared/clear');
   await studio.post('/api/venue/sim', SIM_OFF);
+  expect(loops, 'no ResizeObserver loop').toEqual([]);
 });
 
 for (const size of SIZES) {
@@ -126,7 +156,9 @@ for (const size of SIZES) {
     await page.setViewportSize(size);
     await openUi(page, studio);
     await expect(page.locator('#galvoBadge')).toBeVisible();
-    const cueId = (await page.locator('#cues .cue[data-id]').first().getAttribute('data-id'))!;
+    // The cue with the longest name on the page (« Lissajous 1:2 · cyan → magenta », 31 characters), the one a narrow pane must still show whole.
+    const cueId = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('#cues .cue[data-id]')]
+      .map(c => ({ id: c.dataset.id!, n: (c.textContent ?? '').trim().length })).sort((a, b) => b.n - a.n)[0].id);
     for (const ws of WORKSPACES) {
       await openWorkspace(page, ws);
       for (const prep of PREP_STATES) {
@@ -137,11 +169,12 @@ for (const size of SIZES) {
           const expected = ['offBadge', 'galvoBadge'];
           if (prep !== 'none') expected.push('outTag');
           if (mode !== '2d') { expected.push('aud3d'); await expect(page.locator('#aud3d'), label).toBeVisible(); }
-          await checkBadges(page, label, expected, prep !== 'none');
+          const cue = prep === 'cue' || prep === 'cue-only';
+          await checkBadges(page, label, expected, prep !== 'none', cue);
           if (mode === '2d') continue;
           await open3dSettings(page);
           await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
-          await checkBadges(page, `${label} drawer open`, expected, prep !== 'none');
+          await checkBadges(page, `${label} drawer open`, expected, prep !== 'none', cue);
           await page.locator('#render3dClose').click();
           await expect(page.locator('#render3d')).toBeHidden();
         }

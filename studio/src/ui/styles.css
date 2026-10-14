@@ -559,7 +559,7 @@
   #creationTabs button { flex: 1 1 auto; }
   .soon { padding: 0 4px; }
   /* The preview fits the stage: square in 2D, the whole stage in 3D. */
-  .view { flex: 1 1 auto; min-height: 160px; container-type: size; display: flex; gap: 12px; align-items: flex-start; }
+  .view { flex: 1 1 auto; min-height: 160px; container: stageview / size; display: flex; gap: 12px; align-items: flex-start; }
   .view > canvas#preview, #beamsMsg { width: min(100cqw, 100cqh); height: auto; flex: none; }
   .view > canvas#beams { width: 100cqw; height: 100cqh; aspect-ratio: auto; flex: none; }
   .view.both > canvas#preview { width: min(calc(50cqw - 6px), 100cqh); }
@@ -572,23 +572,34 @@
      framed in blue (--ws-timeline), the output keeps its own look. --ps:
      the side of the « Sortie » and « Préparé » squares; the prepared pane
      adds its controls column (154 px) and its header (40 px). */
-  .view.prep { --ps: min(calc(50cqw - 83px), calc(100cqh - 40px)); }
+  .view.prep { --ps: min(calc(50cqw - 83px), calc(100cqh - 40px)); --pw: calc(var(--ps) + 154px); --pcw: var(--ps); }
   .view.prep.both { --ps: min(calc((100cqw - 178px) / 3), calc(100cqh - 40px)); }
   .view.prep > canvas#preview { width: var(--ps); }
-  .view.prep > canvas#beams { width: calc(100cqw - var(--ps) - 166px); }
+  .view.prep > canvas#beams { width: calc(100cqw - var(--pw) - 12px); }
   .view.prep.both > canvas#beams { width: var(--ps); }
-  #prepPane { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 4px 6px 6px; border: 2px solid var(--ws-timeline); border-radius: 8px; background: var(--panel); }
+  /* The pane has an explicit width (--pw: T-512). */
+  #prepPane { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 4px 6px 6px; border: 2px solid var(--ws-timeline); border-radius: 8px; background: var(--panel); box-sizing: border-box; width: var(--pw, auto); }
   #prepPane[hidden] { display: none; }
   .prep-body { display: flex; gap: 8px; align-items: flex-start; }
   #prepPane canvas { display: block; flex: none; width: var(--pc, var(--ps)); height: auto; aspect-ratio: 1; background: #000; border-radius: 4px; }
-  .prep-side { width: 130px; max-height: var(--pc, var(--ps)); overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-  .prep-head { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); min-width: 0; width: calc(var(--ps) + 138px); }
-  .prep-head span { flex: 1; min-width: 0; }
+  .prep-side { width: 130px; max-height: var(--ph, var(--ps)); overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .prep-side input { margin: 0; }
+  /* The header wraps rather than cut the name: the name (never ellipsised,
+     at most two lines) takes the room left; in a narrow pane it gets its
+     own line under « Préparé » and the buttons (@container prep below).
+     The header is the inline-size container these rules query (not the
+     pane: the pane's --ps uses cqw, which must stay the view's). */
+  .prep-head { display: flex; flex-wrap: wrap; gap: 2px 6px; align-items: center; font-size: 12px; color: var(--muted); min-width: 0; container: prep / inline-size; }
+  .prep-head span { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
   .prep-head button { flex: none; padding: 3px 10px; font-size: 12px; }
   .prep-head b { color: var(--ws-timeline); text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
-  .prep-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @container prep (max-width: 360px) {
+    .prep-head b { margin-right: auto; }
+    .prep-head span { order: 2; flex-basis: 100%; font-size: 11px; }
+    .prep-head button { padding: 2px 6px; font-size: 11px; }
+  }
   .prep-side > div { display: flex; flex-direction: column; }
-  .prep-side label { font-size: 11px; color: var(--muted); }
+  .prep-side label { font-size: 11px; line-height: 1.2; color: var(--muted); }
   .prep-side input[type=color] { width: 100%; height: 20px; padding: 0; border: 1px solid var(--line); background: var(--panel-2); }
   #prepSend:not(:disabled) { background: var(--ws-timeline); border-color: var(--ws-timeline); color: #fff; font-weight: 600; }
   #prepBtn.active { background: var(--ws-timeline); border-color: var(--ws-timeline); color: #fff; }
@@ -626,21 +637,46 @@
   /* With the prepared pane shown, only the pane moves down under the
      badges' row (--badges-row, measured in view3d.js), so no badge covers
      « Préparé », the cue name, « Envoyer » or a slider; the output canvases
-     keep their size (badges float over them as everywhere). The pane keeps
-     its width (--ps), only its picture shrinks to the height left (--pc).
-     A narrow view gets compact badges and a compact pane header, so the
-     cue name keeps room next to « Envoyer » and « Vider ». */
-  .view.prep #prepPane { margin-top: var(--badges-row, 36px); --phead: 46px; --pc: max(24px, min(var(--ps), calc(100cqh - var(--phead) - var(--badges-row, 36px)))); }
-  @container (max-width: 560px) {
-    /* The buttons go to a second line rather than squeeze the name. */
-    .view.prep #prepPane { --phead: 70px; }
-    .prep-head { gap: 2px 4px; flex-wrap: wrap; }
-    .prep-head #prepName { flex: 1 1 64px; }
-    .prep-head button { padding: 2px 6px; font-size: 11px; }
-    .prep-head b { letter-spacing: .02em; }
+     keep their size (badges float over them as everywhere). The pane's
+     picture takes the height left under the row and the header, whose
+     real height is measured (--phead, view3d.js): --pc, at most the
+     pane's inner width (--pcw). The chrome around the picture is 18 px
+     (border 4, padding 4 + 6, gap 4). */
+  .view.prep #prepPane { margin-top: var(--badges-row, 36px); --ph: calc(100cqh - var(--badges-row, 36px) - var(--phead, 22px) - 18px); --pc: max(40px, min(var(--pcw), var(--ph))); }
+  @container stageview (max-width: 560px) {
     #viewBadges { top: 8px; left: 8px; right: 8px; gap: 4px 6px; }
     #viewBadges > [id] { padding: 2px 8px; font-size: 11px; }
+    /* With the pane shown, the row must stay one line (the pane takes the
+       rest of a 160 px view): short labels, the whole text in the title. */
+    .view.prep #viewBadges { gap: 4px; }
+    .view.prep #viewBadges > [id] { padding: 2px 6px; }
+    .view.prep #viewBadges .bx { display: none; }
+    .view.prep #viewBadges .bl { text-transform: capitalize; }
   }
+  /* The slider column shows whole or not at all (.no-side, set in
+     view3d.js when the height left under the row and the header is less
+     than the column needs: LIVE up to 1280 px wide, TIMELINE up to 1440).
+     Without
+     it the pane is 196 px wide, its picture up to 180 px, and the output
+     gets the width the column used; the cue's own sliders stay. */
+  .view.prep.no-side { --pw: 196px; --pcw: 180px; }
+  .view.prep.no-side .prep-side { display: none; }
+  .view.prep.no-side > canvas#preview { width: min(calc(100cqw - 208px), 100cqh); }
+  .view.prep.no-side > canvas#beams { width: calc(100cqw - 208px); }
+  .view.prep.no-side.both > canvas#preview { width: min(calc((100cqw - 220px) / 2), 100cqh); }
+  .view.prep.no-side.both > canvas#beams { width: calc((100cqw - 220px) / 2); }
+  /* PUPITRE's 300 px stage (T-513): the pane goes under the views, full
+     width and without the slider column, sized so that the whole stack
+     fits the view: in 2D or 3D the output keeps 160 px, in 2D+3D the two
+     views and the picture share the height. */
+  main[data-ws-active="desk"] .view.prep { flex-direction: column; --dpc: min(180px, calc(100cqh - var(--phead, 22px) - 190px)); }
+  main[data-ws-active="desk"] .view.prep.both { --dpc: min(180px, calc((100cqh - var(--phead, 22px) - 42px) / 3)); }
+  main[data-ws-active="desk"] .view.prep #prepPane { width: 100%; margin-top: 0; --pc: max(40px, var(--dpc)); }
+  main[data-ws-active="desk"] .view.prep .prep-side { display: none; }
+  main[data-ws-active="desk"] .view.prep > canvas#preview { width: min(100cqw, calc(100cqh - 30px - var(--dpc) - var(--phead, 22px))); }
+  main[data-ws-active="desk"] .view.prep > canvas#beams { width: 100cqw; height: calc(100cqh - 30px - var(--dpc) - var(--phead, 22px)); }
+  main[data-ws-active="desk"] .view.prep.both > canvas#preview { width: min(100cqw, calc((100cqh - 42px - var(--dpc) - var(--phead, 22px)) / 2)); }
+  main[data-ws-active="desk"] .view.prep.both > canvas#beams { height: calc((100cqh - 42px - var(--dpc) - var(--phead, 22px)) / 2); }
   /* T-280: the previews show simulated galvos, not the frame as sent. */
   #galvoBadge { padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
   #galvoBadge[hidden] { display: none; }
