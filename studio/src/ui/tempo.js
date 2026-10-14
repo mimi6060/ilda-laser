@@ -115,6 +115,10 @@ function showTempo(t) {
   const FOLLOW = { waiting: 'en attente', locked: 'verrouillé', coasting: 'maintien', unlocked: 'déverrouillé' };
   $('tempoSrc').hidden = !auto;
   $('tempoSrc').textContent = auto ? `${FOLLOW[t.follow] || t.follow} ${Math.round(100 * (t.confidence || 0))} %` + (t.guide_bpm ? ` · guide ${t.guide_bpm.toFixed(0)}` : '') : '';
+  // Under 1360 px the line is hidden for room (T-504): the Auto button's title keeps it.
+  const ab = $('tempoAuto');
+  ab.dataset.title ??= ab.title;
+  ab.title = ab.dataset.title + (auto ? ' — ' + $('tempoSrc').textContent : '');
   // Décalage de sortie (T-246): a controller may move it too.
   const off = t.output_offset_ms || 0;
   $('latBtn').classList.toggle('active', off !== 0);
@@ -272,6 +276,23 @@ $('latBtn').addEventListener('click', e => {
   loadLatency();
 });
 document.addEventListener('click', e => { if (!$('latMenu').hidden && !e.target.closest('.lat-wrap')) latClose(); });
+
+// « ⋯ » (T-504): below 1900 px the secondary tempo controls (÷2, ×2,
+// nudges, Lat., Pilote) wait behind it so the arm state keeps its room.
+// It stays open while they are used; a click elsewhere closes it.
+function tbMoreClose() {
+  if (!$('tbMore').classList.contains('open')) return;
+  $('tbMore').classList.remove('open');
+  $('tbMoreBtn').setAttribute('aria-expanded', 'false');
+  if (!$('latMenu').hidden) latClose();
+}
+$('tbMoreBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  if ($('tbMore').classList.contains('open')) return tbMoreClose();
+  $('tbMore').classList.add('open');
+  $('tbMoreBtn').setAttribute('aria-expanded', 'true');
+});
+document.addEventListener('click', e => { if (!e.target.closest('.tb-more-wrap, #vljMenu')) tbMoreClose(); });
 
 // ---------- Pilote automatique (T-148) ----------
 // A cue of the page (or of the pages ticked) every N bars, in order or at

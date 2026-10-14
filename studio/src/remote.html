@@ -35,7 +35,10 @@
   .tabs button { flex: none; }
   .tabs button[aria-pressed=true] { background: var(--accent); color: #fff; border-color: var(--accent); }
   .grid { display: grid; gap: 6px; }
-  .grid button { min-height: 64px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; user-select: none; -webkit-user-select: none; touch-action: none; }
+  .grid button { min-height: 64px; font-size: 14px; line-height: 1.25; overflow: hidden; overflow-wrap: anywhere; user-select: none; -webkit-user-select: none; touch-action: none; }
+  /* T-510: on a phone, the page tabs wrap (no hidden scroll) and the cue
+     grid takes 2 columns, so the names read in full. */
+  @media (max-width: 479px) { .tabs { flex-wrap: wrap; overflow-x: visible; } }
   .grid button.on { background: var(--on); border-color: var(--ok); }
   .grid .empty { min-height: 64px; border-radius: 10px; border: 1px dashed var(--line); }
   #state { font-weight: 700; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); }
@@ -201,7 +204,7 @@ function render(s) {
     });
   }
   const grid = $('grid');
-  const cols = Math.min(s.cols, window.innerWidth < 560 ? 4 : 8);
+  const cols = Math.min(s.cols, window.innerWidth < 480 ? 2 : window.innerWidth < 560 ? 4 : 8);
   grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
   const gridKey = JSON.stringify([s.page, s.cols, s.cells.map(c => c && [c.id, c.name])]);
   if (grid.dataset.key !== gridKey) {

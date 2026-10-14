@@ -539,6 +539,10 @@ function searchReveal(el) {
   const cp = el.closest('#creationPanel [data-cpanel]');
   if (cp) setCreationTab(cp.dataset.cpanel);
   for (let d = el.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true;
+  // A tempo control behind « ⋯ » (T-504): open it after this click has
+  // bubbled (a click elsewhere closes the popover).
+  const more = document.getElementById('tbMoreBtn');
+  if (el.closest('#tbMore') && more.offsetParent && more.getAttribute('aria-expanded') !== 'true') setTimeout(() => more.click(), 0);
   return true;
 }
 function searchGoCue(id) {

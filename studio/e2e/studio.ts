@@ -366,6 +366,16 @@ export async function reveal(page: Page, selector: string) {
   await expect(page.locator(selector).first()).toBeVisible();
 }
 
+/**
+ * Show the secondary tempo controls (÷2, ×2, nudges, Lat., Pilote): below
+ * 1900 px they wait behind « ⋯ » in the top bar (T-504).
+ */
+export async function openTopMore(page: Page) {
+  const more = page.locator('#tbMoreBtn');
+  if (await more.isVisible() && (await more.getAttribute('aria-expanded')) !== 'true') await more.click();
+  await expect(page.locator('#tbMore')).toBeVisible();
+}
+
 /** Open the UI on the LIVE workspace and wait until it has loaded its state and cue grid. */
 export async function openUi(page: Page, studio: Studio) {
   await page.goto(studio.url + '/');

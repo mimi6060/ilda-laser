@@ -3,7 +3,7 @@
 // estimated latency and the analysis delay, and runs *Caler à l'oreille*.
 // The offset never delays a stop: Escape still darkens the laser at once.
 // Preview only (fake output).
-import { test, expect, useStudio, openUi, focusPage, type Tempo } from '../studio';
+import { test, expect, useStudio, openUi, openTopMore, focusPage, type Tempo } from '../studio';
 
 const studio = useStudio();
 type Latency = { config: { output_offset_ms: number; analysis_delay_ms: number }; min_ms: number; max_ms: number; output: { ms: number | null; detail: string } };
@@ -23,6 +23,7 @@ test.afterEach(async () => {
 });
 
 test('the Lat. menu sets the output offset, clamped, and shows the estimates', async ({ page }) => {
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   await expect(page.locator('#latMenu')).toBeVisible();
   await expect(page.locator('#latEst')).toContainText(/Latence estimée : \d+ ms/);
@@ -57,6 +58,7 @@ test('the offset is kept across a restart', async () => {
 });
 
 test('Caler à l\'oreille: starts and stops the metronome and the flash', async ({ page }) => {
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   const ear = page.locator('#latEar');
   await ear.click();
@@ -69,6 +71,7 @@ test('Caler à l\'oreille: starts and stops the metronome and the flash', async 
   await expect(page.locator('#latFlash.on')).toHaveCount(0);
   // Closing the menu stops it too.
   await ear.click();
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   await expect(page.locator('#latMenu')).toBeHidden();
   await expect(ear).toHaveAttribute('aria-pressed', 'false');
@@ -76,6 +79,7 @@ test('Caler à l\'oreille: starts and stops the metronome and the flash', async 
 
 test('with the largest offset, Escape still darkens the laser at once', async ({ page }) => {
   expect(await studio.post('/api/latency', { output_offset_ms: 100 })).toBe(200);
+  await openTopMore(page);
   await page.locator('#latBtn').click();
   expect((await studio.state()).armed).toBe(false);
   await page.locator('#armBtn').click();
@@ -103,3 +107,33 @@ test('with the largest offset, Escape still darkens the laser at once', async ({
   expect(after.filter((a) => a.lit > 0)).toEqual([]);
   await expect(page.locator('#estopBanner')).toBeVisible();
 });
+
+// T-504 review: behind « ⋯ » (below 1900 px) the Lat. menu still wraps its
+// text, the safety line included: nothing runs out of its panel. ⌘K on
+// a control behind « ⋯ » (÷2) opens it to show the button.
+for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
+  test(`at ${width}×${height} the Lat. menu keeps its text inside, and search reaches it`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await openTopMore(page);
+    await page.locator('#latBtn').click();
+    await expect(page.locator('#latMenu')).toBeVisible();
+    const out = await page.locator('#latMenu').evaluate(menu => {
+      const box = menu.getBoundingClientRect();
+      return [...menu.querySelectorAll('*')].filter(el => (el as HTMLElement).offsetParent)
+        .filter(el => { const r = el.getBoundingClientRect(); return r.right > box.right + 0.5 || r.left < box.left - 0.5 || el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow !== 'visible'; })
+        .map(el => el.id || el.textContent!.trim().slice(0, 40));
+    });
+    expect(out).toEqual([]);
+    const ws = await page.locator('#latMenu .hint').evaluateAll(els => els.filter(el => (el as HTMLElement).offsetParent).map(el => getComputedStyle(el).whiteSpace));
+    expect(ws.every(w => w === 'normal')).toBe(true);
+    // Closed, then found through the global search.
+    await page.locator('h1').click();
+    await expect(page.locator('#tbMore')).toBeHidden();
+    await focusPage(page);
+    await page.keyboard.press('Control+k');
+    await page.locator('#searchInput').fill('tempo.half');
+    await expect(page.locator('#searchResults .sr').first()).toContainText(/tempo\.half|÷2|moitié/i);
+    await page.keyboard.press('Enter');
+    await expect(page.locator('button[data-ctl="tempo.half"]')).toBeVisible();
+  });
+}

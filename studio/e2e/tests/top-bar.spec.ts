@@ -135,6 +135,74 @@ test('Maître drives master.brightness, never above 100 %, in sync with LIVE', a
   await expect.poll(async () => (await studio.live()).brightness).toBeLessThanOrEqual(1);
 });
 
+// T-504: at the usual screen sizes, no horizontal scroll, every top-bar
+// and tab-bar control inside the window, and the arm state with its
+// reason never cut (no ellipsis, no clipping by the status column).
+const SIZES = [[1024, 768], [1280, 800], [1440, 900], [1920, 1080]] as const;
+for (const [width, height] of SIZES) {
+  test(`at ${width}×${height}: nothing off screen, the arm reason in full`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    for (const ws of WORKSPACES) {
+      await openWorkspace(page, ws);
+      const fit = await page.evaluate(() => {
+        const de = document.documentElement;
+        const shown = (el: Element) => !!(el as HTMLElement).offsetParent;
+        const off = [...document.querySelectorAll('header button, header input, #wsTabs button')].filter(shown)
+          .filter(el => { const r = el.getBoundingClientRect(); return r.left < -0.5 || r.right > innerWidth + 0.5 || r.top < -0.5; })
+          .map(el => el.id || el.textContent!.trim());
+        const line = document.querySelector('.arm-line')!, status = document.querySelector('.tb-status')!.getBoundingClientRect();
+        const info = document.querySelector('#armInfo')!;
+        const outside = [...info.getClientRects()].some(r => r.left < status.left - 0.5 || r.right > status.right + 0.5 || r.top < status.top - 0.5 || r.bottom > status.bottom + 0.5);
+        const lock = document.querySelector('#lockBtn')!;
+        return { scroll: de.scrollWidth - de.clientWidth, off, text: info.textContent,
+          cut: line.scrollWidth > line.clientWidth || line.scrollHeight > line.clientHeight || outside,
+          lock: lock.scrollWidth - lock.clientWidth };
+      });
+      expect(fit.scroll, `horizontal scroll in ${ws}`).toBe(0);
+      expect(fit.off, `controls off screen in ${ws}`).toEqual([]);
+      expect(fit.text, ws).toMatch(/^Désarmé/);
+      expect(fit.cut, `arm state cut in ${ws}: ${fit.text}`).toBe(false);
+      expect(fit.lock, `#lockBtn overflows in ${ws}`).toBeLessThanOrEqual(0);
+      for (const sel of ['#blackoutBtn', '#estopBtn', '#armBtn', '#armInfo']) {
+        await expect(page.locator(sel), `${sel} in ${ws}`).toBeInViewport({ ratio: 1 });
+      }
+    }
+    // The secondary tempo controls: inline from 1900 px, else behind « ⋯ »,
+    // and once shown they fit in the window too.
+    await openWorkspace(page, 'live');
+    if (width < 1900) {
+      await expect(page.locator('#latBtn')).toBeHidden();
+      await page.locator('#tbMoreBtn').click();
+      await expect(page.locator('#tbMoreBtn')).toHaveAttribute('aria-expanded', 'true');
+    } else {
+      await expect(page.locator('#tbMoreBtn')).toBeHidden();
+    }
+    for (const sel of ['button[data-ctl="tempo.half"]', '#latBtn', '#vljBtn']) {
+      await expect(page.locator(sel), sel).toBeInViewport({ ratio: 1 });
+    }
+    if (width < 1900) {
+      await page.locator('h1').click();
+      await expect(page.locator('#tbMore')).toBeHidden();
+      await expect(page.locator('#tbMoreBtn')).toHaveAttribute('aria-expanded', 'false');
+    }
+  });
+}
+
+test('a long disarm reason wraps instead of being cut, at 1280 px', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  // The longest text the line can take: the reason and its source, the time.
+  // Set and measured in one go: the next frame writes the real state back.
+  const r = await page.evaluate(() => {
+    document.querySelector('#armInfo')!.textContent = 'Désarmé — raison : Sortie perdue, reconnexion en cours (système), 23:59:59';
+    const line = document.querySelector('.arm-line')!, arm = document.querySelector('#armBtn')!.getBoundingClientRect();
+    const status = document.querySelector('.tb-status')!.getBoundingClientRect();
+    const outside = [...document.querySelector('#armInfo')!.getClientRects()].some(q => q.right > status.right + 0.5 || q.bottom > status.bottom + 0.5);
+    return { cut: line.scrollWidth > line.clientWidth || line.scrollHeight > line.clientHeight || outside,
+      armInside: arm.right <= innerWidth && arm.top >= 0, scroll: document.documentElement.scrollWidth > innerWidth };
+  });
+  expect(r).toEqual({ cut: false, armInside: true, scroll: false });
+});
+
 // Last: stops this file's studio.
 test('engine gone: « Connexion au moteur perdue » within 2 s', async ({ page }) => {
   await focusPage(page);

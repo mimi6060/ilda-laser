@@ -1,7 +1,7 @@
 // Tempo bar: BPM field, Tap (Enter), Sync 1 (Backspace), ×2 / ÷2.
 // Keys are real key presses in the visible page (a hidden tab throttles
 // timers and would distort tap intervals).
-import { test, expect, useStudio, openUi, focusPage, type Tempo } from '../studio';
+import { test, expect, useStudio, openUi, openTopMore, focusPage, type Tempo } from '../studio';
 
 const studio = useStudio();
 const tempo = async () => (await studio.state()).tempo as Tempo;
@@ -93,6 +93,7 @@ test('the Tap button taps and Sync 1 resyncs', async ({ page }) => {
 });
 
 test('×2 and ÷2 double and halve the tempo', async ({ page }) => {
+  await openTopMore(page);
   await page.locator('button[data-ctl="tempo.double"]').click();
   await expect.poll(async () => (await tempo()).bpm).toBe(240);
   await expect(page.locator('#bpm')).toHaveValue('240.0');
