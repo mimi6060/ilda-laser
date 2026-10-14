@@ -107,3 +107,33 @@ test('with the largest offset, Escape still darkens the laser at once', async ({
   expect(after.filter((a) => a.lit > 0)).toEqual([]);
   await expect(page.locator('#estopBanner')).toBeVisible();
 });
+
+// T-504 review: behind « ⋯ » (below 1900 px) the Lat. menu still wraps its
+// text, the safety line included: nothing runs out of its panel. ⌘K on
+// a control behind « ⋯ » (÷2) opens it to show the button.
+for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
+  test(`at ${width}×${height} the Lat. menu keeps its text inside, and search reaches it`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await openTopMore(page);
+    await page.locator('#latBtn').click();
+    await expect(page.locator('#latMenu')).toBeVisible();
+    const out = await page.locator('#latMenu').evaluate(menu => {
+      const box = menu.getBoundingClientRect();
+      return [...menu.querySelectorAll('*')].filter(el => (el as HTMLElement).offsetParent)
+        .filter(el => { const r = el.getBoundingClientRect(); return r.right > box.right + 0.5 || r.left < box.left - 0.5 || el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow !== 'visible'; })
+        .map(el => el.id || el.textContent!.trim().slice(0, 40));
+    });
+    expect(out).toEqual([]);
+    const ws = await page.locator('#latMenu .hint').evaluateAll(els => els.filter(el => (el as HTMLElement).offsetParent).map(el => getComputedStyle(el).whiteSpace));
+    expect(ws.every(w => w === 'normal')).toBe(true);
+    // Closed, then found through the global search.
+    await page.locator('h1').click();
+    await expect(page.locator('#tbMore')).toBeHidden();
+    await focusPage(page);
+    await page.keyboard.press('Control+k');
+    await page.locator('#searchInput').fill('tempo.half');
+    await expect(page.locator('#searchResults .sr').first()).toContainText(/tempo\.half|÷2|moitié/i);
+    await page.keyboard.press('Enter');
+    await expect(page.locator('button[data-ctl="tempo.half"]')).toBeVisible();
+  });
+}

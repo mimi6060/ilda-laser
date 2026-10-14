@@ -1722,6 +1722,8 @@
     #tbMore.open { display: flex; align-items: center; gap: 4px; position: absolute; top: calc(100% + 8px); left: 0; z-index: 30; padding: 6px;
       border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; white-space: nowrap; }
   }
+  /* The nowrap is for the button row: the Lat. menu inside wraps its text (review of T-504). */
+  #tbMore.open #latMenu { white-space: normal; }
   .tb-more-wrap:has(.tb-extra.active, .vlj-open.active, .vlj-open.waiting) #tbMoreBtn { color: var(--accent); border-color: var(--accent); }
   .tempo #tempoSrc { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Compensation de latence (T-246). */
