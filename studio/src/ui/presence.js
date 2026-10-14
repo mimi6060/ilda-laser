@@ -11,7 +11,7 @@
 // imports its predecessor and app.js imports the last one, so the ES
 // evaluation order is the page order the script had.
 import './laser.js';
-import { $, api, apiJson, assignPageLeaving, noticeCondition, pps, sendLatest } from './core.js';
+import { $, api, apiJson, assignPageLeaving, noticeCondition, pps, sendLatest, setShortText } from './core.js';
 import { showPoints } from './state.js';
 import { lastPoints } from './view3d.js';
 import { drawPsnOverlay, drawSafetyOverlay, drawTargetsOverlay } from './targets.js';
@@ -72,7 +72,8 @@ function showPresence(f) {
   if (!p.hold_to_run) holdDown = false;
   const led = $('presenceLed');
   led.classList.toggle('ok', p.ui_alive);
-  led.textContent = libelle(p.ui_alive ? 'barre.presence.present' : 'barre.presence.absent');
+  if (p.ui_alive) setShortText(led, libelle('barre.presence.present'), libelle('barre.presence.present.court'));
+  else setShortText(led, libelle('barre.presence.absent'), libelle('barre.presence.absent.court'));
   const stalled = !f.engine_ok || (!f.armed && f.arm?.last_disarm?.reason === 'engine_stall');
   $('engineLed').classList.toggle('ok', !stalled);
   $('engineLed').classList.toggle('bad', stalled);

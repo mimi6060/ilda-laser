@@ -1926,9 +1926,9 @@
   .tb-master input { width: 110px; height: 18px; margin: 0; }
   @media (max-width: 1359px) { .tb-master input { width: 80px; } }
   .tb-master .v { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text); }
-  /* T-504: the status takes the room left. The arm state, its reason and
-     the safety profile never get cut: they wrap onto a second line. The
-     output and the LEDs may ellipsise (their title keeps the text). */
+  /* T-504: the status takes the room left. The arm state and its reason
+     never get cut: they wrap onto a second line. The output and the LEDs
+     may ellipsise (their title keeps the text). */
   .tb-status { display: flex; flex-direction: column; justify-content: center; gap: 0; min-width: 180px; flex: 1 1 260px; overflow: hidden; font-size: 11px; }
   /* Whole-pixel lines: the bar's height stays a whole number whether the
      arm state takes one line or two (no blurry half-pixel offsets). */
@@ -1944,6 +1944,26 @@
   .tb-status .leds { display: flex; gap: 10px; }
   .tb-status .led { flex: none; }
   .tb-status #midiStatus { flex: 0 1 auto; min-width: 48px; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
+  /* T-517: under 1440 px the column is only 240–280 px wide. The output
+     drops « Sortie : » (the TEST / DAC / PONK badge says it) and keeps the
+     device's name; the safety profile shows a shield instead of
+     « Profil : », always whole, and for a long output name its name
+     yields first, down to a few letters, never hidden; presence and MIDI
+     show their short form (data-short). Every title keeps the whole text. */
+  @media (max-width: 1439px) {
+    .out-line #output .pfx, .out-line #profilePill .sep { display: none; }
+    .tb-status > .out-line { gap: 6px; }
+    .out-line #profilePill { display: flex; align-items: center; gap: 4px; flex: 0 100 auto; min-width: 6.5em; overflow: hidden; }
+    /* The marker: a shield in the pill's colour (orange when the profile
+       needs a check); the word « Profil » stays the text for readers and the title. */
+    .out-line #profilePill .tag { --shield: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='M8 1.5 2.5 3.6v4.1c0 3.2 2.3 5.7 5.5 6.8 3.2-1.1 5.5-3.6 5.5-6.8V3.6z'/%3E%3Cpath d='m5.5 8 1.8 1.8L10.7 6.4'/%3E%3C/svg%3E");
+      flex: none; width: 12px; height: 12px; font-size: 0; background: currentColor;
+      -webkit-mask: var(--shield) center / contain no-repeat; mask: var(--shield) center / contain no-repeat; }
+    .out-line #profilePill .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tb-status [data-short] > .long { display: none; }
+    .tb-status [data-short]::after { content: attr(data-short); }
+    .tb-status #midiStatus { flex: none; min-width: 0; }
+  }
   #linkLost { padding: 6px 12px; border-radius: 8px; background: var(--warn); color: #241600; font-weight: 800; font-size: 12px; white-space: nowrap; box-shadow: 0 0 16px #ffb02088; }
   #linkLost[hidden] { display: none; }
   .tb-safety { display: flex; align-items: center; gap: 10px; margin-left: auto; }

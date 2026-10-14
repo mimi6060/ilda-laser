@@ -186,6 +186,106 @@ for (const [width, height] of SIZES) {
       await expect(page.locator('#tbMoreBtn')).toHaveAttribute('aria-expanded', 'false');
     }
   });
+
+  // T-517: the output's name, the presence and MIDI read at a glance (a
+  // compact form under 1440 px, the whole text in the title), never cut
+  // down to « Sortie :… » or to nothing.
+  test(`at ${width}×${height}: output name, presence and MIDI readable`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await expect(page.locator('#midiStatus')).toHaveText('MIDI : désactivé');
+    await expect(page.locator('#output')).toHaveText(/^Sortie : /);
+    for (const ws of WORKSPACES) {
+      await openWorkspace(page, ws);
+      // The second pass gives the output a 25-character name (as a DAC's
+      // « Helios 1 · Ether Dream »), built the way the page builds it.
+      const seen = await page.evaluate(() => {
+        const status = document.querySelector('.tb-status')!.getBoundingClientRect();
+        // The characters really on screen: inside the element and its
+        // clipping parents, before the ellipsis, the hidden parts skipped.
+        const shown = (sel: string) => {
+          const el = document.querySelector<HTMLElement>(sel)!;
+          const box = el.getBoundingClientRect(), parent = el.parentElement!.getBoundingClientRect();
+          const long = el.querySelector<HTMLElement>('.long');
+          if (el.dataset.short && long && getComputedStyle(long).display === 'none') {
+            const cut = el.scrollWidth > el.clientWidth + 0.5 || box.right > Math.min(status.right, parent.right) + 0.5;
+            return { text: el.dataset.short, cut, full: el.textContent!, title: el.title };
+          }
+          // Each text node is clipped by its own boxes up to the element's
+          // parent; an ellipsising box leaves room for its « … ».
+          const limit = (node: Node) => {
+            let right = Math.min(status.right, parent.right);
+            for (let b = node.parentElement; b && b !== el.parentElement; b = b.parentElement) {
+              right = Math.min(right, b.getBoundingClientRect().right - (b.scrollWidth > b.clientWidth ? 12 : 0));
+            }
+            return right;
+          };
+          let text = '';
+          const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          const range = document.createRange();
+          for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+            if (!n.parentElement!.checkVisibility()) continue;
+            const right = limit(n);
+            for (let i = 0; i < n.textContent!.length; i++) {
+              range.setStart(n, i); range.setEnd(n, i + 1);
+              const r = range.getBoundingClientRect();
+              if (r.width > 0 && r.right <= right + 0.5) text += n.textContent![i];
+              else if (r.width > 0) break;
+            }
+          }
+          return { text, cut: text.length < el.textContent!.length, full: el.textContent!, title: el.title };
+        };
+        // The profile's marker: the word « Profil », or under 1440 px a shield
+        // icon; shown whole, inside the pill and the column.
+        const marker = () => {
+          const tag = document.querySelector<HTMLElement>('#profilePill .tag')!;
+          const r = tag.getBoundingClientRect(), pill = tag.parentElement!.getBoundingClientRect();
+          const mask = getComputedStyle(tag).maskImage;
+          // The shield is painted by its background through the mask: it needs a colour.
+          const painted = !mask.includes('svg') || getComputedStyle(tag).backgroundColor !== 'rgba(0, 0, 0, 0)';
+          return { kind: mask.includes('svg') ? 'icon' : tag.innerText, whole: painted
+            && tag.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && r.width >= 10 && r.height >= 10
+            && tag.scrollWidth <= tag.clientWidth && r.left >= pill.left - 0.5 && r.right <= Math.min(pill.right, status.right) + 0.5 };
+        };
+        const now = { output: shown('#output'), presence: shown('#presenceLed'), midi: shown('#midiStatus'), profile: shown('#profilePill'), marker: marker() };
+        const out = document.querySelector('#output')!, before = [...out.childNodes];
+        const pfx = document.createElement('span');
+        pfx.className = 'pfx';
+        pfx.textContent = 'Sortie : ';
+        out.replaceChildren(pfx, 'Helios 1 · Ether Dream (IDN)');
+        const long = { output: shown('#output'), profile: shown('#profilePill'), marker: marker() };
+        out.replaceChildren(...before);
+        return { now, long };
+      });
+      const where = `${ws} at ${width}`;
+      // Today's test output: its name in full, with the profile next to it.
+      expect(seen.now.output.text.replace(/^Sortie : /, ''), where).toBe('Sortie de test');
+      expect(seen.now.output.title, where).toContain('Sortie : Sortie de test');
+      // Under 1440 px the output's name comes first; the profile keeps at least 6 letters.
+      const profileName = seen.now.profile.text.replace(/^Profil( : )?/, '');
+      if (width >= 1440) expect(profileName, where).toBe('Réglages actuels');
+      else expect('Réglages actuels'.startsWith(profileName) && profileName.length >= 6, `${where}: « ${profileName} »`).toBe(true);
+      expect(seen.now.profile.title, where).toContain('Profil : Réglages actuels');
+      // A long name: at least its first 15 characters; the profile yields but stays.
+      const name = seen.long.output.text.replace(/^Sortie : /, '');
+      expect(name.length, `${where}: « ${seen.long.output.text} »`).toBeGreaterThanOrEqual(15);
+      expect('Helios 1 · Ether Dream (IDN)'.startsWith(name), where).toBe(true);
+      // The safety profile stays recognisable: its marker whole (« Profil »,
+      // a shield under 1440 px), and the first letters of its name.
+      for (const v of [seen.now, seen.long]) {
+        expect(v.marker, where).toEqual({ kind: width < 1440 ? 'icon' : 'Profil', whole: true });
+        expect(v.profile.text, where).toMatch(width < 1440 ? /^Régl/ : /^Profil : Régl/);
+      }
+      expect(seen.long.profile.text.replace(/^Profil( : )?/, '').length, `${where}: profile « ${seen.long.profile.text} »`).toBeGreaterThanOrEqual(6);
+      // Presence: whole word(s), never cut.
+      expect(seen.now.presence.text, where).toMatch(/^(Opérateur présent|Présent)$/);
+      expect(seen.now.presence.cut, where).toBe(false);
+      // MIDI: a state, never empty nor a bare ellipsis; the short form is never cut.
+      expect(seen.now.midi.text, where).toMatch(/^MIDI\b/);
+      expect(seen.now.midi.text.replace(/^MIDI\s*:?\s*/, '').replace(/…$/, '').length, `${where}: « ${seen.now.midi.text} »`).toBeGreaterThan(0);
+      if (width < 1440) expect(seen.now.midi, where).toMatchObject({ text: 'MIDI ✕', cut: false });
+      expect(seen.now.midi.title, where).toContain('MIDI : désactivé');
+    }
+  });
 }
 
 test('a long disarm reason wraps instead of being cut, at 1280 px', async ({ page }) => {
