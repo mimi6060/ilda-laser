@@ -80,7 +80,10 @@ const inside = (a: Box, b: Box, tol = 0.5) =>
 async function setMode(page: Page, mode: typeof MODES[number]) {
   await page.locator(`#viewSeg [data-view="${mode}"]`).click();
   await expect(page.locator(`#viewSeg [data-view="${mode}"]`)).toHaveClass(/active/);
-  if (mode !== '2d') await expect(page.locator('#beams')).toBeVisible();
+  // In 2D+3D with the pane in a view up to 420 px wide, the 3D view
+  // yields to the 2D output (T-516: stage-layout.spec measures it).
+  if (mode === '3d') await expect(page.locator('#beams')).toBeVisible();
+  if (mode === 'both') await expect(page.locator('#preview')).toBeVisible();
   await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
 }
 
