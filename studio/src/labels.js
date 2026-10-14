@@ -265,7 +265,8 @@ const LABELS = Object.freeze({
   // Vidéo de la vue 3D quand le panneau la masque.
   'video.arretee.masquee': 'Enregistrement 3D arrêté : vue 3D masquée par le panneau Préparé — vidéo téléchargée ({taille})',
   'video.arretee.masquee.vide': 'Enregistrement 3D arrêté : vue 3D masquée par le panneau Préparé — vidéo vide, rien à télécharger',
-  'video.impossible.masquee': 'Enregistrement 3D impossible : la vue 3D est masquée par le panneau Préparé (couper Préparer, Vider, ou mode 3D)',
+  // {avis} = l'avis de la vue (apercu.3d_masquee[.mode]) : la même consigne selon l'état (T-518).
+  'video.impossible.masquee': 'Enregistrement 3D impossible — {avis}',
   // Commun
   'commun.fermer': 'Fermer',
   'commun.oui': 'Oui',

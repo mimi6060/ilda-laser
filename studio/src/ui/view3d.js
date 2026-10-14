@@ -282,7 +282,12 @@ const vidReady = () => !!view3d && show3d && !collapsed3d && !!vidFormat();
 const vidHidden = () => collapsed3d;
 const vidPad = n => String(n).padStart(2, '0');
 function vidClock(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return `${vidPad(Math.floor(s / 60))}:${vidPad(s % 60)}`; }
-function vidMb(bytes) { return (bytes / 1048576).toLocaleString('fr-FR', { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + ' Mo'; }
+// Under 1 000 ko in ko (at least 1), so a short capture never reads « 0,0 Mo » (T-518).
+function vidMb(bytes) {
+  const ko = Math.max(1, Math.round(bytes / 1024));
+  if (ko < 1000) return ko + ' ko';
+  return (bytes / 1048576).toLocaleString('fr-FR', { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + ' Mo';
+}
 function vidShow() {
   const btn = $('vidBtn'), on = !!REC.rec, ok = on || vidReady();
   btn.disabled = !ok;
@@ -425,7 +430,8 @@ function vidFinish(rec) {
 }
 function vidToggle() {
   if (REC.rec) vidStop('arrêt');
-  else if (collapsed3d) notify({ level: 'info', source: 'Vidéo 3D', text: libelle('video.impossible.masquee') });
+  // Same remedy as the #no3dNote notice above the view: it depends on « Préparer » (T-518).
+  else if (collapsed3d) notify({ level: 'info', source: 'Vidéo 3D', text: libelle('video.impossible.masquee', { avis: libelle(prepMode ? 'apercu.3d_masquee.mode' : 'apercu.3d_masquee') }) });
   else vidStart();
 }
 // The options menu, beside the button.
@@ -450,6 +456,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) vidSt
 window.__rec = {
   canvas: () => REC.cv, recording: () => !!REC.rec, last: () => REC.last,
   format: () => { const f = vidFormat(); return f && f.mime; },
+  size: bytes => vidMb(bytes),
 };
 vidShow();
 
