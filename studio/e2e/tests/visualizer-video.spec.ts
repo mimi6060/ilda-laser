@@ -98,7 +98,9 @@ test('records n seconds of the 3D view, watermarked, without a request or a chan
   expect(file.suggestedFilename()).toMatch(/^laser-studio-simulation-\d{8}-\d{6}\.(webm|mp4)$/);
   const bytes = readFileSync((await file.path())!);
   expect(bytes.length).toBeGreaterThan(0);
-  await expect(page.locator('#vidStatus')).toHaveText(/^Vidéo prête \(\d+,\d Mo\)$/);
+  // The size of the file itself, in ko below 1 000 ko (T-518).
+  await expect(page.locator('#vidStatus')).toHaveText(`Vidéo prête (${await page.evaluate(n => (window as any).__rec.size(n), bytes.length)})`);
+  await expect(page.locator('#vidStatus')).toHaveText(/^Vidéo prête \((\d+ ko|\d+,\d Mo)\)$/);
   await expect(page.locator('#vidBtn')).toHaveText('● Enregistrer');
   const last = await page.evaluate(() => (window as any).__rec.last());
   expect(last.why).toBe('fin');
@@ -198,21 +200,61 @@ test('the prepared pane hiding the 3D view ends the recording with a visible rea
   const stopped = page.locator('#toasts .toast', { hasText: 'Enregistrement 3D arrêté' });
   await expect(stopped).toBeVisible();
   await expect(stopped).toContainText('vue 3D masquée par le panneau Préparé');
-  await expect(stopped).toContainText(/\d Mo/);
-  // Alt+R while the canvas is hidden: nothing records, a message says why.
+  // A short capture: a non-zero size, in ko under 1 Mo, never « 0,0 Mo » (T-518).
+  await expect(stopped).toContainText(/\d (ko|Mo)/);
+  await expect(stopped).not.toContainText('0,0 Mo');
+  // Alt+R while the canvas is hidden: nothing records, a message says why,
+  // with the notice's own remedy: « Préparer » on → « Vider » would not help (T-518).
+  const note = page.locator('#no3dNote');
+  await expect(note).toBeVisible();
+  const refused = page.locator('#toasts .toast', { hasText: 'Enregistrement 3D impossible' });
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.keyboard.press('Alt+KeyR');
-  await expect(page.locator('#toasts .toast', { hasText: 'Enregistrement 3D impossible' })).toBeVisible();
+  await expect(refused).toBeVisible();
+  await expect(refused).toContainText(await note.innerText());
+  await expect(refused).toContainText('couper Préparer ou mode 3D');
+  await expect(refused).not.toContainText('Vider');
+  await expect(refused).not.toContainText('Envoyer');
   expect(await page.evaluate(() => (window as any).__rec.recording())).toBe(false);
   await expect(page.locator('#vid3d')).toBeHidden();
-  // « Préparer » off (nothing prepared): the 3D view and the button are back.
+  // A real cue prepared, then « Préparer » off: the pane stays, so does the
+  // collapse, and the refusal now names « Vider, Envoyer ou mode 3D », as the notice.
+  const cueId = await page.locator('#cues .cue[data-id]').first().getAttribute('data-id');
+  expect(await studio.post('/api/prepared', { id: cueId })).toBe(200);
+  await expect(page.locator('#prepSend')).toBeEnabled();
   await page.locator('#prepBtn').click();
+  await expect(page.locator('#prepBtn')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#beams')).toBeHidden();
+  await page.locator('#toasts .toast').evaluateAll(ts => ts.forEach(t => t.remove()));
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('Alt+KeyR');
+  await expect(refused).toBeVisible();
+  await expect(refused).toContainText(await note.innerText());
+  await expect(refused).toContainText('Vider, Envoyer ou mode 3D');
+  await expect(refused).not.toContainText('couper Préparer');
+  expect(await page.evaluate(() => (window as any).__rec.recording())).toBe(false);
+  // « Vider » (« Préparer » off): the pane goes, the 3D view and the button are back.
+  await page.locator('#prepClear').click();
   await expect(page.locator('#beams')).toBeVisible();
   await expect(page.locator('#vid3d')).toBeVisible();
   await expect(page.locator('#vidBtn')).toBeEnabled();
   expect(seen.errors).toEqual([]);
-  // The recording, its stop and the refusal make no request (« Préparer » is this page's mode).
-  expect(unusual(seen.requests, from, studio.url)).toEqual([]);
+  // The recording, its stop and the refusals make no request (« Préparer » is this
+  // page's mode); « Vider » is the one studio call.
+  expect(unusual(seen.requests, from, studio.url).filter(r => !r.endsWith('/api/prepared/clear'))).toEqual([]);
+});
+
+// T-518: the size a stopped capture reports is never « 0,0 Mo ».
+test('a capture size reads in ko below 1 000 ko and in Mo above, never 0,0 Mo', async ({ page }) => {
+  await openUi(page, studio);
+  const size = (b: number) => page.evaluate(n => (window as any).__rec.size(n), b);
+  expect(await size(1)).toBe('1 ko');
+  expect(await size(300)).toBe('1 ko');
+  expect(await size(12 * 1024)).toBe('12 ko');
+  expect(await size(999 * 1024)).toBe('999 ko');
+  expect(await size(1000 * 1024)).toBe('1,0 Mo');
+  expect(await size(1048576)).toBe('1,0 Mo');
+  expect(await size(5.25 * 1048576)).toBe('5,3 Mo');
 });
 
 test('without MediaRecorder the button is greyed with its reason, no console error', async ({ page }) => {
