@@ -641,6 +641,8 @@
         <span id="vidStatus" class="hint" role="status" aria-live="polite"></span>
       </span>
       <span class="hint" id="hint3d" hidden title="Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer">Glisser pour tourner, molette pour zoomer, Maj+glisser pour déplacer</span>
+      <!-- T-516: in a narrow view, 2D+3D with the prepared pane shows the 2D output alone; the bar says so. -->
+      <span class="hint" id="no3dNote" hidden role="status" title="Dans une vue étroite, le panneau « Préparé » prend la place de la vue 3D (et de son volume public). Elle revient quand le panneau disparaît (Préparer coupé et aucun cue préparé) ou en mode 3D."><span class="prep-on" data-t="apercu.3d_masquee.mode" data-t-fallback>Vue 3D masquée (panneau Préparé) : couper Préparer ou mode 3D</span><span class="prep-off" data-t="apercu.3d_masquee" data-t-fallback>Vue 3D masquée (panneau Préparé) : Vider, Envoyer ou mode 3D</span></span>
     </div>
     <div class="view">
       <canvas id="preview" width="900" height="900"></canvas>

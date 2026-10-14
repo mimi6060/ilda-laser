@@ -11,7 +11,7 @@
 // imports its predecessor and app.js imports the last one, so the ES
 // evaluation order is the page order the script had.
 import './state.js';
-import { $, VUE, VUE_RENDU, api, hex, rgb, sendLatest, setVal } from './core.js';
+import { $, VUE, VUE_RENDU, api, hex, notify, rgb, sendLatest, setVal } from './core.js';
 import { draw } from './presence.js';
 import { remember, remembered } from './workspaces.js';
 import { outdoorState, safety } from './safety.js';
@@ -72,11 +72,33 @@ function showAud3d() {
 // itself; the badges and the stats underneath never move.
 const R3_OPEN_KEY = 'laserStudio.beam3d.settingsOpen';
 let render3dOpen = remembered(R3_OPEN_KEY) === '1';
+// T-516: the 3D canvas is hidden by the stylesheet in a view up to 420 px
+// wide in 2D+3D with the prepared pane (the 2D output alone is kept).
+let collapsed3d = false;
 function showRender3dDrawer() {
-  const open = show3d && render3dOpen;
+  const open = show3d && render3dOpen && !collapsed3d;
   $('render3d').hidden = !open;
-  $('render3dBtn').hidden = !show3d;
+  $('render3dBtn').hidden = !show3d || collapsed3d;
   $('render3dBtn').setAttribute('aria-expanded', String(open));
+}
+// While the 3D canvas is collapsed (see collapsed3d), the bar says so
+// (#no3dNote) and the 3D-only controls go: « Recentrer », the drag hint,
+// the video (a recording in progress stops, as when leaving the 3D
+// view), the settings drawer and its button. Everything comes back as
+// soon as the canvas is drawn again (pane gone, 3D mode, wider view).
+// Called after a mode or pane change (setView shows the controls again
+// for a 3D mode, so this always re-applies the state), and from the
+// view's ResizeObserver (on the next frame, so the bar's change never
+// lands in the observer's own cycle).
+function sync3dCollapsed() {
+  const next = show3d && !$('beams').offsetParent, changed = next !== collapsed3d;
+  collapsed3d = next;
+  $('no3dNote').hidden = !next;
+  for (const id of ['recenter3d', 'hint3d']) $(id).hidden = !show3d || next;
+  if (next) $('vid3d').hidden = true; else if (show3d) $('vid3d').hidden = false;
+  if (next && changed) { vidStop('masquee'); closeRecMenu(); }
+  showRender3dDrawer();
+  if (changed) vidShow(); // the button's enabled state follows vidReady()
 }
 // T-512: the drawer starts under the badges' row, however many lines it
 // wraps to (--badges-h on the view, at least 48 px), the prepared pane
@@ -106,6 +128,7 @@ function fitDrawerUnderBadges() {
     view.classList.toggle('no-side', view.clientHeight - low - head - 18 < need);
   }
   drawerMoreBelow();
+  if ((show3d && !$('beams').offsetParent) !== collapsed3d) requestAnimationFrame(sync3dCollapsed);
 }
 $('render3d').addEventListener('scroll', drawerMoreBelow, { passive: true });
 if (typeof ResizeObserver === 'function') {
@@ -211,6 +234,7 @@ async function setView(mode) {
   showAud3d();
   if (show2d) draw(lastShown);
   remember(STAGE_KEY, mode);
+  sync3dCollapsed();
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
 
@@ -252,7 +276,10 @@ function vidFormat() {
   for (const [mime, ext] of REC_FORMATS) { try { if (MediaRecorder.isTypeSupported(mime)) return { mime, ext }; } catch { /* next */ } }
   return null;
 }
-const vidReady = () => !!view3d && show3d && !!vidFormat();
+// Not while the canvas is collapsed behind the prepared pane (T-516): the
+// button is hidden, and Alt+R says why (vidToggle).
+const vidReady = () => !!view3d && show3d && !collapsed3d && !!vidFormat();
+const vidHidden = () => collapsed3d;
 const vidPad = n => String(n).padStart(2, '0');
 function vidClock(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return `${vidPad(Math.floor(s / 60))}:${vidPad(s % 60)}`; }
 function vidMb(bytes) { return (bytes / 1048576).toLocaleString('fr-FR', { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + ' Mo'; }
@@ -380,17 +407,27 @@ function vidFinish(rec) {
   REC.chunks = []; REC.bytes = 0; REC.why = '';
   vidCleanup();
   vidShow();
-  if (!bytes) { $('vidStatus').textContent = 'Vidéo vide : rien à télécharger'; return; }
+  if (!bytes) {
+    $('vidStatus').textContent = 'Vidéo vide : rien à télécharger';
+    if (why === 'masquee') notify({ level: 'warning', source: 'Vidéo 3D', text: libelle('video.arretee.masquee.vide') });
+    return;
+  }
   const blob = new Blob(chunks, { type: fmt.mime.split(';')[0] });
   REC.last = { name, bytes: blob.size, seconds: REC.elapsed, mime: blob.type, why };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-  const said = { vue: ' (vue 3D quittée)', espace: ' (espace de travail changé)', page: ' (page masquée)', taille: ' (taille maximale atteinte)', erreur: ' (erreur du navigateur)' }[why] || '';
+  const said = { vue: ' (vue 3D quittée)', espace: ' (espace de travail changé)', page: ' (page masquée)', taille: ' (taille maximale atteinte)', erreur: ' (erreur du navigateur)', masquee: ' (vue 3D masquée par le panneau Préparé)' }[why] || '';
   $('vidStatus').textContent = `Vidéo prête (${vidMb(blob.size)})${said}`;
+  // The status line sits in #vid3d, hidden with the collapsed canvas (T-516): a toast says it.
+  if (why === 'masquee') notify({ level: 'warning', source: 'Vidéo 3D', text: libelle('video.arretee.masquee', { taille: vidMb(blob.size) }) });
 }
-function vidToggle() { if (REC.rec) vidStop('arrêt'); else vidStart(); }
+function vidToggle() {
+  if (REC.rec) vidStop('arrêt');
+  else if (collapsed3d) notify({ level: 'info', source: 'Vidéo 3D', text: libelle('video.impossible.masquee') });
+  else vidStart();
+}
 // The options menu, beside the button.
 function closeRecMenu() { $('vidMenu').hidden = true; $('vidOptBtn').setAttribute('aria-expanded', 'false'); }
 function openRecMenu() {
@@ -443,6 +480,7 @@ function showPrepPane() {
   if (on && !prepTimer) { prepTimer = setInterval(pollPrepared, 50); pollPrepared(); }
   if (!on && prepTimer) { clearInterval(prepTimer); prepTimer = null; }
   if (!c) draw([], prepCv);
+  sync3dCollapsed();
 }
 function showPrepared(p) {
   if (!p || p.rev === prepRev) return;
@@ -485,4 +523,4 @@ $('prepColor').oninput = e => prepPost('/api/prepared/adjust', { color: rgb(e.ta
 export { R3_KEY, REC, STAGE_KEY, assignCam3dRestored, assignLastPoints, assignLastShown, beam3d,
   cam3dRestored, lastPoints, lastShown, loadRender3d, outdoorTo3d, prepMode, prepareCue, prepared,
   safetyTo3d, saveRender3d, sendPrepared, setCam3d, setView, show2d, show3d, showCam3d, showPrepared,
-  setRender3dOpen, showRender3d, vidReady, vidStop, vidToggle, view3d };
+  setRender3dOpen, showRender3d, vidHidden, vidReady, vidStop, vidToggle, view3d };

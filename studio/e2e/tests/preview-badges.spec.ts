@@ -80,7 +80,10 @@ const inside = (a: Box, b: Box, tol = 0.5) =>
 async function setMode(page: Page, mode: typeof MODES[number]) {
   await page.locator(`#viewSeg [data-view="${mode}"]`).click();
   await expect(page.locator(`#viewSeg [data-view="${mode}"]`)).toHaveClass(/active/);
-  if (mode !== '2d') await expect(page.locator('#beams')).toBeVisible();
+  // In 2D+3D with the pane in a view up to 420 px wide, the 3D view
+  // yields to the 2D output (T-516: stage-layout.spec measures it).
+  if (mode === '3d') await expect(page.locator('#beams')).toBeVisible();
+  if (mode === 'both') await expect(page.locator('#preview')).toBeVisible();
   await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
 }
 
@@ -188,6 +191,9 @@ for (const size of SIZES) {
           const cue = prep === 'cue' || prep === 'cue-only';
           await checkBadges(page, label, expected, prep !== 'none', cue);
           if (mode === '2d') continue;
+          // T-516: with the 3D canvas collapsed behind the pane (2D+3D in
+          // a narrow view), the drawer and its button are hidden with it.
+          if (!(await page.locator('#beams').isVisible())) { await expect(page.locator('#render3dBtn'), label).toBeHidden(); await expect(page.locator('#render3d'), label).toBeHidden(); continue; }
           await open3dSettings(page);
           await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
           await checkBadges(page, `${label} drawer open`, expected, prep !== 'none', cue);

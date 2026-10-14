@@ -172,21 +172,34 @@
     grid-template-areas: "stage layers panel" "cues cues cues"; }
   main[data-ws-active="timeline"] { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); grid-template-rows: minmax(300px, 44%) minmax(0, 1fr);
     grid-template-areas: "stage panel" "editor editor"; }
+  /* TIMELINE in 2D without the prepared pane (T-515): the preview is a
+     square bound by the row's height (349 px at 1920×1080), and a 2fr
+     stage left a 400 px hole beside it. The stage column is then just
+     wider than the square (its stats wrap to two lines) and the panel
+     gets the room: 494 px at 1920 (preview 332, hole 162), 380 px at
+     1440 and 1280 (hole 127 / 166), 380 at 1024 (hole 180). In 3D,
+     2D+3D or with the pane the width is used, so 2fr stays. */
+  main[data-ws-active="timeline"]:has(> .stage > .view:not(.both, .prep) > canvas#preview:not([hidden])) { grid-template-columns: minmax(380px, 1fr) minmax(0, 2.8fr); }
   /* A 1024 px screen: narrower layers and panel so the stage can still
      show the 2D and 3D views side by side (2 × 160 px). */
   @media (max-width: 1100px) {
     main[data-ws-active="live"] { grid-template-columns: minmax(0, 1fr) 300px 330px; }
-    /* Under a 338 px view, one line of stats: the points and the safety
+    /* Under a 400 px view, one line of stats: the points and the safety
        counter stay; the frame rate and the key reminders (in the
-       shortcuts sheet anyway) go. */
-    main[data-ws-active="live"] .stats > span:nth-child(2), main[data-ws-active="live"] .stats > span:last-child { display: none; }
+       shortcuts sheet anyway) go. LIVE and TIMELINE (T-515): the
+       TIMELINE stage sits over the editor, whose tracks need the rows. */
+    main:is([data-ws-active="live"], [data-ws-active="timeline"]) .stats > span:nth-child(2),
+    main:is([data-ws-active="live"], [data-ws-active="timeline"]) .stats > span:last-child { display: none; }
     /* A 1024×768 screen with the top bar on two rows (T-504) leaves the
        LIVE stage 241 px: smaller page padding and a tighter view bar
        (two rows in 3D) give the 160 px view its room back. */
     main { padding: 6px 12px; gap: 6px; }
-    main[data-ws-active="live"] .viewbar { gap: 2px 8px; margin-bottom: 0; }
-    main[data-ws-active="live"] .viewbar .seg button, main[data-ws-active="live"] .viewbar > button { padding: 3px 10px; }
-    main[data-ws-active="live"] .stats { margin-top: 2px; }
+    main:is([data-ws-active="live"], [data-ws-active="timeline"]) .viewbar { gap: 2px 8px; margin-bottom: 0; }
+    main:is([data-ws-active="live"], [data-ws-active="timeline"]) .viewbar .seg button,
+    main:is([data-ws-active="live"], [data-ws-active="timeline"]) .viewbar > button { padding: 3px 10px; }
+    main[data-ws-active="timeline"] .viewbar .seg button, main[data-ws-active="timeline"] .viewbar > button { padding: 2px 8px; }
+    main[data-ws-active="timeline"] #tlEditor { padding: 6px 8px; gap: 4px 6px; }
+    main:is([data-ws-active="live"], [data-ws-active="timeline"]) .stats { margin-top: 2px; }
     /* 64 px layer cards: 2 px more for the speed select (« BPM »). */
     main[data-ws-active="live"] .ws-layers .layer { padding: 6px 2px; }
     main[data-ws-active="live"] .ws-layers .layers { gap: 4px; }
@@ -207,12 +220,44 @@
     /* Lower rows in the cue header, so one row of cues stays whole. */
     .ws-cues .cue-bar .seg button, .ws-cues .cue-bar > button, .ws-cues .fest-row button { padding: 4px 8px; }
     .ws-cues .cue-bar input, .ws-cues .cue-bar select { padding: 5px; }
+    /* TIMELINE (T-515): the 300 px stage row left the editor 259 px, of
+       which the toolbar took up to 206: 16 px of tracks. The stage row
+       is now what the 3D view needs at 1024 (bar on two rows 70 + view
+       160 + one line of stats 19, 3 px spare; the 2D preview gets
+       200 px) and the editor the rest: with the compact toolbar below,
+       at least two tracks show with their clips in every mode (193 px
+       of tracks with an example show open). An `auto` row would not do:
+       Chrome sizes it to the canvases' cqh, which falls back to the
+       viewport while the container's height is unknown. */
+    main[data-ws-active="timeline"] { grid-template-rows: 252px minmax(0, 1fr); }
+  }
+  /* The cue grid's header at 1024 (T-516), after the 780 px rules it
+     overrides: the cue bar wrapped to two rows and the palettes to two,
+     leaving one row of cues in the 300 px cue region. Smaller type,
+     padding and gaps put the cue bar on one row (« Basculer … Quantif.
+     Off Temps Mesure Plus… » in 970 px) and lower every row: two rows
+     of cues fit (2 × 56 + 6 = 118 px). */
+  @media (max-width: 1100px) {
+    .ws-cues h2 { margin-bottom: 4px; }
+    .ws-cues .cue-bar, .ws-cues .fest-row, .ws-cues .cue-tabs-row { gap: 4px 5px; margin-bottom: 4px; font-size: 11px; }
+    .ws-cues .cue-bar .seg button, .ws-cues .cue-bar > button, .ws-cues .fest-row button, .ws-cues .cue-tabs-row > button { padding: 3px 5px; font-size: 11px; }
+    .ws-cues .cue-bar label, .ws-cues .fest-row label, .ws-cues .cue-bar select, .ws-cues .cue-bar input { font-size: 11px; }
+    .ws-cues .cue-bar select, .ws-cues .cue-bar input { padding: 3px; }
+    .ws-cues .cue-tabs button { padding: 4px 10px 4px 8px; font-size: 11px; }
+    .ws-cues .fest-pal { padding: 3px 8px 3px 5px; gap: 5px; }
+    .ws-cues .fest-pal .dot { width: 12px; height: 12px; }
   }
   /* TIMELINE editor (T-162): toolbar, then library | track heads | canvas. */
   #tlEditor { grid-area: editor; display: grid; min-height: 0; min-width: 0; gap: 6px 8px; padding: 8px 10px;
     grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "tools tools" "lib tracks"; }
   .tl-tools { grid-area: tools; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .tl-tools button { padding: 5px 9px; font-size: 12px; }
+  /* Rows the toolbar does not need (T-515): the « ? » (added by help.js
+     after the message line, so it sat alone on a last row) goes first;
+     the message line takes no row while it is empty; the knob labels
+     lose the 10 px label margin that made their rows 41 px. */
+  .tl-tools > .help-q { order: -1; }
+  .tl-tools .tl-knob { margin: 0; }
   .tl-tools input[type=number] { width: 62px; padding: 4px; }
   .tl-tools input[type=text] { width: 150px; padding: 4px; }
   .tl-tools select { width: auto; padding: 4px; }
@@ -220,6 +265,18 @@
   .tl-tools .sep { width: 1px; align-self: stretch; background: var(--line); }
   #tlModified { color: var(--warn); font-size: 12px; }
   #tlEdMsg { margin: 0; flex-basis: 100%; }
+  #tlEdMsg:empty { display: none; }
+  /* The toolbar at 1024 (T-515, after the rules it overrides): smaller
+     type, padding and gaps: three rows of 23 px and the message line
+     with an example show open (96 px) instead of five rows and the
+     « ? » (206 px). */
+  @media (max-width: 1100px) {
+    .tl-tools { gap: 4px; }
+    .tl-tools button, .tl-tools .tl-knob, #tlModified { font-size: 11px; }
+    .tl-tools button { padding: 3px 7px; }
+    .tl-tools input[type=number], .tl-tools input[type=text], .tl-tools select { padding: 3px; }
+    #tlEdMsg { font-size: 11px; line-height: 1.3; }
+  }
   #tlEdMsg.err { color: var(--danger); }
   .tl-csv { position: relative; }
   #tlCsvMenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 180px; display: flex; flex-direction: column; gap: 2px; padding: 6px;
@@ -669,6 +726,22 @@
   .view.prep.no-side > canvas#beams { width: calc(100cqw - 208px); }
   .view.prep.no-side.both > canvas#preview { width: min(calc((100cqw - 220px) / 2), 100cqh); }
   .view.prep.no-side.both > canvas#beams { width: calc((100cqw - 220px) / 2); }
+  /* A narrow view (LIVE, TIMELINE and RÉGLAGES at 1024: 358–398 px) in
+     2D+3D with the pane (T-516): three squares and the 196 px pane left
+     the output 69 px. The 2D output alone is kept (the task's choice:
+     it is what « Envoyer » replaces), 150–190 px wide, without the
+     slider column; the 3D view and its sliders are back as soon as the
+     pane goes. The audience count (badge and stats) comes from the
+     frame, not from the drawing, so it stays. PUPITRE keeps its own
+     stacked layout (T-513). (The pane's variables are set on the pane:
+     a rule on .view itself would not apply here, since an element is
+     not its own query container.) */
+  @container stageview (max-width: 420px) {
+    main:not([data-ws-active="desk"]) .view.prep.both > canvas#beams { display: none; }
+    main:not([data-ws-active="desk"]) .view.prep.both > #prepPane { --pw: 196px; --pcw: 180px; }
+    main:not([data-ws-active="desk"]) .view.prep.both .prep-side { display: none; }
+    main:not([data-ws-active="desk"]) .view.prep.both > canvas#preview, main:not([data-ws-active="desk"]) .view.prep.no-side.both > canvas#preview { width: min(calc(100cqw - 208px), 100cqh); }
+  }
   /* PUPITRE's 300 px stage (T-513): the pane goes under the views, full
      width and without the slider column, sized so that the whole stack
      fits the view: in 2D or 3D the output keeps 160 px, in 2D+3D the two
@@ -1805,6 +1878,19 @@
   .cue:hover { border-color: color-mix(in srgb, var(--cat) 60%, #262a3b); border-left-color: var(--cat); box-shadow: 0 0 16px color-mix(in srgb, var(--cat) 25%, transparent); }
   .cue canvas.th { width: 46px; height: 46px; aspect-ratio: 1; border: 0; border-radius: 7px; background: #000; flex: none; }
   .cue .n { flex: 1; min-width: 0; padding-right: 10px; font-weight: 600; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  /* A word wider than the name's box (« Spirographe » in 67 px at 1280)
+     wraps inside the word (hyphenated when the browser can) rather than
+     get cut sideways without a sign; the third line ends in « … » (T-516). */
+  .cue .n { overflow-wrap: anywhere; hyphens: auto; }
+  /* Cue names at 1024 (T-516): a 116 px cell with a 46 px picture left
+     36 px of text, and « Lissajous » (55 px) was cut mid-word. A 32 px
+     picture and 11 px type give the name 58 px: « Lissajous » and
+     « Faisceaux » (54 px) fit a line. */
+  @media (max-width: 1100px) {
+    .cue { gap: 5px; padding-right: 6px; }
+    .cue canvas.th { width: 32px; height: 32px; border-radius: 5px; }
+    .cue .n { font-size: 11px; padding-right: 8px; }
+  }
   .cue .key { top: 3px; right: 5px; font-family: ui-monospace, "SF Mono", monospace; }
   .cue .tag { bottom: 3px; right: 6px; }
   /* Cue program (T-157): « ∿ » over the picture, which plays on hover. */
@@ -2010,6 +2096,15 @@
   .vid3d { min-width: 0; flex: 0 1 auto; }
   /* One line: the 3D hint gives way to the buttons (its full text stays in its title). */
   .viewbar #hint3d { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* T-516: the notice that the 3D view is hidden behind the prepared pane
+     takes a row of its own in the bar (where « Recentrer », the drag hint
+     and the video sat), whole on one line in a 358 px stage at 11 px. */
+  .viewbar #no3dNote { flex: 1 1 100%; font-size: 11px; color: var(--warn); overflow: visible; text-overflow: clip; }
+  .viewbar #no3dNote[hidden] { display: none; }
+  /* Its text names what brings the 3D back in the current state: with
+     « Préparer » on the pane stays whatever is prepared (couper Préparer),
+     off it goes with the cue (Vider, Envoyer). */
+  body.prep-mode #no3dNote .prep-off, body:not(.prep-mode) #no3dNote .prep-on { display: none; }
   #vidBtn { white-space: nowrap; font-variant-numeric: tabular-nums; }
   #vidMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 4px; width: 280px; padding: 10px; border-radius: 10px;
     background: var(--panel); border: 1px solid var(--line); box-shadow: 0 10px 30px #000a; }

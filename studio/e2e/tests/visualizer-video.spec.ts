@@ -172,6 +172,49 @@ test('Alt+R starts and stops in LIVE; 1920×1080 draws the 3D view at that size'
   expect(seen.errors).toEqual([]);
 });
 
+// T-516: at 1024×768 in 2D+3D the prepared pane hides the 3D canvas. A
+// recording then ends with its file and a visible toast naming the
+// reason (the status line sits in the hidden #vid3d), and Alt+R is
+// refused with a message while the canvas is hidden.
+test('the prepared pane hiding the 3D view ends the recording with a visible reason; Alt+R is refused meanwhile', async ({ page }) => {
+  const seen = watch(page);
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await openUi(page, studio);
+  await page.locator('#viewSeg [data-view="both"]').click();
+  await expect(page.locator('#beams')).toBeVisible();
+  await expect(page.locator('#vidBtn')).toBeEnabled();
+  await setPrefs(page, '0', 'vue');
+  const from = seen.requests.length;
+  const download = page.waitForEvent('download', { timeout: 15_000 });
+  await page.locator('#vidBtn').click();
+  await expect(page.locator('#vidBtn')).toHaveClass(/recording/);
+  await page.waitForTimeout(1500);
+  await page.locator('#prepBtn').click();
+  expect((await download).suggestedFilename()).toMatch(/\.(webm|mp4)$/);
+  expect(await page.evaluate(() => (window as any).__rec.recording())).toBe(false);
+  expect(await page.evaluate(() => (window as any).__rec.last().why)).toBe('masquee');
+  await expect(page.locator('#beams')).toBeHidden();
+  await expect(page.locator('#vid3d')).toBeHidden();
+  const stopped = page.locator('#toasts .toast', { hasText: 'Enregistrement 3D arrêté' });
+  await expect(stopped).toBeVisible();
+  await expect(stopped).toContainText('vue 3D masquée par le panneau Préparé');
+  await expect(stopped).toContainText(/\d Mo/);
+  // Alt+R while the canvas is hidden: nothing records, a message says why.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('Alt+KeyR');
+  await expect(page.locator('#toasts .toast', { hasText: 'Enregistrement 3D impossible' })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__rec.recording())).toBe(false);
+  await expect(page.locator('#vid3d')).toBeHidden();
+  // « Préparer » off (nothing prepared): the 3D view and the button are back.
+  await page.locator('#prepBtn').click();
+  await expect(page.locator('#beams')).toBeVisible();
+  await expect(page.locator('#vid3d')).toBeVisible();
+  await expect(page.locator('#vidBtn')).toBeEnabled();
+  expect(seen.errors).toEqual([]);
+  // The recording, its stop and the refusal make no request (« Préparer » is this page's mode).
+  expect(unusual(seen.requests, from, studio.url)).toEqual([]);
+});
+
 test('without MediaRecorder the button is greyed with its reason, no console error', async ({ page }) => {
   await page.addInitScript(() => { delete (window as any).MediaRecorder; });
   const seen = watch(page);

@@ -143,19 +143,22 @@ for (const size of SIZES_3D) {
   });
 }
 
-// T-509: TIMELINE with an example show open (markers, tracks, the panel).
-test('TIMELINE with an example show at 1440×900', async ({ page }) => {
-  await openWith(page, SIZES[0], { touch: 'off' });
-  await openWorkspace(page, 'timeline');
-  await page.locator('#tlExamples').click();
-  await page.locator('#tlExDialog .tl-ex', { hasText: 'Montée 16 mesures' }).click();
-  await expect(page.locator('#tlExDialog')).toBeHidden();
-  await expect.poll(async () => (await studio.get('/api/timeline')).state.name).toBe('Montée 16 mesures vers le drop');
-  await page.locator('#tlFit').click();
-  await settle(page);
-  await expect(page).toHaveScreenshot('ws-timeline-example-1440x900.png', { ...SHOT, mask: [...moving(page), page.locator('#tlModified, #tlTempoHint')] });
-  await studio.post('/api/timeline/stop');
-});
+// T-509: TIMELINE with an example show open (markers, tracks, the panel);
+// T-515: at 1024×768 too, where the tracks used to be 16 px.
+for (const size of [SIZES[0], SIZES[2]]) {
+  test(`TIMELINE with an example show at ${size.width}×${size.height}`, async ({ page }) => {
+    await openWith(page, size, { touch: 'off' });
+    await openWorkspace(page, 'timeline');
+    await page.locator('#tlExamples').click();
+    await page.locator('#tlExDialog .tl-ex', { hasText: 'Montée 16 mesures' }).click();
+    await expect(page.locator('#tlExDialog')).toBeHidden();
+    await expect.poll(async () => (await studio.get('/api/timeline')).state.name).toBe('Montée 16 mesures vers le drop');
+    await page.locator('#tlFit').click();
+    await settle(page);
+    await expect(page).toHaveScreenshot(`ws-timeline-example-${size.width}x${size.height}.png`, { ...SHOT, mask: [...moving(page), page.locator('#tlModified, #tlTempoHint')] });
+    await studio.post('/api/timeline/stop');
+  });
+}
 
 const MODES = {
   day: { touch: 'off' },
