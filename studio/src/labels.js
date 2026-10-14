@@ -32,6 +32,8 @@ const LABELS = Object.freeze({
   // Barre du haut
   'barre.produit': 'Laser Studio',
   'barre.maitre': 'Maître',
+  'barre.plus': 'Autres commandes de tempo',
+  'barre.plus.info': '÷2, ×2, décaler le temps, latence et pilote automatique',
   'barre.maitre.info': 'Luminosité maître : 100 % au plus, la limite de sécurité s\'applique après',
   'barre.wifi': 'Wi-Fi',
   'barre.sd_noir': 'SD : NOIR',

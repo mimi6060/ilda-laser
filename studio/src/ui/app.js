@@ -16,6 +16,7 @@ import { arm } from './laser.js';
 import { LINK } from './state.js';
 import { lastPoints, lastShown, view3d } from './view3d.js';
 import { reloadSafety } from './safety.js';
+import { restoreStage } from './workspaces.js';
 import { sliderLabel } from './direct.js';
 import { askBeforeQuit } from './project.js';
 import { pg } from './program.js';
@@ -33,6 +34,10 @@ for (const [name, get] of Object.entries({
   armed: () => armed,
   LINK: () => LINK,
 })) Object.defineProperty(window, name, { get, configurable: true });
+
+// The remembered 2D/3D stage (T-508): here, once every module has run, as
+// drawing the preview reads the safety overlay of safety.js / targets.js.
+restoreStage();
 
 // Tells the inline guard of index.html that the keyboard handler of
 // laser.js is installed: Échap is handled there from now on.

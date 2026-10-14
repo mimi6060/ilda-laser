@@ -157,6 +157,43 @@ test('the blackout channel latches the emergency stop', async ({ page }) => {
   expect(await armed()).toBe(false);
 });
 
+// T-502: a poll that left before the click (or is answered while the save
+// is in flight) carries the old settings; it must not untick the box.
+test("a stale poll never undoes the operator's click", async ({ page }) => {
+  await openPanel(page);
+  await expect(page.locator('#artnetState')).toHaveText('Coupé');
+  // Hold every panel poll once the server has answered it: what it carries
+  // is the state from before the click.
+  const held: (() => void)[] = [];
+  let open = false;
+  await page.route('**/api/netin', async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const res = await route.fetch();
+    if (!open) await new Promise<void>(release => held.push(release));
+    await route.fulfill({ response: res });
+  });
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  expect((await netin()).artnet.status.local).toBeNull();
+  const saved = page.waitForResponse(r => r.url().endsWith('/api/netin') && r.request().method() === 'POST');
+  const stale = held.splice(0); // answered by the server before the click
+  await page.locator('#artnetEnabled').click();
+  expect((await saved).ok()).toBe(true);
+  await expect(page.locator('#artnetEnabled')).toBeChecked();
+  // Release the stale answers (later polls stay held, so only these can
+  // reach the box), let the page handle them, then look again.
+  const answered = Promise.all(stale.map(() => page.waitForResponse(r => r.url().endsWith('/api/netin') && r.request().method() === 'GET')));
+  for (const release of stale) release();
+  await answered;
+  await page.evaluate(() => new Promise(r => setTimeout(r, 300)));
+  expect(await page.locator('#artnetEnabled').isChecked()).toBe(true);
+  open = true;
+  for (const release of held.splice(0)) release();
+  await page.unrouteAll({ behavior: 'wait' });
+  await expect(page.locator('#artnetState')).toContainText('En attente');
+  expect((await studio.get('/api/netin')).config.artnet.enabled).toBe(true);
+  expect(await armed()).toBe(false);
+});
+
 test('a bad address is refused with a French message', async ({ page }) => {
   await openPanel(page);
   await page.locator('#oscBind').fill('console.local');

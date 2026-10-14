@@ -55,7 +55,7 @@
      what is hidden while locked. Hold-to-confirm fills the button. */
   #lockBtn { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 8px; white-space: nowrap; }
   #lockBtn svg { width: 16px; height: 16px; flex: none; }
-  #lockBtn .ring { position: absolute; inset: -3px; border-radius: 10px; pointer-events: none; opacity: 0;
+  #lockBtn .ring { position: absolute; inset: 0; border-radius: 8px; pointer-events: none; opacity: 0;
     background: conic-gradient(var(--warn) calc(var(--hold, 0) * 360deg), transparent 0);
     -webkit-mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); padding: 3px; }
   #lockBtn.holding .ring { opacity: 1; }
@@ -158,6 +158,9 @@
   #wsTabs button.active { color: var(--text); border-bottom-color: var(--accent); background: var(--panel); }
   #wsTabs button kbd { margin-left: 4px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
   #wsHint { margin: 0 0 0 auto; align-self: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* T-504: never a horizontal scroll; if the buttons don't fit, a second row. */
+  #wsTabs { flex-wrap: wrap; }
+  #wsTabs #wsHint { flex: 1 1 0; min-width: 0; text-align: right; }
   main { display: grid; gap: 12px; padding: 12px 16px; height: max(560px, calc(100vh - var(--top-h, 150px)));
     grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); grid-template-areas: "stage panel"; }
   /* Rows (T-503, T-506, T-509): the stage row never goes under what the
@@ -631,11 +634,15 @@
   .seg { display: flex; gap: 4px; }
   /* FX grid (T-146): a row per line, its 8 cells and its Action fader. */
   .fg-bar { flex-wrap: wrap; }
-  .fg-row { display: grid; grid-template-columns: 18px repeat(8, minmax(0, 1fr)); gap: 4px; align-items: stretch; margin-top: 6px; }
-  .fg-row .n { align-self: center; color: var(--muted); font-size: 11px; text-align: center; }
+  /* T-507: in the 400 px panel a line's 8 cells take two rows of 4, so the
+     names stay readable (two lines at most); 8 abreast when there is room. */
+  #fgGrid { container-type: inline-size; }
+  .fg-row { display: grid; grid-template-columns: 18px repeat(4, minmax(0, 1fr)); gap: 4px; align-items: stretch; margin-top: 6px; }
+  .fg-row .n { grid-row: span 2; align-self: center; color: var(--muted); font-size: 11px; text-align: center; }
+  @container (min-width: 720px) { .fg-row { grid-template-columns: 18px repeat(8, minmax(0, 1fr)); } .fg-row .n { grid-row: auto; } }
   .fg-act { grid-column: 2 / -1; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
   .fg-act input { flex: 1; }
-  .fg-cell { position: relative; min-height: 40px; padding: 4px; font-size: 11px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis;
+  .fg-cell { position: relative; min-height: 40px; padding: 4px; font-size: 11px; line-height: 1.2; overflow: hidden; overflow-wrap: anywhere; hyphens: auto;
     touch-action: none; user-select: none; -webkit-user-select: none; background: var(--panel-2); border: 1px solid var(--line); color: var(--text); }
   .fg-cell.empty { color: var(--muted); }
   .fg-cell.on { border-color: var(--ws-live); color: #fff; background: color-mix(in srgb, var(--ws-live) calc(20% + var(--lvl, 1) * 35%), var(--panel-2)); }
@@ -770,7 +777,9 @@
   .shapes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 8px; }
   .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
   .row > * { flex: 1; }
-  .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+  /* T-505: the box beside its text (a plain label spreads « name … value »). */
+  .check { display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin-top: 10px; font-size: 13px; }
+  label:has(> input:is([type=checkbox], [type=radio])) { justify-content: flex-start; }
   .meter { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 4px; }
   .meter > div { height: 100%; width: 0; background: var(--accent); transition: width 50ms linear; }
   #beatDot { width: 12px; height: 12px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--line); display: inline-block; }
@@ -1786,10 +1795,27 @@
   header { gap: 8px; padding: 6px 14px; min-height: 60px; flex-wrap: nowrap; row-gap: 6px; }
   @media (max-width: 1279px) { header { flex-wrap: wrap; } }
   header button { white-space: nowrap; }
+  /* « CIEL COUPÉ » is laid out on two lines in its 60 px button (T-504). */
+  header #skyBtn { white-space: normal; }
   header h1 .name { display: none; }
   @media (min-width: 1600px) { header h1 .name { display: inline; } }
   #projName { max-width: 120px; }
-  @media (max-width: 1359px) { .tempo .tb-extra, .tempo .tb-bpm { display: none; } #projName { max-width: 80px; } }
+  @media (max-width: 1359px) { .tempo > .tb-extra, .tempo .tb-bpm, .tempo #tempoSrc { display: none; } #projName { max-width: 80px; } }
+  /* « ⋯ » (T-504): the secondary tempo controls inline from 1900 px,
+     below in a popover under the button; it lights up while one of
+     them is on (offset, autopilot). */
+  .tb-more-wrap { position: relative; display: inline-flex; align-items: center; }
+  #tbMore { display: contents; }
+  #tbMoreBtn { display: none; font-weight: 800; letter-spacing: .08em; }
+  @media (max-width: 1899px) {
+    #tbMoreBtn { display: inline-block; }
+    #tbMore { display: none; }
+    #tbMore.open { display: flex; align-items: center; gap: 4px; position: absolute; top: calc(100% + 8px); left: 0; z-index: 30; padding: 6px;
+      border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; white-space: nowrap; }
+  }
+  /* The nowrap is for the button row: the Lat. menu inside wraps its text (review of T-504). */
+  #tbMore.open #latMenu { white-space: normal; }
+  .tb-more-wrap:has(.tb-extra.active, .vlj-open.active, .vlj-open.waiting) #tbMoreBtn { color: var(--accent); border-color: var(--accent); }
   .tempo #tempoSrc { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Compensation de latence (T-246). */
   .lat-wrap { position: relative; display: inline-flex; }
@@ -1822,9 +1848,21 @@
   .tb-master .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0; }
   .tb-master label { margin: 0; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #aeb4cf; }
   .tb-master input { width: 110px; height: 18px; margin: 0; }
+  @media (max-width: 1359px) { .tb-master input { width: 80px; } }
   .tb-master .v { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text); }
-  .tb-status { display: flex; flex-direction: column; justify-content: center; gap: 1px; min-width: 100px; flex: 1 1 220px; max-width: 320px; overflow: hidden; }
-  .tb-status > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* T-504: the status takes the room left. The arm state, its reason and
+     the safety profile never get cut: they wrap onto a second line. The
+     output and the LEDs may ellipsise (their title keeps the text). */
+  .tb-status { display: flex; flex-direction: column; justify-content: center; gap: 0; min-width: 180px; flex: 1 1 260px; overflow: hidden; font-size: 11px; }
+  /* Whole-pixel lines: the bar's height stays a whole number whether the
+     arm state takes one line or two (no blurry half-pixel offsets). */
+  .tb-status > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; }
+  .tb-status > .arm-line { display: block; overflow: visible; white-space: normal; text-overflow: clip; }
+  .tb-status .arm-line > *, .tb-status #armInfo { overflow: visible; white-space: normal; }
+  .tb-status > .out-line { display: flex; align-items: center; gap: 8px; height: 14px; }
+  .out-line #output[data-kind]::before { padding-top: 0; padding-bottom: 0; line-height: 12px; vertical-align: 0; }
+  .out-line #output { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .out-line #profilePill { flex: none; white-space: nowrap; }
   #output { flex: none; font-size: 12px; }
   .tb-status #armInfo { font-size: 11px; }
   .tb-status .leds { display: flex; gap: 10px; }
@@ -1933,7 +1971,7 @@
   #searchBtn svg { width: 14px; height: 14px; flex: none; }
   :is(#searchBtn, #cmdBtn) kbd { font-size: 10px; }
   #wsTabs #cmdBtn { margin-left: 4px; font-family: ui-monospace, Menlo, monospace; }
-  @media (max-width: 1399px) { :is(#searchBtn, #cmdBtn) .long { display: none; } #cmdBtn kbd { display: none; } }
+  @media (max-width: 1699px) { :is(#searchBtn, #cmdBtn) .long { display: none; } #cmdBtn kbd { display: none; } }
   /* Five workspaces (T-427): narrower tabs below 1500 px, so « ? Aide » stays on one line at 1280. */
   #wsTabs :is(#helpBtn, #keysBtn) { white-space: nowrap; }
   @media (max-width: 1499px) { #wsTabs .ws-tablist button { padding-left: 12px; padding-right: 12px; } }
@@ -2081,7 +2119,7 @@
   #wsTabs #winBtn::before { display: none; }
   #winBtn .short { display: none; }
   #winBtn svg { width: 14px; height: 14px; vertical-align: -2px; }
-  @media (max-width: 1399px) { #winBtn .long { display: none; } #winBtn .short { display: inline; } }
+  @media (max-width: 1699px) { #winBtn .long { display: none; } #winBtn .short { display: inline; } }
   #winMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 2px; min-width: 180px; padding: 6px; border-radius: 10px;
     background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px #000c; }
   #winMenu[hidden] { display: none; }

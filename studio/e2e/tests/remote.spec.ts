@@ -88,6 +88,24 @@ test('enabled from RÉGLAGES, paired, plays and stops; never arms; off after a r
     const box = (await tab.locator(sel).first().boundingBox())!;
     expect(box.height, sel).toBeGreaterThanOrEqual(44);
   }
+  // On a phone (T-510): 2 columns, every cue name in full on two lines at
+  // most, the page tabs wrapped (no hidden scroll), NOIR / ARRÊT on screen.
+  await tab.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => tab.locator('#grid').evaluate(g => getComputedStyle(g).gridTemplateColumns.split(' ').length)).toBe(2);
+  const names = await tab.locator('#grid button').evaluateAll(els => els.map(el => {
+    const r = document.createRange(); r.selectNodeContents(el);
+    const lh = parseFloat(getComputedStyle(el).lineHeight);
+    return { name: el.textContent, cut: el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight, lines: Math.round(r.getBoundingClientRect().height / lh) };
+  }));
+  expect(names.length).toBeGreaterThan(0);
+  for (const n of names) {
+    expect(n.cut, `${n.name} cut`).toBe(false);
+    expect(n.lines, `${n.name} lines`).toBeLessThanOrEqual(2);
+  }
+  expect(await tab.locator('#tabs').evaluate(t => t.scrollWidth <= t.clientWidth)).toBe(true);
+  await expect(tab.locator('#stopBtn')).toBeInViewport({ ratio: 1 });
+  expect(await tab.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await tab.setViewportSize({ width: 820, height: 1180 });
   await expect(page.locator('#remotePill')).toHaveText('Télécommande : 1');
   await expect(page.locator('#remoteList')).toContainText('Tablette e2e');
 

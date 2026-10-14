@@ -262,7 +262,8 @@ function showOutputKind(f) {
   const lost = state === 'lost';
   const kind = lost || f.output_error ? 'error' : state === 'connecting' ? 'preview' : f.output_kind || 'preview';
   el.dataset.state = state;
-  const title = (lost ? 'Sortie perdue : laser désarmé, reconnexion en cours si elle est activée. ' + (f.output_error || '')
+  // The line may be ellipsised in a narrow top bar (T-504): its title keeps the text.
+  const title = el.textContent + ' — ' + (lost ? 'Sortie perdue : laser désarmé, reconnexion en cours si elle est activée. ' + (f.output_error || '')
     : f.output_error ? 'Erreur de sortie' : OUTPUT_TITLES[kind] || '') + ' — clic : RÉGLAGES › Sorties et projecteurs';
   if (el.dataset.kind === kind && el.title === title) return;
   el.dataset.kind = kind;

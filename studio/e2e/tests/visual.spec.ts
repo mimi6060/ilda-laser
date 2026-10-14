@@ -16,7 +16,7 @@
 //
 // Preview only: the fake test output; arming is a click on the LASER
 // button, like the operator's, and every test ends disarmed.
-import { test, expect, useStudio, openUi, openWorkspace, open3dSettings, focusPage, type Workspace } from '../studio';
+import { test, expect, useStudio, openUi, openWorkspace, open3dSettings, focusPage, reveal, type Workspace } from '../studio';
 import type { Locator, Page } from '@playwright/test';
 
 const studio = useStudio();
@@ -93,6 +93,15 @@ for (const size of SIZES) {
         await expect(page).toHaveScreenshot(`ws-${ws}-${size.width}x${size.height}.png`, { ...SHOT, mask: moving(page) });
       });
     }
+
+    // T-507: the effect names, two rows of four cells per line.
+    test('LIVE › Effets', async ({ page }) => {
+      await openWith(page, size, { touch: 'off' });
+      await reveal(page, '#fgGrid');
+      await expect(page.locator('#fgGrid .fg-cell')).toHaveCount(32);
+      await settle(page);
+      await expect(page).toHaveScreenshot(`live-fx-${size.width}x${size.height}.png`, { ...SHOT, mask: moving(page) });
+    });
 
     test('LIVE shows the preview, the cue grid and the top bar without scrolling the page', async ({ page }) => {
       await openWith(page, size, { touch: 'off' });

@@ -543,6 +543,10 @@ function searchReveal(el) {
   // Behind « Plus… » of the cue bar (T-506), or in the 3D settings drawer (T-503).
   if (el.closest('#cueMore')) setCueMore(true);
   if (el.closest('#render3d')) { if (!show3d) setView('3d'); setRender3dOpen(true); }
+  // A tempo control behind « ⋯ » (T-504): open it after this click has
+  // bubbled (a click elsewhere closes the popover).
+  const more = document.getElementById('tbMoreBtn');
+  if (el.closest('#tbMore') && more.offsetParent && more.getAttribute('aria-expanded') !== 'true') setTimeout(() => more.click(), 0);
   return true;
 }
 function searchGoCue(id) {
