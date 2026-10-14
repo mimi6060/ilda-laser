@@ -257,6 +257,8 @@ const LABELS = Object.freeze({
   // en vue étroite avec le panneau « Préparé », nomme toujours les faisceaux.
   'apercu.badge.public': 'Faisceaux dans le public',
   'apercu.badge.public.court': 'Faisc. public',
+  // Vue étroite, 2D+3D avec le panneau « Préparé » (T-516) : la 2D seule est gardée.
+  'apercu.3d_masquee': 'Vue 3D masquée (panneau Préparé) : Vider, Envoyer ou mode 3D',
   // Commun
   'commun.fermer': 'Fermer',
   'commun.oui': 'Oui',

@@ -2096,6 +2096,11 @@
   .vid3d { min-width: 0; flex: 0 1 auto; }
   /* One line: the 3D hint gives way to the buttons (its full text stays in its title). */
   .viewbar #hint3d { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* T-516: the notice that the 3D view is hidden behind the prepared pane
+     takes a row of its own in the bar (where « Recentrer », the drag hint
+     and the video sat), whole on one line in a 358 px stage at 11 px. */
+  .viewbar #no3dNote { flex: 1 1 100%; font-size: 11px; color: var(--warn); overflow: visible; text-overflow: clip; }
+  .viewbar #no3dNote[hidden] { display: none; }
   #vidBtn { white-space: nowrap; font-variant-numeric: tabular-nums; }
   #vidMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 4px; width: 280px; padding: 10px; border-radius: 10px;
     background: var(--panel); border: 1px solid var(--line); box-shadow: 0 10px 30px #000a; }

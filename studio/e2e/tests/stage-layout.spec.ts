@@ -37,7 +37,9 @@ async function box(loc: Locator): Promise<Box> {
 async function setMode(page: Page, mode: typeof MODES[number]) {
   await page.locator(`#viewSeg [data-view="${mode}"]`).click();
   await expect(page.locator(`#viewSeg [data-view="${mode}"]`)).toHaveClass(/active/);
-  if (mode !== '2d') await expect(page.locator('#beams')).toBeVisible();
+  // In 2D+3D with the prepared pane in a narrow view the 3D canvas is
+  // hidden (T-516): viewUsable checks it where it must show.
+  if (mode === '3d') await expect(page.locator('#beams')).toBeVisible();
   if (mode !== '3d') await expect(page.locator('#preview')).toBeVisible();
   // One layout pass after the switch.
   await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -258,41 +260,91 @@ for (const size of SIZES) {
     // left the output 69 px at 1024; in a view up to 420 px wide the 2D
     // output alone is kept, at least 120 px, with the audience count
     // still shown (badge and stats); wider, the 3D view stays beside it.
-    test('LIVE and TIMELINE: « Préparer » in 2D+3D keeps a usable output', async ({ page }) => {
+    // The collapse is never silent: the bar says the 3D is hidden and how
+    // to get it back, the 3D-only controls go, and the 3D stays hidden
+    // while a prepared cue keeps the pane (« Préparer » off included)
+    // until « Vider » / « Envoyer ».
+    test('LIVE and TIMELINE: « Préparer » in 2D+3D keeps a usable output, and says when the 3D is hidden', async ({ page }) => {
       await page.setViewportSize(size);
       await openUi(page, studio);
+      const cueId = await page.locator('#cues .cue[data-id]').first().getAttribute('data-id');
+      expect(cueId).toBeTruthy();
+      const beams = page.locator('#beams'), note = page.locator('#no3dNote'), prep = page.locator('#prepBtn');
+      const controls3d = ['#recenter3d', '#hint3d', '#vid3d', '#render3dBtn', '#render3d'];
+      // The 3D view and its controls, or the notice and none of them.
+      const expect3d = async (shown: boolean, label: string) => {
+        if (shown) {
+          await expect(beams, `${label} 3D view`).toBeVisible();
+          expect((await box(beams)).height, `${label} 3D view height`).toBeGreaterThanOrEqual(MIN_VIEW);
+          await expect(note, `${label} no notice`).toBeHidden();
+          for (const sel of ['#recenter3d', '#render3dBtn', '#vid3d']) await expect(page.locator(sel), `${label} ${sel}`).toBeVisible();
+        } else {
+          await expect(beams, `${label} 3D view hidden`).toBeHidden();
+          await expect(note, `${label} notice`).toBeVisible();
+          await expect(note, label).toContainText(/3D/);
+          await expect(note, label).toContainText(/Vider/);
+          for (const sel of controls3d) await expect(page.locator(sel), `${label} ${sel} hidden with the 3D`).toBeHidden();
+          // The notice is whole, on one line, inside the stage and off the view (badges and pane are in the view).
+          const n = await note.evaluate(e => ({ sw: e.scrollWidth, cw: e.clientWidth, lh: parseFloat(getComputedStyle(e).lineHeight), h: e.clientHeight }));
+          expect(n.sw, `${label} notice whole (${n.sw} px in ${n.cw})`).toBeLessThanOrEqual(n.cw + 1);
+          expect(n.h, `${label} notice on one line`).toBeLessThanOrEqual(n.lh + 2);
+          const nb = await box(note);
+          expect(inside(nb, await box(page.locator('#stage'))), `${label} notice inside the stage`).toBe(true);
+          expect(bottom(nb), `${label} notice above the view`).toBeLessThanOrEqual((await box(page.locator('#stage .view'))).y + 0.5);
+          // The audience count goes on: badge and stats agree and are not reset.
+          await expect.poll(async () => page.evaluate(() => [document.getElementById('aud3dN')!.textContent, document.getElementById('stAud')!.textContent]), { message: `${label} audience count` })
+            .toEqual(expect.arrayContaining([expect.stringMatching(/^[1-9]\d*$/)]));
+          const [badge, stats] = await page.evaluate(() => [document.getElementById('aud3dN')!.textContent, document.getElementById('stAud')!.textContent]);
+          expect(badge, `${label} badge and stats agree`).toBe(stats);
+        }
+      };
       for (const ws of ['live', 'timeline'] as const) {
         await openWorkspace(page, ws);
         await setMode(page, 'both');
-        const prep = page.locator('#prepBtn');
+        // The drawer open before the pane shows: it must not float over a 2D-only view.
+        await open3dSettings(page);
         await prep.click();
         await expect(prep).toHaveAttribute('aria-pressed', 'true');
         await expect(page.locator('#prepPane')).toBeVisible();
         await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
         const label = `${ws} both prepared`;
         const view = await box(page.locator('#stage .view'));
+        const narrow = view.width <= 420;
         const pv = await box(page.locator('#preview'));
         expect(pv.width, `${label} 2D output width`).toBeGreaterThanOrEqual(120);
         expect(pv.height, `${label} 2D output height`).toBeGreaterThanOrEqual(120);
         expect(inside(pv, view), `${label} 2D output inside the view`).toBe(true);
         expect(inside(await box(page.locator('#prepPane')), view), `${label} pane inside the view`).toBe(true);
-        const beams = page.locator('#beams');
-        if (view.width <= 420) {
-          await expect(beams, `${label} 3D view yields to the 2D output in a narrow view`).toBeHidden();
-        } else {
-          await expect(beams, label).toBeVisible();
-          expect((await box(beams)).width, `${label} 3D view width`).toBeGreaterThanOrEqual(120);
-        }
+        await expect3d(!narrow, label);
+        if (!narrow) expect((await box(beams)).width, `${label} 3D view width`).toBeGreaterThanOrEqual(120);
+        // A second click on « 2D+3D » (setView shows the 3D controls again) changes nothing.
+        await setMode(page, 'both');
+        await expect3d(!narrow, `${label}, 2D+3D clicked again`);
         await expect(page.locator('#aud3d'), `${label} audience badge`).toBeVisible();
         await expect(page.locator('#stAudWrap'), `${label} audience count in the stats`).toBeVisible();
         expect(inside(await box(page.locator('#stAudWrap')), await box(page.locator('#stage'))), `${label} stats inside the stage`).toBe(true);
-        // « Préparer » off: the 3D view is back.
+        // A real cue prepared, then « Préparer » off: the pane stays, so does the collapse (and the notice).
+        expect(await studio.post('/api/prepared', { id: cueId })).toBe(200);
+        await expect(page.locator('#prepSend')).toBeEnabled();
         await prep.click();
         await expect(prep).toHaveAttribute('aria-pressed', 'false');
-        await expect(beams).toBeVisible();
-        expect((await box(beams)).height, `${label} 3D view back`).toBeGreaterThanOrEqual(MIN_VIEW);
+        await expect(page.locator('#prepPane')).toBeVisible();
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+        await expect3d(!narrow, `${label}, « Préparer » off with a cue`);
+        // 3D mode shows the 3D beside the pane; back to 2D+3D collapses it again.
+        await setMode(page, '3d');
+        await expect3d(true, `${ws} 3d with the pane`);
+        await setMode(page, 'both');
+        await expect3d(!narrow, `${label} again`);
+        // « Vider »: the pane goes, the 3D view is back with its controls.
+        await page.locator('#prepClear').click();
+        await expect(page.locator('#prepPane')).toBeHidden();
+        await expect3d(true, `${ws} both after Vider`);
+        await page.locator('#render3dClose').click();
         await setMode(page, '2d');
+        await expect(note).toBeHidden();
       }
+      await studio.post('/api/prepared/clear');
     });
   });
 }

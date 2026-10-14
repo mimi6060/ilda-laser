@@ -72,11 +72,32 @@ function showAud3d() {
 // itself; the badges and the stats underneath never move.
 const R3_OPEN_KEY = 'laserStudio.beam3d.settingsOpen';
 let render3dOpen = remembered(R3_OPEN_KEY) === '1';
+// T-516: the 3D canvas is hidden by the stylesheet in a view up to 420 px
+// wide in 2D+3D with the prepared pane (the 2D output alone is kept).
+let collapsed3d = false;
 function showRender3dDrawer() {
-  const open = show3d && render3dOpen;
+  const open = show3d && render3dOpen && !collapsed3d;
   $('render3d').hidden = !open;
-  $('render3dBtn').hidden = !show3d;
+  $('render3dBtn').hidden = !show3d || collapsed3d;
   $('render3dBtn').setAttribute('aria-expanded', String(open));
+}
+// While the 3D canvas is collapsed (see collapsed3d), the bar says so
+// (#no3dNote) and the 3D-only controls go: « Recentrer », the drag hint,
+// the video (a recording in progress stops, as when leaving the 3D
+// view), the settings drawer and its button. Everything comes back as
+// soon as the canvas is drawn again (pane gone, 3D mode, wider view).
+// Called after a mode or pane change (setView shows the controls again
+// for a 3D mode, so this always re-applies the state), and from the
+// view's ResizeObserver (on the next frame, so the bar's change never
+// lands in the observer's own cycle).
+function sync3dCollapsed() {
+  const next = show3d && !$('beams').offsetParent, changed = next !== collapsed3d;
+  collapsed3d = next;
+  $('no3dNote').hidden = !next;
+  for (const id of ['recenter3d', 'hint3d']) $(id).hidden = !show3d || next;
+  if (next) $('vid3d').hidden = true; else if (show3d) $('vid3d').hidden = false;
+  if (next && changed) { vidStop('vue'); closeRecMenu(); }
+  showRender3dDrawer();
 }
 // T-512: the drawer starts under the badges' row, however many lines it
 // wraps to (--badges-h on the view, at least 48 px), the prepared pane
@@ -106,6 +127,7 @@ function fitDrawerUnderBadges() {
     view.classList.toggle('no-side', view.clientHeight - low - head - 18 < need);
   }
   drawerMoreBelow();
+  if ((show3d && !$('beams').offsetParent) !== collapsed3d) requestAnimationFrame(sync3dCollapsed);
 }
 $('render3d').addEventListener('scroll', drawerMoreBelow, { passive: true });
 if (typeof ResizeObserver === 'function') {
@@ -211,6 +233,7 @@ async function setView(mode) {
   showAud3d();
   if (show2d) draw(lastShown);
   remember(STAGE_KEY, mode);
+  sync3dCollapsed();
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.view));
 
@@ -443,6 +466,7 @@ function showPrepPane() {
   if (on && !prepTimer) { prepTimer = setInterval(pollPrepared, 50); pollPrepared(); }
   if (!on && prepTimer) { clearInterval(prepTimer); prepTimer = null; }
   if (!c) draw([], prepCv);
+  sync3dCollapsed();
 }
 function showPrepared(p) {
   if (!p || p.rev === prepRev) return;
