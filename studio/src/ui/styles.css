@@ -592,7 +592,7 @@
   .prep-side input[type=color] { width: 100%; height: 20px; padding: 0; border: 1px solid var(--line); background: var(--panel-2); }
   #prepSend:not(:disabled) { background: var(--ws-timeline); border-color: var(--ws-timeline); color: #fff; font-weight: 600; }
   #prepBtn.active { background: var(--ws-timeline); border-color: var(--ws-timeline); color: #fff; }
-  #outTag { position: absolute; top: 44px; left: 12px; padding: 2px 10px; border-radius: 999px; background: #000c; color: var(--text); border: 1px solid var(--line); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+  #outTag { padding: 2px 10px; border-radius: 999px; background: #000c; color: var(--text); border: 1px solid var(--line); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
   #outTag[hidden] { display: none; }
   .cue.prepared { box-shadow: inset 0 0 0 2px var(--ws-timeline); }
   /* The cue last pressed in another window (T-281). */
@@ -614,10 +614,27 @@
     #wsTabs #keysBtn { display: none; }
     header { flex-wrap: wrap; }
   }
-  #offBadge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
+  #offBadge { padding: 4px 10px; border-radius: 6px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
   #offBadge.hidden { display: none; }
+  /* T-512: the preview's badges share one row along the top of the view
+     that wraps on a narrow stage, so no badge ever covers another (they
+     used to be placed one by one and overlapped at 1024 px). The 3D
+     drawer starts under the row (--badges-h, measured in view3d.js). */
+  #viewBadges { position: absolute; z-index: 5; top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 8px; pointer-events: none; }
+  #viewBadges > * { flex: none; max-width: 100%; box-sizing: border-box; pointer-events: auto; }
+  #viewBadges > #galvoBadge { pointer-events: none; }
+  /* With « Préparer » the row stays over the output (« Sortie »), off the
+     prepared pane, while the output side holds 300 px; on a narrower
+     stage it runs over the pane's header, and lets clicks through to its
+     buttons. A narrow view gets compact badges. */
+  @media (min-width: 901px) { .view.prep #viewBadges { right: min(calc(var(--ps) + 178px), calc(100% - 300px)); } }
+  .view.prep #viewBadges > [id] { pointer-events: none; }
+  @container (max-width: 560px) {
+    #viewBadges { top: 8px; left: 8px; right: 8px; gap: 4px 6px; }
+    #viewBadges > [id] { padding: 2px 8px; font-size: 11px; }
+  }
   /* T-280: the previews show simulated galvos, not the frame as sent. */
-  #galvoBadge { position: absolute; z-index: 5; bottom: 12px; left: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
+  #galvoBadge { padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--warn); font-size: 12px; border: 1px solid var(--line); pointer-events: none; }
   #galvoBadge[hidden] { display: none; }
   .stats { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .stats b { color: var(--text); font-weight: 600; }
@@ -1114,14 +1131,18 @@
   #beamsMsg { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
   /* 3D settings (T-503): a drawer over the bottom of the view, opened by
      « Réglages 3D » in the bar, that scrolls inside itself and never
-     takes the view's height. The top 48 px stay free for the badges
-     (« Laser éteint », « Faisceaux dans le public »). */
-  .render3d { position: absolute; left: 0; bottom: 0; z-index: 4; width: min(100%, 640px); max-height: min(calc(100% - 48px), 62%); overflow-y: auto; scrollbar-width: thin; box-sizing: border-box;
+     takes the view's height. The badges' row above it stays free
+     (« Laser éteint », « Faisceaux dans le public »): T-512. */
+  .render3d { position: absolute; left: 0; bottom: 0; z-index: 4; width: min(100%, 640px); max-height: min(calc(100% - var(--badges-h, 48px)), 62%); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--muted) transparent; box-sizing: border-box;
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; padding: 4px 10px 8px; border: 1px solid var(--line); border-radius: 10px;
     background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 8px 24px #0008; }
   .render3d .check { margin-top: 6px; }
-  .render3d::-webkit-scrollbar { width: 5px; }
-  .render3d::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  /* T-512: a scrollbar that shows, and the last line fades out while more
+     settings sit below (.more-below, set in view3d.js). */
+  .render3d::-webkit-scrollbar { width: 8px; }
+  .render3d::-webkit-scrollbar-track { background: color-mix(in srgb, var(--line) 40%, transparent); border-radius: 4px; }
+  .render3d::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 4px; }
+  .render3d.more-below { mask-image: linear-gradient(180deg, #000 calc(100% - 28px), #0004); }
   .r3head { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
   .r3head b { flex: 1; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   .r3head button { padding: 2px 8px; font-size: 12px; }
@@ -1133,7 +1154,7 @@
   .cam3d .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .cam3d-lbl { font-size: 12px; color: var(--muted); }
   .r3safety { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0 14px; align-items: center; border-top: 1px solid var(--line); margin-top: 6px; }
-  #aud3d { position: absolute; top: 12px; right: 12px; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
+  #aud3d { margin-left: auto; padding: 4px 12px; border-radius: 999px; background: #000c; color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
   #aud3d.hot, #stAudWrap.hot b { color: var(--danger); }
   #aud3d.hot { border-color: var(--danger); }
   #strobeLed, #dwellLed { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0; text-transform: none; border: 1px solid var(--line); color: var(--muted); opacity: .5; }

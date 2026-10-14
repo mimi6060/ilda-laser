@@ -78,6 +78,25 @@ function showRender3dDrawer() {
   $('render3dBtn').hidden = !show3d;
   $('render3dBtn').setAttribute('aria-expanded', String(open));
 }
+// T-512: the drawer starts under the badges' row, however many lines it
+// wraps to (--badges-h on the view), and says when more settings sit
+// below its edge (.more-below fades its last line).
+function drawerMoreBelow() {
+  const d = $('render3d');
+  d.classList.toggle('more-below', d.scrollTop + d.clientHeight < d.scrollHeight - 1);
+}
+function fitDrawerUnderBadges() {
+  const row = $('viewBadges'), view = row.parentElement;
+  const vis = [...row.children].filter(b => b.offsetParent);
+  const low = vis.length ? Math.max(...vis.map(b => b.getBoundingClientRect().bottom)) - view.getBoundingClientRect().top + 6 : 0;
+  view.style.setProperty('--badges-h', Math.max(48, Math.ceil(low)) + 'px');
+  drawerMoreBelow();
+}
+$('render3d').addEventListener('scroll', drawerMoreBelow, { passive: true });
+if (typeof ResizeObserver === 'function') {
+  const ro = new ResizeObserver(fitDrawerUnderBadges);
+  ro.observe($('viewBadges')); ro.observe($('render3d')); ro.observe($('viewBadges').parentElement);
+}
 function setRender3dOpen(on) {
   render3dOpen = !!on;
   remember(R3_OPEN_KEY, render3dOpen ? '1' : '0');

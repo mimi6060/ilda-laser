@@ -661,10 +661,14 @@
           </div>
         </div>
       </div>
-      <div id="offBadge">Laser éteint : aperçu seulement</div>
-      <div id="galvoBadge" hidden title="Aperçu seulement : les galvos sont simulés (approximation). Le laser reçoit l'image telle quelle ; le vrai projecteur peut arrondir ou scintiller davantage. RÉGLAGES › Simulation de l'aperçu">Galvos simulés : approximation</div>
-      <div id="outTag" hidden>Sortie</div>
-      <div id="aud3d" hidden role="status" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="aud3dN">0</b></div>
+      <!-- The preview's state and safety badges (T-512): one wrapping row,
+           so none ever covers another, whatever the stage width. -->
+      <div id="viewBadges">
+        <div id="outTag" hidden>Sortie</div>
+        <div id="offBadge">Laser éteint : aperçu seulement</div>
+        <div id="galvoBadge" hidden title="Aperçu seulement : les galvos sont simulés (approximation). Le laser reçoit l'image telle quelle ; le vrai projecteur peut arrondir ou scintiller davantage. RÉGLAGES › Simulation de l'aperçu">Galvos simulés : approximation</div>
+        <div id="aud3d" hidden role="status" title="Aide à la conception, ne remplace pas une étude de sécurité ni la réglementation locale">Faisceaux dans le public : <b id="aud3dN">0</b></div>
+      </div>
     <!-- 3D settings (T-503): a drawer over the view, opened by « Réglages 3D ». -->
     <div class="render3d" id="render3d" role="group" aria-label="Réglages de la vue 3D" data-search="Réglages 3D" hidden>
       <div class="r3head"><b>Réglages 3D</b><button id="render3dClose" title="Refermer (le bouton « Réglages 3D » les rouvre)">Fermer</button></div>
