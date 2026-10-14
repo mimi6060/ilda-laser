@@ -125,6 +125,23 @@ function decodeFrame(buf) {
   }
   return { seq: d.getUint32(4, true), flags: d.getUint16(10, true), points };
 }
+// The output line (T-517): « Sortie : » sits in its own span, so a narrow
+// top bar can drop it (the TEST / DAC / PONK badge already says it) and
+// keep the device's name.
+function showOutputName(f) {
+  const el = $('output');
+  const name = f.output_state === 'lost' || f.output_state === 'connecting' || f.output_error ? '' : f.output || '';
+  const text = f.output_state === 'lost' ? 'Sortie perdue'
+    : f.output_state === 'connecting' ? 'Connexion de la sortie…'
+    : f.output_error ? '⚠ ' + f.output_error
+    : name ? 'Sortie : ' + name : 'Aperçu seulement';
+  if (el.textContent === text && !!el.querySelector('.pfx') === !!name) return;
+  if (!name) { el.textContent = text; return; }
+  const pfx = document.createElement('span');
+  pfx.className = 'pfx';
+  pfx.textContent = 'Sortie : ';
+  el.replaceChildren(pfx, name);
+}
 function showPoints(points) {
   assignLastPoints(points);
   // One frame feeds whichever view is shown; the 3D view only reads it.
@@ -266,10 +283,7 @@ function applyState(f, at, pushed) {
     lastFixedRate = f.fixed_rate;
     if (($('pwTarget').value || 'main') === 'main') showFixedRateStatus(f.fixed_rate);
   }
-  $('output').textContent = f.output_state === 'lost' ? 'Sortie perdue'
-    : f.output_state === 'connecting' ? 'Connexion de la sortie…'
-    : f.output_error ? '⚠ ' + f.output_error
-    : f.output ? 'Sortie : ' + f.output : 'Aperçu seulement';
+  showOutputName(f);
   showOutputKind(f);
   showArtnetStatus(f.output_status);
   showDmxOutLive(f.dmx_out);

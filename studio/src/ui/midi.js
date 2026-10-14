@@ -10,7 +10,7 @@
 // imports its predecessor and app.js imports the last one, so the ES
 // evaluation order is the page order the script had.
 import './venue.js';
-import { $, api, apiJson, noticeCondition, post } from './core.js';
+import { $, api, apiJson, noticeCondition, post, setShortText } from './core.js';
 import { LOCKED_FR, flash, showMode } from './workspaces.js';
 import { controlDefaults, controlKinds, sliderLabel, toNeutral } from './direct.js';
 import { emptyState } from './command.js';
@@ -31,9 +31,13 @@ async function midiLoop() {
     }
     const live = m.devices.filter(d => d.connected);
     const st = $('midiStatus');
-    st.textContent = !m.enabled ? 'MIDI : désactivé' : live.length
+    const full = !m.enabled ? 'MIDI : désactivé' : live.length
       ? 'MIDI : ' + live.map(d => d.model === 'Unknown' ? d.name : d.model_label).join(', ') + ' connecté' + (live.length > 1 ? 's' : '')
       : 'MIDI : aucun contrôleur';
+    // A narrow bar shows the short state (T-517); the title keeps the whole line.
+    setShortText(st, full, !m.enabled ? libelle('barre.midi.court.desactive')
+      : live.length ? libelle('barre.midi.court.connecte') : libelle('barre.midi.court.aucun'));
+    st.title = full + ' — ' + libelle('barre.midi.info');
     st.classList.toggle('on', live.length > 0);
     const lost = m.devices.filter(d => d.lost);
     $('midiLost').textContent = 'Contrôleur MIDI déconnecté' + (lost.length ? ' : ' + lost.map(d => d.name).join(', ') : '');

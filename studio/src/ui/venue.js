@@ -338,9 +338,16 @@ function showProfilePill(p) {
   if (p === undefined) return;
   if (!p || !p.name) { el.hidden = true; return; }
   el.hidden = false;
-  el.textContent = 'Profil : ' + p.name + (p.modified ? ' (modifié)' : '');
+  // « Profil : » in its own span: a narrow top bar drops it (T-517).
+  const text = 'Profil : ' + p.name + (p.modified ? ' (modifié)' : '');
+  if (el.textContent !== text) {
+    const pfx = document.createElement('span');
+    pfx.className = 'pfx';
+    pfx.textContent = 'Profil : ';
+    el.replaceChildren(pfx, text.slice(pfx.textContent.length));
+  }
   el.classList.toggle('warn', !!(p.modified || p.stale));
-  el.title = 'Profil de sécurité actif' + (p.stale ? ' — vérification sur place à refaire' : '') + ' (RÉGLAGES › Sécurité)';
+  el.title = el.textContent + ' — profil de sécurité actif' + (p.stale ? ' — vérification sur place à refaire' : '') + ' (RÉGLAGES › Sécurité)';
 }
 async function reloadProfiles() {
   try {
