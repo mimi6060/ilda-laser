@@ -257,8 +257,15 @@ const LABELS = Object.freeze({
   // en vue étroite avec le panneau « Préparé », nomme toujours les faisceaux.
   'apercu.badge.public': 'Faisceaux dans le public',
   'apercu.badge.public.court': 'Faisc. public',
-  // Vue étroite, 2D+3D avec le panneau « Préparé » (T-516) : la 2D seule est gardée.
+  // Vue étroite, 2D+3D avec le panneau « Préparé » (T-516) : la 2D seule est
+  // gardée. Le panneau reste tant que « Préparer » est actif (.mode) ou
+  // qu'un cue est préparé : l'avis nomme ce qui le fait partir.
   'apercu.3d_masquee': 'Vue 3D masquée (panneau Préparé) : Vider, Envoyer ou mode 3D',
+  'apercu.3d_masquee.mode': 'Vue 3D masquée (panneau Préparé) : couper Préparer ou mode 3D',
+  // Vidéo de la vue 3D quand le panneau la masque.
+  'video.arretee.masquee': 'Enregistrement 3D arrêté : vue 3D masquée par le panneau Préparé — vidéo téléchargée ({taille})',
+  'video.arretee.masquee.vide': 'Enregistrement 3D arrêté : vue 3D masquée par le panneau Préparé — vidéo vide, rien à télécharger',
+  'video.impossible.masquee': 'Enregistrement 3D impossible : la vue 3D est masquée par le panneau Préparé (couper Préparer, Vider, ou mode 3D)',
   // Commun
   'commun.fermer': 'Fermer',
   'commun.oui': 'Oui',

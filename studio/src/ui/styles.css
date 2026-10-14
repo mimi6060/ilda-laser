@@ -2101,6 +2101,10 @@
      and the video sat), whole on one line in a 358 px stage at 11 px. */
   .viewbar #no3dNote { flex: 1 1 100%; font-size: 11px; color: var(--warn); overflow: visible; text-overflow: clip; }
   .viewbar #no3dNote[hidden] { display: none; }
+  /* Its text names what brings the 3D back in the current state: with
+     « Préparer » on the pane stays whatever is prepared (couper Préparer),
+     off it goes with the cue (Vider, Envoyer). */
+  body.prep-mode #no3dNote .prep-off, body:not(.prep-mode) #no3dNote .prep-on { display: none; }
   #vidBtn { white-space: nowrap; font-variant-numeric: tabular-nums; }
   #vidMenu { position: fixed; z-index: 46; display: flex; flex-direction: column; gap: 4px; width: 280px; padding: 10px; border-radius: 10px;
     background: var(--panel); border: 1px solid var(--line); box-shadow: 0 10px 30px #000a; }

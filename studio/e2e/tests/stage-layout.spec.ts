@@ -271,8 +271,10 @@ for (const size of SIZES) {
       expect(cueId).toBeTruthy();
       const beams = page.locator('#beams'), note = page.locator('#no3dNote'), prep = page.locator('#prepBtn');
       const controls3d = ['#recenter3d', '#hint3d', '#vid3d', '#render3dBtn', '#render3d'];
-      // The 3D view and its controls, or the notice and none of them.
-      const expect3d = async (shown: boolean, label: string) => {
+      // The 3D view and its controls, or the notice and none of them. The
+      // notice names what brings the 3D back in this state: with
+      // « Préparer » on, the pane stays whatever « Vider » / « Envoyer » do.
+      const expect3d = async (shown: boolean, label: string, prepOn = false) => {
         if (shown) {
           await expect(beams, `${label} 3D view`).toBeVisible();
           expect((await box(beams)).height, `${label} 3D view height`).toBeGreaterThanOrEqual(MIN_VIEW);
@@ -281,8 +283,11 @@ for (const size of SIZES) {
         } else {
           await expect(beams, `${label} 3D view hidden`).toBeHidden();
           await expect(note, `${label} notice`).toBeVisible();
-          await expect(note, label).toContainText(/3D/);
-          await expect(note, label).toContainText(/Vider/);
+          await expect(note, label).toContainText(/3D/, { useInnerText: true });
+          if (prepOn) {
+            await expect(note, `${label} notice with « Préparer » on`).toContainText(/Préparer/, { useInnerText: true });
+            await expect(note, `${label} notice does not offer « Vider »`).not.toContainText(/Vider|Envoyer/, { useInnerText: true });
+          } else await expect(note, `${label} notice with « Préparer » off`).toContainText(/Vider/, { useInnerText: true });
           for (const sel of controls3d) await expect(page.locator(sel), `${label} ${sel} hidden with the 3D`).toBeHidden();
           // The notice is whole, on one line, inside the stage and off the view (badges and pane are in the view).
           const n = await note.evaluate(e => ({ sw: e.scrollWidth, cw: e.clientWidth, lh: parseFloat(getComputedStyle(e).lineHeight), h: e.clientHeight }));
@@ -315,15 +320,25 @@ for (const size of SIZES) {
         expect(pv.height, `${label} 2D output height`).toBeGreaterThanOrEqual(120);
         expect(inside(pv, view), `${label} 2D output inside the view`).toBe(true);
         expect(inside(await box(page.locator('#prepPane')), view), `${label} pane inside the view`).toBe(true);
-        await expect3d(!narrow, label);
+        await expect3d(!narrow, label, true);
         if (!narrow) expect((await box(beams)).width, `${label} 3D view width`).toBeGreaterThanOrEqual(120);
         // A second click on « 2D+3D » (setView shows the 3D controls again) changes nothing.
         await setMode(page, 'both');
-        await expect3d(!narrow, `${label}, 2D+3D clicked again`);
+        await expect3d(!narrow, `${label}, 2D+3D clicked again`, true);
         await expect(page.locator('#aud3d'), `${label} audience badge`).toBeVisible();
         await expect(page.locator('#stAudWrap'), `${label} audience count in the stats`).toBeVisible();
         expect(inside(await box(page.locator('#stAudWrap')), await box(page.locator('#stage'))), `${label} stats inside the stage`).toBe(true);
-        // A real cue prepared, then « Préparer » off: the pane stays, so does the collapse (and the notice).
+        // A real cue prepared with « Préparer » on: « Vider » empties the pane but
+        // keeps it, so the 3D stays collapsed and the notice must not offer « Vider ».
+        expect(await studio.post('/api/prepared', { id: cueId })).toBe(200);
+        await expect(page.locator('#prepSend')).toBeEnabled();
+        await expect3d(!narrow, `${label}, cue with « Préparer » on`, true);
+        await page.locator('#prepClear').click();
+        await expect(page.locator('#prepSend')).toBeDisabled();
+        await expect(page.locator('#prepPane')).toBeVisible();
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+        await expect3d(!narrow, `${label}, « Vider » with « Préparer » on`, true);
+        // The cue prepared again, then « Préparer » off: the pane stays, so does the collapse; now « Vider » applies.
         expect(await studio.post('/api/prepared', { id: cueId })).toBe(200);
         await expect(page.locator('#prepSend')).toBeEnabled();
         await prep.click();

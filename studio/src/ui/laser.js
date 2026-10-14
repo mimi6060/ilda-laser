@@ -15,7 +15,7 @@ import { assignPickingHoldKey, clientId, downCodes, keyName, pickHoldKey, pickin
   setHold, shiftMod } from './presence.js';
 import { LINK } from './state.js';
 import { REC, beam3d, prepMode, prepareCue, prepared, sendPrepared, setCam3d, show3d, vidReady,
-  vidToggle, view3d } from './view3d.js';
+  vidHidden, vidToggle, view3d } from './view3d.js';
 import { VIEW_FKEYS, WORKSPACES, activeWs, closeViewsMenu, recallSlot, setWorkspace, showVueArm,
   storeSlot, vueAllows } from './workspaces.js';
 import { cqAct, cqPlayer } from './cuelist.js';
@@ -253,7 +253,7 @@ function buildShortcuts() {
     // read by position like the other Alt letters.
     { id: 'view3d.record', group: 'Vue 3D', codes: ['KeyR'], alt: true, zones: LIVE_ZONES, show: true,
       label: 'Enregistrer la vue 3D en vidéo (démarrer / arrêter ; vue 3D affichée)',
-      when: () => !!REC.rec || vidReady(),
+      when: () => !!REC.rec || vidReady() || vidHidden(), // hidden behind the prepared pane: refused with a message
       down: e => { if (!e.repeat) vidToggle(); } },
     { id: 'view3d.camera', group: 'Vue 3D', codes: ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'], alt: true, shift: true, zones: '*', show: true,
       cap: () => '1 … 6', label: 'Point de vue : Public (régie), Premier rang, Scène, Dessus, Côté, Libre (vue 3D affichée)',
