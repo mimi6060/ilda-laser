@@ -207,6 +207,38 @@ test('the « Vues » menu saves, renames and deletes; operators in RÉGLAGES', a
   expect((await studio.state()).armed).toBe(false);
 });
 
+// T-519: switching operator re-applies the preferences, never the page's
+// set-up: the tab-bar hint keeps one size watcher, and still adapts.
+test('switching operator several times keeps one watcher on the tab-bar hint', async ({ page }) => {
+  await page.addInitScript(() => {
+    const observe = ResizeObserver.prototype.observe;
+    (window as any).__hintObserves = 0;
+    ResizeObserver.prototype.observe = function (target: Element, opts?: ResizeObserverOptions) {
+      if (target.id === 'wsHint') (window as any).__hintObserves++;
+      return observe.call(this, target, opts);
+    };
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await opened(page);
+  const observes = () => page.evaluate(() => (window as any).__hintObserves as number);
+  expect(await observes()).toBe(1);
+  await openWorkspace(page, 'settings');
+  await page.locator('#operatorPanel summary').click();
+  page.once('dialog', d => d.accept('Marie'));
+  await page.locator('#opNew').click();
+  await expect(page.locator('#opSelect')).toHaveValue('Marie');
+  for (const name of ['Défaut', 'Marie', 'Défaut', 'Marie', 'Défaut']) {
+    await page.locator('#opSelect').selectOption(name);
+    await expect.poll(async () => (await studio.get('/api/operators')).current).toBe(name);
+    await expect.poll(async () => (await op(page)).ready).toBe(true);
+  }
+  expect(await observes()).toBe(1);
+  // The one watcher still works: shortened at 1440, hidden at 1280.
+  await expect(page.locator('#wsHint')).toHaveClass(/\bshort\b/);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.locator('#wsHint')).toHaveClass(/\bnone\b/);
+});
+
 test('a damaged operator file gives the empty « Défaut » profile, nothing blocked', async ({ page }) => {
   const dir = path.join(studio.dataDir, 'operators');
   mkdirSync(dir, { recursive: true });
