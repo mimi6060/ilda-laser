@@ -88,6 +88,7 @@ pub(crate) const UI_ASSETS: &[(&str, &str, &str)] = &[
     ("/ui/program.js", include_str!("ui/program.js"), JS),
     ("/ui/help.js", include_str!("ui/help.js"), JS),
     ("/ui/command.js", include_str!("ui/command.js"), JS),
+    ("/ui/simple.js", include_str!("ui/simple.js"), JS),
     ("/ui/app.js", include_str!("ui/app.js"), JS),
 ];
 
@@ -1572,7 +1573,13 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
                             }
                             json_response(json!({ "armed": s.gate.is_armed() }))
                         }
-                        Err(blocking) => with_status(json_response(json!({ "armed": false, "blocking": blocking })), 409),
+                        Err(blocking) => {
+                            // The same blocks, each with its id and UI anchor,
+                            // so the « Prêt à armer » assistant can lead to the
+                            // control that lifts it (T-530).
+                            let items = s.gate.blocking_items();
+                            with_status(json_response(json!({ "armed": false, "blocking": blocking, "blocking_items": items })), 409)
+                        }
                     }
                 } else {
                     // Disarming is always accepted, whatever else the body says.

@@ -207,6 +207,10 @@
   <button id="scrTrustYes" data-t="scripts.confiance.oui"></button><button id="scrTrustNo" data-t="scripts.confiance.non"></button></div>
 <!-- Espaces de travail (T-295) : changer d'onglet ne change que l'affichage. -->
 <nav id="wsTabs" data-t-aria-label="espaces.libelle">
+  <!-- Mode Simple / Mode Pro (T-530): simple is the default; this button
+       switches and the choice is remembered in this browser. Visible in
+       both modes (the workspace tabs are hidden in simple mode). -->
+  <button id="modeBtn" class="mode-btn" aria-pressed="false" title="Passer à l'interface complète (Mode Pro)">Mode Pro</button>
   <div class="ws-tablist" role="tablist" data-t-aria-label="espaces.libelle">
   <button role="tab" data-ws-tab="live" data-t-title="espaces.live.info"><span data-t="espaces.live"></span> <kbd>F1</kbd></button>
   <button role="tab" data-ws-tab="timeline" data-t-title="espaces.timeline.info"><span data-t="espaces.timeline"></span> <kbd>F2</kbd></button>
@@ -728,6 +732,31 @@
       <span id="evoState"></span>
     </div>
   </div>
+
+  <!-- Mode Simple (T-530) : la vue épurée, à côté du grand aperçu. Masquée
+       en Mode Pro (styles.css). Elle réutilise les contrôles existants :
+       les looks écrivent le « content » via /api/settings (comme CRÉATION),
+       la Luminosité est le même master.brightness que le Direct et la barre
+       du haut, et les boutons LASER / Noir / ARRÊT restent ceux de la barre
+       du haut (jamais dupliqués). -->
+  <aside class="ws-simple" data-ws="live" id="simplePanel" aria-label="Mode simple">
+    <h2>Looks</h2>
+    <div class="simple-looks" id="simpleLooks" role="group" aria-label="Choisir un look">
+      <button type="button" data-simple-shape="circle">Cercle</button>
+      <button type="button" data-simple-shape="square">Carré</button>
+      <button type="button" data-simple-shape="triangle">Triangle</button>
+      <button type="button" data-simple-shape="star">Étoile</button>
+      <button type="button" data-simple-gen="spiral_arms">Spirale</button>
+      <button type="button" data-simple-gen="tunnel">Tunnel</button>
+    </div>
+    <h2>Luminosité</h2>
+    <div class="simple-bright">
+      <input type="range" id="smplBright" min="0" max="100" data-live="brightness" data-k="100" data-control="master.brightness" title="master.brightness" aria-label="Luminosité">
+      <span class="v" id="smplBrightV"></span>
+    </div>
+    <p class="simple-safety-note">Le laser démarre toujours éteint. LASER, Noir et ARRÊT sont en haut à droite. Un vrai arrêt reste matériel (coupure projecteur, arrêt d'urgence).</p>
+    <button type="button" class="simple-adv" id="simpleAdvanced">Réglages avancés…</button>
+  </aside>
 
   <!-- LIVE : panneau à onglets (Direct, Modulateurs, Musique, Scènes) + grille de cues -->
   <div class="ws-panel" data-ws="live" id="livePanel">

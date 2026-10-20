@@ -208,6 +208,63 @@ function opTouched() {
   OP.timer = setTimeout(opPushPrefs, 500);
 }
 
+// ---------- Mode Simple / Mode Pro (T-530) ----------
+// Simple is the default for a first launch: a clean view with the big
+// preview, a few looks, the master brightness and the safety buttons. Pro
+// is the full studio. Only the screen changes — nothing is posted, no
+// safety is loosened: arming goes through the very same gate and
+// interlocks whatever the mode. Remembered in this browser (key `ui.mode`,
+// not synced to the operator profile), everything in try/catch. A window
+// (T-281) is always Pro: it is a cut-down view already.
+const UI_MODE_KEY = 'ui.mode';
+let uiMode = 'simple';
+function readUiMode() {
+  try { return localStorage.getItem(UI_MODE_KEY) === 'pro' ? 'pro' : 'simple'; } catch { return 'simple'; }
+}
+function applyUiMode() {
+  document.body.classList.toggle('mode-simple', uiMode === 'simple');
+  document.body.classList.toggle('mode-pro', uiMode === 'pro');
+  const b = $('modeBtn');
+  if (b) {
+    const simple = uiMode === 'simple';
+    b.textContent = simple ? 'Mode Pro' : 'Mode Simple';
+    b.title = simple ? 'Passer à l\'interface complète (Mode Pro)' : 'Revenir à l\'interface simplifiée (Mode Simple)';
+    b.setAttribute('aria-pressed', String(!simple));
+  }
+}
+function setUiMode(mode) {
+  const m = mode === 'pro' ? 'pro' : 'simple';
+  const changed = m !== uiMode;
+  uiMode = m;
+  try { localStorage.setItem(UI_MODE_KEY, m); } catch { /* private window: not remembered */ }
+  applyUiMode();
+  // Simple mode shows the LIVE workspace only; its density stays hidden.
+  if (changed && uiMode === 'simple' && activeWs !== 'live') setWorkspace('live');
+}
+uiMode = VUE ? 'pro' : readUiMode();
+applyUiMode();
+if (VUE) { const b = $('modeBtn'); if (b) b.hidden = true; }
+$('modeBtn')?.addEventListener('click', () => setUiMode(uiMode === 'simple' ? 'pro' : 'simple'));
+
+// Leads straight to the control that lifts an arming block (T-530): the
+// « Prêt à armer » assistant passes a stable anchor (an element/panel id,
+// never a French label). Switches to Pro so the panel is visible, opens
+// its workspace and any <details> around it, then scrolls and flashes it.
+function gotoAnchor(anchor) {
+  if (!anchor) return;
+  setUiMode('pro');
+  const el = document.getElementById(anchor);
+  if (!el) return;
+  const wsEl = el.closest('[data-ws]');
+  if (wsEl && WORKSPACES.includes(wsEl.dataset.ws)) setWorkspace(wsEl.dataset.ws);
+  for (let d = el.closest('details'); d; d = d.parentElement?.closest('details')) d.open = true;
+  if (el.tagName === 'DETAILS') el.open = true;
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.add('anchor-flash');
+  setTimeout(() => el.classList.remove('anchor-flash'), 1600);
+  try { el.focus({ preventScroll: true }); } catch { /* not focusable */ }
+}
+
 // ---------- Mode nuit et mode tactile (T-282) ----------
 // This browser's display only: nothing reaches the studio or the laser.
 // prefs = { night, nightLevel (0.4–1), redTint, touch: 'auto'|'on'|'off' }.
@@ -305,6 +362,8 @@ document.addEventListener('click', e => {
 function setWorkspace(ws) {
   if (!WORKSPACES.includes(ws) || VUE) ws = 'live'; // every window (T-281) is cut from LIVE
   if (showMode && (ws === 'creation' || ws === 'settings')) ws = 'live'; // T-283
+  // Mode Simple shows LIVE only; reaching another workspace means Pro (T-530).
+  if (uiMode === 'simple' && ws !== 'live') setUiMode('pro');
   // PUPITRE (T-427): leaving lets go of what it held and of full screen.
   if (activeWs === 'desk' && ws !== 'desk' && typeof deskLeave === 'function') deskLeave();
   // Vidéo de la vue 3D (T-459): another workspace ends the recording.
@@ -358,7 +417,9 @@ function fitHint() {
 const hintFit = new ResizeObserver(fitHint);
 hintFit.observe($('wsHint'));
 hintFit.observe($('wsHint').firstElementChild);
-setWorkspace(remembered(WS_KEY));
+// Simple mode starts on LIVE whatever the remembered workspace was, so a
+// first launch opens the clean view (T-530); Pro restores the last one.
+setWorkspace(uiMode === 'simple' ? 'live' : remembered(WS_KEY));
 setLivePanel(remembered(PANEL_KEY));
 // The remembered stage (2D/3D) is restored by app.js once every module has
 // run (T-508): setView draws the 2D preview, whose overlays read modules
@@ -422,7 +483,7 @@ function opReplaceLocal(prefs) {
 function opApplyPrefs() {
   try {
     displayPrefs = readDisplayPrefs(); applyDisplay();
-    setWorkspace(remembered(WS_KEY));
+    setWorkspace(uiMode === 'simple' ? 'live' : remembered(WS_KEY));
     setLivePanel(remembered(PANEL_KEY));
     setCreationTab(remembered(CTAB_KEY));
     if (view3d) { view3d.setRender({ ...beam3d.DEFAULT_RENDER, ...loadRender3d() }); showRender3d(); }
@@ -753,5 +814,5 @@ if (globalThis.ResizeObserver) new ResizeObserver(() => {
 }).observe($('top'));
 
 export { CONFIRM_HOLD_MS, LOCKED_FR, LONG_PRESS_MS, VIEW_FKEYS, WORKSPACES, activeWs, closeViewsMenu,
-  flash, holdToRun, opTouched, recallSlot, remember, remembered, restoreStage, setLivePanel, setWorkspace,
-  showMode, showShowMode, showVueArm, storeSlot, vueAllows, winSend };
+  flash, gotoAnchor, holdToRun, opTouched, recallSlot, remember, remembered, restoreStage, setLivePanel,
+  setUiMode, setWorkspace, showMode, showShowMode, showVueArm, storeSlot, uiMode, vueAllows, winSend };

@@ -160,6 +160,34 @@ pub struct Interlock {
     pub ok: bool,
 }
 
+/// One blocking interlock, with a stable anchor so the UI can lead straight
+/// to the control that lifts it (T-530, « Prêt à armer » assistant). The
+/// anchor is an element/panel id, never the French label, which may change.
+#[derive(Clone, Debug, Serialize)]
+pub struct BlockingItem {
+    pub id: &'static str,
+    pub label_fr: String,
+    /// Id of the UI element or panel to open (empty: nothing to click; the
+    /// page itself clears it, e.g. the operator-presence heartbeat).
+    pub anchor: &'static str,
+}
+
+/// The UI element/panel id that resolves an interlock, matched on its stable
+/// id (T-530). Unknown ids (or ones the page clears by itself) get no
+/// anchor, so the assistant just shows them as text.
+pub fn anchor_for(id: &str) -> &'static str {
+    match id {
+        ESTOP => "estopReset",
+        CHECKLIST | HW_STOP => "checklistPanel",
+        AUDIENCE_ZONE => "sfZones",
+        OUTPUT | PROJECTORS => "outputsPanel",
+        OUTDOOR_AUTH => "outdoorPanel",
+        STANDBY => "standbyPill",
+        DATA_ACK => "dataWarn",
+        _ => "",
+    }
+}
+
 /// Id of the interlock held open by a latched emergency stop.
 pub const ESTOP: &str = "estop";
 /// Id of the always-blocking interlock enabled by `--test-interlock`.
@@ -260,6 +288,16 @@ impl ArmGate {
     /// Labels of the interlocks that currently block arming.
     pub fn blocking(&self) -> Vec<String> {
         self.interlocks.iter().filter(|i| !i.ok).map(|i| i.label_fr.clone()).collect()
+    }
+
+    /// The same list as `blocking`, each with its id and UI anchor (T-530),
+    /// in the same order. The text `blocking` stays for older front-ends.
+    pub fn blocking_items(&self) -> Vec<BlockingItem> {
+        self.interlocks
+            .iter()
+            .filter(|i| !i.ok)
+            .map(|i| BlockingItem { id: i.id, label_fr: i.label_fr.clone(), anchor: anchor_for(i.id) })
+            .collect()
     }
 
     pub fn has_interlock(&self, id: &str) -> bool {
@@ -412,6 +450,7 @@ impl ArmGate {
                 at: ms(*at),
             }),
             blocking: self.blocking(),
+            blocking_items: self.blocking_items(),
             estop: estop.state().map(|(src, at)| EStopStatus { source: src, source_fr: src.label_fr(), at }),
         }
     }
@@ -426,6 +465,8 @@ pub struct ArmStatus {
     pub source_fr: Option<&'static str>,
     pub last_disarm: Option<LastDisarm>,
     pub blocking: Vec<String>,
+    /// The same blocks as `blocking`, each with its id and UI anchor (T-530).
+    pub blocking_items: Vec<BlockingItem>,
     pub estop: Option<EStopStatus>,
 }
 
@@ -631,6 +672,38 @@ mod tests {
         // Coming back does not re-arm.
         gate.set_interlock("door", true);
         assert!(!gate.is_armed());
+    }
+
+    #[test]
+    fn blocking_items_carry_a_stable_anchor_and_keep_the_text_list() {
+        let mut gate = ArmGate::default();
+        gate.register(OUTPUT, OUTPUT_LABEL, false);
+        gate.register(CHECKLIST, "Liste « Avant le show » à terminer", false);
+        let status = gate.status(&EStop::default());
+        // The text list is unchanged (older front-ends read it).
+        assert_eq!(status.blocking, vec![OUTPUT_LABEL.to_string(), "Liste « Avant le show » à terminer".to_string()]);
+        // The structured list adds id + anchor, in the same order.
+        let items = &status.blocking_items;
+        assert_eq!(items.len(), 2);
+        assert_eq!((items[0].id, items[0].anchor), (OUTPUT, "outputsPanel"));
+        assert_eq!(items[0].label_fr, OUTPUT_LABEL);
+        assert_eq!((items[1].id, items[1].anchor), (CHECKLIST, "checklistPanel"));
+        // Resolving one drops it from both lists.
+        gate.set_interlock(OUTPUT, true);
+        let status = gate.status(&EStop::default());
+        assert_eq!(status.blocking, vec!["Liste « Avant le show » à terminer".to_string()]);
+        assert_eq!(status.blocking_items.len(), 1);
+        assert_eq!(status.blocking_items[0].id, CHECKLIST);
+    }
+
+    #[test]
+    fn anchors_are_known_for_the_user_facing_interlocks() {
+        for (id, anchor) in [(OUTPUT, "outputsPanel"), (PROJECTORS, "outputsPanel"), (CHECKLIST, "checklistPanel"), (HW_STOP, "checklistPanel"), (AUDIENCE_ZONE, "sfZones"), (ESTOP, "estopReset")] {
+            assert_eq!(anchor_for(id), anchor, "anchor for {id}");
+        }
+        // An id with no control to open gets no anchor.
+        assert_eq!(anchor_for(UI_ALIVE), "");
+        assert_eq!(anchor_for("mystery"), "");
     }
 
     #[test]

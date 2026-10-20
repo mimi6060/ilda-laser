@@ -9,8 +9,8 @@
 //   tempo.js → cues.js → presets.js → macros.js → shows.js → timeline-editor.js →
 //   timeline-markers.js → timeline-canvas.js → layers.js → desk.js → modulators.js → outputs.js →
 //   venue.js → midi.js → apc40.js → project.js → figures.js → media.js →
-//   program.js → help.js → command.js
-import './command.js';
+//   program.js → help.js → command.js → simple.js
+import './simple.js';
 import { api, armed, controlLatest, sendLatest } from './core.js';
 import { arm } from './laser.js';
 import { LINK } from './state.js';

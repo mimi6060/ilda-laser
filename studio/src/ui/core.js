@@ -571,6 +571,8 @@ function showSettings() {
   setVal('aFlash', Math.round(s.audio.flash * 100));
   setCheck('aColor', s.audio.color_on_beat);
   showValues();
+  // Mode Simple (T-530) reflects the active look from this one event.
+  document.dispatchEvent(new CustomEvent('ls:look'));
 }
 
 // The text options (T-439): absent style = the defaults (segment font).

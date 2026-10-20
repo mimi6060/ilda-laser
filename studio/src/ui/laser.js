@@ -16,8 +16,8 @@ import { assignPickingHoldKey, clientId, downCodes, keyName, pickHoldKey, pickin
 import { LINK } from './state.js';
 import { REC, beam3d, prepMode, prepareCue, prepared, sendPrepared, setCam3d, show3d, vidReady,
   vidHidden, vidToggle, view3d } from './view3d.js';
-import { VIEW_FKEYS, WORKSPACES, activeWs, closeViewsMenu, recallSlot, setWorkspace, showVueArm,
-  storeSlot, vueAllows } from './workspaces.js';
+import { VIEW_FKEYS, WORKSPACES, activeWs, closeViewsMenu, gotoAnchor, recallSlot, setUiMode, setWorkspace,
+  showVueArm, storeSlot, vueAllows } from './workspaces.js';
 import { cqAct, cqPlayer } from './cuelist.js';
 import { toggleSky } from './safety.js';
 import { FX_HOLDS, assignReverseKey, control, fxHold, reverse, reverseKey } from './direct.js';
@@ -43,8 +43,23 @@ import { toggleCommand } from './command.js';
 // ---------- laser on/off, emergency stop ----------
 // Frames fetched before the last arm request answered may carry an old
 // "armed" value; they must not overwrite what the server just told us.
-let arm = null, refusedTimer = null, armAnsweredAt = 0;
+let arm = null, armAnsweredAt = 0;
 function assignArm(v) { return (arm = v); }
+// « Prêt à armer » assistant (T-530): once an arm is refused, a panel that
+// stays while blocks remain. `seen` keeps every block of the attempt so a
+// lifted one turns green instead of vanishing; it is driven by the live
+// arm status (each frame), so checks tick over as the operator fixes
+// things. null = closed. It changes nothing about the gate: the real arm
+// still goes through /api/arm and every interlock.
+let armWizard = null;
+function openArmWizard(items) {
+  const seen = new Map();
+  for (const it of items) {
+    const key = it.id || it.label_fr;
+    if (!seen.has(key)) seen.set(key, { id: it.id || '', label: it.label_fr, anchor: it.anchor || '' });
+  }
+  armWizard = { seen };
+}
 // {enforced, complete} of the pre-show checklist (T-258), from each frame.
 let checklistState = null;
 function assignChecklistState(v) { return (checklistState = v); }
@@ -59,9 +74,9 @@ async function sendArm(body) {
   armAnsweredAt = performance.now();
   // Binary frames up to this one were published before the change (T-411).
   LINK.armSeqMin = +(r.headers.get('X-Frame-Seq') || 0);
-  if (r.ok) { assignArmed((await r.json()).armed); $('armRefused').hidden = true; showArmed(); return; }
+  if (r.ok) { assignArmed((await r.json()).armed); armWizard = null; $('armRefused').hidden = true; showArmed(); return; }
   if (r.status === 409) {
-    const { blocking, confirm_backup_lost } = await r.json();
+    const { blocking, blocking_items, confirm_backup_lost } = await r.json();
     // Main machine whose backup is unreachable (T-456): the operator
     // confirms the risk, then the request goes again, explicitly on.
     if (confirm_backup_lost && !body.confirm_backup_lost) {
@@ -69,13 +84,14 @@ async function sendArm(body) {
       if (confirm(confirm_backup_lost)) return sendArm({ on: true, source: body.source, confirm_backup_lost: true });
       return;
     }
-    assignArmed(false); showArmed();
-    const box = $('armRefused');
-    box.innerHTML = '<b>Armement impossible :</b><ul></ul>';
-    for (const why of blocking) { const li = document.createElement('li'); li.textContent = why; box.querySelector('ul').appendChild(li); }
-    box.hidden = false;
-    clearTimeout(refusedTimer);
-    refusedTimer = setTimeout(() => { box.hidden = true; }, 5000);
+    assignArmed(false);
+    // Each block carries a stable anchor (T-530); older servers send only
+    // the text list, so fall back to anchor-less items.
+    const items = Array.isArray(blocking_items) && blocking_items.length
+      ? blocking_items
+      : (blocking || []).map(label => ({ id: '', label_fr: label, anchor: '' }));
+    openArmWizard(items);
+    showArmed();
   } else console.warn('/api/arm', await r.text());
 }
 // Plain "off" (Shift+Escape, blackouts) is always explicit, never a toggle.
@@ -112,12 +128,86 @@ function showArmed() {
   $('armBtn').classList.toggle('todo', todo);
   $('armBtn').textContent = libelle(armed ? 'securite.laser.on' : !todo ? 'securite.laser.off' : hwStopPending() ? 'securite.laser.arret_materiel' : 'securite.laser.liste');
   $('offBadge').classList.toggle('hidden', armed);
+  renderArmWizard();
   if (!arm) return showVueArm();
   $('estopBanner').hidden = !arm.estop;
   const d = arm.last_disarm;
   $('armInfo').textContent = arm.armed ? libelle('securite.arme.depuis', { duree: since(arm.since), source: arm.source_fr })
     : d ? libelle('securite.desarme.raison', { raison: d.reason_fr, source: d.source_fr, heure: clock(d.at) }) : libelle('securite.desarme');
   showVueArm();
+}
+// Draws the « Prêt à armer » assistant into #armRefused (the old refusal
+// box, now persistent). Called from showArmed, so it tracks the live arm
+// status: a lifted block turns green, and when all are clear the big LASER
+// button arms in one click (the panel offers one too). Nothing here arms
+// by itself. Kept as a role="alert" <ul> of <li> so the refusal still
+// reads as before.
+function renderArmWizard() {
+  const box = $('armRefused');
+  if (armed) { armWizard = null; }
+  if (!armWizard) { box.hidden = true; box.textContent = ''; return; }
+  // Merge any block the live status shows but the attempt had not, so a new
+  // lock (output lost, e-stop…) appears while the panel is open.
+  const liveItems = (arm && Array.isArray(arm.blocking_items)) ? arm.blocking_items : [];
+  for (const it of liveItems) {
+    const key = it.id || it.label_fr;
+    if (!armWizard.seen.has(key)) armWizard.seen.set(key, { id: it.id || '', label: it.label_fr, anchor: it.anchor || '' });
+  }
+  if (!liveItems.length) for (const s of (arm && arm.blocking) || []) {
+    if (!armWizard.seen.has(s)) armWizard.seen.set(s, { id: '', label: s, anchor: '' });
+  }
+  // A block is lifted when neither its id nor its label is blocking now.
+  const liveIds = new Set(liveItems.map(i => i.id).filter(Boolean));
+  const liveLabels = new Set([...((arm && arm.blocking) || []), ...liveItems.map(i => i.label_fr)]);
+  const resolved = e => !(e.id && liveIds.has(e.id)) && !liveLabels.has(e.label);
+  const entries = [...armWizard.seen.values()];
+  const allOk = entries.every(resolved);
+  box.textContent = '';
+  const head = document.createElement('b');
+  head.textContent = allOk ? 'Prêt à armer' : 'Armement impossible :';
+  box.appendChild(head);
+  const ul = document.createElement('ul');
+  for (const e of entries) {
+    const ok = resolved(e);
+    const li = document.createElement('li');
+    li.classList.toggle('ok', ok);
+    const mark = document.createElement('span');
+    mark.className = 'chk';
+    mark.setAttribute('aria-hidden', 'true');
+    mark.textContent = ok ? '✓' : '•';
+    const label = document.createElement('span');
+    label.className = 'lbl';
+    label.textContent = e.label;
+    li.append(mark, label);
+    if (!ok && e.anchor) {
+      const go = document.createElement('button');
+      go.type = 'button';
+      go.className = 'go';
+      go.textContent = 'Régler';
+      go.addEventListener('click', () => gotoAnchor(e.anchor));
+      li.appendChild(go);
+    }
+    ul.appendChild(li);
+  }
+  box.appendChild(ul);
+  // All clear: a one-click arm here (the top LASER button works too).
+  if (allOk) {
+    const row = document.createElement('div');
+    row.className = 'aw-actions';
+    const armGo = document.createElement('button');
+    armGo.type = 'button';
+    armGo.className = 'aw-arm';
+    armGo.textContent = 'Armer le laser';
+    armGo.addEventListener('click', () => setArmed(true, 'ui'));
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'aw-close';
+    close.textContent = 'Fermer';
+    close.addEventListener('click', () => { armWizard = null; renderArmWizard(); });
+    row.append(armGo, close);
+    box.appendChild(row);
+  }
+  box.hidden = false;
 }
 // ShowNET output (T-472): the hardware-stop reminder and the Wi-Fi pill,
 // a permanent warning while the link to the box is the Wi-Fi. A LaserCube

@@ -428,8 +428,19 @@ export { expect };
  * that question is accepted by default. Other dialogs keep Playwright's
  * default (dismissed) unless the spec listens for them itself.
  */
-export const test = base.extend({
-  page: async ({ page }, use) => {
+export const test = base.extend<{ uiMode: 'pro' | 'simple' | 'default' }>({
+  // Mode Simple is the real first-launch default (T-530), but the whole
+  // existing suite drives the full Pro interface. So every spec starts in
+  // Pro; a spec checking the default opts out with
+  // test.use({ uiMode: 'default' }) (nothing set, so the app picks Simple),
+  // or forces Simple with 'simple'.
+  uiMode: ['pro', { option: true }],
+  page: async ({ page, uiMode }, use) => {
+    if (uiMode !== 'default') {
+      await page.addInitScript(mode => {
+        try { localStorage.setItem('ui.mode', mode); } catch { /* private window */ }
+      }, uiMode);
+    }
     page.on('dialog', d => {
       if (d.type() === 'beforeunload') d.accept().catch(() => {});
       else if (page.listenerCount('dialog') === 1) d.dismiss().catch(() => {});
