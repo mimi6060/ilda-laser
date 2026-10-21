@@ -458,6 +458,7 @@
   #figLib .figitem { display: flex; gap: 4px; }
   #figLib .figitem .n { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #figLib .figitem .del { flex: none; padding: 4px 8px; color: var(--muted); }
+  #figLib .figitem .badge, #objLib .objitem .badge { flex: none; font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; }
   /* Parties d'une figure (T-441) */
   #figParts .figpart { display: flex; gap: 4px; align-items: center; margin-top: 4px; border-radius: 6px; }
   #figParts .figpart.hover { outline: 1px solid var(--accent); }

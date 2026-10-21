@@ -115,8 +115,9 @@ test('empty lists say what they are for and offer the first action', async ({ pa
   // CRÉATION › Figures.
   await page.locator('#wsTabs [data-ws-tab="creation"]').click();
   await page.locator('#creationTabs [data-ctab="figures"]').click();
-  await expect(page.locator('#figLib')).toContainText('Dessinez vos propres figures ou importez un SVG.');
-  await page.locator('#figLib').getByRole('button', { name: 'Importer…' }).click();
+  // The tab ships with built-in figures (T-533); import from the toolbar.
+  await expect(page.locator('#figLib .figitem.builtin')).not.toHaveCount(0);
+  await page.locator('#figImport').click();
   await expect(page.locator('#figImportDlg')).toBeVisible();
   await page.locator('#impClose').click();
 

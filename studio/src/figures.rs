@@ -265,10 +265,31 @@ pub fn preset_of(fig: &Figure) -> Preset {
     }
 }
 
+/// The built-in starter figures (T-533): read-only, procedural, never
+/// written to disk nor baked into a project.
+pub fn builtin_figures() -> Vec<Figure> {
+    crate::starter::builtin_figures()
+}
+
+/// `user` figures and the `builtin` ones they don't shadow, in name order.
+fn merged<'a>(user: &'a [Figure], builtin: &'a [Figure]) -> Vec<&'a Figure> {
+    let mut out: Vec<&Figure> = user.iter().collect();
+    out.extend(builtin.iter().filter(|b| !user.iter().any(|f| f.name == b.name)));
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// The figure cues for `user`'s library merged with the built-ins (a
+/// project open builds the presets with the studio lock released, T-488).
+pub fn merged_presets(user: &[Figure]) -> Vec<Preset> {
+    let builtin = builtin_figures();
+    merged(user, &builtin).into_iter().map(preset_of).collect()
+}
+
 /// Rebuilds the « Figures » cue page (and the grid controls for MIDI)
 /// from the library. Called whenever the library changes.
 pub fn refresh(s: &mut crate::Shared) {
-    let figures: Vec<Preset> = s.figures.list().iter().map(preset_of).collect();
+    let figures: Vec<Preset> = s.figures.all().into_iter().map(preset_of).collect();
     refresh_with(s, figures);
 }
 
@@ -287,6 +308,8 @@ pub fn refresh_with(s: &mut crate::Shared, figures: Vec<Preset>) {
 pub struct FigureStore {
     dir: Option<PathBuf>,
     list: Vec<Figure>,
+    /// Read-only starter figures (T-533): never on disk nor in a project.
+    builtin: Vec<Figure>,
 }
 
 impl FigureStore {
@@ -311,12 +334,12 @@ impl FigureStore {
             }
         }
         list.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { dir: Some(dir), list }
+        Self { dir: Some(dir), list, builtin: builtin_figures() }
     }
 
     /// A library that never touches the disk (tests).
     pub fn in_memory() -> Self {
-        Self { dir: None, list: Vec::new() }
+        Self { dir: None, list: Vec::new(), builtin: Vec::new() }
     }
 
     pub fn dir(&self) -> Option<&Path> {
@@ -328,7 +351,20 @@ impl FigureStore {
     }
 
     pub fn get(&self, name: &str) -> Option<&Figure> {
-        self.list.iter().find(|f| f.name == name.trim())
+        let name = name.trim();
+        self.list.iter().find(|f| f.name == name).or_else(|| self.builtin.iter().find(|f| f.name == name))
+    }
+
+    /// The figures shown and played: the user's library plus the built-ins
+    /// (T-533) a user figure of the same name doesn't shadow, in name order.
+    pub fn all(&self) -> Vec<&Figure> {
+        merged(&self.list, &self.builtin)
+    }
+
+    /// Whether `name` is a read-only built-in (no user figure shadows it).
+    pub fn is_builtin(&self, name: &str) -> bool {
+        let name = name.trim();
+        !self.list.iter().any(|f| f.name == name) && self.builtin.iter().any(|f| f.name == name)
     }
 
     /// The file of a figure: names are file names, so it can never leave

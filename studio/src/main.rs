@@ -116,6 +116,7 @@ mod remote;
 mod standby;
 mod sdbank;
 mod sheets;
+mod starter;
 mod psn;
 mod targets;
 mod tempo;
@@ -1787,7 +1788,7 @@ fn startup_state(cli: &Cli) -> Shared {
         citp: citp::CitpState::load(cli.data_dir.join("citp.json")),
     };
     usercues::sync_presets(&mut state);
-    let objects = state.objects.list().iter().map(wire::preset_of).collect();
+    let objects: Vec<_> = state.objects.all().into_iter().map(wire::preset_of).collect();
     wire::set_presets(&mut state, objects);
     figures::refresh(&mut state);
     // Macro lines checked against the registry they will run on (T-425).

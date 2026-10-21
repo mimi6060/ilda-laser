@@ -827,8 +827,8 @@ fn prepare(p: &mut Project) -> Prepared {
     p.user_cues = crate::usercues::checked(std::mem::take(&mut p.user_cues));
     Prepared {
         catalog: crate::presets::catalog(),
-        figure_presets: p.figures.iter().map(crate::figures::preset_of).collect(),
-        object_presets: p.objects.iter().map(crate::wire::preset_of).collect(),
+        figure_presets: crate::figures::merged_presets(&p.figures),
+        object_presets: crate::wire::merged_presets(&p.objects),
         user_cue_presets: crate::usercues::presets_of(&p.user_cues),
     }
 }
@@ -2676,7 +2676,15 @@ mod tests {
         std::fs::write(dir.join("projects/ancien.lsproj"), json!({ "format_version": 1, "name": "ancien" }).to_string()).unwrap();
         post(&shared, &dir, "open", json!({ "path": "ancien" })).unwrap();
         assert!(shared.lock().unwrap().objects.list().is_empty());
-        assert!(!shared.lock().unwrap().presets.iter().any(|p| p.id.starts_with(crate::wire::ID_PREFIX)));
+        {
+            // The previous project's object cue is gone; only the built-in
+            // starter objects remain (T-533), shown on a projectless state.
+            let s = shared.lock().unwrap();
+            let obj_ids: std::collections::HashSet<_> = s.presets.iter().filter(|p| p.id.starts_with(crate::wire::ID_PREFIX)).map(|p| p.id.clone()).collect();
+            let builtin_ids: std::collections::HashSet<_> = crate::wire::builtin_objects().iter().map(|o| crate::wire::cue_id(&o.name)).collect();
+            assert_eq!(obj_ids, builtin_ids, "only the built-in object cues remain");
+            assert!(!obj_ids.contains("object:Autre"));
+        }
         // A hostile project: a name leaving the folder, too many edges, a duplicate.
         for (tag, objects) in [
             ("evil", json!([{ "name": "../../evil" }])),

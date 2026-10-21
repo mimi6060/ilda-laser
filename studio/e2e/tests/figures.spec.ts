@@ -117,7 +117,7 @@ test('draw, save, reopen identical, play as a cue: a non-empty frame, laser stil
 
   // It is a cue of the Figures page in LIVE.
   await openWorkspace(page, 'live');
-  await page.locator('#cueTabs button', { hasText: 'Figures (1)' }).click();
+  await page.locator('#cueTabs button', { hasText: /Figures \(\d+\)/ }).click();
   await expect(page.locator('#cues .cue[data-id="figure:Ma figure"]')).toBeVisible();
   await expect(page.locator('#cues .cue[data-id="figure:Ma figure"]')).toHaveClass(/active/);
   // A second click stops it (Basculer).
@@ -242,4 +242,18 @@ test('delete from the library removes the cue; the Look sub-tab still works', as
   await page.locator('#creationTabs [data-ctab="look"]').click();
   await expect(page.locator('#figEditor')).toBeHidden();
   await expect(page.locator('#shapes')).toBeVisible();
+});
+
+test('built-in starter figures ship read-only and open into the editor', async ({ page }) => {
+  await openEditor(page);
+  // Shipped on a fresh data dir (T-533): flagged « intégré », no delete.
+  const row = page.locator('#figLib .figitem', { has: page.locator('[data-fig="Cœur"]') });
+  await expect(row).toBeVisible();
+  await expect(row.locator('.badge')).toHaveText('intégré');
+  await expect(row.locator('.del')).toHaveCount(0);
+  expect((await studio.presets()).presets.some(p => p.id === 'figure:Cœur')).toBe(true);
+  // Opening it loads it into the editor (selecting a figure loads it).
+  await page.locator('#figLib [data-fig="Cœur"]').click();
+  await expect(page.locator('#figName')).toHaveValue('Cœur');
+  await expect(page.locator('#figProps')).toBeVisible();
 });

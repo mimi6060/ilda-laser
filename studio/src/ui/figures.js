@@ -603,18 +603,27 @@ async function loadFigLib() {
     return;
   }
   for (const f of fe.lib) {
-    const row = document.createElement('div'); row.className = 'figitem';
+    const row = document.createElement('div'); row.className = 'figitem' + (f.builtin ? ' builtin' : '');
     const open = document.createElement('button'); open.className = 'n';
     open.textContent = `${f.name} · ${f.frames} image${f.frames > 1 ? 's' : ''}`;
-    open.title = 'Ouvrir dans l\'éditeur'; open.dataset.fig = f.name;
+    open.title = f.builtin ? 'Figure intégrée (lecture seule) : ouvrez-la puis renommez-la pour créer la vôtre' : 'Ouvrir dans l\'éditeur';
+    open.dataset.fig = f.name;
     open.onclick = () => openFigure(f.name);
-    const del = document.createElement('button'); del.className = 'del'; del.textContent = '×';
-    del.title = `Supprimer « ${f.name} » de la bibliothèque`;
-    del.onclick = async () => {
-      if (!confirm(`Supprimer la figure « ${f.name} » ?`)) return;
-      if (await post('/api/figures/delete', { name: f.name })) { figMsg(`« ${f.name} » supprimée.`); await loadFigLib(); await loadPresets(); loadLfos(); }
-    };
-    row.append(open, del); box.appendChild(row);
+    row.append(open);
+    if (f.builtin) {
+      // Built-in (T-533): read-only, no delete; « Ouvrir » then rename to copy.
+      const badge = document.createElement('small'); badge.className = 'badge'; badge.textContent = 'intégré';
+      row.append(badge);
+    } else {
+      const del = document.createElement('button'); del.className = 'del'; del.textContent = '×';
+      del.title = `Supprimer « ${f.name} » de la bibliothèque`;
+      del.onclick = async () => {
+        if (!confirm(`Supprimer la figure « ${f.name} » ?`)) return;
+        if (await post('/api/figures/delete', { name: f.name })) { figMsg(`« ${f.name} » supprimée.`); await loadFigLib(); await loadPresets(); loadLfos(); }
+      };
+      row.append(del);
+    }
+    box.appendChild(row);
   }
 }
 async function openFigure(name) {

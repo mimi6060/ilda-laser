@@ -217,7 +217,10 @@ async function loadObjLib() {
     const play = document.createElement('button'); play.textContent = 'Jouer';
     play.title = 'Jouer comme un cue (page Objets 3D) ; n\'arme pas le laser';
     play.onclick = () => objPlay(o);
-    row.append(n, play); box.appendChild(row);
+    row.append(n, play);
+    // Built-in (T-533): read-only, flagged; its delete is disabled in the props.
+    if (o.builtin) { const badge = document.createElement('small'); badge.className = 'badge'; badge.textContent = 'intégré'; row.append(badge); }
+    box.appendChild(row);
   }
   objShowProps();
 }
@@ -232,8 +235,11 @@ function objShowProps() {
   setVal('objPersp', o.perspective);
   setCheck('objDepth', o.depth_color);
   $('objStats').textContent = `${objNum(o.vertices)} sommets · ${objNum(o.edges)} arêtes · ${objNum(o.strokes)} tracé(s) · `
-    + `Points estimés : ${objNum(o.est_points)} / ${objNum(ob.budget)}`;
+    + `Points estimés : ${objNum(o.est_points)} / ${objNum(ob.budget)}`
+    + (o.builtin ? ' · Objet intégré (lecture seule)' : '');
   $('objStats').classList.toggle('bad', o.est_points > ob.budget);
+  $('objDelete').disabled = !!o.builtin;
+  $('objDelete').title = o.builtin ? 'Objet intégré : non supprimable ; renommez-le puis Enregistrer pour créer le vôtre' : '';
 }
 async function objPlay(o) {
   if (await post('/api/presets/play', { id: o.id })) { objMsg(`« ${o.name} » joué (cue de la page Objets 3D).`); refreshLook(); }

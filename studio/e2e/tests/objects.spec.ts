@@ -37,7 +37,9 @@ test.describe('objets 3D', () => {
 
   test('a cube is previewed, imported, turns as a cue within the budget and survives a restart', async ({ page }) => {
     await openObjects(page, studio);
-    await expect(page.locator('#objLib')).toContainText('Aucun objet 3D importé');
+    // Built-in starter objects (T-533) fill the tab on a fresh data dir.
+    await expect(page.locator('#objLib .objitem[data-obj="Cube"]')).toContainText('intégré');
+    expect((await studio.get('/api/objects')).objects.some((o: { name: string; builtin?: boolean }) => o.name === 'Sphère' && o.builtin)).toBe(true);
     await page.locator('#objImport').click();
     await expect(page.locator('#objImportDlg')).toBeVisible();
 
@@ -59,7 +61,7 @@ test.describe('objets 3D', () => {
     await page.locator('#objCoplanar').check();
     await expect(page.locator('#objReport')).toContainText('Arêtes : 12');
     await expect(page.locator('#objImpName')).toHaveValue('Mon cube');
-    expect((await studio.get('/api/objects')).objects, 'a preview saves nothing').toEqual([]);
+    expect((await studio.get('/api/objects')).objects.filter((o: { builtin?: boolean }) => !o.builtin), 'a preview saves nothing').toEqual([]);
 
     await page.locator('#objImpOk').click();
     await expect(page.locator('#objImportDlg')).toBeHidden();
@@ -95,11 +97,11 @@ test.describe('objets 3D', () => {
     await page.locator('#objPersp').fill('6');
     await page.locator('#objSave').click();
     await expect(page.locator('#objMsg')).toContainText('« Mon cube » enregistré');
-    await expect.poll(async () => (await studio.get('/api/objects')).objects[0]).toMatchObject({ color: [255, 0, 0], perspective: 6 });
+    await expect.poll(async () => (await studio.get('/api/objects')).objects.find((o: { name: string }) => o.name === 'Mon cube')).toMatchObject({ color: [255, 0, 0], perspective: 6 });
 
     // Kept across a restart.
     await studio.restart();
-    await expect.poll(async () => (await studio.get('/api/objects')).objects.map((o: { name: string }) => o.name)).toEqual(['Mon cube']);
+    await expect.poll(async () => (await studio.get('/api/objects')).objects.filter((o: { builtin?: boolean }) => !o.builtin).map((o: { name: string }) => o.name)).toEqual(['Mon cube']);
     expect((await studio.presets()).presets.some(p => p.id === 'object:Mon cube')).toBe(true);
     expect((await studio.frame()).armed).toBe(false);
     await openObjects(page, studio);
@@ -110,7 +112,8 @@ test.describe('objets 3D', () => {
     page.once('dialog', d => d.accept());
     await page.locator('#objDelete').click();
     await expect(page.locator('#objMsg')).toContainText('supprimé');
-    await expect(page.locator('#objLib')).toContainText('Aucun objet 3D importé');
+    await expect(page.locator('#objLib .objitem[data-obj="Mon cube"]')).toHaveCount(0);
+    await expect(page.locator('#objLib .objitem[data-obj="Cube"]')).toBeVisible(); // the built-in stays
     expect((await studio.presets()).presets.some(p => p.id === 'object:Mon cube')).toBe(false);
   });
 
@@ -118,7 +121,22 @@ test.describe('objets 3D', () => {
     expect(await studio.post('/api/lock', { show_mode: true })).toBe(200);
     const r = await fetch(studio.url + '/api/objects/import?name=x', { method: 'POST', body: CUBE });
     expect(r.status).toBe(423);
-    expect((await studio.get('/api/objects')).objects).toEqual([]);
+    expect((await studio.get('/api/objects')).objects.filter((o: { builtin?: boolean }) => !o.builtin)).toEqual([]);
     expect(await studio.post('/api/lock', { show_mode: false })).toBe(200);
+  });
+
+  test('built-in starter objects ship read-only and play as cues', async ({ page }) => {
+    await openObjects(page, studio);
+    // Shipped on a fresh data dir (T-533): flagged « intégré ».
+    const cube = page.locator('#objLib .objitem[data-obj="Cube"]');
+    await expect(cube).toContainText('intégré');
+    expect((await studio.presets()).presets.some(p => p.id === 'object:Sphère')).toBe(true);
+    // Selecting it shows read-only props (delete disabled); playing turns a wire cube, never armed.
+    await cube.locator('.n').click();
+    await expect(page.locator('#objProps')).toBeVisible();
+    await expect(page.locator('#objDelete')).toBeDisabled();
+    await page.locator('#objPlay').click();
+    await expect.poll(async () => (await studio.state()).settings.content.kind).toBe('wire');
+    expect((await studio.frame()).armed).toBe(false);
   });
 });

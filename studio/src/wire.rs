@@ -262,10 +262,31 @@ pub fn set_presets(s: &mut crate::Shared, objects: Vec<Preset>) {
     s.presets.extend(objects);
 }
 
+/// The built-in starter objects (T-533): read-only, procedural, never
+/// written to disk nor baked into a project.
+pub fn builtin_objects() -> Vec<WireObject> {
+    crate::starter::builtin_objects()
+}
+
+/// `user` objects and the `builtin` ones they don't shadow, in name order.
+fn merged<'a>(user: &'a [WireObject], builtin: &'a [WireObject]) -> Vec<&'a WireObject> {
+    let mut out: Vec<&WireObject> = user.iter().collect();
+    out.extend(builtin.iter().filter(|b| !user.iter().any(|o| o.name == b.name)));
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// The object cues for `user`'s library merged with the built-ins (a
+/// project open builds the presets with the studio lock released, T-488).
+pub fn merged_presets(user: &[WireObject]) -> Vec<Preset> {
+    let builtin = builtin_objects();
+    merged(user, &builtin).into_iter().map(preset_of).collect()
+}
+
 /// Rebuilds the « Objets 3D » cue page (and the grid controls for MIDI)
 /// from the library. Called whenever the library changes.
 pub fn refresh(s: &mut crate::Shared) {
-    let objects: Vec<Preset> = s.objects.list().iter().map(preset_of).collect();
+    let objects: Vec<Preset> = s.objects.all().into_iter().map(preset_of).collect();
     set_presets(s, objects);
     crate::grid::refresh(s);
 }
@@ -275,6 +296,8 @@ pub fn refresh(s: &mut crate::Shared) {
 pub struct WireStore {
     dir: Option<PathBuf>,
     list: Vec<WireObject>,
+    /// Read-only starter objects (T-533): never on disk nor in a project.
+    builtin: Vec<WireObject>,
 }
 
 impl WireStore {
@@ -297,12 +320,12 @@ impl WireStore {
                 }
             }
         }
-        Self { dir: Some(dir), list: sorted(list) }
+        Self { dir: Some(dir), list: sorted(list), builtin: builtin_objects() }
     }
 
     /// A library that never touches the disk (tests).
     pub fn in_memory() -> Self {
-        Self { dir: None, list: Vec::new() }
+        Self { dir: None, list: Vec::new(), builtin: Vec::new() }
     }
 
     pub fn dir(&self) -> Option<&Path> {
@@ -314,7 +337,20 @@ impl WireStore {
     }
 
     pub fn get(&self, name: &str) -> Option<&WireObject> {
-        self.list.iter().find(|o| o.name == name.trim())
+        let name = name.trim();
+        self.list.iter().find(|o| o.name == name).or_else(|| self.builtin.iter().find(|o| o.name == name))
+    }
+
+    /// The objects shown and played: the user's library plus the built-ins
+    /// (T-533) a user object of the same name doesn't shadow, in name order.
+    pub fn all(&self) -> Vec<&WireObject> {
+        merged(&self.list, &self.builtin)
+    }
+
+    /// Whether `name` is a read-only built-in (no user object shadows it).
+    pub fn is_builtin(&self, name: &str) -> bool {
+        let name = name.trim();
+        !self.list.iter().any(|o| o.name == name) && self.builtin.iter().any(|o| o.name == name)
     }
 
     /// The file of an object: names are file names, so it can never leave

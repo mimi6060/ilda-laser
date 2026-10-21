@@ -3378,9 +3378,9 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
             let s = shared.lock().unwrap();
             let list: Vec<_> = s
                 .figures
-                .list()
-                .iter()
-                .map(|f| json!({ "name": f.name, "id": crate::figures::cue_id(&f.name), "frames": f.frames.len(), "points": f.point_count() }))
+                .all()
+                .into_iter()
+                .map(|f| json!({ "name": f.name, "id": crate::figures::cue_id(&f.name), "frames": f.frames.len(), "points": f.point_count(), "builtin": s.figures.is_builtin(&f.name) }))
                 .collect();
             json_response(json!(list))
         }
@@ -3423,7 +3423,16 @@ fn dispatch(request: &mut Request, shared: &Arc<Mutex<Shared>>, calibration_path
         // 3D objects (T-462): the library, also the « Objets 3D » cue page.
         (Method::Get, "/api/objects") => {
             let s = shared.lock().unwrap();
-            let list: Vec<_> = s.objects.list().iter().map(object_summary).collect();
+            let list: Vec<_> = s
+                .objects
+                .all()
+                .into_iter()
+                .map(|o| {
+                    let mut v = object_summary(o);
+                    v["builtin"] = json!(s.objects.is_builtin(&o.name));
+                    v
+                })
+                .collect();
             json_response(json!({
                 "objects": list,
                 "budget": s.mixer.point_budget,
