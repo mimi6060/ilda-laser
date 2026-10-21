@@ -62,6 +62,25 @@ fn polygon(sides: usize, r: f32) -> Vec<[f32; 2]> {
     }).collect()
 }
 
+/// A point `len` from `from` along a limb at elevation `e` (radians, 0 =
+/// straight down, π/2 = horizontal, π = straight up); `right` mirrors the
+/// side. Used to place the stick dancer's and the silhouette's limbs.
+fn dir_pt(from: [f32; 2], e: f32, len: f32, right: bool) -> [f32; 2] {
+    let sx = if right { 1.0 } else { -1.0 };
+    [from[0] + sx * len * e.sin(), from[1] - len * e.cos()]
+}
+
+/// `n + 1` points of a circular arc of centre `c`, radius `r`, from
+/// `from_deg` to `to_deg` (degrees), both ends included.
+fn arc(c: [f32; 2], r: f32, from_deg: f32, to_deg: f32, n: usize) -> Vec<[f32; 2]> {
+    (0..=n)
+        .map(|i| {
+            let a = (from_deg + (to_deg - from_deg) * i as f32 / n as f32).to_radians();
+            [c[0] + r * a.cos(), c[1] + r * a.sin()]
+        })
+        .collect()
+}
+
 /// The built-in figures, in no particular order (the UI sorts by name).
 pub fn builtin_figures() -> Vec<Figure> {
     let mut figs = vec![
@@ -78,6 +97,8 @@ pub fn builtin_figures() -> Vec<Figure> {
         spiral(),
         wave(),
         beating_heart(),
+        dancer_stick(),
+        dancer_silhouette(),
     ];
     for f in &mut figs {
         // Our own content is already in range; keep it safe anyway.
@@ -194,6 +215,114 @@ fn beating_heart() -> Figure {
         })
         .collect();
     Figure { name: "Cœur qui bat".to_string(), frames, rate: 2.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
+}
+
+/// An animated stick-figure dancer (T-533): a head (small circle), a
+/// spine, two arms and two legs, each a lit stroke. The joint elevations
+/// are our own sinusoids of the frame phase, so arms and legs sweep
+/// through a believable, looped dance cycle. Our own geometry, drawn by
+/// maths: nothing traced from any product's content.
+fn dancer_stick() -> Figure {
+    const N: usize = 8;
+    let frames = (0..N)
+        .map(|i| {
+            let w = i as f32 / N as f32 * TAU;
+            let sway = 0.06 * w.sin();
+            let hip = [sway * 0.5, -0.02];
+            let shoulder = [sway, 0.30];
+            let head_c = [sway, 0.48];
+            // Arms raise in turn (one up while the other is lower), elbows
+            // bending on the off-beat.
+            let (aru, alu) = (1.1 + 1.0 * w.sin(), 1.1 - 1.0 * w.sin());
+            let (arf, alf) = (aru + 0.4 * w.cos(), alu - 0.4 * w.cos());
+            let elbow_r = dir_pt(shoulder, aru, 0.15, true);
+            let hand_r = dir_pt(elbow_r, arf, 0.14, true);
+            let elbow_l = dir_pt(shoulder, alu, 0.15, false);
+            let hand_l = dir_pt(elbow_l, alf, 0.14, false);
+            // Legs step side to side (one lifts while the other plants),
+            // knees bending a little past the thigh.
+            let (lrt, llt) = (0.18 + 0.32 * w.sin().max(0.0), 0.18 + 0.32 * (-w.sin()).max(0.0));
+            let knee_r = dir_pt(hip, lrt, 0.17, true);
+            let foot_r = dir_pt(knee_r, lrt + 0.18, 0.17, true);
+            let knee_l = dir_pt(hip, llt, 0.17, false);
+            let foot_l = dir_pt(knee_l, llt + 0.18, 0.17, false);
+            let head = closed(arc(head_c, 0.1, 0.0, 360.0, 20));
+            FigureFrame {
+                strokes: vec![
+                    stroke(head, CYAN),
+                    stroke(vec![[head_c[0], head_c[1] - 0.1], shoulder, hip], CYAN),
+                    stroke(vec![shoulder, elbow_r, hand_r], CYAN),
+                    stroke(vec![shoulder, elbow_l, hand_l], CYAN),
+                    stroke(vec![hip, knee_r, foot_r], CYAN),
+                    stroke(vec![hip, knee_l, foot_l], CYAN),
+                ],
+            }
+        })
+        .collect();
+    Figure { name: "Danseuse".to_string(), frames, rate: 4.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
+}
+
+/// An animated dancer silhouette (T-533): one closed outline per frame
+/// tracing the body — head, V of raised arms, waist pinch, A of the legs
+/// (the right one pointed) — walked clockwise with a little limb width.
+/// A few poses (sway, arm spread, pointed leg) make a looped dance. Our
+/// own outline, computed from joints: nothing traced from any product.
+fn dancer_silhouette() -> Figure {
+    const N: usize = 4;
+    const WA: f32 = 0.035; // arm half-width
+    const WL: f32 = 0.05; // leg half-width
+    let frames = (0..N)
+        .map(|i| {
+            let w = i as f32 / N as f32 * TAU;
+            let sway = 0.05 * w.sin();
+            let head_c = [sway, 0.60];
+            let shoulder_r = [sway + 0.13, 0.44];
+            let shoulder_l = [sway - 0.13, 0.44];
+            let hand_r = dir_pt(shoulder_r, 2.3 + 0.2 * w.sin(), 0.30, true);
+            let hand_l = dir_pt(shoulder_l, 2.3 - 0.2 * w.sin(), 0.30, false);
+            let waist_r = [sway * 0.5 + 0.06, 0.20];
+            let waist_l = [sway * 0.5 - 0.06, 0.20];
+            let hip_r = [0.12, 0.07];
+            let hip_l = [-0.12, 0.07];
+            // Right leg pointed out (lifts across the cycle); left planted.
+            let foot_r = dir_pt(hip_r, 0.12 + 0.22 * w.sin().max(0.0), 0.70, true);
+            let foot_l = dir_pt(hip_l, 0.06, 0.72, false);
+            let mut b: Vec<[f32; 2]> = Vec::new();
+            // Head: right half (top → lower right), down to the neck.
+            b.extend(arc(head_c, 0.10, 90.0, -55.0, 8));
+            b.push([head_c[0] + 0.05, 0.50]);
+            // Right arm: up the outer edge, across the hand, down to the armpit.
+            b.push([shoulder_r[0] + WA, shoulder_r[1]]);
+            b.push([hand_r[0] + WA, hand_r[1]]);
+            b.push([hand_r[0], hand_r[1] + WA]);
+            b.push([hand_r[0] - WA, hand_r[1]]);
+            b.push([shoulder_r[0] - WA, shoulder_r[1] - 0.02]);
+            // Right side of the torso and the right leg.
+            b.push([waist_r[0], waist_r[1]]);
+            b.push([hip_r[0] + WL, hip_r[1]]);
+            b.push([foot_r[0] + WL, foot_r[1]]);
+            b.push([foot_r[0], foot_r[1] - WL]);
+            b.push([foot_r[0] - WL, foot_r[1]]);
+            b.push([sway * 0.3, 0.015]); // crotch
+            // Left leg and left side of the torso.
+            b.push([foot_l[0] + WL, foot_l[1]]);
+            b.push([foot_l[0], foot_l[1] - WL]);
+            b.push([foot_l[0] - WL, foot_l[1]]);
+            b.push([hip_l[0] - WL, hip_l[1]]);
+            b.push([waist_l[0], waist_l[1]]);
+            // Left arm: up from the armpit, across the hand, down to the shoulder.
+            b.push([shoulder_l[0] + WA, shoulder_l[1] - 0.02]);
+            b.push([hand_l[0] + WA, hand_l[1]]);
+            b.push([hand_l[0], hand_l[1] + WA]);
+            b.push([hand_l[0] - WA, hand_l[1]]);
+            b.push([shoulder_l[0] - WA, shoulder_l[1]]);
+            b.push([head_c[0] - 0.05, 0.50]);
+            // Head: left half (lower left → top), closing the outline.
+            b.extend(arc(head_c, 0.10, 235.0, 90.0, 8));
+            FigureFrame { strokes: vec![stroke(closed(b), MAGENTA)] }
+        })
+        .collect();
+    Figure { name: "Danseuse silhouette".to_string(), frames, rate: 2.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +561,7 @@ mod tests {
     #[test]
     fn figures_are_valid_in_range_and_closed_outlines_close() {
         let figs = builtin_figures();
-        assert!(figs.len() >= 12, "a dozen figures at least");
+        assert!(figs.len() >= 14, "a dozen figures at least, plus the dancers");
         let mut names = std::collections::HashSet::new();
         for mut f in figs {
             assert!(names.insert(f.name.clone()), "unique name: {}", f.name);
@@ -458,6 +587,12 @@ mod tests {
         // Open strokes are not forced closed.
         let sp = spiral();
         assert_ne!(sp.frames[0].strokes[0].points.first(), sp.frames[0].strokes[0].points.last());
+        // The silhouette dancer closes in every frame (its single stroke).
+        for frame in &dancer_silhouette().frames {
+            assert_eq!(frame.strokes.len(), 1, "one closed outline per frame");
+            let s = &frame.strokes[0];
+            assert_eq!(s.points.first(), s.points.last(), "silhouette closes");
+        }
     }
 
     #[test]
@@ -465,6 +600,23 @@ mod tests {
         let h = beating_heart();
         assert_eq!(h.frames.len(), 4);
         assert!(h.frames.iter().all(|f| !f.strokes.is_empty()));
+    }
+
+    #[test]
+    fn the_dancers_are_animated() {
+        let stick = dancer_stick();
+        assert_eq!(stick.frames.len(), 8);
+        // Head, spine, two arms, two legs, every frame.
+        assert!(stick.frames.iter().all(|f| f.strokes.len() == 6));
+        // The head is a closed circle.
+        assert_eq!(stick.frames[0].strokes[0].points.first(), stick.frames[0].strokes[0].points.last());
+        // The poses change from frame to frame (a real cycle, not a still).
+        assert_ne!(stick.frames[0], stick.frames[2]);
+
+        let sil = dancer_silhouette();
+        assert_eq!(sil.frames.len(), 4);
+        assert!(sil.frames.iter().all(|f| f.strokes.len() == 1 && f.strokes[0].points.len() > 20));
+        assert_ne!(sil.frames[0], sil.frames[1]);
     }
 
     #[test]
