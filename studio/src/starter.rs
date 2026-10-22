@@ -238,97 +238,233 @@ fn limb_quad(a: [f32; 2], b: [f32; 2], wa: f32, wb: f32) -> Vec<[f32; 2]> {
     ])
 }
 
-/// `p` rotated by `ang` radians around `c`.
-fn rot_about(c: [f32; 2], p: [f32; 2], ang: f32) -> [f32; 2] {
-    let (s, co) = ang.sin_cos();
-    let (x, y) = (p[0] - c[0], p[1] - c[1]);
-    [c[0] + x * co - y * s, c[1] + x * s + y * co]
+// ---------------------------------------------------------------------------
+// A ballerina in real 3D: an articulated body that dances a short
+// choreography — préparation, pirouettes en passé with the arms in fifth,
+// développé à la seconde, arabesque, back to fifth — while she turns on her
+// pointe. Each frame poses the joints in 3D (keyframes blended smoothly),
+// spins the body, projects with perspective and draws limbs as tapered
+// outlines sized by depth; far parts are dimmed. The tutu is a 3D disc whose
+// hem lifts as she spins. Our own geometry and choreography, all maths:
+// nothing traced from any product's content.
+// ---------------------------------------------------------------------------
+
+type V3 = [f32; 3];
+
+fn v_add(a: V3, b: V3) -> V3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-/// A hologram ballerina: a low-poly body (head, torso, tutu, tapered limb
-/// segments) in cyan, laced with a blue mesh and a constellation of lines
-/// reaching out to drifting nodes. One arm raised high, the other held out,
-/// on pointe with the other leg in passé. Eight frames: the arms breathe,
-/// the tutu ripples, the network twinkles. Our own geometry, placed by
-/// hand: nothing traced from any product's content.
+fn v_lerp(a: V3, b: V3, u: f32) -> V3 {
+    [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u]
+}
+
+/// `from` moved `len` towards `to` (keeps the limb's length when poses blend).
+fn v_toward(from: V3, to: V3, len: f32) -> V3 {
+    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+    [from[0] + d[0] / l * len, from[1] + d[1] / l * len, from[2] + d[2] / l * len]
+}
+
+fn smooth(u: f32) -> f32 {
+    let u = u.clamp(0.0, 1.0);
+    u * u * (3.0 - 2.0 * u)
+}
+
+/// Arm positions (elbow, hand) of the right arm, body frame; the left arm
+/// mirrors x.
+#[derive(Clone, Copy)]
+enum Arm { Low, First, Fifth, Second, Front }
+
+fn arm_pose(a: Arm) -> [V3; 2] {
+    match a {
+        Arm::Low => [[0.24, 0.28, 0.08], [0.12, 0.08, 0.16]],
+        Arm::First => [[0.30, 0.36, 0.16], [0.06, 0.32, 0.30]],
+        Arm::Fifth => [[0.32, 0.74, 0.10], [0.08, 0.96, 0.10]],
+        Arm::Second => [[0.44, 0.50, 0.05], [0.70, 0.47, 0.08]],
+        Arm::Front => [[0.20, 0.62, 0.26], [0.24, 0.78, 0.52]],
+    }
+}
+
+/// Positions (knee, ankle, toe) of the working (right) leg.
+#[derive(Clone, Copy)]
+enum Leg { Fifth, Passe, Seconde, Arabesque }
+
+fn leg_pose(l: Leg) -> [V3; 3] {
+    let straight = |d: V3| {
+        let hip = [0.09, 0.0, 0.0];
+        [v_toward(hip, v_add(hip, d), 0.42), v_toward(hip, v_add(hip, d), 0.84), v_toward(hip, v_add(hip, d), 0.96)]
+    };
+    match l {
+        Leg::Fifth => [[0.05, -0.42, 0.03], [0.01, -0.84, 0.03], [0.0, -0.96, 0.03]],
+        Leg::Passe => [[0.38, -0.16, 0.16], [-0.03, -0.40, 0.06], [-0.06, -0.50, 0.05]],
+        Leg::Seconde => straight([1.0, 0.3, 0.05]),
+        Leg::Arabesque => straight([0.08, 0.2, -1.0]),
+    }
+}
+
+/// The choreography: (time in the loop, left arm, right arm, right leg,
+/// torso lean forward). Poses blend smoothly from one key to the next.
+const BALLET: [(f32, Arm, Arm, Leg, f32); 11] = [
+    (0.00, Arm::Low, Arm::Low, Leg::Fifth, 0.0),
+    (0.10, Arm::First, Arm::First, Leg::Passe, 0.0),
+    (0.18, Arm::Fifth, Arm::Fifth, Leg::Passe, 0.0),
+    (0.44, Arm::Fifth, Arm::Fifth, Leg::Passe, 0.0),
+    (0.52, Arm::Second, Arm::Second, Leg::Fifth, 0.0),
+    (0.62, Arm::Second, Arm::Second, Leg::Seconde, 0.0),
+    (0.70, Arm::Second, Arm::Second, Leg::Seconde, 0.0),
+    (0.78, Arm::Second, Arm::Front, Leg::Arabesque, 0.14),
+    (0.88, Arm::Second, Arm::Front, Leg::Arabesque, 0.14),
+    (0.96, Arm::Low, Arm::Low, Leg::Fifth, 0.0),
+    (1.00, Arm::Low, Arm::Low, Leg::Fifth, 0.0),
+];
+
+/// The blended pose at `t`: left arm, right arm, right leg, lean.
+fn ballet_pose(t: f32) -> ([V3; 2], [V3; 2], [V3; 3], f32) {
+    let k = BALLET.windows(2).find(|w| t <= w[1].0).unwrap_or(&BALLET[9..11]);
+    let (a, b) = (k[0], k[1]);
+    let u = smooth((t - a.0) / (b.0 - a.0));
+    let (la0, la1, ra0, ra1) = (arm_pose(a.1), arm_pose(b.1), arm_pose(a.2), arm_pose(b.2));
+    let (l0, l1) = (leg_pose(a.3), leg_pose(b.3));
+    let mirror = |p: V3| [-p[0], p[1], p[2]];
+    (
+        [mirror(v_lerp(la0[0], la1[0], u)), mirror(v_lerp(la0[1], la1[1], u))],
+        [v_lerp(ra0[0], ra1[0], u), v_lerp(ra0[1], ra1[1], u)],
+        [v_lerp(l0[0], l1[0], u), v_lerp(l0[1], l1[1], u), v_lerp(l0[2], l1[2], u)],
+        a.4 + (b.4 - a.4) * u,
+    )
+}
+
+/// Turning speed at `t`: a slow turn plus the fast pirouettes.
+fn ballet_speed(t: f32) -> f32 {
+    0.5 + 7.0 * smooth((t - 0.12) / 0.06) * (1.0 - smooth((t - 0.42) / 0.06))
+}
+
+/// `c` scaled by `f` (dims a stroke that is far from the audience).
+fn dim(c: [u8; 3], f: f32) -> [u8; 3] {
+    [(c[0] as f32 * f) as u8, (c[1] as f32 * f) as u8, (c[2] as f32 * f) as u8]
+}
+
 fn ballerina() -> Figure {
-    const N: usize = 8;
+    const N: usize = 96;
+    const CAM: f32 = 4.2; // camera distance
+    const FOV: f32 = 3.9; // projection scale
+    const TILT: f32 = 0.32; // camera a little above, to read the tutu as a disc
+    // The heading of each frame: the speed integrated over the loop, scaled
+    // to a whole number of turns so the loop closes seamlessly.
+    let speeds: Vec<f32> = (0..N).map(|i| ballet_speed(i as f32 / N as f32)).collect();
+    let total: f32 = speeds.iter().sum();
+    let turns = (total / N as f32).round();
+    let max_speed = speeds.iter().cloned().fold(0.0, f32::max);
+    let mut acc = 0.0;
+    let yaws: Vec<f32> = speeds
+        .iter()
+        .map(|s| {
+            let y = acc / total * turns * TAU;
+            acc += s;
+            y
+        })
+        .collect();
     let frames = (0..N)
         .map(|i| {
-            let ph = i as f32 / N as f32 * TAU;
-            let head_c = [0.03, 0.52];
-            let head: Vec<[f32; 2]> = (0..7)
+            let t = i as f32 / N as f32;
+            let (la, ra, rl, lean) = ballet_pose(t);
+            let spin = speeds[i] / max_speed;
+            let (sy, cy) = yaws[i].sin_cos();
+            let (st, ct) = TILT.sin_cos();
+            // World → screen: spin, tilt, perspective. Returns the point,
+            // its scale (for widths) and its depth (for dimming).
+            let proj = |v: V3| {
+                let (x, y, z) = (v[0] * cy - v[2] * sy, v[1], v[0] * sy + v[2] * cy);
+                let (y, z) = (y * ct - z * st, y * st + z * ct);
+                let k = FOV / (CAM - z);
+                ([(x * k).clamp(-1.0, 1.0), (y * k).clamp(-1.0, 1.0)], k, z)
+            };
+            let shade = |z: f32| 0.5 + 0.5 * ((z + 0.4) / 0.8).clamp(0.0, 1.0);
+            let line = |pts: &[V3], color: [u8; 3]| {
+                let pr: Vec<_> = pts.iter().map(|&v| proj(v)).collect();
+                let z = pr.iter().map(|p| p.2).sum::<f32>() / pr.len() as f32;
+                stroke(pr.iter().map(|p| p.0).collect(), dim(color, shade(z)))
+            };
+            // A limb segment: a tapered outline, wider when nearer.
+            let limb = |a: V3, b: V3, wa: f32, wb: f32| {
+                let (pa, ka, za) = proj(a);
+                let (pb, kb, zb) = proj(b);
+                let pts = limb_quad(pa, pb, wa * ka, wb * kb)
+                    .into_iter()
+                    .map(|p| [p[0].clamp(-1.0, 1.0), p[1].clamp(-1.0, 1.0)])
+                    .collect();
+                stroke(pts, dim(CYAN, shade((za + zb) / 2.0)))
+            };
+            // Skeleton.
+            let chest = [0.0, 0.45, lean];
+            let head = [0.0, 0.71, lean * 1.4];
+            let (sh_r, sh_l) = (v_add(chest, [0.17, 0.07, 0.0]), v_add(chest, [-0.17, 0.07, 0.0]));
+            let (hip_r, hip_l) = ([0.09, 0.0, 0.0], [-0.09, 0.0, 0.0]);
+            let leaned = |p: V3| v_add(p, [0.0, 0.0, lean]);
+            let elbow_r = v_toward(sh_r, leaned(ra[0]), 0.28);
+            let hand_r = v_toward(elbow_r, leaned(ra[1]), 0.26);
+            let elbow_l = v_toward(sh_l, leaned(la[0]), 0.28);
+            let hand_l = v_toward(elbow_l, leaned(la[1]), 0.26);
+            let knee_r = v_toward(hip_r, rl[0], 0.42);
+            let ankle_r = v_toward(knee_r, rl[1], 0.42);
+            let toe_r = v_toward(ankle_r, rl[2], 0.12);
+            let knee_l = v_toward(hip_l, [-0.07, -0.42, 0.0], 0.42);
+            let ankle_l = v_toward(knee_l, [-0.05, -0.84, 0.0], 0.42);
+            let toe_l = v_toward(ankle_l, [-0.05, -0.96, 0.0], 0.12);
+            // Head: a circle facing the audience, the bun at the back.
+            let (hc, hk, hz) = proj(head);
+            let (bc, bk, bz) = proj(v_add(head, [0.0, 0.09, -0.05]));
+            let circle = |c: [f32; 2], r: f32, n: usize| {
+                closed(arc(c, r, 0.0, 360.0, n).into_iter().map(|p| [p[0].clamp(-1.0, 1.0), p[1].clamp(-1.0, 1.0)]).collect())
+            };
+            let mut strokes = vec![
+                stroke(circle(hc, 0.085 * hk, 18), dim(MAGENTA, shade(hz))),
+                stroke(circle(bc, 0.035 * bk, 10), dim(MAGENTA, shade(bz))),
+                line(&[sh_l, sh_r], CYAN),
+                limb([0.0, 0.53, lean], [0.0, 0.08, lean * 0.2], 0.13, 0.075),
+                limb(sh_r, elbow_r, 0.035, 0.03),
+                limb(elbow_r, hand_r, 0.03, 0.02),
+                limb(sh_l, elbow_l, 0.035, 0.03),
+                limb(elbow_l, hand_l, 0.03, 0.02),
+                limb(hip_r, knee_r, 0.06, 0.04),
+                limb(knee_r, ankle_r, 0.04, 0.022),
+                limb(ankle_r, toe_r, 0.022, 0.008),
+                limb(hip_l, knee_l, 0.06, 0.04),
+                limb(knee_l, ankle_l, 0.04, 0.022),
+                limb(ankle_l, toe_l, 0.022, 0.008),
+            ];
+            // The tutu: waist ring, hem ring lifted by the spin and rippling,
+            // and the pleats between them.
+            const K: usize = 12;
+            let ring = |k: usize, r: f32, rz: f32, y: f32| {
+                let a = k as f32 / K as f32 * TAU;
+                [r * a.cos(), y, rz * a.sin()]
+            };
+            let waist: Vec<V3> = (0..=K).map(|k| ring(k, 0.12, 0.10, 0.04)).collect();
+            let hem: Vec<V3> = (0..=K)
                 .map(|k| {
-                    let a = PI / 2.0 + k as f32 / 7.0 * TAU;
-                    rot_about(head_c, [head_c[0] + 0.062 * a.cos(), head_c[1] + 0.08 * a.sin()], -0.25)
+                    let ripple = 0.025 * (3.0 * k as f32 / K as f32 * TAU + t * TAU * 4.0).sin();
+                    ring(k, 0.42, 0.42, -0.07 + 0.08 * spin + ripple)
                 })
                 .collect();
-            let (neck, shl, shr) = ([0.02, 0.42], [-0.10, 0.36], [0.12, 0.35]);
-            // Raised arm breathes up and down; the side arm's hand flutters.
-            let up = 0.12 * ph.sin();
-            let el = rot_about(shl, [-0.22, 0.58], up);
-            let wl = rot_about(shl, [-0.33, 0.79], up * 1.3);
-            let hl = rot_about(shl, [-0.37, 0.88], up * 1.4);
-            let fl = 0.06 * (ph + 1.0).sin();
-            let er = [0.33, 0.34];
-            let wr = rot_about(er, [0.52, 0.37], fl);
-            let hr = rot_about(er, [0.61, 0.40], fl * 1.4);
-            let (waist_l, waist_r, chest_l, chest_r) = ([-0.07, 0.11], [0.08, 0.11], [-0.09, 0.24], [0.11, 0.23]);
-            let torso = closed(vec![shl, neck, shr, chest_r, waist_r, waist_l, chest_l]);
-            // Tutu, flared to one side as in a turn; its hem ripples.
-            let hem: Vec<[f32; 2]> = [[-0.17, -0.09], [-0.06, -0.17], [0.09, -0.19], [0.24, -0.15], [0.37, -0.06], [0.45, 0.03]]
-                .iter()
-                .enumerate()
-                .map(|(k, p)| [p[0], p[1] + 0.02 * (2.0 * ph + k as f32).sin()])
+            strokes.push(line(&waist, WHITE));
+            strokes.push(line(&hem, WHITE));
+            for k in 0..K {
+                strokes.push(line(&[waist[k], hem[k]], BLUE));
+            }
+            // A ring of light on the floor under the pointe.
+            let floor: Vec<V3> = (0..=12)
+                .map(|k| {
+                    let a = k as f32 / 12.0 * TAU;
+                    [-0.05 + 0.24 * a.cos(), -0.97, 0.24 * a.sin()]
+                })
                 .collect();
-            let mut tutu = vec![waist_l, waist_r, [0.25, 0.10]];
-            tutu.extend(hem.iter().rev());
-            let tutu = closed(tutu);
-            // Standing leg on pointe; the other in passé, foot at the knee.
-            let (hip_l, knee_l, ankle_l, toe_l) = ([-0.03, -0.13], [-0.04, -0.48], [-0.02, -0.80], [-0.01, -0.93]);
-            let (hip_r, knee_r, ankle_r, toe_r) = ([0.11, -0.14], [0.34, -0.35], [0.04, -0.46], [-0.01, -0.49]);
-            let mut strokes = vec![
-                stroke(closed(head), CYAN),
-                stroke(torso, CYAN),
-                stroke(tutu, CYAN),
-                stroke(limb_quad(shl, el, 0.035, 0.03), CYAN),
-                stroke(limb_quad(el, wl, 0.03, 0.022), CYAN),
-                stroke(limb_quad(wl, hl, 0.022, 0.008), CYAN),
-                stroke(limb_quad(shr, er, 0.035, 0.03), CYAN),
-                stroke(limb_quad(er, wr, 0.03, 0.022), CYAN),
-                stroke(limb_quad(wr, hr, 0.022, 0.008), CYAN),
-                stroke(limb_quad(hip_l, knee_l, 0.055, 0.035), CYAN),
-                stroke(limb_quad(knee_l, ankle_l, 0.035, 0.02), CYAN),
-                stroke(limb_quad(ankle_l, toe_l, 0.02, 0.01), CYAN),
-                stroke(limb_quad(hip_r, knee_r, 0.055, 0.035), CYAN),
-                stroke(limb_quad(knee_r, ankle_r, 0.035, 0.02), CYAN),
-                stroke(limb_quad(ankle_r, toe_r, 0.02, 0.01), CYAN),
-            ];
-            // The mesh: torso diagonals and the tutu's pleats.
-            for seg in [[shl, waist_r], [shr, waist_l], [neck, chest_l], [neck, chest_r], [chest_l, chest_r]] {
-                strokes.push(stroke(seg.to_vec(), BLUE));
-            }
-            let mid = [0.01, 0.11];
-            for h in &hem {
-                strokes.push(stroke(vec![mid, *h], BLUE));
-            }
-            // The constellation: drifting nodes wired to the body, two in
-            // three lit on each frame, in turn.
-            let nodes = [[-0.55, 0.55], [-0.62, 0.05], [-0.45, -0.40], [0.55, 0.70], [0.72, 0.15], [0.60, -0.30], [0.30, -0.72], [-0.30, 0.92], [0.22, 0.85]];
-            let joints = [hl, el, hem[0], hr, hr, hem[5], knee_r, hl, head_c];
-            for (k, (n, j)) in nodes.iter().zip(joints).enumerate() {
-                if (k + i) % 3 != 0 {
-                    let kf = k as f32;
-                    let node = [n[0] + 0.03 * (ph + kf).sin(), n[1] + 0.03 * (ph + kf * 1.7).cos()];
-                    strokes.push(stroke(vec![j, node], BLUE));
-                }
-            }
-            // A glint on the floor under the pointe.
-            strokes.push(stroke(vec![[-0.18, -0.96], [0.16, -0.96]], BLUE));
+            strokes.push(line(&floor, BLUE));
             FigureFrame { strokes }
         })
         .collect();
-    Figure { name: "Ballerine hologramme".to_string(), frames, rate: 4.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
+    Figure { name: "Ballerine 3D".to_string(), frames, rate: 6.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
 }
 
 /// A star of `points` points: outer radius `ro`, inner `ri`, first spike up.
@@ -994,15 +1130,19 @@ mod tests {
     }
 
     #[test]
-    fn the_ballerina_is_an_animated_hologram_in_range() {
+    fn the_3d_ballerina_turns_and_dances_in_range() {
         let b = ballerina();
-        assert_eq!(b.frames.len(), 8);
-        // Head, torso and tutu are closed outlines.
-        for s in &b.frames[0].strokes[..3] {
+        assert_eq!(b.frames.len(), 96);
+        // Head, bun and the shoulder line, ten limb outlines, the tutu's two
+        // rings and twelve pleats, the floor ring.
+        assert!(b.frames.iter().all(|f| f.strokes.len() == 3 + 11 + 2 + 12 + 1));
+        // The head and the limbs are closed outlines.
+        for s in &b.frames[0].strokes[..2] {
             assert_eq!(s.points.first(), s.points.last());
         }
-        // It moves (arms breathe, tutu ripples, the network twinkles).
-        assert_ne!(b.frames[0], b.frames[2]);
+        // She moves: pirouette, développé, arabesque are different pictures.
+        assert_ne!(b.frames[0], b.frames[24]);
+        assert_ne!(b.frames[24], b.frames[60]);
         for f in &b.frames {
             for s in &f.strokes {
                 for p in &s.points {
