@@ -588,7 +588,7 @@ mod tests {
         let g = CueGrid::load(path.clone());
         let names: Vec<&str> = g.pages.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["Mes cues", "Figures", crate::presets::FESTIVAL, crate::presets::EVOLVING, crate::wire::CATEGORY], "appended, the others keep their numbers");
-        assert_eq!((g.pages[2].slots.len(), g.pages[3].slots.len()), (40, 12));
+        assert_eq!((g.pages[2].slots.len(), g.pages[3].slots.len()), (40, 30));
         // Saved, then loaded again: still once.
         g.save();
         let mut g = CueGrid::load(path.clone());

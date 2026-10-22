@@ -391,6 +391,103 @@ pub fn catalog() -> Vec<Preset> {
         b.graphic("Géométrie", label, "wire3d", 1, a, 1.0, 8.0, look, 0.6);
     }
 
+    // More cues so no page stays thin (T-534): every under-filled cue page
+    // brought to at least 30 with our own procedural variations - other
+    // colours, counts, densities, heights and directions of each page's own
+    // generators and shapes. Appended after the graphics and before the
+    // evolving page, so every earlier id and every grid page number (page.N,
+    // F-keys, MIDI, DMX, APC) stays the same. Our own looks only.
+
+    // Tunnels (24 -> 32): more rings, more sides, more pulsing rings.
+    for (count, look) in [(5, SOLID_CYAN), (10, RAINBOW), (12, RED_BLUE)] {
+        b.generator("Tunnels", &format!("Tunnel {count} anneaux"), "tunnel", count, 0.0, 0.0, look, 0.7);
+    }
+    b.generator("Tunnels", "Tunnel 7 côtés torsadé", "polygon_tunnel", 6, 7.0, 1.5, CYAN_MAGENTA, 0.7);
+    b.generator("Tunnels", "Tunnel 10 côtés", "polygon_tunnel", 6, 10.0, 0.0, RAINBOW, 0.7);
+    for (count, look) in [(4, SOLID_GREEN), (6, GREEN_YELLOW), (8, CYAN_MAGENTA)] {
+        b.generator("Tunnels", &format!("Anneaux pulsés {count}"), "pulse_rings", count, 0.0, 0.0, look, 0.7);
+    }
+
+    // Balayages (17 -> 32): more sweep colours, more sheet heights, a denser
+    // grid of scanning lines.
+    for look in [SOLID_BLUE, SOLID_MAGENTA, SOLID_YELLOW, CYAN_MAGENTA, GREEN_YELLOW] {
+        b.generator("Balayages", "Balayage", "sweep", 1, 0.0, 0.0, look, 0.7);
+    }
+    for (height, look) in [(0.3, SOLID_RED), (-0.3, SOLID_YELLOW), (0.4, GREEN_RED), (0.0, SOLID_WHITE)] {
+        b.generator("Balayages", "Nappe (liquid sky)", "liquid_sky", 1, 0.0, height, look, 0.8);
+    }
+    for (count, cross, label, look) in [
+        (7, 0.0, "Lignes", SOLID_CYAN),
+        (7, 1.0, "Grille", RAINBOW),
+        (4, 0.0, "Lignes", GREEN_YELLOW),
+        (6, 1.0, "Grille", CYAN_MAGENTA),
+        (10, 0.0, "Lignes", SOLID_MAGENTA),
+        (10, 1.0, "Grille", RAINBOW),
+    ] {
+        b.generator("Balayages", &format!("{label} de balayage {count}"), "grid_scan", count, cross, 0.0, look, 0.7);
+    }
+
+    // Vagues (28 -> 32): a few more oscillators, arms and rays.
+    b.generator("Vagues", "Oscillateurs ×4", "sine_stack", 4, 1.0, 0.8, CYAN_MAGENTA, 0.7);
+    b.generator("Vagues", "Oscillateurs ×6", "sine_stack", 6, 1.0, 0.8, RAINBOW, 0.7);
+    b.generator("Vagues", "Spirale 5 bras", "spiral_arms", 5, 1.0, 0.0, RAINBOW, 0.6);
+    b.generator("Vagues", "Soleil 16 rayons", "starburst", 16, 0.0, 0.0, SOLID_YELLOW, 0.6);
+
+    // Géométrie (18 -> 32): more shapes and more turning colours.
+    for (shape, label, color_name, color, rotation) in [
+        ("cross", "Croix", "vert", GREEN, 0.0),
+        ("cross", "Croix", "cyan", CYAN, 90.0),
+        ("cross", "Croix", "magenta", MAGENTA, -45.0),
+        ("spiral", "Spirale géométrique", "jaune", YELLOW, 0.0),
+        ("spiral", "Spirale géométrique", "vert", GREEN, 60.0),
+        ("spiral", "Spirale géométrique", "cyan", CYAN, -120.0),
+        ("circle", "Cercle", "cyan", CYAN, 120.0),
+        ("circle", "Cercle", "jaune", YELLOW, -30.0),
+        ("square", "Carré", "magenta", MAGENTA, 60.0),
+        ("square", "Carré", "cyan", CYAN, -120.0),
+        ("triangle", "Triangle", "jaune", YELLOW, 90.0),
+        ("triangle", "Triangle", "blanc", WHITE, -30.0),
+        ("star", "Étoile", "cyan", CYAN, 30.0),
+        ("star", "Étoile", "blanc", WHITE, -60.0),
+    ] {
+        let settings = Settings { content: Content::Shape { shape: shape.to_string() }, color, rotation_speed: rotation, ..Settings::default() };
+        let spin = if rotation != 0.0 { " qui tourne" } else { "" };
+        b.add("Géométrie", format!("{label}{spin} · {color_name}"), settings);
+    }
+
+    // Audio (15 -> 32): more spectrum bars and more of our generators
+    // reacting to the sound (the reactivity is set below, with the others).
+    for (count, look) in [(8, CYAN_MAGENTA), (12, SOLID_GREEN), (16, RED_BLUE), (20, RAINBOW), (24, GREEN_YELLOW)] {
+        b.generator("Audio", &format!("Spectre {count} barres"), "spectrum", count, 0.0, 0.0, look, 0.7);
+    }
+    for (label, generator, count, a, bb, look) in [
+        ("Hélice au rythme", "helix", 2, 1.5, 0.0, RED_BLUE),
+        ("Fleur au rythme", "flower", 8, 0.0, 0.0, RAINBOW),
+        ("Lissajous au rythme", "lissajous", 1, 3.0, 2.0, CYAN_MAGENTA),
+        ("Spirographe au rythme", "spirograph", 1, 4.0, 1.0, RAINBOW),
+        ("Grille au rythme", "grid_scan", 5, 1.0, 0.0, SOLID_CYAN),
+        ("Balayage au rythme", "sweep", 1, 0.0, 0.0, SOLID_MAGENTA),
+        ("Étoile filante au rythme", "starburst", 10, 0.0, 0.0, SOLID_YELLOW),
+        ("Soleil large au rythme", "starburst", 24, 0.0, 0.0, RAINBOW),
+        ("Rosace fine au rythme", "rose", 7, 0.0, 0.0, CYAN_MAGENTA),
+        ("Tunnel polygonal au rythme", "polygon_tunnel", 6, 5.0, 1.0, RED_BLUE),
+        ("Spirale serrée au rythme", "spiral_arms", 6, 1.5, 0.0, RAINBOW),
+        ("Nappe au rythme", "liquid_sky", 1, 0.0, 0.3, SOLID_GREEN),
+    ] {
+        b.generator("Audio", label, generator, count, a, bb, look, 0.6);
+    }
+    // Make every Audio cue react to the microphone (the base block set the
+    // first ones; this covers the ones just added too). Idempotent.
+    for p in b.presets.iter_mut().filter(|p| p.category == "Audio") {
+        p.settings.audio = AudioReact { enabled: true, size: 0.4, rotate: 0.1, color_on_beat: true, flash: 0.3 };
+    }
+
+    // Texte & horloge (27 -> 32): more words.
+    for (word, color_name, color) in [("YEAH", "jaune", YELLOW), ("ALLEZ", "cyan", CYAN), ("SUPER", "vert", GREEN), ("BRAVO", "magenta", MAGENTA), ("FEU", "rouge", RED)] {
+        let settings = Settings { content: Content::Text { text: word.to_string(), style: Default::default() }, color, scale: 0.25, ..Settings::default() };
+        b.add("Texte & horloge", format!("{word} · {color_name}"), settings);
+    }
+
     // The « Festival évolutifs » page (T-112 to T-123), appended.
     for (tag, name, settings) in evolving_cues() {
         b.add(EVOLVING, name, settings);
@@ -716,7 +813,7 @@ fn evolving_cue(tag: CueTag, name: &str, content: Content, program: Option<CuePr
 /// Our own looks, written as maths over the beat with our generators:
 /// nothing taken from another product's library.
 fn evolving_cues() -> Vec<(CueTag, String, Settings)> {
-    vec![
+    let mut cues = vec![
         evolving_e1(),
         evolving_e2(),
         evolving_e3(),
@@ -729,6 +826,82 @@ fn evolving_cues() -> Vec<(CueTag, String, Settings)> {
         evolving_e10(),
         evolving_e11(),
         evolving_e12(),
+    ];
+    cues.extend(evolving_more());
+    cues
+}
+
+/// A simple evolving moment (T-534): one festival generator in a festival
+/// palette that breathes over its length through `frames` of `(beat, a,
+/// scale)`. Beat-locked (so it plays the same at any tempo) and drawn by a
+/// festival generator (so it stays above the horizon). Our own looks, maths
+/// over the beat: nothing taken from another product's library.
+#[allow(clippy::too_many_arguments)]
+fn evolve(
+    tag: CueTag,
+    name: &'static str,
+    length: f32,
+    looped: bool,
+    generator: &'static str,
+    palette: usize,
+    mode: ColorMode,
+    b: f32,
+    count: u32,
+    period: f32,
+    steps: f32,
+    frames: &[(f32, f32, f32)],
+) -> (CueTag, String, Settings) {
+    let pal = crate::festival::PALETTES[palette];
+    let keys: Vec<EvolvingKey> = frames
+        .iter()
+        .map(|&(at, a, scale)| {
+            let mut params = GenParams { count, a, b, color_mode: mode, color2: pal.c2, ..synced() };
+            params.period_beats = period;
+            if steps > 0.0 {
+                params.steps_per_beat = steps;
+            }
+            EvolvingKey { at_beats: at, ease: KeyEase::Smooth, ..key(generator, params, pal.c1, scale) }
+        })
+        .collect();
+    evolving_cue(tag, name, evolving(length, looped, keys), None)
+}
+
+/// Eighteen more evolving moments (T-534), so the « Festival évolutifs »
+/// page holds at least thirty cues like the others. Each is one of our
+/// festival generators breathing over 16 or 32 beats - intros that open,
+/// builds that speed up, drops that pump, breaks that drift - in a festival
+/// palette. Our own looks only.
+fn evolving_more() -> Vec<(CueTag, String, Settings)> {
+    use ColorMode::{Alternate, Gradient, Solid, ToWhite};
+    use CueTag::*;
+    const EIGHTH: f32 = 1.0 / 8.0;
+    const SIXTEENTH: f32 = 1.0 / 16.0;
+    const THIRTYSECOND: f32 = 1.0 / 32.0;
+    const SIXTYFOURTH: f32 = 1.0 / 64.0;
+    vec![
+        // Intros that open up.
+        evolve(Intro, "voile qui s'ouvre", 32.0, false, "curtain", PAL_ICE, Solid, 0.1, 4, 16.0, 0.0, &[(0.0, 0.0, 0.3), (32.0, 0.0, 0.8)]),
+        evolve(Intro, "soleil qui s'étend", 32.0, false, "sunburst", PAL_SUNSET, Gradient, 0.0, 16, 4.0, 0.0, &[(0.0, SIXTYFOURTH, 0.6), (32.0, SIXTYFOURTH, 0.85)]),
+        evolve(Intro, "plafond qui se pose", 32.0, false, "ceiling", PAL_GREEN, Solid, 0.1, 1, 4.0, 0.0, &[(0.0, 0.01, 0.5), (32.0, 0.02, 0.9)]),
+        // Builds that lift and speed up.
+        evolve(Build, "éventail qui s'élève", 16.0, false, "fan_tilt", PAL_SUNSET, ToWhite, 0.0, 10, 16.0, 0.0, &[(0.0, 0.0, 0.5), (16.0, 0.0, 0.8)]),
+        evolve(Build, "tunnel de doigts qui accélère", 32.0, false, "finger_tunnel", PAL_GREEN, Solid, 0.0, 12, 4.0, 0.0, &[(0.0, THIRTYSECOND, 0.35), (32.0, 0.25, 0.4)]),
+        evolve(Build, "scanner qui balaie", 16.0, false, "scanner", PAL_HARD, Solid, 0.0, 1, 4.0, 0.0, &[(0.0, 0.2, 0.6), (16.0, 0.2, 0.85)]),
+        evolve(Build, "grille qui monte", 32.0, false, "grid", PAL_GREEN, Solid, 0.1, 5, 4.0, 0.0, &[(0.0, 2.0, 0.4), (32.0, 2.0, 0.8)]),
+        // Drops that pump and cross.
+        evolve(Drop, "éventail qui pompe fort", 16.0, true, "fan", PAL_HARD, Solid, 0.25, 10, 4.0, 0.0, &[(0.0, 1.0, 0.6), (8.0, 1.0, 0.8), (16.0, 1.0, 0.6)]),
+        evolve(Drop, "ciseaux serrés", 32.0, true, "scissor", PAL_POP, Solid, 0.3, 10, 2.0, 0.0, &[(0.0, 0.4, 0.7), (16.0, 0.5, 0.7), (32.0, 0.4, 0.7)]),
+        evolve(Drop, "faisceaux qui explosent", 16.0, true, "bundle_burst", PAL_ICE, Solid, 0.35, 10, 4.0, 0.0, &[(0.0, 0.25, 0.6), (8.0, 0.25, 0.75), (16.0, 0.25, 0.6)]),
+        evolve(Drop, "soleil pair / impair", 16.0, true, "sunburst", PAL_WHITE, Solid, 1.0, 18, 4.0, 0.0, &[(0.0, SIXTEENTH, 0.8), (8.0, SIXTEENTH, 0.85), (16.0, SIXTEENTH, 0.8)]),
+        // Breaks that drift.
+        evolve(Break, "nappe glacier qui respire", 32.0, true, "ceiling", PAL_ICE, Gradient, 0.12, 1, 4.0, 0.0, &[(0.0, 0.01, 0.8), (16.0, 0.03, 0.9), (32.0, 0.01, 0.8)]),
+        evolve(Break, "aurore vert / bleu", 32.0, true, "aurora", PAL_GREEN_BLUE, Gradient, 0.35, 1, 4.0, 0.0, &[(0.0, 0.2, 0.75), (16.0, 0.2, 0.8), (32.0, 0.2, 0.75)]),
+        evolve(Break, "double tunnel afterlife", 32.0, true, "twin_tunnel", PAL_AFTERLIFE, Alternate, 0.0, 1, 4.0, 0.0, &[(0.0, SIXTEENTH, 0.35), (16.0, EIGHTH, 0.4), (32.0, SIXTEENTH, 0.35)]),
+        evolve(Break, "cascade glacier", 32.0, true, "waterfall", PAL_ICE, Gradient, 0.1, 6, 4.0, 2.0, &[(0.0, 0.0, 0.75), (16.0, 0.0, 0.85), (32.0, 0.0, 0.75)]),
+        // Grooves that ride the beat.
+        evolve(Groove, "balayage miroir vert / bleu", 32.0, true, "fan_sweep", PAL_GREEN_BLUE, Alternate, 0.3, 10, 8.0, 0.0, &[(0.0, 0.3, 0.7), (16.0, 0.4, 0.7), (32.0, 0.3, 0.7)]),
+        evolve(Groove, "lame qui bascule", 32.0, true, "blade", PAL_ICE, Solid, 0.3, 1, 16.0, 0.0, &[(0.0, 0.0, 0.7), (16.0, 0.0, 0.85), (32.0, 0.0, 0.7)]),
+        evolve(Groove, "lamelles vert / bleu", 32.0, true, "slats", PAL_GREEN_BLUE, Alternate, 0.3, 10, 4.0, 2.0, &[(0.0, 1.0, 0.75), (16.0, 1.0, 0.85), (32.0, 1.0, 0.75)]),
     ]
 }
 
@@ -1237,6 +1410,32 @@ mod tests {
         assert!(all.iter().all(|p| CATEGORIES.contains(&p.category)));
     }
 
+    /// T-534: no cue page stays thin. Every catalogue page (the libraries
+    /// Figures, ILDA and Objets 3D aside, which hold operator content) has
+    /// at least thirty cues, and the grid pagination is unchanged: only
+    /// « Abstraits » and « Faisceaux » spill past their first grid page, so
+    /// « Festival » and every F-key / MIDI / DMX / APC page mapping keep
+    /// their number.
+    #[test]
+    fn every_cue_page_has_at_least_thirty_cues_and_pagination_is_stable() {
+        let all = catalog();
+        let libraries = [crate::figures::CATEGORY, crate::ilda_library::CATEGORY, crate::wire::CATEGORY];
+        let grid = crate::controls::GRID_ROWS * crate::controls::GRID_COLS;
+        for c in CATEGORIES.iter().filter(|c| !libraries.contains(*c)) {
+            let n = all.iter().filter(|p| p.category == *c).count();
+            assert!(n >= 30, "page '{c}' has only {n} cues");
+        }
+        // Every early (non-late) page but « Abstraits » and « Faisceaux »
+        // stays on one grid page, exactly as before: no new overflow page
+        // shifts the later pages' numbers.
+        let early = &CATEGORIES[..CATEGORIES.len() - LATE_PAGES];
+        for c in early.iter().filter(|c| !libraries.contains(*c)) {
+            let n = all.iter().filter(|p| p.category == *c).count();
+            let overflows = *c == "Abstraits" || *c == "Faisceaux";
+            assert_eq!(n > grid, overflows, "page '{c}' overflow changed ({n} cues)");
+        }
+    }
+
     #[test]
     fn every_cue_renders_something_within_budget() {
         for p in catalog() {
@@ -1383,8 +1582,13 @@ mod tests {
 
     /// The T-108 graphics, after those.
     const GRAPHIC_CUES: usize = 12;
-    /// The T-112 to T-123 « Festival évolutifs » page, after those.
-    const EVOLVING_CUES: usize = 12;
+    /// The T-534 extra cues (thin pages brought to >= 30: Tunnels +8,
+    /// Balayages +15, Vagues +4, Géométrie +14, Audio +17, Texte +5),
+    /// appended after the graphics and before the evolving page.
+    const MORE_CUES: usize = 8 + 15 + 4 + 14 + 17 + 5;
+    /// The « Festival évolutifs » page: the twelve T-112 to T-123 cues plus
+    /// the eighteen T-534 ones, after those.
+    const EVOLVING_CUES: usize = 12 + 18;
     /// The T-440 abstracts (stacked oscillators), after those.
     const ABSTRACT_CUES: usize = 11;
 
@@ -1490,7 +1694,7 @@ mod tests {
     fn graphic_cues_are_appended_with_room_on_their_pages() {
         let all = catalog();
         let start = LEGACY_CUES + RHYTHM_CUES + PROGRAM_CUES + CROSSING_CUES + TEXTURE_CUES + FESTIVAL_CUES;
-        assert_eq!(all.len(), start + GRAPHIC_CUES + EVOLVING_CUES + ABSTRACT_CUES, "appended before the evolving cues");
+        assert_eq!(all.len(), start + GRAPHIC_CUES + MORE_CUES + EVOLVING_CUES + ABSTRACT_CUES, "appended before the evolving cues");
         let new = &all[start..start + GRAPHIC_CUES];
         assert_eq!((new[0].id.as_str(), new[6].id.as_str()), ("texte-horloge-022", "geometrie-013"));
         for p in new {
