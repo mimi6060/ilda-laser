@@ -99,6 +99,23 @@ pub fn builtin_figures() -> Vec<Figure> {
         beating_heart(),
         dancer_stick(),
         dancer_silhouette(),
+        dancer_3d(),
+        star5(),
+        star6(),
+        circle_fig(),
+        triangle(),
+        square_fig(),
+        octagon(),
+        sun(),
+        butterfly(),
+        gear(),
+        house(),
+        fir_tree(),
+        cloud(),
+        music_note(),
+        crown(),
+        bowtie(),
+        shooting_star(),
     ];
     for f in &mut figs {
         // Our own content is already in range; keep it safe anyway.
@@ -325,6 +342,257 @@ fn dancer_silhouette() -> Figure {
     Figure { name: "Danseuse silhouette".to_string(), frames, rate: 2.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
 }
 
+/// A star of `points` points: outer radius `ro`, inner `ri`, first spike up.
+fn star(points: usize, ro: f32, ri: f32) -> Vec<[f32; 2]> {
+    (0..2 * points)
+        .map(|i| {
+            let r = if i % 2 == 0 { ro } else { ri };
+            let a = PI / 2.0 + i as f32 / (2 * points) as f32 * TAU;
+            [r * a.cos(), r * a.sin()]
+        })
+        .collect()
+}
+
+fn star5() -> Figure {
+    outline("Étoile", YELLOW, star(5, 0.9, 0.38))
+}
+
+fn star6() -> Figure {
+    outline("Étoile 6 branches", CYAN, star(6, 0.9, 0.5))
+}
+
+fn circle_fig() -> Figure {
+    outline("Cercle", GREEN, curve(64, |t| {
+        let a = t * TAU;
+        [0.85 * a.cos(), 0.85 * a.sin()]
+    }))
+}
+
+fn triangle() -> Figure {
+    outline("Triangle", BLUE, polygon(3, 0.9))
+}
+
+fn square_fig() -> Figure {
+    outline("Carré", GREEN, vec![[-0.7, 0.7], [0.7, 0.7], [0.7, -0.7], [-0.7, -0.7]])
+}
+
+fn octagon() -> Figure {
+    outline("Octogone", MAGENTA, polygon(8, 0.85))
+}
+
+/// A sun: a core circle ringed by twelve rays.
+fn sun() -> Figure {
+    let core = closed(curve(40, |t| {
+        let a = t * TAU;
+        [0.42 * a.cos(), 0.42 * a.sin()]
+    }));
+    let mut strokes = vec![stroke(core, YELLOW)];
+    for i in 0..12 {
+        let a = i as f32 / 12.0 * TAU;
+        strokes.push(stroke(vec![[0.55 * a.cos(), 0.55 * a.sin()], [0.9 * a.cos(), 0.9 * a.sin()]], YELLOW));
+    }
+    one_frame("Soleil", strokes)
+}
+
+/// A butterfly curve (Temple Fay), scaled into the field.
+fn butterfly() -> Figure {
+    let pts = curve(720, |t| {
+        let th = t * 12.0 * PI;
+        let bracket = th.cos().exp() - 2.0 * (4.0 * th).cos() - (th / 12.0).sin().powi(5);
+        [th.sin() * bracket / 5.2, th.cos() * bracket / 5.2]
+    });
+    outline("Papillon", MAGENTA, pts)
+}
+
+/// A cog/gear wheel: square teeth around the rim.
+fn gear() -> Figure {
+    const TEETH: usize = 12;
+    let pts = curve(TEETH * 24, |t| {
+        let a = t * TAU;
+        let tooth = (a * TEETH as f32).sin().signum();
+        let r = 0.72 + 0.12 * tooth;
+        [r * a.cos(), r * a.sin()]
+    });
+    outline("Engrenage", WHITE, pts)
+}
+
+/// A little house: walls and a peaked roof.
+fn house() -> Figure {
+    outline("Maison", GREEN, vec![
+        [-0.55, -0.6], [0.55, -0.6], [0.55, 0.15], [0.0, 0.7], [-0.55, 0.15],
+    ])
+}
+
+/// A fir tree: three tiers over a trunk, one symmetric outline.
+fn fir_tree() -> Figure {
+    outline("Sapin", GREEN, vec![
+        [0.0, 0.85],
+        [-0.22, 0.45], [-0.1, 0.45],
+        [-0.34, 0.1], [-0.16, 0.1],
+        [-0.48, -0.3], [-0.12, -0.3],
+        [-0.12, -0.55], [0.12, -0.55],
+        [0.12, -0.3], [0.48, -0.3],
+        [0.16, 0.1], [0.34, 0.1],
+        [0.1, 0.45], [0.22, 0.45],
+    ])
+}
+
+/// A cloud: three rounded bumps over a flat base.
+fn cloud() -> Figure {
+    let mut b = Vec::new();
+    b.extend(arc([-0.35, -0.05], 0.3, 185.0, 10.0, 12));
+    b.extend(arc([0.02, 0.1], 0.34, 150.0, 30.0, 12));
+    b.extend(arc([0.4, -0.05], 0.3, 170.0, -10.0, 12));
+    b.push([0.6, -0.22]);
+    b.push([-0.6, -0.22]);
+    outline("Nuage", WHITE, b)
+}
+
+/// An eighth note: an oval head, a stem and a flag.
+fn music_note() -> Figure {
+    let head = closed(curve(28, |t| {
+        let a = t * TAU;
+        [-0.15 + 0.22 * a.cos(), -0.45 + 0.15 * a.sin()]
+    }));
+    let stem = vec![[0.07, -0.4], [0.07, 0.7]];
+    let flag = vec![[0.07, 0.7], [0.35, 0.5], [0.33, 0.28]];
+    one_frame("Note", vec![stroke(head, CYAN), stroke(stem, CYAN), stroke(flag, CYAN)])
+}
+
+/// A crown: three points over a base.
+fn crown() -> Figure {
+    outline("Couronne", YELLOW, vec![
+        [-0.6, -0.4], [-0.6, 0.3], [-0.3, -0.05], [0.0, 0.45], [0.3, -0.05], [0.6, 0.3], [0.6, -0.4],
+    ])
+}
+
+/// A bow tie: an hourglass outline pinched at the knot.
+fn bowtie() -> Figure {
+    outline("Nœud papillon", RED, vec![
+        [-0.6, 0.4], [-0.08, 0.1], [0.08, 0.1], [0.6, 0.4],
+        [0.6, -0.4], [0.08, -0.1], [-0.08, -0.1], [-0.6, -0.4],
+    ])
+}
+
+/// A shooting star: a small star in the corner with a trailing streak.
+fn shooting_star() -> Figure {
+    let star_pts: Vec<[f32; 2]> = star(5, 0.32, 0.13).into_iter().map(|p| [p[0] + 0.45, p[1] + 0.4]).collect();
+    let trail = vec![[0.45, 0.4], [-0.3, -0.3], [-0.75, -0.72]];
+    one_frame("Étoile filante", vec![stroke(closed(star_pts), WHITE), stroke(trail, CYAN)])
+}
+
+// ---------------------------------------------------------------------------
+// A dancer rendered in real 3D (T-534): an articulated humanoid skeleton
+// built from joints in 3D space. Each frame advances a dance phase (limbs
+// swing, hips sway, body bobs) AND a global yaw, then projects the 3D
+// skeleton to 2D with the same perspective idea as the wireframe objects.
+// Baked into figure frames, so the Figure model drives it unchanged: it
+// spins in depth while it dances. Our own geometry and motion, all maths —
+// nothing traced from any product's content.
+// ---------------------------------------------------------------------------
+
+/// A 3D point rotated about the vertical (y) axis by `yaw` radians.
+fn rot_y(v: [f32; 3], yaw: f32) -> [f32; 3] {
+    let (s, c) = yaw.sin_cos();
+    [v[0] * c - v[2] * s, v[1], v[0] * s + v[2] * c]
+}
+
+/// A limb end `len` from `from`, at elevation `e` from straight down
+/// (0 = down, π = up) and azimuth `az` (swinging sideways into depth z);
+/// `right` mirrors x for the body's right side.
+fn limb3(from: [f32; 3], e: f32, az: f32, len: f32, right: bool) -> [f32; 3] {
+    let sx = if right { 1.0 } else { -1.0 };
+    [
+        from[0] + sx * len * e.sin() * az.cos(),
+        from[1] - len * e.cos(),
+        from[2] + len * e.sin() * az.sin(),
+    ]
+}
+
+fn dancer_3d() -> Figure {
+    const N: usize = 48;
+    const CAM: f32 = 3.0; // camera distance, in model units
+    const FOV: f32 = 2.3; // projection scale
+    const YC: f32 = 0.12; // vertical centring offset
+    let frames = (0..N)
+        .map(|i| {
+            let t = i as f32 / N as f32;
+            let yaw = t * TAU; // one full spin per loop
+            let p = t * 2.0 * TAU; // two dance cycles per spin
+            let bob = 0.02 * (2.0 * p).sin();
+            let sway = 0.05 * p.sin();
+            let twist = 0.35 * (p + 0.4).sin();
+            // Spine joints (model space, before the global yaw).
+            let pelvis = [sway, bob, 0.0];
+            let chest = [sway * 0.4, bob + 0.28, 0.0];
+            let neck = [chest[0], chest[1] + 0.08, 0.0];
+            let head_c = [chest[0], chest[1] + 0.18, 0.0];
+            // Shoulders and hips twist around the spine.
+            let shoulder = |right: bool| {
+                let r = rot_y([if right { 0.15 } else { -0.15 }, 0.05, 0.0], twist);
+                [chest[0] + r[0], chest[1] + r[1], chest[2] + r[2]]
+            };
+            let hip = |right: bool| {
+                let r = rot_y([if right { 0.08 } else { -0.08 }, 0.0, 0.0], -twist * 0.5);
+                [pelvis[0] + r[0], pelvis[1] + r[1], pelvis[2] + r[2]]
+            };
+            let (sr, sl) = (shoulder(true), shoulder(false));
+            let (hr, hl) = (hip(true), hip(false));
+            // Arms raise and swing fore/aft, left and right in opposition.
+            let (er, el) = (2.3 + 0.8 * p.sin(), 2.3 - 0.8 * p.sin());
+            let (azr, azl) = (0.5 + 0.6 * p.cos(), 0.5 - 0.6 * p.cos());
+            let elbow_r = limb3(sr, er, azr, 0.15, true);
+            let wrist_r = limb3(elbow_r, er + 0.4 * p.cos(), azr, 0.14, true);
+            let elbow_l = limb3(sl, el, -azl, 0.15, false);
+            let wrist_l = limb3(elbow_l, el - 0.4 * p.cos(), -azl, 0.14, false);
+            // Legs step with a knee bend, opposite phase, swinging in depth.
+            let (lr, ll) = (0.2 + 0.28 * p.sin().max(0.0), 0.2 + 0.28 * (-p.sin()).max(0.0));
+            let (lazr, lazl) = (0.3 * p.cos(), -0.3 * p.cos());
+            let knee_r = limb3(hr, lr, lazr, 0.17, true);
+            let ankle_r = limb3(knee_r, lr + 0.2, lazr, 0.17, true);
+            let knee_l = limb3(hl, ll, lazl, 0.17, false);
+            let ankle_l = limb3(knee_l, ll + 0.2, lazl, 0.17, false);
+            // Spin in depth, centre vertically, project with perspective.
+            let proj = |v: [f32; 3]| {
+                let r = rot_y(v, yaw);
+                let k = FOV / (CAM - r[2]);
+                [r[0] * k, (r[1] - YC) * k]
+            };
+            let seg = |pts: Vec<[f32; 3]>, color: [u8; 3]| stroke(pts.into_iter().map(proj).collect(), color);
+            // Head: two circles (a little 3D globe) that turn with the spin.
+            let ring = |vertical: bool| {
+                (0..=16)
+                    .map(|j| {
+                        let a = j as f32 / 16.0 * TAU;
+                        let off = if vertical {
+                            [0.07 * a.cos(), 0.07 * a.sin(), 0.0]
+                        } else {
+                            [0.07 * a.cos(), 0.0, 0.07 * a.sin()]
+                        };
+                        [head_c[0] + off[0], head_c[1] + off[1], head_c[2] + off[2]]
+                    })
+                    .collect::<Vec<_>>()
+            };
+            FigureFrame {
+                strokes: vec![
+                    seg(ring(true), MAGENTA),
+                    seg(ring(false), MAGENTA),
+                    seg(vec![head_c, neck, chest, pelvis], CYAN),
+                    seg(vec![sl, sr], CYAN),
+                    seg(vec![hl, hr], CYAN),
+                    seg(vec![sr, hr], CYAN),
+                    seg(vec![sl, hl], CYAN),
+                    seg(vec![sr, elbow_r, wrist_r], GREEN),
+                    seg(vec![sl, elbow_l, wrist_l], GREEN),
+                    seg(vec![hr, knee_r, ankle_r], YELLOW),
+                    seg(vec![hl, knee_l, ankle_l], YELLOW),
+                ],
+            }
+        })
+        .collect();
+    Figure { name: "Danseuse 3D".to_string(), frames, rate: 16.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
+}
+
 // ---------------------------------------------------------------------------
 // Wireframe 3D objects
 // ---------------------------------------------------------------------------
@@ -387,6 +655,26 @@ pub fn builtin_objects() -> Vec<WireObject> {
         cylinder(16),
         pyramid(),
         star_3d(),
+        prism(3, 0.8, 0.8, "Prisme triangulaire", GREEN),
+        prism(5, 0.8, 0.8, "Prisme pentagonal", CYAN),
+        prism(6, 0.8, 0.8, "Prisme hexagonal", MAGENTA),
+        prism(8, 0.8, 0.8, "Prisme octogonal", YELLOW),
+        prism(4, 0.95, 0.5, "Colonne", BLUE),
+        antiprism(4, "Antiprisme carré", RED),
+        antiprism(5, "Antiprisme pentagonal", WHITE),
+        bipyramid(5, "Bipyramide", CYAN),
+        bipyramid(6, "Diamant", MAGENTA),
+        box_obj(),
+        cuboctahedron(),
+        helix(4.0, "Hélice", GREEN),
+        helix(8.0, "Ressort", YELLOW),
+        conical_spiral(),
+        trefoil(),
+        mobius(),
+        urchin(),
+        asterisk_3d(),
+        capsule(),
+        ring_obj(),
     ];
     for o in &mut objs {
         let _ = o.validate();
@@ -554,6 +842,238 @@ fn star_3d() -> WireObject {
     object("Étoile 3D", WHITE, verts, edges)
 }
 
+/// A prism: two `sides`-gon caps joined by verticals.
+fn prism(sides: usize, half_h: f32, r: f32, name: &str, color: [u8; 3]) -> WireObject {
+    let mut verts = Vec::new();
+    for &y in &[half_h, -half_h] {
+        for i in 0..sides {
+            let a = i as f32 / sides as f32 * TAU;
+            verts.push([r * a.cos(), y, r * a.sin()]);
+        }
+    }
+    let top = |i: usize| (i % sides) as u32;
+    let bot = |i: usize| (sides + i % sides) as u32;
+    let mut edges = Vec::new();
+    for i in 0..sides {
+        edges.push([top(i), top(i + 1)]);
+        edges.push([bot(i), bot(i + 1)]);
+        edges.push([top(i), bot(i)]);
+    }
+    object(name, color, verts, edges)
+}
+
+/// An antiprism: two `sides`-gon caps offset by half a step, triangulated.
+fn antiprism(sides: usize, name: &str, color: [u8; 3]) -> WireObject {
+    let (half_h, r) = (0.55_f32, 0.8_f32);
+    let mut verts = Vec::new();
+    for i in 0..sides {
+        let a = i as f32 / sides as f32 * TAU;
+        verts.push([r * a.cos(), -half_h, r * a.sin()]);
+    }
+    for i in 0..sides {
+        let a = (i as f32 + 0.5) / sides as f32 * TAU;
+        verts.push([r * a.cos(), half_h, r * a.sin()]);
+    }
+    let bot = |i: usize| (i % sides) as u32;
+    let top = |i: usize| (sides + i % sides) as u32;
+    let mut edges = Vec::new();
+    for i in 0..sides {
+        edges.push([bot(i), bot(i + 1)]);
+        edges.push([top(i), top(i + 1)]);
+        edges.push([bot(i), top(i)]);
+        edges.push([bot(i + 1), top(i)]);
+    }
+    object(name, color, verts, edges)
+}
+
+/// A bipyramid: an `sides`-gon equator with an apex above and below.
+fn bipyramid(sides: usize, name: &str, color: [u8; 3]) -> WireObject {
+    let r = 0.8_f32;
+    let mut verts = vec![[0.0, 0.95, 0.0], [0.0, -0.95, 0.0]];
+    for i in 0..sides {
+        let a = i as f32 / sides as f32 * TAU;
+        verts.push([r * a.cos(), 0.0, r * a.sin()]);
+    }
+    let ring = |i: usize| (2 + i % sides) as u32;
+    let mut edges = Vec::new();
+    for i in 0..sides {
+        edges.push([ring(i), ring(i + 1)]);
+        edges.push([0, ring(i)]);
+        edges.push([1, ring(i)]);
+    }
+    object(name, color, verts, edges)
+}
+
+/// A 2:1:1 rectangular box.
+fn box_obj() -> WireObject {
+    let verts: Vec<[f32; 3]> = (0..8)
+        .map(|i| [if i & 1 == 0 { -1.0 } else { 1.0 }, if i & 2 == 0 { -0.5 } else { 0.5 }, if i & 4 == 0 { -0.5 } else { 0.5 }])
+        .collect();
+    let edges = (0..8u32).flat_map(|i| [1u32, 2, 4].into_iter().filter(move |bit| i & bit == 0).map(move |bit| [i, i | bit])).collect();
+    object("Boîte", BLUE, verts, edges)
+}
+
+/// A cuboctahedron: the twelve (±1,±1,0) permutations.
+fn cuboctahedron() -> WireObject {
+    let mut verts = Vec::new();
+    for &s1 in &[-1.0_f32, 1.0] {
+        for &s2 in &[-1.0_f32, 1.0] {
+            verts.push([s1, s2, 0.0]);
+            verts.push([s1, 0.0, s2]);
+            verts.push([0.0, s1, s2]);
+        }
+    }
+    let edges = nearest_edges(&verts);
+    object("Cuboctaèdre", CYAN, verts, edges)
+}
+
+/// A helix of `turns` turns around the vertical axis.
+fn helix(turns: f32, name: &str, color: [u8; 3]) -> WireObject {
+    let n = (turns * 40.0) as usize;
+    let verts: Vec<[f32; 3]> = (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let a = t * turns * TAU;
+            [0.6 * a.cos(), -0.9 + 1.8 * t, 0.6 * a.sin()]
+        })
+        .collect();
+    let edges = (0..n as u32).map(|i| [i, i + 1]).collect();
+    object(name, color, verts, edges)
+}
+
+/// A conical spiral that widens as it descends.
+fn conical_spiral() -> WireObject {
+    let n = 200usize;
+    let verts: Vec<[f32; 3]> = (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let a = t * 6.0 * TAU;
+            let r = 0.1 + 0.8 * t;
+            [r * a.cos(), 0.9 - 1.8 * t, r * a.sin()]
+        })
+        .collect();
+    let edges = (0..n as u32).map(|i| [i, i + 1]).collect();
+    object("Spirale 3D", MAGENTA, verts, edges)
+}
+
+/// A trefoil knot (a closed 3D curve).
+fn trefoil() -> WireObject {
+    let n = 160usize;
+    let verts: Vec<[f32; 3]> = (0..n)
+        .map(|i| {
+            let t = i as f32 / n as f32 * TAU;
+            [t.sin() + 2.0 * (2.0 * t).sin(), t.cos() - 2.0 * (2.0 * t).cos(), -(3.0 * t).sin()]
+        })
+        .collect();
+    let mut edges: Vec<[u32; 2]> = (0..n as u32 - 1).map(|i| [i, i + 1]).collect();
+    edges.push([n as u32 - 1, 0]);
+    object("Nœud", GREEN, verts, edges)
+}
+
+/// A Möbius strip, as two rails joined by rungs (the rails swap at the seam).
+fn mobius() -> WireObject {
+    let n = 60usize;
+    let w = 0.3_f32;
+    let mut verts = Vec::new();
+    for i in 0..n {
+        let u = i as f32 / n as f32 * TAU;
+        let hw = u / 2.0;
+        for &s in &[-1.0_f32, 1.0] {
+            let r = 0.8 + s * w * hw.cos();
+            verts.push([r * u.cos(), s * w * hw.sin(), r * u.sin()]);
+        }
+    }
+    let inner = |i: usize| (2 * (i % n)) as u32;
+    let outer = |i: usize| (2 * (i % n) + 1) as u32;
+    let mut edges = Vec::new();
+    for i in 0..n {
+        edges.push([inner(i), inner(i + 1)]);
+        edges.push([outer(i), outer(i + 1)]);
+        edges.push([inner(i), outer(i)]);
+    }
+    object("Ruban de Möbius", WHITE, verts, edges)
+}
+
+/// A sea urchin: spikes from the centre to the icosahedron's directions.
+fn urchin() -> WireObject {
+    let p = (1.0 + 5.0_f32.sqrt()) / 2.0;
+    let dirs = [
+        [0.0, 1.0, p], [0.0, 1.0, -p], [0.0, -1.0, p], [0.0, -1.0, -p],
+        [1.0, p, 0.0], [1.0, -p, 0.0], [-1.0, p, 0.0], [-1.0, -p, 0.0],
+        [p, 0.0, 1.0], [p, 0.0, -1.0], [-p, 0.0, 1.0], [-p, 0.0, -1.0],
+    ];
+    let mut verts = vec![[0.0, 0.0, 0.0]];
+    verts.extend(dirs);
+    let edges = (1..=dirs.len() as u32).map(|i| [0u32, i]).collect();
+    object("Oursin", YELLOW, verts, edges)
+}
+
+/// A 3D asterisk: three axes crossing at the centre.
+fn asterisk_3d() -> WireObject {
+    let verts = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0], [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0], [0.0, 0.0, -1.0],
+    ];
+    let edges = (1..=6u32).map(|i| [0u32, i]).collect();
+    object("Astérisque 3D", RED, verts, edges)
+}
+
+/// A capsule (pill): a cylinder with rounded caps, as latitude rings.
+fn capsule() -> WireObject {
+    let meridians = 12usize;
+    let lats = 10usize;
+    let mut verts = Vec::new();
+    for la in 0..=lats {
+        let theta = la as f32 / lats as f32 * PI;
+        let y = theta.cos();
+        let rad = theta.sin();
+        let ys = if y > 0.0 { 0.45 + 0.5 * y } else { -0.45 + 0.5 * y };
+        for lo in 0..meridians {
+            let phi = lo as f32 / meridians as f32 * TAU;
+            verts.push([0.55 * rad * phi.cos(), ys, 0.55 * rad * phi.sin()]);
+        }
+    }
+    let idx = |la: usize, lo: usize| (la * meridians + lo % meridians) as u32;
+    let mut edges = Vec::new();
+    for lo in 0..meridians {
+        for la in 0..lats {
+            edges.push([idx(la, lo), idx(la + 1, lo)]);
+        }
+    }
+    for la in 0..=lats {
+        for lo in 0..meridians {
+            edges.push([idx(la, lo), idx(la, lo + 1)]);
+        }
+    }
+    object("Capsule", CYAN, verts, edges)
+}
+
+/// A flat ring (annulus) in the horizontal plane, with a few spokes.
+fn ring_obj() -> WireObject {
+    let n = 32usize;
+    let (ro, ri) = (0.9_f32, 0.55_f32);
+    let mut verts = Vec::new();
+    for &r in &[ro, ri] {
+        for i in 0..n {
+            let a = i as f32 / n as f32 * TAU;
+            verts.push([r * a.cos(), 0.0, r * a.sin()]);
+        }
+    }
+    let out = |i: usize| (i % n) as u32;
+    let inn = |i: usize| (n + i % n) as u32;
+    let mut edges = Vec::new();
+    for i in 0..n {
+        edges.push([out(i), out(i + 1)]);
+        edges.push([inn(i), inn(i + 1)]);
+        if i % 4 == 0 {
+            edges.push([out(i), inn(i)]);
+        }
+    }
+    object("Anneau", GREEN, verts, edges)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,7 +1081,7 @@ mod tests {
     #[test]
     fn figures_are_valid_in_range_and_closed_outlines_close() {
         let figs = builtin_figures();
-        assert!(figs.len() >= 14, "a dozen figures at least, plus the dancers");
+        assert!(figs.len() >= 30, "at least thirty built-in figures");
         let mut names = std::collections::HashSet::new();
         for mut f in figs {
             assert!(names.insert(f.name.clone()), "unique name: {}", f.name);
@@ -620,9 +1140,27 @@ mod tests {
     }
 
     #[test]
+    fn the_3d_dancer_spins_and_dances_in_range() {
+        let d = dancer_3d();
+        assert_eq!(d.frames.len(), 48);
+        assert!(d.frames.iter().all(|f| f.strokes.len() == 11));
+        // It moves (a real spin + dance, not a still pose).
+        assert_ne!(d.frames[0], d.frames[12]);
+        assert_ne!(d.frames[0], d.frames[24]);
+        // Every projected point stays inside the field.
+        for f in &d.frames {
+            for s in &f.strokes {
+                for p in &s.points {
+                    assert!(p[0].abs() <= 1.0 && p[1].abs() <= 1.0, "out of range: {p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn objects_are_valid_with_coherent_edges() {
         let objs = builtin_objects();
-        assert!(objs.len() >= 11, "cube … star");
+        assert!(objs.len() >= 30, "at least thirty built-in 3D objects");
         let mut names = std::collections::HashSet::new();
         for mut o in objs {
             assert!(names.insert(o.name.clone()), "unique name: {}", o.name);
