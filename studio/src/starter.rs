@@ -279,67 +279,84 @@ fn dancer_stick() -> Figure {
     Figure { name: "Danseuse".to_string(), frames, rate: 4.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
 }
 
-/// An animated dancer silhouette (T-533): one closed outline per frame
-/// tracing the body — head, V of raised arms, waist pinch, A of the legs
-/// (the right one pointed) — walked clockwise with a little limb width.
-/// A few poses (sway, arm spread, pointed leg) make a looped dance. Our
-/// own outline, computed from joints: nothing traced from any product.
+/// A point `len` from `from` at elevation `e` from straight down
+/// (0 = down, π = up); `right` mirrors x. The 2D sibling of `limb3`.
+fn limb2(from: [f32; 2], e: f32, len: f32, right: bool) -> [f32; 2] {
+    let sx = if right { 1.0 } else { -1.0 };
+    [from[0] + sx * len * e.sin(), from[1] - len * e.cos()]
+}
+
+/// A smooth tapered capsule from `a` (half-width `wa`) to `b` (half-width
+/// `wb`): one straight side, a rounded cap at `b`, the other side, a
+/// rounded cap at `a`. A closed outline — a limb segment with soft ends.
+fn stadium(a: [f32; 2], b: [f32; 2], wa: f32, wb: f32) -> Vec<[f32; 2]> {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+    let (nx, ny) = (-dy / len, dx / len); // left normal
+    let ang = dy.atan2(dx).to_degrees(); // direction of a→b
+    let mut p = vec![[a[0] + nx * wa, a[1] + ny * wa], [b[0] + nx * wb, b[1] + ny * wb]];
+    p.extend(arc(b, wb, ang + 90.0, ang - 90.0, 6)); // cap over b
+    p.push([a[0] - nx * wa, a[1] - ny * wa]);
+    p.extend(arc(a, wa, ang - 90.0, ang - 270.0, 6)); // cap over a
+    closed(p)
+}
+
+/// An animated dancer silhouette (T-534): a full, rounded body — a head, a
+/// tapered leotard torso, and arms and legs built from smooth capsules
+/// (`stadium`) with soft ends. Eight frames carry a flowing dance: a port
+/// de bras (arms sweeping up and down, right leading), a hip sway and bob,
+/// and the right leg extending to a pointed side extension while the left
+/// stands in a soft plié. Our own geometry, all maths from the joints:
+/// nothing traced from any product's content.
 fn dancer_silhouette() -> Figure {
-    const N: usize = 4;
-    const WA: f32 = 0.035; // arm half-width
-    const WL: f32 = 0.05; // leg half-width
+    const N: usize = 8;
     let frames = (0..N)
         .map(|i| {
-            let w = i as f32 / N as f32 * TAU;
-            let sway = 0.05 * w.sin();
-            let head_c = [sway, 0.60];
-            let shoulder_r = [sway + 0.13, 0.44];
-            let shoulder_l = [sway - 0.13, 0.44];
-            let hand_r = dir_pt(shoulder_r, 2.3 + 0.2 * w.sin(), 0.30, true);
-            let hand_l = dir_pt(shoulder_l, 2.3 - 0.2 * w.sin(), 0.30, false);
-            let waist_r = [sway * 0.5 + 0.06, 0.20];
-            let waist_l = [sway * 0.5 - 0.06, 0.20];
-            let hip_r = [0.12, 0.07];
-            let hip_l = [-0.12, 0.07];
-            // Right leg pointed out (lifts across the cycle); left planted.
-            let foot_r = dir_pt(hip_r, 0.12 + 0.22 * w.sin().max(0.0), 0.70, true);
-            let foot_l = dir_pt(hip_l, 0.06, 0.72, false);
-            let mut b: Vec<[f32; 2]> = Vec::new();
-            // Head: right half (top → lower right), down to the neck.
-            b.extend(arc(head_c, 0.10, 90.0, -55.0, 8));
-            b.push([head_c[0] + 0.05, 0.50]);
-            // Right arm: up the outer edge, across the hand, down to the armpit.
-            b.push([shoulder_r[0] + WA, shoulder_r[1]]);
-            b.push([hand_r[0] + WA, hand_r[1]]);
-            b.push([hand_r[0], hand_r[1] + WA]);
-            b.push([hand_r[0] - WA, hand_r[1]]);
-            b.push([shoulder_r[0] - WA, shoulder_r[1] - 0.02]);
-            // Right side of the torso and the right leg.
-            b.push([waist_r[0], waist_r[1]]);
-            b.push([hip_r[0] + WL, hip_r[1]]);
-            b.push([foot_r[0] + WL, foot_r[1]]);
-            b.push([foot_r[0], foot_r[1] - WL]);
-            b.push([foot_r[0] - WL, foot_r[1]]);
-            b.push([sway * 0.3, 0.015]); // crotch
-            // Left leg and left side of the torso.
-            b.push([foot_l[0] + WL, foot_l[1]]);
-            b.push([foot_l[0], foot_l[1] - WL]);
-            b.push([foot_l[0] - WL, foot_l[1]]);
-            b.push([hip_l[0] - WL, hip_l[1]]);
-            b.push([waist_l[0], waist_l[1]]);
-            // Left arm: up from the armpit, across the hand, down to the shoulder.
-            b.push([shoulder_l[0] + WA, shoulder_l[1] - 0.02]);
-            b.push([hand_l[0] + WA, hand_l[1]]);
-            b.push([hand_l[0], hand_l[1] + WA]);
-            b.push([hand_l[0] - WA, hand_l[1]]);
-            b.push([shoulder_l[0] - WA, shoulder_l[1]]);
-            b.push([head_c[0] - 0.05, 0.50]);
-            // Head: left half (lower left → top), closing the outline.
-            b.extend(arc(head_c, 0.10, 235.0, 90.0, 8));
-            FigureFrame { strokes: vec![stroke(closed(b), MAGENTA)] }
+            let p = i as f32 / N as f32 * TAU;
+            let sway = 0.04 * p.sin();
+            let bob = 0.015 * (2.0 * p).sin();
+            // Spine landmarks.
+            let hip_c = [sway, -0.05 + bob];
+            let chest = [sway * 0.7, 0.30 + bob];
+            let head_c = [sway * 0.5, 0.54 + bob];
+            let sr = [chest[0] + 0.12, chest[1] + 0.04];
+            let sl = [chest[0] - 0.12, chest[1] + 0.04];
+            let hr = [hip_c[0] + 0.08, hip_c[1]];
+            let hl = [hip_c[0] - 0.08, hip_c[1]];
+            // Port de bras: arms sweep up and down, the right one leading.
+            let aru = 2.1 + 0.8 * p.sin();
+            let alu = 2.1 - 0.8 * p.sin();
+            let elbow_r = limb2(sr, aru, 0.17, true);
+            let wrist_r = limb2(elbow_r, aru + 0.25 * p.cos(), 0.16, true);
+            let elbow_l = limb2(sl, alu, 0.17, false);
+            let wrist_l = limb2(elbow_l, alu - 0.25 * p.cos(), 0.16, false);
+            // Left leg stands in a soft plié; the right extends, pointed.
+            let knee_l = limb2(hl, 0.12, 0.20, false);
+            let ankle_l = limb2(knee_l, 0.06, 0.20, false);
+            let legr = 0.25 + 0.5 * p.sin().max(0.0);
+            let knee_r = limb2(hr, legr, 0.20, true);
+            let ankle_r = limb2(knee_r, legr + 0.15, 0.20, true);
+            // Waist points pinch the torso between chest and hips.
+            let wr = [chest[0] + 0.07, (chest[1] + hip_c[1]) * 0.5];
+            let wl = [chest[0] - 0.07, (chest[1] + hip_c[1]) * 0.5];
+            let torso = closed(vec![sl, sr, wr, hr, hl, wl]);
+            FigureFrame {
+                strokes: vec![
+                    stroke(closed(arc(head_c, 0.1, 0.0, 360.0, 22)), MAGENTA),
+                    stroke(torso, MAGENTA),
+                    stroke(stadium(sr, elbow_r, 0.045, 0.04), MAGENTA),
+                    stroke(stadium(elbow_r, wrist_r, 0.04, 0.03), MAGENTA),
+                    stroke(stadium(sl, elbow_l, 0.045, 0.04), MAGENTA),
+                    stroke(stadium(elbow_l, wrist_l, 0.04, 0.03), MAGENTA),
+                    stroke(stadium(hr, knee_r, 0.075, 0.06), MAGENTA),
+                    stroke(stadium(knee_r, ankle_r, 0.06, 0.035), MAGENTA),
+                    stroke(stadium(hl, knee_l, 0.075, 0.06), MAGENTA),
+                    stroke(stadium(knee_l, ankle_l, 0.06, 0.035), MAGENTA),
+                ],
+            }
         })
         .collect();
-    Figure { name: "Danseuse silhouette".to_string(), frames, rate: 2.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
+    Figure { name: "Danseuse silhouette".to_string(), frames, rate: 4.0, per: RateUnit::Beat, loop_mode: LoopMode::Loop, ..Figure::default() }
 }
 
 /// A star of `points` points: outer radius `ro`, inner `ri`, first spike up.
@@ -1107,11 +1124,12 @@ mod tests {
         // Open strokes are not forced closed.
         let sp = spiral();
         assert_ne!(sp.frames[0].strokes[0].points.first(), sp.frames[0].strokes[0].points.last());
-        // The silhouette dancer closes in every frame (its single stroke).
+        // Every part of the silhouette dancer is a closed outline.
         for frame in &dancer_silhouette().frames {
-            assert_eq!(frame.strokes.len(), 1, "one closed outline per frame");
-            let s = &frame.strokes[0];
-            assert_eq!(s.points.first(), s.points.last(), "silhouette closes");
+            assert_eq!(frame.strokes.len(), 10, "head, torso and eight limb capsules");
+            for s in &frame.strokes {
+                assert_eq!(s.points.first(), s.points.last(), "silhouette part closes");
+            }
         }
     }
 
@@ -1134,9 +1152,9 @@ mod tests {
         assert_ne!(stick.frames[0], stick.frames[2]);
 
         let sil = dancer_silhouette();
-        assert_eq!(sil.frames.len(), 4);
-        assert!(sil.frames.iter().all(|f| f.strokes.len() == 1 && f.strokes[0].points.len() > 20));
-        assert_ne!(sil.frames[0], sil.frames[1]);
+        assert_eq!(sil.frames.len(), 8);
+        assert!(sil.frames.iter().all(|f| f.strokes.len() == 10));
+        assert_ne!(sil.frames[0], sil.frames[2]);
     }
 
     #[test]
