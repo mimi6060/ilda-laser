@@ -560,6 +560,7 @@ pub fn describe(e: &SafetyEvent) -> String {
         },
         "checklist_reset" if str_of(d, "reason") == "shownet" => "Liste de contrôle avant show recommencée : sortie ShowNET, nouveaux points à cocher".into(),
         "checklist_reset" => "Liste de contrôle avant show recommencée".into(),
+        "checklist_restored" => "Liste de contrôle avant show reprise au démarrage (terminée il y a moins de 24 h)".into(),
         "checklist_edit" => format!("Liste de contrôle avant show modifiée{}", changed()),
         "audience_mode" if str_of(d, "mode") == "scanning" => {
             let n = d.get("conditions").and_then(Value::as_array).map_or(0, |a| a.len());

@@ -70,7 +70,9 @@ function showChecklist(c) {
   for (const id of ['clOperator', 'clOutdoor', 'clScan', 'clComplete']) $(id).disabled = c.complete;
   $('clRun').hidden = !!clEditing;
   $('clDone').hidden = !c.complete;
-  if (c.complete) $('clDone').textContent = `Liste terminée par ${c.operator} à ${clock(c.completed_at)}. Le laser peut être armé (Espace ou bouton).`;
+  if (c.complete) $('clDone').textContent = c.restored
+    ? `Liste reprise : terminée par ${c.operator} le ${new Date(c.completed_at).toLocaleString('fr-FR')}, valable jusqu'au ${new Date(c.valid_until).toLocaleString('fr-FR')}. Si le lieu, le câblage ou le matériel ont changé, recommencez-la. Le laser reste désarmé jusqu'à votre geste, et votre arrêt sûr reste matériel.`
+    : `Liste terminée par ${c.operator} à ${clock(c.completed_at)}. Le laser peut être armé (Espace ou bouton).`;
   const ul = $('clItems');
   ul.innerHTML = '';
   for (const it of c.items.filter(i => i.visible)) {
