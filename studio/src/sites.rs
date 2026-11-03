@@ -415,9 +415,15 @@ pub fn apply(s: &mut Shared, site: &SiteProfile, confirm_loosen: bool, src: ArmS
             Ok(()) => {
                 if let Err(e) = profiles::apply(s, p.clone(), true, src) {
                     errors.push(e.message_fr());
+                    s.checklist.restart();
+                    s.sync_checklist();
                 }
             }
-            Err(e) => errors.push(format!("sécurité : {e:#}")),
+            Err(e) => {
+                errors.push(format!("sécurité : {e:#}"));
+                s.checklist.restart();
+                s.sync_checklist();
+            }
         }
     } else {
         s.checklist.restart();

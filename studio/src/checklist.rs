@@ -201,6 +201,8 @@ struct SavedRun {
     operator: String,
     completed_at: u64,
     done: Vec<SavedTick>,
+    /// The list as it was validated: any other list asks again.
+    config: ChecklistConfig,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -274,6 +276,7 @@ impl Checklist {
             let age = now.duration_since(at_ms(s.completed_at));
             !self.config.audience_scan
                 && self.load_error.is_none()
+                && s.config == self.config
                 && !s.operator.is_empty()
                 && age.is_ok_and(|a| a < REMEMBER_FOR)
                 && self.visible_items().all(|i| s.done.iter().any(|d| d.id == i.id))
@@ -291,12 +294,18 @@ impl Checklist {
     }
 
     /// A failure only means the list is asked again at the next start.
+    /// A run done in preview is not kept: it was never done for a laser,
+    /// and must not open a real output at the next start.
     fn save_run(&self) {
+        if !self.enforced {
+            return;
+        }
         let (Some(path), Some(completed_at)) = (self.run_path(), self.run.completed_at) else { return };
         let saved = SavedRun {
             operator: self.run.operator.clone(),
             completed_at: ms(completed_at),
             done: self.run.done.iter().map(|(id, at, value)| SavedTick { id: id.clone(), at: ms(*at), value: value.clone() }).collect(),
+            config: self.config.clone(),
         };
         let written = serde_json::to_vec_pretty(&saved).map_err(anyhow::Error::from).and_then(|json| crate::datafile::replace(&path, &json));
         if let Err(e) = written {
@@ -306,7 +315,11 @@ impl Checklist {
 
     fn forget_run(&self) {
         if let Some(path) = self.run_path() {
-            let _ = std::fs::remove_file(path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("checklist run not forgotten: {e}");
+                }
+            }
         }
     }
 
@@ -739,6 +752,28 @@ mod tests {
         tick_all(&mut c);
         c.complete().unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn a_run_done_in_preview_does_not_open_a_real_output() {
+        let dir = crate::datafile::tests::temp_dir("checklist-preview");
+        let path = dir.join("checklist.json");
+        let mut c = Checklist::load(path.clone(), false);
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        c.complete().unwrap();
+        assert!(!Checklist::load(path, true).is_complete());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_list_changed_by_hand_asks_again() {
+        let (dir, path) = saved_run("checklist-hand");
+        let mut cfg = Checklist::load(path.clone(), true).config().clone();
+        cfg.items[0].text_fr.push_str(" Autre texte.");
+        std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert!(!Checklist::load(path, true).is_complete());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
