@@ -9,8 +9,13 @@
 //!
 //! The list itself (items, outdoor / audience-scanning flags) is kept in
 //! `<data-dir>/checklist.json` and survives restarts. What was ticked is
-//! the *run*: in memory only, so every start of the studio begins with an
-//! empty list.
+//! the *run*: an open run lives in memory only. A *completed* run is kept
+//! in `<data-dir>/checklist_run.json` and comes back after a restart for
+//! `REMEMBER_FOR` (24 h), so a same-day restart doesn't ask for the whole
+//! list again. It never comes back when the show scans the audience, when
+//! a shown item isn't ticked in it, or once restarted, edited or expired.
+//! The laser still starts disarmed: a remembered list only lets the
+//! operator arm it, like a list completed by hand.
 //!
 //! When a real output is configured (`--device`, `--ponk`, or the hidden
 //! `--test-checklist` that simulates one), the `checklist` interlock blocks
@@ -31,7 +36,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Label of the `checklist` interlock (also the arm button's hint).
 pub const LABEL_FR: &str = "Liste de contrôle avant show à faire";
@@ -187,7 +192,31 @@ pub fn audience_items() -> Vec<ChecklistItem> {
     vec![irradiance, attenuation]
 }
 
-/// What was ticked this session. Never saved.
+/// How long a completed run stays valid across restarts.
+pub const REMEMBER_FOR: Duration = Duration::from_secs(24 * 3600);
+
+/// A completed run as saved in `checklist_run.json`.
+#[derive(Serialize, Deserialize)]
+struct SavedRun {
+    operator: String,
+    completed_at: u64,
+    done: Vec<SavedTick>,
+    /// The list as it was validated: any other list asks again.
+    config: ChecklistConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedTick {
+    id: String,
+    at: u64,
+    value: Option<String>,
+}
+
+fn at_ms(t: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(t)
+}
+
+/// What was ticked this session. Saved only once completed.
 #[derive(Clone, Debug, Default)]
 pub struct ChecklistRun {
     pub operator: String,
@@ -211,6 +240,8 @@ pub struct Checklist {
     /// This Mac is on mains power and not overheating (T-495), as last
     /// applied to the run; None: not known (or a new run).
     mac_ready: Option<bool>,
+    /// The completed run came back from the last start, not from a click.
+    restored: bool,
 }
 
 impl Checklist {
@@ -226,11 +257,79 @@ impl Checklist {
             },
             crate::datafile::Loaded::Quarantined(w) => (ChecklistConfig::default(), Some(format!("{} Liste par défaut.", w.message_fr()))),
         };
-        Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error, output: None, mac_ready: None }
+        let mut c = Self { path: Some(path), config, run: ChecklistRun::default(), enforced, load_error, output: None, mac_ready: None, restored: false };
+        c.restore_run(SystemTime::now());
+        c
+    }
+
+    fn run_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|p| p.with_file_name("checklist_run.json"))
+    }
+
+    /// Brings back a saved completed run if it still holds at `now`;
+    /// otherwise forgets it. The ShowNET items aren't shown yet (no output
+    /// at load): `set_output` restarts the run if they aren't ticked in it.
+    fn restore_run(&mut self, now: SystemTime) {
+        let Some(path) = self.run_path() else { return };
+        let Ok(bytes) = std::fs::read(&path) else { return };
+        let saved = serde_json::from_slice::<SavedRun>(&bytes).ok().filter(|s| {
+            let age = now.duration_since(at_ms(s.completed_at));
+            !self.config.audience_scan
+                && self.load_error.is_none()
+                && s.config == self.config
+                && !s.operator.is_empty()
+                && age.is_ok_and(|a| a < REMEMBER_FOR)
+                && self.visible_items().all(|i| s.done.iter().any(|d| d.id == i.id))
+        });
+        let Some(saved) = saved else {
+            self.forget_run();
+            return;
+        };
+        self.run = ChecklistRun {
+            operator: saved.operator,
+            done: saved.done.into_iter().map(|d| (d.id, at_ms(d.at), d.value)).collect(),
+            completed_at: Some(at_ms(saved.completed_at)),
+        };
+        self.restored = true;
+    }
+
+    /// A failure only means the list is asked again at the next start.
+    /// A run done in preview is not kept: it was never done for a laser,
+    /// and must not open a real output at the next start.
+    fn save_run(&self) {
+        if !self.enforced {
+            return;
+        }
+        let (Some(path), Some(completed_at)) = (self.run_path(), self.run.completed_at) else { return };
+        let saved = SavedRun {
+            operator: self.run.operator.clone(),
+            completed_at: ms(completed_at),
+            done: self.run.done.iter().map(|(id, at, value)| SavedTick { id: id.clone(), at: ms(*at), value: value.clone() }).collect(),
+            config: self.config.clone(),
+        };
+        let written = serde_json::to_vec_pretty(&saved).map_err(anyhow::Error::from).and_then(|json| crate::datafile::replace(&path, &json));
+        if let Err(e) = written {
+            log::warn!("checklist run not saved: {e:#}");
+        }
+    }
+
+    fn forget_run(&self) {
+        if let Some(path) = self.run_path() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("checklist run not forgotten: {e}");
+                }
+            }
+        }
+    }
+
+    /// The completed run came back from the last start.
+    pub fn restored(&self) -> bool {
+        self.restored
     }
 
     pub fn in_memory(enforced: bool) -> Self {
-        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None, output: None, mac_ready: None }
+        Self { path: None, config: ChecklistConfig::default(), run: ChecklistRun::default(), enforced, load_error: None, output: None, mac_ready: None, restored: false }
     }
 
     /// A real output is configured: the list gates arming.
@@ -392,6 +491,8 @@ impl Checklist {
             .filter_map(|i| self.done(&i.id).map(|(_, at, value)| json!({ "id": i.id, "text": i.text_fr, "at": ms(*at), "value": value })))
             .collect();
         self.run.completed_at = Some(SystemTime::now());
+        self.restored = false;
+        self.save_run();
         Ok(json!({
             "operator": self.run.operator,
             "items": items,
@@ -407,6 +508,8 @@ impl Checklist {
         let was_complete = self.is_complete();
         let operator = std::mem::take(&mut self.run.operator);
         self.run = ChecklistRun { operator, ..Default::default() };
+        self.restored = false;
+        self.forget_run();
         // A new run: the power watch's state is applied to it again.
         self.mac_ready = None;
         was_complete
@@ -448,6 +551,8 @@ impl Checklist {
             "enforced": self.enforced,
             "complete": self.is_complete(),
             "completed_at": self.run.completed_at.map(ms),
+            "restored": self.restored,
+            "valid_until": self.run.completed_at.filter(|_| self.path.is_some()).map(|t| ms(t + REMEMBER_FOR)),
             "operator": self.run.operator,
             "outdoor": self.config.outdoor,
             "audience_scan": self.config.audience_scan,
@@ -619,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_survives_a_restart_but_not_the_ticks() {
+    fn the_list_and_a_completed_run_survive_a_restart() {
         let dir = crate::datafile::tests::temp_dir("checklist");
         let path = dir.join("checklist.json");
         let mut c = Checklist::load(path.clone(), true);
@@ -632,8 +737,130 @@ mod tests {
         let again = Checklist::load(path, true);
         assert_eq!(again.config(), c.config());
         assert!(again.config().items.iter().any(|i| i.text_fr == "Extincteur à portée"));
+        assert!(again.is_complete() && again.satisfied() && again.restored());
+        assert_eq!(again.view()["operator"], "Op");
+        assert_eq!(again.view()["restored"], true);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A completed run saved in a fresh data dir, and the path of its list.
+    fn saved_run(name: &str) -> (PathBuf, PathBuf) {
+        let dir = crate::datafile::tests::temp_dir(name);
+        let path = dir.join("checklist.json");
+        let mut c = Checklist::load(path.clone(), true);
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        c.complete().unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_run_done_in_preview_does_not_open_a_real_output() {
+        let dir = crate::datafile::tests::temp_dir("checklist-preview");
+        let path = dir.join("checklist.json");
+        let mut c = Checklist::load(path.clone(), false);
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        c.complete().unwrap();
+        assert!(!Checklist::load(path, true).is_complete());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_list_changed_by_hand_asks_again() {
+        let (dir, path) = saved_run("checklist-hand");
+        let mut cfg = Checklist::load(path.clone(), true).config().clone();
+        cfg.items[0].text_fr.push_str(" Autre texte.");
+        std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert!(!Checklist::load(path, true).is_complete());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_open_run_is_never_kept() {
+        let dir = crate::datafile::tests::temp_dir("checklist-open");
+        let path = dir.join("checklist.json");
+        let mut c = Checklist::load(path.clone(), true);
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        let again = Checklist::load(path, true);
         assert!(!again.is_complete() && !again.satisfied());
         assert_eq!(again.view()["operator"], "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_remembered_run_expires_after_a_day() {
+        let (dir, path) = saved_run("checklist-expiry");
+        let mut c = Checklist::load(path.clone(), true);
+        let completed = c.run.completed_at.unwrap();
+        for (now, kept) in [(completed + REMEMBER_FOR - Duration::from_secs(1), true), (completed - Duration::from_secs(1), false), (completed + REMEMBER_FOR, false)] {
+            c.save_run();
+            c.run = ChecklistRun::default();
+            c.restored = false;
+            c.restore_run(now);
+            assert_eq!(c.is_complete(), kept, "{now:?}");
+            assert_eq!(c.run_path().unwrap().exists(), kept);
+            c.run.completed_at = Some(completed);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restarting_or_editing_forgets_the_remembered_run() {
+        let (dir, path) = saved_run("checklist-forget");
+        let mut c = Checklist::load(path.clone(), true);
+        assert!(c.restart());
+        assert!(!Checklist::load(path.clone(), true).is_complete());
+        let _ = std::fs::remove_dir_all(dir);
+
+        let (dir, path) = saved_run("checklist-edit");
+        let mut c = Checklist::load(path.clone(), true);
+        let mut cfg = c.config().clone();
+        cfg.items.push(ChecklistItem::new("", "Extincteur à portée", ItemWhen::Always));
+        c.set_config(cfg, false).unwrap();
+        assert!(!Checklist::load(path, true).is_complete());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn audience_scanning_never_comes_back_by_itself() {
+        let dir = crate::datafile::tests::temp_dir("checklist-audience");
+        let path = dir.join("checklist.json");
+        let mut c = Checklist::load(path.clone(), true);
+        let mut cfg = c.config().clone();
+        cfg.audience_scan = true;
+        c.set_config(cfg, false).unwrap();
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        c.complete().unwrap();
+        let again = Checklist::load(path, true);
+        assert!(!again.is_complete() && !again.satisfied());
+        assert!(!again.is_done(AUDIENCE_ITEMS[0]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run completed without the ShowNET items doesn't open a ShowNET
+    /// output; one completed on a ShowNET output keeps « Arrêt matériel testé ».
+    #[test]
+    fn a_remembered_run_follows_the_shownet_items() {
+        let (dir, path) = saved_run("checklist-shownet");
+        let mut c = Checklist::load(path.clone(), true);
+        assert!(c.set_output(Some(OutputKind::ShowNet)), "restarts");
+        assert!(!c.is_complete() && !c.hw_stop_ok());
+        assert!(!Checklist::load(path.clone(), true).is_complete());
+        let _ = std::fs::remove_dir_all(dir);
+
+        let dir = crate::datafile::tests::temp_dir("checklist-shownet2");
+        let path = dir.join("checklist.json");
+        let mut c = Checklist::load(path.clone(), true);
+        c.set_output(Some(OutputKind::ShowNet));
+        c.set_operator("Op").unwrap();
+        tick_all(&mut c);
+        c.complete().unwrap();
+        let mut again = Checklist::load(path, true);
+        assert!(!again.set_output(Some(OutputKind::ShowNet)));
+        assert!(again.is_complete() && again.hw_stop_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 

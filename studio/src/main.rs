@@ -1273,6 +1273,10 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let wifi_watch = Arc::clone(&state.wifi);
     let power_watch = Arc::clone(&state.power_watch);
     let remembered = state.outputs.connection().selected.filter(|_| output.is_none() && !hold_outputs);
+    if state.checklist.restored() {
+        let c = state.checklist.view();
+        state.gate.log().record("checklist_restored", Some("system"), serde_json::json!({ "operator": c["operator"], "completed_at": c["completed_at"] }));
+    }
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
     let url = format!("http://127.0.0.1:{}/", cli.port);
@@ -3497,8 +3501,14 @@ mod tests {
         let again = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
         // The ShowNET and audience items are put back (T-472, T-255).
         assert_eq!(again.checklist.config().items.iter().filter(|i| i.only_for.is_none() && i.when != checklist::ItemWhen::AudienceScan).count(), 1, "the edited list is kept");
-        assert!(!again.gate.interlock_ok(interlock::CHECKLIST), "the ticks are not");
+        assert!(again.gate.interlock_ok(interlock::CHECKLIST), "a completed run comes back");
+        assert!(!again.gate.is_armed(), "and the laser still starts disarmed");
+        let mut again = again;
+        again.checklist.restart();
         drop(again);
+        let fresh = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
+        assert!(!fresh.gate.interlock_ok(interlock::CHECKLIST), "a restarted list is asked again");
+        drop(fresh);
         let _ = std::fs::remove_dir_all(dir);
     }
 
