@@ -316,6 +316,8 @@ pub fn low_space(data_free: Option<u64>, backup_free: Option<u64>, min_gb: f32) 
 }
 
 /// Free bytes for an unprivileged user on the disk holding `dir`.
+/// Unknown (`None`) where there is no `statvfs` (Windows).
+#[cfg(unix)]
 pub fn free_bytes(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
@@ -323,6 +325,11 @@ pub fn free_bytes(dir: &Path) -> Option<u64> {
     // SAFETY: `c` is a valid NUL-terminated path and `st` a writable statvfs.
     let rc = unsafe { libc::statvfs(c.as_ptr(), &mut st) };
     (rc == 0).then(|| (st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+}
+
+#[cfg(not(unix))]
+pub fn free_bytes(_dir: &Path) -> Option<u64> {
+    None
 }
 
 /// Writes `bytes` to `<dossier>/Laser Studio/<rel>`, atomically. The
