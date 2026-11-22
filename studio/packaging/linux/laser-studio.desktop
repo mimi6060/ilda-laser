@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Laser Studio
+Comment=Logiciel de show laser
+Exec=laser-studio
+Icon=laser-studio
+Terminal=true
+Categories=AudioVideo;
