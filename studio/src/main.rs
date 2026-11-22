@@ -128,6 +128,7 @@ mod timeline;
 mod timeline_csv;
 mod transition;
 mod tunnels;
+mod update;
 mod usercues;
 mod versions;
 mod venue;
@@ -1165,6 +1166,11 @@ fn main() -> Result<()> {
     if cli.list_controls {
         print!("{}", controls::markdown(&controls::ControlRegistry::build(&presets::catalog())));
         return Ok(());
+    }
+    // A published build updates itself before it starts, when online
+    // (update.rs); offline it starts without a word.
+    if cli.app && !cli.no_open && cli.device.is_none() {
+        update::at_startup();
     }
     // The macOS application with its menu-bar item (T-413): AppKit owns
     // the main thread, the studio runs unchanged on another one.
