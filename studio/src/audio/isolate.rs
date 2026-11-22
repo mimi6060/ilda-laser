@@ -400,8 +400,12 @@ fn wait_or_kill(child: &Registered, deadline: Instant) -> Option<ExitStatus> {
 
 /// Why the child gave no reply, for the UI.
 fn crash_message(status: ExitStatus) -> String {
-    use std::os::unix::process::ExitStatusExt;
-    match (status.signal(), status.code()) {
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+    // Windows has no signals: a crash shows as an exit code.
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    match (signal, status.code()) {
         (Some(sig), _) => format!("le décodeur s'est arrêté brutalement (signal {sig}) sur ce fichier, abîmé ou piégé : fichier refusé, le studio continue"),
         (_, Some(101)) => "le décodeur a planté sur ce fichier, abîmé ou piégé : fichier refusé, le studio continue".to_string(),
         (_, code) => format!("le décodeur n'a pas répondu (code {}) : fichier refusé, le studio continue", code.unwrap_or(-1)),

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laser Studio — Télécharger</title>
+<meta name="description" content="Télécharger et installer Laser Studio sur Mac, Windows ou Linux.">
+<style>
+  :root {
+    --bg: #0b0d12; --card: #151922; --line: #262c3a; --text: #e8ebf2; --muted: #9aa3b5;
+    --accent: #2ee6a8; --accent-ink: #04120d; --warn-bg: #2a1d0b; --warn-line: #6b4a12; --warn: #ffcf7a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 2.4rem; line-height: 1.15; margin: 0 0 8px; }
+  h1 span { color: var(--accent); }
+  h2 { font-size: 1.3rem; margin: 48px 0 12px; }
+  h3 { margin: 0 0 8px; font-size: 1.1rem; }
+  p.lead { color: var(--muted); font-size: 1.1rem; margin: 0 0 32px; }
+  a { color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .os { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .os.me { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .os .tag { font-size: .8rem; color: var(--accent); min-height: 1.2em; }
+  .os small { color: var(--muted); }
+  .btn { display: inline-block; text-align: center; background: var(--accent); color: var(--accent-ink); font-weight: 700; text-decoration: none; padding: 12px 16px; border-radius: 10px; margin-top: auto; }
+  .btn:hover { filter: brightness(1.1); }
+  details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin: 12px 0; }
+  details[open] { padding-bottom: 18px; }
+  summary { cursor: pointer; font-weight: 700; }
+  ol { padding-left: 1.3em; margin: 12px 0 0; }
+  li { margin: 6px 0; }
+  code, kbd { background: #0f1218; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: .92em; }
+  pre { background: #0f1218; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; }
+  .warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn); border-radius: 12px; padding: 16px 18px; }
+  .warn strong { color: #ffe2ae; }
+  footer { margin-top: 56px; color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Laser <span>Studio</span></h1>
+  <p class="lead">Logiciel de show laser : formes, textes, effets et animations au rythme de la musique, avec un aperçu en direct. Gratuit, pour Mac, Windows et Linux.</p>
+
+  <div class="grid">
+    <div class="os" data-os="mac">
+      <div class="tag"></div>
+      <h3>🍎 macOS</h3>
+      <small>macOS 11 ou plus récent · Mac Apple (M1…M4) et Intel</small>
+      <a class="btn" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-macOS.zip">Télécharger pour Mac</a>
+    </div>
+    <div class="os" data-os="win">
+      <div class="tag"></div>
+      <h3>🪟 Windows</h3>
+      <small>Windows 10 ou 11 · 64 bits</small>
+      <a class="btn" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Windows.zip">Télécharger pour Windows</a>
+    </div>
+    <div class="os" data-os="linux">
+      <div class="tag"></div>
+      <h3>🐧 Linux</h3>
+      <small>Ubuntu 22.04+, Debian 12+, Fedora… · 64 bits</small>
+      <a class="btn" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Linux.tar.gz">Télécharger pour Linux</a>
+    </div>
+  </div>
+
+  <h2>Installation</h2>
+
+  <details data-os="mac">
+    <summary>🍎 Sur Mac</summary>
+    <ol>
+      <li>Ouvre le fichier <code>LaserStudio-macOS.zip</code> téléchargé : il devient <b>Laser Studio</b>.</li>
+      <li>Glisse <b>Laser Studio</b> dans le dossier <b>Applications</b>.</li>
+      <li>La première fois, macOS dit que l'app vient d'un développeur non identifié. Fais <b>clic droit › Ouvrir</b>, puis <b>Ouvrir</b>.<br>
+        Si ça ne marche pas : <b>Réglages Système › Confidentialité et sécurité</b>, tout en bas <b>Ouvrir quand même</b>.</li>
+      <li>Si le studio demande le micro, accepte : c'est pour que les effets suivent la musique.</li>
+    </ol>
+  </details>
+
+  <details data-os="win">
+    <summary>🪟 Sur Windows</summary>
+    <ol>
+      <li>Fais <b>clic droit › Extraire tout…</b> sur <code>LaserStudio-Windows.zip</code>.</li>
+      <li>Dans le dossier extrait, double-clique sur <b>Laser Studio.exe</b>.</li>
+      <li>Si Windows affiche « Windows a protégé votre ordinateur » : clique <b>Informations complémentaires</b>, puis <b>Exécuter quand même</b>.</li>
+      <li>Si le pare-feu pose une question, tu peux refuser l'accès réseau public ; autorise le réseau privé seulement si tu pilotes un laser par le réseau.</li>
+      <li>Une fenêtre noire reste ouverte : c'est le studio. <b>La fermer arrête Laser Studio.</b></li>
+    </ol>
+  </details>
+
+  <details data-os="linux">
+    <summary>🐧 Sur Linux</summary>
+    <ol>
+      <li>Dans un terminal :
+<pre>tar xzf LaserStudio-Linux.tar.gz
+cd laser-studio
+./laser-studio</pre></li>
+      <li>Pour un laser Helios en USB, ajoute une règle udev (une seule fois) puis rebranche-le :
+<pre>echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="e500", MODE="0666"' | sudo tee /etc/udev/rules.d/99-helios.rules
+sudo udevadm control --reload-rules</pre></li>
+    </ol>
+  </details>
+
+  <h2>Premiers pas</h2>
+  <ol>
+    <li>Au lancement, Laser Studio s'ouvre <b>dans ton navigateur</b> (adresse <code>http://127.0.0.1:8080</code> ou voisine). Si rien ne s'ouvre, tape cette adresse toi-même.</li>
+    <li>Par défaut, c'est le <b>mode Aperçu</b> : rien ne sort vers un laser, tu peux tout essayer sans matériel.</li>
+    <li>Pour brancher un laser : <b>Réglages › Sorties et projecteurs</b> (Helios USB, Ether Dream, HeliosPRO, LaserCube, MadMapper via PONK…).</li>
+    <li>Le laser démarre toujours <b>désarmé</b>. <kbd>Espace</kbd> arme le laser, <kbd>Échap</kbd> = arrêt d'urgence.</li>
+  </ol>
+
+  <h2>Sécurité</h2>
+  <div class="warn">
+    <strong>Un laser peut rendre aveugle en une fraction de seconde.</strong>
+    Ne vise jamais le public ni les yeux, garde le faisceau au-dessus des têtes ou dans une zone fermée.
+    Les arrêts du logiciel ne suffisent pas : garde toujours à portée de main <strong>l'arrêt d'urgence matériel</strong> et la clé du projecteur, et teste-les avant chaque show.
+  </div>
+
+  <footer>
+    Code source et versions : <a href="https://github.com/mimi6060/ilda-laser">github.com/mimi6060/ilda-laser</a> ·
+    <a href="https://github.com/mimi6060/ilda-laser/releases">toutes les versions</a>
+  </footer>
+</main>
+<script>
+  // Highlights the visitor's system and opens its installation steps.
+  (function () {
+    var ua = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "";
+    ua = ua.toLowerCase();
+    var os = /mac|iphone|ipad/.test(ua) ? "mac" : /win/.test(ua) ? "win" : /linux|x11/.test(ua) ? "linux" : null;
+    if (!os) return;
+    var card = document.querySelector('.os[data-os="' + os + '"]');
+    if (card) { card.classList.add("me"); card.querySelector(".tag").textContent = "Ton système"; card.parentNode.prepend(card); }
+    var steps = document.querySelector('details[data-os="' + os + '"]');
+    if (steps) steps.open = true;
+  })();
+</script>
+</body>
+</html>

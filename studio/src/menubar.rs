@@ -177,10 +177,22 @@ pub fn parse_action(s: &str) -> Option<MenuAction> {
     [MenuAction::OpenUi, MenuAction::EStop, MenuAction::Quit].into_iter().find(|a| action_id(*a) == s)
 }
 
-/// Opens `url` in the default browser (`open`, macOS).
+/// Opens `url` in the default browser (`open` on macOS, `explorer` on
+/// Windows, `xdg-open` on Linux).
 pub fn open_in_browser(url: &str) -> anyhow::Result<()> {
     use anyhow::Context;
-    let status = std::process::Command::new("/usr/bin/open").arg(url).status().context("open")?;
+    let opener = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let status = std::process::Command::new(opener).arg(url).status().context("open")?;
+    // explorer exits with 1 even when it opened the page.
+    if cfg!(windows) {
+        return Ok(());
+    }
     anyhow::ensure!(status.success(), "open {url} : {status}");
     Ok(())
 }

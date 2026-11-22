@@ -209,7 +209,6 @@ pub struct DacLock {
 impl DacLock {
     /// Claims `id` in `dir`, or fails at once (never waits).
     pub fn acquire(dir: &std::path::Path, id: &str) -> Result<Self> {
-        use std::os::fd::AsRawFd;
         std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("dossier des verrous de sortie {} : {e}", dir.display()))?;
         // The id in hex: any id is a safe file name; a long one is hashed.
         let hex: String = id.bytes().map(|b| format!("{b:02x}")).collect();
@@ -221,9 +220,8 @@ impl DacLock {
         };
         let path = dir.join(format!("{name}.lock"));
         let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| anyhow::anyhow!("verrou de sortie {} : {e}", path.display()))?;
-        // SAFETY: a valid descriptor owned by `file` for the call.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
+        // An exclusive lock, never waiting (flock on Unix, LockFileEx on Windows).
+        if file.try_lock().is_err() {
             bail!("{IN_USE_FR} ({id})");
         }
         Ok(DacLock { id: id.to_string(), _file: file })
