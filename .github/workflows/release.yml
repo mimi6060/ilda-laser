@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # The release version compiled into a tagged build (update.rs): only
+  # those builds update themselves. Empty on a pull request.
+  LASER_STUDIO_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+
 jobs:
   macos:
     runs-on: macos-latest
