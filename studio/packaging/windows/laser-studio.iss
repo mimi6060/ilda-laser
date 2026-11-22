@@ -1,8 +1,9 @@
 ; Windows installer for Laser Studio (Inno Setup 6), built by the Release
 ; workflow:
 ;   iscc /DAppVersion=0.1.0 /DBinary=..\..\..\target\release\laser-studio.exe studio\packaging\windows\laser-studio.iss
-; Installs for the current user only (no administrator rights), with a
-; Start menu shortcut, an optional desktop shortcut and an uninstaller.
+; One click: no question is asked. It installs for the current user only
+; (no administrator rights), adds Start menu and desktop shortcuts and an
+; uninstaller, then starts the studio. Run again, it updates in place.
 ; The console window stays: closing it stops the studio.
 
 #ifndef AppVersion
@@ -21,6 +22,11 @@ AppPublisherURL=https://mimi6060.github.io/ilda-laser/
 DefaultDirName={autopf}\Laser Studio
 DefaultGroupName=Laser Studio
 DisableProgramGroupPage=yes
+DisableWelcomePage=yes
+DisableDirPage=yes
+DisableReadyPage=yes
+DisableFinishedPage=yes
+CloseApplications=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -35,16 +41,13 @@ WizardStyle=modern
 [Languages]
 Name: "fr"; MessagesFile: "compiler:Languages\French.isl"
 
-[Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-
 [Files]
 Source: "{#Binary}"; DestDir: "{app}"; DestName: "Laser Studio.exe"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Laser Studio"; Filename: "{app}\Laser Studio.exe"; IconFilename: "{app}\icon.ico"
-Name: "{autodesktop}\Laser Studio"; Filename: "{app}\Laser Studio.exe"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
+Name: "{autodesktop}\Laser Studio"; Filename: "{app}\Laser Studio.exe"; IconFilename: "{app}\icon.ico"
 
 [Run]
-Filename: "{app}\Laser Studio.exe"; Description: "{cm:LaunchProgram,Laser Studio}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Laser Studio.exe"; Description: "{cm:LaunchProgram,Laser Studio}"; Flags: nowait skipifsilent
