@@ -24,6 +24,7 @@
   .os.me { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
   .os .tag { font-size: .8rem; color: var(--accent); min-height: 1.2em; }
   .os small { color: var(--muted); }
+  .os .alt { font-size: .85rem; color: var(--muted); text-align: center; }
   .btn { display: inline-block; text-align: center; background: var(--accent); color: var(--accent-ink); font-weight: 700; text-decoration: none; padding: 12px 16px; border-radius: 10px; margin-top: auto; }
   .btn:hover { filter: brightness(1.1); }
   details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin: 12px 0; }
@@ -54,13 +55,15 @@
       <div class="tag"></div>
       <h3>🪟 Windows</h3>
       <small>Windows 10 ou 11 · 64 bits</small>
-      <a class="btn" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Windows.zip">Télécharger pour Windows</a>
+      <a class="btn" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Windows-Setup.exe">Télécharger pour Windows</a>
+      <a class="alt" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Windows.zip">ou version portable (.zip, sans installation)</a>
     </div>
     <div class="os" data-os="linux">
       <div class="tag"></div>
       <h3>🐧 Linux</h3>
       <small>Ubuntu 22.04+, Debian 12+, Fedora… · 64 bits</small>
-      <a class="btn" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Linux.tar.gz">Télécharger pour Linux</a>
+      <a class="btn" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Linux.AppImage">Télécharger pour Linux</a>
+      <a class="alt" href="https://github.com/mimi6060/ilda-laser/releases/latest/download/LaserStudio-Linux.tar.gz">ou archive .tar.gz</a>
     </div>
   </div>
 
@@ -80,9 +83,10 @@
   <details data-os="win">
     <summary>🪟 Sur Windows</summary>
     <ol>
-      <li>Fais <b>clic droit › Extraire tout…</b> sur <code>LaserStudio-Windows.zip</code>.</li>
-      <li>Dans le dossier extrait, double-clique sur <b>Laser Studio.exe</b>.</li>
+      <li>Double-clique sur <code>LaserStudio-Windows-Setup.exe</code>.</li>
       <li>Si Windows affiche « Windows a protégé votre ordinateur » : clique <b>Informations complémentaires</b>, puis <b>Exécuter quand même</b>.</li>
+      <li>Suis l'installation (pas besoin d'être administrateur). Coche « Créer une icône sur le Bureau » si tu veux un raccourci.</li>
+      <li>Ensuite, lance <b>Laser Studio</b> depuis le <b>menu Démarrer</b> ou le Bureau. Pour désinstaller : <b>Paramètres › Applications</b>.</li>
       <li>Si le pare-feu pose une question, tu peux refuser l'accès réseau public ; autorise le réseau privé seulement si tu pilotes un laser par le réseau.</li>
       <li>Une fenêtre noire reste ouverte : c'est le studio. <b>La fermer arrête Laser Studio.</b></li>
     </ol>
@@ -91,10 +95,10 @@
   <details data-os="linux">
     <summary>🐧 Sur Linux</summary>
     <ol>
-      <li>Dans un terminal :
-<pre>tar xzf LaserStudio-Linux.tar.gz
-cd laser-studio
-./laser-studio</pre></li>
+      <li>Clic droit sur <code>LaserStudio-Linux.AppImage</code> › <b>Propriétés › Permissions</b> › coche <b>Autoriser l'exécution</b>. Ou dans un terminal :
+<pre>chmod +x LaserStudio-Linux.AppImage</pre></li>
+      <li>Double-clique dessus : une fenêtre de terminal s'ouvre, c'est le studio. <b>La fermer arrête Laser Studio.</b></li>
+      <li>Si rien ne se passe, il manque FUSE : <code>sudo apt install libfuse2</code> (Ubuntu/Debian), ou lance-le avec <code>--appimage-extract-and-run</code>.</li>
       <li>Pour un laser Helios en USB, ajoute une règle udev (une seule fois) puis rebranche-le :
 <pre>echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="e500", MODE="0666"' | sudo tee /etc/udev/rules.d/99-helios.rules
 sudo udevadm control --reload-rules</pre></li>

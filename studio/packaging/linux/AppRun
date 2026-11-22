@@ -1,0 +1,24 @@
+#!/bin/sh
+# AppImage entry point. The studio has no window of its own (its UI is in
+# the browser), so a double-clicked AppImage opens it in a terminal:
+# closing that terminal stops the studio, as on Windows. Started from a
+# terminal, or with arguments, it runs right there.
+HERE=$(dirname "$(readlink -f "$0")")
+BIN="$HERE/usr/bin/laser-studio"
+
+if [ -t 0 ] || [ "$#" -gt 0 ] || [ -n "$LASER_STUDIO_IN_TERMINAL" ]; then
+    exec "$BIN" "$@"
+fi
+
+export LASER_STUDIO_IN_TERMINAL=1
+SELF=${APPIMAGE:-$0}
+for term in x-terminal-emulator gnome-terminal konsole xfce4-terminal mate-terminal lxterminal kitty alacritty xterm; do
+    command -v "$term" >/dev/null 2>&1 || continue
+    case "$term" in
+        gnome-terminal) exec "$term" --title "Laser Studio" -- "$SELF" ;;
+        *) exec "$term" -e "$SELF" ;;
+    esac
+done
+
+# No terminal found: run without one (stop it with `pkill laser-studio`).
+exec "$BIN"
