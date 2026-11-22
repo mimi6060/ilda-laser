@@ -50,4 +50,6 @@ Name: "{autoprograms}\Laser Studio"; Filename: "{app}\Laser Studio.exe"; IconFil
 Name: "{autodesktop}\Laser Studio"; Filename: "{app}\Laser Studio.exe"; IconFilename: "{app}\icon.ico"
 
 [Run]
-Filename: "{app}\Laser Studio.exe"; Description: "{cm:LaunchProgram,Laser Studio}"; Flags: nowait skipifsilent
+; Also after a silent install: that is how the studio's automatic update
+; (update.rs) starts the new version.
+Filename: "{app}\Laser Studio.exe"; Description: "{cm:LaunchProgram,Laser Studio}"; Flags: nowait
