@@ -99,7 +99,7 @@ test.describe('simulated real output', () => {
     expect(arm.last_disarm.reason_fr).toBe(`Verrou : ${LABEL}`);
   });
 
-  test('an edited list survives a restart, its ticks do not', async ({ page }) => {
+  test('an edited, completed list survives a restart and the laser stays disarmed', async ({ page }) => {
     await openUi(page, studio);
     await openWorkspace(page, 'settings');
     await page.locator('#checklistPanel > summary').click();
@@ -113,11 +113,23 @@ test.describe('simulated real output', () => {
     await studio.completeChecklist();
     expect((await studio.get('/api/checklist')).complete).toBe(true);
 
+    // A page refresh keeps the validation.
+    await page.reload();
+    expect((await studio.get('/api/checklist')).complete).toBe(true);
+
     await studio.restart();
     const c = await studio.get('/api/checklist');
-    expect(c.complete).toBe(false);
+    expect(c.complete).toBe(true);
+    expect(c.restored).toBe(true);
     expect(c.items.some((i: { text_fr: string }) => i.text_fr === 'Extincteur CO2 à portée de main')).toBe(true);
-    expect(c.items.every((i: { done: boolean }) => !i.done)).toBe(true);
+    const arm = await studio.get('/api/arm');
+    expect(arm.armed).toBe(false);
+    expect(arm.blocking).not.toContain(LABEL);
+
+    // Restarting the list forgets it: the next start asks for it again.
+    await studio.post('/api/checklist/restart', {});
+    await studio.restart();
+    expect((await studio.get('/api/checklist')).complete).toBe(false);
     expect((await studio.get('/api/arm')).blocking).toContain(LABEL);
   });
 });

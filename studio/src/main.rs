@@ -319,7 +319,20 @@ const APP_PORT_TRIES: u16 = 20;
 /// as `studio-data/`, in the place macOS apps keep theirs.
 fn app_data_dir(home: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
     let home = home.filter(|h| !h.is_empty()).context("HOME n'est pas défini : impossible de trouver le dossier Application Support")?;
-    Ok(PathBuf::from(home).join("Library").join("Application Support").join("Laser Studio"))
+    Ok(app_data_base(PathBuf::from(home)).join("Laser Studio"))
+}
+
+/// Where applications keep their data under `home` (`HOME`, or
+/// `USERPROFILE` on Windows): Application Support on macOS, `AppData\Roaming`
+/// on Windows, `$XDG_DATA_HOME` or `~/.local/share` on Linux.
+fn app_data_base(home: PathBuf) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else if cfg!(windows) {
+        std::env::var_os("APPDATA").filter(|a| !a.is_empty()).map_or_else(|| home.join("AppData").join("Roaming"), PathBuf::from)
+    } else {
+        std::env::var_os("XDG_DATA_HOME").filter(|x| !x.is_empty()).map_or_else(|| home.join(".local").join("share"), PathBuf::from)
+    }
 }
 
 /// A port free on 127.0.0.1: `preferred` or one of the next ones, else
@@ -358,7 +371,9 @@ fn resolve_app_mode(cli: &mut Cli, explicit_data_dir: bool, explicit_port: bool,
 /// pass a `-psn_…` process serial number: dropped.
 fn launch_args(args: Vec<std::ffi::OsString>, exe: Option<&std::path::Path>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<_> = args.into_iter().enumerate().filter(|(i, a)| *i == 0 || !a.to_string_lossy().starts_with("-psn_")).map(|(_, a)| a).collect();
-    if exe.is_some_and(in_app_bundle) && args.len() <= 1 {
+    // On Windows and Linux there is no bundle: a double-clicked binary
+    // (no argument) is the application.
+    if (exe.is_some_and(in_app_bundle) || !cfg!(target_os = "macos")) && args.len() <= 1 {
         args.push("--app".into());
     }
     args
@@ -381,7 +396,8 @@ fn parse_cli() -> Result<Cli> {
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if cli.decode.is_none() && !cli.list_devices && !cli.list_controls {
         let explicit = |id: &str| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
-        resolve_app_mode(&mut cli, explicit("data_dir"), explicit("port"), std::env::var_os("HOME").as_deref())?;
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).or_else(|| std::env::var_os("USERPROFILE"));
+        resolve_app_mode(&mut cli, explicit("data_dir"), explicit("port"), home.as_deref())?;
     }
     Ok(cli)
 }
@@ -1133,7 +1149,7 @@ fn main() -> Result<()> {
         env_logger::init();
         // T-359: never outlive the studio, nor the time limit.
         let timeout = cli.test_decode_timeout_ms.map_or(audio::isolate::DECODE_TIMEOUT, Duration::from_millis);
-        spawn_decode_watch(cli.exit_with_parent.unwrap_or_else(std::os::unix::process::parent_id), cli.data_dir.clone(), timeout);
+        spawn_decode_watch(cli.exit_with_parent.unwrap_or_else(|| current_parent(0)), cli.data_dir.clone(), timeout);
         let want = if cli.decode_peaks { audio::isolate::Want::Peaks } else { audio::isolate::Want::Samples };
         std::process::exit(audio::isolate::child_main(&cli.data_dir, name, want, cli.test_hooks));
     }
@@ -1273,6 +1289,10 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     let wifi_watch = Arc::clone(&state.wifi);
     let power_watch = Arc::clone(&state.power_watch);
     let remembered = state.outputs.connection().selected.filter(|_| output.is_none() && !hold_outputs);
+    if state.checklist.restored() {
+        let c = state.checklist.view();
+        state.gate.log().record("checklist_restored", Some("system"), serde_json::json!({ "operator": c["operator"], "completed_at": c["completed_at"] }));
+    }
     let shared = Arc::new(Mutex::new(state));
     let running = Arc::new(AtomicBool::new(true));
     let url = format!("http://127.0.0.1:{}/", cli.port);
@@ -1505,6 +1525,21 @@ fn run_studio(cli: Cli, on_ready: Option<Box<dyn FnOnce(menubar::Ready) + Send>>
     served
 }
 
+/// This process's parent id. Windows has no portable call for it: there
+/// `expected` is returned, so only the data-directory check can find an
+/// orphan (the decoder child still stops at its time limit).
+fn current_parent(expected: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        let _ = expected;
+        std::os::unix::process::parent_id()
+    }
+    #[cfg(not(unix))]
+    {
+        expected
+    }
+}
+
 /// T-358: why a test studio started with `--exit-with-parent` must stop,
 /// if it must: the harness that started it is gone (we were re-parented,
 /// e.g. to launchd) or its temporary data directory was deleted.
@@ -1524,7 +1559,7 @@ fn orphan_reason(parent: u32, current_parent: u32, data_dir_exists: bool) -> Opt
 fn spawn_orphan_watch(parent: u32, data_dir: PathBuf, estop: Arc<EStop>, running: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         while running.load(Ordering::SeqCst) {
-            if let Some(why) = orphan_reason(parent, std::os::unix::process::parent_id(), data_dir.is_dir()) {
+            if let Some(why) = orphan_reason(parent, current_parent(parent), data_dir.is_dir()) {
                 log::warn!("Studio de test : {why}, arrêt");
                 estop.kill_output();
                 running.store(false, Ordering::SeqCst);
@@ -1541,7 +1576,7 @@ fn spawn_orphan_watch(parent: u32, data_dir: PathBuf, estop: Arc<EStop>, running
 fn spawn_decode_watch(parent: u32, data_dir: PathBuf, timeout: Duration) {
     let started = Instant::now();
     std::thread::spawn(move || loop {
-        let orphan = orphan_reason(parent, std::os::unix::process::parent_id(), data_dir.is_dir());
+        let orphan = orphan_reason(parent, current_parent(parent), data_dir.is_dir());
         if let Some(why) = audio::isolate::child_must_exit(orphan, started.elapsed(), timeout) {
             eprintln!("--decode: {why}, arrêt");
             std::process::exit(3);
@@ -3497,8 +3532,14 @@ mod tests {
         let again = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
         // The ShowNET and audience items are put back (T-472, T-255).
         assert_eq!(again.checklist.config().items.iter().filter(|i| i.only_for.is_none() && i.when != checklist::ItemWhen::AudienceScan).count(), 1, "the edited list is kept");
-        assert!(!again.gate.interlock_ok(interlock::CHECKLIST), "the ticks are not");
+        assert!(again.gate.interlock_ok(interlock::CHECKLIST), "a completed run comes back");
+        assert!(!again.gate.is_armed(), "and the laser still starts disarmed");
+        let mut again = again;
+        again.checklist.restart();
         drop(again);
+        let fresh = startup_state(&parse(&["--no-midi", "--test-checklist", "--data-dir", data_dir]));
+        assert!(!fresh.gate.interlock_ok(interlock::CHECKLIST), "a restarted list is asked again");
+        drop(fresh);
         let _ = std::fs::remove_dir_all(dir);
     }
 

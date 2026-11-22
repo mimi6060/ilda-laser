@@ -148,7 +148,7 @@ function sfFromControls() {
 const SL_GROUPS = {
   arm: ['arm', 'arm_refused', 'disarm'],
   estop: ['estop', 'estop_reset'],
-  locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_reset', 'checklist_edit', 'show_mode', 'safety_lock', 'input_lost', 'input_back'],
+  locks: ['interlock', 'presence', 'watchdog', 'checklist', 'checklist_restored', 'checklist_reset', 'checklist_edit', 'show_mode', 'safety_lock', 'input_lost', 'input_back'],
   limiter: ['limiter'],
   play: ['cue', 'scene', 'show'],
   settings: ['safety_settings', 'presence_settings', 'midi_safety', 'power_caps', 'netin_settings', 'audience_mode', 'safety_profile'],
