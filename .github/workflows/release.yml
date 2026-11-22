@@ -18,7 +18,7 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust (Apple silicon + Intel)
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Laser Studio.app (Apple silicon)
@@ -33,7 +33,7 @@ jobs:
           codesign --force --sign - "out/Laser Studio.app"
       - name: Zip
         run: cd out && ditto -c -k --keepParent "Laser Studio.app" ../LaserStudio-macOS.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: LaserStudio-macOS.zip
@@ -41,7 +41,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build
         run: cargo build --release -p laser-studio
       - name: Zip
@@ -50,7 +50,7 @@ jobs:
           New-Item -ItemType Directory -Force "Laser Studio" | Out-Null
           Copy-Item target/release/laser-studio.exe "Laser Studio/Laser Studio.exe"
           Compress-Archive -Path "Laser Studio" -DestinationPath LaserStudio-Windows.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: LaserStudio-Windows.zip
@@ -58,7 +58,7 @@ jobs:
   linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: System libraries (audio, MIDI, USB)
         run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libudev-dev
       - name: Build
@@ -68,7 +68,7 @@ jobs:
           mkdir laser-studio
           cp target/release/laser-studio laser-studio/
           tar czf LaserStudio-Linux.tar.gz laser-studio
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: LaserStudio-Linux.tar.gz
@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Publish the release
